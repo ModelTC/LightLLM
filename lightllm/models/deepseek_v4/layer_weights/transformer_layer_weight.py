@@ -309,11 +309,14 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
 
     def _dequant_in_place(self, weights):
         p = self.prefix + "."
+        self._dequant_local_fp8_experts_to_bf16(weights)
         scale_renames = self._fp8_scale_renames()
         # Convert every `.scale` belonging to this layer. Weights are loaded incrementally
         # per safetensors shard, so the paired weight may live in another shard:
         # - routed expert `.scale` follows the fused_moe quant method's weight_scale_suffix:
         #   MXFP4 consumes `.scale` as-is, FP8 DeepGEMM expects `.weight_scale_inv` (rename only);
+        #   an FP8 source overridden to online FP4 has already consumed local weight/scale pairs
+        #   above, including pairs split across safetensors shards;
         # - FP8 matmul scales only need renaming for DeepGEMM, no weight required;
         # - FP8 pairs on no-quant paths (wo_a's ROWBMMWeight) are expanded to bf16,
         #   the only case that truly requires weight and scale in the same shard.
@@ -346,3 +349,47 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # adds APE into each token's two score halves before compression using position % 4,
         # so the raw checkpoint layout is the equivalent representation here.
         return
+
+    def _dequant_local_fp8_experts_to_bf16(self, weights):
+        """Pair local routed-expert FP8 tensors that can arrive in different shards.
+
+        An FP8 source checkpoint overridden with ``--expert_dtype fp4`` needs
+        BF16 input for the existing online FP4 quantizer.  LOADWORKER can call
+        this method concurrently for different shards, so retain only local
+        experts until both weight and scale arrive and dequantize outside the
+        lock.
+        """
+        quant_method = self.experts_.quant_method
+        if self.quant_cfg.config_expert_dtype != "fp8" or quant_method.weight_scale_suffix is not None:
+            return
+
+        expert_prefix = f"{self.prefix}.ffn.experts."
+        local_expert_ids = set(self.experts_.local_expert_ids)
+        pairs = []
+        with self.lock:
+            pending = getattr(self, "_pending_fp8_expert_pairs", None)
+            if pending is None:
+                pending = self._pending_fp8_expert_pairs = {}
+            for key in list(weights):
+                if not key.startswith(expert_prefix) or not (key.endswith(".weight") or key.endswith(".scale")):
+                    continue
+                suffix = key[len(expert_prefix) :]
+                parts = suffix.split(".")
+                if len(parts) != 3 or parts[1] not in ("w1", "w2", "w3") or parts[2] not in ("weight", "scale"):
+                    continue
+                try:
+                    expert_id = int(parts[0])
+                except ValueError:
+                    continue
+                if expert_id not in local_expert_ids:
+                    continue
+                tensor_key = key[: -len(f".{parts[2]}")]
+                pair = pending.setdefault(tensor_key, {})
+                pair[parts[2]] = weights.pop(key)
+                if "weight" in pair and "scale" in pair:
+                    pairs.append((tensor_key, pending.pop(tensor_key)))
+
+        for tensor_key, pair in pairs:
+            weights[f"{tensor_key}.weight"] = dequant_fp8_block_to_bf16(pair["weight"], pair["scale"]).to(
+                self.data_type_
+            )

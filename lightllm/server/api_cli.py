@@ -664,8 +664,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=None,
         choices=["fp8", "fp4"],
         help="""Requested dtype for MoE expert weights, fp8 or fp4. Resolves the fused_moe
-            quant method: fp8 -> fp8w8a8-b128-deepgemm; fp4 -> fp4fp8-b32-deepgemm (online
-            quantization) on SM100 GPUs, or mxfp4w4a16-b32-marlin (Marlin W4A16, TP only) on other GPUs.
+            quant method: fp8 -> fp8w8a8-b128-deepgemm. For DeepSeek-V4 native MXFP4 checkpoints,
+            fp4 uses DeepGEMM Mega MoE on SM100/B300 with --enable_ep_moe, otherwise it uses
+            mxfp4w4a16-b32-marlin (Marlin W4A16, TP only). Other models retain fp4 online
+            quantization -> fp4fp8-b32-deepgemm on SM100 GPUs. A DeepSeek-V4 FP8 source checkpoint
+            with requested fp4 is also online-converted FP8 -> BF16 -> FP4 and uses the same Mega MoE path.
             Defaults to `expert_dtype` in config.json if present. Per-layer override:
             --quant_cfg mix_bits with name `fused_moe`.""",
     )
@@ -713,7 +716,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_ep_moe",
         action="store_true",
-        help="""Whether to enable ep moe for deepseekv3 model.""",
+        help="""Whether to enable expert-parallel MoE (including DeepSeek-V4 MXFP4 Mega MoE on SM100/B300).""",
     )
     parser.add_argument(
         "--ep_redundancy_expert_config_path",

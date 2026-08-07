@@ -17,6 +17,27 @@ except ImportError:
     HAS_DEEPGEMM = False
 
 
+def pack_ue8m0_scales_to_int32(scales: torch.Tensor) -> torch.Tensor:
+    """Pack raw UE8M0 scale bytes in DeepGEMM's native int32 byte order.
+
+    ``deep_gemm.pack_ue8m0_to_int`` converts four E8M0 exponent bytes by
+    reinterpreting their contiguous storage as one int32.  Native MXFP4
+    checkpoints already store those bytes as float8_e8m0fnu (or, in older
+    exports, as an int8/uint8 byte view), so no floating-point conversion is
+    needed or allowed here.
+    """
+    if scales.ndim != 2:
+        raise ValueError(f"MXFP4 scales must be 2D [N, K/32], got shape {tuple(scales.shape)}")
+    supported_dtypes = (torch.float8_e8m0fnu, torch.uint8, torch.int8)
+    if scales.dtype not in supported_dtypes:
+        raise TypeError("MXFP4 scales must use torch.float8_e8m0fnu or an int8/uint8 byte view, " f"got {scales.dtype}")
+    if scales.shape[-1] % 4 != 0:
+        raise ValueError(f"MXFP4 scale K dimension must be divisible by 4 for UE8M0 packing, got {scales.shape[-1]}")
+    # This is deliberately a byte reinterpretation: on CUDA and CPU it has
+    # the same little-endian layout as DeepGEMM's uint8.view(int32) helper.
+    return scales.view(torch.uint8).contiguous().view(scales.shape[0], -1).view(torch.int32)
+
+
 class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -204,6 +225,59 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             weight_scale_split_dim=-2,
         )
         return mm_param, mm_param_list
+
+
+@QUANTMETHODS.register("mxfp4fp8-b32-deepgemm", platform="cuda")
+class DeepGEMMNativeMXFP4B32QuantizationMethod(DeepGEMMFP8FP4B32QuantizationMethod):
+    """Load native MXFP4 checkpoint bytes directly into DeepGEMM FP4 buffers."""
+
+    def __init__(self):
+        super().__init__()
+        # DeepSeek-V4 uses the checkpoint-native names, unlike the online
+        # FP4 quantizer above whose scale is generated during loading.
+        self.weight_scale_suffix = "scale"
+
+    @property
+    def method_name(self):
+        # The execution path remains the existing DeepGEMM Mega MoE backend;
+        # only this registry key identifies the checkpoint source format.
+        return "fp4fp8-b32-deepgemm"
+
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
+        raise NotImplementedError("mxfp4fp8-b32-deepgemm only loads native packed MXFP4 expert weights")
+
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
+        if weight.dtype not in (torch.int8, torch.uint8):
+            raise TypeError(
+                "native MXFP4 packed weights must use torch.int8 or torch.uint8 E2M1 bytes, " f"got {weight.dtype}"
+            )
+        if tuple(weight.shape) != tuple(weight_pack.weight.shape):
+            raise ValueError(
+                "native MXFP4 packed weight shape mismatch: "
+                f"expected {tuple(weight_pack.weight.shape)}, got {tuple(weight.shape)}"
+            )
+        # Reinterpret uint8 source bytes as int8 before copying so E2M1 bits
+        # are preserved without relying on a numeric dtype conversion.
+        weight_pack.weight.copy_(weight.view(torch.int8))
+        weight_pack.load_ok[0] = True
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
+        if weight_scale is None:
+            return
+        expected_shape = (*weight_pack.weight_scale.shape[:-1], weight_pack.weight_scale.shape[-1] * 4)
+        if tuple(weight_scale.shape) != expected_shape:
+            raise ValueError(
+                "native MXFP4 scale shape mismatch: "
+                f"expected {expected_shape} [N, K/32], got {tuple(weight_scale.shape)}"
+            )
+        packed_scale = pack_ue8m0_scales_to_int32(weight_scale)
+        if packed_scale.shape != weight_pack.weight_scale.shape:
+            raise ValueError(
+                "packed native MXFP4 scale shape mismatch: "
+                f"expected {tuple(weight_pack.weight_scale.shape)}, got {tuple(packed_scale.shape)}"
+            )
+        weight_pack.weight_scale.copy_(packed_scale)
+        weight_pack.load_ok[1] = True
 
 
 @QUANTMETHODS.register(["mxfp4w4a16-b32-marlin"], platform="cuda")

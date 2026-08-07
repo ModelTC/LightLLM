@@ -142,17 +142,32 @@ class DistributeGroupManager:
 
         返回方法名称集合是为了去重并支持混合量化。例如部分 MoE 层使用 FP4、
         其余层使用 FP8 时，可以据此同时初始化两条执行路径所需的 buffer；普通
-        dense 层没有 ``experts``，会被自然跳过。
+        dense 层没有 ``experts``；DeepSeek-V4 uses ``experts_``. 两者都会被
+        识别，其他层会被自然跳过。
         """
         quant_method_names = set()
         for layer_weight in layer_weights:
-            # dense 层没有 experts；这里只关心真正参与 MoE 计算的层。
-            experts = getattr(layer_weight, "experts", None)
+            # dense 层没有 experts；DeepSeek-V4 keeps the same object as experts_.
+            experts = getattr(layer_weight, "experts", None) or getattr(layer_weight, "experts_", None)
             quant_method = getattr(experts, "quant_method", None)
             method_name = getattr(quant_method, "method_name", None)
             if method_name is not None:
                 quant_method_names.add(method_name)
         return quant_method_names
+
+    @staticmethod
+    def _select_deepep_buffers(expert_quant_method_names: Set[str], is_sm100: bool):
+        """Return whether the legacy and Mega MoE buffer paths are needed."""
+        if not expert_quant_method_names:
+            raise ValueError("No valid MoE quant method was found while initializing DeepEP buffers")
+
+        mega_moe_quant_method = "fp4fp8-b32-deepgemm"
+        if not is_sm100:
+            return False, True
+
+        has_mega_moe_layer = mega_moe_quant_method in expert_quant_method_names
+        has_legacy_moe_layer = any(method_name != mega_moe_quant_method for method_name in expert_quant_method_names)
+        return has_mega_moe_layer, has_legacy_moe_layer
 
     def new_deepep_group(
         self,
@@ -180,6 +195,13 @@ class DistributeGroupManager:
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
 
+        # Select buffers before constructing DeepEP's ElasticBuffer: pure
+        # SM100 FP4 Mega MoE only needs DeepGEMM's symmetric buffer and must
+        # not require the legacy low-latency transport backend.
+        enable_mega_moe_buffer, enable_low_latency_buffer = self._select_deepep_buffers(
+            expert_quant_method_names, is_sm100_gpu()
+        )
+
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
         # DeepEP reuses this group's NCCL communicator via _comm_ptr(). Because the
@@ -193,44 +215,21 @@ class DistributeGroupManager:
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
         self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
-        self.ep_buffer = deep_ep.ElasticBuffer(
-            deepep_group,
-            num_max_tokens_per_rank=self.ll_num_tokens,
-            hidden=self.ll_hidden,
-            num_topk=num_experts_per_tok,
-            use_fp8_dispatch=True,
-            allow_multiple_reduction=True,
-        )
+        self.ep_buffer = None
         self.ep_mega_moe_buffer = None
         self.ep_low_latency_buffer = None
-
-        if not expert_quant_method_names:
-            raise ValueError("No valid MoE quant method was found while initializing DeepEP buffers")
-
-        mega_moe_quant_method = "fp4fp8-b32-deepgemm"
-        is_sm100 = is_sm100_gpu()
-
-        # Buffer 选择规则：
-        # 1. 非 SM100 不支持 Mega MoE，只初始化 legacy low-latency buffer；
-        # 2. SM100 全部 MoE 层为 FP4，只初始化 Mega MoE buffer；
-        # 3. SM100 全部 MoE 层为 FP8，只初始化 legacy low-latency buffer；
-        # 4. SM100 逐层混合 FP4/FP8，两套 buffer 都要初始化。
-        if is_sm100:
-            # 只要存在一个 FP4 MoE 层，就需要 Mega MoE buffer；只要存在一个非 FP4
-            # MoE 层，就需要 legacy low-latency buffer。FP4/FP8 逐层混用时两者都会初始化。
-            has_mega_moe_layer = mega_moe_quant_method in expert_quant_method_names
-            has_legacy_moe_layer = any(
-                method_name != mega_moe_quant_method for method_name in expert_quant_method_names
-            )
-            enable_mega_moe_buffer = has_mega_moe_layer
-            enable_low_latency_buffer = has_legacy_moe_layer
-        else:
-            enable_mega_moe_buffer = False
-            enable_low_latency_buffer = True
 
         if enable_low_latency_buffer:
             # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
             # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
+            self.ep_buffer = deep_ep.ElasticBuffer(
+                deepep_group,
+                num_max_tokens_per_rank=self.ll_num_tokens,
+                hidden=self.ll_hidden,
+                num_topk=num_experts_per_tok,
+                use_fp8_dispatch=True,
+                allow_multiple_reduction=True,
+            )
             num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
                 self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
             )
@@ -263,7 +262,11 @@ class DistributeGroupManager:
             enable_mega_moe_buffer,
             sorted(expert_quant_method_names),
         )
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+        theoretical_sms = (
+            self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+            if self.ep_buffer is not None
+            else 0
+        )
         self._set_num_sms_for_deep_gemm(theoretical_sms)
 
     def _set_num_sms_for_deep_gemm(self, deepep_sms: int):

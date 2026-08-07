@@ -1,11 +1,6 @@
 import yaml
 import collections
 from .registry import QUANTMETHODS
-from .w8a8 import *
-from .w8a8gx import *
-from .deepgemm import *
-from .awq import *
-from .no_quant import *
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import is_sm100_gpu
 
@@ -20,11 +15,12 @@ SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
 
 class Quantcfg:
-    def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None):
+    def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None, enable_ep_moe=False):
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
         self.start_args_expert_dtype = expert_dtype
         self.config_expert_dtype = network_config.get("expert_dtype", None)
+        self.enable_ep_moe = enable_ep_moe
         self.network_config = network_config
         # Parse quant_cfg first so model config only fills missing per-layer fused_moe entries;
         # an explicit startup argument is applied afterward and overrides every layer.
@@ -57,16 +53,36 @@ class Quantcfg:
         self._mapping_quant_method()
 
     def _mapping_expert_quant_method(self):
-        expert_dtype = self.start_args_expert_dtype or self.config_expert_dtype
-        if expert_dtype is None:
+        requested_expert_dtype = self.start_args_expert_dtype or self.config_expert_dtype
+        if requested_expert_dtype is None:
             return
 
-        # DeepSeek-V4 fp4 checkpoints store their expert weights in the
-        # pre-packed MXFP4 representation handled by the Marlin backend.
-        if expert_dtype == "fp4" and self.network_config.get("model_type") == "deepseek_v4":
+        # ``expert_dtype`` can be overridden at startup, but config.json is
+        # the only reliable source-format signal.  In particular, an FP8
+        # checkpoint with ``--expert_dtype fp4`` must be online-quantized,
+        # not passed to the native MXFP4 byte loader.
+        is_dsv4_native_mxfp4 = (
+            self.network_config.get("model_type") == "deepseek_v4"
+            and requested_expert_dtype in ("fp4", "mxfp4")
+            and self.config_expert_dtype in ("fp4", "mxfp4", None)
+        )
+        if is_dsv4_native_mxfp4:
+            # DeepSeek-V4 stores its FP4 experts as native packed MXFP4.  In
+            # TP mode retain Marlin; EP can consume the source bytes directly
+            # with DeepGEMM Mega MoE on SM100/B300.
+            if self.enable_ep_moe:
+                if not is_sm100_gpu():
+                    raise RuntimeError(
+                        "DeepSeek-V4 native MXFP4 experts with --enable_ep_moe require an SM100 GPU; "
+                        "please use --expert_dtype fp8 on non-SM100 GPUs."
+                    )
+                target = "mxfp4fp8-b32-deepgemm"
+            else:
+                target = "mxfp4w4a16-b32-marlin"
             expert_dtype = "mxfp4"
-
-        target = self._get_expert_quant_type(expert_dtype)
+        else:
+            target = self._get_expert_quant_type(requested_expert_dtype)
+            expert_dtype = requested_expert_dtype
         for layer_num in range(self.layer_num):
             layer_quant_cfg = self.quant_cfg[layer_num]
             if self.start_args_expert_dtype is not None:
@@ -134,3 +150,12 @@ class Quantcfg:
         quant_method = QUANTMETHODS.get(quant_type)
         quant_method.hf_quantization_config = self.hf_quantization_config
         return quant_method
+
+
+# Import implementations after Quantcfg is defined.  Several implementation
+# modules import Quantcfg through this package while registering themselves.
+from .w8a8 import *  # noqa: E402, F401, F403
+from .w8a8gx import *  # noqa: E402, F401, F403
+from .deepgemm import *  # noqa: E402, F401, F403
+from .awq import *  # noqa: E402, F401, F403
+from .no_quant import *  # noqa: E402, F401, F403

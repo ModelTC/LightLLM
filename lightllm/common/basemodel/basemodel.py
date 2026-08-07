@@ -170,7 +170,13 @@ class TpPartBaseModel:
         return
 
     def _init_quant(self):
-        self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
+        self.quant_cfg = Quantcfg(
+            self.config,
+            self.quant_type,
+            self.quant_cfg_path,
+            self.expert_dtype,
+            enable_ep_moe=self.args.enable_ep_moe,
+        )
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_weights(self, start_layer_index=0):
