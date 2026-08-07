@@ -63,6 +63,7 @@ class StartArgs:
             "choices": [
                 "deepseek-r1",
                 "deepseek-v3",
+                "deepseek-v4",
                 "glm45",
                 "gpt-oss",
                 "kimi",
@@ -194,12 +195,12 @@ class StartArgs:
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
-    pd_kv_page_num: int = field(default=16)
-    pd_kv_page_size: int = field(default=1024)
+    pd_kv_page_num: Optional[int] = field(default=None)
+    pd_kv_page_size: Optional[int] = field(default=None)
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
-    cpu_cache_token_page_size: int = field(default=256)
+    cpu_cache_token_page_size: Optional[int] = field(default=None)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
     disk_cache_dir: Optional[str] = field(default=None)

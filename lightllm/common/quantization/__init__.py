@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 EXPERT_DTYPE_TO_QUANT_TYPE = {
     "fp8": "fp8w8a8-b128-deepgemm",
     "fp4": "fp4fp8-b32-deepgemm",
+    "mxfp4": "mxfp4w4a16-b32-marlin",
 }
 SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
@@ -24,6 +25,7 @@ class Quantcfg:
         self.quant_type = quant_type
         self.start_args_expert_dtype = expert_dtype
         self.config_expert_dtype = network_config.get("expert_dtype", None)
+        self.network_config = network_config
         # Parse quant_cfg first so model config only fills missing per-layer fused_moe entries;
         # an explicit startup argument is applied afterward and overrides every layer.
         self._parse_custom_cfg(custom_cfg_path)
@@ -59,6 +61,11 @@ class Quantcfg:
         if expert_dtype is None:
             return
 
+        # DeepSeek-V4 fp4 checkpoints store their expert weights in the
+        # pre-packed MXFP4 representation handled by the Marlin backend.
+        if expert_dtype == "fp4" and self.network_config.get("model_type") == "deepseek_v4":
+            expert_dtype = "mxfp4"
+
         target = self._get_expert_quant_type(expert_dtype)
         for layer_num in range(self.layer_num):
             layer_quant_cfg = self.quant_cfg[layer_num]
@@ -90,7 +97,6 @@ class Quantcfg:
                     self.quant_type = "fp8w8a8-b128-vllm"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
             self._mapping_expert_quant_method()
-
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):
