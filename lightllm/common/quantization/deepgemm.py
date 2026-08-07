@@ -5,6 +5,7 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod, Wei
 from lightllm.common.quantization.registry import QUANTMETHODS
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 
@@ -62,7 +63,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        weight, scale = weight_quant(weight.cuda(device), self.block_size, use_ue8m0_scales=is_sm100_gpu())
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -90,6 +91,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=alloc_func,
+                use_ue8m0_scales=is_sm100_gpu(),
             )
 
         if out is None:
