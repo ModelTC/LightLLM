@@ -7,7 +7,7 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List
+from typing import final, List, Optional
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -103,6 +103,7 @@ class TpPartBaseModel:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
+            "eagle_frozen_kv",
         ]
         self.prefill_graph: PrefillCudaGraph = None
 
@@ -544,6 +545,52 @@ class TpPartBaseModel:
 
         return new_model_output
 
+    def _gather_last_input_embs(self, input_embs: torch.Tensor, infer_state: InferStateInfo) -> torch.Tensor:
+        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        if infer_state.is_prefill and infer_state.need_dp_prefill_balance:
+            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
+        return last_input_embs
+
+    def _build_model_output(
+        self,
+        post_out: torch.Tensor | ModelOutput,
+        gathered_input_embs: torch.Tensor,
+        infer_state: InferStateInfo,
+    ) -> ModelOutput:
+        if isinstance(post_out, torch.Tensor):
+            logits = post_out.contiguous()
+            prompt_logics = infer_state.prompt_logics
+            mtp_hiddens = None
+        else:
+            assert isinstance(post_out, ModelOutput), f"Invalid post_out type: {type(post_out)}"
+
+            logits = post_out.logits
+            prompt_logics = post_out.prompt_logics
+            mtp_hiddens = post_out.mtp_main_output_hiddens
+
+        if self.is_mtp_mode:
+            if mtp_hiddens is None:
+                mtp_hiddens = gathered_input_embs
+            mtp_hiddens = mtp_hiddens.contiguous()
+        else:
+            mtp_hiddens = None
+
+        return ModelOutput(
+            logits=logits,
+            mtp_main_output_hiddens=mtp_hiddens,
+            prompt_logics=prompt_logics,
+        )
+
+    def _post_forward_to_model_output(self, input_embs: torch.Tensor, infer_state: InferStateInfo) -> ModelOutput:
+        # Build ModelOutput from post_infer.token_forward output
+        last_input_embs = self._gather_last_input_embs(input_embs, infer_state)
+        post_out = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
+        return self._build_model_output(
+            post_out=post_out,
+            gathered_input_embs=last_input_embs,
+            infer_state=infer_state,
+        )
+
     def _prefill(
         self,
         model_input: ModelInput,
@@ -705,19 +752,7 @@ class TpPartBaseModel:
 
         input_embs = output_tensors[0]
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        if infer_state.need_dp_prefill_balance:
-            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
-
-        predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
-        model_output = ModelOutput(logits=predict_logits, prompt_logics=infer_state.prompt_logics)
-
-        # 特殊模型特殊模式的额外输出
-        if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            if infer_state.need_dp_prefill_balance:
-                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+        model_output = self._post_forward_to_model_output(input_embs, infer_state)
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -735,17 +770,7 @@ class TpPartBaseModel:
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        predict_logits: torch.Tensor = self.post_infer.token_forward(
-            last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
-        )
-
-        model_output = ModelOutput(logits=predict_logits.contiguous())
-
-        # 特殊模型特殊模式的额外输出
-        if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+        model_output = self._post_forward_to_model_output(input_embs, infer_state)
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -972,28 +997,24 @@ class TpPartBaseModel:
         infer_state.call_overlap_hook()
         infer_state1.call_overlap_hook()
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-        if infer_state.need_dp_prefill_balance:
-            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
-            last_input_embs1 = infer_state1._all_to_all_unbalance_get(data=last_input_embs1)
+        last_input_embs = self._gather_last_input_embs(input_embs, infer_state)
+        last_input_embs1 = self._gather_last_input_embs(input_embs1, infer_state1)
 
-        predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
+        post_out0, post_out1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
         g_cache_manager.cache_env_out()
 
-        model_output = ModelOutput(logits=predict_logits.contiguous(), prompt_logics=infer_state.prompt_logics)
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), prompt_logics=infer_state1.prompt_logics)
-
-        if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            if infer_state.need_dp_prefill_balance:
-                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-                input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+        model_output = self._build_model_output(
+            post_out=post_out0,
+            gathered_input_embs=last_input_embs,
+            infer_state=infer_state,
+        )
+        model_output1 = self._build_model_output(
+            post_out=post_out1,
+            gathered_input_embs=last_input_embs1,
+            infer_state=infer_state1,
+        )
 
         return model_output, model_output1
 
@@ -1014,21 +1035,23 @@ class TpPartBaseModel:
         infer_state.call_overlap_hook()
         infer_state1.call_overlap_hook()
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+        last_input_embs = self._gather_last_input_embs(input_embs, infer_state)
+        last_input_embs1 = self._gather_last_input_embs(input_embs1, infer_state1)
 
-        predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
+        post_out0, post_out1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        model_output = ModelOutput(logits=predict_logits.contiguous())
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous())
-
-        if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+        model_output = self._build_model_output(
+            post_out=post_out0,
+            gathered_input_embs=last_input_embs,
+            infer_state=infer_state,
+        )
+        model_output1 = self._build_model_output(
+            post_out=post_out1,
+            gathered_input_embs=last_input_embs1,
+            infer_state=infer_state1,
+        )
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()
@@ -1242,8 +1265,12 @@ class TpPartBaseModel:
 
         is_mtp_draft_model = getattr(self, "is_mtp_draft_model", False)
         if is_mtp_draft_model:
+            # Gemma-4's drafter consumes the recurrent hidden state in backbone
+            # width (the target's hidden size), not its own draft width; the other
+            # MTP drafters have draft width == backbone width so hidden_size fits.
+            hidden_size = self.config.get("backbone_hidden_size", self.config["hidden_size"])
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
-                token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
+                token_num, hidden_size, dtype=self.data_type, device="cuda"
             )
         else:
             special_model_input["mtp_draft_input_hiddens"] = None

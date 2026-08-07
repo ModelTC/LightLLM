@@ -10,7 +10,7 @@ import torch.distributed as dist
 from io import BytesIO
 from typing import List, Tuple
 from PIL import Image
-from lightllm.server.embed_cache.utils import create_shm, free_shm, get_shm_name_data
+from lightllm.server.embed_cache.utils import create_shm, free_shm, get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
@@ -130,7 +130,32 @@ class VisionPeakVramHolder:
 
             create_shm(get_shm_name_data(item.uuid), image_bytes)
             items.append(item)
+
+        # Gemma4 encode requires token_num to be set.
+        self._fill_token_num(items)
         return items
+
+    def _fill_token_num(self, items: List[ImageItem]) -> None:
+        image_processor = getattr(self.model, "image_processor", None)
+        if image_processor is None or not items:
+            return
+
+        if all(item.token_num is not None for item in items):
+            return
+
+        pil_images = []
+        for item in items:
+            image_data = read_shm(get_shm_name_data(item.uuid))
+            with Image.open(BytesIO(image_data)) as image:
+                pil_images.append(image.convert("RGB"))
+
+        image_inputs = image_processor(pil_images, return_tensors="pt")
+        token_nums = image_inputs.get("num_soft_tokens_per_image")
+        if token_nums is None:
+            return
+        for item, token_num in zip(items, token_nums):
+            if item.token_num is None:
+                item.token_num = int(token_num)
 
     @staticmethod
     def _free_image_items(items: List[ImageItem]) -> None:

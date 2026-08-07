@@ -733,13 +733,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
+            "eagle_frozen_kv",
             None,
         ],
         default=None,
         help="""Supported MTP modes.
         None: Disables MTP.
         *_with_att: Uses the MTP model with an attention mechanism to predict the next draft token.
-        *_no_att: Uses the MTP model without an attention module to predict the next draft token.""",
+        *_no_att: Uses the MTP model without an attention module to predict the next draft token.
+        eagle_frozen_kv: Eagle-style draft whose attention reads the target model's KV cache and
+        writes none of its own (Gemma-4 assistant drafters).""",
     )
     parser.add_argument(
         "--mtp_draft_model_dir",
