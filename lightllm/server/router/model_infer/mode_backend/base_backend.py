@@ -618,6 +618,24 @@ class ModeBackend:
         """
         return [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
 
+    def _filter_cpu_cache_task_not_ready_req_ids(self, req_ids: List[int]) -> List[int]:
+        """
+        过滤出当前正在进行 cpu cache 操作的任务， 对齐进行拦截操作。
+        """
+        if not self.args.enable_cpu_cache:
+            return req_ids
+
+        ready_req_ids = []
+        for req_id in req_ids:
+            req: InferReq = g_infer_context.requests_mapping[req_id]
+            if req.cpu_cache_load_task_status.is_finished():
+                if req.cpu_cache_offload_task_status.is_not_started():
+                    ready_req_ids.append(req_id)
+                elif req.cpu_cache_offload_task_status.is_finished():
+                    ready_req_ids.append(req_id)
+
+        return ready_req_ids
+
     def _timer_merge_radix_tree(self):
         self._radix_tree_merge_counter += 1
         if (
@@ -662,10 +680,14 @@ class ModeBackend:
         self._timer_merge_radix_tree()
 
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
-            self.multi_level_cache_module.update_cpu_cache_task_states()
+            self.multi_level_cache_module.update_cpu_cache_offload_task_states()
+            self.multi_level_cache_module.update_cpu_cache_load_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
+
+        # 过滤出当前正在进行 cpu cache 操作的任务， 对齐进行拦截操作。
+        req_ids = self._filter_cpu_cache_task_not_ready_req_ids(req_ids)
 
         if len(req_ids) == 0:
             return [], []
