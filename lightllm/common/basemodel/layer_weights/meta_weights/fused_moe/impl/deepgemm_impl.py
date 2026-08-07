@@ -17,6 +17,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.utils.device_utils import is_sm100_gpu
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
@@ -76,6 +77,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         output = fused_experts(
             hidden_states=input_tensor,
@@ -87,6 +90,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
+            clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
         )
         return output
 
@@ -114,6 +119,18 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             scoring_func=scoring_func,
         )
 
+        return self.low_latency_dispatch_with_topk(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+    def low_latency_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
@@ -123,10 +140,15 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
             num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
+            round_scale=is_sm100_gpu(),
+            use_ue8m0=is_sm100_gpu(),
             async_finish=False,
             return_recv_hook=True,
         )
         return recv_x, masked_m, topk_idx, topk_weights, handle, hook
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
+        return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
 
     def select_experts_and_quant_input(
         self,
@@ -194,6 +216,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         masked_m: torch.Tensor,
         dtype: torch.dtype,
         expected_m: int,
+        clamp_limit: Optional[float] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -206,6 +229,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2_weight,
             w2_scale,
             expected_m=expected_m,
+            clamp_limit=clamp_limit,
         )
 
     def prefilled_group_gemm(
@@ -220,6 +244,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
         microbatch_index: int = 0,
+        clamp_limit: Optional[float] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -239,6 +264,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 block_size_k=self.quant_method.block_size,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
+                clamp_limit=clamp_limit,
             )
         else:
             gather_out = torch.empty(
@@ -254,7 +280,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 N = w13_weight.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=recv_x[0].device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, limit=clamp_limit)
                 _gemm_out_a, _silu_out = None, None
         del recv_x
         return gather_out

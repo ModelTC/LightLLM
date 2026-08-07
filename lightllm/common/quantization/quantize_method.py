@@ -55,6 +55,7 @@ class QuantizationMethod(ABC):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         pass
 

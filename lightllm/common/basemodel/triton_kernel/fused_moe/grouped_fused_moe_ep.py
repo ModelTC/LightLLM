@@ -3,7 +3,7 @@
 import torch
 import triton
 import triton.language as tl
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
@@ -29,7 +29,6 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
 logger = init_logger(__name__)
-_MEGA_MOE_STATES: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
 SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
 
 
@@ -51,6 +50,165 @@ def use_sm100_mega_moe(quant_method: Any) -> bool:
     return is_sm100_gpu() and quant_method.method_name == "fp4fp8-b32-deepgemm"
 
 
+def _per_token_cast_to_fp8_packed_ue8m0(hidden_states: torch.Tensor, gran_k: int):
+    from deep_gemm.utils import per_token_cast_to_fp8
+
+    hidden_states, scale = per_token_cast_to_fp8(
+        hidden_states,
+        use_ue8m0=True,
+        gran_k=gran_k,
+        use_packed_ue8m0=False,
+    )
+    assert scale.size(-1) % 4 == 0, "packed UE8M0 scale requires scale groups divisible by 4"
+    scale = (scale.view(torch.int32) >> 23).to(torch.uint8).view(torch.int32)
+    return hidden_states, scale
+
+
+@triton.jit
+def _ceil_to_ue8m0(x):
+    bits = x.to(tl.float32).to(tl.int32, bitcast=True)
+    exp = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0)
+    exp = tl.maximum(tl.minimum(exp, 254), 1)
+    return (exp << 23).to(tl.float32, bitcast=True), exp
+
+
+@triton.jit
+def _mega_moe_quant_topk_to_buffer_kernel(
+    x_ptr,
+    x_out_ptr,
+    x_sf_out_ptr,
+    topk_idx_ptr,
+    topk_idx_out_ptr,
+    topk_weights_ptr,
+    topk_weights_out_ptr,
+    stride_x_m: tl.constexpr,
+    stride_x_k: tl.constexpr,
+    stride_x_out_m: tl.constexpr,
+    stride_x_out_k: tl.constexpr,
+    stride_x_sf_out_m: tl.constexpr,
+    stride_x_sf_out_k: tl.constexpr,
+    stride_topk_idx_m: tl.constexpr,
+    stride_topk_idx_k: tl.constexpr,
+    stride_topk_idx_out_m: tl.constexpr,
+    stride_topk_idx_out_k: tl.constexpr,
+    stride_topk_weights_m: tl.constexpr,
+    stride_topk_weights_k: tl.constexpr,
+    stride_topk_weights_out_m: tl.constexpr,
+    stride_topk_weights_out_k: tl.constexpr,
+    FP8_MIN: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    TOPK: tl.constexpr,
+    TOPK_BLOCK: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token_id = tl.program_id(0)
+    pack_id = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK)
+    cols = pack_id * BLOCK + offsets
+
+    x = tl.load(x_ptr + token_id * stride_x_m + cols * stride_x_k).to(tl.float32)
+    abs_x = tl.abs(x)
+    group_id = offsets // GROUP_SIZE
+
+    amax0 = tl.max(tl.where(group_id == 0, abs_x, 0.0))
+    amax1 = tl.max(tl.where(group_id == 1, abs_x, 0.0))
+    amax2 = tl.max(tl.where(group_id == 2, abs_x, 0.0))
+    amax3 = tl.max(tl.where(group_id == 3, abs_x, 0.0))
+
+    scale0, exp0 = _ceil_to_ue8m0(tl.maximum(amax0, 1.0e-4) / FP8_MAX)
+    scale1, exp1 = _ceil_to_ue8m0(tl.maximum(amax1, 1.0e-4) / FP8_MAX)
+    scale2, exp2 = _ceil_to_ue8m0(tl.maximum(amax2, 1.0e-4) / FP8_MAX)
+    scale3, exp3 = _ceil_to_ue8m0(tl.maximum(amax3, 1.0e-4) / FP8_MAX)
+
+    scale = tl.where(
+        group_id == 0,
+        scale0,
+        tl.where(group_id == 1, scale1, tl.where(group_id == 2, scale2, scale3)),
+    )
+    x_q = tl.clamp(x / scale, FP8_MIN, FP8_MAX).to(x_out_ptr.dtype.element_ty)
+    tl.store(x_out_ptr + token_id * stride_x_out_m + cols * stride_x_out_k, x_q)
+
+    packed_scale = exp0 | (exp1 << 8) | (exp2 << 16) | (exp3 << 24)
+    tl.store(x_sf_out_ptr + token_id * stride_x_sf_out_m + pack_id * stride_x_sf_out_k, packed_scale)
+
+    if pack_id == 0:
+        topk_offsets = tl.arange(0, TOPK_BLOCK)
+        topk_mask = topk_offsets < TOPK
+        topk_idx = tl.load(
+            topk_idx_ptr + token_id * stride_topk_idx_m + topk_offsets * stride_topk_idx_k,
+            mask=topk_mask,
+        )
+        topk_weights = tl.load(
+            topk_weights_ptr + token_id * stride_topk_weights_m + topk_offsets * stride_topk_weights_k,
+            mask=topk_mask,
+        )
+        tl.store(
+            topk_idx_out_ptr + token_id * stride_topk_idx_out_m + topk_offsets * stride_topk_idx_out_k,
+            topk_idx.to(topk_idx_out_ptr.dtype.element_ty),
+            mask=topk_mask,
+        )
+        tl.store(
+            topk_weights_out_ptr + token_id * stride_topk_weights_out_m + topk_offsets * stride_topk_weights_out_k,
+            topk_weights.to(topk_weights_out_ptr.dtype.element_ty),
+            mask=topk_mask,
+        )
+
+
+def _prepare_mega_moe_buffer(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    buffer: Any,
+    group_size: int,
+):
+    num_tokens, hidden_size = hidden_states.shape
+    if num_tokens == 0:
+        return
+    assert hidden_size % (group_size * 4) == 0, "packed UE8M0 scale requires four FP8 groups per int32"
+    assert hidden_states.is_contiguous(), "hidden_states must be contiguous"
+    assert topk_ids.shape == topk_weights.shape and topk_ids.shape[0] == num_tokens
+    assert topk_ids.shape[1] > 0
+    assert buffer.x.shape[0] >= num_tokens and buffer.x.shape[1] == hidden_size
+    assert buffer.x_sf.shape[0] >= num_tokens and buffer.x_sf.shape[1] == hidden_size // group_size // 4
+    assert buffer.topk_idx.shape[0] >= num_tokens and buffer.topk_idx.shape[1] == topk_ids.shape[1]
+    assert buffer.topk_weights.shape[0] >= num_tokens and buffer.topk_weights.shape[1] == topk_ids.shape[1]
+
+    block = group_size * 4
+    finfo = torch.finfo(buffer.x.dtype)
+    _mega_moe_quant_topk_to_buffer_kernel[(num_tokens, hidden_size // block)](
+        hidden_states,
+        buffer.x,
+        buffer.x_sf,
+        topk_ids,
+        buffer.topk_idx,
+        topk_weights,
+        buffer.topk_weights,
+        hidden_states.stride(0),
+        hidden_states.stride(1),
+        buffer.x.stride(0),
+        buffer.x.stride(1),
+        buffer.x_sf.stride(0),
+        buffer.x_sf.stride(1),
+        topk_ids.stride(0),
+        topk_ids.stride(1),
+        buffer.topk_idx.stride(0),
+        buffer.topk_idx.stride(1),
+        topk_weights.stride(0),
+        topk_weights.stride(1),
+        buffer.topk_weights.stride(0),
+        buffer.topk_weights.stride(1),
+        FP8_MIN=finfo.min,
+        FP8_MAX=finfo.max,
+        TOPK=topk_ids.shape[1],
+        TOPK_BLOCK=triton.next_power_of_2(topk_ids.shape[1]),
+        GROUP_SIZE=group_size,
+        BLOCK=block,
+        num_warps=4,
+        num_stages=4,
+    )
+
+
 def check_ep_expert_dtype(quant_method: Any):
     expert_dtype = getattr(quant_method, "method_name", None)
     if expert_dtype not in SUPPORTED_EP_EXPERT_DTYPES:
@@ -58,7 +216,7 @@ def check_ep_expert_dtype(quant_method: Any):
             "EP MoE requires --expert_dtype to be one of ['fp8', 'fp4'], "
             f"but the resolved fused_moe quant method is `{expert_dtype}`. "
             "Please start with --expert_dtype fp8 or --expert_dtype fp4. "
-            "Note that --expert_dtype fp4 is only supported on SM100 GPUs."
+            "Note that --expert_dtype fp4 with EP MoE is only supported on SM100 GPUs."
         )
     if expert_dtype == "fp4fp8-b32-deepgemm" and not is_sm100_gpu():
         raise RuntimeError(
@@ -75,49 +233,46 @@ def masked_group_gemm(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     expected_m: int,
+    clamp_limit: Optional[float] = None,
+    alloc_tensor_func: Callable = torch.empty,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
     block_size = 128
     # groupgemm (masked layout)
-    gemm_out_a = torch.empty((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
+    gemm_out_a = alloc_tensor_func((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
     expected_m = min(expected_m, padded_m)
-    qsilu_out_scale = torch.empty((E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32)
-    qsilu_out = torch.empty((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
+    qsilu_out_scale = alloc_tensor_func(
+        (E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32
+    )
+    qsilu_out = alloc_tensor_func((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
-    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
+    silu_and_mul_masked_post_quant_fwd(
+        gemm_out_a,
+        qsilu_out,
+        qsilu_out_scale,
+        block_size,
+        masked_m,
+        use_ue8m0_scales=is_sm100_gpu(),
+        limit=clamp_limit,
+    )
     del gemm_out_a
-    gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
+    # Reuse W1's storage lifetime before allocating the W2 output.
+    gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
 
-def _get_mega_moe_cache_state(w13: Any, w2: Any):
-    state_key = (
-        w13.weight.data_ptr(),
-        w13.weight_scale.data_ptr(),
-        w2.weight.data_ptr(),
-        w2.weight_scale.data_ptr(),
+def transform_mega_moe_weights_in_place(w13: Any, w2: Any):
+    """Convert to Mega MoE layout without retaining a second weight copy."""
+    transformed_l1, transformed_l2 = deep_gemm.transform_weights_for_mega_moe(
+        (w13.weight, w13.weight_scale),
+        (w2.weight, w2.weight_scale),
     )
-    return _MEGA_MOE_STATES.setdefault(state_key, {})
-
-
-def _get_mega_moe_weights(w13: Any, w2: Any, state: Dict[str, Any]):
-    if "weight_cache" not in state:
-        state["weight_cache"] = deep_gemm.transform_weights_for_mega_moe(
-            (w13.weight, w13.weight_scale),
-            (w2.weight, w2.weight_scale),
-        )
-    return state["weight_cache"]
-
-
-def _get_mega_moe_cumulative_stats(num_local_experts: int, device: torch.device, state: Dict[str, Any]):
-    stats = state.get("stats")
-    if stats is None or stats.numel() != num_local_experts or stats.device != device:
-        stats = torch.zeros((num_local_experts,), device=device, dtype=torch.int32)
-        state["stats"] = stats
-    return stats
+    w13.weight.copy_(transformed_l1[0])
+    w13.weight_scale.copy_(transformed_l1[1])
+    w2.weight_scale.copy_(transformed_l2[1])
 
 
 def mega_moe_impl(
@@ -127,11 +282,11 @@ def mega_moe_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_method: Any,
+    clamp_limit: Optional[float] = None,
+    alloc_tensor_func: Callable = torch.empty,
 ):
     if not (HAS_DEEPGEMM and hasattr(deep_gemm, "fp8_fp4_mega_moe")):
         raise RuntimeError("deep_gemm does not provide fp8-fp4 Mega MoE kernel")
-
-    from deep_gemm.utils import per_token_cast_to_fp8
 
     buffer = getattr(dist_group_manager, "ep_mega_moe_buffer", None)
     if buffer is None:
@@ -143,27 +298,17 @@ def mega_moe_impl(
             f"Mega MoE got {num_tokens} tokens, exceeding num_max_tokens_per_rank={buffer.num_max_tokens_per_rank}"
         )
 
-    qinput_tensor = per_token_cast_to_fp8(
-        hidden_states,
-        use_ue8m0=True,
-        gran_k=quant_method.block_size,
-        use_packed_ue8m0=True,
-    )
-    state = _get_mega_moe_cache_state(w13, w2)
-    l1_weights, l2_weights = _get_mega_moe_weights(w13, w2, state)
-    stats = _get_mega_moe_cumulative_stats(w13.weight.shape[0], hidden_states.device, state)
-    buffer.x[:num_tokens].copy_(qinput_tensor[0])
-    buffer.x_sf[:num_tokens].copy_(qinput_tensor[1])
-    buffer.topk_idx[:num_tokens].copy_(topk_ids)
-    buffer.topk_weights[:num_tokens].copy_(topk_weights)
+    l1_weights = (w13.weight, w13.weight_scale)
+    l2_weights = (w2.weight, w2.weight_scale)
+    _prepare_mega_moe_buffer(hidden_states, topk_ids, topk_weights, buffer, quant_method.block_size)
 
-    output = torch.empty_like(hidden_states)
+    output = alloc_tensor_func(hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype)
     deep_gemm.fp8_fp4_mega_moe(
         output,
         l1_weights,
         l2_weights,
         buffer,
-        cumulative_local_expert_recv_stats=stats,
+        activation_clamp=clamp_limit,
     )
     return output
 
@@ -175,20 +320,15 @@ def quantize_fused_experts_input(
 ):
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
-        from deep_gemm.utils import per_token_cast_to_fp8
-
-        return per_token_cast_to_fp8(
-            hidden_states,
-            use_ue8m0=True,
-            gran_k=quant_method.block_size,
-            use_packed_ue8m0=True,
-        )
+        return _per_token_cast_to_fp8_packed_ue8m0(hidden_states, quant_method.block_size)
 
     block_size_k = 0
     if w13.weight.ndim == 3:
         block_size_k = w13.weight.shape[2] // w13.weight_scale.shape[2]
     assert block_size_k == 128, "block_size_k must be 128"
-    return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
+    return per_token_group_quant_fp8(
+        hidden_states, block_size_k, dtype=w13.weight.dtype, use_ue8m0_scales=is_sm100_gpu()
+    )
 
 
 def fused_experts(
@@ -201,10 +341,21 @@ def fused_experts(
     quant_method: Any,
     is_prefill: Optional[bool],
     previous_event: Optional[Any] = None,
+    clamp_limit: Optional[float] = None,
+    alloc_tensor_func: Callable = torch.empty,
 ):
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
-        return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
+        return mega_moe_impl(
+            hidden_states,
+            w13,
+            w2,
+            topk_weights,
+            topk_idx,
+            quant_method,
+            clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
+        )
 
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
     return fused_experts_impl(
@@ -222,6 +373,8 @@ def fused_experts(
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,
         previous_event=previous_event,
+        clamp_limit=clamp_limit,
+        alloc_tensor_func=alloc_tensor_func,
     )
 
 
@@ -240,6 +393,8 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     previous_event: Optional[Any] = None,
+    clamp_limit: Optional[float] = None,
+    alloc_tensor_func: Callable = torch.empty,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -261,7 +416,13 @@ def fused_experts_impl(
 
     combined_x = None
     if is_prefill:
-        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
+        qinput_tensor, input_scale = per_token_group_quant_fp8(
+            hidden_states,
+            block_size_k,
+            dtype=w1.dtype,
+            alloc_func=alloc_tensor_func,
+            use_ue8m0_scales=is_sm100_gpu(),
+        )
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
         #   recv_x[0]: [num_expanded_tokens, hidden]
@@ -309,6 +470,7 @@ def fused_experts_impl(
                 block_size_k=block_size_k,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
                 hidden_dtype=hidden_states.dtype,
+                clamp_limit=clamp_limit,
             )
         else:
             gather_out = torch.empty(
@@ -324,7 +486,7 @@ def fused_experts_impl(
                 N = w1.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
                 _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, limit=clamp_limit)
                 _gemm_out_a, _silu_out = None, None
         del recv_x
 
@@ -346,11 +508,24 @@ def fused_experts_impl(
             num_max_dispatch_tokens_per_rank,
             num_experts,
             use_fp8=use_fp8_w8a8,
+            round_scale=is_sm100_gpu(),
+            use_ue8m0=is_sm100_gpu(),
             async_finish=False,
             return_recv_hook=False,
         )
         # deepgemm
-        gemm_out_b = masked_group_gemm(recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m)
+        gemm_out_b = masked_group_gemm(
+            recv_x,
+            masked_m,
+            hidden_states.dtype,
+            w1,
+            w1_scale,
+            w2,
+            w2_scale,
+            expected_m,
+            clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
+        )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
@@ -468,6 +643,7 @@ def chunked_expanded_moe_forward(
     block_size_k: int,
     workspace: torch.Tensor,  # [workspace_bytes], uint8
     hidden_dtype: torch.dtype,  # scalar dtype descriptor
+    clamp_limit: Optional[float] = None,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     alignment = 128
@@ -535,7 +711,7 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out)
+            silu_and_mul_fwd(gemm_out_a, silu_out, limit=clamp_limit)
             workspace_manager.free(gemm_out_a)
             del gemm_out_a
 
@@ -555,6 +731,7 @@ def chunked_expanded_moe_forward(
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=workspace_quant_alloc,
+                use_ue8m0_scales=is_sm100_gpu(),
             )
             workspace_manager.free(silu_out)
             del silu_out

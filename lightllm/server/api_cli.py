@@ -105,15 +105,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_kv_page_num",
         type=int,
-        default=16,
-        help="pd mode, kv move page_num",
+        default=None,
+        help="pd mode, kv move page_num; defaults to 8 for DeepSeek-V4 and 16 otherwise.",
     )
 
     parser.add_argument(
         "--pd_kv_page_size",
         type=int,
-        default=1024,
-        help="pd mode, kv page size.",
+        default=None,
+        help="pd mode, kv page size; defaults to 2048 for DeepSeek-V4 and 1024 otherwise.",
     )
 
     parser.add_argument(
@@ -183,6 +183,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "qwen",
             "deepseekv31",
             "deepseekv32",
+            "deepseekv4",
             "glm47",
             "kimi_k2",
             "qwen3_coder",
@@ -196,6 +197,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         choices=[
             "deepseek-r1",
             "deepseek-v3",
+            "deepseek-v4",
             "glm45",
             "gpt-oss",
             "kimi",
@@ -661,8 +663,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default=None,
         choices=["fp8", "fp4"],
-        help="""Expert quantization dtype for EP MoE. Supported values are
-            fp8 and fp4. Note that fp4 is only supported on SM100 GPUs.""",
+        help="""Requested dtype for MoE expert weights, fp8 or fp4. Resolves the fused_moe
+            quant method: fp8 -> fp8w8a8-b128-deepgemm. For DeepSeek-V4 native MXFP4 checkpoints,
+            fp4 uses DeepGEMM Mega MoE on SM100/B300 with --enable_ep_moe, otherwise it uses
+            mxfp4w4a16-b32-marlin (Marlin W4A16, TP only). Other models retain fp4 online
+            quantization -> fp4fp8-b32-deepgemm on SM100 GPUs. A DeepSeek-V4 FP8 source checkpoint
+            with requested fp4 is also online-converted FP8 -> BF16 -> FP4 and uses the same Mega MoE path.
+            Defaults to `expert_dtype` in config.json if present. Per-layer override:
+            --quant_cfg mix_bits with name `fused_moe`.""",
     )
     parser.add_argument(
         "--vit_quant_type",
@@ -708,7 +716,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_ep_moe",
         action="store_true",
-        help="""Whether to enable ep moe for deepseekv3 model.""",
+        help="""Whether to enable expert-parallel MoE (including DeepSeek-V4 MXFP4 Mega MoE on SM100/B300).""",
     )
     parser.add_argument(
         "--ep_redundancy_expert_config_path",
@@ -803,8 +811,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu_cache_token_page_size",
         type=int,
-        default=256,
-        help="""The token page size of cpu cache""",
+        default=None,
+        help="""The token page size of cpu cache. Defaults to 2048 for DeepSeek-V4 and 256 otherwise.""",
     )
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(

@@ -51,13 +51,14 @@ def _pick_block_r(rows: int, device_index: int) -> int:
     return max(1, min(128, block_r))
 
 
-def _hadamard_transform_triton(x: torch.Tensor, scale: float) -> torch.Tensor:
+def _hadamard_transform_triton(x: torch.Tensor, scale: float, out: torch.Tensor = None) -> torch.Tensor:
     original_shape = x.shape
     hidden_size = x.size(-1)
     if not x.is_contiguous():
         x = x.contiguous()
     rows = x.numel() // hidden_size
-    out = torch.empty_like(x)
+    if out is None:
+        out = torch.empty_like(x)
     BLOCK_R = _pick_block_r(rows, x.device.index)
     grid = (triton.cdiv(rows, BLOCK_R),)
     _hadamard_transform_kernel[grid](
@@ -72,9 +73,9 @@ def _hadamard_transform_triton(x: torch.Tensor, scale: float) -> torch.Tensor:
     return out.view(original_shape)
 
 
-def hadamard_transform(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+def hadamard_transform(x: torch.Tensor, scale: float = 1.0, out: torch.Tensor = None) -> torch.Tensor:
     assert x.is_cuda, "hadamard_transform only supports CUDA tensors"
     assert x.dtype == torch.bfloat16, "hadamard_transform expects bfloat16 input"
     assert x.size(-1) == 128, "DeepSeek-V3.2 Hadamard transform expects hidden size 128"
 
-    return _hadamard_transform_triton(x, scale)
+    return _hadamard_transform_triton(x, scale, out)

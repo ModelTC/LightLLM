@@ -7,6 +7,14 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 @triton.jit
+def _ceil_to_ue8m0(x):
+    bits = x.to(tl.float32).to(tl.int32, bitcast=True)
+    exp = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0)
+    exp = tl.maximum(tl.minimum(exp, 254), 1)
+    return (exp << 23).to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _silu_and_mul_post_quant_kernel(
     input_ptr,
     stride_input_0,
@@ -24,8 +32,11 @@ def _silu_and_mul_post_quant_kernel(
     size_n,
     fp8_max,
     fp8_min,
+    limit: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
+    USE_UE8M0_SCALE: tl.constexpr,
+    USE_LIMIT_ONLY: tl.constexpr = False,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
 ):
     expert_id = tl.program_id(2)
@@ -51,6 +62,9 @@ def _silu_and_mul_post_quant_kernel(
     for token_index in tl.range(token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE):
         gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(tl.float32)
         up = tl.load(input_ptr_offs + token_index * stride_input_1 + size_n, mask=offs_in_d < size_n, other=0.0)
+        if USE_LIMIT_ONLY:
+            gate = tl.minimum(gate, limit)
+            up = tl.minimum(tl.maximum(up, -limit), limit)
         if USE_TANH_APPROXIMATE_GELU:
             gate_cubed = gate * gate * gate
             tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
@@ -61,7 +75,10 @@ def _silu_and_mul_post_quant_kernel(
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-        output_s = _absmax / fp8_max
+        if USE_UE8M0_SCALE:
+            output_s = _ceil_to_ue8m0(tl.maximum(_absmax, 1.0e-4) / fp8_max)
+        else:
+            output_s = _absmax / fp8_max
         output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(output_ptr.dtype.element_ty)
         tl.store(
             output_ptr_offs + token_index * stride_output_1,
@@ -80,6 +97,8 @@ def silu_and_mul_masked_post_quant_fwd(
     output_scale: torch.Tensor,
     quant_group_size: int,
     masked_m: torch.Tensor,
+    use_ue8m0_scales: bool = False,
+    limit=None,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -133,8 +152,11 @@ def silu_and_mul_masked_post_quant_fwd(
         size_n,
         fp8_max,
         fp8_min,
+        limit=limit,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
+        USE_UE8M0_SCALE=use_ue8m0_scales,
+        USE_LIMIT_ONLY=limit is not None,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
         num_warps=num_warps,
     )
