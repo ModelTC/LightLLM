@@ -7,7 +7,7 @@ logger = init_logger(__name__)
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 
-    def __init__(self, message="Server is busy, please try again later", status_code=429):
+    def __init__(self, message="Too many requests. Please try again later.", status_code=429):
         """
         Initialize the ServerBusyError
 
@@ -21,7 +21,7 @@ class ServerBusyError(Exception):
 
     def __str__(self):
         """String representation of the error"""
-        return f"{self.message} (Status code: {self.status_code})"
+        return self.message
 
 
 class ClientDisconnected(Exception):

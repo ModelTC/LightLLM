@@ -33,6 +33,7 @@ def test_server_busy_response_is_rate_limited(monkeypatch):
     body = json.loads(response.body)
 
     assert response.status_code == 429
+    assert body["error"]["message"] == "Too many requests. Please try again later."
     assert body["error"]["type"] == "RateLimitError"
     assert body["error"]["code"] == 429
     assert metric_client.counters == ["lightllm_request_failure"]
@@ -158,7 +159,7 @@ def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
         "type": "error",
         "error": {
             "type": "rate_limit_error",
-            "message": "Server is busy, please try again later (Status code: 429)",
+            "message": "Too many requests. Please try again later.",
         },
     }
     assert metric_client.counters == ["lightllm_request_failure"]
