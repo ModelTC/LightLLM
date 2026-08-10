@@ -54,6 +54,16 @@ from dataclasses import asdict, dataclass, is_dataclass
 
 from .api_errors import create_error_response, create_server_busy_response
 from .api_openai import chat_completions_impl, completions_impl
+from .visual_chat_proxy import (
+    VisualChatProxyError,
+    VisualProxyCapacityError,
+    VisualProxyRuntime,
+    VisualProxySettings,
+    VisualProxyTimeoutError,
+    VisualProxyUpstreamError,
+    should_use_visual_proxy,
+    visual_chat_completions_impl,
+)
 from .api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -79,6 +89,7 @@ class G_Objs:
     # OpenAI-compatible "created" timestamp for /v1/models.
     # Should be stable for the lifetime of this server process.
     model_created: int = None
+    visual_proxy_runtime: VisualProxyRuntime = None
 
     def set_args(self, args: StartArgs):
         self.args = args
@@ -369,7 +380,39 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         )
 
     try:
-        resp = await chat_completions_impl(request, raw_request)
+        visual_remote_url = getattr(g_objs.args, "visual_remote_url", None)
+        if should_use_visual_proxy(visual_remote_url, request):
+            logger.info(
+                "[visual-chat-proxy][external_request] method=POST " "path=/v1/chat/completions model=%s stream=%s",
+                request.model,
+                request.stream,
+            )
+            runtime = g_objs.visual_proxy_runtime
+            if runtime is None:
+                raise VisualChatProxyError("Visual proxy runtime is not initialized")
+            async with runtime.request_slot():
+                resp = await visual_chat_completions_impl(
+                    request=request,
+                    raw_request=raw_request,
+                    runtime=runtime,
+                    main_chat_handler=chat_completions_impl,
+                )
+                if isinstance(resp, ChatCompletionResponse):
+                    resp = JSONResponse(resp.model_dump(mode="json", exclude_none=True))
+        else:
+            resp = await chat_completions_impl(request, raw_request)
+    except VisualProxyCapacityError as e:
+        logger.warning("%s", str(e))
+        return create_error_response(HTTPStatus.TOO_MANY_REQUESTS, str(e), err_type="RateLimitError")
+    except VisualProxyTimeoutError as e:
+        logger.warning("%s", str(e))
+        return create_error_response(HTTPStatus.GATEWAY_TIMEOUT, str(e), err_type="UpstreamTimeoutError")
+    except VisualProxyUpstreamError as e:
+        logger.warning("%s", str(e))
+        return create_error_response(HTTPStatus.BAD_GATEWAY, str(e), err_type="UpstreamError")
+    except VisualChatProxyError as e:
+        logger.error("%s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.BAD_GATEWAY, str(e), err_type="UpstreamError")
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
@@ -547,6 +590,9 @@ async def profiler_stop() -> Response:
 @app.on_event("shutdown")
 async def shutdown():
     logger.info("Received signal to shutdown. Performing graceful shutdown...")
+    if g_objs.visual_proxy_runtime is not None:
+        await g_objs.visual_proxy_runtime.close()
+        g_objs.visual_proxy_runtime = None
     await asyncio.sleep(3)
 
     # 杀掉所有子进程
@@ -566,6 +612,8 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
+    if getattr(g_objs.args, "visual_remote_url", None):
+        g_objs.visual_proxy_runtime = VisualProxyRuntime(VisualProxySettings.from_args(g_objs.args))
     loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return
