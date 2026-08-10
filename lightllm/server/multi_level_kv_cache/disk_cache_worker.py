@@ -21,7 +21,7 @@ except ImportError as e:
     )
     raise ImportError("LightMem library is required for disk cache functionality") from e
 
-TASK_WAIT_TIMEOUT_S = 60.0
+TASK_WAIT_TIMEOUT_S = 120.0
 
 
 @dataclass
