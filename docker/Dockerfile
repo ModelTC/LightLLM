@@ -71,7 +71,7 @@ ENV CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/
 
 RUN if [ "${ENABLE_CACHE}" = "1" ]; then \
-      apt-get update && apt-get install -y libboost-dev && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y libboost-dev zlib1g-dev && rm -rf /var/lib/apt/lists/*; \
       LIGHTMEM_REF=9f9817b0ec6ae7055dea0542a63f66de2685ed90; \
       pip install --no-deps -v "git+https://github.com/ModelTC/LightMem.git@${LIGHTMEM_REF}#egg=light_mem"; \
     fi
