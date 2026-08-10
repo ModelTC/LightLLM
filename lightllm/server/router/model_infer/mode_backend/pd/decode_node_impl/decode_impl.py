@@ -135,9 +135,9 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 ] = mem_indexes
                 if isinstance(req_manager, DeepseekV4ReqManager):
                     req_manager.prepare_pd_decode_cache(
-                        req_idx=req_obj.req_idx,
-                        ready_cache_len=req_obj.cur_kv_len,
-                        input_len=input_len,
+                        req_list=[req_obj.req_idx],
+                        ready_list=[req_obj.cur_kv_len],
+                        seq_list=[input_len],
                         new_full_slots=mem_indexes,
                     )
 

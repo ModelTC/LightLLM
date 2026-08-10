@@ -305,6 +305,8 @@ class ModeBackend:
                 self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
             else:
                 self.mem_managers.append(self.model.mem_manager)
+        if self.is_deepseek_v4:
+            self.dp_kv_shared_module.init_dsv4_cache_transfer(self.mem_managers)
         return
 
     def get_max_total_token_num(self):

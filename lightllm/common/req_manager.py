@@ -530,33 +530,47 @@ class DeepseekV4ReqManager(ReqManager):
 
     def prepare_pd_decode_cache(
         self,
-        req_idx: int,
-        ready_cache_len: int,
-        input_len: int,
+        req_list: List[int],
+        ready_list: List[int],
+        seq_list: List[int],
         new_full_slots: torch.Tensor,
     ) -> None:
-        """Allocate DSV4 derived slots for a suffix received by a PD decode node."""
+        """Allocate DSV4 derived slots for request-major suffixes received from peers."""
         page = self.get_prompt_cache_page_size()
-        assert ready_cache_len % page == 0
-        assert new_full_slots.numel() == input_len - ready_cache_len
+        assert len(req_list) == len(ready_list) == len(seq_list) and len(req_list) > 0
+        assert all(ready % page == 0 and seq_len > ready for ready, seq_len in zip(ready_list, seq_list))
+        assert new_full_slots.numel() == sum(seq_len - ready for ready, seq_len in zip(ready_list, seq_list))
 
         new_full_slots = new_full_slots.reshape(-1).to(self.req_to_token_indexs.device, non_blocking=True)
         self.prepare_prefill_compress_slots(
-            req_list=[req_idx],
-            ready_list=[ready_cache_len],
-            seq_list=[input_len],
+            req_list=req_list,
+            ready_list=ready_list,
+            seq_list=seq_list,
             mem_indexes=new_full_slots,
         )
 
-        resume_start = max(ready_cache_len, max(0, input_len // page * page - page))
+        # swa 只保存最后一部分，前面的不需要
+        swa_start_list = []
+        swa_parts = []
+        offset = 0
+        # swa 不一样
+        for ready, seq_len in zip(ready_list, seq_list):
+            swa_start = max(ready, max(0, seq_len // page * page - page))
+            swa_start_list.append(swa_start)
+            suffix_len = seq_len - ready
+            swa_parts.append(new_full_slots[offset + swa_start - ready : offset + suffix_len])
+            offset += suffix_len
+        swa_full_slots = swa_parts[0] if len(swa_parts) == 1 else torch.cat(swa_parts)
+
         self.mem_manager.alloc_swa_prefill(
-            new_full_slots[resume_start - ready_cache_len :],
+            swa_full_slots,
             self.req_to_token_indexs,
-            req_list=[req_idx],
-            ready_list=[resume_start],
-            seq_list=[input_len],
+            req_list=req_list,
+            ready_list=swa_start_list,
+            seq_list=seq_list,
         )
-        self._swa_evict_marks[req_idx] = resume_start
+        for req_idx, swa_start in zip(req_list, swa_start_list):
+            self._swa_evict_marks[req_idx] = swa_start
         return
 
     def prepare_decode_swa(
