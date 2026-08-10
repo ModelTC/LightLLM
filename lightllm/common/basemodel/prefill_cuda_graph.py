@@ -1,4 +1,6 @@
+import os
 import torch
+import copy
 import bisect
 import triton
 from typing import List, Tuple
@@ -6,6 +8,7 @@ from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
 from .cuda_graph import CudaGraph
@@ -58,7 +61,10 @@ class PrefillCudaGraph:
 
     def need_capture(self, handle_token_num: int):
         finded_handle_token_num = self.find_closest_graph_handle_token_num(handle_token_num=handle_token_num)
-        return finded_handle_token_num is not None and finded_handle_token_num not in self.graph
+        if finded_handle_token_num is not None:
+            return finded_handle_token_num not in self.graph
+        else:
+            assert False, "dead code"
 
     def find_closest_graph_handle_token_num(self, handle_token_num: int):
         index = bisect.bisect_left(self.graph_handle_token_nums, handle_token_num)

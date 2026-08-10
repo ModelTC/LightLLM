@@ -25,17 +25,17 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         self.markov_head_type_ = str(network_config.get("markov_head_type", "")).lower()
         self.enable_confidence_head_ = bool(network_config.get("enable_confidence_head", False))
         self.confidence_head_with_markov_ = bool(network_config.get("confidence_head_with_markov", False))
-        self.mtp_draft_confidence_logits = None
-        self.mtp_draft_token_ids = None
+        self.confidence_logits = None
+        self.draft_token_ids = None
 
-    def pop_mtp_draft_confidence_logits(self):
-        logits = self.mtp_draft_confidence_logits
-        self.mtp_draft_confidence_logits = None
+    def pop_confidence_logits(self):
+        logits = self.confidence_logits
+        self.confidence_logits = None
         return logits
 
-    def pop_mtp_draft_token_ids(self):
-        token_ids = self.mtp_draft_token_ids
-        self.mtp_draft_token_ids = None
+    def pop_draft_token_ids(self):
+        token_ids = self.draft_token_ids
+        self.draft_token_ids = None
         return token_ids
 
     def has_markov_head(self) -> bool:
@@ -69,7 +69,6 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
 
     def _markov_step_bias(
         self,
-        *,
         prev_token_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         state: torch.Tensor,
@@ -100,7 +99,6 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
     def apply_markov_logits(
         self,
         base_logits: torch.Tensor,
-        *,
         block_hidden: torch.Tensor,
         anchor_token_ids: torch.Tensor,
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
@@ -131,7 +129,6 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
     def predict_confidence_logits(
         self,
         block_hidden: torch.Tensor,
-        *,
         anchor_token_ids: torch.Tensor,
         sampled_tokens: torch.Tensor,
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
@@ -210,7 +207,6 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
     def _sample_tp_sharded_vanilla_markov(
         self,
         local_logits: torch.Tensor,
-        *,
         infer_state: LlamaInferStateInfo,
         anchor_token_ids: torch.Tensor,
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
@@ -239,7 +235,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         for step_idx in range(self.block_size_):
             prev_embeddings = self._markov_prev_embeddings(prev_token_ids, layer_weight)
             local_markov_bias = F.linear(prev_embeddings.to(dtype=local_markov_w2.dtype), local_markov_w2)
-            local_base_logits = local_logits[:, step_idx::self.block_size_].permute(1, 0).float()
+            local_base_logits = local_logits[:, step_idx :: self.block_size_].permute(1, 0).float()
             local_scores = local_base_logits + local_markov_bias
             local_max_values, local_max_indexes = torch.max(local_scores, dim=-1)
             local_token_ids = local_max_indexes + local_start
@@ -276,27 +272,17 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         infer_state: LlamaInferStateInfo,
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
     ):
-        self.mtp_draft_confidence_logits = None
-        self.mtp_draft_token_ids = None
-        if self._is_commit_prefill(infer_state):
+        self.confidence_logits = None
+        self.draft_token_ids = None
+        if infer_state.is_prefill:
             return super().token_forward(
                 input_embdings=input_embdings,
                 infer_state=infer_state,
                 layer_weight=layer_weight,
             )
 
-        if infer_state.is_prefill:
-            logits, _ = self._token_forward_with_hidden(
-                input_embdings=input_embdings,
-                infer_state=infer_state,
-                layer_weight=layer_weight,
-            )
-            return logits
-
         use_tp_sharded_markov = (
-            self.tp_world_size_ > 1
-            and self.has_markov_head()
-            and self.markov_head_type_ == "vanilla"
+            self.tp_world_size_ > 1 and self.has_markov_head() and self.markov_head_type_ == "vanilla"
         )
         if use_tp_sharded_markov:
             local_logits, head_hidden = self._token_forward_with_local_logits_and_hidden(
@@ -315,14 +301,14 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
                 anchor_token_ids=anchor_token_ids,
                 layer_weight=layer_weight,
             )
-            self.mtp_draft_token_ids = sampled_tokens.reshape(-1)
-            self.mtp_draft_confidence_logits = self.predict_confidence_logits(
+            self.draft_token_ids = sampled_tokens.reshape(-1)
+            self.confidence_logits = self.predict_confidence_logits(
                 block_hidden,
                 anchor_token_ids=anchor_token_ids,
                 sampled_tokens=sampled_tokens,
                 layer_weight=layer_weight,
             )
-            # The proposer consumes mtp_draft_token_ids directly. Keep the
+            # The proposer consumes draft_token_ids directly. Keep the
             # leading row dimension for generic graph padding/unpadding while
             # avoiding an otherwise unused [rows, vocab] tensor. A single
             # placeholder column is required because CUDA graph's no-ref
@@ -349,7 +335,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
             anchor_token_ids=anchor_token_ids,
             layer_weight=layer_weight,
         )
-        self.mtp_draft_confidence_logits = self.predict_confidence_logits(
+        self.confidence_logits = self.predict_confidence_logits(
             block_hidden,
             anchor_token_ids=anchor_token_ids,
             sampled_tokens=sampled_tokens,

@@ -9,32 +9,18 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, network_config):
         super().__init__(network_config)
         self.hidden_size_ = network_config["hidden_size"]
-        return
 
-    def prepare_mtp_draft_hiddens(
+    def prepare_spec_draft_hiddens(
         self,
         infer_state: InferStateInfo,
         layer_weight: Qwen3EaglePreAndPostLayerWeight,
     ) -> None:
-        # Keep the ModelInput hidden raw for CUDA graph replay; Eagle layers consume this working buffer.
-        infer_state.eagle_draft_hidden_states = self.project_mtp_draft_hiddens(
-            infer_state.mtp_draft_input_hiddens,
-            layer_weight,
-        )
-        return
-
-    def project_mtp_draft_hiddens(
-        self,
-        target_hiddens,
-        layer_weight: Qwen3EaglePreAndPostLayerWeight,
-        use_custom_tensor_mananger: bool = True,
-    ):
-        if target_hiddens is None or target_hiddens.shape[-1] == self.hidden_size_:
-            return target_hiddens
-        return layer_weight.fc_weight_.mm(
-            target_hiddens,
-            use_custom_tensor_mananger=use_custom_tensor_mananger,
-        )
+        target_hiddens = infer_state.mtp_draft_input_hiddens
+        # Target verification provides concatenated auxiliary-layer hiddens (N * H).
+        # Recurrent draft steps feed the previous draft output, which is already H.
+        if target_hiddens.shape[-1] != self.hidden_size_:
+            target_hiddens = layer_weight.fc_weight_.mm(target_hiddens)
+        infer_state.eagle_draft_hidden_states = target_hiddens
 
     def context_forward(
         self,
@@ -42,7 +28,7 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
         infer_state: InferStateInfo,
         layer_weight: Qwen3EaglePreAndPostLayerWeight,
     ):
-        self.prepare_mtp_draft_hiddens(infer_state, layer_weight)
+        self.prepare_spec_draft_hiddens(infer_state, layer_weight)
         return super().context_forward(input_ids, infer_state, layer_weight)
 
     def token_forward(
@@ -51,5 +37,5 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
         infer_state: InferStateInfo,
         layer_weight: Qwen3EaglePreAndPostLayerWeight,
     ):
-        self.prepare_mtp_draft_hiddens(infer_state, layer_weight)
+        self.prepare_spec_draft_hiddens(infer_state, layer_weight)
         return super().token_forward(input_ids, infer_state, layer_weight)

@@ -3,30 +3,26 @@ import random
 import numpy as np
 
 from lightllm.server.router.model_infer.speculative.planner import (
-    DSparkDynamicMTPPlanner,
-    DynamicMTPPlanner,
-    FixedMTPPlanner,
+    DSparkDynamicSpecPlanner,
+    DynamicSpecPlanner,
+    FixedSpecPlanner,
 )
 
 
 def test_fixed_planner_returns_static_plan():
-    plan = FixedMTPPlanner(mtp_step=3).plan(req_num=4, original_batch_size=16)
+    plan = FixedSpecPlanner(max_draft_step=3).plan(req_num=4, original_batch_size=16)
 
     assert not plan.is_dynamic
     assert plan.dynamic_batch_size is None
     assert plan.draft_step == plan.pre_draft_step == 3
-    assert plan.selection_mode == "none"
     assert not plan.skip_verify_sync
 
 
 def test_dynamic_planner_stays_full_width_until_costs_are_profiled():
-    plan = DynamicMTPPlanner(mtp_step=3, use_random_mode=False).plan(
-        req_num=2, original_batch_size=8
-    )
+    plan = DynamicSpecPlanner(max_draft_step=3, use_random_mode=False).plan(req_num=2, original_batch_size=8)
 
     assert plan.dynamic_batch_size == 8
     assert plan.draft_step == plan.pre_draft_step == 3
-    assert plan.selection_mode == "observe"
 
 
 def test_planner_does_not_reset_process_global_random_state():
@@ -34,13 +30,13 @@ def test_planner_does_not_reset_process_global_random_state():
     expected = random.random()
     random.seed(2027)
 
-    DynamicMTPPlanner(mtp_step=3)
+    DynamicSpecPlanner(max_draft_step=3)
 
     assert random.random() == expected
 
 
 def test_dspark_applies_confidence_capacity_after_two_step_delay():
-    planner = DSparkDynamicMTPPlanner(mtp_step=3)
+    planner = DSparkDynamicSpecPlanner(max_draft_step=3)
     planner.update_infer_cost(batch_size=2, infer_cost_ms=1.0, is_draft_model=False)
     planner.update_infer_cost(batch_size=4, infer_cost_ms=1.1, is_draft_model=False)
     planner.update_infer_cost(batch_size=8, infer_cost_ms=10.0, is_draft_model=False)
@@ -57,7 +53,7 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
 
 
 def test_topk_prefix_sums_only_computes_requested_counts():
-    result = DSparkDynamicMTPPlanner._topk_prefix_sums(
+    result = DSparkDynamicSpecPlanner._topk_prefix_sums(
         values=np.asarray([0.1, 0.9, 0.4, 0.7]),
         counts=[0, 2, 4],
     )

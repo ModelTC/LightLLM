@@ -1,4 +1,9 @@
-from lightllm.common.basemodel.layer_weights.meta_weights import COLMMWeight, KVROWNMMWeight, RMSNormWeight, ROWMMWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import (
+    COLMMWeight,
+    KVROWNMMWeight,
+    QKRMSNORMWeight,
+    ROWMMWeight,
+)
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
 
@@ -31,7 +36,6 @@ class Qwen3DFlashTransformerLayerWeight(LlamaTransformerLayerWeight):
         self._ffn_norm_weight_name = f"{weight_prefix}.post_attention_layernorm.weight"
         self._q_norm_name = f"{weight_prefix}.self_attn.q_norm.weight"
         self._k_norm_name = f"{weight_prefix}.self_attn.k_norm.weight"
-        return
 
     def _init_qkv(self):
         in_dim = self.n_embed
@@ -53,7 +57,6 @@ class Qwen3DFlashTransformerLayerWeight(LlamaTransformerLayerWeight):
             bias_names=[self._k_bias_name, self._v_bias_name],
             quant_method=self.get_quant_method("kv_proj"),
         )
-        return
 
     def _init_o(self):
         in_dim = self.o_head_num_ * self.head_dim
@@ -66,7 +69,6 @@ class Qwen3DFlashTransformerLayerWeight(LlamaTransformerLayerWeight):
             bias_names=self._o_bias_name,
             quant_method=self.get_quant_method("o_proj"),
         )
-        return
 
     def _init_ffn(self):
         self.gate_up_proj = ROWMMWeight(
@@ -85,18 +87,12 @@ class Qwen3DFlashTransformerLayerWeight(LlamaTransformerLayerWeight):
             bias_names=self._down_bias_name,
             quant_method=self.get_quant_method("down_proj"),
         )
-        return
 
     def _init_norm(self):
         super()._init_norm()
-        self.q_norm_weight_ = RMSNormWeight(
+        self.qk_norm_weight_ = QKRMSNORMWeight(
             dim=self.head_dim,
-            weight_name=self._q_norm_name,
+            q_weight_name=self._q_norm_name,
+            k_weight_name=self._k_norm_name,
             data_type=self.data_type_,
         )
-        self.k_norm_weight_ = RMSNormWeight(
-            dim=self.head_dim,
-            weight_name=self._k_norm_name,
-            data_type=self.data_type_,
-        )
-        return

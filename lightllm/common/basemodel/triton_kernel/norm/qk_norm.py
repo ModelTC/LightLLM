@@ -27,8 +27,8 @@ def _rms_norm_fwd_fused(
     var = tl.sum(x * x, axis=0) / head_dim
     rstd = 1 / tl.sqrt(var + eps)
     # Normalize and apply linear transformation
-    w = tl.load(W + tl.arange(0, BLOCK_SIZE)).to(tl.float32)
-    x_hat = x * rstd
+    w = tl.load(W + tl.arange(0, BLOCK_SIZE))
+    x_hat = (x * rstd).to(X.dtype.element_ty)
     y = x_hat * w
     # Write output
     tl.store(X + cols, y.to(X.dtype.element_ty))

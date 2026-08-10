@@ -9,25 +9,24 @@ def _fwd_kernel_cumprod_probs(
     req_to_next_token_probs,
     req_to_next_token_probs_stride,
     b_req_idx,
-    mtp_step,
+    max_draft_step,
     BLOCK_SIZE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
-    cur_req_idx = tl.load(b_req_idx + cur_index * (mtp_step + 1))
+    cur_req_idx = tl.load(b_req_idx + cur_index * (max_draft_step + 1))
     base_ptr = req_to_next_token_probs + cur_req_idx * req_to_next_token_probs_stride
     tl.store(base_ptr, 1.0)
 
     offset = tl.arange(0, BLOCK_SIZE)
-    store_mask = offset < (mtp_step + 1)
+    store_mask = offset < (max_draft_step + 1)
 
     probs = tl.load(base_ptr + offset, mask=store_mask, other=0.0)
     # offset 0 是 target sample，本轮恒接受；只有 draft 条件接受概率需要 clamp。
     probs = tl.where(offset == 0, 1.0, probs)
     # 对于 draft probs 中大于 0.99 的值，设置为 0.99，避免错误的值，照成后续的采样操作失败。
     # 对于 draft probs 中小于 0.01 的值，设置为 0.01，避免错误的值，照成后续的采样操作失败。
-    # 这样修改后，我们可以做到，对于一个req的所有mtp step 步的概率的cumprod是降序的
-    # 从而在采样时，我们只需要进行排序，则选中的位置，必然满足先后关系，避免一些复杂的
-    # 额外操作。
+    # This makes each request's cumulative acceptance probabilities monotonic,
+    # so global top-k selection cannot pick a later draft row without its prefix.
     probs = tl.where((offset != 0) & (probs >= 0.99), 0.99, probs)
     probs = tl.where((offset != 0) & (probs <= 0.01), 0.01, probs)
 
@@ -99,23 +98,23 @@ def argsort(x, ids, dim: tl.core.constexpr = None, descending: tl.core.constexpr
 
 
 @triton.jit
-def _fwd_kernel_sample_dynamic_mtp_steps(
+def _fwd_kernel_select_dynamic_spec_rows(
     req_to_next_token_probs,
     req_to_next_token_probs_stride,
-    select_run_reqs,
+    selected_row_mask,
     b_req_idx,
-    mtp_step,
-    verify_step,
+    max_draft_step,
+    pre_draft_step,
     req_num,
     dynamic_batch_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    all_num = req_num * (verify_step + 1)
+    all_num = req_num * (pre_draft_step + 1)
     offset = tl.arange(0, BLOCK_SIZE)
     mask = offset < all_num
-    req_offset = offset // (verify_step + 1)
-    next_token_offset = offset % (verify_step + 1)
-    original_offset = req_offset * (mtp_step + 1) + next_token_offset
+    req_offset = offset // (pre_draft_step + 1)
+    next_token_offset = offset % (pre_draft_step + 1)
+    original_offset = req_offset * (max_draft_step + 1) + next_token_offset
 
     req_idx_index = tl.load(b_req_idx + original_offset, mask=mask, other=0)
 
@@ -127,26 +126,26 @@ def _fwd_kernel_sample_dynamic_mtp_steps(
 
     sorted_probs, sorted_ids = argsort(probs, original_offset, descending=True)
 
-    tl.store(select_run_reqs + sorted_ids, 1, mask=mask & (offset < dynamic_batch_size))
+    tl.store(selected_row_mask + sorted_ids, 1, mask=mask & (offset < dynamic_batch_size))
     return
 
 
-def sample_dynamic_mtp_req_mask(
+def sample_dynamic_spec_row_mask(
     dynamic_batch_size: int,
     b_req_idx: torch.Tensor,
     req_to_next_token_probs: torch.Tensor,
-    mtp_step: int,
-    verify_step: int = None,
+    max_draft_step: int,
+    pre_draft_step: int = None,
 ) -> torch.Tensor:
     dynamic_batch_size = int(dynamic_batch_size)
-    mtp_step = int(mtp_step)
-    verify_step = mtp_step if verify_step is None else int(verify_step)
-    assert 0 <= verify_step <= mtp_step
-    assert b_req_idx.shape[0] % (mtp_step + 1) == 0
+    max_draft_step = int(max_draft_step)
+    pre_draft_step = max_draft_step if pre_draft_step is None else int(pre_draft_step)
+    assert 0 <= pre_draft_step <= max_draft_step
+    assert b_req_idx.shape[0] % (max_draft_step + 1) == 0
     assert req_to_next_token_probs.is_cuda
     assert dynamic_batch_size <= b_req_idx.shape[0]
-    req_num = len(b_req_idx) // (mtp_step + 1)
-    valid_row_num = req_num * (verify_step + 1)
+    req_num = len(b_req_idx) // (max_draft_step + 1)
+    valid_row_num = req_num * (pre_draft_step + 1)
     assert dynamic_batch_size <= valid_row_num
 
     # cumprod probs for each request
@@ -154,27 +153,144 @@ def sample_dynamic_mtp_req_mask(
         req_to_next_token_probs=req_to_next_token_probs,
         req_to_next_token_probs_stride=req_to_next_token_probs.stride(0),
         b_req_idx=b_req_idx,
-        mtp_step=mtp_step,
-        BLOCK_SIZE=triton.next_power_of_2(mtp_step + 1),
+        max_draft_step=max_draft_step,
+        BLOCK_SIZE=triton.next_power_of_2(max_draft_step + 1),
         num_warps=1,
         num_stages=1,
     )
 
     # 1 为选中， 0 为未选中
-    select_run_reqs = torch.zeros((len(b_req_idx),), dtype=torch.int32, device="cuda")
+    selected_row_mask = torch.zeros((len(b_req_idx),), dtype=torch.int32, device="cuda")
 
     grid = (1,)
-    _fwd_kernel_sample_dynamic_mtp_steps[grid](
+    _fwd_kernel_select_dynamic_spec_rows[grid](
         req_to_next_token_probs=req_to_next_token_probs,
         req_to_next_token_probs_stride=req_to_next_token_probs.stride(0),
-        select_run_reqs=select_run_reqs,
+        selected_row_mask=selected_row_mask,
         b_req_idx=b_req_idx,
-        mtp_step=mtp_step,
-        verify_step=verify_step,
+        max_draft_step=max_draft_step,
+        pre_draft_step=pre_draft_step,
         req_num=req_num,
         dynamic_batch_size=dynamic_batch_size,
         BLOCK_SIZE=triton.next_power_of_2(valid_row_num),
         num_warps=1,
         num_stages=1,
     )
-    return select_run_reqs
+    return selected_row_mask
+
+
+@triton.jit
+def _fwd_kernel_trim_post_sample_tensors(
+    b_req_idx,
+    out_b_req_idx,
+    b_temperatures,
+    out_b_temperatures,
+    b_top_ps,
+    out_b_top_ps,
+    b_top_ks,
+    out_b_top_ks,
+    b_length_penalty_param,
+    out_b_length_penalty_param,
+    b_mask_eos_reqs,
+    out_b_mask_eos_reqs,
+    selected_row_mask,
+    selected_dst_pos,
+    batch_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+    selected = tl.load(selected_row_mask + offsets, mask=mask, other=0) != 0
+    dst_pos = tl.load(selected_dst_pos + offsets, mask=mask, other=0)
+    write_mask = mask & selected
+
+    tl.store(
+        out_b_req_idx + dst_pos,
+        tl.load(b_req_idx + offsets, mask=mask, other=0),
+        mask=write_mask,
+    )
+    tl.store(
+        out_b_temperatures + dst_pos,
+        tl.load(b_temperatures + offsets, mask=mask, other=0.0),
+        mask=write_mask,
+    )
+    tl.store(
+        out_b_top_ps + dst_pos,
+        tl.load(b_top_ps + offsets, mask=mask, other=0.0),
+        mask=write_mask,
+    )
+    tl.store(
+        out_b_top_ks + dst_pos,
+        tl.load(b_top_ks + offsets, mask=mask, other=0),
+        mask=write_mask,
+    )
+    tl.store(
+        out_b_length_penalty_param + dst_pos,
+        tl.load(b_length_penalty_param + offsets, mask=mask, other=0),
+        mask=write_mask,
+    )
+    tl.store(
+        out_b_mask_eos_reqs + dst_pos,
+        tl.load(b_mask_eos_reqs + offsets, mask=mask, other=0),
+        mask=write_mask,
+    )
+
+
+def trim_post_sample_tensors(
+    dynamic_batch_size: int,
+    selected_row_mask: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_temperatures: torch.Tensor,
+    b_top_ps: torch.Tensor,
+    b_top_ks: torch.Tensor,
+    b_length_penalty_param: torch.Tensor,
+    b_mask_eos_reqs: torch.Tensor,
+):
+    assert selected_row_mask.is_cuda
+    dynamic_batch_size = int(dynamic_batch_size)
+    selected_row_mask = selected_row_mask.to(torch.int32)
+    selected_dst_pos = torch.cumsum(selected_row_mask, dim=0, dtype=torch.int32) - 1
+    batch_size = selected_row_mask.shape[0]
+
+    output_tensors = tuple(
+        torch.empty((dynamic_batch_size,), dtype=tensor.dtype, device=tensor.device)
+        for tensor in (
+            b_req_idx,
+            b_temperatures,
+            b_top_ps,
+            b_top_ks,
+            b_length_penalty_param,
+            b_mask_eos_reqs,
+        )
+    )
+    (
+        out_b_req_idx,
+        out_b_temperatures,
+        out_b_top_ps,
+        out_b_top_ks,
+        out_b_length_penalty_param,
+        out_b_mask_eos_reqs,
+    ) = output_tensors
+
+    block_size = 256
+    _fwd_kernel_trim_post_sample_tensors[(triton.cdiv(batch_size, block_size),)](
+        b_req_idx=b_req_idx,
+        out_b_req_idx=out_b_req_idx,
+        b_temperatures=b_temperatures,
+        out_b_temperatures=out_b_temperatures,
+        b_top_ps=b_top_ps,
+        out_b_top_ps=out_b_top_ps,
+        b_top_ks=b_top_ks,
+        out_b_top_ks=out_b_top_ks,
+        b_length_penalty_param=b_length_penalty_param,
+        out_b_length_penalty_param=out_b_length_penalty_param,
+        b_mask_eos_reqs=b_mask_eos_reqs,
+        out_b_mask_eos_reqs=out_b_mask_eos_reqs,
+        selected_row_mask=selected_row_mask,
+        selected_dst_pos=selected_dst_pos,
+        batch_size=batch_size,
+        BLOCK_SIZE=block_size,
+        num_warps=4,
+        num_stages=1,
+    )
+    return output_tensors

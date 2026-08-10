@@ -18,15 +18,18 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
     from that corrected state.
     """
 
-    def __init__(self, runtime) -> None:
-        super().__init__(runtime)
-        self._confidence_draft_prune = os.getenv(
-            # Dynamic Eagle3 already ranks target verify rows by proposal
-            # confidence.  Apply the same budget to deep draft frontiers by
-            # default; static Eagle3 is explicitly excluded below.
-            "LIGHTLLM_EAGLE3_CONFIDENCE_DRAFT_PRUNE",
-            "1",
-        ).lower() in {"1", "true", "yes", "on"}
+    def __init__(self, engine) -> None:
+        super().__init__(engine)
+        self._confidence_draft_prune = (
+            os.getenv(
+                # Dynamic Eagle3 already ranks target verify rows by proposal
+                # confidence.  Apply the same budget to deep draft frontiers by
+                # default; static Eagle3 is explicitly excluded below.
+                "LIGHTLLM_EAGLE3_CONFIDENCE_DRAFT_PRUNE",
+                "1",
+            ).lower()
+            in {"1", "true", "yes", "on"}
+        )
         self._draft_prune_safety_factor = max(
             0.0,
             float(os.getenv("LIGHTLLM_EAGLE3_DRAFT_PRUNE_SAFETY_FACTOR", "1.10")),
@@ -38,7 +41,6 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
 
     def _get_pruned_active_count(
         self,
-        *,
         current_count: int,
         draft_row_budget: int,
         next_depth: int,
@@ -55,17 +57,16 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
 
     def propose_next(
         self,
-        *,
         main_model_input: ModelInput,
-        main_model_output: ModelOutput = None,
+        main_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
-        verify_result=None,
+        accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        assert 0 <= draft_step <= self.backend.mtp_step
-        assert verify_result is not None, "Eagle3 proposal requires target verify result"
-        del main_model_output
+        assert 0 <= draft_step <= self.backend.max_draft_step
+        assert accept_len is not None, "Eagle3 proposal requires target accept lengths"
+        assert main_model_output is not None and main_model_output.spec_hidden is not None
         verify_row_count = next_token_ids.shape[0]
         num_reqs = b_req_mtp_start_loc.shape[0]
         proposal_token_ids = next_token_ids.new_full(
@@ -73,20 +74,11 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             fill_value=1,
         )
         proposal_token_ids[:, 0].copy_(next_token_ids)
-        collect_dynamic_probs = self.enable_dynamic_mtp and self.runtime.collect_dynamic_probs
+        collect_dynamic_probs = self.enable_dynamic_spec
         draft_probs = [] if collect_dynamic_probs else None
 
-        if draft_step == 0:
-            return SpecProposal(
-                token_ids=proposal_token_ids,
-                extra_mem_indexes_cpu=None,
-                draft_probs=draft_probs,
-                draft_forward_rows=0,
-            )
+        target_hidden = main_model_output.spec_hidden
 
-        target_hidden = self.runtime.get_hidden()
-
-        accept_len = verify_result.accept_len
         # Scatter consumes the accepted-tail row for each request; only those
         # rows need new draft columns after the commit step.
         selected_rows = self.select_accepted_tail_rows(
@@ -94,12 +86,20 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             accept_len=accept_len,
         )
         draft_model = self.backend.draft_models[0]
-        draft_model_input = self.make_full_verify_decode_input(
+        draft_model_input = self.make_verify_extend_input(
             base_input=main_model_input,
             input_ids=next_token_ids,
             draft_hidden=target_hidden,
         )
         draft_model_output = draft_model.forward(draft_model_input)
+
+        if draft_step == 0:
+            return SpecProposal(
+                token_ids=proposal_token_ids,
+                extra_mem_indexes_cpu=None,
+                draft_probs=draft_probs,
+            )
+
         draft_logits = draft_model_output.logits.index_select(0, selected_rows)
         if collect_dynamic_probs:
             draft_next_token_ids, selected_draft_prob = self.backend._gen_argmax_token_ids_and_prob(
@@ -115,16 +115,14 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
         else:
             draft_next_token_ids = self.backend._gen_argmax_token_ids(ModelOutput(logits=draft_logits))
             chain_survival = None
-        draft_hidden = self.runtime.get_hidden().index_select(0, selected_rows)
+        assert draft_model_output.spec_hidden is not None
+        draft_hidden = draft_model_output.spec_hidden.index_select(0, selected_rows)
         proposal_token_ids[selected_rows, 1] = draft_next_token_ids
-        draft_forward_rows = verify_row_count
-
         if draft_step == 1:
             return SpecProposal(
                 token_ids=proposal_token_ids,
                 extra_mem_indexes_cpu=None,
                 draft_probs=draft_probs,
-                draft_forward_rows=draft_forward_rows,
             )
 
         eagle_mem_indexes_cpu = self.alloc_extra_mem_indexes(num_reqs * (draft_step - 1))
@@ -186,7 +184,6 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
                 max_kv_seq_len=main_model_input.max_kv_seq_len + step,
             )
             draft_output = draft_model.forward(draft_input)
-            draft_forward_rows += active_count
             if collect_dynamic_probs:
                 draft_next_token_ids, selected_draft_prob = self.backend._gen_argmax_token_ids_and_prob(draft_output)
                 draft_prob = self.scatter_selected_step_probs(
@@ -199,12 +196,12 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             else:
                 draft_next_token_ids = self.backend._gen_argmax_token_ids(draft_output)
             proposal_token_ids[selected_rows, step + 1] = draft_next_token_ids
-            draft_hidden = self.runtime.get_hidden()
+            draft_hidden = draft_output.spec_hidden
+            assert draft_hidden is not None
             selected_seq_len = selected_seq_len + 1
 
         return SpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=eagle_mem_indexes_cpu,
             draft_probs=draft_probs,
-            draft_forward_rows=draft_forward_rows,
         )

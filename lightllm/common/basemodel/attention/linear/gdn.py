@@ -2,13 +2,16 @@ import dataclasses
 import torch
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.envs_utils import enable_dynamic_mtp_verify, get_env_start_args, get_llm_data_type
+from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
 from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
+)
+from lightllm.common.basemodel.triton_kernel.linear_att.spec_state_params import (
+    build_dynamic_spec_linear_att_state_params,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import fused_recurrent_gated_delta_rule
 
@@ -26,7 +29,7 @@ class LinearAttBackend(BaseAttBackend):
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
-        self.mtp_step = get_env_start_args().mtp_step
+        self.max_draft_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
@@ -109,12 +112,12 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
     def init_state(self):
         backend: LinearAttBackend = self.backend
-        mtp_step = backend.mtp_step
+        max_draft_step = backend.max_draft_step
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (max_draft_step + 1)
         return
 
     def prefill_att(
@@ -137,8 +140,8 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
-        if backend.mtp_step > 0:
-            conv_states = conv_states[:, :, : -backend.mtp_step]
+        if backend.max_draft_step > 0:
+            conv_states = conv_states[:, :, : -backend.max_draft_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(
             mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight
@@ -199,85 +202,46 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
 
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
+    b1_spec_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
 
-    def _uses_dynamic_mtp_layout(self) -> bool:
-        return (
-            self.backend.mtp_step > 0
-            and enable_dynamic_mtp_verify()
-            and not getattr(self.infer_state, "use_static_mtp_layout", False)
-        )
-
-    def prepare_for_forward(self):
-        """Build compact GDN row metadata as part of the captured forward.
-
-        CUDA graph replay copies the primary ModelInput tensors into the graph
-        state. Deriving these tensors inside the graph makes every replay use
-        the current compact request layout instead of capture-time metadata.
-        """
-
-        if not self._uses_dynamic_mtp_layout():
-            return
-
-        from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-            build_dynamic_mtp_linear_att_state_params,
-        )
-
-        backend: LinearAttBackend = self.backend
-        batch_size = self.infer_state.batch_size
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        self.b_ssm_buffer_idx = self.b_conv_buffer_idx.view(batch_size, 1) * (backend.mtp_step + 1) + torch.arange(
-            backend.mtp_step + 1,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, backend.mtp_step + 1)
-        return
-
     def init_state(self):
-        backend: LinearAttBackend = self.backend
-        mtp_step = backend.mtp_step
+        draft_step = self.infer_state.draft_step
 
-        # decode 模式下
-        if mtp_step == 0:
-            # 非mtp模式下，不需要额外状态
+        if draft_step == 0:
             self.b_conv_buffer_idx = self.infer_state.b_req_idx
             self.b_ssm_buffer_idx = self.infer_state.b_req_idx
             return
 
-        if mtp_step > 0:
-            # mtp 模式下
-            batch_size = self.infer_state.batch_size
-            if self._uses_dynamic_mtp_layout():
-                # This must run inside _token_forward so CUDA graph replay
-                # recomputes it from the current compact row layout.
-                return
-
-            att_batch_size = batch_size // (mtp_step + 1)
-            assert batch_size % (mtp_step + 1) == 0
-
-            device = self.infer_state.b_req_idx.device
-
-            # shape 为 [att_batch_size + 1]
-            self.b1_mtp_cu_q_seq_len = torch.arange(0, batch_size + 1, mtp_step + 1, dtype=torch.int32, device=device)
-            # shape 为 [att_batch_size]
-            self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_step + 1)[:, 0].contiguous()
-            self.b_ssm_buffer_idx = (self.b_conv_buffer_idx * (mtp_step + 1)).view(att_batch_size, 1) + torch.arange(
-                mtp_step + 1, device=device, dtype=self.infer_state.b_req_idx.dtype
-            ).view(1, mtp_step + 1)
-            # shape 为 [att_batch_size]
-            # 上一步接受的数量，用于linear att 的decode mtp 算子定位正确的conv 和 ssm信息的起点。
+        batch_size = self.infer_state.batch_size
+        device = self.infer_state.b_req_idx.device
+        if self.backend.uses_dynamic_spec_verify_layout(self.infer_state):
+            (
+                self.b1_spec_cu_q_seq_len,
+                self.b_conv_buffer_idx,
+                self.b_num_accepted_tokens,
+            ) = build_dynamic_spec_linear_att_state_params(
+                b_req_idx=self.infer_state.b_req_idx,
+                b_mtp_index=self.infer_state.b_mtp_index,
+                req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
+                hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
+            )
+        else:
+            assert batch_size % (draft_step + 1) == 0, (
+                "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
+                f"got batch_size={batch_size}, draft_step={draft_step}."
+            )
+            att_batch_size = batch_size // (draft_step + 1)
+            self.b1_spec_cu_q_seq_len = torch.arange(
+                0, batch_size + 1, draft_step + 1, dtype=torch.int32, device=device
+            )
+            self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, draft_step + 1)[:, 0].contiguous()
             self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
-            return
+
+        # Each request owns one recurrent-state slot per verify row.
+        state_offsets = torch.arange(draft_step + 1, device=device, dtype=self.infer_state.b_req_idx.dtype)
+        self.b_ssm_buffer_idx = self.b_conv_buffer_idx[:, None] * (draft_step + 1) + state_offsets[None, :]
+        return
 
     def decode_att(
         self,
@@ -299,9 +263,8 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
 
-        if backend.mtp_step > 0:
-            # MTP 模式下，使用线性层 MTP 状态。
-            core_attn_out = self._gdn_mtp_kernel(
+        if self.infer_state.draft_step > 0:
+            core_attn_out = self._gdn_spec_kernel(
                 mixed_qkv,
                 conv_states,
                 ssm_states,
@@ -371,7 +334,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
         return core_attn_out, z
 
-    def _gdn_mtp_kernel(
+    def _gdn_spec_kernel(
         self,
         mixed_qkv: torch.Tensor,
         conv_states: torch.Tensor,
@@ -387,12 +350,12 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
 
         backend: LinearAttBackend = self.backend
 
-        cu_seqlens_q = self.b1_mtp_cu_q_seq_len
+        cu_seqlens_q = self.b1_spec_cu_q_seq_len
         mixed_qkv = causal_conv1d_update_spec(
             mixed_qkv,
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
-            mtp_step=backend.mtp_step,
+            mtp_step=infer_state.draft_step,
             bias=layer_weight.linear_conv1d.bias,
             activation=backend.activation,
             conv_state_indices=self.b_conv_buffer_idx,

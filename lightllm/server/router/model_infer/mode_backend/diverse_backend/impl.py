@@ -1,4 +1,5 @@
 import torch
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.infer_batch import (
     g_infer_context,
     InferReq,
@@ -13,16 +14,22 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from ..chunked_prefill.impl import ChunkedPrefillBackend
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class DiversehBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
 
-        if self.spec_config.enabled:
-            # 当前只有 mistral mtp 可以使用 diverse mode 的 mtp 功能。
+        if get_env_start_args().mtp_mode:
+            # 当前只有 mistral 和 Qwen3Next mtp 可以使用 diverse mode 的 mtp 功能。
             self.prefill = self.beam_prefill
-            assert self.spec_config.uses_no_attention_draft and not self.spec_config.is_eagle3
+            assert get_env_start_args().mtp_mode in [
+                "vanilla_no_att",
+                "eagle_no_att",
+                "qwen3next_vanilla",
+                "qwen3next_eagle",
+            ]
         else:
             self.prefill = self.beam_prefill
 

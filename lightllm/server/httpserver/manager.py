@@ -27,7 +27,7 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
-from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock
+from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -38,7 +38,6 @@ from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
-from lightllm.common.speculative import SpeculativeConfig
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -711,9 +710,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
-        mtp_verify_step_num = 0
-        spec_config = SpeculativeConfig.from_args(self.args)
-        is_static_mtp = spec_config.step > 0 and not spec_config.dynamic_verify
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -748,14 +744,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
                     cur_mtp_verify_token_num = metadata.get("mtp_verify_token_num", 0)
-                    prev_mtp_verify_token_num = sub_req_id_to_mtp_verify_token_num.get(sub_req_id, 0)
                     sub_req_id_to_mtp_verify_token_num[sub_req_id] = cur_mtp_verify_token_num
                     cur_mtp_verify_step_num = metadata.get("mtp_verify_step_num", 0)
                     sub_req_id_to_mtp_verify_step_num[sub_req_id] = cur_mtp_verify_step_num
-                    if is_static_mtp and cur_mtp_verify_token_num > prev_mtp_verify_token_num:
-                        mtp_verify_step_num += (cur_mtp_verify_token_num - prev_mtp_verify_token_num) // (
-                            self.args.mtp_step + 1
-                        )
 
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
@@ -773,8 +764,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         unfinished_count -= 1
 
                     if unfinished_count == 0:
-                        finish_time = time.time()
-                        total_cost_time_ms = (finish_time - start_time) * 1000
+                        total_cost_time_ms = (time.time() - start_time) * 1000
                         mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
@@ -788,30 +778,18 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
                         mtp_accepted_token_num = sum(sub_req_id_to_mtp_accepted_token_num.values())
                         mtp_verify_token_num = sum(sub_req_id_to_mtp_verify_token_num.values())
-                        mtp_total_step = sum(sub_req_id_to_mtp_verify_step_num.values())
-                        if mtp_total_step <= 0:
-                            mtp_total_step = out_token_counter - mtp_accepted_token_num
-                        if mtp_total_step <= 0 and is_static_mtp and mtp_verify_step_num > 0:
-                            mtp_total_step = mtp_verify_step_num
-                        mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
-                        mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_step, 1)
-                        mtp_avg_accept_len_per_step_direct = mtp_accepted_token_num / max(mtp_total_step, 1)
-                        decode_start_time = start_time + first_token_cost_ms / 1000.0
-                        decode_end_time = finish_time
-                        decode_total_time_ms = max((decode_end_time - decode_start_time) * 1000, 0.0)
-                        decode_token_counter = max(out_token_counter - 1, 0)
-                        decode_token_throughput = decode_token_counter / max(decode_total_time_ms / 1000.0, 1e-6)
+                        mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
+                        if mtp_total_verify_steps <= 0:
+                            mtp_total_verify_steps = out_token_counter - mtp_accepted_token_num
+                        mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
+                        mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
+                        mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
-                            f"decode_start_time:{decode_start_time} "
-                            f"decode_end_time:{decode_end_time} "
-                            f"decode_total_time:{decode_total_time_ms}ms "
-                            f"decode_token_counter:{decode_token_counter} "
-                            f"decode_token_throughput:{decode_token_throughput} "
                             f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
                             f"prompt_token_num:{prompt_tokens} "
                             f"gpu cache hit: {gpu_prompt_cache_ratio > 0} "
@@ -824,10 +802,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_accepted_token_num:{mtp_accepted_token_num} "
-                            f"mtp_total_step:{mtp_total_step} "
+                            f"mtp_total_verify_steps:{mtp_total_verify_steps} "
                             f"mtp_total_verify_tokens:{mtp_verify_token_num} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
-                            f"mtp_avg_accept_len_per_step_direct:{mtp_avg_accept_len_per_step_direct} "
+                            f"mtp_avg_accepted_tokens_per_step:{mtp_avg_accepted_tokens_per_step} "
                             f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
                         )
 

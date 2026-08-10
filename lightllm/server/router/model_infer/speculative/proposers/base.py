@@ -8,7 +8,7 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 if TYPE_CHECKING:
-    from lightllm.server.router.model_infer.speculative.runtime import SpecRuntime
+    from lightllm.server.router.model_infer.speculative.engine import SpecEngine
 
 
 @dataclass
@@ -21,11 +21,11 @@ class SpecProposal:
 
         token_ids: [verify_batch, draft_step + 1]
 
-    In static MTP, `draft_step == backend.mtp_step`.  In dynamic MTP it may be
-    shorter and the runtime pads before scatter.
+    With fixed scheduling, `draft_step == backend.max_draft_step`. Dynamic speculative
+    scheduling may make it shorter, and the engine pads before scatter.
 
     `draft_probs` is intentionally narrower than DeepSpec's full
-    [B, K, vocab] probability tensor.  Current LightLLM dynamic MTP only needs
+    [B, K, vocab] probability tensor. The current dynamic scheduler only needs
     the selected-token probability from each draft step:
 
         draft_probs[i]: [verify_batch]
@@ -33,7 +33,7 @@ class SpecProposal:
     `schedule_probs` optionally overrides `draft_probs` for dynamic verify
     row selection.  It can be a list of per-step vectors or a dense
     [verify_batch, draft_step] matrix.  DSpark uses confidence-head conditional
-    acceptance probabilities here; runtime scatters them into the same
+    acceptance probabilities here; the engine scatters them into the same
     per-request buffer and the dynamic selector converts them to prefix
     survival probabilities.
 
@@ -49,9 +49,6 @@ class SpecProposal:
     extra_mem_indexes_cpu: Optional[torch.Tensor]
     draft_probs: Optional[List[torch.Tensor]] = None
     schedule_probs: Optional[Union[List[torch.Tensor], torch.Tensor]] = None
-    # Actual rows processed by draft-model forwards.  Recurrent Eagle can
-    # prune low-confidence deep chains, so this need not equal B * draft_step.
-    draft_forward_rows: Optional[int] = None
 
 
 class BaseSpecProposer:
@@ -59,54 +56,47 @@ class BaseSpecProposer:
 
     A proposer owns the draft-side state transition.  The target model gives it
     the current target token ids plus captured target hidden features through
-    SpecRuntime.prepare_draft_* methods.  The proposer returns candidate ids
+    SpecEngine.prepare_draft_* methods.  The proposer returns candidate ids
     but does not verify acceptance; verification is handled by SpecVerifier.
     """
 
-    def __init__(self, runtime: "SpecRuntime") -> None:
-        self.runtime = runtime
-        self.backend = runtime.backend
+    def __init__(self, engine: "SpecEngine") -> None:
+        self.engine = engine
+        self.backend = engine.backend
 
     @property
-    def enable_dynamic_mtp(self) -> bool:
-        return self.runtime.enable_dynamic_mtp
+    def enable_dynamic_spec(self) -> bool:
+        return self.engine.enable_dynamic_spec
 
     def prepare_draft_prefill_input(
         self,
-        *,
         model_input: ModelInput,
         next_token_ids: torch.Tensor,
-        mtp_draft_input_hiddens: Optional[torch.Tensor] = None,
-        microbatch_index: int = 0,
+        mtp_draft_input_hiddens: torch.Tensor,
     ) -> ModelInput:
-        return self.runtime.prepare_draft_prefill_input(
+        return self.engine.prepare_draft_prefill_input(
             model_input=model_input,
             next_token_ids=next_token_ids,
             mtp_draft_input_hiddens=mtp_draft_input_hiddens,
-            microbatch_index=microbatch_index,
         )
 
     def prepare_draft_decode_input(
         self,
-        *,
         model_input: ModelInput,
         next_token_ids: torch.Tensor,
-        mtp_draft_input_hiddens: Optional[torch.Tensor] = None,
-        microbatch_index: int = 0,
+        mtp_draft_input_hiddens: torch.Tensor,
     ) -> ModelInput:
-        return self.runtime.prepare_draft_decode_input(
+        return self.engine.prepare_draft_decode_input(
             model_input=model_input,
             next_token_ids=next_token_ids,
             mtp_draft_input_hiddens=mtp_draft_input_hiddens,
-            microbatch_index=microbatch_index,
         )
 
-    def select_accepted_tail_rows(self, *, b_req_mtp_start_loc: torch.Tensor, accept_len: torch.Tensor) -> torch.Tensor:
+    def select_accepted_tail_rows(self, b_req_mtp_start_loc: torch.Tensor, accept_len: torch.Tensor) -> torch.Tensor:
         return (b_req_mtp_start_loc + accept_len - 1).to(torch.long)
 
     def scatter_selected_step_probs(
         self,
-        *,
         selected_rows: torch.Tensor,
         selected_probs: torch.Tensor,
         verify_row_count: int,
@@ -122,12 +112,12 @@ class BaseSpecProposer:
     def alloc_extra_mem_indexes(self, token_count: int) -> torch.Tensor:
         """Allocate draft-owned temporary KV slots."""
 
-        return self.runtime.alloc_extra_mem_indexes(token_count)
+        return self.engine.alloc_extra_mem_indexes(token_count)
 
     def build_initial_draft_state(
         self,
-        *,
         model_input: ModelInput,
+        model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
         """Build initial draft KV/state before the first decode verify step.
@@ -137,7 +127,7 @@ class BaseSpecProposer:
           mem_indexes are reused by the draft state builder.
         - `next_token_ids`: first accepted target token, shape [run_req_num].
 
-        Runtime.prepare_draft_prefill_input injects captured target hidden
+        SpecEngine.prepare_draft_prefill_input injects captured target hidden
         features into `mtp_draft_input_hiddens`.
 
         This hook only prepares draft-side state.  It intentionally does not
@@ -150,10 +140,11 @@ class BaseSpecProposer:
 
     def build_initial_draft_state_overlap(
         self,
-        *,
         model_input0: ModelInput,
+        model_output0: ModelOutput,
         next_token_ids0: torch.Tensor,
         model_input1: ModelInput,
+        model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
         """Build initial draft state for two overlapped prefill microbatches."""
@@ -162,30 +153,47 @@ class BaseSpecProposer:
 
     def propose_next(
         self,
-        *,
         main_model_input: ModelInput,
-        main_model_output: Optional[ModelOutput] = None,
+        main_model_output: Optional[ModelOutput],
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
-        verify_result=None,
+        accept_len: Optional[torch.Tensor] = None,
     ) -> SpecProposal:
         """Generate candidate tokens after one target decode forward.
 
         Inputs:
-        - `main_model_input`: target decode ModelInput.  In static MTP its
-          batch is laid out as [req0-main, req0-draft1, ...].  Dynamic MTP may
+        - `main_model_input`: target decode ModelInput. In the fixed layout its
+          batch is laid out as [req0-main, req0-draft1, ...]. Dynamic scheduling may
           compact this batch before target forward.
         - `next_token_ids`: target sampled ids for rows in `main_model_input`,
           shape [verify_batch].
         - `b_req_mtp_start_loc`: start row for each logical request inside the
-          MTP-expanded batch, shape [logical_req_num].
+          speculative verify batch, shape [logical_req_num].
         - `draft_step`: number of candidate draft tokens to produce.
-        - `verify_result`: optional target verification result from the just
-          finished target forward.  Stateful block proposers use it to commit
-          the accepted target-hidden segment before preparing the next block.
+        - `accept_len`: optional accepted-prefix length from the just-finished
+          target forward. Stateful block proposers use it to commit the
+          accepted target-hidden segment before preparing the next block.
 
         Returns a SpecProposal whose `token_ids[:, 0]` is `next_token_ids`.
         """
+
+        raise NotImplementedError
+
+    def propose_next_overlap(
+        self,
+        main_model_input0: ModelInput,
+        main_model_output0: ModelOutput,
+        next_token_ids0: torch.Tensor,
+        real_verify_rows0: int,
+        accept_len0: torch.Tensor,
+        main_model_input1: ModelInput,
+        main_model_output1: ModelOutput,
+        next_token_ids1: torch.Tensor,
+        real_verify_rows1: int,
+        accept_len1: torch.Tensor,
+        draft_step: int,
+    ) -> SpecProposal:
+        """Generate a proposal for two DP-overlapped microbatches."""
 
         raise NotImplementedError

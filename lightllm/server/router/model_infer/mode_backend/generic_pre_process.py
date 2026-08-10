@@ -7,7 +7,8 @@ from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
     enable_triton_mtp_kernel,
     get_diverse_max_batch_shared_group_size,
-    enable_dynamic_mtp_verify,
+    enable_dynamic_spec,
+    get_env_start_args,
 )
 
 
@@ -116,7 +117,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        for step in range(req.mtp_step):
+        for step in range(req.max_draft_step):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
@@ -134,13 +135,11 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_position_delta = build_b_position_delta(multimodal_params)
 
-    # diverse mode 和 dynamic MTP mode 使用不同的 shared group 构建逻辑
     if enable_diverse_mode_gqa_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
-    elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
-        # MTP 模式下，使用专门的 shared group 构建函数
-        b_shared_seq_len = None  # MTP 模式不需要 b_shared_seq_len
-        b_mark_shared_group = build_mtp_shared_group_infos(run_reqs=run_reqs)
+    elif enable_dynamic_spec() or enable_triton_mtp_kernel():
+        b_shared_seq_len = None
+        b_mark_shared_group = build_spec_shared_group_markers(b_mtp_index=b_mtp_index)
     else:
         b_shared_seq_len = None
         b_mark_shared_group = None
@@ -163,6 +162,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
+        draft_step=get_env_start_args().mtp_step,
         is_prefill=False,
         multimodal_params=multimodal_params,
     )
@@ -226,33 +226,23 @@ def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Te
     return b_shared_seq_len, b_mark_shared_group
 
 
-def build_mtp_shared_group_infos(run_reqs: List[InferReq]) -> torch.Tensor:
-    # Similar to build_diverse_shared_group_infos,
-    # but the grouping logic is based on b_mtp_index, which indicates the MTP step of each request
+def build_spec_shared_group_markers(b_mtp_index: torch.Tensor) -> torch.Tensor:
+    # Each logical request starts at row index 0. Only the final row of each
+    # speculative query group stores its group size; earlier rows store zero.
     max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
-    req_ids = [req.req_id for req in run_reqs]
     b_mark_shared_group = []
-    _current_group = []
-    for node in req_ids:
-        if not _current_group:
-            _current_group.append(node)
-        elif node == _current_group[-1]:
-            _current_group.append(node)
-        else:
-            b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
-            b_mark_shared_group[-1] = len(_current_group)
-            _current_group.clear()
-            _current_group.append(node)
+    group_start = 0
+    for group_end in range(1, len(b_mtp_index) + 1):
+        reaches_request_boundary = group_end == len(b_mtp_index) or b_mtp_index[group_end] == 0
+        reaches_size_limit = group_end - group_start == max_batch_shared_group_size
+        if not reaches_request_boundary and not reaches_size_limit:
+            continue
 
-        if len(_current_group) == max_batch_shared_group_size:
-            b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
-            b_mark_shared_group[-1] = len(_current_group)
-            _current_group.clear()
-    if _current_group:
-        b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
-        b_mark_shared_group[-1] = len(_current_group)
-        _current_group.clear()
+        group_size = group_end - group_start
+        b_mark_shared_group.extend([0] * (group_size - 1))
+        b_mark_shared_group.append(group_size)
+        group_start = group_end
 
-    assert len(b_mark_shared_group) == len(run_reqs)
+    assert len(b_mark_shared_group) == len(b_mtp_index)
     b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
     return b_mark_shared_group

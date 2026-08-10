@@ -68,9 +68,9 @@ class LinearAttCacheConfig:
         # Base committed sliding-window state, without speculative MTP tail.
         return (self.get_conv_dim(), self.conv_kernel_size - 1)
 
-    def get_mtp_conv_state_shape(self, mtp_step: int):
+    def get_spec_conv_state_shape(self, max_draft_step: int):
         # Working state with room for S speculative tokens before acceptance.
-        return (self.get_conv_dim(), (self.conv_kernel_size - 1) + mtp_step)
+        return (self.get_conv_dim(), (self.conv_kernel_size - 1) + max_draft_step)
 
     def get_ssm_state_shape(self):
         return (self.num_linear_v_heads, self.head_linear_k_dim, self.head_linear_v_dim)

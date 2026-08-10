@@ -2,12 +2,13 @@ from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import (
     Qwen3DSparkPostLayerInfer,
 )
+from lightllm.models.qwen3_dspark.model import DSparkModelOutputMixin
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import (
     Qwen3DSparkPreAndPostLayerWeight,
 )
 
 
-class Qwen3_5DSparkModel(Qwen3_5DFlashModel):
+class Qwen3_5DSparkModel(DSparkModelOutputMixin, Qwen3_5DFlashModel):
     """DSpark draft model paired with a Qwen3.5 hybrid-attention target.
 
     DeepSpec exports these checkpoints as ``Qwen3DSparkModel`` because the

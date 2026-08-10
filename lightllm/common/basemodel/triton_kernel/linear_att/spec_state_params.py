@@ -4,7 +4,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _build_dynamic_mtp_linear_att_state_params_kernel(
+def _build_dynamic_spec_linear_att_state_params_kernel(
     b_req_idx,
     b_mtp_index,
     req_to_mtp_state_index,
@@ -22,15 +22,7 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     req_idx = tl.load(b_req_idx + offsets, mask=token_mask, other=hold_req_id)
     mtp_index = tl.load(b_mtp_index + offsets, mask=token_mask, other=0)
 
-    # CUDA-graph warmup uses HOLD_REQUEST_ID for every row but still supplies
-    # a real 0..K MTP layout. Runtime graph padding, by contrast, appends HOLD
-    # rows whose mtp_index is always zero. Preserve warmup work while excluding
-    # runtime padding from the final real sequence.
-    has_hold_draft_row = tl.sum(
-        tl.where(token_mask & (req_idx == hold_req_id) & (mtp_index > 0), 1, 0),
-        axis=0,
-    ) > 0
-    valid_row = token_mask & ((req_idx != hold_req_id) | has_hold_draft_row)
+    valid_row = token_mask & (req_idx != hold_req_id)
     actual_token_num = tl.sum(tl.where(valid_row, 1, 0), axis=0)
 
     # Keep tensor shapes dependent only on the target graph batch size. The
@@ -41,6 +33,7 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     tl.store(out_num_accepted_tokens + offsets, 1, mask=token_mask)
     tl.debug_barrier()
 
+    # mtp_index restarts at zero on the first row of every request group.
     is_start = valid_row & (mtp_index == 0)
     sequence_index = tl.cumsum(tl.where(is_start, 1, 0), axis=0) - 1
     accepted_state_index = tl.load(
@@ -54,18 +47,42 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     tl.store(out_num_accepted_tokens + sequence_index, accepted_state_index + 1, mask=is_start)
 
 
-def build_dynamic_mtp_linear_att_state_params(
-    *,
+def build_dynamic_spec_linear_att_state_params(
     b_req_idx: torch.Tensor,
     b_mtp_index: torch.Tensor,
     req_to_mtp_state_index: torch.Tensor,
     hold_req_id: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build graph-stable varlen GDN parameters for compact MTP verify rows.
+    """Convert compact speculative-verify rows to variable-length GDN sequences.
 
-    The compact input remains request-major and each request contributes a
-    prefix beginning at ``b_mtp_index == 0``. Outputs are padded to the token
-    batch size; trailing entries describe zero-length sequences.
+    Rows remain request-major after dynamic verification trimming, but each request can
+    contribute a different number of rows. ``b_mtp_index`` starts at zero for
+    every request and then increases within that request.
+
+    For example, let ``H`` denote ``hold_req_id`` and suppose::
+
+        b_req_idx   = [7, 7, 7, 4, 9, 9, H, H]
+        b_mtp_index = [0, 1, 2, 0, 0, 1, 0, 0]
+
+    The first six rows contain three query sequences::
+
+        request 7 -> rows [0, 3), query length 3
+        request 4 -> rows [3, 4), query length 1
+        request 9 -> rows [4, 6), query length 2
+
+    Runtime ``H`` rows are graph padding and do not form query sequences. If
+    ``req_to_mtp_state_index`` stores ``{7: 2, 4: 0, 9: 1}``, the fixed-shape
+    outputs are::
+
+        b1_cu_q_seq_len       = [0, 3, 4, 6, 6, 6, 6, 6, 6]
+        b_conv_buffer_idx     = [7, 4, 9, H, H, H, H, H]
+        b_num_accepted_tokens = [3, 1, 2, 1, 1, 1, 1, 1]
+
+    ``b_conv_buffer_idx`` therefore changes from one request id per query row
+    to one request id per GDN sequence. Repeated cumulative lengths describe
+    zero-length tail sequences. Keeping every output shape dependent only on
+    the padded input batch allows the same CUDA Graph to replay different
+    per-request query lengths.
     """
 
     assert b_req_idx.is_cuda and b_mtp_index.is_cuda and req_to_mtp_state_index.is_cuda
@@ -78,7 +95,7 @@ def build_dynamic_mtp_linear_att_state_params(
     b_conv_buffer_idx = torch.empty_like(b_req_idx)
     b_num_accepted_tokens = torch.empty_like(b_req_idx)
 
-    _build_dynamic_mtp_linear_att_state_params_kernel[(1,)](
+    _build_dynamic_spec_linear_att_state_params_kernel[(1,)](
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         req_to_mtp_state_index=req_to_mtp_state_index,

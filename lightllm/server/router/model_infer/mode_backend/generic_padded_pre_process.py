@@ -6,9 +6,18 @@ import triton
 from typing import List, Optional, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.utils.infer_utils import calculate_time
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import (
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_dynamic_spec,
+    enable_triton_mtp_kernel,
+    get_env_start_args,
+)
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from .generic_pre_process import build_b_position_delta
+from .generic_pre_process import (
+    build_b_position_delta,
+    build_diverse_shared_group_infos,
+    build_spec_shared_group_markers,
+)
 
 
 def padded_prepare_prefill_inputs(
@@ -150,7 +159,7 @@ def padded_prepare_decode_inputs(
     b_mtp_index = []
     b_seq_len = []
     b_q_seq_len = []
-    args_mtp_step = get_env_start_args().mtp_step
+    draft_step = get_env_start_args().mtp_step
     batch_multimodal_params = []
     for req in req_objs:
         run_reqs.append(req)
@@ -163,7 +172,7 @@ def padded_prepare_decode_inputs(
         b_mtp_index.append(0)
         batch_multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        for step in range(req.mtp_step):
+        for step in range(req.max_draft_step):
             run_reqs.append(req)
             seq_len += 1
             total_token_num += seq_len
@@ -182,7 +191,7 @@ def padded_prepare_decode_inputs(
         b_q_seq_len.append(1)
         b_mtp_index.append(0)
         batch_multimodal_params.append({"images": [], "audios": []})
-        for step in range(args_mtp_step):
+        for step in range(draft_step):
             seq_len += 1
             total_token_num += seq_len
             b_seq_len.append(seq_len)
@@ -199,16 +208,28 @@ def padded_prepare_decode_inputs(
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_position_delta = build_b_position_delta(batch_multimodal_params)
 
-    # dynamic prompt cache 准备 token
-    padded_mem_indexes_num = padded_req_num * (args_mtp_step + 1)
-    if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0] - padded_mem_indexes_num)
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0] - padded_mem_indexes_num)
+    padded_row_count = padded_req_num * (draft_step + 1)
+    if enable_diverse_mode_gqa_decode_fast_kernel():
+        b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
+        if padded_row_count > 0:
+            b_shared_seq_len = F.pad(b_shared_seq_len, (0, padded_row_count), value=0)
+            b_mark_shared_group = F.pad(b_mark_shared_group, (0, padded_row_count), value=1)
+    elif enable_dynamic_spec() or enable_triton_mtp_kernel():
+        b_shared_seq_len = None
+        b_mark_shared_group = build_spec_shared_group_markers(b_mtp_index=b_mtp_index)
+    else:
+        b_shared_seq_len = None
+        b_mark_shared_group = None
 
-    if padded_mem_indexes_num > 0:
+    # dynamic prompt cache 准备 token
+    if g_infer_context.radix_cache is not None:
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0] - padded_row_count)
+    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0] - padded_row_count)
+
+    if padded_row_count > 0:
         mem_indexes = F.pad(
             input=mem_indexes,
-            pad=(0, padded_mem_indexes_num),
+            pad=(0, padded_row_count),
             mode="constant",
             value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
         )
@@ -224,6 +245,9 @@ def padded_prepare_decode_inputs(
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
         b_position_delta=b_position_delta,
+        b_shared_seq_len=b_shared_seq_len,
+        b_mark_shared_group=b_mark_shared_group,
+        draft_step=draft_step,
         is_prefill=False,
         multimodal_params=batch_multimodal_params,
     )

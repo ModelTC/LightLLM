@@ -4,7 +4,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import _trim_post_sample_tensors
+from lightllm.common.basemodel.triton_kernel.dynamic_spec_utils import trim_post_sample_tensors
 
 
 def test_trim_post_sample_tensors():
@@ -30,9 +30,9 @@ def test_trim_post_sample_tensors():
         out_b_top_ks,
         out_b_length_penalty_param,
         out_b_mask_eos_reqs,
-    ) = _trim_post_sample_tensors(
+    ) = trim_post_sample_tensors(
         dynamic_batch_size=dynamic_batch_size,
-        selected_run_reqs=selected,
+        selected_row_mask=selected,
         b_req_idx=b_req_idx,
         b_temperatures=b_temperatures,
         b_top_ps=b_top_ps,

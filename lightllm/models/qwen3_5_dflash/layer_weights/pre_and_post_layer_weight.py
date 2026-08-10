@@ -9,13 +9,6 @@ from lightllm.common.quantization import Quantcfg
 
 
 class Qwen35DFlashPreAndPostLayerWeight(PreAndPostLayerWeight):
-    """Qwen3.5 DFlash weights outside the draft decoder stack.
-
-    Qwen3.5 DFlash checkpoints only store the DFlash projection and draft
-    output norm. Token embedding and LM head weights are shared from the target
-    model by Qwen3_5DFlashModel.
-    """
-
     def __init__(self, data_type, network_config, quant_cfg: Quantcfg):
         super().__init__(data_type, network_config)
         self.quant_cfg = quant_cfg
@@ -44,4 +37,3 @@ class Qwen35DFlashPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name="norm.weight",
             data_type=self.data_type_,
         )
-        return

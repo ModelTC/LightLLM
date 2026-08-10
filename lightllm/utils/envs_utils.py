@@ -5,7 +5,6 @@ import uuid
 from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.speculative import SpeculativeConfig
 
 
 logger = init_logger(__name__)
@@ -223,14 +222,19 @@ def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
 
 
 @lru_cache(maxsize=None)
-def enable_dynamic_mtp_verify() -> bool:
+def enable_dynamic_spec() -> bool:
+    """Whether speculative scheduling may vary draft and verify widths.
+
+    ``--mtp_dynamic_verify`` remains the compatible command-line switch;
+    DSpark enables dynamic speculative scheduling unconditionally.
     """
-    启用动态 MTP 长度验证功能
-    在 MTP 模式下，根据每步的 prob 分布动态调整验证长度
-    通过启动参数 --mtp_dynamic_verify 控制；DSpark 模式固定使用
-    confidence-scheduled dynamic verify。
-    """
-    return SpeculativeConfig.from_args(get_env_start_args()).dynamic_verify
+
+    args = get_env_start_args()
+    if args.mtp_mode == "dspark":
+        return True
+    if args.mtp_mode == "dflash":
+        return False
+    return bool(args.mtp_dynamic_verify)
 
 
 @lru_cache(maxsize=None)
@@ -267,20 +271,20 @@ def enable_cpu_cache_numa_interleave() -> bool:
 
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
+    # mtp 模式下需要在mem manger上扩展draft model使用的layer
     args = get_env_start_args()
-    spec_config = SpeculativeConfig.from_args(args)
-    if not spec_config.uses_attention_draft:
+    spec_mode = args.mtp_mode
+    if spec_mode not in ("vanilla_with_att", "eagle_with_att", "eagle3", "dspark", "dflash"):
         return 0
-    if spec_config.is_dflash or spec_config.is_dspark or spec_config.is_eagle3:
-        draft_model_dir = args.mtp_draft_model_dir
-        if isinstance(draft_model_dir, list):
-            draft_model_dir = draft_model_dir[0]
-        if not draft_model_dir:
-            return spec_config.draft_model_count
+    draft_model_count = args.mtp_step if spec_mode == "vanilla_with_att" else 1
+    if spec_mode in ("dflash", "dspark", "eagle3"):
+        if not args.mtp_draft_model_dir:
+            return draft_model_count
+        draft_model_dir = args.mtp_draft_model_dir[0]
         with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
             draft_config = json.load(json_file)
-        return int(draft_config.get("num_hidden_layers", draft_config.get("n_layer", spec_config.draft_model_count)))
-    return spec_config.draft_model_count
+        return int(draft_config.get("num_hidden_layers", draft_config.get("n_layer", draft_model_count)))
+    return draft_model_count
 
 
 @lru_cache(maxsize=None)

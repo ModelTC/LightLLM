@@ -1,61 +1,33 @@
-from lightllm.server.router.model_infer.speculative.proposers.base import BaseSpecProposer, SpecProposal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.speculative.proposers.base import BaseSpecProposer
 
 
-def build_spec_proposer(runtime) -> BaseSpecProposer:
-    spec_config = runtime.spec_config
-    if spec_config.is_dspark:
+def build_spec_proposer(engine) -> "BaseSpecProposer":
+    spec_mode = engine.spec_mode
+    if spec_mode == "dspark":
         from lightllm.server.router.model_infer.speculative.proposers.dspark import DSparkProposer
 
-        return DSparkProposer(runtime)
-    if spec_config.is_dflash:
+        return DSparkProposer(engine=engine)
+    if spec_mode == "dflash":
         from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
 
-        return DFlashProposer(runtime)
-    if spec_config.is_eagle3:
+        return DFlashProposer(engine=engine)
+    if spec_mode == "eagle3":
         from lightllm.server.router.model_infer.speculative.proposers.eagle3 import Eagle3Proposer
 
-        return Eagle3Proposer(runtime)
-    if spec_config.uses_recurrent_draft_model:
+        return Eagle3Proposer(engine=engine)
+    if spec_mode in ("eagle_with_att", "eagle_no_att", "qwen3next_eagle"):
         from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import EagleMTPProposer
 
-        return EagleMTPProposer(runtime)
+        return EagleMTPProposer(engine=engine)
 
     from lightllm.server.router.model_infer.speculative.proposers.vanilla_mtp import VanillaMTPProposer
 
-    return VanillaMTPProposer(runtime)
-
-
-def __getattr__(name):
-    if name == "DFlashProposer":
-        from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
-
-        return DFlashProposer
-    if name == "DSparkProposer":
-        from lightllm.server.router.model_infer.speculative.proposers.dspark import DSparkProposer
-
-        return DSparkProposer
-    if name == "EagleMTPProposer":
-        from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import EagleMTPProposer
-
-        return EagleMTPProposer
-    if name == "Eagle3Proposer":
-        from lightllm.server.router.model_infer.speculative.proposers.eagle3 import Eagle3Proposer
-
-        return Eagle3Proposer
-    if name == "VanillaMTPProposer":
-        from lightllm.server.router.model_infer.speculative.proposers.vanilla_mtp import VanillaMTPProposer
-
-        return VanillaMTPProposer
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return VanillaMTPProposer(engine=engine)
 
 
 __all__ = [
-    "BaseSpecProposer",
-    "DFlashProposer",
-    "DSparkProposer",
-    "EagleMTPProposer",
-    "Eagle3Proposer",
-    "SpecProposal",
-    "VanillaMTPProposer",
     "build_spec_proposer",
 ]

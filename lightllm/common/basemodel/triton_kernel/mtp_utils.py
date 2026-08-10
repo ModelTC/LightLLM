@@ -4,8 +4,8 @@ import triton.language as tl
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
-from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import sample_dynamic_mtp_req_mask
-from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size, get_env_start_args
+from lightllm.common.basemodel.triton_kernel.dynamic_spec_utils import sample_dynamic_spec_row_mask
+from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
 @triton.jit
@@ -13,7 +13,7 @@ def _fwd_kernel_mtp_verify(
     req_to_next_token_ids,
     req_to_next_token_ids_stride,
     new_next_token_ids,
-    mtp_accept_len,
+    spec_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
     accepted_index,
@@ -42,7 +42,7 @@ def _fwd_kernel_mtp_verify(
     mismatch_positions = tl.where(match_mask, BLOCK_SIZE, offset)
     first_mismatch_pos = tl.min(mismatch_positions)
     accept_len = first_mismatch_pos + 1
-    tl.store(mtp_accept_len + cur_index, accept_len)
+    tl.store(spec_accept_len + cur_index, accept_len)
     accpeted_index = tl.where((offset < accept_len), 1, 0)
     tl.store(accepted_index + req_offset, accpeted_index, mask=offset < req_mtp_num)
     return
@@ -57,21 +57,21 @@ def mtp_verify(
     """
     This function is used to verify the accept_len.
     Args:
-        req_to_next_token_ids: (max_req_num, max_mtp_step)
+        req_to_next_token_ids: (max_req_num, verify_width)
         b_req_mtp_start_loc: (num_reqs,)
         new_next_token_ids: (batch_size,)
         b_req_idx: (batch_size,)
     Returns:
-        mtp_accept_len: (num_reqs,)
+        spec_accept_len: (num_reqs,)
         accepted_index: (batch_size,)
         accepted_index: [1, 0, 1, 1, 0], 0 means the token is not accepted, 1 means the token is accepted.
     """
-    max_mtp_step = req_to_next_token_ids.shape[1]
+    verify_width = req_to_next_token_ids.shape[1]
     BLOCK_SIZE = 16
-    assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than {BLOCK_SIZE}"
+    assert verify_width <= BLOCK_SIZE, f"verify_width must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
     req_mtp_all_num = b_req_idx.shape[0]
-    mtp_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=req_to_next_token_ids.device)
+    spec_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=req_to_next_token_ids.device)
     accepted_index = torch.empty((req_mtp_all_num,), dtype=torch.int32, device=req_to_next_token_ids.device)
 
     grid = (num_reqs,)
@@ -80,7 +80,7 @@ def mtp_verify(
         req_to_next_token_ids=req_to_next_token_ids,
         req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
         new_next_token_ids=new_next_token_ids,
-        mtp_accept_len=mtp_accept_len,
+        spec_accept_len=spec_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
         accepted_index=accepted_index,
@@ -89,7 +89,7 @@ def mtp_verify(
         num_warps=num_warps,
         num_stages=1,
     )
-    return mtp_accept_len, accepted_index
+    return spec_accept_len, accepted_index
 
 
 @triton.jit
@@ -102,20 +102,21 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     req_to_next_token_probs_stride,
     all_next_token_probs,
     all_next_token_probs_stride,
-    mtp_accept_len,
+    spec_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
     mtp_step,
-    HAS_HAS_NEXT_TOKEN_PROBS: tl.constexpr,
+    HAS_NEXT_TOKEN_PROBS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+
     cur_index = tl.program_id(0)
     req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
-    accept_len = tl.load(mtp_accept_len + cur_index)
+    accept_len = tl.load(spec_accept_len + cur_index)
     cur_req_idx = tl.load(b_req_idx + req_start_loc)
     offset = tl.arange(0, BLOCK_SIZE)
 
-    if HAS_HAS_NEXT_TOKEN_PROBS:
+    if HAS_NEXT_TOKEN_PROBS:
         cur_next_token_probs = tl.load(
             all_next_token_probs + (req_start_loc + accept_len - 1) * all_next_token_probs_stride + offset,
             mask=offset < mtp_step,
@@ -144,21 +145,21 @@ def mtp_scatter_next_token_ids(
     b_req_mtp_start_loc: torch.Tensor,
     all_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
-    mtp_accept_len: torch.Tensor,
+    spec_accept_len: torch.Tensor,
     req_to_next_token_probs: Optional[torch.Tensor] = None,
     all_next_token_probs: Optional[torch.Tensor] = None,
 ):
-    max_mtp_step = req_to_next_token_ids.shape[1]
+    verify_width = req_to_next_token_ids.shape[1]
     BLOCK_SIZE = 16
-    assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than {BLOCK_SIZE}"
+    assert verify_width <= BLOCK_SIZE, f"verify_width must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
     mtp_step = all_next_token_ids.shape[1]
     if req_to_next_token_probs is not None:
         assert all_next_token_probs is not None
         assert all_next_token_probs.shape == all_next_token_ids.shape
 
-    HAS_HAS_NEXT_TOKEN_PROBS = req_to_next_token_probs is not None
-    # Triton launch 参数阶段不能直接传 None；不开动态 MTP 时这里传一个不会被实际使用的 dummy tensor 即可。
+    HAS_NEXT_TOKEN_PROBS = req_to_next_token_probs is not None
+    # Triton launch arguments cannot be None; static verification uses an unused placeholder.
     req_to_next_token_probs_arg = (
         req_to_next_token_probs if req_to_next_token_probs is not None else req_to_next_token_ids
     )
@@ -181,11 +182,11 @@ def mtp_scatter_next_token_ids(
         req_to_next_token_probs_stride=req_to_next_token_probs_stride,
         all_next_token_probs=all_next_token_probs_arg,
         all_next_token_probs_stride=all_next_token_probs_stride,
-        mtp_accept_len=mtp_accept_len,
+        spec_accept_len=spec_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
         mtp_step=mtp_step,
-        HAS_HAS_NEXT_TOKEN_PROBS=HAS_HAS_NEXT_TOKEN_PROBS,
+        HAS_NEXT_TOKEN_PROBS=HAS_NEXT_TOKEN_PROBS,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
         num_stages=1,
@@ -193,7 +194,7 @@ def mtp_scatter_next_token_ids(
 
 
 @triton.jit
-def _fwd_kernel_trim_dynamic_mtp_model_input(
+def _fwd_kernel_compact_dynamic_spec_model_input(
     input_ids,
     out_input_ids,
     b_req_idx,
@@ -312,35 +313,32 @@ def _fwd_kernel_pack_selected_rows_2d(
     tl.store(dst_ptrs, vals, mask=write_row & col_mask)
 
 
-def _pack_selected_rows_2d(
-    src: Optional[torch.Tensor],
-    selected_mask_gpu: torch.Tensor,
+def _pack_selected_hidden(
+    hidden: torch.Tensor,
+    selected_row_mask: torch.Tensor,
     selected_dst_pos: torch.Tensor,
     dynamic_batch_size: int,
 ):
-    if src is None:
-        return None
-
-    assert src.is_cuda
-    assert src.ndim == 2
-    assert selected_mask_gpu.is_cuda
+    assert hidden.is_cuda
+    assert hidden.ndim == 2
+    assert selected_row_mask.is_cuda
     assert selected_dst_pos.is_cuda
-    assert src.shape[0] == selected_mask_gpu.shape[0]
+    assert hidden.shape[0] == selected_row_mask.shape[0]
 
-    selected_mask_gpu = selected_mask_gpu.to(torch.int32)
-    hidden_size = src.shape[1]
-    dst = torch.empty((dynamic_batch_size, hidden_size), dtype=src.dtype, device=src.device)
-    grid = (src.shape[0], triton.cdiv(hidden_size, 128))
+    selected_row_mask = selected_row_mask.to(torch.int32)
+    hidden_size = hidden.shape[1]
+    dst = torch.empty((dynamic_batch_size, hidden_size), dtype=hidden.dtype, device=hidden.device)
+    grid = (hidden.shape[0], triton.cdiv(hidden_size, 128))
     _fwd_kernel_pack_selected_rows_2d[grid](
-        src=src,
-        src_stride_0=src.stride(0),
-        src_stride_1=src.stride(1),
+        src=hidden,
+        src_stride_0=hidden.stride(0),
+        src_stride_1=hidden.stride(1),
         dst=dst,
         dst_stride_0=dst.stride(0),
         dst_stride_1=dst.stride(1),
-        selected_mask=selected_mask_gpu,
+        selected_mask=selected_row_mask,
         selected_dst_pos=selected_dst_pos,
-        batch_size=src.shape[0],
+        batch_size=hidden.shape[0],
         hidden_size=hidden_size,
         BLOCK_N=128,
         num_warps=4,
@@ -349,11 +347,12 @@ def _pack_selected_rows_2d(
     return dst
 
 
-def _rebuild_trimmed_mtp_b_mark_shared_group_from_b_req_idx(b_req_idx: torch.Tensor) -> torch.Tensor:
+def _rebuild_mtp_group_markers(b_req_idx: torch.Tensor, max_request_rows: int) -> torch.Tensor:
     assert b_req_idx.is_cuda
     batch_size = b_req_idx.shape[0]
     max_batch_shared_group_size = int(get_diverse_max_batch_shared_group_size())
     assert max_batch_shared_group_size > 0
+    assert max_request_rows > 0
     if batch_size == 0:
         return torch.empty((0,), dtype=torch.int32, device=b_req_idx.device)
 
@@ -364,7 +363,7 @@ def _rebuild_trimmed_mtp_b_mark_shared_group_from_b_req_idx(b_req_idx: torch.Ten
         out_b_mark_shared_group=b_mark_shared_group,
         batch_size=batch_size,
         max_batch_shared_group_size=max_batch_shared_group_size,
-        MAX_RUN_SCAN=16,
+        MAX_RUN_SCAN=max_request_rows - 1,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,
         num_stages=1,
@@ -372,19 +371,19 @@ def _rebuild_trimmed_mtp_b_mark_shared_group_from_b_req_idx(b_req_idx: torch.Ten
     return b_mark_shared_group
 
 
-def _trim_decode_model_input_inplace(
+def _compact_decode_model_input(
     model_input: ModelInput,
-    selected_mask_gpu: torch.Tensor,
+    selected_row_mask: torch.Tensor,
     dynamic_batch_size: int,
 ) -> ModelInput:
     assert not model_input.is_prefill
-    assert selected_mask_gpu.is_cuda
+    assert selected_row_mask.is_cuda
     assert model_input.b_req_idx.is_cuda
     assert model_input.b_mtp_index.is_cuda
     assert model_input.b_seq_len.is_cuda
 
-    # 动态 MTP 采样阶段已经保证 selected_mask_gpu 恰好选出 dynamic_batch_size 个位置。
-    selected_mask_gpu = selected_mask_gpu.to(torch.int32)
+    # Dynamic scheduling guarantees exactly dynamic_batch_size selected rows.
+    selected_row_mask = selected_row_mask.to(torch.int32)
     old_batch_size = model_input.b_req_idx.shape[0]
     selected_dst_pos = torch.empty((old_batch_size,), dtype=torch.int32, device=model_input.b_req_idx.device)
 
@@ -432,7 +431,7 @@ def _trim_decode_model_input_inplace(
     dummy_1d = model_input.b_req_idx
     BLOCK_SIZE = triton.next_power_of_2(old_batch_size)
     grid = (1,)
-    _fwd_kernel_trim_dynamic_mtp_model_input[grid](
+    _fwd_kernel_compact_dynamic_spec_model_input[grid](
         input_ids=model_input.input_ids if model_input.input_ids is not None else dummy_1d,
         out_input_ids=out_input_ids if out_input_ids is not None else dummy_1d,
         b_req_idx=model_input.b_req_idx,
@@ -447,7 +446,7 @@ def _trim_decode_model_input_inplace(
         out_mem_indexes=out_mem_indexes if out_mem_indexes is not None else dummy_1d,
         b_shared_seq_len=model_input.b_shared_seq_len if model_input.b_shared_seq_len is not None else dummy_1d,
         out_b_shared_seq_len=out_b_shared_seq_len if out_b_shared_seq_len is not None else dummy_1d,
-        selected_mask=selected_mask_gpu,
+        selected_mask=selected_row_mask,
         selected_dst_pos=selected_dst_pos,
         batch_size=old_batch_size,
         HAS_INPUT_IDS=model_input.input_ids is not None,
@@ -466,73 +465,60 @@ def _trim_decode_model_input_inplace(
     model_input.b_position_delta = out_b_position_delta
     model_input.mem_indexes = out_mem_indexes
     model_input.b_shared_seq_len = out_b_shared_seq_len
-    model_input.b_mark_shared_group = _rebuild_trimmed_mtp_b_mark_shared_group_from_b_req_idx(out_b_req_idx)
+    model_input.b_mark_shared_group = _rebuild_mtp_group_markers(
+        out_b_req_idx,
+        max_request_rows=model_input.draft_step + 1,
+    )
 
-    if model_input.input_ids is not None:
-        assert model_input.input_ids.shape[0] == dynamic_batch_size
     if model_input.mtp_draft_input_hiddens is not None:
         assert model_input.mtp_draft_input_hiddens.is_cuda
-        model_input.mtp_draft_input_hiddens = _pack_selected_rows_2d(
+        model_input.mtp_draft_input_hiddens = _pack_selected_hidden(
             model_input.mtp_draft_input_hiddens,
-            selected_mask_gpu,
+            selected_row_mask,
             selected_dst_pos,
             dynamic_batch_size,
         )
-    if model_input.b_position_delta is not None:
-        assert model_input.b_position_delta.shape[0] == dynamic_batch_size
-    if model_input.mem_indexes is not None:
-        assert model_input.mem_indexes.shape[0] == dynamic_batch_size
     model_input.batch_size = dynamic_batch_size
 
     return model_input
 
 
-def prepare_dynamic_mtp_model_input(
+def prepare_dynamic_spec_model_input(
     model_input: ModelInput,
     req_num: int,
     dynamic_batch_size: int,
-    req_to_next_token_ids: torch.Tensor,
-    req_to_next_token_probs: Optional[torch.Tensor] = None,
-    verify_step: Optional[int] = None,
-    use_prefix_selection: bool = False,
+    req_to_next_token_probs: torch.Tensor,
+    pre_draft_step: Optional[int] = None,
 ):
-    if req_to_next_token_probs is None:
-        selected_mask = torch.ones((model_input.batch_size,), dtype=torch.int32, device="cuda")
-        return model_input, selected_mask
-
     req_num = int(req_num)
     dynamic_batch_size = int(dynamic_batch_size)
-    assert not model_input.is_prefill, "trim_dynamic_mtp_model_input only supports decode inputs"
+    assert not model_input.is_prefill, "prepare_dynamic_spec_model_input only supports decode inputs"
+    assert req_to_next_token_probs is not None
     assert dynamic_batch_size >= req_num
     assert dynamic_batch_size <= model_input.batch_size
-    mtp_step = int(get_env_start_args().mtp_step)
-    verify_step = mtp_step if verify_step is None else int(verify_step)
-    assert 0 <= verify_step <= mtp_step
-    assert model_input.batch_size == req_num * (mtp_step + 1)
-    assert dynamic_batch_size <= req_num * (verify_step + 1)
+    max_draft_step = int(model_input.draft_step)
+    pre_draft_step = max_draft_step if pre_draft_step is None else int(pre_draft_step)
+    assert 0 <= pre_draft_step <= max_draft_step
+    assert model_input.batch_size == req_num * (max_draft_step + 1)
+    assert dynamic_batch_size <= req_num * (pre_draft_step + 1)
 
-    # ! 在一个CUDA流上面的GPU操作会自动串行化，因此不需要额外同步
-    # ! model_input必须在GPU上，才能高效进行trim操作
+    # All compaction work stays on the current CUDA stream and needs no host sync.
     model_input.to_cuda()
 
-    if use_prefix_selection:
-        assert dynamic_batch_size == req_num * (verify_step + 1)
-        selected_mask_gpu = (model_input.b_mtp_index <= verify_step).to(dtype=torch.int32)
-    else:
-        selected_mask_gpu = sample_dynamic_mtp_req_mask(
-            dynamic_batch_size=dynamic_batch_size,
-            b_req_idx=model_input.b_req_idx,
-            req_to_next_token_probs=req_to_next_token_probs,
-            mtp_step=mtp_step,
-            verify_step=verify_step,
-        )
+    selected_row_mask = sample_dynamic_spec_row_mask(
+        dynamic_batch_size=dynamic_batch_size,
+        b_req_idx=model_input.b_req_idx,
+        req_to_next_token_probs=req_to_next_token_probs,
+        max_draft_step=max_draft_step,
+        pre_draft_step=pre_draft_step,
+    )
 
-    model_input = _trim_decode_model_input_inplace(
+    model_input = _compact_decode_model_input(
         model_input=model_input,
-        selected_mask_gpu=selected_mask_gpu,
+        selected_row_mask=selected_row_mask,
         dynamic_batch_size=dynamic_batch_size,
     )
-    # Keep CPU mem_indexes unfiltered here.  Copying selected_mask_gpu back to
+    # Keep CPU mem_indexes unfiltered here. Copying selected_row_mask back to
     # CPU in this hot path synchronizes the overlap stream; the router frees
     # unselected/rejected CPU mem indexes after its existing async mask copy is
     # consumed.  Decode only needs b_position_delta on device, so placeholder
@@ -543,18 +529,16 @@ def prepare_dynamic_mtp_model_input(
         empty_multimodal_params = {"images": [], "audios": []}
         model_input.multimodal_params = [empty_multimodal_params] * dynamic_batch_size
 
-    # ! 现在这些值没有实际作用，同时修改这些值还会导致阻塞操作，因此暂时不修改这些值了
-    # model_input.total_token_num = int(model_input.b_seq_len.sum().item())
-    # model_input.max_kv_seq_len = int(model_input.b_seq_len.max().item())
     model_input.max_q_seq_len = 1
-    return model_input, selected_mask_gpu
+    return model_input, selected_row_mask
 
 
 @triton.jit
 def _fwd_kernel_gen_b_req_mtp_start_loc(
     b_mtp_index,
     b_req_mtp_start_loc,
-    batch_size,
+    num_reqs: tl.constexpr,
+    batch_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offset = tl.arange(0, BLOCK_SIZE)
@@ -573,6 +557,7 @@ def gen_b_req_mtp_start_loc(b_mtp_index: torch.Tensor, num_reqs: int):
     _fwd_kernel_gen_b_req_mtp_start_loc[grid](
         b_mtp_index=b_mtp_index,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
+        num_reqs=num_reqs,
         batch_size=batch_size,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,
@@ -611,13 +596,13 @@ def _fwd_kernel_linear_att_mtp_state_index_update(
     return
 
 
-def linear_att_mtp_state_index_update(
+def linear_att_spec_state_index_update(
     req_to_mtp_state_index: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_mtp_index: torch.Tensor,
     accepted_index: torch.Tensor,
-    max_mtp_step: int,
+    verify_width: int,
 ):
     """
     Update req_to_mtp_state_index with the max b_mtp_index among accepted tokens per request.
@@ -627,10 +612,10 @@ def linear_att_mtp_state_index_update(
         b_req_idx: (batch_size,)
         b_mtp_index: (batch_size,)
         accepted_index: (batch_size,), 1 means accepted, 0 means not accepted.
-        max_mtp_step: max mtp step per request, typically mtp_step + 1.
+        verify_width: maximum verify width per request, including the target row.
     """
     BLOCK_SIZE = 16
-    assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than {BLOCK_SIZE}"
+    assert verify_width <= BLOCK_SIZE, f"verify_width must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
     req_mtp_all_num = b_req_idx.shape[0]
 
@@ -649,3 +634,36 @@ def linear_att_mtp_state_index_update(
         num_warps=num_warps,
         num_stages=1,
     )
+
+
+def test_mtp_verify():
+    req_to_next_token_ids = torch.tensor(
+        [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int64, device="cuda"
+    )
+    b_req_idx = torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32, device="cuda")
+    b_req_mtp_start_loc = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
+    new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int64, device="cuda")
+    all_next_token_ids = torch.tensor(
+        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int64, device="cuda"
+    )
+    spec_accept_len, accepted_index = mtp_verify(
+        req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx
+    )
+    mtp_scatter_next_token_ids(
+        req_to_next_token_ids, b_req_mtp_start_loc, all_next_token_ids, b_req_idx, spec_accept_len
+    )
+    print(spec_accept_len)
+    print(req_to_next_token_ids)
+    print(accepted_index)
+
+
+def test_gen_b_req_mtp_start_loc():
+    b_mtp_index = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32, device="cuda")
+    gt_output = torch.where(b_mtp_index == 0)[0]
+    b_req_mtp_start_loc = gen_b_req_mtp_start_loc(b_mtp_index, 2)
+    print(b_req_mtp_start_loc, gt_output)
+
+
+if __name__ == "__main__":
+    test_mtp_verify()
+    # test_gen_b_req_mtp_start_loc()

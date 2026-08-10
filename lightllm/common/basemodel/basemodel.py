@@ -14,6 +14,7 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
@@ -24,20 +25,20 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import (
-    enable_triton_mtp_kernel,
-    get_env_start_args,
-    get_llm_data_type,
-    get_added_mtp_kv_layer_num,
-)
+from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.hidden_collector import (
+    HiddenCollector,
+    unpad_collected_hidden,
+)
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import (
     set_model_init_status,
     enable_diverse_mode_gqa_decode_fast_kernel,
     enable_full_att_decode_tune,
-    enable_dynamic_mtp_verify,
+    enable_dynamic_spec,
+    enable_triton_mtp_kernel,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
@@ -54,6 +55,8 @@ torch.backends.cudnn.enabled = True
 
 
 class TpPartBaseModel:
+    is_mtp_draft_model = False
+
     # weight class
     pre_and_post_weight_class = None
     transformer_weight_class = None
@@ -83,27 +86,14 @@ class TpPartBaseModel:
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.data_type = get_llm_data_type()
-        mtp_step = get_env_start_args().mtp_step
-        # A graph for more logical requests than the scheduler can ever run is
-        # unreachable. In MTP modes the value is expanded by ``mtp_step + 1``
-        # below, so leaving the CLI default (often 256) uncapped can otherwise
-        # create multi-GiB full-vocabulary graph outputs for a server limited
-        # to only a few dozen concurrent requests.
-        self.graph_max_batch_size = min(
-            kvargs.get("graph_max_batch_size", 16),
-            self.max_req_num,
-        )
+        self.decode_batch_multiplier = kvargs.get("decode_batch_multiplier", 1)
+        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_batch_size = (
             self.graph_max_batch_size // 2
             if get_env_start_args().enable_decode_microbatch_overlap
             else self.graph_max_batch_size
         )
-        # mtp 模式下需要修缮对应的最大batch size，为 （mtp_step + 1) 的倍数
-        self.graph_max_batch_size = self.graph_max_batch_size * (mtp_step + 1)
-        self.graph_split_batch_size = int(kvargs.get("graph_split_batch_size", self.args.graph_split_batch_size))
-        self.graph_grow_step_size = int(kvargs.get("graph_grow_step_size", self.args.graph_grow_step_size))
-        assert self.graph_split_batch_size > 0
-        assert self.graph_grow_step_size > 0
+        self.graph_max_batch_size = self.graph_max_batch_size * self.decode_batch_multiplier
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -116,10 +106,8 @@ class TpPartBaseModel:
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
-        self.spec_adapter = None
 
         self._init_config()
-
         self._verify_must()
         self._verify_params()
         self._init_quant()
@@ -149,6 +137,7 @@ class TpPartBaseModel:
             logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
+        self._init_hidden_collector(hidden_layer_ids=kvargs.get("hidden_layer_ids"))
         self._autotune_warmup()
         self._full_att_decode_autotune()
         self._init_padded_req()
@@ -157,26 +146,6 @@ class TpPartBaseModel:
         self._check_max_len_infer()
         torch.cuda.empty_cache()
         set_model_init_status(True)
-        return
-
-    def _wait_other_modules_ready(self):
-        for event in self.wait_events:
-            event.wait()
-        return
-
-    def set_spec_adapter(self, spec_adapter):
-        self.spec_adapter = spec_adapter
-        if self.graph is not None:
-            self.graph.set_spec_adapter(spec_adapter, model=self)
-            # Models build their initial decode graphs before the speculative
-            # runtime exists. Attaching the adapter changes both graph batch
-            # sizes and cache keys, so eagerly capture the speculative graph
-            # variants on dummy state now. Lazy capture during the first live
-            # request can execute in-place KV/linear-state updates repeatedly.
-            if get_env_start_args().enable_decode_microbatch_overlap:
-                self.graph.warmup_overlap(self)
-            else:
-                self.graph.warmup(self)
         return
 
     def _init_config(self):
@@ -188,12 +157,6 @@ class TpPartBaseModel:
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
-
-        # eagle3 mode 下，需要修改 vocab_size 为 draft_vocab_size, 其他场景
-        # 这个代码并不会生效。
-        if "draft_vocab_size" in self.config.keys():
-            self.config["target_vocab_size"] = self.config["vocab_size"]
-            self.config["vocab_size"] = self.config["draft_vocab_size"]
         return
 
     @final
@@ -270,8 +233,6 @@ class TpPartBaseModel:
         return
 
     def _init_req_manager(self):
-        from lightllm.common.req_manager import ReqManager
-
         create_max_seq_len = 0
 
         if self.batch_max_tokens is not None:
@@ -313,6 +274,7 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
+        batch_multiplier = 1 if enable_dynamic_spec() and not self.is_mtp_draft_model else self.decode_batch_multiplier
         self.graph = (
             None
             if self.disable_cudagraph
@@ -320,8 +282,8 @@ class TpPartBaseModel:
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
-                graph_split_batch_size=self.graph_split_batch_size,
-                graph_grow_step_size=self.graph_grow_step_size,
+                batch_multiplier=batch_multiplier,
+                capture_infer_cost=enable_dynamic_spec(),
             )
         )
         if self.graph is not None:
@@ -361,7 +323,7 @@ class TpPartBaseModel:
         if self.disable_cudagraph:
             return
         # Only tune on the main model; MTP draft models skip this path.
-        if getattr(self, "is_mtp_draft_model", False):
+        if self.is_mtp_draft_model:
             return
 
         # Opt-in switch for FA3 full-attention decode num_splits tuning.
@@ -372,7 +334,7 @@ class TpPartBaseModel:
         # Only Fa3AttBackend decode path needs this num_splits warmup.
         decode_backends = [
             self.decode_att_backend,
-            getattr(self, "decode_att_backend1", None),
+            self.decode_att_backend1,
         ]
         if not any(
             backend is not None and backend.__class__.__name__ == "Fa3AttBackend" for backend in decode_backends
@@ -381,15 +343,28 @@ class TpPartBaseModel:
 
         from lightllm.utils.sgl_utils import fa3_decode_autotune
 
+        batch_multiplier = 1 if enable_dynamic_spec() and not self.is_mtp_draft_model else self.decode_batch_multiplier
         cuda_graph_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
             max_batch_size=self.graph_max_batch_size,
             tp_world_size=self.tp_world_size_,
+            batch_multiplier=batch_multiplier,
         )
-        fa3_decode_autotune(self, cuda_graph_batch_sizes)
+        fa3_decode_autotune(self, cuda_graph_batch_sizes, batch_multiplier=batch_multiplier)
         return
 
     def _init_custom(self):
         pass
+
+    def _init_hidden_collector(self, hidden_layer_ids):
+        microbatch_count = (
+            2 if self.args.enable_prefill_microbatch_overlap or self.args.enable_decode_microbatch_overlap else 1
+        )
+        self.hidden_collector = HiddenCollector(
+            model=self,
+            spec_mode=self.args.mtp_mode,
+            layer_ids=hidden_layer_ids,
+            microbatch_count=microbatch_count,
+        )
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
@@ -397,7 +372,7 @@ class TpPartBaseModel:
         assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
-            return self._prefill(model_input)
+            return self._prefill(model_input=model_input)
         else:
             return self._decode(model_input)
 
@@ -427,7 +402,7 @@ class TpPartBaseModel:
             if enable_diverse_mode_gqa_decode_fast_kernel():
                 infer_state.b_shared_seq_len = model_input.b_shared_seq_len
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
-            elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
+            elif enable_dynamic_spec() or enable_triton_mtp_kernel():
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params
@@ -441,8 +416,7 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
-        infer_state.disable_mtp_decode_att = model_input.disable_mtp_decode_att
-        infer_state.use_static_mtp_layout = model_input.use_static_mtp_layout
+        infer_state.draft_step = model_input.draft_step
 
         if infer_state.is_prefill:
             infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
@@ -501,7 +475,7 @@ class TpPartBaseModel:
                 new_model_input.b_mark_shared_group = F.pad(
                     new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
                 )
-        elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
+        elif enable_dynamic_spec() or enable_triton_mtp_kernel():
             assert new_model_input.b_mark_shared_group is not None
             new_model_input.b_mark_shared_group = F.pad(
                 new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=0
@@ -564,59 +538,26 @@ class TpPartBaseModel:
         new_model_input.check_input()
         return new_model_input
 
-    def _create_unpad_decode_model_output(
-        self,
-        model_output: ModelOutput,
-        origin_batch_size: int,
-        microbatch_index: int = 0,
-    ):
+    def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
         padded_batch_size = model_output.logits.shape[0]
         if padded_batch_size == origin_batch_size:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        if new_model_output.mtp_draft_token_ids is not None:
-            new_model_output.mtp_draft_token_ids = new_model_output.mtp_draft_token_ids[0:origin_batch_size]
-        if new_model_output.mtp_draft_confidence_logits is not None:
-            confidence_rows = new_model_output.mtp_draft_confidence_logits.shape[0]
-            if confidence_rows == padded_batch_size:
-                confidence_origin_rows = origin_batch_size
-            else:
-                assert padded_batch_size % confidence_rows == 0, (
-                    "padded decode logits rows must be divisible by confidence rows: "
-                    f"{padded_batch_size}, got {confidence_rows}"
-                )
-                rows_per_confidence = padded_batch_size // confidence_rows
-                assert origin_batch_size % rows_per_confidence == 0, (
-                    "origin decode rows must align with confidence row grouping: "
-                    f"{origin_batch_size}, rows_per_confidence={rows_per_confidence}"
-                )
-                confidence_origin_rows = origin_batch_size // rows_per_confidence
-            new_model_output.mtp_draft_confidence_logits = new_model_output.mtp_draft_confidence_logits[
-                0:confidence_origin_rows
-            ]
-        if self.spec_adapter is not None:
-            self.spec_adapter.unpad_hidden(token_num=origin_batch_size, microbatch_index=microbatch_index)
-
+        new_model_output.spec_hidden = unpad_collected_hidden(new_model_output.spec_hidden, origin_batch_size)
         return new_model_output
 
     def _create_unpad_prefill_model_output(
-        self,
-        padded_model_output: ModelOutput,
-        origin_handle_token_num: int,
-        origin_batch_size: int,
-        microbatch_index: int = 0,
+        self, padded_model_output: ModelOutput, origin_handle_token_num: int, origin_batch_size: int
     ):
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        new_model_output.spec_hidden = unpad_collected_hidden(new_model_output.spec_hidden, origin_handle_token_num)
         # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
         # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
         if new_model_output.prompt_logics is not None:
             new_model_output.prompt_logics = new_model_output.prompt_logics[0:origin_handle_token_num]
-
-        if self.spec_adapter is not None:
-            self.spec_adapter.unpad_hidden(token_num=origin_handle_token_num, microbatch_index=microbatch_index)
 
         return new_model_output
 
@@ -666,7 +607,7 @@ class TpPartBaseModel:
 
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
-        model_output = self._context_forward(infer_state)
+        model_output = self._context_forward(infer_state=infer_state)
 
         model_output = self._create_unpad_prefill_model_output(
             padded_model_output=model_output,
@@ -695,15 +636,14 @@ class TpPartBaseModel:
             infer_batch_size = model_input.batch_size
 
         if self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size,
-            max_len_in_batch=model_input.max_kv_seq_len,
+            batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
         ):
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
-            need_capture = self.graph.need_capture(infer_batch_size, model_context=model_input)
             infer_state = self._create_inferstate(model_input)
+            need_capture = self.graph.need_capture(infer_batch_size)
             infer_state.is_cuda_graph = need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -749,26 +689,19 @@ class TpPartBaseModel:
 
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_tensors = [input_embs]
+        hidden_collector = HiddenCollector() if Autotuner.is_autotune_warmup() else self.hidden_collector
 
         def prefill_func(input_tensors, infer_state):
-            spec_context = (
-                self.spec_adapter.create_forward_context(self, infer_state) if self.spec_adapter is not None else None
-            )
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 _input_embs = layer.context_forward(_input_embs, infer_state, self.trans_layers_weight[i])
-                if spec_context is not None:
-                    spec_context.add_hidden(
-                        layer_index=i,
-                        layer_num=self.layers_num,
-                        hidden=_input_embs,
-                    )
+                hidden_collector.add(
+                    layer_index=i,
+                    hidden=_input_embs,
+                )
 
-            layer_hidden = spec_context.build_layer_hidden() if spec_context is not None else None
-            if layer_hidden is not None:
-                return [_input_embs, layer_hidden]
-            return [_input_embs]
+            return hidden_collector.prefill_outputs(_input_embs)
 
         handle_token_num = infer_state.input_ids.shape[0]
 
@@ -800,80 +733,43 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
-        model_output = ModelOutput(logits=predict_logits, prompt_logics=infer_state.prompt_logics)
-
-        if self.spec_adapter is not None:
-            if len(output_tensors) > 1:
-                spec_hidden = self.pre_infer._tpsp_allgather(input=output_tensors[1], infer_state=infer_state)
-                if infer_state.need_dp_prefill_balance:
-                    spec_hidden = infer_state._all_to_all_unbalance_get(data=spec_hidden)
-            else:
-                spec_hidden = last_input_embs
-            self.spec_adapter.capture_hidden(
-                infer_state=infer_state,
-                hidden=spec_hidden.contiguous(),
-                final_hidden=last_input_embs.contiguous(),
-            )
+        spec_hidden = hidden_collector.finish(
+            infer_state=infer_state,
+            final_hidden=last_input_embs,
+            forward_outputs=output_tensors,
+        )
+        model_output = ModelOutput(
+            logits=predict_logits,
+            spec_hidden=spec_hidden,
+            prompt_logics=infer_state.prompt_logics,
+        )
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
         dist_group_manager.clear_deepep_buffer()
         return model_output
 
-    @final
     def _token_forward(self, infer_state: InferStateInfo):
-        # Some derived decode metadata depends on runtime tensor values and
-        # must therefore be computed inside CUDA graph capture/replay. The
-        # attention states cache it for reuse by every transformer layer.
-        infer_state.decode_att_state.prepare_for_forward()
-        if infer_state.decode_att_state1 is not None:
-            infer_state.decode_att_state1.prepare_for_forward()
-
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
-        spec_context = (
-            self.spec_adapter.create_forward_context(self, infer_state) if self.spec_adapter is not None else None
-        )
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
-            if spec_context is not None:
-                spec_context.add_hidden(layer_index=i, layer_num=self.layers_num, hidden=input_embs)
+            self.hidden_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         predict_logits: torch.Tensor = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
-        mtp_draft_confidence_logits = None
-        pop_confidence_logits = getattr(self.post_infer, "pop_mtp_draft_confidence_logits", None)
-        if pop_confidence_logits is not None:
-            mtp_draft_confidence_logits = pop_confidence_logits()
-
-        mtp_draft_token_ids = None
-        pop_draft_token_ids = getattr(self.post_infer, "pop_mtp_draft_token_ids", None)
-        if pop_draft_token_ids is not None:
-            mtp_draft_token_ids = pop_draft_token_ids()
-
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_draft_confidence_logits=mtp_draft_confidence_logits,
-            mtp_draft_token_ids=mtp_draft_token_ids,
+        spec_hidden = self.hidden_collector.finish(
+            infer_state=infer_state,
+            final_hidden=last_input_embs,
         )
-
-        if spec_context is not None:
-            spec_hidden = spec_context.build_layer_hidden()
-            if spec_hidden is not None:
-                spec_hidden = self.pre_infer._tpsp_allgather(input=spec_hidden, infer_state=infer_state)
-            else:
-                spec_hidden = last_input_embs
-            spec_context.capture(
-                hidden=spec_hidden.contiguous(),
-                final_hidden=last_input_embs.contiguous(),
-            )
+        model_output = ModelOutput(logits=predict_logits.contiguous(), spec_hidden=spec_hidden)
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -959,13 +855,11 @@ class TpPartBaseModel:
             padded_model_output=model_output0,
             origin_handle_token_num=origin_handle_token_num0,
             origin_batch_size=origin_batch_size0,
-            microbatch_index=0,
         )
         model_output1 = self._create_unpad_prefill_model_output(
             padded_model_output=model_output1,
             origin_handle_token_num=origin_handle_token_num1,
             origin_batch_size=origin_batch_size1,
-            microbatch_index=1,
         )
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -1003,17 +897,12 @@ class TpPartBaseModel:
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
+            need_capture = self.graph.need_capture(infer_batch_size)
             # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            need_capture = self.graph.need_capture(
-                infer_batch_size,
-                model_context=padded_model_input0,
-                model_context1=padded_model_input1,
-            )
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state0.is_cuda_graph = need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -1024,6 +913,7 @@ class TpPartBaseModel:
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
+            infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state1.is_cuda_graph = need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -1047,12 +937,8 @@ class TpPartBaseModel:
                 )
 
             # TODO 动态 mtp fix
-            model_output0 = self._create_unpad_decode_model_output(
-                model_output0, origin_batch_size=origin_batch_size, microbatch_index=0
-            )
-            model_output1 = self._create_unpad_decode_model_output(
-                model_output1, origin_batch_size=origin_batch_size, microbatch_index=1
-            )
+            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
+            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
         else:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
@@ -1077,12 +963,8 @@ class TpPartBaseModel:
             infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
-            model_output0 = self._create_unpad_decode_model_output(
-                model_output0, origin_batch_size=origin_batch_size, microbatch_index=0
-            )
-            model_output1 = self._create_unpad_decode_model_output(
-                model_output1, origin_batch_size=origin_batch_size, microbatch_index=1
-            )
+            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
+            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
 
         return model_output0, model_output1
 
@@ -1109,6 +991,15 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
+            self.hidden_collector.add(
+                layer_index=i,
+                hidden=input_embs,
+            )
+            self.hidden_collector.add(
+                layer_index=i,
+                hidden=input_embs1,
+                microbatch_index=1,
+            )
 
         # 折叠模式调用完infer_state 和 infer_state1 上的hook函数后，input_embs 和 input_embs1 才具备正确的运算数据。
         infer_state.call_overlap_hook()
@@ -1125,22 +1016,25 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        model_output = ModelOutput(logits=predict_logits.contiguous(), prompt_logics=infer_state.prompt_logics)
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), prompt_logics=infer_state1.prompt_logics)
-
-        if self.spec_adapter is not None:
-            spec_context = self.spec_adapter.create_forward_context(self, infer_state)
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            if infer_state.need_dp_prefill_balance:
-                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-            spec_context.capture_final_hidden(input_embs.contiguous())
-
-        if self.spec_adapter is not None:
-            spec_context1 = self.spec_adapter.create_forward_context(self, infer_state1)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            if infer_state1.need_dp_prefill_balance:
-                input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
-            spec_context1.capture_final_hidden(input_embs1.contiguous())
+        spec_hidden = self.hidden_collector.finish(
+            infer_state=infer_state,
+            final_hidden=last_input_embs,
+        )
+        spec_hidden1 = self.hidden_collector.finish(
+            infer_state=infer_state1,
+            final_hidden=last_input_embs1,
+            microbatch_index=1,
+        )
+        model_output = ModelOutput(
+            logits=predict_logits.contiguous(),
+            spec_hidden=spec_hidden,
+            prompt_logics=infer_state.prompt_logics,
+        )
+        model_output1 = ModelOutput(
+            logits=predict_logits1.contiguous(),
+            spec_hidden=spec_hidden1,
+            prompt_logics=infer_state1.prompt_logics,
+        )
 
         return model_output, model_output1
 
@@ -1156,6 +1050,15 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
+            self.hidden_collector.add(
+                layer_index=i,
+                hidden=input_embs,
+            )
+            self.hidden_collector.add(
+                layer_index=i,
+                hidden=input_embs1,
+                microbatch_index=1,
+            )
 
         # 折叠模式调用完infer_state 上的hook函数后，input_embs 和 input_embs 才具备正确的运算数据。
         infer_state.call_overlap_hook()
@@ -1168,18 +1071,17 @@ class TpPartBaseModel:
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        model_output = ModelOutput(logits=predict_logits.contiguous())
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous())
-
-        if self.spec_adapter is not None:
-            spec_context = self.spec_adapter.create_forward_context(self, infer_state)
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            spec_context.capture_final_hidden(input_embs.contiguous())
-
-        if self.spec_adapter is not None:
-            spec_context1 = self.spec_adapter.create_forward_context(self, infer_state1)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            spec_context1.capture_final_hidden(input_embs1.contiguous())
+        spec_hidden = self.hidden_collector.finish(
+            infer_state=infer_state,
+            final_hidden=last_input_embs,
+        )
+        spec_hidden1 = self.hidden_collector.finish(
+            infer_state=infer_state1,
+            final_hidden=last_input_embs1,
+            microbatch_index=1,
+        )
+        model_output = ModelOutput(logits=predict_logits.contiguous(), spec_hidden=spec_hidden)
+        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), spec_hidden=spec_hidden1)
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()
@@ -1308,9 +1210,9 @@ class TpPartBaseModel:
                     multimodal_params=[{"images": [], "audios": []}],
                     **self._gen_special_model_input(total_token_num),
                 )
-                model_output = self.forward(
-                    model_input,
-                )
+                model_input.to_cuda()
+                assert model_input.mem_indexes.is_cuda
+                model_output = self._prefill(model_input=model_input)
                 del model_output
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
@@ -1391,8 +1293,7 @@ class TpPartBaseModel:
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
-        is_mtp_draft_model = getattr(self, "is_mtp_draft_model", False)
-        if is_mtp_draft_model:
+        if self.is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
                 token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
             )
@@ -1400,10 +1301,3 @@ class TpPartBaseModel:
             special_model_input["mtp_draft_input_hiddens"] = None
 
         return special_model_input
-
-    def _gen_mtp_draft_special_model_input(self, token_num: int):
-        return {
-            "mtp_draft_input_hiddens": torch.randn(
-                token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
-            )
-        }

@@ -4,10 +4,10 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
-from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_mtp_fa3_decode_params
+from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params
 
 
-def _reference_dynamic_mtp_fa3_decode_params(b_req_idx, b_seq_len, b_mark_shared_group, hold_req_id):
+def _reference_dynamic_spec_fa3_decode_params(b_req_idx, b_seq_len, b_mark_shared_group, hold_req_id):
     batch_size = b_req_idx.shape[0]
     b_req_idx_cpu = b_req_idx.cpu()
     b_seq_len_cpu = b_seq_len.cpu()
@@ -28,7 +28,7 @@ def _reference_dynamic_mtp_fa3_decode_params(b_req_idx, b_seq_len, b_mark_shared
 
 
 @pytest.mark.parametrize("batch_size", [1, 7, 256, 257, 777, 1025, 1537])
-def test_build_dynamic_mtp_fa3_decode_params(batch_size):
+def test_build_dynamic_spec_fa3_decode_params(batch_size):
     hold_req_id = -1
     b_req_idx = torch.arange(batch_size, dtype=torch.int32, device="cuda") + 100
     b_seq_len = (torch.arange(batch_size, dtype=torch.int32, device="cuda") % 97) + 1
@@ -39,14 +39,14 @@ def test_build_dynamic_mtp_fa3_decode_params(batch_size):
         if 0 <= pos < batch_size:
             b_mark_shared_group[pos] = pos % 5 + 1
 
-    actual = build_dynamic_mtp_fa3_decode_params(
+    actual = build_dynamic_spec_fa3_decode_params(
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,
         att_batch_size=batch_size,
         hold_req_id=hold_req_id,
     )
-    expected = _reference_dynamic_mtp_fa3_decode_params(
+    expected = _reference_dynamic_spec_fa3_decode_params(
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,
@@ -57,21 +57,21 @@ def test_build_dynamic_mtp_fa3_decode_params(batch_size):
         assert torch.equal(actual_tensor.cpu(), expected_tensor)
 
 
-def test_build_dynamic_mtp_fa3_decode_params_all_padding():
+def test_build_dynamic_spec_fa3_decode_params_all_padding():
     batch_size = 513
     hold_req_id = -1
     b_req_idx = torch.arange(batch_size, dtype=torch.int32, device="cuda")
     b_seq_len = torch.arange(batch_size, dtype=torch.int32, device="cuda") + 1
     b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
 
-    actual = build_dynamic_mtp_fa3_decode_params(
+    actual = build_dynamic_spec_fa3_decode_params(
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,
         att_batch_size=batch_size,
         hold_req_id=hold_req_id,
     )
-    expected = _reference_dynamic_mtp_fa3_decode_params(
+    expected = _reference_dynamic_spec_fa3_decode_params(
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,

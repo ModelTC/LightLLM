@@ -16,17 +16,17 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.speculative import SpeculativeConfig
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_att_mixed_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
     PPLINT8KVMemoryManager,
+    PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
     Qwen3NextMemManager,
 )
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 from lightllm.utils.dist_utils import get_current_device_id
@@ -119,10 +119,13 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         logger.error(f"not support mem manager: {mem_manager_class} for cpu kv cache")
         raise Exception(f"not support mem manager: {mem_manager_class} for cpu kv cache")
 
-    spec_config = SpeculativeConfig.from_args(args)
-    if spec_config.enabled and mem_manager_class is not Qwen3NextMemManager:
+    if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
-        cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
+        if not is_linear_att_mixed_model(args.model_dir):
+            # 对于非 linear att 混合模型，需要额外增加 mtp 的 kv 层数，
+            # 对于 linear att 混合模型，如qwen 3.5 mtp，已经将 kv 数据
+            # 打包成一个块了，所以不需要额外增加，其 layer_num 一直都保持为 1
+            cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
         (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())

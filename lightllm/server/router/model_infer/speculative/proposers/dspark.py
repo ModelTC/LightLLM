@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.models.qwen3_dspark.model_output import DSparkModelOutput
 from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
 
@@ -15,50 +16,52 @@ class DSparkProposer(DFlashProposer):
     confidence logits, so the proposer follows the same token path as DFlash.
     """
 
-    variant = "dspark"
-
     @torch.no_grad()
     def propose_next(
         self,
-        *,
         main_model_input: ModelInput,
-        main_model_output: ModelOutput = None,
+        main_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
-        verify_result=None,
+        accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        del main_model_output
-        assert 0 <= draft_step <= self.backend.mtp_step
-        assert verify_result is not None, "DSpark proposal requires target verify result"
+        assert 0 <= draft_step <= self.backend.max_draft_step
+        assert accept_len is not None, "DSpark proposal requires target accept lengths"
 
         num_reqs = int(b_req_mtp_start_loc.shape[0])
         verify_row_count = next_token_ids.shape[0]
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        layout = self.backend.block_draft_layout
-        assert block_size == layout.query_block_size
-        assert verify_result.accept_len.shape[0] == num_reqs
+        assert block_size == self.backend.max_draft_step, (
+            f"DSpark requires --mtp_step={block_size} for this checkpoint, " f"got {self.backend.max_draft_step}"
+        )
+        assert accept_len.shape[0] == num_reqs
 
         proposal_token_ids = next_token_ids.new_full(
             (verify_row_count, draft_step + 1),
             fill_value=1,
         )
         proposal_token_ids[:, 0] = next_token_ids
-        schedule_probs = [] if self.enable_dynamic_mtp else None
+        schedule_probs = [] if self.enable_dynamic_spec else None
+
+        assert main_model_output is not None and main_model_output.spec_hidden is not None
+        self.extend_draft_kv_cache(
+            main_model_input=main_model_input,
+            target_hidden=main_model_output.spec_hidden,
+        )
 
         if draft_step == 0:
             return SpecProposal(
                 token_ids=proposal_token_ids,
                 extra_mem_indexes_cpu=None,
-                draft_probs=[] if self.enable_dynamic_mtp else None,
+                draft_probs=[] if self.enable_dynamic_spec else None,
                 schedule_probs=schedule_probs,
             )
 
-        self.extend_draft_kv_cache(main_model_input=main_model_input)
         selected_rows = self.select_accepted_tail_rows(
             b_req_mtp_start_loc=b_req_mtp_start_loc,
-            accept_len=verify_result.accept_len,
+            accept_len=accept_len,
         )
         draft_input, draft_mem_indexes_cpu = self.build_block_draft_input(
             main_model_input=main_model_input,
@@ -67,26 +70,26 @@ class DSparkProposer(DFlashProposer):
             num_reqs=num_reqs,
         )
         draft_model_output = draft_model.forward(draft_input)
+        assert isinstance(draft_model_output, DSparkModelOutput)
 
         expected_block_rows = num_reqs * block_size
         assert draft_model_output.logits.ndim >= 2, "draft logits must have a leading block-row dimension"
         assert (
             draft_model_output.logits.shape[0] == expected_block_rows
         ), f"draft logits rows must be {expected_block_rows}, got {draft_model_output.logits.shape[0]}"
-        flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
+        if draft_model_output.draft_token_ids is None:
+            flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
+        else:
+            flat_token_ids = draft_model_output.draft_token_ids
         assert (
             flat_token_ids.numel() == expected_block_rows
         ), f"draft token rows must be {expected_block_rows}, got {flat_token_ids.numel()}"
         block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
-        proposal_token_ids[selected_rows, 1:] = self.select_draft_token_ids(
-            block_token_ids=block_token_ids,
-            draft_step=draft_step,
-            layout=layout,
-        )
+        proposal_token_ids[selected_rows, 1:] = block_token_ids[:, :draft_step]
 
         draft_probs = None
-        if self.enable_dynamic_mtp:
-            confidence_logits = draft_model_output.mtp_draft_confidence_logits
+        if self.enable_dynamic_spec:
+            confidence_logits = draft_model_output.confidence_logits
             if confidence_logits is None:
                 raise RuntimeError("DSpark dynamic verify requires confidence head logits")
             assert confidence_logits.ndim == 2, "confidence logits must be [selected_rows, block_size]"
@@ -94,13 +97,11 @@ class DSparkProposer(DFlashProposer):
                 confidence_logits.shape[0] == num_reqs
             ), f"confidence logits rows must be {num_reqs}, got {confidence_logits.shape[0]}"
             assert (
-                confidence_logits.shape[1] >= layout.proposal_output_start + draft_step
-            ), f"confidence logits columns must cover the proposal layout, got {confidence_logits.shape[1]}"
-            output_start = layout.proposal_output_start
-            output_end = output_start + draft_step
+                confidence_logits.shape[1] == block_size
+            ), f"confidence logits must have {block_size} columns, got {confidence_logits.shape[1]}"
             schedule_probs = self._scatter_step_probs(
                 selected_rows=selected_rows,
-                probs=confidence_logits[:, output_start:output_end].sigmoid(),
+                probs=confidence_logits[:, :draft_step].sigmoid(),
                 verify_row_count=verify_row_count,
             )
 
@@ -113,7 +114,6 @@ class DSparkProposer(DFlashProposer):
 
     def _scatter_step_probs(
         self,
-        *,
         selected_rows: torch.Tensor,
         probs: torch.Tensor,
         verify_row_count: int,

@@ -34,6 +34,11 @@ class Qwen3EaglePreAndPostLayerWeight(PreAndPostLayerWeight):
             data_type=self.data_type_,
         )
 
+        # Compressed-vocabulary EAGLE3 stores two mappings with the checkpoint:
+        # d2t[draft_id] is an offset, so target_id = draft_id + d2t[draft_id];
+        # t2d[target_id] is a bool mask indicating whether target_id exists in the draft vocabulary.
+        # Inference applies d2t after draft argmax; t2d is loaded for checkpoint compatibility but is not read.
+        # Without these tensors, draft and target token ids are treated as identical.
         self.d2t_weight_ = None
         self.t2d_weight_ = None
         if draft_vocab_size is not None and target_vocab_size is not None:
@@ -60,5 +65,3 @@ class Qwen3EaglePreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name="embed_tokens.weight",
             data_type=self.data_type_,
         )
-
-        return

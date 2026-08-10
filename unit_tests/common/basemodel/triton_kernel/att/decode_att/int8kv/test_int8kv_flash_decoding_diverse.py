@@ -54,7 +54,7 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
     )
 
     num_heads = 32
-    kv_head_num = 2  # gqa_group_size = 16，满足 Triton tl.dot 的 M >= 16 要求
+    kv_head_num = 8
     mark_shared_group_size = 3
     seq_len = 3547
     head_dim = 128
@@ -118,7 +118,6 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
         cache_v_scale=cache_v_scale,
         alloc_tensor_func=alloc_tensor_func,
     )
-
     # 运行 diverse 版本
     diverse_out = diverse_attention(
         q=q.clone(),
@@ -130,4 +129,11 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
         alloc_tensor_func=alloc_tensor_func,
     )
 
-    torch.testing.assert_close(normal_out, diverse_out, atol=1e-2, rtol=1e-2)
+    print(f"\nshared_seq_len={shared_seq_len}\nbatch_size={batch_size}")
+    print(f"normal_out: {normal_out[0, 0, :4]}")
+    print(f"diverse_out: {diverse_out[0, 0, :4]}")
+    print(f"max diff: {(normal_out - diverse_out).abs().max()}")
+
+    assert torch.allclose(
+        normal_out, diverse_out, atol=1e-2, rtol=1e-2
+    ), f"diverse vs normal decode mismatch for shared_seq_len={shared_seq_len}"

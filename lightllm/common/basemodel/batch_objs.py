@@ -1,12 +1,7 @@
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from typing import List
-from lightllm.utils.envs_utils import (
-    enable_diverse_mode_gqa_decode_fast_kernel,
-    enable_dynamic_mtp_verify,
-    enable_triton_mtp_kernel,
-)
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -59,13 +54,8 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
-    # 部分 spec draft 模型会在服务 MTP 模式下执行普通 decode batch
-    # （例如 Eagle3 commit accepted rows），此时 attention 不应按 MTP 展开布局建参。
-    disable_mtp_decode_att: bool = False
-    # Dynamic verification normally needs arbitrary per-request row groups.
-    # A full-width plan has the original fixed K+1 layout and can reuse the
-    # substantially cheaper Static MTP attention parameter construction.
-    use_static_mtp_layout: bool = False
+    # Maximum number of extra query rows per request.
+    draft_step: int = 0
 
     def to_cuda(self):
         self.check_input()
@@ -91,22 +81,10 @@ class ModelInput:
 
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-        if not self.is_prefill and enable_diverse_mode_gqa_decode_fast_kernel():
-            batch_size = len(self.b_req_idx)
-            if self.b_mark_shared_group is None:
-                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
-            else:
-                self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
-            if self.b_shared_seq_len is None:
-                self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
-            else:
-                self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
-        elif not self.is_prefill and (enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()):
-            batch_size = len(self.b_req_idx)
-            if self.b_mark_shared_group is None:
-                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
-            else:
-                self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
+        if self.b_mark_shared_group is not None:
+            self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
+        if self.b_shared_seq_len is not None:
+            self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
@@ -123,14 +101,10 @@ class ModelInput:
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
+    # Hidden states collected for the active speculative strategy.
+    spec_hidden: Optional[torch.Tensor] = None
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
-    # DSpark dynamic verify 使用的 raw confidence logits，由 draft model
-    # post layer 产生，proposer 只负责 scatter 到 verify batch。
-    mtp_draft_confidence_logits: Optional[torch.Tensor] = None
-    # TP-sharded DSpark Markov head 已经完成全局 greedy 选择时，直接携带
-    # draft token，避免为了下游 argmax 再 all-gather 完整词表 logits。
-    mtp_draft_token_ids: Optional[torch.Tensor] = None
 
     # prompt_logics 用于在开启 return_all_prompt_logics 模式（如 enable_prompt_logprobs）时，
     # 保存整个 prefill 阶段每一个 token 位置对应的 logits（而非仅最后一个位置的 logits）。
@@ -140,7 +114,5 @@ class ModelOutput:
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
-        if self.mtp_draft_confidence_logits is not None:
-            self.mtp_draft_confidence_logits = tensor_to_no_ref_tensor(self.mtp_draft_confidence_logits)
-        if self.mtp_draft_token_ids is not None:
-            self.mtp_draft_token_ids = tensor_to_no_ref_tensor(self.mtp_draft_token_ids)
+        if self.spec_hidden is not None:
+            self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)

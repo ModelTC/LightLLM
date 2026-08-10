@@ -5,12 +5,11 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.speculative import BlockDraftLayout
 from lightllm.server.router.model_infer.speculative.proposers.base import BaseSpecProposer, SpecProposal
 
 
 class DFlashProposer(BaseSpecProposer):
-    """DFlash block proposer aligned to the Eagle3 runtime boundary.
+    """DFlash block proposer aligned to the Eagle3 engine boundary.
 
     DFlash remains a non-causal block-prefill draft model, not a recurrent
     token decoder.  The service flow is:
@@ -23,17 +22,15 @@ class DFlashProposer(BaseSpecProposer):
       `SpecProposal.extra_mem_indexes_cpu`
     """
 
-    variant = "dflash"
-
     @torch.no_grad()
     def build_initial_draft_state(
         self,
-        *,
         model_input: ModelInput,
+        model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        del next_token_ids
-        target_hidden = self.runtime.get_hidden()
+        target_hidden = model_output.spec_hidden
+        assert target_hidden is not None
         if target_hidden.numel() == 0:
             return
 
@@ -44,34 +41,35 @@ class DFlashProposer(BaseSpecProposer):
         # DFlash consumes target hidden states directly on this prefill path.
         draft_input.mtp_draft_input_hiddens = target_hidden
         draft_model.forward(draft_input)
-        return
 
     @torch.no_grad()
     def propose_next(
         self,
-        *,
         main_model_input: ModelInput,
-        main_model_output: ModelOutput = None,
+        main_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
-        verify_result=None,
+        accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        del main_model_output
-        assert 0 <= draft_step <= self.backend.mtp_step
-        assert verify_result is not None, "DFlash proposal requires target verify result"
+        assert 0 <= draft_step <= self.backend.max_draft_step
+        assert accept_len is not None, "DFlash proposal requires target accept lengths"
 
         num_reqs = int(b_req_mtp_start_loc.shape[0])
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        layout = self.backend.block_draft_layout
-        assert block_size == layout.query_block_size
-        assert verify_result.accept_len.shape[0] == num_reqs
+        assert accept_len.shape[0] == num_reqs
         token_ids = next_token_ids.new_full(
             (next_token_ids.shape[0], draft_step + 1),
             fill_value=1,
         )
         token_ids[:, 0] = next_token_ids
+
+        assert main_model_output is not None and main_model_output.spec_hidden is not None
+        self.extend_draft_kv_cache(
+            main_model_input=main_model_input,
+            target_hidden=main_model_output.spec_hidden,
+        )
 
         if draft_step == 0:
             return SpecProposal(
@@ -80,13 +78,11 @@ class DFlashProposer(BaseSpecProposer):
                 draft_probs=None,
             )
 
-        self.extend_draft_kv_cache(main_model_input=main_model_input)
-
-        # DFlash only drafts from the accepted tail row of each request.  Unlike
-        # MTP, one anchor row expands to a whole non-causal block.
+        # DFlash drafts from the accepted tail row of each request; one anchor
+        # row expands to a complete non-causal draft block.
         selected_rows = self.select_accepted_tail_rows(
             b_req_mtp_start_loc=b_req_mtp_start_loc,
-            accept_len=verify_result.accept_len,
+            accept_len=accept_len,
         )
         draft_input, draft_mem_indexes_cpu = self.build_block_draft_input(
             main_model_input=main_model_input,
@@ -99,31 +95,19 @@ class DFlashProposer(BaseSpecProposer):
         flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
         assert flat_token_ids.numel() == num_reqs * block_size
         block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
-        token_ids[selected_rows, 1:] = self.select_draft_token_ids(
-            block_token_ids=block_token_ids,
-            draft_step=draft_step,
-            layout=layout,
+        # Standard DFlash has one leading bonus row; DeepSpec checkpoints do not.
+        bonus_rows = block_size - draft_step
+        assert bonus_rows in (0, 1), (
+            f"DFlash block_size={block_size} must equal mtp_step={draft_step} " f"or mtp_step + 1={draft_step + 1}"
         )
+        token_ids[selected_rows, 1:] = block_token_ids[:, bonus_rows:]
         return SpecProposal(
             token_ids=token_ids,
             extra_mem_indexes_cpu=draft_mem_indexes_cpu,
             draft_probs=None,
         )
 
-    @staticmethod
-    def select_draft_token_ids(
-        *,
-        block_token_ids: torch.Tensor,
-        draft_step: int,
-        layout: BlockDraftLayout,
-    ) -> torch.Tensor:
-        output_start = layout.proposal_output_start
-        output_end = output_start + int(draft_step)
-        assert 0 <= output_start <= output_end <= block_token_ids.shape[1]
-        return block_token_ids[:, output_start:output_end]
-
-    def extend_draft_kv_cache(self, *, main_model_input: ModelInput) -> None:
-        target_hidden = self.runtime.get_hidden()
+    def extend_draft_kv_cache(self, main_model_input: ModelInput, target_hidden: torch.Tensor) -> None:
         draft_model = self.backend.draft_models[0]
         batch_size = int(target_hidden.shape[0])
         assert batch_size == main_model_input.b_req_idx.shape[0]
@@ -158,11 +142,9 @@ class DFlashProposer(BaseSpecProposer):
         draft_kv_input.b_prefill_has_output_cpu = [False for _ in range(batch_size)]
         draft_kv_input.mtp_draft_input_hiddens = target_hidden
         draft_model.forward(draft_kv_input)
-        return
 
     def build_block_draft_input(
         self,
-        *,
         main_model_input: ModelInput,
         next_token_ids: torch.Tensor,
         selected_rows: torch.Tensor,
@@ -195,6 +177,7 @@ class DFlashProposer(BaseSpecProposer):
         draft_input.max_q_seq_len = 1
         draft_input.max_kv_seq_len = main_model_input.max_kv_seq_len + block_size
         draft_input.max_cache_len = draft_input.max_kv_seq_len
+        draft_input.draft_step = block_size - 1
         draft_input.b_req_idx = (
             main_model_input.b_req_idx.index_select(0, selected_rows).repeat_interleave(block_size).contiguous()
         )

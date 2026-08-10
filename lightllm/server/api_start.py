@@ -3,8 +3,6 @@ import os
 import uuid
 import subprocess
 import math
-from dataclasses import replace
-from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
@@ -28,41 +26,8 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
-from lightllm.common.speculative import (
-    SpeculativeConfig,
-    get_block_draft_layout,
-)
 
 logger = init_logger(__name__)
-
-
-def normalize_block_mtp_step_from_first_draft_config(
-    args: StartArgs, spec_config: SpeculativeConfig
-) -> SpeculativeConfig:
-    if not spec_config.uses_block_draft_model:
-        return spec_config
-
-    assert args.mtp_draft_model_dir is not None and len(args.mtp_draft_model_dir) > 0
-    mtp_model_cfg, _ = PretrainedConfig.get_config_dict(args.mtp_draft_model_dir[0])
-    layout = get_block_draft_layout(
-        mtp_model_cfg,
-        mode=spec_config.mode,
-        require_confidence_head=spec_config.is_dspark,
-    )
-    configured_step = int(args.mtp_step)
-    draft_step = layout.resolve_draft_step(configured_step)
-    if configured_step not in (0, draft_step):
-        logger.warning(
-            "Overriding mtp_step=%s with draft_step=%s from block_size=%s for %s mode",
-            configured_step,
-            draft_step,
-            layout.query_block_size,
-            spec_config.mode,
-        )
-    args.mtp_step = draft_step
-    spec_config = replace(spec_config, step=draft_step)
-    spec_config.validate()
-    return spec_config
 
 
 def _set_envs_and_config(args: StartArgs):
@@ -132,9 +97,9 @@ def _launch_subprocesses(args: StartArgs):
         args.embed_cache_storage_size = 0.8
         args.graph_max_batch_size = 6
         logger.info(
-            "performance_mode is personal, set running_max_req_size to 3,"
-            "batch_max_tokens to 2048, chunked_prefill_size to 1024,"
-            "graph_max_batch_size to 32"
+            f"performance_mode is personal, set running_max_req_size to 3,"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
+            f"graph_max_batch_size to 32"
         )
 
     if not args.disable_shm_warning:
@@ -197,19 +162,30 @@ def _launch_subprocesses(args: StartArgs):
             )
 
     # mtp params check
-    spec_config = SpeculativeConfig.from_args(args)
-    spec_config.validate()
-    if spec_config.enabled:
+    spec_mode = args.mtp_mode
+    if spec_mode is not None:
+        if spec_mode in ("vanilla_with_att", "vanilla_no_att", "qwen3next_vanilla"):
+            assert args.mtp_step > 0
+            draft_model_count = args.mtp_step
+        elif spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3", "qwen3next_eagle"):
+            assert args.mtp_step > 0
+            draft_model_count = 1
+        else:
+            assert spec_mode in ("dspark", "dflash"), f"unsupported speculative mode {spec_mode}"
+            assert args.mtp_step > 0
+            draft_model_count = 1
+
+        if spec_mode == "dspark":
+            args.mtp_dynamic_verify = True
+        elif spec_mode == "dflash":
+            args.mtp_dynamic_verify = False
+
         if args.mtp_draft_model_dir is None:
-            assert not spec_config.uses_block_draft_model, (
-                f"--mtp_draft_model_dir is required for {spec_config.mode} mode"
-            )
-            args.mtp_draft_model_dir = [args.model_dir] * spec_config.draft_model_count
-        elif isinstance(args.mtp_draft_model_dir, str):
-            args.mtp_draft_model_dir = [args.mtp_draft_model_dir]
-        assert len(args.mtp_draft_model_dir) >= spec_config.draft_model_count
-        spec_config = normalize_block_mtp_step_from_first_draft_config(args, spec_config)
+            assert spec_mode not in ("dspark", "dflash"), f"--mtp_draft_model_dir is required for {spec_mode} mode"
+            args.mtp_draft_model_dir = [args.model_dir] * draft_model_count
+        assert len(args.mtp_draft_model_dir) >= draft_model_count
     else:
+        assert args.mtp_step == 0
         assert args.mtp_draft_model_dir is None
 
     # automatically set visual_dp based on visual_tp and tp.

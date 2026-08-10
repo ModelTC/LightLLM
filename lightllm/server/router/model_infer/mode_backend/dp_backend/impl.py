@@ -13,9 +13,10 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 )
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
-    linear_att_mtp_state_index_update,
+    linear_att_spec_state_index_update,
 )
 from .control_state import DPControlState
 
@@ -28,23 +29,32 @@ class DPChunkedPrefillBackend(ModeBackend):
         self.control_state_machine = DPControlState(backend=self)
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
-        if self.spec_config.enabled:
-            if self.spec_config.uses_block_draft_model:
+        spec_mode = get_env_start_args().mtp_mode
+        if spec_mode is not None:
+            if spec_mode in ("dspark", "dflash"):
                 raise NotImplementedError("DP backend does not support DFlash/DSpark block draft mode yet.")
-            self.is_mtp_eagle = self.spec_config.uses_recurrent_draft_model
-            self.num_mtp_models = self.spec_config.draft_model_count
+            self.uses_recurrent_draft = spec_mode in (
+                "eagle_with_att",
+                "eagle_no_att",
+                "eagle3",
+                "qwen3next_eagle",
+            )
             if self.enable_prefill_microbatch_overlap:
-                self.prefill = self.prefill_overlap_mtp
+                self.prefill = self.prefill_overlap_spec
             else:
-                self.prefill = self.prefill_mtp
+                self.prefill = self.prefill_spec
             if self.enable_decode_microbatch_overlap:
-                self.decode = self.decode_overlap_mtp
+                self.decode = self.decode_overlap_spec
                 self._draft_decode_overlap_func = (
-                    self._draft_decode_eagle_overlap if self.is_mtp_eagle else self._draft_decode_vanilla_overlap
+                    self._draft_decode_eagle_overlap
+                    if self.uses_recurrent_draft
+                    else self._draft_decode_vanilla_overlap
                 )
             else:
-                self.decode = self.decode_mtp
-                self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
+                self.decode = self.decode_spec
+                self._draft_decode_func = (
+                    self._draft_decode_eagle if self.uses_recurrent_draft else self._draft_decode_vanilla
+                )
         else:
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap
@@ -58,6 +68,28 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         self.classed_req_strict_prefill = False
         return
+
+    @staticmethod
+    def _build_padded_next_token_ids(
+        token_ids: torch.Tensor,
+        batch_size: int,
+        copy_len: int,
+        source_start: int = 0,
+    ) -> torch.Tensor:
+        """Pad DP-local draft tokens to the collective batch shape."""
+
+        copy_len = int(copy_len)
+        source_start = int(source_start)
+        assert 0 <= copy_len <= int(batch_size)
+        assert source_start + copy_len <= token_ids.shape[0]
+
+        padded_token_ids = torch.zeros((int(batch_size),), dtype=torch.int64, device=token_ids.device)
+        if copy_len > 0:
+            padded_token_ids[:copy_len].copy_(
+                token_ids[source_start : source_start + copy_len],
+                non_blocking=True,
+            )
+        return padded_token_ids
 
     def _init_reqs(self, reqs: List[Tuple]):
         if not self.args.enable_dp_prompt_cache_fetch:
@@ -398,7 +430,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_pre_post_handle()
         return
 
-    def prefill_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+    def prefill_spec(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         # main model prefill
         model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         req_num = len(run_reqs)
@@ -426,14 +458,14 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
 
             # mtp kv fill
-            draft_next_token_ids_gpu = self.spec_adapter.build_padded_next_token_ids(
-                token_ids=next_token_ids if req_num > 0 else None,
+            draft_next_token_ids_gpu = self._build_padded_next_token_ids(
+                token_ids=next_token_ids,
                 batch_size=model_input.batch_size,
                 copy_len=req_num,
-                device=model_input.b_req_idx.device,
             )
-            self.spec_adapter.build_initial_draft_state(
+            self.spec_engine.build_initial_draft_state(
                 model_input=model_input,
+                model_output=model_output,
                 next_token_ids=draft_next_token_ids_gpu,
             )
             if req_num > 0:
@@ -470,14 +502,14 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_pre_post_handle()
         return
 
-    def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
+    def decode_spec(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         model_input, run_reqs, _ = padded_prepare_decode_inputs(decode_reqs)
         b_mtp_index_cpu = model_input.b_mtp_index
         req_num = len(run_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            mtp_accept_len, b_req_mtp_start_loc, next_token_ids = None, None, None
+            spec_accept_len, b_req_mtp_start_loc, next_token_ids = None, None, None
             if req_num > 0:
                 logits = model_output.logits[0:req_num, :]
                 b_mtp_index_cpu = b_mtp_index_cpu[0:req_num]
@@ -499,29 +531,29 @@ class DPChunkedPrefillBackend(ModeBackend):
                     dtype=torch.int32,
                 ).cuda(non_blocking=True)
 
-                verify_result = self.spec_adapter.verify_target_tokens(
+                verify_result = self.spec_engine.verify_target_tokens(
                     new_next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                 )
-                mtp_accept_len = verify_result.accept_len
+                spec_accept_len = verify_result.accept_len
                 accepted_index = verify_result.accepted_index
                 if self.is_linear_att_mixed_model:
-                    linear_att_mtp_state_index_update(
+                    linear_att_spec_state_index_update(
                         req_to_mtp_state_index=self.model.req_manager.req_to_mtp_state_index,
                         b_req_mtp_start_loc=b_req_mtp_start_loc,
                         b_req_idx=b_req_idx,
                         b_mtp_index=model_input.b_mtp_index[0:req_num],
                         accepted_index=accepted_index,
-                        max_mtp_step=self.mtp_step + 1,
+                        verify_width=self.max_draft_step + 1,
                     )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
                     gpu_tensor=accepted_index,
                 )
-                mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                    key="mtp_accept_len",
-                    gpu_tensor=mtp_accept_len,
+                spec_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                    key="spec_accept_len",
+                    gpu_tensor=spec_accept_len,
                 )
 
             verify_event = torch.cuda.Event()
@@ -529,9 +561,10 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             eagle_mem_indexes_cpu = self._draft_decode_func(
                 model_input=model_input,
+                model_output=model_output,
                 next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
-                mtp_accept_len=mtp_accept_len,
+                spec_accept_len=spec_accept_len,
                 req_num=req_num,
             )
             if req_num > 0:
@@ -548,18 +581,18 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
-            self._update_mtp_verify_token_num(decode_reqs=decode_reqs)
+            self._update_spec_verify_token_num(decode_reqs=decode_reqs)
             verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
             # 第三阶段
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
             need_free_mem_indexes = model_input.mem_indexes_cpu[0:req_num][accepted_index_cpu == 0]
             if eagle_mem_indexes_cpu is not None:
                 need_free_mem_indexes = torch.cat([need_free_mem_indexes, eagle_mem_indexes_cpu], dim=0)
 
+            self._update_spec_accept_ratio(decode_reqs=decode_reqs, spec_accept_len_cpu=spec_accept_len_cpu)
             select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
             self._post_handle(
                 run_reqs=verify_ok_reqs,
@@ -583,41 +616,46 @@ class DPChunkedPrefillBackend(ModeBackend):
     def _draft_decode_vanilla(
         self,
         model_input: ModelInput,
+        model_output: ModelOutput,
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
+        spec_accept_len: torch.Tensor,
         req_num: int,
     ):
         all_next_token_ids = []
         # share some inference info with the main model
         draft_model_input = model_input
-        draft_next_token_ids_gpu = self.spec_adapter.build_padded_next_token_ids(
-            token_ids=next_token_ids if req_num > 0 else None,
+        draft_hidden = model_output.spec_hidden
+        assert draft_hidden is not None
+        draft_next_token_ids_gpu = self._build_padded_next_token_ids(
+            token_ids=next_token_ids,
             batch_size=model_input.batch_size,
             copy_len=req_num,
-            device=model_input.b_req_idx.device,
         )
 
         all_next_token_ids.append(draft_next_token_ids_gpu)
 
         # process the draft model output
-        for draft_model_idx in range(self.mtp_step):
+        for draft_model_idx in range(self.max_draft_step):
 
-            draft_model_input = self.spec_adapter.prepare_draft_decode_input(
+            draft_model_input = self.spec_engine.prepare_draft_decode_input(
                 model_input=draft_model_input,
                 next_token_ids=draft_next_token_ids_gpu,
+                mtp_draft_input_hiddens=draft_hidden,
             )
             # spec decode: MTP
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
+            draft_hidden = draft_model_output.spec_hidden
+            assert draft_hidden is not None
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
             all_next_token_ids.append(draft_next_token_ids_gpu)
 
         if req_num > 0:
-            self.spec_adapter.scatter_token_id_steps(
+            self.spec_engine.scatter_token_id_steps(
                 token_id_steps=all_next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx[:req_num],
-                mtp_accept_len=mtp_accept_len,
+                spec_accept_len=spec_accept_len,
                 row_count=req_num,
             )
         return None
@@ -625,62 +663,61 @@ class DPChunkedPrefillBackend(ModeBackend):
     def _draft_decode_eagle(
         self,
         model_input: ModelInput,
+        model_output: ModelOutput,
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
+        spec_accept_len: torch.Tensor,
         req_num: int,
     ):
-        all_next_token_ids = []
-        # share some inference info with the main model
-        draft_model_input = model_input
-        all_next_token_ids.append(next_token_ids)
-        draft_next_token_ids_gpu = self.spec_adapter.build_padded_next_token_ids(
-            token_ids=next_token_ids if req_num > 0 else None,
+        verify_width = self.max_draft_step + 1
+        assert req_num % verify_width == 0
+        assert model_input.batch_size % verify_width == 0
+        real_request_num = req_num // verify_width
+        request_capacity = model_input.batch_size // verify_width
+
+        padded_next_token_ids = self._build_padded_next_token_ids(
+            token_ids=next_token_ids,
             batch_size=model_input.batch_size,
             copy_len=req_num,
+        )
+        padded_start_locs = torch.arange(
+            0,
+            model_input.batch_size,
+            verify_width,
+            dtype=torch.int32,
             device=model_input.b_req_idx.device,
         )
+        padded_accept_len = torch.ones(
+            (request_capacity,),
+            dtype=torch.int32,
+            device=model_input.b_req_idx.device,
+        )
+        if real_request_num > 0:
+            padded_accept_len[:real_request_num].copy_(spec_accept_len)
 
-        real_req_num = req_num // (self.mtp_step + 1)
-        padded_req_num = model_input.batch_size // (self.mtp_step + 1) - real_req_num
-        eagle_mem_indexes_cpu = self.spec_adapter.alloc_extra_mem_indexes(real_req_num * self.mtp_step)
-        eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
-
-        # process the draft model output
-        for _step in range(self.mtp_step):
-
-            draft_model_input = self.spec_adapter.prepare_draft_decode_input(
-                model_input=draft_model_input,
-                next_token_ids=draft_next_token_ids_gpu,
-            )
-            # spec decode: MTP
-            draft_model_idx = _step % self.num_mtp_models
-            draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
-            # update the meta info of the inference
-            draft_model_input.b_seq_len += 1
-            draft_model_input.max_kv_seq_len += 1
-            draft_model_input.mem_indexes = self.spec_adapter.append_padded_eagle_step_mem_indexes(
-                model_input=draft_model_input,
-                eagle_mem_indexes=eagle_mem_indexes,
-                step=_step,
-                real_req_num=real_req_num,
-                padded_req_num=padded_req_num,
-                mtp_step=self.mtp_step,
-            )
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-            all_next_token_ids.append(draft_next_token_ids_gpu)
+        # DP keeps the target verify layout padded for collective shape
+        # agreement.  The proposer still follows the common topology: one
+        # full-row extend, followed by recurrent decode over one row per
+        # (real or HOLD) request.
+        proposal = self.spec_engine.propose_next(
+            main_model_input=model_input,
+            main_model_output=model_output,
+            next_token_ids=padded_next_token_ids,
+            b_req_mtp_start_loc=padded_start_locs,
+            draft_step=self.max_draft_step,
+            accept_len=padded_accept_len,
+        )
 
         if req_num > 0:
-            self.spec_adapter.scatter_token_id_steps(
-                token_id_steps=all_next_token_ids,
+            self.spec_engine.scatter_next_tokens(
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
+                all_next_token_ids=proposal.token_ids[:req_num],
                 b_req_idx=model_input.b_req_idx[:req_num],
-                mtp_accept_len=mtp_accept_len,
-                row_count=req_num,
+                spec_accept_len=spec_accept_len,
             )
-        return eagle_mem_indexes_cpu
+        return proposal.extra_mem_indexes_cpu
 
-    def prefill_overlap_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+    def prefill_overlap_spec(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         (
             model_input0,
             run_reqs0,
@@ -722,25 +759,25 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                 )
 
-            draft_next_token_ids_gpu0 = self.spec_adapter.build_padded_next_token_ids(
-                token_ids=next_token_ids if req_num0 > 0 else None,
+            draft_next_token_ids_gpu0 = self._build_padded_next_token_ids(
+                token_ids=next_token_ids,
                 batch_size=model_input0.batch_size,
                 copy_len=req_num0,
                 source_start=0,
-                device=model_input0.b_req_idx.device,
             )
-            draft_next_token_ids_gpu1 = self.spec_adapter.build_padded_next_token_ids(
-                token_ids=next_token_ids if req_num1 > 0 else None,
+            draft_next_token_ids_gpu1 = self._build_padded_next_token_ids(
+                token_ids=next_token_ids,
                 batch_size=model_input1.batch_size,
                 copy_len=req_num1,
                 source_start=req_num0,
-                device=model_input1.b_req_idx.device,
             )
 
-            self.spec_adapter.build_initial_draft_state_overlap(
+            self.spec_engine.build_initial_draft_state_overlap(
                 model_input0=model_input0,
+                model_output0=model_output0,
                 next_token_ids0=draft_next_token_ids_gpu0,
                 model_input1=model_input1,
+                model_output1=model_output1,
                 next_token_ids1=draft_next_token_ids_gpu1,
             )
 
@@ -774,7 +811,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_pre_post_handle()
         return
 
-    def decode_overlap_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
+    def decode_overlap_spec(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         (
             model_input0,
             run_reqs0,
@@ -793,7 +830,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             logits0 = model_output0.logits
             logits1 = model_output1.logits
             run_reqs = run_reqs0 + run_reqs1
-            b_req_idx, mtp_accept_len, b_req_mtp_start_loc, next_token_ids = None, None, None, None
+            b_req_idx, spec_accept_len, b_req_mtp_start_loc, next_token_ids = None, None, None, None
             if (req_num0 + req_num1) > 0:
                 logits = torch.empty(
                     (req_num0 + req_num1, logits0.shape[1]), dtype=logits0.dtype, device=logits0.device
@@ -817,20 +854,32 @@ class DPChunkedPrefillBackend(ModeBackend):
                     dtype=torch.int32,
                 ).cuda(non_blocking=True)
 
-                verify_result = self.spec_adapter.verify_target_tokens(
+                verify_result = self.spec_engine.verify_target_tokens(
                     new_next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                 )
-                mtp_accept_len = verify_result.accept_len
+                spec_accept_len = verify_result.accept_len
                 accepted_index = verify_result.accepted_index
+                if self.is_linear_att_mixed_model:
+                    b_mtp_index = torch.cat(
+                        (model_input0.b_mtp_index[0:req_num0], model_input1.b_mtp_index[0:req_num1]), dim=0
+                    )
+                    linear_att_spec_state_index_update(
+                        req_to_mtp_state_index=self.model.req_manager.req_to_mtp_state_index,
+                        b_req_mtp_start_loc=b_req_mtp_start_loc,
+                        b_req_idx=b_req_idx,
+                        b_mtp_index=b_mtp_index,
+                        accepted_index=accepted_index,
+                        verify_width=self.max_draft_step + 1,
+                    )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
                     gpu_tensor=accepted_index,
                 )
-                mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                    key="mtp_accept_len",
-                    gpu_tensor=mtp_accept_len,
+                spec_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                    key="spec_accept_len",
+                    gpu_tensor=spec_accept_len,
                 )
                 all_next_token_ids.append(next_token_ids)
 
@@ -840,9 +889,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             eagle_mem_indexes_cpu = self._draft_decode_overlap_func(
                 model_input0=model_input0,
                 model_input1=model_input1,
+                model_output0=model_output0,
+                model_output1=model_output1,
                 b_req_idx=b_req_idx,
                 next_token_ids=next_token_ids,
-                mtp_accept_len=mtp_accept_len,
+                spec_accept_len=spec_accept_len,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 req_num0=req_num0,
                 req_num1=req_num1,
@@ -860,13 +911,12 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num0 + req_num1 > 0:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
-            self._update_mtp_verify_token_num(decode_reqs=decode_reqs)
+            self._update_spec_verify_token_num(decode_reqs=decode_reqs)
             verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
             mem_indexes_cpu = torch.cat(
                 (model_input0.mem_indexes_cpu[0:req_num0], model_input1.mem_indexes_cpu[0:req_num1]), dim=0
             )
@@ -874,6 +924,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             if eagle_mem_indexes_cpu is not None:
                 need_free_mem_indexes = torch.cat((need_free_mem_indexes, eagle_mem_indexes_cpu), dim=0)
 
+            self._update_spec_accept_ratio(decode_reqs=decode_reqs, spec_accept_len_cpu=spec_accept_len_cpu)
             select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
             self._post_handle(
                 run_reqs=verify_ok_reqs,
@@ -896,9 +947,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         self,
         model_input0: ModelInput,
         model_input1: ModelInput,
+        model_output0: ModelOutput,
+        model_output1: ModelOutput,
         b_req_idx: torch.Tensor,
         next_token_ids: torch.Tensor = None,
-        mtp_accept_len: torch.Tensor = None,
+        spec_accept_len: torch.Tensor = None,
         b_req_mtp_start_loc: torch.Tensor = None,
         req_num0: int = 0,
         req_num1: int = 0,
@@ -907,39 +960,43 @@ class DPChunkedPrefillBackend(ModeBackend):
         all_next_token_ids.append(next_token_ids)
         # share some inference info with the main model
         draft_model_input0, draft_model_input1 = model_input0, model_input1
+        draft_hidden0 = model_output0.spec_hidden
+        draft_hidden1 = model_output1.spec_hidden
+        assert draft_hidden0 is not None and draft_hidden1 is not None
 
-        draft_next_token_ids_gpu0 = self.spec_adapter.build_padded_next_token_ids(
-            token_ids=next_token_ids if req_num0 > 0 else None,
+        draft_next_token_ids_gpu0 = self._build_padded_next_token_ids(
+            token_ids=next_token_ids,
             batch_size=model_input0.batch_size,
             copy_len=req_num0,
             source_start=0,
-            device=model_input0.b_req_idx.device,
         )
-        draft_next_token_ids_gpu1 = self.spec_adapter.build_padded_next_token_ids(
-            token_ids=next_token_ids if req_num1 > 0 else None,
+        draft_next_token_ids_gpu1 = self._build_padded_next_token_ids(
+            token_ids=next_token_ids,
             batch_size=model_input1.batch_size,
             copy_len=req_num1,
             source_start=req_num0,
-            device=model_input1.b_req_idx.device,
         )
 
         # process the draft model output
-        for draft_model_idx in range(self.mtp_step):
+        for draft_model_idx in range(self.max_draft_step):
 
-            draft_model_input0 = self.spec_adapter.prepare_draft_decode_input(
+            draft_model_input0 = self.spec_engine.prepare_draft_decode_input(
                 model_input=draft_model_input0,
                 next_token_ids=draft_next_token_ids_gpu0,
-                microbatch_index=0,
+                mtp_draft_input_hiddens=draft_hidden0,
             )
-            draft_model_input1 = self.spec_adapter.prepare_draft_decode_input(
+            draft_model_input1 = self.spec_engine.prepare_draft_decode_input(
                 model_input=draft_model_input1,
                 next_token_ids=draft_next_token_ids_gpu1,
-                microbatch_index=1,
+                mtp_draft_input_hiddens=draft_hidden1,
             )
 
             draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
                 draft_model_input0, draft_model_input1
             )
+            draft_hidden0 = draft_model_output0.spec_hidden
+            draft_hidden1 = draft_model_output1.spec_hidden
+            assert draft_hidden0 is not None and draft_hidden1 is not None
 
             draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
             draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)
@@ -949,11 +1006,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             all_next_token_ids.append(draft_next_token_ids)
 
         if req_num0 + req_num1 > 0:
-            self.spec_adapter.scatter_token_id_steps(
+            self.spec_engine.scatter_token_id_steps(
                 token_id_steps=all_next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=b_req_idx,
-                mtp_accept_len=mtp_accept_len,
+                spec_accept_len=spec_accept_len,
             )
         return None
 
@@ -961,95 +1018,73 @@ class DPChunkedPrefillBackend(ModeBackend):
         self,
         model_input0: ModelInput,
         model_input1: ModelInput,
+        model_output0: ModelOutput,
+        model_output1: ModelOutput,
         b_req_idx: torch.Tensor,
         next_token_ids: torch.Tensor = None,
-        mtp_accept_len: torch.Tensor = None,
+        spec_accept_len: torch.Tensor = None,
         b_req_mtp_start_loc: torch.Tensor = None,
         req_num0: int = 0,
         req_num1: int = 0,
     ):
-        all_next_token_ids = []
-        all_next_token_ids.append(next_token_ids)
-        # share some inference info with the main model
-        draft_model_input0, draft_model_input1 = model_input0, model_input1
+        verify_width = self.max_draft_step + 1
+        assert req_num0 % verify_width == 0
+        assert req_num1 % verify_width == 0
+        assert model_input0.batch_size % verify_width == 0
+        assert model_input1.batch_size % verify_width == 0
+        real_request_num0 = req_num0 // verify_width
+        real_request_num1 = req_num1 // verify_width
+        request_capacity0 = model_input0.batch_size // verify_width
+        request_capacity1 = model_input1.batch_size // verify_width
 
-        draft_next_token_ids_gpu0 = self.spec_adapter.build_padded_next_token_ids(
-            token_ids=next_token_ids if req_num0 > 0 else None,
+        padded_next_token_ids0 = self._build_padded_next_token_ids(
+            token_ids=next_token_ids,
             batch_size=model_input0.batch_size,
             copy_len=req_num0,
             source_start=0,
-            device=model_input0.b_req_idx.device,
         )
-        draft_next_token_ids_gpu1 = self.spec_adapter.build_padded_next_token_ids(
-            token_ids=next_token_ids if req_num1 > 0 else None,
+        padded_next_token_ids1 = self._build_padded_next_token_ids(
+            token_ids=next_token_ids,
             batch_size=model_input1.batch_size,
             copy_len=req_num1,
             source_start=req_num0,
+        )
+        padded_accept_len0 = torch.ones(
+            (request_capacity0,),
+            dtype=torch.int32,
+            device=model_input0.b_req_idx.device,
+        )
+        padded_accept_len1 = torch.ones(
+            (request_capacity1,),
+            dtype=torch.int32,
             device=model_input1.b_req_idx.device,
         )
-        real_req_num0 = req_num0 // (self.mtp_step + 1)
-        real_req_num1 = req_num1 // (self.mtp_step + 1)
-        real_req_num = real_req_num0 + real_req_num1
-        padded_req_num0 = model_input0.batch_size // (self.mtp_step + 1) - real_req_num0
-        padded_req_num1 = model_input1.batch_size // (self.mtp_step + 1) - real_req_num1
-        eagle_mem_indexes_cpu = self.spec_adapter.alloc_extra_mem_indexes(real_req_num * self.mtp_step)
-        eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
-        eagle_mem_indexes0 = eagle_mem_indexes[0 : real_req_num0 * self.mtp_step]
-        eagle_mem_indexes1 = eagle_mem_indexes[real_req_num0 * self.mtp_step : real_req_num * self.mtp_step]
-
-        # process the draft model output
-        for _step in range(self.mtp_step):
-
-            draft_model_input0 = self.spec_adapter.prepare_draft_decode_input(
-                model_input=draft_model_input0,
-                next_token_ids=draft_next_token_ids_gpu0,
-                microbatch_index=0,
-            )
-            draft_model_input1 = self.spec_adapter.prepare_draft_decode_input(
-                model_input=draft_model_input1,
-                next_token_ids=draft_next_token_ids_gpu1,
-                microbatch_index=1,
+        if real_request_num0 > 0:
+            padded_accept_len0[:real_request_num0].copy_(spec_accept_len[:real_request_num0])
+        if real_request_num1 > 0:
+            padded_accept_len1[:real_request_num1].copy_(
+                spec_accept_len[real_request_num0 : real_request_num0 + real_request_num1]
             )
 
-            draft_model_idx = _step % self.num_mtp_models
-            draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
-                draft_model_input0, draft_model_input1
-            )
-
-            draft_model_input0.b_seq_len += 1
-            draft_model_input0.max_kv_seq_len += 1
-            draft_model_input0.mem_indexes = self.spec_adapter.append_padded_eagle_step_mem_indexes(
-                model_input=draft_model_input0,
-                eagle_mem_indexes=eagle_mem_indexes0,
-                step=_step,
-                real_req_num=real_req_num0,
-                padded_req_num=padded_req_num0,
-                mtp_step=self.mtp_step,
-            )
-
-            draft_model_input1.b_seq_len += 1
-            draft_model_input1.max_kv_seq_len += 1
-            draft_model_input1.mem_indexes = self.spec_adapter.append_padded_eagle_step_mem_indexes(
-                model_input=draft_model_input1,
-                eagle_mem_indexes=eagle_mem_indexes1,
-                step=_step,
-                real_req_num=real_req_num1,
-                padded_req_num=padded_req_num1,
-                mtp_step=self.mtp_step,
-            )
-
-            draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
-            draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)
-            draft_next_token_ids = torch.cat(
-                (draft_next_token_ids_gpu0[0:req_num0], draft_next_token_ids_gpu1[0:req_num1]), dim=0
-            )
-            all_next_token_ids.append(draft_next_token_ids)
+        proposal = self.spec_engine.propose_next_overlap(
+            main_model_input0=model_input0,
+            main_model_output0=model_output0,
+            next_token_ids0=padded_next_token_ids0,
+            real_verify_rows0=req_num0,
+            accept_len0=padded_accept_len0,
+            main_model_input1=model_input1,
+            main_model_output1=model_output1,
+            next_token_ids1=padded_next_token_ids1,
+            real_verify_rows1=req_num1,
+            accept_len1=padded_accept_len1,
+            draft_step=self.max_draft_step,
+        )
 
         if req_num0 + req_num1 > 0:
-            self.spec_adapter.scatter_token_id_steps(
-                token_id_steps=all_next_token_ids,
+            self.spec_engine.scatter_next_tokens(
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
+                all_next_token_ids=proposal.token_ids,
                 b_req_idx=b_req_idx,
-                mtp_accept_len=mtp_accept_len,
+                spec_accept_len=spec_accept_len,
             )
-        return eagle_mem_indexes_cpu
+        return proposal.extra_mem_indexes_cpu

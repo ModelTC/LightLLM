@@ -3,36 +3,36 @@ import pytest
 import triton
 import numpy as np
 
-from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import (
+from lightllm.common.basemodel.triton_kernel.dynamic_spec_utils import (
     _fwd_kernel_cumprod_probs,
-    sample_dynamic_mtp_req_mask,
+    sample_dynamic_spec_row_mask,
 )
 
 
-def _reference_cumprod_probs(req_to_next_token_probs, b_req_idx, mtp_step: int) -> torch.Tensor:
+def _reference_cumprod_probs(req_to_next_token_probs, b_req_idx, max_draft_step: int) -> torch.Tensor:
     probs = req_to_next_token_probs.clone()
-    req_num = b_req_idx.shape[0] // (mtp_step + 1)
+    req_num = b_req_idx.shape[0] // (max_draft_step + 1)
     for req_i in range(req_num):
-        req_idx = int(b_req_idx[req_i * (mtp_step + 1)].item())
-        row = probs[req_idx, : mtp_step + 1].clone()
+        req_idx = int(b_req_idx[req_i * (max_draft_step + 1)].item())
+        row = probs[req_idx, : max_draft_step + 1].clone()
         row[0] = 1.0
         row[1:] = torch.clamp(row[1:], min=0.01, max=0.99)
-        probs[req_idx, : mtp_step + 1] = torch.cumprod(row, dim=0)
+        probs[req_idx, : max_draft_step + 1] = torch.cumprod(row, dim=0)
     return probs
 
 
 def _flat_cumprod_probs(
     b_req_idx: torch.Tensor,
     req_to_next_token_probs: torch.Tensor,
-    mtp_step: int,
+    max_draft_step: int,
 ) -> torch.Tensor:
-    probs = _reference_cumprod_probs(req_to_next_token_probs, b_req_idx, mtp_step)
-    req_num = b_req_idx.shape[0] // (mtp_step + 1)
-    all_num = req_num * (mtp_step + 1)
+    probs = _reference_cumprod_probs(req_to_next_token_probs, b_req_idx, max_draft_step)
+    req_num = b_req_idx.shape[0] // (max_draft_step + 1)
+    all_num = req_num * (max_draft_step + 1)
     flat_probs = []
     for offset in range(all_num):
         req_idx = int(b_req_idx[offset].item())
-        mtp_index = offset % (mtp_step + 1)
+        mtp_index = offset % (max_draft_step + 1)
         flat_probs.append(probs[req_idx, mtp_index])
     return torch.stack(flat_probs)
 
@@ -46,24 +46,24 @@ def _assert_topk_mask(select: torch.Tensor, flat_probs: torch.Tensor, dynamic_ba
         assert selected_scores.min() >= unselected_scores.max() - 1e-5
 
 
-def _make_batch_probs(req_num: int, mtp_step: int, rows):
+def _make_batch_probs(req_num: int, max_draft_step: int, rows):
     max_req = req_num
     probs = torch.zeros((max_req + 1, 16), dtype=torch.float32, device="cuda")
     for req_idx, row in enumerate(rows):
-        probs[req_idx, : mtp_step + 1] = torch.tensor(row, dtype=torch.float32, device="cuda")
-    b_req_idx = torch.arange(req_num, dtype=torch.int32, device="cuda").repeat_interleave(mtp_step + 1)
+        probs[req_idx, : max_draft_step + 1] = torch.tensor(row, dtype=torch.float32, device="cuda")
+    b_req_idx = torch.arange(req_num, dtype=torch.int32, device="cuda").repeat_interleave(max_draft_step + 1)
     return probs, b_req_idx
 
 
-@pytest.mark.parametrize("mtp_step", [1, 3])
-def test_cumprod_probs_kernel(mtp_step: int):
+@pytest.mark.parametrize("max_draft_step", [1, 3])
+def test_cumprod_probs_kernel(max_draft_step: int):
     req_num = 2
     probs, b_req_idx = _make_batch_probs(
         req_num,
-        mtp_step,
+        max_draft_step,
         rows=[
-            [1.0] + [0.5] * mtp_step,
-            [1.0] + [0.2] * mtp_step,
+            [1.0] + [0.5] * max_draft_step,
+            [1.0] + [0.2] * max_draft_step,
         ],
     )
     probs_clone = probs.clone()
@@ -71,29 +71,29 @@ def test_cumprod_probs_kernel(mtp_step: int):
         req_to_next_token_probs=probs_clone,
         req_to_next_token_probs_stride=probs_clone.stride(0),
         b_req_idx=b_req_idx,
-        mtp_step=mtp_step,
-        BLOCK_SIZE=triton.next_power_of_2(mtp_step + 1),
+        max_draft_step=max_draft_step,
+        BLOCK_SIZE=triton.next_power_of_2(max_draft_step + 1),
         num_warps=1,
         num_stages=1,
     )
-    expected = _reference_cumprod_probs(probs, b_req_idx, mtp_step)
-    assert torch.allclose(probs_clone[:, : mtp_step + 1], expected[:, : mtp_step + 1], rtol=1e-5, atol=1e-5)
+    expected = _reference_cumprod_probs(probs, b_req_idx, max_draft_step)
+    assert torch.allclose(probs_clone[:, : max_draft_step + 1], expected[:, : max_draft_step + 1], rtol=1e-5, atol=1e-5)
 
 
 def test_cumprod_probs_clamps_invalid_values():
-    mtp_step = 2
+    max_draft_step = 2
     req_num = 1
-    probs, b_req_idx = _make_batch_probs(req_num, mtp_step, rows=[[1.0, 0.0, 1.5]])
+    probs, b_req_idx = _make_batch_probs(req_num, max_draft_step, rows=[[1.0, 0.0, 1.5]])
     _fwd_kernel_cumprod_probs[(req_num,)](
         req_to_next_token_probs=probs,
         req_to_next_token_probs_stride=probs.stride(0),
         b_req_idx=b_req_idx,
-        mtp_step=mtp_step,
-        BLOCK_SIZE=triton.next_power_of_2(mtp_step + 1),
+        max_draft_step=max_draft_step,
+        BLOCK_SIZE=triton.next_power_of_2(max_draft_step + 1),
         num_warps=1,
         num_stages=1,
     )
-    row = probs[0, : mtp_step + 1]
+    row = probs[0, : max_draft_step + 1]
     # Index 0 is the always-accepted target sample; clamping applies only to drafts.
     assert row[0].item() == pytest.approx(1.0)
     assert row[1].item() == pytest.approx(0.01, rel=1e-4)
@@ -101,22 +101,22 @@ def test_cumprod_probs_clamps_invalid_values():
 
 
 def test_cumprod_probs_clamps_boundary_values():
-    mtp_step = 3
+    max_draft_step = 3
     req_num = 1
-    probs, b_req_idx = _make_batch_probs(req_num, mtp_step, rows=[[1.0, 0.995, 0.005, 0.5]])
+    probs, b_req_idx = _make_batch_probs(req_num, max_draft_step, rows=[[1.0, 0.995, 0.005, 0.5]])
     raw_probs = probs.clone()
     _fwd_kernel_cumprod_probs[(req_num,)](
         req_to_next_token_probs=probs,
         req_to_next_token_probs_stride=probs.stride(0),
         b_req_idx=b_req_idx,
-        mtp_step=mtp_step,
-        BLOCK_SIZE=triton.next_power_of_2(mtp_step + 1),
+        max_draft_step=max_draft_step,
+        BLOCK_SIZE=triton.next_power_of_2(max_draft_step + 1),
         num_warps=1,
         num_stages=1,
     )
-    expected = _reference_cumprod_probs(raw_probs, b_req_idx, mtp_step)
-    row = probs[0, : mtp_step + 1]
-    assert torch.allclose(row, expected[0, : mtp_step + 1], rtol=1e-5, atol=1e-5)
+    expected = _reference_cumprod_probs(raw_probs, b_req_idx, max_draft_step)
+    row = probs[0, : max_draft_step + 1]
+    assert torch.allclose(row, expected[0, : max_draft_step + 1], rtol=1e-5, atol=1e-5)
     # Draft probabilities 0.995 and 0.005 clamp to 0.99 and 0.01.
     assert row[0].item() == pytest.approx(1.0)
     assert row[1].item() == pytest.approx(0.99, rel=1e-4)
@@ -125,24 +125,24 @@ def test_cumprod_probs_clamps_boundary_values():
 
 
 def test_sample_select_count():
-    mtp_step = 3
+    max_draft_step = 3
     req_num = 3
     probs, b_req_idx = _make_batch_probs(
         req_num,
-        mtp_step,
+        max_draft_step,
         rows=[
             [1.0, 0.95, 0.90, 0.10],
             [1.0, 0.20, 0.80, 0.80],
             [1.0, 0.99, 0.99, 0.99],
         ],
     )
-    all_num = req_num * (mtp_step + 1)
+    all_num = req_num * (max_draft_step + 1)
     for dynamic_batch_size in [3, 8, all_num]:
-        select = sample_dynamic_mtp_req_mask(
+        select = sample_dynamic_spec_row_mask(
             dynamic_batch_size=dynamic_batch_size,
             b_req_idx=b_req_idx,
             req_to_next_token_probs=probs.clone(),
-            mtp_step=mtp_step,
+            max_draft_step=max_draft_step,
         )
         assert select.dtype == torch.int32
         assert select.shape[0] == all_num
@@ -151,63 +151,63 @@ def test_sample_select_count():
 
 
 def test_sample_accepts_numpy_scalar_dynamic_batch_size():
-    mtp_step = 3
+    max_draft_step = 3
     probs, b_req_idx = _make_batch_probs(
         3,
-        mtp_step,
+        max_draft_step,
         rows=[
             [1.0, 0.95, 0.90, 0.10],
             [1.0, 0.20, 0.80, 0.80],
             [1.0, 0.99, 0.99, 0.99],
         ],
     )
-    select = sample_dynamic_mtp_req_mask(
+    select = sample_dynamic_spec_row_mask(
         dynamic_batch_size=np.int64(8),
         b_req_idx=b_req_idx,
         req_to_next_token_probs=probs,
-        mtp_step=np.int64(mtp_step),
+        max_draft_step=np.int64(max_draft_step),
     )
     assert int(select.sum().item()) == 8
 
 
 def test_sample_topk_by_cumprod_score():
-    mtp_step = 3
+    max_draft_step = 3
     probs, b_req_idx = _make_batch_probs(
         3,
-        mtp_step,
+        max_draft_step,
         rows=[
             [1.0, 0.95, 0.90, 0.10],
             [1.0, 0.20, 0.80, 0.80],
             [1.0, 0.99, 0.99, 0.99],
         ],
     )
-    flat_probs = _flat_cumprod_probs(b_req_idx, probs, mtp_step)
+    flat_probs = _flat_cumprod_probs(b_req_idx, probs, max_draft_step)
     for dynamic_batch_size in [1, 4, 8, 12]:
-        select = sample_dynamic_mtp_req_mask(
+        select = sample_dynamic_spec_row_mask(
             dynamic_batch_size=dynamic_batch_size,
             b_req_idx=b_req_idx,
             req_to_next_token_probs=probs.clone(),
-            mtp_step=mtp_step,
+            max_draft_step=max_draft_step,
         )
         _assert_topk_mask(select, flat_probs, dynamic_batch_size)
 
 
 def test_sample_picks_highest_cumprod_rows():
-    mtp_step = 1
+    max_draft_step = 1
     probs, b_req_idx = _make_batch_probs(
         2,
-        mtp_step,
+        max_draft_step,
         rows=[
             [1.0, 0.9],
             [1.0, 0.1],
         ],
     )
-    flat_probs = _flat_cumprod_probs(b_req_idx, probs, mtp_step)
-    select = sample_dynamic_mtp_req_mask(
+    flat_probs = _flat_cumprod_probs(b_req_idx, probs, max_draft_step)
+    select = sample_dynamic_spec_row_mask(
         dynamic_batch_size=2,
         b_req_idx=b_req_idx,
         req_to_next_token_probs=probs.clone(),
-        mtp_step=mtp_step,
+        max_draft_step=max_draft_step,
     )
     _assert_topk_mask(select, flat_probs, 2)
     # top-2 scores are both 0.99 at mtp_index==0 (req0 and req1 main rows)
@@ -216,14 +216,14 @@ def test_sample_picks_highest_cumprod_rows():
 
 
 def test_sample_single_request():
-    mtp_step = 2
-    probs, b_req_idx = _make_batch_probs(1, mtp_step, rows=[[1.0, 0.5, 0.25]])
-    flat_probs = _flat_cumprod_probs(b_req_idx, probs, mtp_step)
-    select = sample_dynamic_mtp_req_mask(
+    max_draft_step = 2
+    probs, b_req_idx = _make_batch_probs(1, max_draft_step, rows=[[1.0, 0.5, 0.25]])
+    flat_probs = _flat_cumprod_probs(b_req_idx, probs, max_draft_step)
+    select = sample_dynamic_spec_row_mask(
         dynamic_batch_size=2,
         b_req_idx=b_req_idx,
         req_to_next_token_probs=probs.clone(),
-        mtp_step=mtp_step,
+        max_draft_step=max_draft_step,
     )
     _assert_topk_mask(select, flat_probs, 2)
 

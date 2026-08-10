@@ -1,11 +1,11 @@
 import dataclasses
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
-from lightllm.utils.envs_utils import enable_dynamic_mtp_verify, get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import (
-    build_dynamic_mtp_fa3_decode_params,
+    build_dynamic_spec_fa3_decode_params,
     page_table_copy,
 )
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
@@ -104,7 +104,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=getattr(self.infer_state, "prefill_causal", True),
+            causal=self.infer_state.prefill_causal,
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
@@ -126,53 +126,48 @@ class Fa3DecodeAttState(BaseDecodeAttState):
 
     def init_state(self):
         self.backend: Fa3AttBackend = self.backend
-        args_mtp_step = getattr(self.infer_state, "decode_mtp_step", None)
-        if args_mtp_step is None:
-            args_mtp_step = get_env_start_args().mtp_step
-        if self.infer_state.disable_mtp_decode_att:
-            args_mtp_step = 0
-        is_block_draft_decode = getattr(self.infer_state, "is_draft_model", False)
-        is_dynamic_mtp = (
-            args_mtp_step > 0
-            and enable_dynamic_mtp_verify()
-            and not is_block_draft_decode
-            and not getattr(self.infer_state, "use_static_mtp_layout", False)
-        )
+        draft_step = self.infer_state.draft_step
+        decode_rows_per_request = draft_step + 1
+        uses_dynamic_spec_verify_layout = self.backend.uses_dynamic_spec_verify_layout(self.infer_state)
 
-        if is_dynamic_mtp:
-            att_batch_size = self.infer_state.batch_size
-            (b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len,) = build_dynamic_mtp_fa3_decode_params(
+        if draft_step > 0 and not uses_dynamic_spec_verify_layout:
+            assert self.infer_state.batch_size % decode_rows_per_request == 0, (
+                "FA3 fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
+                f"got batch_size={self.infer_state.batch_size}, draft_step={draft_step}."
+            )
+
+        # 修正 mtp 在 fa3 下的输入。
+        if uses_dynamic_spec_verify_layout:
+            (b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len,) = build_dynamic_spec_fa3_decode_params(
                 b_req_idx=self.infer_state.b_req_idx,
                 b_seq_len=self.infer_state.b_seq_len,
                 b_mark_shared_group=self.infer_state.b_mark_shared_group,
-                att_batch_size=att_batch_size,
+                att_batch_size=self.infer_state.batch_size,
                 hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
             )
-            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
-            self.cu_seqlens_q = b1_cu_q_seq_len.int()
-            self.cu_seqlens_k = b1_cu_kv_seq_len.int()
-        elif args_mtp_step > 0:
-            # 修正 mtp 在 fa3 下的输入。
-            mtp_size = args_mtp_step + 1
+        elif draft_step > 0:
             b_q_seq_len = torch.full(
-                (self.infer_state.b_seq_len.shape[0] // mtp_size,),
-                fill_value=mtp_size,
+                (self.infer_state.b_seq_len.shape[0] // decode_rows_per_request,),
+                fill_value=decode_rows_per_request,
                 dtype=torch.int32,
                 device=self.infer_state.b_seq_len.device,
             )
-            b_kv_seq_len = self.infer_state.b_seq_len[mtp_size - 1 :: mtp_size]
+            b_kv_seq_len = self.infer_state.b_seq_len[draft_step::decode_rows_per_request]
+            b_att_req_idx = self.infer_state.b_req_idx[draft_step::decode_rows_per_request]
+            self.b_att_seq_len = b_kv_seq_len.contiguous()
+        else:
+            b_att_req_idx = self.infer_state.b_req_idx
+            self.b_att_seq_len = self.infer_state.b_seq_len
+
+        if draft_step > 0:
             b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
             self.cu_seqlens_q = b1_cu_q_seq_len.int()
             self.cu_seqlens_k = b1_cu_kv_seq_len.int()
-            att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
         else:
             self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
-            att_batch_size = self.infer_state.batch_size
 
-        if not is_dynamic_mtp:
-            assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
-
+        att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
         # 可以使用 cuda graph的时候从 buffer中申请
         if (
@@ -190,29 +185,12 @@ class Fa3DecodeAttState(BaseDecodeAttState):
                 device=self.infer_state.input_ids.device,
             )
 
-        if is_dynamic_mtp:
-            page_table_copy(
-                page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
-                req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=b_att_req_idx,
-            )
-            self.decode_max_q_seq_len = args_mtp_step + 1
-        elif args_mtp_step > 0:
-            page_table_copy(
-                page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
-                req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.infer_state.b_req_idx[args_mtp_step :: (args_mtp_step + 1)],
-            )
-            self.b_att_seq_len = self.infer_state.b_seq_len[args_mtp_step :: (args_mtp_step + 1)].contiguous()
-            self.decode_max_q_seq_len = args_mtp_step + 1
-        else:
-            page_table_copy(
-                page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
-                req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.infer_state.b_req_idx,
-            )
-            self.b_att_seq_len = self.infer_state.b_seq_len
-            self.decode_max_q_seq_len = 1
+        page_table_copy(
+            page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
+            req_to_token_indexs=model.req_manager.req_to_token_indexs,
+            b_req_idx=b_att_req_idx,
+        )
+        self.decode_max_q_seq_len = decode_rows_per_request
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "Fa3DecodeAttState"):
@@ -266,7 +244,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.decode_max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=getattr(self.infer_state, "decode_causal", True),
+            causal=self.infer_state.decode_causal,
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,

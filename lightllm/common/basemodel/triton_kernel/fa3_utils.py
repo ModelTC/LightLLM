@@ -3,8 +3,8 @@ import triton
 import triton.language as tl
 
 
-_DYNAMIC_MTP_FA3_FAST_PATH_MAX_BATCH_SIZE = 1024
-_DYNAMIC_MTP_FA3_COMPACT_BLOCK_SIZE = 256
+_DYNAMIC_SPEC_FA3_FAST_PATH_MAX_BATCH_SIZE = 1024
+_DYNAMIC_SPEC_FA3_COMPACT_BLOCK_SIZE = 256
 
 
 @triton.jit
@@ -62,8 +62,41 @@ def page_table_copy(
     )
 
 
+def test_page_table_copy():
+    import torch
+
+    batch_size, seq_len = 2, 8
+
+    req_to_token_indexs = torch.arange(batch_size * seq_len, dtype=torch.int32).reshape(batch_size, seq_len).cuda()
+
+    page_table = torch.full((batch_size, seq_len), -1, dtype=torch.int32, device="cuda")
+
+    b_req_idx = torch.tensor([0, 2, 1, 3], dtype=torch.int32, device="cuda")[::2]
+    print(b_req_idx.stride())
+
+    page_table_copy(page_table, req_to_token_indexs, b_req_idx)
+
+    print("req_to_token_indexs:")
+    print(req_to_token_indexs.cpu().numpy())
+    print("b_req_idx:", b_req_idx.cpu().numpy())
+    print("page_table:")
+    print(page_table.cpu().numpy())
+
+    for batch in range(batch_size):
+        src_idx = b_req_idx[batch].item()
+        expected = req_to_token_indexs[src_idx].cpu().numpy()
+        got = page_table[batch].cpu().numpy()
+        assert (expected == got).all(), f"Batch {batch} mismatch: expected {expected}, got {got}"
+
+    print("✅ Test passed!")
+
+
+if __name__ == "__main__":
+    test_page_table_copy()
+
+
 @triton.jit
-def _build_dynamic_mtp_fa3_decode_params_kernel(
+def _build_dynamic_spec_fa3_decode_params_kernel(
     b_req_idx,
     b_seq_len,
     b_mark_shared_group,
@@ -79,6 +112,7 @@ def _build_dynamic_mtp_fa3_decode_params_kernel(
     mask = offsets < batch_size
 
     mark = tl.load(b_mark_shared_group + offsets, mask=mask, other=0)
+    # A positive mark closes a query group and stores the number of rows in it.
     is_group_end = mask & (mark > 0)
     dst_pos = tl.cumsum(tl.where(is_group_end, 1, 0), axis=0) - 1
 
@@ -97,7 +131,7 @@ def _build_dynamic_mtp_fa3_decode_params_kernel(
 
 
 @triton.jit
-def _count_dynamic_mtp_fa3_decode_params_kernel(
+def _count_dynamic_spec_fa3_decode_params_kernel(
     b_mark_shared_group,
     out_block_counts,
     batch_size,
@@ -113,7 +147,7 @@ def _count_dynamic_mtp_fa3_decode_params_kernel(
 
 
 @triton.jit
-def _compact_dynamic_mtp_fa3_decode_params_kernel(
+def _compact_dynamic_spec_fa3_decode_params_kernel(
     b_req_idx,
     b_seq_len,
     b_mark_shared_group,
@@ -132,6 +166,7 @@ def _compact_dynamic_mtp_fa3_decode_params_kernel(
     mask = offsets < batch_size
 
     mark = tl.load(b_mark_shared_group + offsets, mask=mask, other=0)
+    # A positive mark closes a query group and stores the number of rows in it.
     is_group_end = mask & (mark > 0)
     local_pos = tl.cumsum(tl.where(is_group_end, 1, 0), axis=0) - 1
     block_count = tl.load(block_counts + block_id)
@@ -149,25 +184,57 @@ def _compact_dynamic_mtp_fa3_decode_params_kernel(
 
 
 @torch.no_grad()
-def build_dynamic_mtp_fa3_decode_params(
+def build_dynamic_spec_fa3_decode_params(
     b_req_idx: torch.Tensor,
     b_seq_len: torch.Tensor,
     b_mark_shared_group: torch.Tensor,
     att_batch_size: int,
     hold_req_id: int,
 ):
+    """Convert dynamic speculative-verify rows to one metadata row per FA3 sequence.
+
+    Query rows belonging to the same attention sequence are consecutive.
+    ``b_mark_shared_group`` is zero inside a group; its final row stores the
+    number of query rows in that group.
+
+    For example, let ``H`` denote ``hold_req_id`` and suppose::
+
+        b_req_idx           = [ 7,  7,  7, 4,  9,  9, H, H]
+        b_seq_len           = [12, 13, 14, 8, 20, 21, 0, 0]
+        b_mark_shared_group = [ 0,  0,  3, 1,  0,  2, 0, 0]
+
+    The positive marks close three attention sequences::
+
+        request 7 -> query length 3, final KV length 14
+        request 4 -> query length 1, final KV length 8
+        request 9 -> query length 2, final KV length 21
+
+    The operator retains each group's final row, compacts those rows to the
+    front, and pads the unused tail to ``att_batch_size``::
+
+        b_q_seq_len   = [ 3, 1,  2, 0, 0, 0, 0, 0]
+        b_kv_seq_len  = [14, 8, 21, 0, 0, 0, 0, 0]
+        b_att_req_idx = [7, 4, 9, H, H, H, H, H]
+        b_att_seq_len = [14, 8, 21, 0, 0, 0, 0, 0]
+
+    Thus ``b_att_req_idx`` changes from one request id per query row to one id
+    per FA3 sequence; it selects that sequence's page-table row. A request may
+    still appear more than once if its rows are intentionally split into
+    multiple attention groups. Fixed output shapes let one CUDA Graph replay
+    different speculative verify layouts.
+    """
     assert b_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_shared_group.is_cuda
     assert b_req_idx.shape == b_seq_len.shape == b_mark_shared_group.shape
     assert b_req_idx.shape[0] == att_batch_size
     assert att_batch_size > 0
 
-    if att_batch_size <= _DYNAMIC_MTP_FA3_FAST_PATH_MAX_BATCH_SIZE:
+    if att_batch_size <= _DYNAMIC_SPEC_FA3_FAST_PATH_MAX_BATCH_SIZE:
         b_q_seq_len = torch.empty((att_batch_size,), dtype=torch.int32, device=b_seq_len.device)
         b_kv_seq_len = torch.empty((att_batch_size,), dtype=torch.int32, device=b_seq_len.device)
         b_att_req_idx = torch.empty((att_batch_size,), dtype=torch.int32, device=b_req_idx.device)
         b_att_seq_len = torch.empty((att_batch_size,), dtype=torch.int32, device=b_seq_len.device)
 
-        _build_dynamic_mtp_fa3_decode_params_kernel[(1,)](
+        _build_dynamic_spec_fa3_decode_params_kernel[(1,)](
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
             b_mark_shared_group=b_mark_shared_group,
@@ -188,11 +255,11 @@ def build_dynamic_mtp_fa3_decode_params(
     b_att_req_idx = torch.full((att_batch_size,), hold_req_id, dtype=torch.int32, device=b_req_idx.device)
     b_att_seq_len = torch.zeros((att_batch_size,), dtype=torch.int32, device=b_seq_len.device)
 
-    block_size = _DYNAMIC_MTP_FA3_COMPACT_BLOCK_SIZE
+    block_size = _DYNAMIC_SPEC_FA3_COMPACT_BLOCK_SIZE
     grid = (triton.cdiv(att_batch_size, block_size),)
     block_counts = torch.empty((grid[0],), dtype=torch.int32, device=b_mark_shared_group.device)
 
-    _count_dynamic_mtp_fa3_decode_params_kernel[grid](
+    _count_dynamic_spec_fa3_decode_params_kernel[grid](
         b_mark_shared_group=b_mark_shared_group,
         out_block_counts=block_counts,
         batch_size=att_batch_size,
@@ -202,7 +269,7 @@ def build_dynamic_mtp_fa3_decode_params(
     )
     block_offsets = torch.cumsum(block_counts, dim=0, dtype=torch.int32)
 
-    _compact_dynamic_mtp_fa3_decode_params_kernel[grid](
+    _compact_dynamic_spec_fa3_decode_params_kernel[grid](
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,

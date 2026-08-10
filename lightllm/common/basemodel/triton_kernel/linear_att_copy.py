@@ -10,7 +10,6 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_kv_conv_ptr,  # uint8 view: [buffer_num, linear_layer_num, conv_dim * cpu_conv_row_bytes]
     cpu_kv_ssm_ptr,  # uint8 view: [buffer_num, linear_layer_num, ssm_bytes]
     b_req_idx,  # [batch_size,]
-    req_to_mtp_state_index,  # [max_request_num + 1,]
     big_page_buffer_ids,  # [batch_size,]
     gpu_conv_stride_l,
     gpu_conv_stride_s,
@@ -25,7 +24,7 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_kv_ssm_stride_s,
     cpu_kv_ssm_stride_l,
     cpu_kv_ssm_stride_d,
-    mtp_step: tl.constexpr,
+    mtp_step,
     gpu_conv_dim,  # number of conv rows
     gpu_conv_tail_dim_bytes,  # bytes copied per conv row; equals the CPU/cache row width
     gpu_ssm_tail_dim,
@@ -51,10 +50,7 @@ def _copy_linear_att_state_to_kv_buffer(
         return
 
     cur_req_idx = tl.load(b_req_idx + cur_batch).to(tl.int64)
-    state_offset = 0
-    if mtp_step > 0:
-        state_offset = tl.load(req_to_mtp_state_index + cur_req_idx).to(tl.int64)
-    cur_state_req_idx = (cur_req_idx * (mtp_step + 1) + state_offset).to(tl.int64)
+    cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
 
     gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + cur_req_idx * gpu_conv_stride_s
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
@@ -84,7 +80,6 @@ def _copy_linear_att_state_to_kv_buffer(
 
 def copy_linear_att_state_to_kv_buffer(
     b_req_idx: torch.Tensor,
-    req_to_mtp_state_index: torch.Tensor,
     big_page_buffer_ids: torch.Tensor,
     gpu_conv_state: torch.Tensor,  # [linear_layer_num, req_num, conv_dim, kernel_size]
     gpu_ssm_state: torch.Tensor,  # [linear_layer_num, req_num * (mtp_step + 1), ...]
@@ -94,10 +89,6 @@ def copy_linear_att_state_to_kv_buffer(
 ):
     # gpu_conv_state 的后两维可能是不连续的。
     assert len(b_req_idx) == big_page_buffer_ids.shape[0]
-    if req_to_mtp_state_index is None:
-        assert mtp_step == 0
-        # The constexpr branch below does not dereference this placeholder.
-        req_to_mtp_state_index = b_req_idx
     BLOCK = 4096
 
     assert gpu_conv_state.dim() == 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
@@ -138,7 +129,6 @@ def copy_linear_att_state_to_kv_buffer(
         cpu_kv_conv_ptr=cpu_kv_conv_state,
         cpu_kv_ssm_ptr=cpu_kv_ssm_state,
         b_req_idx=b_req_idx,
-        req_to_mtp_state_index=req_to_mtp_state_index,
         big_page_buffer_ids=big_page_buffer_ids,
         gpu_conv_stride_l=gpu_conv_state.stride(0),
         gpu_conv_stride_s=gpu_conv_state.stride(1),

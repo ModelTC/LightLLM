@@ -1,7 +1,9 @@
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Tuple, Union, Dict
+from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
+
+from lightllm.utils.envs_utils import enable_dynamic_spec, get_env_start_args
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -22,7 +24,7 @@ class BaseAttBackend:
         和缓存布局，不能只按 backend class 共享实例。
         """
         model = kwargs.get("model", args[0] if args else None)
-        instance_key = (cls, id(model))
+        instance_key = (cls, model)
         if instance_key not in cls._instances:
             instance = super().__new__(cls)
             cls._instances[instance_key] = instance
@@ -36,6 +38,14 @@ class BaseAttBackend:
 
     def create_att_decode_state(self) -> "BaseDecodeAttState":
         raise NotImplementedError("not impl")
+
+    def uses_dynamic_spec_verify_layout(self, infer_state: "InferStateInfo") -> bool:
+        if infer_state.draft_step == 0 or not enable_dynamic_spec():
+            return False
+
+        # Target verification may compact each request to a different row count.
+        # Block draft forwards still use their checkpoint-defined fixed layout.
+        return get_env_start_args().mtp_mode not in ("dspark", "dflash") or not self.model.is_mtp_draft_model
 
     def _find_layer_index(
         self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]
@@ -103,11 +113,6 @@ class BasePrefillAttState(ABC):
 class BaseDecodeAttState(ABC):
     backend: BaseAttBackend = None
     infer_state: "InferStateInfo" = None
-
-    def prepare_for_forward(self):
-        """Build derived state that must execute inside a captured forward."""
-
-        return
 
     @abstractmethod
     def init_state(self):

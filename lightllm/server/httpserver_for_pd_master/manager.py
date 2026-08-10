@@ -4,6 +4,7 @@ import asyncio
 import uvloop
 import time
 import datetime
+import ujson as json
 import pickle
 import httpx
 from contextlib import aclosing
@@ -423,10 +424,10 @@ class HttpServerManagerForPDMaster:
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
         prompt_cache_ratio = prompt_cache_len / prompt_tokens
-        mtp_total_step = sum(sub_req_id_to_mtp_verify_step_num.values())
-        if mtp_total_step <= 0:
-            mtp_total_step = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
-        mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
+        mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
+        if mtp_total_verify_steps <= 0:
+            mtp_total_verify_steps = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+        mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             f"X-Request-Id:{x_request_id} "

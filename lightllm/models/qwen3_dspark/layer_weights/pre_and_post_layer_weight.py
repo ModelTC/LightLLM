@@ -64,4 +64,3 @@ class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
                 weight_shape=(1, confidence_input_dim),
                 bias_shape=(1,),
             )
-        return

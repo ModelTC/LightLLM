@@ -614,34 +614,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """,
     )
     parser.add_argument(
-        "--mtp_draft_graph_max_batch_size",
-        type=int,
-        default=None,
-        help="""
-        Optional logical CUDA graph batch-size limit for MTP draft models.
-        Defaults to graph_max_batch_size. The value is expanded by the draft
-        model's decode graph group size in the same way as the main setting.
-        """,
-    )
-    parser.add_argument(
-        "--mtp_draft_graph_split_batch_size",
-        type=int,
-        default=None,
-        help="""
-        Optional dense-prefix CUDA graph limit for MTP draft models.
-        Defaults to graph_split_batch_size.
-        """,
-    )
-    parser.add_argument(
-        "--mtp_draft_graph_grow_step_size",
-        type=int,
-        default=None,
-        help="""
-        Optional CUDA graph batch-size growth step for MTP draft models.
-        Defaults to graph_grow_step_size.
-        """,
-    )
-    parser.add_argument(
         "--graph_max_len_in_batch",
         type=int,
         default=0,
@@ -770,7 +742,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ],
         default=None,
         help="""Speculative decoding mode.
-        *_with_att and *_no_att select attention or non-attention MTP drafts;
+        *_with_att and *_no_att select attention or non-attention draft models;
         eagle3 uses a recurrent EAGLE3 draft; dspark and dflash use block draft models.""",
     )
     parser.add_argument(
@@ -778,8 +750,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         default=None,
-        help="""Path to the draft model for the MTP multi-prediction feature,
-        used for loading the MTP multi-output token model.""",
+        help="""Path to the speculative draft model. The legacy option name is
+        retained for command-line compatibility.""",
     )
     parser.add_argument(
         "--mtp_step",
@@ -791,7 +763,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--mtp_dynamic_verify",
         action="store_true",
-        help="""Whether to enable dynamic verification for MTP multi-prediction results.""",
+        help="""Compatibility switch for dynamic speculative scheduling.
+        DSpark enables this scheduling mode automatically.""",
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",

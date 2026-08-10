@@ -60,4 +60,3 @@ class Qwen3DFlashPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name="lm_head.weight",
             data_type=self.data_type_,
         )
-        return
