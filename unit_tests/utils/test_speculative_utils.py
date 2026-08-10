@@ -5,9 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 import lightllm.common.basemodel.attention.base_att as base_att_module
+import lightllm.server.router.model_infer.mode_backend.base_backend as base_backend_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.utils import envs_utils
 
 
@@ -152,6 +154,20 @@ def test_draft_model_registry_validates_target_family():
             spec_mode="dflash",
             is_linear_att_mixed_model=True,
         )
+
+
+def test_target_hidden_layer_ids_reads_text_config(monkeypatch):
+    monkeypatch.setattr(
+        base_backend_module.PretrainedConfig,
+        "get_config_dict",
+        lambda _: ({"target_layer_ids": [1, 20, 36]}, {}),
+    )
+    backend = ModeBackend.__new__(ModeBackend)
+    backend.args = SimpleNamespace(mtp_mode="dspark", mtp_draft_model_dir=["/models/dspark"])
+
+    layer_ids = backend._target_hidden_layer_ids({"model_type": "qwen3_5", "text_config": {"num_hidden_layers": 40}})
+
+    assert layer_ids == (1, 20, 36)
 
 
 def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):

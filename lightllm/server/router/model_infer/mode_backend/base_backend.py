@@ -473,6 +473,9 @@ class ModeBackend:
         if self.args.mtp_mode not in ("eagle3", "dspark", "dflash"):
             return None
 
+        model_cfg = model_cfg.get("text_config", model_cfg)
+        layer_num = int(model_cfg.get("num_hidden_layers", model_cfg.get("n_layer")))
+
         draft_model_dirs = self.args.mtp_draft_model_dir
         assert draft_model_dirs
         draft_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[0])
@@ -480,10 +483,8 @@ class ModeBackend:
         if target_layer_ids is None and self.args.mtp_mode == "dflash":
             target_layer_ids = draft_cfg.get("dflash_config", {}).get("target_layer_ids")
         if target_layer_ids is None:
-            layer_num = int(model_cfg.get("num_hidden_layers", model_cfg.get("n_layer")))
             target_layer_ids = [1, layer_num // 2 - 1, layer_num - 4]
 
-        layer_num = int(model_cfg.get("num_hidden_layers", model_cfg.get("n_layer")))
         target_layer_ids = tuple(int(layer_id) for layer_id in target_layer_ids)
         assert target_layer_ids and all(
             0 <= layer_id < layer_num for layer_id in target_layer_ids
