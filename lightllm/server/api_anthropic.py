@@ -35,6 +35,14 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 from .api_errors import is_rate_limit_error
+from .visual_chat_proxy import (
+    VisualChatProxyError,
+    VisualProxyCapacityError,
+    VisualProxyTimeoutError,
+    VisualProxyUpstreamError,
+    should_use_visual_proxy,
+    visual_chat_completions_impl,
+)
 
 logger = init_logger(__name__)
 
@@ -134,7 +142,12 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
 
     _replace_anthropic_pdf_documents(anthropic_body)
     tool_result_image_urls = _tool_result_image_urls(anthropic_body)
-    openai_request, tool_name_mapping = adapter.translate_anthropic_to_openai(anthropic_body)
+    adapter_body = {
+        key: value
+        for key, value in anthropic_body.items()
+        if key not in {"chat_template_kwargs", "thinking", "output_config"}
+    }
+    openai_request, tool_name_mapping = adapter.translate_anthropic_to_openai(adapter_body)
 
     if hasattr(openai_request, "model_dump"):
         openai_dict = openai_request.model_dump(exclude_none=True)
@@ -159,6 +172,44 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     if isinstance(extra_body, dict):
         for k, v in extra_body.items():
             openai_dict.setdefault(k, v)
+
+    top_level_template_kwargs = anthropic_body.get("chat_template_kwargs")
+    if top_level_template_kwargs is not None:
+        if not isinstance(top_level_template_kwargs, dict):
+            raise ValueError("chat_template_kwargs must be an object when provided")
+        openai_dict["chat_template_kwargs"] = top_level_template_kwargs
+
+    template_kwargs = openai_dict.get("chat_template_kwargs")
+    if template_kwargs is not None and not isinstance(template_kwargs, dict):
+        raise ValueError("chat_template_kwargs must be an object when provided")
+    template_kwargs = dict(template_kwargs or {})
+    explicit_enable = template_kwargs.get("enable_thinking")
+    if explicit_enable is not None and not isinstance(explicit_enable, bool):
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
+
+    thinking = anthropic_body.get("thinking")
+    if thinking is not None and not isinstance(thinking, dict):
+        raise ValueError("thinking must be an object when provided")
+    if explicit_enable is None and thinking is not None:
+        thinking_type = thinking.get("type")
+        if thinking_type in {"adaptive", "enabled"}:
+            explicit_enable = True
+        elif thinking_type == "disabled":
+            explicit_enable = False
+        else:
+            raise ValueError(f"Unsupported thinking.type: {thinking_type!r}")
+        template_kwargs["enable_thinking"] = explicit_enable
+
+    output_config = anthropic_body.get("output_config")
+    if output_config is not None and not isinstance(output_config, dict):
+        raise ValueError("output_config must be an object when provided")
+    if explicit_enable is True:
+        effort = (output_config or {}).get("effort", "high")
+        if effort not in {"low", "medium", "high", "max"}:
+            raise ValueError("output_config.effort must be 'low', 'medium', 'high', or 'max'")
+        openai_dict["reasoning_effort"] = effort
+    if template_kwargs:
+        openai_dict["chat_template_kwargs"] = template_kwargs
 
     _UNKNOWN_FIELDS = {"extra_body", "metadata", "anthropic_version", "cache_control"}
     dropped = [k for k in anthropic_body if k in _UNKNOWN_FIELDS]
@@ -186,6 +237,19 @@ def _restore_tool_result_image_urls(openai_dict: Dict[str, Any], tool_result_ima
         if content not in tool_result_image_urls.get(msg.get("tool_call_id"), set()):
             continue
         msg["content"] = [{"type": "image_url", "image_url": {"url": content}}]
+
+
+def _drop_provider_thinking_blocks(openai_dict: Dict[str, Any]) -> bool:
+    """Keep provider-signed thinking metadata out of proxy-owned tool traces."""
+    dropped = False
+    for message in openai_dict.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.pop("thinking_blocks", None) is not None:
+            message.pop("reasoning", None)
+            message.pop("reasoning_content", None)
+            dropped = True
+    return dropped
 
 
 def _pdf_data_url_to_anthropic_parts(data_url: str, deadline: float | None = None) -> list[Dict[str, Any]]:
@@ -300,7 +364,10 @@ def _is_vision_enabled() -> bool:
         args = get_env_start_args()
     except Exception:
         return False
-    return bool(getattr(args, "enable_multimodal", False) and not getattr(args, "disable_vision", True))
+    return bool(
+        getattr(args, "visual_remote_url", None)
+        or (getattr(args, "enable_multimodal", False) and not getattr(args, "disable_vision", True))
+    )
 
 
 def _decode_pdf_data_url(data_url: str) -> bytes:
@@ -1257,6 +1324,27 @@ def _rewrap_openai_error_as_anthropic(resp: JSONResponse) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
+async def _dispatch_chat_request(chat_request: Any, raw_request: Request, main_chat_handler: Any) -> Any:
+    """Route translated Anthropic image requests through the visual proxy."""
+    # Imported lazily to avoid an api_http -> api_anthropic -> api_http cycle.
+    from .api_http import g_objs
+
+    visual_remote_url = getattr(getattr(g_objs, "args", None), "visual_remote_url", None)
+    if not should_use_visual_proxy(visual_remote_url, chat_request):
+        return await main_chat_handler(chat_request, raw_request)
+
+    runtime = g_objs.visual_proxy_runtime
+    if runtime is None:
+        raise VisualChatProxyError("Visual proxy runtime is not initialized")
+    async with runtime.request_slot():
+        return await visual_chat_completions_impl(
+            request=chat_request,
+            raw_request=raw_request,
+            runtime=runtime,
+            main_chat_handler=main_chat_handler,
+        )
+
+
 async def anthropic_messages_impl(raw_request: Request) -> Response:
     # Lazy imports to avoid pulling in heavy server deps at module import time.
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
@@ -1288,7 +1376,34 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         logger.exception("Failed to build ChatCompletionRequest")
         return _anthropic_error_response(HTTPStatus.BAD_REQUEST, f"Invalid request after translation: {exc}")
 
-    downstream = await chat_completions_impl(chat_request, raw_request)
+    # Provider-signed thinking is valid native Anthropic history, but it must
+    # not be interpreted as a replayable proxy-owned builtin tool trace.
+    from .api_http import g_objs
+
+    visual_remote_url = getattr(getattr(g_objs, "args", None), "visual_remote_url", None)
+    if should_use_visual_proxy(visual_remote_url, chat_request) and _drop_provider_thinking_blocks(chat_dict):
+        try:
+            chat_request = ChatCompletionRequest(**chat_dict)
+        except Exception as exc:
+            logger.exception("Failed to rebuild visual ChatCompletionRequest")
+            return _anthropic_error_response(
+                HTTPStatus.BAD_REQUEST,
+                f"Invalid visual request after translation: {exc}",
+            )
+
+    try:
+        downstream = await _dispatch_chat_request(chat_request, raw_request, chat_completions_impl)
+    except VisualProxyCapacityError as exc:
+        logger.warning("%s", str(exc))
+        return _anthropic_error_response(HTTPStatus.TOO_MANY_REQUESTS, str(exc))
+    except VisualProxyTimeoutError as exc:
+        logger.warning("%s", str(exc))
+        return _anthropic_error_response(HTTPStatus.GATEWAY_TIMEOUT, str(exc))
+    except (VisualProxyUpstreamError, VisualChatProxyError) as exc:
+        logger.warning("%s", str(exc))
+        return _anthropic_error_response(HTTPStatus.BAD_GATEWAY, str(exc))
+    except ValueError as exc:
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
     if is_stream:
         from .api_stream_obj import CustomStreamingResponse

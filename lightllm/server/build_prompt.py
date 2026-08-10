@@ -5,6 +5,8 @@ from lightllm.utils.log_utils import init_logger
 from functools import lru_cache
 from lightllm.utils.config_utils import get_model_type_v1
 
+from .visual_trace import record_rendered_main_prompt
+
 logger = init_logger(__name__)
 
 tokenizer = None
@@ -196,4 +198,5 @@ async def build_prompt(request, tools) -> str:
             json.dumps(kwargs, ensure_ascii=False, default=str),
         )
         raise ValueError(f"Failed to build prompt: {e}") from e
+    record_rendered_main_prompt(input_str)
     return input_str
