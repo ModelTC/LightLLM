@@ -86,14 +86,13 @@ class DiskCacheWorker:
         while not cond():
             if time.monotonic() >= deadline:
                 logger.error(
-                    "disk cache task '%s' wait timeout after %.1fs, aborting task to avoid hang",
-                    cond_name,
-                    TASK_WAIT_TIMEOUT_S,
+                    f"disk cache task '{cond_name}' wait timeout after "
+                    f"{TASK_WAIT_TIMEOUT_S:.1f}s, aborting task to avoid hang"
                 )
                 try:
                     self.service.abort(task)
                 except Exception as e:
-                    logger.error("disk cache abort task failed: %s", e)
+                    logger.error(f"disk cache abort task failed: {e}")
                 return False
             time.sleep(0.001)
         return True
@@ -147,8 +146,8 @@ class DiskCacheWorker:
             ):
                 if time.monotonic() >= throttle_deadline:
                     logger.error(
-                        "disk cache write throttle wait timeout after %.1fs, proceeding to submit",
-                        TASK_WAIT_TIMEOUT_S,
+                        f"disk cache write throttle wait timeout after {TASK_WAIT_TIMEOUT_S:.1f}s, "
+                        "proceeding to submit"
                     )
                     break
                 time.sleep(0.001)
