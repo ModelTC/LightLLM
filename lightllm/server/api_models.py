@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
 
 from lightllm.utils.config_utils import get_generation_config_diff_dict
 
+MAX_SEED = (1 << 63) - 1
+
 
 class ImageURL(BaseModel):
     url: str
@@ -152,7 +154,7 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
-    seed: Optional[int] = -1
+    seed: Optional[int] = Field(default=None, ge=-1, le=MAX_SEED)
 
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
@@ -232,7 +234,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
-    seed: Optional[int] = -1
+    seed: Optional[int] = Field(default=None, ge=-1, le=MAX_SEED)
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
 

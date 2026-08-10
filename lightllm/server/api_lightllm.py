@@ -1,10 +1,11 @@
 import collections
 from typing import AsyncGenerator
 from fastapi import BackgroundTasks, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
+from .api_stream_obj import CustomStreamingResponse
 import ujson as json
 
 
@@ -164,6 +165,6 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
     from .api_openai import _safe_stream_wrapper
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(
+    return CustomStreamingResponse(
         _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
     )

@@ -7,17 +7,17 @@ logger = init_logger(__name__)
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 
-    def __init__(self, message="Server is busy, please try again later", status_code=503):
+    def __init__(self, message="Server is busy, please try again later", status_code=429):
         """
         Initialize the ServerBusyError
 
         Args:
             message (str): Error message to display
-            status_code (int): HTTP status code (default 503 Service Unavailable)
+            status_code (int): HTTP status code (default 429 Too Many Requests)
         """
         super().__init__(message)
         self.message = message
-        self.status_code = status_code  # HTTP 503 Service Unavailable
+        self.status_code = status_code  # HTTP 429 Too Many Requests
 
     def __str__(self):
         """String representation of the error"""

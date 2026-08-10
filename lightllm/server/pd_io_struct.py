@@ -56,7 +56,7 @@ class PD_Client_Obj:
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
-    # cache-aware 选点用：累计派发到该节点的 prompt 字符数（只增不减，非实时负载）。
+    # cache-aware 选点用：当前派发到该节点且尚未产出首 token 的 prompt 字符数。
     dispatched_prompt_chars: int = 0
 
     def __post_init__(self):

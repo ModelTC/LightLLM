@@ -23,7 +23,7 @@ h11==0.14.0
 humanfriendly==10.0
 humanize==4.7.0
 idna==3.4
-Jinja2==3.1.2
+Jinja2==3.1.6
 jmespath==1.0.1
 jsonpatch==1.32
 jsonpointer==2.0

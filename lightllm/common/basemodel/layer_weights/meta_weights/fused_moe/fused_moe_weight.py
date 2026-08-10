@@ -274,21 +274,27 @@ class FusedMoeWeight(BaseWeightTpl):
     def prefilled_group_gemm(
         self,
         num_recv_tokens_per_expert_list,
+        num_unaligned_recv_tokens_per_expert: torch.Tensor,
+        recv_src_metadata: torch.Tensor,
         recv_x: Tuple[torch.Tensor],
         recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
+        microbatch_index: int = 0,
         clamp_limit: Optional[float] = None,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
             num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
+            num_unaligned_recv_tokens_per_expert=num_unaligned_recv_tokens_per_expert,
+            recv_src_metadata=recv_src_metadata,
             recv_x=recv_x,
             recv_topk_idx=recv_topk_idx,
             recv_topk_weights=recv_topk_weights,
             w13=self.w13,
             w2=self.w2,
             hidden_dtype=hidden_dtype,
+            microbatch_index=microbatch_index,
             clamp_limit=clamp_limit,
         )
 

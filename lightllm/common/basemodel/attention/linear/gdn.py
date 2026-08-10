@@ -2,7 +2,7 @@ import dataclasses
 import torch
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
@@ -54,10 +54,6 @@ class LinearAttBackend(BaseAttBackend):
         start_args = get_env_start_args()
         self.ssm_state_dtype = ssm_dtype_dict.get(start_args.linear_att_ssm_data_type, torch.bfloat16)
 
-        # Pre-compute whether dtype conversion is needed
-        # GDN kernel output dtype is self.data_type
-        # Conversion needed only if SSM state uses different dtype
-        self.needs_ssm_dtype_conversion = get_llm_data_type() != self.ssm_state_dtype
         return
 
     def _split_qkvzba(self, mixed_qkvzba):
@@ -187,10 +183,10 @@ class LinearAttPrefillAttState(BasePrefillAttState):
             head_first=False,
             use_qk_l2norm_in_kernel=True,
         )
-        if backend.needs_ssm_dtype_conversion:
-            ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state.to(backend.ssm_state_dtype, copy=False)
-        else:
-            ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state
+        # The chunk kernel accumulates the recurrent state in float32 even when
+        # the state cache is configured as bfloat16. Advanced indexing does
+        # not perform an implicit dtype conversion for index_put.
+        ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
         return core_attn_out
 
 

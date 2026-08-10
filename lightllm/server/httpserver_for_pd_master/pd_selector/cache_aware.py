@@ -10,7 +10,7 @@ PD Master 的 cache-aware prefill 选点策略。
   - 用前缀树（见 PromptCacheTree）记录「历史 prompt -> 处理它的 worker」；
   - 树中的 prefill_node 对应 worker.client_ip_port；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
-  - 用 worker.dispatched_prompt_chars（累计派发的 prompt 字符数）做粗粒度均衡。
+  - 用 worker.dispatched_prompt_chars（当前尚未产出首 token 的 prompt 字符数）做负载均衡。
 
 选点流程见 CacheAwarePolicy.select_worker。
 """
@@ -35,8 +35,8 @@ class CacheAwareConfig:
 
     # 前缀匹配成功率阈值：matched_char_count / input_char_count 超过该值才路由到命中节点。
     cache_threshold: float = 0.5
-    # 派发量不均衡判定：max > min * balance_rel_threshold 时强制选派发量最少的节点。
-    balance_rel_threshold: float = 1.2
+    # cache 命中节点的在途量超过最空闲节点该倍数时，优先选择最空闲节点。
+    balance_rel_threshold: float = 1.8
     # 前缀树允许的最大节点数（不含 root）。
     max_node_count: int = 1_000_000
     # 每次 LRU 驱逐的叶节点数量。
@@ -66,16 +66,6 @@ class CacheAwarePolicy:
             recursion_limit=self.config.recursion_limit,
         )
 
-    def _select_worker_min_dispatched(
-        self,
-        workers: List[PD_Client_Obj],
-        request_text: str,
-    ) -> PD_Client_Obj:
-        """派发量优先兜底：选择累计 dispatched_prompt_chars 最小的 worker，并写入前缀树。"""
-        min_dispatched_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
-        self.prompt_cache_tree.insert(request_text, min_dispatched_worker.client_ip_port)
-        return min_dispatched_worker
-
     def select_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
         """
         为一次请求选择 prefill worker。
@@ -89,38 +79,19 @@ class CacheAwarePolicy:
 
         决策顺序：
           1) workers 为空 -> 返回 None；
-          2) 若 max(dispatched) > min(dispatched) * balance_rel_threshold，
-             认为派发不均衡，直接选派发量最少的节点；
-          3) 否则对 request_text 做前缀匹配，计算
+          2) 对 request_text 做前缀匹配，计算
              match_rate = matched_char_count / input_char_count；
-          4) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 路由到该节点并更新树；
-          5) 未命中阈值或 prefill_node 不在当前 workers 中 -> 回退到派发量最少选择。
+          3) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 得到 cache 命中节点；
+          4) cache 命中节点负载未严重高于最空闲节点 -> 选择 cache 命中节点；
+          5) 未命中或负载严重失衡 -> 选择最空闲节点；
+          6) 将当前 prompt 与最终选中的节点写入前缀树。
         """
         if not workers:
             return None
         if len(request_text) <= 1:
             raise ValueError(f"request_text length must be > 1, got {len(request_text)}")
 
-        # ---- 1. 派发均衡门闩：差距过大时不再追求 cache 亲和 ----
-        dispatched_chars = [worker.dispatched_prompt_chars for worker in workers]
-        min_dispatched = min(dispatched_chars) if dispatched_chars else 0
-        max_dispatched = max(dispatched_chars) if dispatched_chars else 0
-
-        is_imbalanced = max_dispatched > (min_dispatched * self.config.balance_rel_threshold)
-
-        logger.info(
-            f"CacheAwarePolicy: min_dispatched={min_dispatched}, max_dispatched={max_dispatched}, "
-            f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
-            f"is_imbalanced={is_imbalanced}"
-        )
-
-        if is_imbalanced:
-            return self._select_worker_min_dispatched(
-                workers=workers,
-                request_text=request_text,
-            )
-
-        # ---- 2. 前缀匹配：估计当前请求与历史请求的 cache 复用潜力 ----
+        # ---- 1. 前缀匹配：估计当前请求与历史请求的 cache 复用潜力 ----
         result = self.prompt_cache_tree.prefix_match(request_text)
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
@@ -131,26 +102,39 @@ class CacheAwarePolicy:
             f"prefill_node={result.prefill_node}"
         )
 
-        selected_worker: Optional[PD_Client_Obj] = None
+        cache_worker: Optional[PD_Client_Obj] = None
         if match_rate > self.config.cache_threshold and result.prefill_node is not None:
-            # 树中的 prefill_node 是 client_ip_port，需要映射回当前在线 worker 对象。
             for worker in workers:
                 if worker.client_ip_port == result.prefill_node:
-                    selected_worker = worker
+                    cache_worker = worker
                     break
 
+        # ---- 2. 负载配平：cache 节点过载时选择当前在途量最少的节点 ----
+        least_loaded_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
+        request_load = len(request_text)
+        least_projected_load = least_loaded_worker.dispatched_prompt_chars + request_load
+        cache_projected_load = None
+        cache_worker_is_overloaded = False
+        if cache_worker is not None:
+            cache_projected_load = cache_worker.dispatched_prompt_chars + request_load
+            cache_worker_is_overloaded = cache_projected_load > least_projected_load * self.config.balance_rel_threshold
+
+        if cache_worker is None or cache_worker_is_overloaded:
+            selected_worker = least_loaded_worker
+        else:
+            selected_worker = cache_worker
+
         logger.info(
-            f"CacheAwarePolicy: selected_worker="
-            f"{selected_worker.client_ip_port if selected_worker else None}, "
-            f"match_rate={match_rate:.4f}, cache_threshold={self.config.cache_threshold:.4f}"
+            f"CacheAwarePolicy: cache_worker={cache_worker.client_ip_port if cache_worker else None}, "
+            f"cache_worker_load={cache_worker.dispatched_prompt_chars if cache_worker else None}, "
+            f"cache_projected_load={cache_projected_load}, "
+            f"least_loaded_worker={least_loaded_worker.client_ip_port}, "
+            f"least_loaded_worker_load={least_loaded_worker.dispatched_prompt_chars}, "
+            f"least_projected_load={least_projected_load}, "
+            f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
+            f"cache_worker_is_overloaded={cache_worker_is_overloaded}, "
+            f"selected_worker={selected_worker.client_ip_port}"
         )
 
-        # ---- 3. 命中则更新树；未命中则派发量兜底并写入树 ----
-        if selected_worker is not None:
-            self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
-            return selected_worker
-        else:
-            return self._select_worker_min_dispatched(
-                workers=workers,
-                request_text=request_text,
-            )
+        self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
+        return selected_worker

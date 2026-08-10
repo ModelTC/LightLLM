@@ -196,10 +196,13 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
 
         moe_out0 = experts.prefilled_group_gemm(
             recv_count0,
+            handle0.num_unaligned_recv_tokens_per_expert,
+            handle0.recv_src_metadata,
             recv_x0,
             recv_indices0,
             recv_weights0,
             hidden_dtype=x0.dtype,
+            microbatch_index=infer_state.microbatch_index,
             clamp_limit=self.swiglu_limit,
         )
 
@@ -209,10 +212,13 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         dispatch_hook1()
         moe_out1 = experts.prefilled_group_gemm(
             recv_count1,
+            handle1.num_unaligned_recv_tokens_per_expert,
+            handle1.recv_src_metadata,
             recv_x1,
             recv_indices1,
             recv_weights1,
             hidden_dtype=x1.dtype,
+            microbatch_index=infer_state1.microbatch_index,
             clamp_limit=self.swiglu_limit,
         )
 

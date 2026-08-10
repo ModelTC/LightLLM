@@ -2,11 +2,12 @@ import os
 import collections
 from typing import AsyncGenerator
 from fastapi import BackgroundTasks, Request
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 from fastapi.encoders import jsonable_encoder
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
+from .api_stream_obj import CustomStreamingResponse
 import json
 
 RETURN_LIST = os.getenv("RETURN_LIST", "FALSE").upper() in ["ON", "TRUE", "1"]
@@ -191,6 +192,6 @@ async def tgi_generate_stream_impl(request: Request, httpserver_manager: HttpSer
     from .api_openai import _safe_stream_wrapper
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(
+    return CustomStreamingResponse(
         _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
     )

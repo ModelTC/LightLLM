@@ -7,7 +7,9 @@ from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
+    use_sm100_mega_moe,
+)
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.utils.envs_utils import get_env_start_args
@@ -501,7 +503,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 0 moe calu
         _0_moe_out = layer_weight.experts.prefilled_group_gemm(
-            _0_num_recv_tokens_per_expert_list, _0_recv_x, _0_recv_topk_idx, _0_recv_topk_weight
+            _0_num_recv_tokens_per_expert_list,
+            _0_handle.num_unaligned_recv_tokens_per_expert,
+            _0_handle.recv_src_metadata,
+            _0_recv_x,
+            _0_recv_topk_idx,
+            _0_recv_topk_weight,
+            microbatch_index=0,
         )
 
         # 1 dispatch execute
@@ -527,7 +535,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 1 moe calc
         _1_moe_out = layer_weight.experts.prefilled_group_gemm(
-            _1_num_recv_tokens_per_expert_list, _1_recv_x, _1_recv_topk_idx, _1_recv_topk_weight
+            _1_num_recv_tokens_per_expert_list,
+            _1_handle.num_unaligned_recv_tokens_per_expert,
+            _1_handle.recv_src_metadata,
+            _1_recv_x,
+            _1_recv_topk_idx,
+            _1_recv_topk_weight,
+            microbatch_index=1,
         )
 
         # wait 0 combine

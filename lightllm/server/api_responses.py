@@ -7,9 +7,12 @@ from http import HTTPStatus
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 
 from lightllm.utils.log_utils import init_logger
+
+from .api_errors import create_error_response, is_rate_limit_error
+from .api_stream_obj import CustomStreamingResponse
 
 logger = init_logger(__name__)
 
@@ -531,7 +534,8 @@ async def _openai_sse_to_responses_events(
 
     if failed_error is not None:
         response["status"] = "failed"
-        response["error"] = {"code": "server_error", "message": failed_error.get("message", "generation failed")}
+        error_code = "rate_limit_error" if is_rate_limit_error(failed_error) else "server_error"
+        response["error"] = {"code": error_code, "message": failed_error.get("message", "generation failed")}
         yield event("response.failed", {"response": response})
         return
 
@@ -550,7 +554,7 @@ async def _openai_sse_to_responses_events(
 
 async def responses_impl(raw_request: Request) -> Response:
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
-    from .api_openai import chat_completions_impl, create_error_response
+    from .api_openai import chat_completions_impl
 
     try:
         body = await raw_request.json()
@@ -583,9 +587,9 @@ async def responses_impl(raw_request: Request) -> Response:
     downstream = await chat_completions_impl(chat_request, raw_request)
 
     if chat_request.stream:
-        if not isinstance(downstream, StreamingResponse):
+        if not isinstance(downstream, CustomStreamingResponse):
             return downstream
-        return StreamingResponse(
+        return CustomStreamingResponse(
             _openai_sse_to_responses_events(downstream.body_iterator, body),
             media_type="text/event-stream",
         )

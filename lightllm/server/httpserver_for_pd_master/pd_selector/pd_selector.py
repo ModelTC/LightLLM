@@ -87,9 +87,6 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
         d_node = self._importance_sampling(self.decode_nodes)
 
-        # 累计派发字符数，供后续 cache-aware 做派发均衡判断。
-        p_node.dispatched_prompt_chars += len(prompt)
-
         logger.info(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
             f"d_node={d_node.client_ip_port}"
