@@ -44,6 +44,16 @@ def _launch_subprocesses(args: StartArgs):
             not args.disable_cudagraph or args.run_mode == "prefill"
         ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
 
+    if getattr(args, "visual_remote_url", None):
+        from .visual_chat_proxy import validate_visual_proxy_startup
+
+        validate_visual_proxy_startup(args)
+
+    if args.run_mode in ["normal", "prefill", "decode", "visual_only"]:
+        from .api_anthropic import check_pdf_parsing_supported_at_startup
+
+        check_pdf_parsing_supported_at_startup()
+
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
@@ -498,6 +508,15 @@ def pd_master_start(args: StartArgs):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    if getattr(args, "visual_remote_url", None):
+        from .visual_chat_proxy import validate_visual_proxy_startup
+
+        validate_visual_proxy_startup(args)
+
+    from .api_anthropic import check_pdf_parsing_supported_at_startup
+
+    check_pdf_parsing_supported_at_startup()
 
     if args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4":
         raise ValueError("DeepSeek-V4 CPU cache does not support pd_master")
