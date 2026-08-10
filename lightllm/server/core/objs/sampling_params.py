@@ -213,7 +213,7 @@ class AllowedTokenIds(ctypes.Structure):
     def initialize(self, ids: List[int]):
         self.size = len(ids)
         assert self.size <= ALLOWED_TOKEN_IDS_MAX_LENGTH, "Too many allowed token IDs."
-        assert all(isinstance(e, int) for e in self.ids), "all must be int"
+        assert all(isinstance(e, int) for e in ids), "all must be int"
         self.ids[: self.size] = ids[:]
 
     def to_list(self):

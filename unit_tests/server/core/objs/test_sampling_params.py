@@ -126,6 +126,12 @@ def test_node_uuid_roundtrip():
     assert uuid.get() == node_id
 
 
+def test_allowed_token_ids_rejects_non_int():
+    allowed_ids = AllowedTokenIds()
+    with pytest.raises(AssertionError):
+        allowed_ids.initialize([1, "2", 3])
+
+
 @pytest.mark.parametrize(
     "stop_sequences, expected_token_ids, expected_strings",
     [
