@@ -13,35 +13,42 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
 
     def build_initial_draft_state(
         self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        draft_model_input = self.prepare_draft_prefill_input(
-            model_input=model_input,
-            next_token_ids=next_token_ids,
-            mtp_draft_input_hiddens=model_output.spec_hidden,
+        from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
+
+        assert target_model_output.spec_hidden is not None
+        draft_model_input = prepare_mtp_prefill_inputs(
+            model_input=target_model_input,
+            b_next_token_ids=next_token_ids,
+            mtp_draft_input_hiddens=target_model_output.spec_hidden,
         )
         self.backend.draft_models[0].forward(draft_model_input)
 
     def build_initial_draft_state_overlap(
         self,
-        model_input0: ModelInput,
-        model_output0: ModelOutput,
+        target_model_input0: ModelInput,
+        target_model_output0: ModelOutput,
         next_token_ids0: torch.Tensor,
-        model_input1: ModelInput,
-        model_output1: ModelOutput,
+        target_model_input1: ModelInput,
+        target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
-        draft_model_input0 = self.prepare_draft_prefill_input(
-            model_input=model_input0,
-            next_token_ids=next_token_ids0,
-            mtp_draft_input_hiddens=model_output0.spec_hidden,
+        from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
+
+        assert target_model_output0.spec_hidden is not None
+        assert target_model_output1.spec_hidden is not None
+        draft_model_input0 = prepare_mtp_prefill_inputs(
+            model_input=target_model_input0,
+            b_next_token_ids=next_token_ids0,
+            mtp_draft_input_hiddens=target_model_output0.spec_hidden,
         )
-        draft_model_input1 = self.prepare_draft_prefill_input(
-            model_input=model_input1,
-            next_token_ids=next_token_ids1,
-            mtp_draft_input_hiddens=model_output1.spec_hidden,
+        draft_model_input1 = prepare_mtp_prefill_inputs(
+            model_input=target_model_input1,
+            b_next_token_ids=next_token_ids1,
+            mtp_draft_input_hiddens=target_model_output1.spec_hidden,
         )
         self.backend.draft_models[0].microbatch_overlap_prefill(draft_model_input0, draft_model_input1)
 

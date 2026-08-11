@@ -207,8 +207,8 @@ class ChunkedPrefillBackend(ModeBackend):
             # mtp kv fill
             spec_engine = self.spec_engine
             spec_engine.build_initial_draft_state(
-                model_input=model_input,
-                model_output=model_output,
+                target_model_input=model_input,
+                target_model_output=model_output,
                 next_token_ids=next_token_ids,
             )
             g_infer_context.copy_linear_att_state_to_cache_buffer(

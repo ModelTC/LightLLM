@@ -14,10 +14,11 @@ class Qwen3_5DSparkModel(Qwen3DSparkModel):
         rope_parameters = self.config["rope_parameters"]
         if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
             self.config["rope_theta"] = rope_parameters["rope_theta"]
-        if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in self.config:
-            self.config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
-        if "rope_scaling" not in self.config:
-            self.config["rope_scaling"] = rope_parameters
+
+        # DeepSpec trains this Qwen3 draft with ordinary 1D full-head RoPE. Do
+        # not pass the Qwen3.5 target's MRoPE layout into the draft backbone.
+        self.config["rope_scaling"] = None
+        self.config["partial_rotary_factor"] = 1.0
 
     def _init_custom(self):
         # Draft and target use different rotary shapes, so the draft owns its rotary cache.

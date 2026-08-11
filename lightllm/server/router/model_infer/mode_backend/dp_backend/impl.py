@@ -463,8 +463,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 copy_len=req_num,
             )
             self.spec_engine.build_initial_draft_state(
-                model_input=model_input,
-                model_output=model_output,
+                target_model_input=model_input,
+                target_model_output=model_output,
                 next_token_ids=draft_next_token_ids_gpu,
             )
             if req_num > 0:
@@ -636,12 +636,8 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for draft_model_idx in range(self.max_draft_step):
-
-            draft_model_input = self.spec_engine.prepare_draft_decode_input(
-                model_input=draft_model_input,
-                next_token_ids=draft_next_token_ids_gpu,
-                mtp_draft_input_hiddens=draft_hidden,
-            )
+            draft_model_input.input_ids = draft_next_token_ids_gpu
+            draft_model_input.mtp_draft_input_hiddens = draft_hidden
             # spec decode: MTP
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_hidden = draft_model_output.spec_hidden
@@ -772,11 +768,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
 
             self.spec_engine.build_initial_draft_state_overlap(
-                model_input0=model_input0,
-                model_output0=model_output0,
+                target_model_input0=model_input0,
+                target_model_output0=model_output0,
                 next_token_ids0=draft_next_token_ids_gpu0,
-                model_input1=model_input1,
-                model_output1=model_output1,
+                target_model_input1=model_input1,
+                target_model_output1=model_output1,
                 next_token_ids1=draft_next_token_ids_gpu1,
             )
 
@@ -978,17 +974,10 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # process the draft model output
         for draft_model_idx in range(self.max_draft_step):
-
-            draft_model_input0 = self.spec_engine.prepare_draft_decode_input(
-                model_input=draft_model_input0,
-                next_token_ids=draft_next_token_ids_gpu0,
-                mtp_draft_input_hiddens=draft_hidden0,
-            )
-            draft_model_input1 = self.spec_engine.prepare_draft_decode_input(
-                model_input=draft_model_input1,
-                next_token_ids=draft_next_token_ids_gpu1,
-                mtp_draft_input_hiddens=draft_hidden1,
-            )
+            draft_model_input0.input_ids = draft_next_token_ids_gpu0
+            draft_model_input0.mtp_draft_input_hiddens = draft_hidden0
+            draft_model_input1.input_ids = draft_next_token_ids_gpu1
+            draft_model_input1.mtp_draft_input_hiddens = draft_hidden1
 
             draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
                 draft_model_input0, draft_model_input1

@@ -63,74 +63,33 @@ class SpecEngine:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_count)
         return g_infer_context.req_manager.mem_manager.alloc(token_count)
 
-    def prepare_draft_prefill_input(
-        self,
-        model_input: ModelInput,
-        next_token_ids: torch.Tensor,
-        mtp_draft_input_hiddens: torch.Tensor,
-    ) -> ModelInput:
-        """Build draft prefill input from target prefill input.
-
-        `next_token_ids`: [run_req_num]
-        `mtp_draft_input_hiddens`: captured target feature.  The first
-        dimension matches the target prefill token layout after padding/unpad
-        handling; the second dimension is either hidden_size or
-        hidden_size * len(target_layer_ids).
-        """
-
-        from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
-
-        return prepare_mtp_prefill_inputs(
-            model_input=model_input,
-            b_next_token_ids=next_token_ids,
-            mtp_draft_input_hiddens=mtp_draft_input_hiddens,
-        )
-
-    def prepare_draft_decode_input(
-        self,
-        model_input: ModelInput,
-        next_token_ids: torch.Tensor,
-        mtp_draft_input_hiddens: torch.Tensor,
-    ) -> ModelInput:
-        """Mutate a decode ModelInput for one draft forward.
-
-        `next_token_ids`: [verify_batch]
-        `mtp_draft_input_hiddens`: [verify_batch, hidden_dim_for_draft]
-        """
-
-        model_input.input_ids = next_token_ids
-        model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
-        if self.spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3"):
-            model_input.draft_step = 0
-        return model_input
-
     def build_initial_draft_state(
         self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
         self.proposer.build_initial_draft_state(
-            model_input=model_input,
-            model_output=model_output,
+            target_model_input=target_model_input,
+            target_model_output=target_model_output,
             next_token_ids=next_token_ids,
         )
 
     def build_initial_draft_state_overlap(
         self,
-        model_input0: ModelInput,
-        model_output0: ModelOutput,
+        target_model_input0: ModelInput,
+        target_model_output0: ModelOutput,
         next_token_ids0: torch.Tensor,
-        model_input1: ModelInput,
-        model_output1: ModelOutput,
+        target_model_input1: ModelInput,
+        target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
         self.proposer.build_initial_draft_state_overlap(
-            model_input0=model_input0,
-            model_output0=model_output0,
+            target_model_input0=target_model_input0,
+            target_model_output0=target_model_output0,
             next_token_ids0=next_token_ids0,
-            model_input1=model_input1,
-            model_output1=model_output1,
+            target_model_input1=target_model_input1,
+            target_model_output1=target_model_output1,
             next_token_ids1=next_token_ids1,
         )
 

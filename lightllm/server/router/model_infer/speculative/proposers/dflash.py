@@ -25,19 +25,19 @@ class DFlashProposer(BaseSpecProposer):
     @torch.no_grad()
     def build_initial_draft_state(
         self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        target_hidden = model_output.spec_hidden
+        target_hidden = target_model_output.spec_hidden
         assert target_hidden is not None
         if target_hidden.numel() == 0:
             return
 
         draft_model = self.backend.draft_models[0]
-        assert model_input.input_ids is not None
-        assert model_input.input_ids.shape[0] == target_hidden.shape[0]
-        draft_input = copy.copy(model_input)
+        assert target_model_input.input_ids is not None
+        assert target_model_input.input_ids.shape[0] == target_hidden.shape[0]
+        draft_input = copy.copy(target_model_input)
         # DFlash consumes target hidden states directly on this prefill path.
         draft_input.mtp_draft_input_hiddens = target_hidden
         draft_model.forward(draft_input)

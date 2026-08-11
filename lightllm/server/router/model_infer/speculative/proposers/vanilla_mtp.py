@@ -21,62 +21,62 @@ class VanillaMTPProposer(BaseSpecProposer):
 
     def build_initial_draft_state(
         self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        draft_model_input = model_input
+        from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
+
+        draft_model_input = target_model_input
+        source_model_output = target_model_output
         draft_next_token_ids = next_token_ids
-        draft_hidden = model_output.spec_hidden
-        assert draft_hidden is not None
         for draft_model in self.backend.draft_models:
-            draft_model_input = self.prepare_draft_prefill_input(
+            assert source_model_output.spec_hidden is not None
+            draft_model_input = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input,
-                next_token_ids=draft_next_token_ids,
-                mtp_draft_input_hiddens=draft_hidden,
+                b_next_token_ids=draft_next_token_ids,
+                mtp_draft_input_hiddens=source_model_output.spec_hidden,
             )
-            draft_model_output = draft_model.forward(draft_model_input)
-            draft_next_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
-            draft_hidden = draft_model_output.spec_hidden
-            assert draft_hidden is not None
+            source_model_output = draft_model.forward(draft_model_input)
+            draft_next_token_ids = self.backend._gen_argmax_token_ids(source_model_output)
 
     def build_initial_draft_state_overlap(
         self,
-        model_input0: ModelInput,
-        model_output0: ModelOutput,
+        target_model_input0: ModelInput,
+        target_model_output0: ModelOutput,
         next_token_ids0: torch.Tensor,
-        model_input1: ModelInput,
-        model_output1: ModelOutput,
+        target_model_input1: ModelInput,
+        target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
-        draft_model_input0 = model_input0
-        draft_model_input1 = model_input1
+        from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
+
+        draft_model_input0 = target_model_input0
+        draft_model_input1 = target_model_input1
+        source_model_output0 = target_model_output0
+        source_model_output1 = target_model_output1
         draft_next_token_ids0 = next_token_ids0
         draft_next_token_ids1 = next_token_ids1
-        draft_hidden0 = model_output0.spec_hidden
-        draft_hidden1 = model_output1.spec_hidden
-        assert draft_hidden0 is not None and draft_hidden1 is not None
 
         for draft_model in self.backend.draft_models:
-            draft_model_input0 = self.prepare_draft_prefill_input(
+            assert source_model_output0.spec_hidden is not None
+            assert source_model_output1.spec_hidden is not None
+            draft_model_input0 = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input0,
-                next_token_ids=draft_next_token_ids0,
-                mtp_draft_input_hiddens=draft_hidden0,
+                b_next_token_ids=draft_next_token_ids0,
+                mtp_draft_input_hiddens=source_model_output0.spec_hidden,
             )
-            draft_model_input1 = self.prepare_draft_prefill_input(
+            draft_model_input1 = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input1,
-                next_token_ids=draft_next_token_ids1,
-                mtp_draft_input_hiddens=draft_hidden1,
+                b_next_token_ids=draft_next_token_ids1,
+                mtp_draft_input_hiddens=source_model_output1.spec_hidden,
             )
-            draft_model_output0, draft_model_output1 = draft_model.microbatch_overlap_prefill(
+            source_model_output0, source_model_output1 = draft_model.microbatch_overlap_prefill(
                 draft_model_input0,
                 draft_model_input1,
             )
-            draft_next_token_ids0 = self.backend._gen_argmax_token_ids(draft_model_output0)
-            draft_next_token_ids1 = self.backend._gen_argmax_token_ids(draft_model_output1)
-            draft_hidden0 = draft_model_output0.spec_hidden
-            draft_hidden1 = draft_model_output1.spec_hidden
-            assert draft_hidden0 is not None and draft_hidden1 is not None
+            draft_next_token_ids0 = self.backend._gen_argmax_token_ids(source_model_output0)
+            draft_next_token_ids1 = self.backend._gen_argmax_token_ids(source_model_output1)
 
     def propose_next(
         self,
@@ -96,11 +96,8 @@ class VanillaMTPProposer(BaseSpecProposer):
 
         for step in range(draft_step):
             draft_model = self.backend.draft_models[step]
-            draft_model_input = self.prepare_draft_decode_input(
-                model_input=draft_model_input,
-                next_token_ids=draft_next_token_ids,
-                mtp_draft_input_hiddens=draft_hidden,
-            )
+            draft_model_input.input_ids = draft_next_token_ids
+            draft_model_input.mtp_draft_input_hiddens = draft_hidden
             draft_model_output = draft_model.forward(draft_model_input)
             draft_hidden = draft_model_output.spec_hidden
             assert draft_hidden is not None

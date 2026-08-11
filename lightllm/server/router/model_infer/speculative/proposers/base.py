@@ -68,30 +68,6 @@ class BaseSpecProposer:
     def enable_dynamic_spec(self) -> bool:
         return self.engine.enable_dynamic_spec
 
-    def prepare_draft_prefill_input(
-        self,
-        model_input: ModelInput,
-        next_token_ids: torch.Tensor,
-        mtp_draft_input_hiddens: torch.Tensor,
-    ) -> ModelInput:
-        return self.engine.prepare_draft_prefill_input(
-            model_input=model_input,
-            next_token_ids=next_token_ids,
-            mtp_draft_input_hiddens=mtp_draft_input_hiddens,
-        )
-
-    def prepare_draft_decode_input(
-        self,
-        model_input: ModelInput,
-        next_token_ids: torch.Tensor,
-        mtp_draft_input_hiddens: torch.Tensor,
-    ) -> ModelInput:
-        return self.engine.prepare_draft_decode_input(
-            model_input=model_input,
-            next_token_ids=next_token_ids,
-            mtp_draft_input_hiddens=mtp_draft_input_hiddens,
-        )
-
     def select_accepted_tail_rows(self, b_req_mtp_start_loc: torch.Tensor, accept_len: torch.Tensor) -> torch.Tensor:
         return (b_req_mtp_start_loc + accept_len - 1).to(torch.long)
 
@@ -116,19 +92,18 @@ class BaseSpecProposer:
 
     def build_initial_draft_state(
         self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
         """Build initial draft KV/state before the first decode verify step.
 
         Inputs:
-        - `model_input`: target prompt ModelInput.  Its request order and
+        - `target_model_input`: target prompt ModelInput. Its request order and
           mem_indexes are reused by the draft state builder.
+        - `target_model_output`: target output containing the features needed
+          by the selected speculative algorithm.
         - `next_token_ids`: first accepted target token, shape [run_req_num].
-
-        SpecEngine.prepare_draft_prefill_input injects captured target hidden
-        features into `mtp_draft_input_hiddens`.
 
         This hook only prepares draft-side state.  It intentionally does not
         scatter proposal tokens; the first decode iteration verifies as having
@@ -140,11 +115,11 @@ class BaseSpecProposer:
 
     def build_initial_draft_state_overlap(
         self,
-        model_input0: ModelInput,
-        model_output0: ModelOutput,
+        target_model_input0: ModelInput,
+        target_model_output0: ModelOutput,
         next_token_ids0: torch.Tensor,
-        model_input1: ModelInput,
-        model_output1: ModelOutput,
+        target_model_input1: ModelInput,
+        target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
         """Build initial draft state for two overlapped prefill microbatches."""

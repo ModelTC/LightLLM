@@ -94,6 +94,30 @@ def test_confidence_head_does_not_inherit_model_quantization(monkeypatch):
     assert captured_kwargs["quant_method"] is None
 
 
+def test_qwen35_dspark_uses_training_rope_layout(monkeypatch):
+    def init_dspark_config(self):
+        self.config = {
+            "dflash_config": {"mask_token_id": 1},
+            "rope_parameters": {
+                "rope_theta": 1_000_000,
+                "partial_rotary_factor": 0.25,
+                "mrope_interleaved": True,
+                "mrope_section": [11, 11, 10],
+                "rope_type": "default",
+            },
+        }
+
+    monkeypatch.setattr(Qwen3DSparkModel, "_init_config", init_dspark_config)
+    model = Qwen3_5DSparkModel.__new__(Qwen3_5DSparkModel)
+
+    model._init_config()
+
+    assert model.config["rope_scaling"] is None
+    assert model.config["rope_theta"] == 1_000_000
+    assert model.config["partial_rotary_factor"] == 1.0
+    assert model.config["mask_token_id"] == 1
+
+
 def test_vanilla_markov_local_sampling_matches_full_logits():
     post_infer = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
     post_infer.block_size_ = 3
