@@ -78,6 +78,12 @@ class Quantcfg:
 
     def get_quant_method(self, layer_num, name):
         quant_type = self.get_quant_type(layer_num, name)
-        quant_method = QUANTMETHODS.get(quant_type)
+        try:
+            from lightllm.utils.envs_utils import get_env_start_args
+
+            platform = getattr(get_env_start_args(), "hardware_platform", "cuda")
+        except Exception:
+            platform = "cuda"
+        quant_method = QUANTMETHODS.get(quant_type, platform=platform)
         quant_method.hf_quantization_config = self.hf_quantization_config
         return quant_method

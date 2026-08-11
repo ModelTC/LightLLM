@@ -74,6 +74,7 @@ class LlamaTpPartModel(TpPartBaseModel):
         rope_scaling = self.config.get("rope_scaling", None)
         if rope_scaling is None:
             self._init_to_get_rotary()
+            self._maybe_expand_rope_cache_for_npu()
             return
 
         if "rope_type" in rope_scaling:
@@ -96,7 +97,29 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._init_to_get_rotary()
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
+        self._maybe_expand_rope_cache_for_npu()
         return
+
+    def _maybe_expand_rope_cache_for_npu(self):
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        args = get_env_start_args()
+        if getattr(args, "hardware_platform", "cuda") != "ascend":
+            return
+        
+        partial = float(self.config.get("partial_rotary_factor", 1.0) or 1.0)
+        if partial != 1.0:
+            return
+
+        cos = getattr(self, "_cos_cached", None)
+        sin = getattr(self, "_sin_cached", None)
+        if cos is None or sin is None:
+            return
+        if cos.shape[-1] * 2 != self.head_dim_:
+            return
+
+        self._cos_cached = torch.cat((cos, cos), dim=-1)
+        self._sin_cached = torch.cat((sin, sin), dim=-1)
 
     def _init_to_get_rotary(self, default_base=10000):
         partial_head_dim = int(self.config.get("partial_rotary_factor", 1) * self.head_dim_)

@@ -126,14 +126,15 @@ def lm_head(
     return out
 
 
-@register_op("ascend", out=out_like("input"))
+@register_op("ascend")
 def rms_norm(
     *,
     input: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
-    out: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
     gate_value: Optional[torch.Tensor] = None,
+    alloc_func: Callable = torch.empty,
 ) -> torch.Tensor:
     if gate_value is not None:
         raise NotImplementedError("gate_value is not supported for rms_norm on ascend")
@@ -144,9 +145,11 @@ def rms_norm(
     if weight.dtype != input.dtype:
         weight = weight.to(dtype=input.dtype)
     _out = torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]
-    out.copy_(_out)
-    return out
+    if out is not None and out.data_ptr() != _out.data_ptr():
+        out.copy_(_out)
+        return out
 
+    return _out
 
 @register_op("ascend", out=out_like("input"))
 def layer_norm(
@@ -183,6 +186,8 @@ def qk_rms_norm(
         w_k = w_k.to(dtype=flat_k.dtype)
     _q = torch_npu.npu_rms_norm(flat_q, w_q, epsilon=eps)[0]
     _k = torch_npu.npu_rms_norm(flat_k, w_k, epsilon=eps)[0]
+    # Always write back into caller q/k. Writing only into flat_* is unsafe when
+    # reshape() copied a non-contiguous tensor (Qwen3 qk-norm path).
     _q = _q.view(q.shape)
     _k = _k.view(k.shape)
     q.copy_(_q)

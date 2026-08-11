@@ -809,6 +809,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         choices=["cuda", "musa", "ascend", "maca"],
         help="""Hardware platform: cuda | musa | ascend | maca""",
     )
+    parser.add_argument(
+        "--disable_npu_mm_all_reduce",
+        action="store_true",
+        help="""Ascend only: disable fused matmul+all_reduce on prefill o_proj /
+        FFN down (token_num>=512). Falls back to mm + dist all_reduce. Use when
+        HCCL hcom resolve or npu_mm_all_reduce_base fails.""",
+    )
     add_plugin_cli_args(parser)
     parser.add_argument(
         "--enable_torch_fallback",

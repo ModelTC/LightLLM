@@ -5,6 +5,11 @@ from functools import partial
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.distributed.npu_mm_all_reduce import (
+    can_use_npu_mm_all_reduce,
+    is_plain_mm_weight,
+    npu_mm_all_reduce,
+)
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
 
@@ -88,6 +93,23 @@ def npu_ffn_fwd(
     ffn2_out = F.linear(ffn1_out, weight, bias=down_proj_bias)
 
     return ffn2_out
+
+
+def npu_ffn_fwd_mm_ar(
+    input: torch.Tensor,
+    layer_weight: LlamaTransformerLayerWeight,
+    embed_dim: int,
+    infer_state: LlamaInferStateInfo,
+) -> torch.Tensor:
+    import torch.nn.functional as F
+
+    input = input.view(-1, embed_dim)
+    weight = layer_weight.gate_up_proj.mm_param.weight
+    gate_up_bias = layer_weight.gate_up_proj.bias
+    up_gate_out = F.linear(input, weight, bias=gate_up_bias)
+    ffn1_out = npu_silu_and_mul_fwd(up_gate_out)
+
+    return npu_mm_all_reduce(ffn1_out, layer_weight.down_proj, infer_state)
 
 
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
@@ -182,6 +204,13 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             input = infer_state._all_to_all_balance_get(data=input)
 
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
+
+        if (
+            can_use_npu_mm_all_reduce(input.shape[0], infer_state)
+            and is_plain_mm_weight(layer_weight.o_proj)
+        ):
+            return npu_mm_all_reduce(input, layer_weight.o_proj, infer_state)
+
         o_tensor = layer_weight.o_proj.mm(input)
 
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
@@ -190,6 +219,19 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
+
+        if (
+            can_use_npu_mm_all_reduce(input.shape[0], infer_state)
+            and is_plain_mm_weight(layer_weight.down_proj)
+            and input.device.type == "npu"
+        ):
+            return npu_ffn_fwd_mm_ar(
+                input=input,
+                layer_weight=layer_weight,
+                embed_dim=self.embed_dim_,
+                infer_state=infer_state,
+            )
+
         ffn2_out = self._ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
         return self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
 

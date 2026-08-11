@@ -1,9 +1,12 @@
 import torch
 from dataclasses import dataclass, field
-from lightllm.common.basemodel.attention.paged_fa3.graph_utils import sync_attn_params
+from lightllm.common.basemodel.attention.paged_fa3.graph_utils import sync_attn_params, weak_ref_tensor
 from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph, register_decode_graph
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.utils.log_utils import init_logger
 from typing import Any, Optional
+
+logger = init_logger(__name__)
 
 
 class SeqLenManager:
@@ -31,12 +34,32 @@ class SeqLenManager:
         return self.b1_cu_q_seq_len_cpu[:self.n_q], self.b_cu_kv_seq_len_cpu[:self.n_kv]
 
 
+def weak_ref_fia_workspaces() -> None:
+    if ATTN_PARAMS is None:
+        return
+    for bs, ws in list(ATTN_PARAMS.workspaces.items()):
+        if ws is None:
+            continue
+        ATTN_PARAMS.workspaces[bs] = weak_ref_tensor(ws)
+
+
 @register_decode_graph("ascend")
 class AclGraph(DecodeGraph):
 
     def _init_decode_graph_extra(self):
         init_attn_params(self.graph_batch_sizes)
         self.update_stream = torch.npu.Stream()
+        logger.info("AclGraph: weak_ref_fia_workspace enabled after capture")
+
+    def warmup(self, model):
+        super().warmup(model)
+        weak_ref_fia_workspaces()
+        logger.info("AclGraph: FIA workspaces weak-ref'd after capture")
+
+    def warmup_overlap(self, model):
+        super().warmup_overlap(model)
+        weak_ref_fia_workspaces()
+        logger.info("AclGraph: FIA workspaces weak-ref'd after overlap capture")
 
     def _sync_attn(self, batch_size: int, *graph_states: InferStateInfo):
         sync_attn_params(

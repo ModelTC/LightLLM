@@ -15,14 +15,56 @@ logger = init_logger(__name__)
 
 class NPUOperator(BaseMemManagerOperator):
 
+    def __init__(self, mem_manager: "MemoryManager") -> None:
+        super().__init__(mem_manager)
+        self._paged_kv_views = None
+
+    def _get_paged_kv_views(self):
+        if self._paged_kv_views is not None:
+            return self._paged_kv_views
+
+        page_size = get_page_size()
+        kb0 = self.mem_manager.k_buffer[0]
+        if not kb0.is_contiguous() or not self.mem_manager.v_buffer[0].is_contiguous():
+            self._paged_kv_views = []
+            return self._paged_kv_views
+
+        num_blocks = kb0.shape[0] // page_size
+        n_kv, head_dim = kb0.shape[1], kb0.shape[2]
+        self._paged_kv_views = [
+            (
+                self.mem_manager.k_buffer[i].view(num_blocks, page_size, n_kv, head_dim),
+                self.mem_manager.v_buffer[i].view(num_blocks, page_size, n_kv, head_dim),
+            )
+            for i in range(self.mem_manager.k_buffer.shape[0])
+        ]
+        return self._paged_kv_views
+
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         kb, vb = self.mem_manager.k_buffer[layer_index], self.mem_manager.v_buffer[layer_index]
         k_src, v_src = kv[:, : self.mem_manager.head_num, :], kv[:, self.mem_manager.head_num :, :]
         assert kv.shape[0] == mem_index.shape[0], (kv.shape, mem_index.shape)
         assert k_src.shape[1] == kb.shape[1] and k_src.shape[2] == kb.shape[2], (k_src.shape, kb.shape)
         assert v_src.shape[1] == vb.shape[1] and v_src.shape[2] == vb.shape[2], (v_src.shape, vb.shape)
-        self.mem_manager.k_buffer[layer_index].index_copy_(0, mem_index, k_src)
-        self.mem_manager.v_buffer[layer_index].index_copy_(0, mem_index, v_src) 
+
+        views = self._get_paged_kv_views()
+        if views:
+            import torch_npu
+
+            key_cache, value_cache = views[layer_index]
+            slot = mem_index if mem_index.dtype == torch.int32 else mem_index.to(torch.int32)
+            # _npu_reshape_and_cache requires layout: [num_blocks, page_size, n_kv, head_dim]
+            torch_npu._npu_reshape_and_cache(
+                key=k_src,
+                value=v_src,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_indices=slot,
+            )
+            return
+
+        kb.index_copy_(0, mem_index, k_src)
+        vb.index_copy_(0, mem_index, v_src)
 
 
 class NPUMemoryManager(MemoryManager):
