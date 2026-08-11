@@ -734,8 +734,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "vanilla_no_att",
             "eagle_no_att",
             "eagle3",
-            "qwen3next_vanilla",
-            "qwen3next_eagle",
             "dspark",
             "dflash",
             None,

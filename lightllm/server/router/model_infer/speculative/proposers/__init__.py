@@ -18,7 +18,7 @@ def build_spec_proposer(engine) -> "BaseSpecProposer":
         from lightllm.server.router.model_infer.speculative.proposers.eagle3 import Eagle3Proposer
 
         return Eagle3Proposer(engine=engine)
-    if spec_mode in ("eagle_with_att", "eagle_no_att", "qwen3next_eagle"):
+    if spec_mode in ("eagle_with_att", "eagle_no_att"):
         from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import EagleMTPProposer
 
         return EagleMTPProposer(engine=engine)

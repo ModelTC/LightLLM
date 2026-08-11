@@ -49,6 +49,16 @@ class RecurrentEagleMTPProposer(VanillaMTPProposer):
     def project_draft_decode_hidden(self, draft_hidden: torch.Tensor) -> torch.Tensor:
         return draft_hidden
 
+    def _map_draft_token_ids(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
+        return draft_token_ids
+
+    def _gen_argmax_token_ids(self, model_output: ModelOutput) -> torch.Tensor:
+        return self._map_draft_token_ids(self.backend._gen_argmax_token_ids(model_output))
+
+    def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        draft_token_ids, draft_probs = self.backend._gen_argmax_token_ids_and_prob(model_output)
+        return self._map_draft_token_ids(draft_token_ids), draft_probs
+
     def make_verify_extend_input(
         self,
         base_input: ModelInput,
@@ -228,7 +238,7 @@ class RecurrentEagleMTPProposer(VanillaMTPProposer):
             zip(inputs, extend_outputs, selected_rows, real_request_nums)
         ):
             selected_output = ModelOutput(logits=extend_output.logits.index_select(0, selected))
-            step_token_ids = self.backend._gen_argmax_token_ids(selected_output)
+            step_token_ids = self._gen_argmax_token_ids(selected_output)
             draft_next_token_ids.append(step_token_ids)
             assert extend_output.spec_hidden is not None
             draft_hiddens.append(extend_output.spec_hidden.index_select(0, selected))
@@ -293,7 +303,7 @@ class RecurrentEagleMTPProposer(VanillaMTPProposer):
 
             step_outputs = draft_model.microbatch_overlap_decode(*step_inputs)
             for index, step_output in enumerate(step_outputs):
-                step_token_ids = self.backend._gen_argmax_token_ids(step_output)
+                step_token_ids = self._gen_argmax_token_ids(step_output)
                 draft_next_token_ids[index] = step_token_ids
                 draft_hiddens[index] = step_output.spec_hidden
                 assert draft_hiddens[index] is not None
@@ -377,7 +387,7 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
         selected_logits = extend_output.logits.index_select(0, selected_rows)
         selected_output = ModelOutput(logits=selected_logits)
         if self.enable_dynamic_spec:
-            draft_next_token_ids, selected_prob = self.backend._gen_argmax_token_ids_and_prob(selected_output)
+            draft_next_token_ids, selected_prob = self._gen_argmax_token_ids_and_prob(selected_output)
             draft_probs.append(
                 self.scatter_selected_step_probs(
                     selected_rows=selected_rows,
@@ -386,7 +396,7 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
                 )
             )
         else:
-            draft_next_token_ids = self.backend._gen_argmax_token_ids(selected_output)
+            draft_next_token_ids = self._gen_argmax_token_ids(selected_output)
         proposal_token_ids[selected_rows, 1] = draft_next_token_ids
         assert extend_output.spec_hidden is not None
         draft_hidden = extend_output.spec_hidden.index_select(0, selected_rows)
@@ -426,7 +436,7 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
             )
             draft_output = draft_model.forward(draft_input)
             if self.enable_dynamic_spec:
-                draft_next_token_ids, selected_prob = self.backend._gen_argmax_token_ids_and_prob(draft_output)
+                draft_next_token_ids, selected_prob = self._gen_argmax_token_ids_and_prob(draft_output)
                 draft_probs.append(
                     self.scatter_selected_step_probs(
                         selected_rows=selected_rows,
@@ -435,7 +445,7 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
                     )
                 )
             else:
-                draft_next_token_ids = self.backend._gen_argmax_token_ids(draft_output)
+                draft_next_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids[selected_rows, step + 1] = draft_next_token_ids
             draft_hidden = draft_output.spec_hidden
             assert draft_hidden is not None

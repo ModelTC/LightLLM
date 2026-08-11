@@ -92,19 +92,36 @@ class DFlashProposer(BaseSpecProposer):
         )
         draft_model_output = draft_model.forward(draft_input)
 
-        flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
+        if self.enable_dynamic_spec:
+            flat_token_ids, flat_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_model_output)
+        else:
+            flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
         assert flat_token_ids.numel() == num_reqs * block_size
         block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
         # Standard DFlash has one leading bonus row; DeepSpec checkpoints do not.
-        bonus_rows = block_size - draft_step
+        bonus_rows = block_size - self.backend.max_draft_step
         assert bonus_rows in (0, 1), (
-            f"DFlash block_size={block_size} must equal mtp_step={draft_step} " f"or mtp_step + 1={draft_step + 1}"
+            f"DFlash block_size={block_size} must equal mtp_step={self.backend.max_draft_step} "
+            f"or mtp_step + 1={self.backend.max_draft_step + 1}"
         )
-        token_ids[selected_rows, 1:] = block_token_ids[:, bonus_rows:]
+        token_ids[selected_rows, 1:] = block_token_ids[:, bonus_rows : bonus_rows + draft_step]
+
+        draft_probs = None
+        if self.enable_dynamic_spec:
+            block_token_probs = flat_token_probs.reshape(num_reqs, block_size)
+            selected_token_probs = block_token_probs[:, bonus_rows : bonus_rows + draft_step]
+            draft_probs = [
+                self.scatter_selected_step_probs(
+                    selected_rows=selected_rows,
+                    selected_probs=selected_token_probs[:, step],
+                    verify_row_count=next_token_ids.shape[0],
+                )
+                for step in range(draft_step)
+            ]
         return SpecProposal(
             token_ids=token_ids,
             extra_mem_indexes_cpu=draft_mem_indexes_cpu,
-            draft_probs=None,
+            draft_probs=draft_probs,
         )
 
     def extend_draft_kv_cache(self, main_model_input: ModelInput, target_hidden: torch.Tensor) -> None:

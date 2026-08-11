@@ -1,13 +1,10 @@
 from lightllm.common.basemodel.attention import (
-    BaseAttBackend,
     Fa3AttBackend,
     Fp8Fa3AttBackend,
-    get_decode_att_backend_class,
-    get_prefill_att_backend_class,
 )
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.registry import DraftModelRegistry
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
 from lightllm.models.qwen3_dflash.layer_infer.pre_layer_infer import Qwen3DFlashPreLayerInfer
@@ -16,6 +13,7 @@ from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
 
 
+@DraftModelRegistry(model_type="qwen3", spec_modes="dflash")
 class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
@@ -43,7 +41,6 @@ class Qwen3DFlashModel(LlamaTpPartModel):
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
-        self.dist_group = dist_group_manager.get_default_group()
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
 
@@ -55,22 +52,11 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.mem_manager = self.main_model.mem_manager
 
     def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
-        try:
-            self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(
-                index=0,
-                priority_list=["fa3"],
-            )(model=self)
-        except KeyError as exc:
-            raise NotImplementedError(
-                "Qwen3DFlashModel requires FA3 decode attention: "
-                "block draft attention is non-causal and Triton/FlashInfer decode paths do not honor decode_causal."
-            ) from exc
+        super()._init_att_backend()
+        # FA3 is currently the only backend that honors decode_causal=False.
+        # TODO: Remove this restriction after Triton and FlashInfer support non-causal block decode.
         if not isinstance(self.decode_att_backend, (Fa3AttBackend, Fp8Fa3AttBackend)):
-            raise NotImplementedError(
-                "Qwen3DFlashModel requires FA3 decode attention: "
-                "block draft attention is non-causal and Triton/FlashInfer decode paths do not honor decode_causal."
-            )
+            raise NotImplementedError("Qwen3 DFlash decode requires FA3")
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None

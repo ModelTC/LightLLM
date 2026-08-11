@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelOutput
+from lightllm.server.router.model_infer.speculative.proposers.eagle3 import Eagle3Proposer
 from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import EagleMTPProposer
 
 
@@ -86,3 +87,19 @@ def test_overlap_eagle_extends_verify_rows_then_decodes_logical_batch(monkeypatc
     assert proposal.token_ids.shape == (9, 3)
     assert torch.equal(proposal.token_ids[:, 0], torch.tensor([0, 1, 2, 10, 11, 12, 13, 14, 15]))
     assert proposal.extra_mem_indexes_cpu.shape == (3,)
+
+
+def test_eagle3_maps_draft_token_ids_in_proposer():
+    proposer = Eagle3Proposer.__new__(Eagle3Proposer)
+    proposer.backend = SimpleNamespace(
+        draft_models=[SimpleNamespace(map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100)],
+        _gen_argmax_token_ids=lambda _: torch.tensor([1, 2]),
+        _gen_argmax_token_ids_and_prob=lambda _: (torch.tensor([3, 4]), torch.tensor([0.8, 0.7])),
+    )
+
+    token_ids = proposer._gen_argmax_token_ids(ModelOutput(logits=torch.empty(0)))
+    token_ids_with_prob, probs = proposer._gen_argmax_token_ids_and_prob(ModelOutput(logits=torch.empty(0)))
+
+    assert torch.equal(token_ids, torch.tensor([101, 102]))
+    assert torch.equal(token_ids_with_prob, torch.tensor([103, 104]))
+    assert torch.equal(probs, torch.tensor([0.8, 0.7]))

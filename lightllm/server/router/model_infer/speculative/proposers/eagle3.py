@@ -55,6 +55,9 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
         active_count = math.ceil(self._draft_prune_safety_factor * max(1, draft_row_budget) / next_depth)
         return min(current_count, max(1, active_count))
 
+    def _map_draft_token_ids(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
+        return self.backend.draft_models[0].map_draft_vocab_to_main_vocab(draft_token_ids)
+
     def propose_next(
         self,
         main_model_input: ModelInput,
@@ -102,7 +105,7 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
 
         draft_logits = draft_model_output.logits.index_select(0, selected_rows)
         if collect_dynamic_probs:
-            draft_next_token_ids, selected_draft_prob = self.backend._gen_argmax_token_ids_and_prob(
+            draft_next_token_ids, selected_draft_prob = self._gen_argmax_token_ids_and_prob(
                 ModelOutput(logits=draft_logits)
             )
             draft_prob = self.scatter_selected_step_probs(
@@ -113,7 +116,7 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             draft_probs.append(draft_prob)
             chain_survival = selected_draft_prob.float().clamp(0.01, 0.99)
         else:
-            draft_next_token_ids = self.backend._gen_argmax_token_ids(ModelOutput(logits=draft_logits))
+            draft_next_token_ids = self._gen_argmax_token_ids(ModelOutput(logits=draft_logits))
             chain_survival = None
         assert draft_model_output.spec_hidden is not None
         draft_hidden = draft_model_output.spec_hidden.index_select(0, selected_rows)
@@ -185,7 +188,7 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             )
             draft_output = draft_model.forward(draft_input)
             if collect_dynamic_probs:
-                draft_next_token_ids, selected_draft_prob = self.backend._gen_argmax_token_ids_and_prob(draft_output)
+                draft_next_token_ids, selected_draft_prob = self._gen_argmax_token_ids_and_prob(draft_output)
                 draft_prob = self.scatter_selected_step_probs(
                     selected_rows=selected_rows,
                     selected_probs=selected_draft_prob,
@@ -194,7 +197,7 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
                 draft_probs.append(draft_prob)
                 chain_survival = chain_survival * selected_draft_prob.float().clamp(0.01, 0.99)
             else:
-                draft_next_token_ids = self.backend._gen_argmax_token_ids(draft_output)
+                draft_next_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids[selected_rows, step + 1] = draft_next_token_ids
             draft_hidden = draft_output.spec_hidden
             assert draft_hidden is not None

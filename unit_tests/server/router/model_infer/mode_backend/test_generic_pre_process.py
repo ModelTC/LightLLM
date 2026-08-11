@@ -39,17 +39,16 @@ def test_padded_decode_builds_spec_metadata_for_real_and_fake_rows(monkeypatch):
     monkeypatch.setattr(
         generic_padded_pre_process,
         "get_env_start_args",
-        lambda: SimpleNamespace(mtp_step=max_draft_step),
+        lambda: SimpleNamespace(mtp_step=max_draft_step, mtp_dynamic_verify=True),
     )
     monkeypatch.setattr(generic_padded_pre_process, "enable_diverse_mode_gqa_decode_fast_kernel", lambda: False)
-    monkeypatch.setattr(generic_padded_pre_process, "enable_dynamic_spec", lambda: True)
     monkeypatch.setattr(generic_padded_pre_process, "enable_triton_mtp_kernel", lambda: False)
     monkeypatch.setattr(generic_pre_process, "get_diverse_max_batch_shared_group_size", lambda: 8)
 
     req = SimpleNamespace(
         req_idx=7,
         cur_kv_len=4,
-        max_draft_step=max_draft_step,
+        mtp_step=max_draft_step,
         multimodal_params={"images": [], "audios": []},
         get_cur_total_len=lambda: 5,
     )

@@ -7,7 +7,6 @@ from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
     enable_triton_mtp_kernel,
     get_diverse_max_batch_shared_group_size,
-    enable_dynamic_spec,
     get_env_start_args,
 )
 
@@ -117,7 +116,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        for step in range(req.max_draft_step):
+        for step in range(req.mtp_step):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
@@ -137,7 +136,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
 
     if enable_diverse_mode_gqa_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
-    elif enable_dynamic_spec() or enable_triton_mtp_kernel():
+    elif get_env_start_args().mtp_dynamic_verify or enable_triton_mtp_kernel():
         b_shared_seq_len = None
         b_mark_shared_group = build_spec_shared_group_markers(b_mtp_index=b_mtp_index)
     else:

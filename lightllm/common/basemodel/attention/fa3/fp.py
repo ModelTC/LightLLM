@@ -9,6 +9,7 @@ from lightllm.common.basemodel.triton_kernel.fa3_utils import (
     page_table_copy,
 )
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Fa3AttBackend(BaseAttBackend):
@@ -22,13 +23,19 @@ class Fa3AttBackend(BaseAttBackend):
         """
         model = self.model
         if not hasattr(self, "_shared_page_table_buffer"):
+            max_att_batch_size = model.graph_max_batch_size
+            if not get_env_start_args().mtp_dynamic_verify:
+                # FA3 merges each fixed speculative block into one attention sequence.
+                max_att_batch_size //= model.decode_batch_multiplier
+
+            buffer_count = 2 if model.args.enable_decode_microbatch_overlap else 1
             self._shared_page_table_buffer = [
-                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
-                    get_current_device_id()
-                ),
-                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
-                    get_current_device_id()
-                ),
+                torch.empty(
+                    max_att_batch_size * model.graph_max_len_in_batch,
+                    dtype=torch.int32,
+                    device=get_current_device_id(),
+                )
+                for _ in range(buffer_count)
             ]
         return self._shared_page_table_buffer
 

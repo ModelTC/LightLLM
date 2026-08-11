@@ -37,7 +37,6 @@ from lightllm.utils.envs_utils import (
     set_model_init_status,
     enable_diverse_mode_gqa_decode_fast_kernel,
     enable_full_att_decode_tune,
-    enable_dynamic_spec,
     enable_triton_mtp_kernel,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
@@ -137,7 +136,7 @@ class TpPartBaseModel:
             logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
-        self._init_hidden_collector(hidden_layer_ids=kvargs.get("hidden_layer_ids"))
+        self._init_hidden_collector()
         self._autotune_warmup()
         self._full_att_decode_autotune()
         self._init_padded_req()
@@ -274,7 +273,9 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
-        batch_multiplier = 1 if enable_dynamic_spec() and not self.is_mtp_draft_model else self.decode_batch_multiplier
+        batch_multiplier = (
+            1 if self.args.mtp_dynamic_verify and not self.is_mtp_draft_model else self.decode_batch_multiplier
+        )
         self.graph = (
             None
             if self.disable_cudagraph
@@ -283,7 +284,7 @@ class TpPartBaseModel:
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
                 batch_multiplier=batch_multiplier,
-                capture_infer_cost=enable_dynamic_spec(),
+                capture_infer_cost=self.args.mtp_dynamic_verify,
             )
         )
         if self.graph is not None:
@@ -343,7 +344,9 @@ class TpPartBaseModel:
 
         from lightllm.utils.sgl_utils import fa3_decode_autotune
 
-        batch_multiplier = 1 if enable_dynamic_spec() and not self.is_mtp_draft_model else self.decode_batch_multiplier
+        batch_multiplier = (
+            1 if self.args.mtp_dynamic_verify and not self.is_mtp_draft_model else self.decode_batch_multiplier
+        )
         cuda_graph_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
             max_batch_size=self.graph_max_batch_size,
             tp_world_size=self.tp_world_size_,
@@ -355,14 +358,13 @@ class TpPartBaseModel:
     def _init_custom(self):
         pass
 
-    def _init_hidden_collector(self, hidden_layer_ids):
+    def _init_hidden_collector(self):
         microbatch_count = (
             2 if self.args.enable_prefill_microbatch_overlap or self.args.enable_decode_microbatch_overlap else 1
         )
         self.hidden_collector = HiddenCollector(
             model=self,
             spec_mode=self.args.mtp_mode,
-            layer_ids=hidden_layer_ids,
             microbatch_count=microbatch_count,
         )
 
@@ -402,7 +404,7 @@ class TpPartBaseModel:
             if enable_diverse_mode_gqa_decode_fast_kernel():
                 infer_state.b_shared_seq_len = model_input.b_shared_seq_len
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
-            elif enable_dynamic_spec() or enable_triton_mtp_kernel():
+            elif self.args.mtp_dynamic_verify or enable_triton_mtp_kernel():
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params
@@ -475,7 +477,7 @@ class TpPartBaseModel:
                 new_model_input.b_mark_shared_group = F.pad(
                     new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
                 )
-        elif enable_dynamic_spec() or enable_triton_mtp_kernel():
+        elif self.args.mtp_dynamic_verify or enable_triton_mtp_kernel():
             assert new_model_input.b_mark_shared_group is not None
             new_model_input.b_mark_shared_group = F.pad(
                 new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=0

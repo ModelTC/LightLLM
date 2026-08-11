@@ -107,13 +107,6 @@ class ModeBackend:
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
         self.is_pd_mode = self.run_mode in ["prefill", "decode"]
         self.is_pd_decode_mode = self.run_mode == "decode"
-        if self.args.mtp_mode in ("eagle3", "dspark", "dflash"):
-            assert (
-                not self.args.enable_decode_microbatch_overlap
-            ), f"{self.args.mtp_mode} mode does not support decode microbatch overlap"
-            assert (
-                not self.args.enable_prefill_microbatch_overlap
-            ), f"{self.args.mtp_mode} mode does not support prefill microbatch overlap"
 
         self.logger = init_logger(__name__)
 
@@ -154,7 +147,6 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
-            "hidden_layer_ids": self._target_hidden_layer_ids(model_cfg),
             "decode_batch_multiplier": target_decode_batch_multiplier,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
@@ -254,10 +246,7 @@ class ModeBackend:
         # 只会在 pd pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
-        # 开启 mtp 模式，需要完成mtp model的初始化
-        if self.args.mtp_mode is not None:
-            self.init_spec_draft_model(model_kvargs)
-            self.spec_engine = SpecEngine(backend=self)
+        self.init_spec_engine(model_kvargs)
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
@@ -310,12 +299,18 @@ class ModeBackend:
     def decode(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         raise NotImplementedError()
 
-    def init_spec_draft_model(self, main_kvargs: dict):
+    def init_spec_engine(self, main_kvargs: dict):
+        if self.args.mtp_mode is None:
+            return
+        self.init_mtp_draft_model(main_kvargs)
+        self.spec_engine = SpecEngine(backend=self)
+        return
+
+    def init_mtp_draft_model(self, main_kvargs: dict):
         self.max_draft_step = self.args.mtp_step
         self.draft_models = []
         spec_mode = self.args.mtp_mode
-        is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att", "qwen3next_vanilla")
-        is_recurrent_draft = spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3", "qwen3next_eagle")
+        is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att")
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
@@ -328,11 +323,11 @@ class ModeBackend:
             draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
             if is_chained_draft:
                 draft_decode_batch_multiplier = self.max_draft_step + 1
-            elif is_recurrent_draft:
-                draft_decode_batch_multiplier = 1
-            else:
+            elif spec_mode in ("dspark", "dflash"):
                 block_size = int(draft_model_cfg["block_size"])
                 draft_decode_batch_multiplier = block_size
+            else:
+                draft_decode_batch_multiplier = 1
             draft_model_kvargs = {
                 "weight_dir": draft_model_dirs[i],
                 "max_total_token_num": self.model.mem_manager.size,
@@ -360,7 +355,6 @@ class ModeBackend:
             draft_model_class = get_draft_model_class(
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
-                is_linear_att_mixed_model=self.is_linear_att_mixed_model,
             )
             self.draft_models.append(draft_model_class(draft_model_kvargs))
 
@@ -468,28 +462,6 @@ class ModeBackend:
                 )
             start_loc += q_len
         return
-
-    def _target_hidden_layer_ids(self, model_cfg: dict):
-        if self.args.mtp_mode not in ("eagle3", "dspark", "dflash"):
-            return None
-
-        model_cfg = model_cfg.get("text_config", model_cfg)
-        layer_num = int(model_cfg.get("num_hidden_layers", model_cfg.get("n_layer")))
-
-        draft_model_dirs = self.args.mtp_draft_model_dir
-        assert draft_model_dirs
-        draft_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[0])
-        target_layer_ids = draft_cfg.get("target_layer_ids")
-        if target_layer_ids is None and self.args.mtp_mode == "dflash":
-            target_layer_ids = draft_cfg.get("dflash_config", {}).get("target_layer_ids")
-        if target_layer_ids is None:
-            target_layer_ids = [1, layer_num // 2 - 1, layer_num - 4]
-
-        target_layer_ids = tuple(int(layer_id) for layer_id in target_layer_ids)
-        assert target_layer_ids and all(
-            0 <= layer_id < layer_num for layer_id in target_layer_ids
-        ), f"invalid target_layer_ids={target_layer_ids} for target layer_num={layer_num}"
-        return target_layer_ids
 
     def _try_read_new_reqs(self):
         if self.is_multinode_tp:
@@ -849,13 +821,6 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
-        if isinstance(next_token_ids, torch.Tensor):
-            next_token_ids = next_token_ids.numpy()
-        if isinstance(next_token_logprobs, torch.Tensor):
-            next_token_logprobs = next_token_logprobs.numpy()
-        if isinstance(next_token_ranks, torch.Tensor):
-            next_token_ranks = next_token_ranks.numpy()
-
         for req_obj, next_token_id, next_token_logprob, next_token_rank, pack in zip(
             run_reqs, next_token_ids, next_token_logprobs, next_token_ranks, run_reqs_update_packs
         ):
@@ -905,7 +870,7 @@ class ModeBackend:
 
         if selected_run_reqs is None:
             for req in decode_reqs:
-                req.update_spec_verify_token_num(verify_token_num=req.max_draft_step + 1)
+                req.update_spec_verify_token_num(verify_token_num=req.mtp_step + 1)
                 req.update_spec_verify_step_num(verify_step_num=1)
             return
 
@@ -918,22 +883,12 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
-
-        # 如果draft和target的词表不同，需要把draft token映射回主模型词表。
-        if self.args.mtp_mode == "eagle3":
-            draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
-        return draft_next_token_ids_gpu
+        return torch.argmax(logits, dim=-1)
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
-
-        # 如果self.d2t不为None，那么draft的token需要进行相应的转换
-        if self.args.mtp_mode == "eagle3":
-            draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
-
         return draft_next_token_ids_gpu, max_probs
 
     def _sample_and_scatter_token(

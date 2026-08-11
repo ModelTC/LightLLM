@@ -15,7 +15,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
-from lightllm.utils.envs_utils import enable_dynamic_spec, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
@@ -30,19 +30,15 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode is not None:
-            self.prefill = self.prefill_spec
-            self.decode = self.decode_spec
-            self.enable_dynamic_spec = enable_dynamic_spec()
+            self.prefill = self.prefill_mtp
+            self.decode = self.decode_mtp
+            self.enable_dynamic_spec = get_env_start_args().mtp_dynamic_verify
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
 
         self.classed_req_strict_prefill = False
         return
-
-    # cpu 把算子提交到gpu 上
-    # GPU
-    # CPU
 
     def init_custom(self):
         super().init_custom()
@@ -185,7 +181,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
 
-    def prefill_spec(
+    def prefill_mtp(
         self,
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
@@ -244,7 +240,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
 
-    def decode_spec(
+    def decode_mtp(
         self,
         event_pack: OverlapEventPack,
         decode_reqs: List[InferReq],

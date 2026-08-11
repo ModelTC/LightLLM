@@ -222,22 +222,6 @@ def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
 
 
 @lru_cache(maxsize=None)
-def enable_dynamic_spec() -> bool:
-    """Whether speculative scheduling may vary draft and verify widths.
-
-    ``--mtp_dynamic_verify`` remains the compatible command-line switch;
-    DSpark enables dynamic speculative scheduling unconditionally.
-    """
-
-    args = get_env_start_args()
-    if args.mtp_mode == "dspark":
-        return True
-    if args.mtp_mode == "dflash":
-        return False
-    return bool(args.mtp_dynamic_verify)
-
-
-@lru_cache(maxsize=None)
 def enable_triton_mtp_kernel() -> bool:
     """
     启用 Triton MTP 解码专用 kernel
@@ -271,20 +255,23 @@ def enable_cpu_cache_numa_interleave() -> bool:
 
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
-    # mtp 模式下需要在mem manger上扩展draft model使用的layer
     args = get_env_start_args()
-    spec_mode = args.mtp_mode
-    if spec_mode not in ("vanilla_with_att", "eagle_with_att", "eagle3", "dspark", "dflash"):
+    if args.mtp_mode == "eagle_with_att":
+        return 1
+    if args.mtp_mode == "vanilla_with_att":
+        return args.mtp_step
+    if args.mtp_mode not in ("eagle3", "dspark", "dflash"):
         return 0
-    draft_model_count = args.mtp_step if spec_mode == "vanilla_with_att" else 1
-    if spec_mode in ("dflash", "dspark", "eagle3"):
-        if not args.mtp_draft_model_dir:
-            return draft_model_count
-        draft_model_dir = args.mtp_draft_model_dir[0]
-        with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
-            draft_config = json.load(json_file)
-        return int(draft_config.get("num_hidden_layers", draft_config.get("n_layer", draft_model_count)))
-    return draft_model_count
+
+    draft_model_dir = args.mtp_draft_model_dir[0]
+    with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
+        draft_config = json.load(json_file)
+    # Use the effective draft backbone config when the checkpoint stores it nested.
+    draft_config.update(draft_config.get("dflash_config", {}))
+    # A draft model may contain multiple attention layers; each layer needs a
+    # separate KV-cache slot after the target model's layers.
+    total_added_mtp_kv_layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
+    return int(total_added_mtp_kv_layer_num)
 
 
 @lru_cache(maxsize=None)

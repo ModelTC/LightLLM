@@ -21,7 +21,6 @@ from lightllm.server.router.model_infer.speculative.runner import (
     SpecDecodeRunner,
 )
 from lightllm.server.router.model_infer.speculative.verifier import SpecVerifier, SpecVerifyResult
-from lightllm.utils.envs_utils import enable_dynamic_spec
 
 
 class SpecEngine:
@@ -42,7 +41,7 @@ class SpecEngine:
     def __init__(self, backend) -> None:
         self.backend = backend
         self.spec_mode = backend.args.mtp_mode
-        self.enable_dynamic_spec = enable_dynamic_spec()
+        self.enable_dynamic_spec = backend.args.mtp_dynamic_verify
         self.verifier = SpecVerifier(backend=backend)
         self.proposer = build_spec_proposer(engine=self)
         self.decode_runner = SpecDecodeRunner(engine=self)
@@ -101,7 +100,7 @@ class SpecEngine:
 
         model_input.input_ids = next_token_ids
         model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
-        if self.spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3", "qwen3next_eagle"):
+        if self.spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3"):
             model_input.draft_step = 0
         return model_input
 

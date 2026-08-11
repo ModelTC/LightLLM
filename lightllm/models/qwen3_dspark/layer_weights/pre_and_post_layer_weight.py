@@ -1,4 +1,4 @@
-from lightllm.common.basemodel.layer_weights.meta_weights import ParameterWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, ROWMMWeight
 from lightllm.common.quantization import Quantcfg
 from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import Qwen3DFlashPreAndPostLayerWeight
 
@@ -25,31 +25,42 @@ class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
         self.markov_rank = markov_rank
         self.markov_head_type = str(network_config.get("markov_head_type", "")).lower()
         if markov_rank > 0:
-            self.markov_w1_weight_ = ParameterWeight(
+            # W1 is read once per Markov step; replication avoids a sequential TP collective on every lookup.
+            self.markov_w1_weight_ = EmbeddingWeight(
+                dim=markov_rank,
+                vocab_size=vocab_size,
                 weight_name="markov_head.markov_w1.weight",
                 data_type=self.data_type_,
-                weight_shape=(vocab_size, markov_rank),
+                tp_rank=0,
+                tp_world_size=1,
             )
-            self.markov_w2_weight_ = ParameterWeight(
+            self.markov_w2_weight_ = LMHeadWeight(
+                dim=markov_rank,
+                vocab_size=vocab_size,
                 weight_name="markov_head.markov_w2.weight",
                 data_type=self.data_type_,
-                weight_shape=(vocab_size, markov_rank),
             )
             if self.markov_head_type == "gated":
-                self.markov_gate_proj_weight_ = ParameterWeight(
-                    weight_name="markov_head.gate_proj.weight",
-                    bias_name="markov_head.gate_proj.bias",
+                self.markov_gate_proj_weight_ = ROWMMWeight(
+                    in_dim=hidden_size + markov_rank,
+                    out_dims=[markov_rank],
+                    weight_names="markov_head.gate_proj.weight",
+                    bias_names="markov_head.gate_proj.bias",
                     data_type=self.data_type_,
-                    weight_shape=(markov_rank, hidden_size + markov_rank),
-                    bias_shape=(markov_rank,),
+                    quant_method=self.quant_cfg.get_quant_method(0, "markov_head.gate_proj"),
+                    tp_rank=0,
+                    tp_world_size=1,
                 )
             elif self.markov_head_type == "rnn":
-                self.markov_joint_proj_weight_ = ParameterWeight(
-                    weight_name="markov_head.joint_proj.weight",
-                    bias_name="markov_head.joint_proj.bias",
+                self.markov_joint_proj_weight_ = ROWMMWeight(
+                    in_dim=hidden_size + 2 * markov_rank,
+                    out_dims=[3 * markov_rank],
+                    weight_names="markov_head.joint_proj.weight",
+                    bias_names="markov_head.joint_proj.bias",
                     data_type=self.data_type_,
-                    weight_shape=(3 * markov_rank, hidden_size + 2 * markov_rank),
-                    bias_shape=(3 * markov_rank,),
+                    quant_method=self.quant_cfg.get_quant_method(0, "markov_head.joint_proj"),
+                    tp_rank=0,
+                    tp_world_size=1,
                 )
             else:
                 assert self.markov_head_type == "vanilla", f"unsupported DSpark markov head {self.markov_head_type}"
@@ -57,10 +68,13 @@ class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
         self.confidence_head_weight_ = None
         if enable_confidence_head:
             confidence_input_dim = hidden_size + (markov_rank if confidence_head_with_markov else 0)
-            self.confidence_head_weight_ = ParameterWeight(
-                weight_name="confidence_head.proj.weight",
-                bias_name="confidence_head.proj.bias",
+            self.confidence_head_weight_ = ROWMMWeight(
+                in_dim=confidence_input_dim,
+                out_dims=[1],
+                weight_names="confidence_head.proj.weight",
+                bias_names="confidence_head.proj.bias",
                 data_type=self.data_type_,
-                weight_shape=(1, confidence_input_dim),
-                bias_shape=(1,),
+                quant_method=self.quant_cfg.get_quant_method(0, "confidence_head.proj"),
+                tp_rank=0,
+                tp_world_size=1,
             )

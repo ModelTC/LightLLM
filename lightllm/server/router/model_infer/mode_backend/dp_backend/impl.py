@@ -37,21 +37,20 @@ class DPChunkedPrefillBackend(ModeBackend):
                 "eagle_with_att",
                 "eagle_no_att",
                 "eagle3",
-                "qwen3next_eagle",
             )
             if self.enable_prefill_microbatch_overlap:
-                self.prefill = self.prefill_overlap_spec
+                self.prefill = self.prefill_overlap_mtp
             else:
-                self.prefill = self.prefill_spec
+                self.prefill = self.prefill_mtp
             if self.enable_decode_microbatch_overlap:
-                self.decode = self.decode_overlap_spec
+                self.decode = self.decode_overlap_mtp
                 self._draft_decode_overlap_func = (
                     self._draft_decode_eagle_overlap
                     if self.uses_recurrent_draft
                     else self._draft_decode_vanilla_overlap
                 )
             else:
-                self.decode = self.decode_spec
+                self.decode = self.decode_mtp
                 self._draft_decode_func = (
                     self._draft_decode_eagle if self.uses_recurrent_draft else self._draft_decode_vanilla
                 )
@@ -430,7 +429,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_pre_post_handle()
         return
 
-    def prefill_spec(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+    def prefill_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         # main model prefill
         model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         req_num = len(run_reqs)
@@ -502,7 +501,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_pre_post_handle()
         return
 
-    def decode_spec(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
+    def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         model_input, run_reqs, _ = padded_prepare_decode_inputs(decode_reqs)
         b_mtp_index_cpu = model_input.b_mtp_index
         req_num = len(run_reqs)
@@ -717,7 +716,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
         return proposal.extra_mem_indexes_cpu
 
-    def prefill_overlap_spec(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+    def prefill_overlap_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         (
             model_input0,
             run_reqs0,
@@ -811,7 +810,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_pre_post_handle()
         return
 
-    def decode_overlap_spec(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
+    def decode_overlap_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         (
             model_input0,
             run_reqs0,

@@ -3,13 +3,15 @@ from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import lightllm.common.basemodel.attention.base_att as base_att_module
-import lightllm.server.router.model_infer.mode_backend.base_backend as base_backend_module
+import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+from lightllm.common.basemodel.hidden_collector import HiddenCollector
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
 from lightllm.utils import envs_utils
 
 
@@ -49,6 +51,8 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
     [
         ("dspark", False, 7, True, True),
         ("dspark", True, 7, True, False),
+        ("dflash", False, 7, True, True),
+        ("dflash", True, 7, True, False),
         ("vanilla_with_att", True, 7, True, True),
         ("eagle3", True, 0, True, False),
         ("eagle3", False, 7, False, False),
@@ -62,117 +66,172 @@ def test_attention_backend_selects_dynamic_spec_layout(
     dynamic_spec,
     expected,
 ):
-    monkeypatch.setattr(base_att_module, "enable_dynamic_spec", lambda: dynamic_spec)
-    monkeypatch.setattr(base_att_module, "get_env_start_args", lambda: SimpleNamespace(mtp_mode=mtp_mode))
-    backend = SimpleNamespace(model=SimpleNamespace(is_mtp_draft_model=is_draft_model))
+    monkeypatch.setattr(
+        base_att_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
+    )
+    backend = SimpleNamespace(
+        model=SimpleNamespace(
+            is_mtp_draft_model=is_draft_model,
+        )
+    )
     infer_state = SimpleNamespace(draft_step=draft_step)
 
     assert BaseAttBackend.uses_dynamic_spec_verify_layout(backend, infer_state) is expected
 
 
 @pytest.mark.parametrize(
-    "spec_mode, architecture, is_linear_att_mixed_model, expected_class_name",
+    "model_type, spec_mode, expected_class_name",
     [
-        ("dflash", "Qwen3DFlashModel", False, "Qwen3DFlashModel"),
-        ("dflash", "Qwen3DSparkModel", False, "Qwen3DFlashModel"),
-        ("dflash", "Qwen3_5DFlashModel", True, "Qwen3_5DFlashModel"),
-        ("dspark", "Qwen3DSparkModel", False, "Qwen3DSparkModel"),
-        ("dspark", "Qwen3DSparkModel", True, "Qwen3_5DSparkModel"),
-        ("eagle3", "Qwen3Eagle3Model", False, "Qwen3EagleModel"),
+        ("deepseek_v3", "vanilla_with_att", "Deepseek3MTPModel"),
+        ("deepseek_v3", "eagle_with_att", "Deepseek3MTPModel"),
+        ("glm4_moe_lite", "vanilla_with_att", "Glm4MoeLiteMTPModel"),
+        ("glm4_moe_lite", "eagle_with_att", "Glm4MoeLiteMTPModel"),
+        ("mistral", "vanilla_no_att", "MistralMTPModel"),
+        ("mistral", "eagle_no_att", "MistralMTPModel"),
+        ("qwen3_moe", "vanilla_no_att", "Qwen3MOEMTPModel"),
+        ("qwen3_moe", "eagle_no_att", "Qwen3MOEMTPModel"),
+        ("qwen3_5", "vanilla_with_att", "Qwen3_5MTPModel"),
+        ("qwen3_5_text", "eagle_with_att", "Qwen3_5MTPModel"),
+        ("qwen3_5_moe", "vanilla_with_att", "Qwen3_5MoeMTPModel"),
+        ("qwen3_5_moe_text", "eagle_with_att", "Qwen3_5MoeMTPModel"),
+        ("qwen3", "dflash", "Qwen3DFlashModel"),
+        ("qwen3_5", "dflash", "Qwen3_5DFlashModel"),
+        ("qwen3_5_text", "dflash", "Qwen3_5DFlashModel"),
+        ("qwen3", "dspark", "Qwen3DSparkModel"),
+        ("qwen3_5", "dspark", "Qwen3_5DSparkModel"),
+        ("qwen3_5_text", "dspark", "Qwen3_5DSparkModel"),
+        ("qwen3", "eagle3", "Qwen3EagleModel"),
     ],
 )
-def test_draft_model_registry(
-    spec_mode,
-    architecture,
-    is_linear_att_mixed_model,
-    expected_class_name,
-):
+def test_draft_model_registry(model_type, spec_mode, expected_class_name):
     model_class = get_draft_model_class(
-        model_cfg={"model_type": "qwen3", "architectures": [architecture]},
+        model_cfg={"model_type": model_type},
         spec_mode=spec_mode,
-        is_linear_att_mixed_model=is_linear_att_mixed_model,
     )
 
     assert model_class.__name__ == expected_class_name
 
 
-def test_dspark_env_helper_enables_dynamic_spec_without_legacy_flag(monkeypatch):
-    monkeypatch.setenv(
-        "LIGHTLLM_START_ARGS",
-        json.dumps(
-            {
-                "mtp_mode": "dspark",
-                "mtp_dynamic_verify": False,
-                "mtp_step": 4,
-            }
-        ),
-    )
-    envs_utils.get_env_start_args.cache_clear()
-    envs_utils.enable_dynamic_spec.cache_clear()
-
-    assert envs_utils.enable_dynamic_spec()
-
-
-@pytest.mark.parametrize(
-    "mtp_mode, mtp_dynamic_verify, expected",
-    [
-        ("dspark", False, True),
-        ("dflash", True, False),
-        ("eagle3", True, True),
-        ("eagle3", False, False),
-    ],
-)
-def test_env_helper_uses_normalized_dynamic_spec(monkeypatch, mtp_mode, mtp_dynamic_verify, expected):
-    monkeypatch.setenv(
-        "LIGHTLLM_START_ARGS",
-        json.dumps(
-            {
-                "mtp_mode": mtp_mode,
-                "mtp_step": 7,
-                "mtp_dynamic_verify": mtp_dynamic_verify,
-            }
-        ),
-    )
-    envs_utils.get_env_start_args.cache_clear()
-    envs_utils.enable_dynamic_spec.cache_clear()
-
-    assert envs_utils.enable_dynamic_spec() is expected
-
-
-def test_draft_model_registry_rejects_unsupported_architecture():
+def test_draft_model_registry_rejects_unsupported_model_type():
     with pytest.raises(ValueError, match="Unsupported speculative draft model"):
         get_draft_model_class(
-            model_cfg={"model_type": "gemma4", "architectures": ["Gemma4DSparkModel"]},
+            model_cfg={"model_type": "gemma4"},
             spec_mode="dspark",
         )
 
 
-def test_draft_model_registry_validates_target_family():
-    with pytest.raises(ValueError, match="linear-attention mixed targets"):
+@pytest.mark.parametrize(
+    "model_type, spec_mode",
+    [
+        ("deepseek_v3", "eagle3"),
+        ("deepseek_v3", "dspark"),
+        ("deepseek_v3", "dflash"),
+        ("glm4_moe_lite", "eagle3"),
+        ("glm4_moe_lite", "dspark"),
+        ("glm4_moe_lite", "dflash"),
+        ("qwen3_5", "eagle3"),
+        ("qwen3_5_moe", "eagle3"),
+        ("qwen3_5_moe", "dspark"),
+        ("qwen3_5_moe", "dflash"),
+        ("qwen3", "eagle_no_att"),
+    ],
+)
+def test_draft_model_registry_rejects_unsupported_mode(model_type, spec_mode):
+    with pytest.raises(ValueError, match="Unsupported speculative draft model"):
         get_draft_model_class(
-            model_cfg={"model_type": "qwen3", "architectures": ["Qwen3DFlashModel"]},
-            spec_mode="dflash",
-            is_linear_att_mixed_model=True,
+            model_cfg={"model_type": model_type},
+            spec_mode=spec_mode,
         )
 
 
-def test_target_hidden_layer_ids_reads_text_config(monkeypatch):
+def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
+    block_size = 4
+    max_draft_step = 3
+    verify_row_count = 5
+    selected_rows = torch.tensor([0, 3])
+    flat_token_ids = torch.arange(2 * block_size)
+    flat_token_probs = torch.arange(2 * block_size, dtype=torch.float32) / 10
+
+    draft_model = SimpleNamespace(
+        block_size=block_size,
+        forward=lambda _: SimpleNamespace(logits=torch.empty(2 * block_size, 1)),
+    )
+    backend = SimpleNamespace(
+        max_draft_step=max_draft_step,
+        draft_models=[draft_model],
+        _gen_argmax_token_ids_and_prob=lambda _: (flat_token_ids, flat_token_probs),
+    )
+    proposer = DFlashProposer(SimpleNamespace(backend=backend, enable_dynamic_spec=True))
+    proposer.extend_draft_kv_cache = lambda **_: None
+    proposer.select_accepted_tail_rows = lambda **_: selected_rows
+    proposer.build_block_draft_input = lambda **_: (SimpleNamespace(), torch.tensor([10, 11]))
+
+    proposal = proposer.propose_next(
+        main_model_input=SimpleNamespace(),
+        main_model_output=SimpleNamespace(spec_hidden=torch.empty(verify_row_count, 1)),
+        next_token_ids=torch.arange(verify_row_count),
+        b_req_mtp_start_loc=torch.tensor([0, 3]),
+        draft_step=2,
+        accept_len=torch.tensor([1, 1]),
+    )
+
+    expected_blocks = flat_token_ids.reshape(2, block_size)[:, 1:3]
+    torch.testing.assert_close(proposal.token_ids[selected_rows, 1:], expected_blocks)
+    assert len(proposal.draft_probs) == 2
+    for step, probs in enumerate(proposal.draft_probs):
+        expected_probs = torch.zeros(verify_row_count)
+        expected_probs[selected_rows] = flat_token_probs.reshape(2, block_size)[:, step + 1]
+        torch.testing.assert_close(probs, expected_probs)
+
+
+def test_hidden_collector_reads_target_layer_ids(monkeypatch):
     monkeypatch.setattr(
-        base_backend_module.PretrainedConfig,
+        hidden_collector_module.PretrainedConfig,
         "get_config_dict",
         lambda _: ({"target_layer_ids": [1, 20, 36]}, {}),
     )
-    backend = ModeBackend.__new__(ModeBackend)
-    backend.args = SimpleNamespace(mtp_mode="dspark", mtp_draft_model_dir=["/models/dspark"])
+    monkeypatch.setattr(
+        hidden_collector_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(mtp_draft_model_dir=["/models/dspark"]),
+    )
+    model = SimpleNamespace(is_mtp_draft_model=False, layers_num=40)
 
-    layer_ids = backend._target_hidden_layer_ids({"model_type": "qwen3_5", "text_config": {"num_hidden_layers": 40}})
+    collector = HiddenCollector(model=model, spec_mode="dspark")
 
-    assert layer_ids == (1, 20, 36)
+    assert collector.collectors[0].layer_ids == frozenset((1, 20, 36))
 
 
 def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"num_hidden_layers": 5}))
+
+    envs_utils.get_env_start_args.cache_clear()
+    envs_utils.get_added_mtp_kv_layer_num.cache_clear()
+    envs_utils.set_env_start_args(
+        {
+            "mtp_mode": "dflash",
+            "mtp_step": 7,
+            "mtp_dynamic_verify": False,
+            "mtp_draft_model_dir": [str(tmp_path)],
+        }
+    )
+
+    assert envs_utils.get_added_mtp_kv_layer_num() == 5
+
+
+def test_qwen35_dflash_added_kv_layers_come_from_nested_draft_config(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 48,
+                "dflash_config": {"num_hidden_layers": 5},
+            }
+        )
+    )
 
     envs_utils.get_env_start_args.cache_clear()
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()

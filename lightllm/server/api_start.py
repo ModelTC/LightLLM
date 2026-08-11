@@ -162,31 +162,18 @@ def _launch_subprocesses(args: StartArgs):
             )
 
     # mtp params check
-    spec_mode = args.mtp_mode
-    if spec_mode is not None:
-        if spec_mode in ("vanilla_with_att", "vanilla_no_att", "qwen3next_vanilla"):
-            assert args.mtp_step > 0
-            draft_model_count = args.mtp_step
-        elif spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3", "qwen3next_eagle"):
-            assert args.mtp_step > 0
-            draft_model_count = 1
-        else:
-            assert spec_mode in ("dspark", "dflash"), f"unsupported speculative mode {spec_mode}"
-            assert args.mtp_step > 0
-            draft_model_count = 1
-
-        if spec_mode == "dspark":
-            args.mtp_dynamic_verify = True
-        elif spec_mode == "dflash":
-            args.mtp_dynamic_verify = False
-
+    if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:
-            assert spec_mode not in ("dspark", "dflash"), f"--mtp_draft_model_dir is required for {spec_mode} mode"
-            args.mtp_draft_model_dir = [args.model_dir] * draft_model_count
-        assert len(args.mtp_draft_model_dir) >= draft_model_count
+            assert args.mtp_mode not in (
+                "eagle3",
+                "dspark",
+                "dflash",
+            ), f"--mtp_draft_model_dir is required for {args.mtp_mode} mode"
+            args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
+        assert args.mtp_step > 0
     else:
-        assert args.mtp_step == 0
         assert args.mtp_draft_model_dir is None
+        assert args.mtp_step == 0
 
     # automatically set visual_dp based on visual_tp and tp.
     # In visual proxy mode keep the caller-provided visual_dp / visual_tp.

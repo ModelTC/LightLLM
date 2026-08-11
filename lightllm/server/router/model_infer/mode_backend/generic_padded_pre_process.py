@@ -8,7 +8,6 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context, Infe
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
-    enable_dynamic_spec,
     enable_triton_mtp_kernel,
     get_env_start_args,
 )
@@ -159,7 +158,7 @@ def padded_prepare_decode_inputs(
     b_mtp_index = []
     b_seq_len = []
     b_q_seq_len = []
-    draft_step = get_env_start_args().mtp_step
+    args_mtp_step = get_env_start_args().mtp_step
     batch_multimodal_params = []
     for req in req_objs:
         run_reqs.append(req)
@@ -172,7 +171,7 @@ def padded_prepare_decode_inputs(
         b_mtp_index.append(0)
         batch_multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        for step in range(req.max_draft_step):
+        for step in range(req.mtp_step):
             run_reqs.append(req)
             seq_len += 1
             total_token_num += seq_len
@@ -191,7 +190,7 @@ def padded_prepare_decode_inputs(
         b_q_seq_len.append(1)
         b_mtp_index.append(0)
         batch_multimodal_params.append({"images": [], "audios": []})
-        for step in range(draft_step):
+        for step in range(args_mtp_step):
             seq_len += 1
             total_token_num += seq_len
             b_seq_len.append(seq_len)
@@ -208,13 +207,13 @@ def padded_prepare_decode_inputs(
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_position_delta = build_b_position_delta(batch_multimodal_params)
 
-    padded_row_count = padded_req_num * (draft_step + 1)
+    padded_row_count = padded_req_num * (args_mtp_step + 1)
     if enable_diverse_mode_gqa_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
         if padded_row_count > 0:
             b_shared_seq_len = F.pad(b_shared_seq_len, (0, padded_row_count), value=0)
             b_mark_shared_group = F.pad(b_mark_shared_group, (0, padded_row_count), value=1)
-    elif enable_dynamic_spec() or enable_triton_mtp_kernel():
+    elif get_env_start_args().mtp_dynamic_verify or enable_triton_mtp_kernel():
         b_shared_seq_len = None
         b_mark_shared_group = build_spec_shared_group_markers(b_mtp_index=b_mtp_index)
     else:
@@ -247,7 +246,7 @@ def padded_prepare_decode_inputs(
         b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
-        draft_step=draft_step,
+        draft_step=args_mtp_step,
         is_prefill=False,
         multimodal_params=batch_multimodal_params,
     )

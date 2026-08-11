@@ -29,7 +29,7 @@ class LinearAttBackend(BaseAttBackend):
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
-        self.max_draft_step = get_env_start_args().mtp_step
+        self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
@@ -112,12 +112,12 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
     def init_state(self):
         backend: LinearAttBackend = self.backend
-        max_draft_step = backend.max_draft_step
+        mtp_step = backend.mtp_step
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (max_draft_step + 1)
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
         return
 
     def prefill_att(
@@ -140,8 +140,8 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
-        if backend.max_draft_step > 0:
-            conv_states = conv_states[:, :, : -backend.max_draft_step]
+        if backend.mtp_step > 0:
+            conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(
             mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight

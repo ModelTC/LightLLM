@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
 
-from lightllm.utils.envs_utils import enable_dynamic_spec, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -40,12 +40,13 @@ class BaseAttBackend:
         raise NotImplementedError("not impl")
 
     def uses_dynamic_spec_verify_layout(self, infer_state: "InferStateInfo") -> bool:
-        if infer_state.draft_step == 0 or not enable_dynamic_spec():
+        args = get_env_start_args()
+        if infer_state.draft_step == 0 or not args.mtp_dynamic_verify:
             return False
 
         # Target verification may compact each request to a different row count.
         # Block draft forwards still use their checkpoint-defined fixed layout.
-        return get_env_start_args().mtp_mode not in ("dspark", "dflash") or not self.model.is_mtp_draft_model
+        return args.mtp_mode not in ("dspark", "dflash") or not self.model.is_mtp_draft_model
 
     def _find_layer_index(
         self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]

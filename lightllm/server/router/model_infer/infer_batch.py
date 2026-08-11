@@ -566,11 +566,11 @@ class InferReq:
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
 
-        # max_draft_step 用来记录一个请求 draft模型每步需要生成的token数量
+        # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
-        self.max_draft_step: int = get_env_start_args().mtp_step
-        if self.max_draft_step > 0:
-            self.decode_need_token_num = self._spec_decode_need_token_num
+        self.mtp_step: int = get_env_start_args().mtp_step
+        if self.mtp_step > 0:
+            self.decode_need_token_num = self._mtp_decode_need_token_num
         else:
             self.decode_need_token_num = self._normal_decode_need_token_num
 
@@ -923,8 +923,8 @@ class InferReq:
     def _normal_decode_need_token_num(self) -> int:
         return 1
 
-    def _spec_decode_need_token_num(self) -> int:
-        return (1 + self.max_draft_step) * 2
+    def _mtp_decode_need_token_num(self) -> int:
+        return (1 + self.mtp_step) * 2
 
 
 class InferReqUpdatePack:

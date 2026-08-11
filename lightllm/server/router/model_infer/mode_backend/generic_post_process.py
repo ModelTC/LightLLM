@@ -30,9 +30,9 @@ def sample(
         skip_top_p,
         exist_req_use_random_seed,
     ) = _get_post_sample_tensors(reqs)
+    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
-    sample_reqs = reqs
     if selected_row_mask is not None:
         (
             b_req_idx,
@@ -56,15 +56,11 @@ def sample(
             or exist_req_use_random_seed
             or sampling_params_manager.penalty_counter_mode == "cpu_counter"
         ):
-            sample_reqs = _get_selected_reqs(reqs=reqs, selected_row_mask=selected_row_mask)
+            reqs = _get_selected_reqs(reqs=reqs, selected_row_mask=selected_row_mask)
         if has_invalid_token_ids:
-            invalid_token_ids, cu_invalid_token_num, has_invalid_token_ids = _get_invalid_token_tensors(
-                reqs=sample_reqs
-            )
+            invalid_token_ids, cu_invalid_token_num, has_invalid_token_ids = _get_invalid_token_tensors(reqs=reqs)
         if exist_req_use_random_seed:
-            exist_req_use_random_seed = any(req.generator is not None for req in sample_reqs)
-
-    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
+            exist_req_use_random_seed = any(req.generator is not None for req in reqs)
 
     # 这里需要区分历史token的频率惩罚类的系数的生效模式，目前支持两种在线统计方式:
     # 一种是基于 cpu 的，每个 req 对象利用其上绑定的dict对象out_token_id_count，每生成一个token就进行相应
@@ -83,7 +79,7 @@ def sample(
             p_token_ids,
             p_token_counts,
             p_cumsum_seq_len,
-        ) = sampling_params_manager.gen_cpu_out_token_counter_sampling_params(req_objs=sample_reqs)
+        ) = sampling_params_manager.gen_cpu_out_token_counter_sampling_params(req_objs=reqs)
 
         apply_penalty(
             Logits=logits,
@@ -123,13 +119,13 @@ def sample(
 
     elif skip_top_k and skip_top_p:
         # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
-        batch_next_token_ids = _random_sample(probs, sample_reqs, exist_req_use_random_seed)
+        batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
         batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     else:
         batch_next_token_ids, batch_next_token_logprobs = _top_p_top_k_sample(
-            sample_reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+            reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
         )
         return batch_next_token_ids.view(-1), batch_next_token_logprobs.view(-1)
 

@@ -190,8 +190,6 @@ class StartArgs:
                 "eagle3",
                 "dspark",
                 "dflash",
-                "qwen3next_vanilla",
-                "qwen3next_eagle",
                 None,
             ]
         },
