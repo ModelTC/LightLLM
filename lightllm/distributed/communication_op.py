@@ -148,6 +148,8 @@ class DistributeGroupManager:
         for layer_weight in layer_weights:
             # dense 层没有 experts；这里只关心真正参与 MoE 计算的层。
             experts = getattr(layer_weight, "experts", None)
+            if experts is None:
+                experts = getattr(layer_weight, "experts_", None)
             quant_method = getattr(experts, "quant_method", None)
             method_name = getattr(quant_method, "method_name", None)
             if method_name is not None:
