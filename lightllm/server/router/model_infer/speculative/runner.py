@@ -67,12 +67,11 @@ class SpecDecodeRunner:
     ) -> SpecDecodeForwardState:
         engine = self.engine
         b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
-        verify_result = engine.verify_target_tokens(
+        accept_len, accepted_index = engine.verify_target_tokens(
             new_next_token_ids=next_token_ids,
             b_req_idx=model_input.b_req_idx,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
         )
-        accepted_index = verify_result.accepted_index
         if self.backend.is_linear_att_mixed_model:
             linear_att_spec_state_index_update(
                 req_to_mtp_state_index=self.backend.model.req_manager.req_to_mtp_state_index,
@@ -96,7 +95,7 @@ class SpecDecodeRunner:
             next_token_ids=next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=plan.draft_step,
-            accept_len=verify_result.accept_len,
+            accept_len=accept_len,
         )
 
         all_next_token_ids = engine.pad_all_next_token_ids(
@@ -120,7 +119,7 @@ class SpecDecodeRunner:
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             all_next_token_ids=all_next_token_ids,
             b_req_idx=model_input.b_req_idx,
-            spec_accept_len=verify_result.accept_len,
+            spec_accept_len=accept_len,
             all_next_token_probs=all_next_token_probs,
         )
 
@@ -138,7 +137,7 @@ class SpecDecodeRunner:
 
         spec_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
             key="spec_accept_len",
-            gpu_tensor=verify_result.accept_len,
+            gpu_tensor=accept_len,
         )
 
         sync_event = torch.cuda.Event()
@@ -172,14 +171,13 @@ class SpecDecodeRunner:
             accepted_index_cpu=state.accepted_index_cpu,
         )
 
-    def finish_post(self, state: SpecDecodeForwardState, req_num: int, run_reqs: List) -> SpecDecodePostState:
+    def finish_post(self, state: SpecDecodeForwardState, req_num: int) -> SpecDecodePostState:
         state.sync_event.synchronize()
 
         engine = self.engine
         if engine.enable_dynamic_spec:
             engine.update_dynamic_accept_stats(
                 req_num=req_num,
-                run_reqs=run_reqs,
                 accepted_index_cpu=state.accepted_index_cpu,
                 spec_accept_len_cpu=state.spec_accept_len_cpu,
                 dynamic_batch_size=state.plan.dynamic_batch_size,

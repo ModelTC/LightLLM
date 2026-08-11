@@ -6,6 +6,7 @@ import torch
 from lightllm.common.basemodel import batch_objs
 from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
 from lightllm.models.qwen3_dspark import model_output as dspark_model_output
+from lightllm.models.qwen3_dspark.layer_weights import pre_and_post_layer_weight as dspark_pre_post_weight
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
 from lightllm.models.qwen3_dspark.model_output import DSparkModelOutput
@@ -58,6 +59,39 @@ def test_dspark_no_ref_conversion_dispatches_to_dspark_fields(monkeypatch):
         output.draft_token_ids.data_ptr(),
     )
     assert all(converted != original for converted, original in zip(converted_ptrs, original_ptrs))
+
+
+def test_confidence_head_does_not_inherit_model_quantization(monkeypatch):
+    captured_kwargs = {}
+
+    def init_base_weight(self, data_type, network_config, quant_cfg):
+        self.data_type_ = data_type
+        self.quant_cfg = quant_cfg
+
+    class RecordingROWMMWeight:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        dspark_pre_post_weight.Qwen3DFlashPreAndPostLayerWeight,
+        "__init__",
+        init_base_weight,
+    )
+    monkeypatch.setattr(dspark_pre_post_weight, "ROWMMWeight", RecordingROWMMWeight)
+
+    quant_method = object()
+    quant_cfg = SimpleNamespace(get_quant_method=lambda *_: quant_method)
+    dspark_pre_post_weight.Qwen3DSparkPreAndPostLayerWeight(
+        data_type=torch.bfloat16,
+        network_config={
+            "hidden_size": 16,
+            "vocab_size": 32,
+            "enable_confidence_head": True,
+        },
+        quant_cfg=quant_cfg,
+    )
+
+    assert captured_kwargs["quant_method"] is None
 
 
 def test_vanilla_markov_local_sampling_matches_full_logits():

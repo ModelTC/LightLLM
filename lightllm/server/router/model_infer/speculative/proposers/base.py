@@ -57,7 +57,7 @@ class BaseSpecProposer:
     A proposer owns the draft-side state transition.  The target model gives it
     the current target token ids plus captured target hidden features through
     SpecEngine.prepare_draft_* methods.  The proposer returns candidate ids
-    but does not verify acceptance; verification is handled by SpecVerifier.
+    but does not verify acceptance; verification is handled by SpecEngine.
     """
 
     def __init__(self, engine: "SpecEngine") -> None:
@@ -102,7 +102,7 @@ class BaseSpecProposer:
         verify_row_count: int,
     ) -> torch.Tensor:
         out = torch.zeros(
-            (verify_row_count,),
+            (verify_row_count, *selected_probs.shape[1:]),
             dtype=torch.float32,
             device=selected_probs.device,
         )
@@ -154,7 +154,7 @@ class BaseSpecProposer:
     def propose_next(
         self,
         main_model_input: ModelInput,
-        main_model_output: Optional[ModelOutput],
+        main_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,

@@ -22,10 +22,12 @@ def build_spec_proposer(engine) -> "BaseSpecProposer":
         from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import EagleMTPProposer
 
         return EagleMTPProposer(engine=engine)
+    if spec_mode in ("vanilla_with_att", "vanilla_no_att"):
+        from lightllm.server.router.model_infer.speculative.proposers.vanilla_mtp import VanillaMTPProposer
 
-    from lightllm.server.router.model_infer.speculative.proposers.vanilla_mtp import VanillaMTPProposer
+        return VanillaMTPProposer(engine=engine)
 
-    return VanillaMTPProposer(engine=engine)
+    raise ValueError(f"unsupported speculative mode: {spec_mode}")
 
 
 __all__ = [

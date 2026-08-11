@@ -5,11 +5,10 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
-from lightllm.server.router.model_infer.speculative.proposers.vanilla_mtp import VanillaMTPProposer
+from lightllm.server.router.model_infer.speculative.proposers.base import BaseSpecProposer, SpecProposal
 
 
-class RecurrentEagleMTPProposer(VanillaMTPProposer):
+class RecurrentEagleMTPProposer(BaseSpecProposer):
     """Shared draft-state setup for recurrent Eagle MTP proposers."""
 
     def build_initial_draft_state(
@@ -45,9 +44,6 @@ class RecurrentEagleMTPProposer(VanillaMTPProposer):
             mtp_draft_input_hiddens=model_output1.spec_hidden,
         )
         self.backend.draft_models[0].microbatch_overlap_prefill(draft_model_input0, draft_model_input1)
-
-    def project_draft_decode_hidden(self, draft_hidden: torch.Tensor) -> torch.Tensor:
-        return draft_hidden
 
     def _map_draft_token_ids(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
         return draft_token_ids
@@ -290,7 +286,7 @@ class RecurrentEagleMTPProposer(VanillaMTPProposer):
                     self.make_single_step_decode_input(
                         base_input=model_input,
                         input_ids=draft_next_token_ids[index],
-                        draft_hidden=self.project_draft_decode_hidden(draft_hiddens[index]),
+                        draft_hidden=draft_hiddens[index],
                         b_req_idx=selected_req_idxs[index],
                         b_mtp_index=selected_mtp_idxs[index],
                         b_seq_len=selected_seq_lens[index],
@@ -337,24 +333,6 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
     ) -> SpecProposal:
         assert 0 <= draft_step <= self.backend.max_draft_step
         assert accept_len is not None
-        return self._propose_recurrent(
-            main_model_input=main_model_input,
-            main_model_output=main_model_output,
-            next_token_ids=next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            draft_step=draft_step,
-            accept_len=accept_len,
-        )
-
-    def _propose_recurrent(
-        self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-        draft_step: int,
-        accept_len: torch.Tensor,
-    ) -> SpecProposal:
         assert main_model_output is not None and main_model_output.spec_hidden is not None
         verify_row_count = int(next_token_ids.shape[0])
         num_reqs = int(b_req_mtp_start_loc.shape[0])
@@ -425,7 +403,7 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
             draft_input = self.make_single_step_decode_input(
                 base_input=main_model_input,
                 input_ids=draft_next_token_ids,
-                draft_hidden=self.project_draft_decode_hidden(draft_hidden),
+                draft_hidden=draft_hidden,
                 b_req_idx=selected_req_idx,
                 b_mtp_index=selected_mtp_index,
                 b_seq_len=selected_seq_len,

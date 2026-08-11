@@ -63,8 +63,8 @@ class DynamicSpecPlanner:
         self.max_draft_step = int(max_draft_step)
 
         # 用于记录 decode 时的静态推理耗时(ms)。
-        self.main_model_speeds = _InferCostMsTable()
-        self.draft_model_speeds = _InferCostMsTable()
+        self.target_infer_costs = _InferCostMsTable()
+        self.draft_infer_costs = _InferCostMsTable()
 
         # 记录不同 draft 深度的接受概率；第一个 target token 必然接受，不需要统计。
         self.draft_len_to_accept_ratio = [
@@ -94,8 +94,8 @@ class DynamicSpecPlanner:
         )
 
     def update_infer_cost(self, batch_size: int, infer_cost_ms: float, is_draft_model: bool) -> None:
-        speed_table = self.draft_model_speeds if is_draft_model else self.main_model_speeds
-        speed_table.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
+        cost_table = self.draft_infer_costs if is_draft_model else self.target_infer_costs
+        cost_table.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
 
     def update_draft_len_to_accept_ratio(self, draft_len: int, accept_ratio: float) -> None:
         assert draft_len > 0 and draft_len <= self.max_draft_step
@@ -143,7 +143,7 @@ class DynamicSpecPlanner:
         if req_num == 0:
             self.pre_draft_step = self.max_draft_step
             return 0, self.max_draft_step, pre_draft_step
-        if not self.main_model_speeds.has_data() or not self.draft_model_speeds.has_data():
+        if not self.target_infer_costs.has_data() or not self.draft_infer_costs.has_data():
             # The cost model is only meaningful after both target and draft
             # decode costs have been profiled.  Block proposers such as DFlash
             # do not run through draft_model.forward, and cudagraph may also be
@@ -152,7 +152,6 @@ class DynamicSpecPlanner:
             self.pre_draft_step = self.max_draft_step
             return req_num * (pre_draft_step + 1), self.max_draft_step, pre_draft_step
 
-        # case 1 如果采用随机的方式决定 dynamic_batch_size
         self._iter += 1
         if self._use_random_mode and self._iter % self._iter_threshold == 0:
             min_batch_size = req_num
@@ -163,30 +162,24 @@ class DynamicSpecPlanner:
             self.pre_draft_step = draft_step
             return dynamic_batch_size, draft_step, pre_draft_step
 
-        # 通过计算的方式来获取已经知道的最优的 dynamic_batch_size，然后再决定 draft step 步长
         min_batch_size = req_num
         max_batch_size = req_num * (pre_draft_step + 1)
-        dynamic_batch_size_keys = self.main_model_speeds.get_batch_size_keys_between(min_batch_size, max_batch_size)
+        dynamic_batch_size_keys = self.target_infer_costs.get_batch_size_keys_between(min_batch_size, max_batch_size)
 
-        # 计算每个 dynamic_batch_size 对应的接受率以及单token的速度收益，然后选择最优的 dynamic_batch_size
         cost_ms_list = [
             self._get_cost_ms(req_num=req_num, dynamic_batch_size=dynamic_batch_size, draft_step=pre_draft_step)
             for dynamic_batch_size in dynamic_batch_size_keys
         ]
         dynamic_batch_size = dynamic_batch_size_keys[np.argmin(cost_ms_list)]
 
-        # 下一步的 draft step 选择，需要考虑计算不同step步的收益问题再决定
         min_cost_ms = float("inf")
-        min_cost_ms_draft_step = 0  # 默认选择0步长
+        min_cost_ms_draft_step = 0
         for draft_step in range(0, self.max_draft_step + 1):
             cost_ms = self._get_cost_ms(req_num=req_num, dynamic_batch_size=dynamic_batch_size, draft_step=draft_step)
             if cost_ms < min_cost_ms:
                 min_cost_ms = cost_ms
                 min_cost_ms_draft_step = draft_step
 
-        # draft step 步长不能超过 max_draft_step, 也不能小于0
-        min_cost_ms_draft_step = min(min_cost_ms_draft_step, self.max_draft_step)
-        min_cost_ms_draft_step = max(min_cost_ms_draft_step, 0)
         self.pre_draft_step = min_cost_ms_draft_step
         return dynamic_batch_size, min_cost_ms_draft_step, pre_draft_step
 
@@ -195,8 +188,8 @@ class DynamicSpecPlanner:
             req_num=req_num, dynamic_batch_size=dynamic_batch_size
         )
         total_time = (
-            self.main_model_speeds.get(dynamic_batch_size)
-            + self.draft_model_speeds.get(dynamic_batch_size) * draft_step
+            self.target_infer_costs.get(dynamic_batch_size)
+            + self.draft_infer_costs.get(dynamic_batch_size) * draft_step
         )
         token_num = min((dynamic_batch_size * accept_ratio), req_num * (draft_step + 1))
         token_num = max(token_num, req_num)
@@ -230,10 +223,10 @@ class DynamicSpecPlanner:
             right_value = self.draft_len_to_accept_ratio[right - 1].get()
 
         accept_ratio = left_value + (right_value - left_value) * (real_step - left)
-        calcu_accept_ratio = (req_num + (dynamic_batch_size - req_num) * accept_ratio) / dynamic_batch_size
+        estimated_accept_ratio = (req_num + (dynamic_batch_size - req_num) * accept_ratio) / dynamic_batch_size
         weight = ema.get_count() / 10
         # 通过统计数据和单请求数据进行加权平均，得到最终的接受率
-        return calcu_accept_ratio * (1 - weight) + ema.get() * weight
+        return estimated_accept_ratio * (1 - weight) + ema.get() * weight
 
 
 class Eagle3DynamicSpecPlanner(DynamicSpecPlanner):
@@ -557,7 +550,7 @@ class Eagle3DynamicSpecPlanner(DynamicSpecPlanner):
             return 0, self.max_draft_step, pre_draft_step
 
         max_batch_size = req_num * (pre_draft_step + 1)
-        if not self.main_model_speeds.has_data() or not self.draft_model_speeds.has_data():
+        if not self.target_infer_costs.has_data() or not self.draft_infer_costs.has_data():
             self.pre_draft_step = self.max_draft_step
             return max_batch_size, self.max_draft_step, pre_draft_step
 
@@ -595,7 +588,7 @@ class Eagle3DynamicSpecPlanner(DynamicSpecPlanner):
                 # captured shape.  Turn those paid-for padding rows into real
                 # candidates so they can improve accepted progress for the
                 # same target-model graph cost.
-                graph_batch_size = self.main_model_speeds.get_ceil_batch_size(
+                graph_batch_size = self.target_infer_costs.get_ceil_batch_size(
                     dynamic_batch_size,
                     max_batch_size=max_batch_size,
                 )
@@ -651,7 +644,7 @@ class Eagle3DynamicSpecPlanner(DynamicSpecPlanner):
 
     def _get_candidate_batch_sizes(self, req_num: int, max_batch_size: int) -> List[int]:
         candidates = set(
-            self.main_model_speeds.get_batch_size_keys_between(
+            self.target_infer_costs.get_batch_size_keys_between(
                 req_num,
                 max_batch_size,
             )
@@ -866,11 +859,11 @@ class Eagle3DynamicSpecPlanner(DynamicSpecPlanner):
         # proposal step after that runs on one accepted tail per request.
         draft_cost_ms = 0.0
         if draft_step > 0:
-            draft_cost_ms = self.draft_model_speeds.get(dynamic_batch_size)
+            draft_cost_ms = self.draft_infer_costs.get(dynamic_batch_size)
             if draft_step > 1:
-                draft_cost_ms += self.draft_model_speeds.get(req_num) * (draft_step - 1)
+                draft_cost_ms += self.draft_infer_costs.get(req_num) * (draft_step - 1)
 
-        total_time_ms = self.main_model_speeds.get(dynamic_batch_size) + draft_cost_ms
+        total_time_ms = self.target_infer_costs.get(dynamic_batch_size) + draft_cost_ms
         return total_time_ms / expected_token_num
 
 
@@ -908,7 +901,7 @@ class DSparkDynamicSpecPlanner(DynamicSpecPlanner):
 
         if req_num <= 0:
             return
-        if not self.main_model_speeds.has_data():
+        if not self.target_infer_costs.has_data():
             return
 
         probs = self._to_numpy(schedule_probs)
@@ -939,7 +932,7 @@ class DSparkDynamicSpecPlanner(DynamicSpecPlanner):
             return 0, self.max_draft_step, pre_draft_step
 
         max_batch_size = req_num * (pre_draft_step + 1)
-        if not self.main_model_speeds.has_data():
+        if not self.target_infer_costs.has_data():
             return max_batch_size, self.max_draft_step, pre_draft_step
 
         historical_batch_size = self._pop_historical_dynamic_batch_size(
@@ -954,7 +947,7 @@ class DSparkDynamicSpecPlanner(DynamicSpecPlanner):
             # leaking a same-step EMA fallback into DSpark scheduling.
             return req_num, self.max_draft_step, pre_draft_step
 
-        candidate_batch_sizes = set(self.main_model_speeds.get_batch_size_keys_between(req_num, max_batch_size))
+        candidate_batch_sizes = set(self.target_infer_costs.get_batch_size_keys_between(req_num, max_batch_size))
         candidate_batch_sizes.add(req_num)
         candidate_batch_sizes.add(max_batch_size)
         survival_prefix = self._estimate_survival_prefix(pre_draft_step)
@@ -968,7 +961,7 @@ class DSparkDynamicSpecPlanner(DynamicSpecPlanner):
                 dynamic_batch_size=dynamic_batch_size,
                 survival_prefix=survival_prefix,
             )
-            verify_ms = max(self.main_model_speeds.get(dynamic_batch_size), 1e-6)
+            verify_ms = max(self.target_infer_costs.get(dynamic_batch_size), 1e-6)
             throughput = expected_tokens / verify_ms
             if throughput > best_throughput:
                 best_throughput = throughput
@@ -992,7 +985,7 @@ class DSparkDynamicSpecPlanner(DynamicSpecPlanner):
         if flat_survival_scores.shape[0] == 0:
             return int(req_num)
 
-        candidate_batch_sizes = set(self.main_model_speeds.get_batch_size_keys_between(req_num, max_batch_size))
+        candidate_batch_sizes = set(self.target_infer_costs.get_batch_size_keys_between(req_num, max_batch_size))
         candidate_batch_sizes.add(int(req_num))
         candidate_batch_sizes.add(max_batch_size)
 
@@ -1013,7 +1006,7 @@ class DSparkDynamicSpecPlanner(DynamicSpecPlanner):
         for dynamic_batch_size in sorted(candidate_batch_sizes):
             selected_draft_count = dynamic_batch_size - int(req_num)
             expected_tokens = float(req_num) + float(expected_accepts_by_count[selected_draft_count])
-            verify_ms = max(self.main_model_speeds.get(dynamic_batch_size), 1e-6)
+            verify_ms = max(self.target_infer_costs.get(dynamic_batch_size), 1e-6)
             throughput = expected_tokens / verify_ms
             if throughput > best_throughput:
                 best_throughput = throughput
@@ -1109,34 +1102,27 @@ class _InferCostMsTable:
         assert batch_size > 0
         batch_size = int(batch_size)
 
-        # 这种情况理论上不应该存在。
         if len(self.infer_cost_ms_table) == 0:
             return batch_size * 1000.0
 
-        # 存在这个 batch_size 的记录，直接返回
         if batch_size in self.infer_cost_ms_table:
             return self.infer_cost_ms_table[batch_size]
 
-        # 不存在这个 batch_size，需要进行插值估计。
         max_batch_size = self.infer_cost_ms_table.peekitem(-1)[0]
         if batch_size > max_batch_size:
             max_infer_cost_ms = self.infer_cost_ms_table.peekitem(-1)[1]
             # 超过最大 graph 范围时使用高惩罚，使调度器倾向于关闭 speculative draft。
             return max_infer_cost_ms + (batch_size - max_batch_size) * 1000.0
-        else:
-            # 找到第一个大于等于 batch_size 的 key，并返回它的 value。
-            index = self.infer_cost_ms_table.bisect_left(batch_size)
-            return self.infer_cost_ms_table.peekitem(index)[1]
+
+        index = self.infer_cost_ms_table.bisect_left(batch_size)
+        return self.infer_cost_ms_table.peekitem(index)[1]
 
     def get_batch_size_keys_between(self, batch_size1: int, batch_size2: int) -> List[int]:
         assert batch_size1 > 0 and batch_size2 > 0
         start = min(int(batch_size1), int(batch_size2))
         end = max(int(batch_size1), int(batch_size2))
-        ans = list(self.infer_cost_ms_table.irange(minimum=start, maximum=end, inclusive=(True, True)))
-        if len(ans) == 0:
-            return [end]
-        else:
-            return ans
+        batch_sizes = list(self.infer_cost_ms_table.irange(minimum=start, maximum=end, inclusive=(True, True)))
+        return batch_sizes or [end]
 
     def get_ceil_batch_size(self, batch_size: int, max_batch_size: int) -> Optional[int]:
         """Return the next recorded graph shape without inventing a key.

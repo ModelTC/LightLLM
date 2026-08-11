@@ -74,7 +74,9 @@ class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
                 weight_names="confidence_head.proj.weight",
                 bias_names="confidence_head.proj.bias",
                 data_type=self.data_type_,
-                quant_method=self.quant_cfg.get_quant_method(0, "confidence_head.proj"),
+                # The confidence head has a bias and only one output channel.
+                # Keep it in model dtype because W8A8 MM does not support bias.
+                quant_method=None,
                 tp_rank=0,
                 tp_world_size=1,
             )

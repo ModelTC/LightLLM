@@ -5,6 +5,10 @@ from typing import Callable, List, Optional, Tuple
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.mtp_utils import (
+    mtp_scatter_next_token_ids,
+    mtp_verify,
+)
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.speculative.planner import (
     DSparkDynamicSpecPlanner,
@@ -20,29 +24,25 @@ from lightllm.server.router.model_infer.speculative.runner import (
     SpecDecodePostState,
     SpecDecodeRunner,
 )
-from lightllm.server.router.model_infer.speculative.verifier import SpecVerifier, SpecVerifyResult
 
 
 class SpecEngine:
-    """Owns one speculative decoding pipeline for a model backend.
+    """Coordinates speculative decoding for one model backend.
 
-    BaseModel only returns ``ModelOutput.spec_hidden``.  The engine owns
-    planning, target verification, draft extension/decoding, and the request
-    bookkeeping around that pipeline.  Algorithm-specific state stays in the
-    proposer.
+    The engine handles the common decode flow, while each proposer owns its
+    algorithm-specific draft-state update and proposal generation.
 
-    The target-to-draft data path is explicit:
-    1. target forward returns ``ModelOutput.spec_hidden``
-    2. proposer performs one draft extend from that hidden state
-    3. recurrent proposers perform zero or more unit-stride draft decodes
-    4. verifier accepts target rows and scatters the next candidate block
+    Each decode iteration:
+    1. the target model samples tokens and returns captured hidden states;
+    2. verification computes the accepted prefix against the previous proposal;
+    3. the proposer updates draft state and generates the next proposal;
+    4. the proposal is stored in per-request buffers for the next iteration.
     """
 
-    def __init__(self, backend) -> None:
+    def __init__(self, backend, spec_mode: str, enable_dynamic_spec: bool) -> None:
         self.backend = backend
-        self.spec_mode = backend.args.mtp_mode
-        self.enable_dynamic_spec = backend.args.mtp_dynamic_verify
-        self.verifier = SpecVerifier(backend=backend)
+        self.spec_mode = spec_mode
+        self.enable_dynamic_spec = enable_dynamic_spec
         self.proposer = build_spec_proposer(engine=self)
         self.decode_runner = SpecDecodeRunner(engine=self)
         self.planner = self._build_decode_planner()
@@ -175,9 +175,8 @@ class SpecEngine:
         self,
         state: SpecDecodeForwardState,
         req_num: int,
-        run_reqs: List,
     ) -> SpecDecodePostState:
-        return self.decode_runner.finish_post(state=state, req_num=req_num, run_reqs=run_reqs)
+        return self.decode_runner.finish_post(state=state, req_num=req_num)
 
     def prepare_decode_model_input(
         self,
@@ -222,14 +221,12 @@ class SpecEngine:
     ):
         """Build post-handle request lists after optional verify-row compaction."""
 
-        if self.enable_dynamic_spec and selected_row_mask_cpu is not None:
-            selected_row_mask_numpy = selected_row_mask_cpu.numpy()
-            run_reqs = [original_run_reqs[i] for i in range(len(original_run_reqs)) if selected_row_mask_numpy[i] == 1]
+        if selected_row_mask_cpu is not None:
+            run_reqs = [req for req, selected in zip(original_run_reqs, selected_row_mask_cpu.tolist()) if selected]
         else:
             run_reqs = original_run_reqs
 
-        accepted_index_cpu_numpy = accepted_index_cpu.numpy()
-        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu_numpy[i] == 1]
+        verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
         return run_reqs, verify_ok_reqs
 
     def build_decode_free_mem_indexes_cpu(
@@ -239,7 +236,7 @@ class SpecEngine:
         accepted_index_cpu: torch.Tensor,
     ) -> torch.Tensor:
         mem_indexes_cpu = model_input.mem_indexes_cpu
-        if not self.enable_dynamic_spec or selected_row_mask_cpu is None:
+        if selected_row_mask_cpu is None:
             return mem_indexes_cpu[accepted_index_cpu == 0]
 
         selected_mask = selected_row_mask_cpu.to(dtype=torch.bool)
@@ -258,17 +255,12 @@ class SpecEngine:
     def update_dynamic_accept_stats(
         self,
         req_num: int,
-        run_reqs,
         accepted_index_cpu: torch.Tensor,
         spec_accept_len_cpu: torch.Tensor,
-        dynamic_batch_size: Optional[int],
-        pre_draft_step: Optional[int] = None,
+        dynamic_batch_size: int,
+        pre_draft_step: int,
     ) -> None:
-        if not self.enable_dynamic_spec:
-            return
-
-        assert dynamic_batch_size is not None
-        assert len(run_reqs) == accepted_index_cpu.shape[0]
+        assert accepted_index_cpu.shape[0] == dynamic_batch_size
         assert spec_accept_len_cpu.shape[0] == req_num
         accept_lengths = spec_accept_len_cpu.numpy()
         accept_count = int(accept_lengths.sum())
@@ -331,11 +323,8 @@ class SpecEngine:
     def update_dynamic_schedule_stats(
         self,
         req_num: int,
-        schedule_probs_cpu: Optional[torch.Tensor],
+        schedule_probs_cpu: torch.Tensor,
     ) -> None:
-        if not self.needs_schedule_probs_cpu() or schedule_probs_cpu is None:
-            return
-
         self.planner.update_predicted_schedule_probs(
             schedule_probs=schedule_probs_cpu,
             req_num=req_num,
@@ -344,7 +333,7 @@ class SpecEngine:
     def propose_next(
         self,
         main_model_input: ModelInput,
-        main_model_output: Optional[ModelOutput],
+        main_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
@@ -392,11 +381,12 @@ class SpecEngine:
         new_next_token_ids: torch.Tensor,
         b_req_idx: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
-    ) -> SpecVerifyResult:
-        return self.verifier.verify_target_tokens(
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return mtp_verify(
+            req_to_next_token_ids=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
             new_next_token_ids=new_next_token_ids,
             b_req_idx=b_req_idx,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
         )
 
     def build_all_next_token_probs(
@@ -458,11 +448,17 @@ class SpecEngine:
         spec_accept_len: torch.Tensor,
         all_next_token_probs: Optional[torch.Tensor] = None,
     ) -> None:
-        self.verifier.scatter_next_tokens(
+        mtp_scatter_next_token_ids(
+            req_to_next_token_ids=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             all_next_token_ids=all_next_token_ids,
             b_req_idx=b_req_idx,
             spec_accept_len=spec_accept_len,
+            req_to_next_token_probs=(
+                self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_probs
+                if all_next_token_probs is not None
+                else None
+            ),
             all_next_token_probs=all_next_token_probs,
         )
 

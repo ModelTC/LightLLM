@@ -303,7 +303,11 @@ class ModeBackend:
         if self.args.mtp_mode is None:
             return
         self.init_mtp_draft_model(main_kvargs)
-        self.spec_engine = SpecEngine(backend=self)
+        self.spec_engine = SpecEngine(
+            backend=self,
+            spec_mode=self.args.mtp_mode,
+            enable_dynamic_spec=self.args.mtp_dynamic_verify,
+        )
         return
 
     def init_mtp_draft_model(self, main_kvargs: dict):

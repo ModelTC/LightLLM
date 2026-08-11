@@ -300,7 +300,6 @@ class ChunkedPrefillBackend(ModeBackend):
         spec_post_state = spec_engine.finish_decode_post(
             state=spec_decode_state,
             req_num=len(decode_reqs),
-            run_reqs=run_reqs,
         )
         self._update_spec_accept_ratio(
             decode_reqs=decode_reqs,

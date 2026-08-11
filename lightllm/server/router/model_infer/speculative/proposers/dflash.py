@@ -9,7 +9,7 @@ from lightllm.server.router.model_infer.speculative.proposers.base import BaseSp
 
 
 class DFlashProposer(BaseSpecProposer):
-    """DFlash block proposer aligned to the Eagle3 engine boundary.
+    """Non-causal block proposer for DFlash.
 
     DFlash remains a non-causal block-prefill draft model, not a recurrent
     token decoder.  The service flow is:
@@ -75,7 +75,6 @@ class DFlashProposer(BaseSpecProposer):
             return SpecProposal(
                 token_ids=token_ids,
                 extra_mem_indexes_cpu=None,
-                draft_probs=None,
             )
 
         # DFlash drafts from the accepted tail row of each request; one anchor
@@ -132,7 +131,8 @@ class DFlashProposer(BaseSpecProposer):
         draft_kv_input = copy.copy(main_model_input)
         draft_kv_input.batch_size = batch_size
         draft_kv_input.total_token_num = batch_size
-        draft_kv_input.multimodal_params = [{"images": [], "audios": []} for _ in range(batch_size)]
+        empty_multimodal_params = {"images": [], "audios": []}
+        draft_kv_input.multimodal_params = [empty_multimodal_params] * batch_size
         # This hidden-commit prefill path does not consume token ids, but
         # InferState uses input_ids.shape[0] to build position ids. Keep it
         # aligned with the fixed-shape target verify batch.
@@ -217,5 +217,6 @@ class DFlashProposer(BaseSpecProposer):
         draft_input.mem_indexes = draft_mem_indexes_cpu.cuda(non_blocking=True)
         draft_input.b_mark_shared_group = torch.zeros_like(draft_input.b_req_idx)
         draft_input.b_mark_shared_group[block_size - 1 :: block_size] = block_size
-        draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
+        empty_multimodal_params = {"images": [], "audios": []}
+        draft_input.multimodal_params = [empty_multimodal_params] * draft_input.batch_size
         return draft_input, draft_mem_indexes_cpu

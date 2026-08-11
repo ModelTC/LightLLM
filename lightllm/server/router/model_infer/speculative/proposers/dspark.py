@@ -55,7 +55,6 @@ class DSparkProposer(DFlashProposer):
             return SpecProposal(
                 token_ids=proposal_token_ids,
                 extra_mem_indexes_cpu=None,
-                draft_probs=[] if self.enable_dynamic_spec else None,
                 schedule_probs=schedule_probs,
             )
 
@@ -87,7 +86,6 @@ class DSparkProposer(DFlashProposer):
         block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
         proposal_token_ids[selected_rows, 1:] = block_token_ids[:, :draft_step]
 
-        draft_probs = None
         if self.enable_dynamic_spec:
             confidence_logits = draft_model_output.confidence_logits
             if confidence_logits is None:
@@ -99,35 +97,16 @@ class DSparkProposer(DFlashProposer):
             assert (
                 confidence_logits.shape[1] == block_size
             ), f"confidence logits must have {block_size} columns, got {confidence_logits.shape[1]}"
-            schedule_probs = self._scatter_step_probs(
+            # Match the clamp used by the GPU dynamic row selector before it
+            # converts conditional confidence to prefix survival probability.
+            schedule_probs = self.scatter_selected_step_probs(
                 selected_rows=selected_rows,
-                probs=confidence_logits[:, :draft_step].sigmoid(),
+                selected_probs=confidence_logits[:, :draft_step].sigmoid().clamp(min=0.01, max=0.99),
                 verify_row_count=verify_row_count,
             )
 
         return SpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=draft_mem_indexes_cpu,
-            draft_probs=draft_probs,
             schedule_probs=schedule_probs,
         )
-
-    def _scatter_step_probs(
-        self,
-        selected_rows: torch.Tensor,
-        probs: torch.Tensor,
-        verify_row_count: int,
-    ):
-        assert selected_rows.ndim == 1, "selected_rows must be 1D"
-        assert probs.ndim == 2, "confidence probabilities must be [selected_rows, draft_step]"
-        assert probs.shape[0] == selected_rows.shape[0], (
-            "confidence probability rows must match selected rows: " f"{selected_rows.shape[0]}, got {probs.shape[0]}"
-        )
-        # Keep the async CPU capacity estimate aligned with the GPU dynamic
-        # selector, which clamps conditional draft probabilities before
-        # converting them to prefix survival scores.  Unselected rows remain
-        # zero because scatter_selected_step_probs initializes the output.
-        probs = probs.clamp(min=0.01, max=0.99)
-        out = probs.new_zeros((verify_row_count, probs.shape[1]), dtype=torch.float32)
-        out[selected_rows, :] = probs.float()
-        return out
