@@ -84,6 +84,7 @@ template <bool UsePDL>
 __device__ __forceinline__ void pdl_wait_primary() {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   if constexpr (UsePDL) {
+    // PDL may start this grid early, so this must precede its first global load.
     asm volatile("griddepcontrol.wait;" ::: "memory");
   }
 #endif
@@ -176,6 +177,8 @@ __global__ __launch_bounds__(kFusedQBlockSize, 16) void fused_q_norm_rope_kernel
   const uint32_t total_works = params.batch_size * params.num_q_heads;
   if (work_id >= total_works) return;
 
+  pdl_wait_primary<UsePDL>();
+
   const uint32_t batch_id = work_id / params.num_q_heads;
   const uint32_t head_id = work_id % params.num_q_heads;
   const auto* input_ptr =
@@ -185,8 +188,6 @@ __global__ __launch_bounds__(kFusedQBlockSize, 16) void fused_q_norm_rope_kernel
   const int32_t position = static_cast<int32_t>(static_cast<const PosT*>(params.positions)[batch_id]);
 
   __shared__ Storage rope_storage[kFusedQNumWarps][kRopeVecs];
-
-  pdl_wait_primary<UsePDL>();
 
   Storage input_vec[kLocalSize];
 #pragma unroll
@@ -260,12 +261,12 @@ __global__ __launch_bounds__(kFusedKBlockSize, 8) void fused_k_norm_rope_flashml
   const uint32_t work_id = blockIdx.x;
   if (work_id >= params.batch_size) return;
 
+  pdl_wait_primary<UsePDL>();
+
   const auto* input_ptr = params.kv + work_id * params.kv_stride_batch;
   const int32_t position = static_cast<int32_t>(static_cast<const PosT*>(params.positions)[work_id]);
   const int32_t out_loc = params.out_loc[work_id];
   const float* freqs_cis = params.freqs_cis + position * kMainRopeDim;
-
-  pdl_wait_primary<UsePDL>();
 
   const Storage input_vec = reinterpret_cast<const Storage*>(input_ptr)[tx];
   const Storage weight_vec = reinterpret_cast<const Storage*>(params.kv_weight)[tx];
@@ -341,13 +342,13 @@ __global__ __launch_bounds__(kFusedQBlockSize, 16) void fused_q_indexer_rope_had
   const uint32_t total_works = params.batch_size * params.num_heads;
   if (work_id >= total_works) return;
 
+  pdl_wait_primary<UsePDL>();
+
   const uint32_t batch_id = work_id / params.num_heads;
   const int32_t position = static_cast<int32_t>(static_cast<const PosT*>(params.positions)[batch_id]);
   const auto* input_ptr = params.q_input + static_cast<int64_t>(work_id) * kIndexerHeadDim;
   const float* freqs_cis = params.freqs_cis + position * kIndexerRopeDim;
   const bool is_rope_lane = lane_id >= kWarpThreads - kRopeVecs;
-
-  pdl_wait_primary<UsePDL>();
 
   const float weight_value = __bfloat162float(params.weight[work_id]);
   const Storage input_vec = reinterpret_cast<const Storage*>(input_ptr)[lane_id];
