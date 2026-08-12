@@ -58,6 +58,8 @@ class PD_Client_Obj:
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
     # cache-aware 选点用：当前派发到该节点且尚未产出首 token 的 prompt 字符数。
     dispatched_prompt_chars: int = 0
+    # 当前派发到该节点且尚未产出首 token 的请求数。
+    dispatched_req_num: int = 0
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:

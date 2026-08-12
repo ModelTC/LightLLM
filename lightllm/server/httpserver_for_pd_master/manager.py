@@ -211,19 +211,15 @@ class HttpServerManagerForPDMaster:
         block_group_request_id = origin_request_id
         p_node = None
         d_node = None
-        prefill_load_released = False
+        pending_prefill_load_chars = None
 
         try:
             p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
-            # 记录当前 P 节点的在途 prompt 负载，首 token 生成后即可释放。
-            p_node.dispatched_prompt_chars += len(prompt)
-
-            history_gen_token_strs = []
-
             if not p_node or not d_node:
                 logger.error(f"{origin_request_id}: No p_node or d_node found")
                 raise Exception(f"{origin_request_id}: No p_node or d_node found")
 
+            history_gen_token_strs = []
             origin_prompt_cache_len = None
 
             for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
@@ -233,11 +229,17 @@ class HttpServerManagerForPDMaster:
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = block_max_new_tokens
 
+                # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
+                # prompt 更新该节点的在途 prefill 负载，不会重新选点。
+                block_prompt = prompt + "".join(history_gen_token_strs)
+                pending_prefill_load_chars = len(block_prompt)
+                p_node.dispatched_prompt_chars += pending_prefill_load_chars
+                p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
                     start_time,
-                    prompt + "".join(history_gen_token_strs),
+                    block_prompt,
                     sampling_params,
                     multimodal_params,
                     request,
@@ -255,9 +257,12 @@ class HttpServerManagerForPDMaster:
                     if iter_index == 0 and origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
-                    if not prefill_load_released:
-                        p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - len(prompt))
-                        prefill_load_released = True
+                    if pending_prefill_load_chars is not None:
+                        p_node.dispatched_prompt_chars = max(
+                            0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
+                        )
+                        p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
+                        pending_prefill_load_chars = None
                     yield origin_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
@@ -277,8 +282,9 @@ class HttpServerManagerForPDMaster:
             raise e
 
         finally:
-            if p_node is not None and not prefill_load_released:
-                p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - len(prompt))
+            if p_node is not None and pending_prefill_load_chars is not None:
+                p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - pending_prefill_load_chars)
+                p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
             await self.remove_req(block_group_request_id)
         return
 

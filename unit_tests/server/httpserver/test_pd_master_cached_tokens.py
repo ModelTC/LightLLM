@@ -26,7 +26,7 @@ def _make_manager(monkeypatch):
     mgr.metric_client = SimpleNamespace(counter_inc=lambda *a, **k: None, histogram_observe=lambda *a, **k: None)
     mgr.tokens = lambda *a, **k: 10
     mgr._log_req_header = lambda *a, **k: asyncio.sleep(0)
-    p_node = SimpleNamespace(dispatched_prompt_chars=0)
+    p_node = SimpleNamespace(dispatched_prompt_chars=0, dispatched_req_num=0)
     mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, 1))
     mgr.remove_req = lambda *a, **k: asyncio.sleep(0)
     return mgr
