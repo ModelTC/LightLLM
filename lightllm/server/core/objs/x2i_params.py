@@ -25,6 +25,37 @@ class CfgNormType(IntEnum):
     def __repr__(self):
         return self.as_str()
 
+    @staticmethod
+    def from_str(s: str) -> "CfgNormType":
+        for e in CfgNormType:
+            if e.as_str() == s:
+                return e
+        raise ValueError(f"Invalid cfg norm: {s}")
+
+
+class OutputFormatType(IntEnum):
+    JPEG = 0
+    PNG = 1
+    WEBP = 2
+
+    def as_str(self) -> str:
+        mapping = {
+            OutputFormatType.JPEG: "jpeg",
+            OutputFormatType.PNG: "png",
+            OutputFormatType.WEBP: "webp",
+        }
+        return mapping[self]
+
+    def __repr__(self):
+        return self.as_str()
+
+    @staticmethod
+    def from_str(s: str) -> "OutputFormatType":
+        for e in OutputFormatType:
+            if e.as_str() == s:
+                return e
+        raise ValueError(f"Invalid output format: {s}")
+
 
 class X2IParams(ctypes.Structure):
     _pack_ = 4
@@ -44,6 +75,7 @@ class X2IParams(ctypes.Structure):
         ("past_kvcache_text", PastKVCachePageList),
         ("past_kvcache_img", PastKVCachePageList),
         ("total_prompt_tokens", ctypes.c_int),
+        ("output_format", ctypes.c_int),
         ("request_id", ctypes.c_int64),
         # session_id 用于在 x2i server 端按聊天会话缓存 RNG state，
         # 解决多并发下不同 session 互相覆盖全局 torch/cuda RNG 的问题。
@@ -63,6 +95,7 @@ class X2IParams(ctypes.Structure):
     _cfg_interval: float = (0, 1)
     _timestep_shift: float = 3.0
     _dynamic_resolution: bool = True
+    _output_format: str = OutputFormatType.JPEG
 
     def init(self, **kwargs):
         def _get(key, default):
@@ -79,6 +112,7 @@ class X2IParams(ctypes.Structure):
         self.cfg_norm = _get("cfg_norm", X2IParams._cfg_norm)
         self.cfg_interval = _get("cfg_interval", X2IParams._cfg_interval)
         self.timestep_shift = _get("timestep_shift", X2IParams._timestep_shift)
+        self.output_format = _get("output_format", X2IParams._output_format)
         self.past_kvcache = PastKVCachePageList()
         self.past_kvcache_text = PastKVCachePageList()
         self.past_kvcache_img = PastKVCachePageList()
@@ -97,7 +131,11 @@ class X2IParams(ctypes.Structure):
         if not isinstance(image_config, ImageConfig):
             raise TypeError(f"expected ImageConfig, got {type(image_config)!r}")
         w, h = image_config.get_resolution()
-        kwargs: Dict[str, Any] = {"width": w, "height": h}
+        kwargs: Dict[str, Any] = {
+            "width": w,
+            "height": h,
+            "output_format": OutputFormatType.from_str(image_config.image_type),
+        }
         if image_config.steps is not None:
             kwargs["steps"] = image_config.steps
         if image_config.guidance_scale is not None:
@@ -111,10 +149,7 @@ class X2IParams(ctypes.Structure):
         if image_config.dynamic_resolution is not None:
             kwargs["dynamic_resolution"] = image_config.dynamic_resolution
         if image_config.cfg_norm is not None:
-            for e in CfgNormType:
-                if e.as_str() == image_config.cfg_norm:
-                    kwargs["cfg_norm"] = e
-                    break
+            kwargs["cfg_norm"] = CfgNormType.from_str(image_config.cfg_norm)
         self.init(**kwargs)
 
     def update_hw(self, width: int, height: int):

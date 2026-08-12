@@ -53,8 +53,8 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
 from .api_openai import (
-    chat_completions_impl, 
-    completions_impl, 
+    chat_completions_impl,
+    completions_impl,
     chat_completions_impl_v2,
     image_generation_impl,
 )
@@ -69,7 +69,7 @@ from .api_models import (
     ImageGenerationRequest,
     ImageGenerationResponse,
     ImageEditRequest,
-    ImageEditResponse
+    ImageEditResponse,
 )
 from .build_prompt import init_tokenizer
 
@@ -271,13 +271,13 @@ def http_endpoint_guard(func: Callable[..., Awaitable[Any]]):
 @http_endpoint_guard
 async def generate(request: Request) -> Response:
     return await g_objs.g_generate_func(request, g_objs.httpserver_manager)
-    
+
 
 @app.post("/generate_stream")
 @http_endpoint_guard
 async def generate_stream(request: Request) -> Response:
     return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
-   
+
 
 @app.post("/get_score")
 @http_endpoint_guard
@@ -288,7 +288,7 @@ async def get_score(request: Request) -> Response:
 @app.post("/")
 @http_endpoint_guard
 async def compat_generate(request: Request) -> Response:
-   
+
     request_dict = await request.json()
     stream = request_dict.pop("stream", False)
     if stream:
@@ -301,7 +301,7 @@ async def compat_generate(request: Request) -> Response:
 @http_endpoint_guard
 async def chat_completions(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
     return await chat_completions_impl_v2(request, raw_request)
-    
+
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 @http_endpoint_guard
@@ -313,7 +313,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 @http_endpoint_guard
 async def generate_image(request: Request) -> Response:
     return await g_objs.g_generate_image_func(request, g_objs.httpserver_manager)
-   
+
 
 @app.post("/v1/images/generations", response_model=ImageGenerationResponse)
 @http_endpoint_guard
@@ -321,7 +321,7 @@ async def image_generation(request: ImageGenerationRequest, raw_request: Request
     return await image_generation_impl(request, raw_request)
 
 
-@app.post("/v1/images/edit", response_model=ImageEditResponse)
+@app.post("/v1/images/edits", response_model=ImageEditResponse)
 @http_endpoint_guard
 async def image_edit(request: ImageEditRequest, raw_request: Request) -> Response:
     return await image_generation_impl(request, raw_request)
@@ -331,6 +331,7 @@ async def image_edit(request: ImageEditRequest, raw_request: Request) -> Respons
 @http_endpoint_guard
 async def anthropic_messages(raw_request: Request) -> Response:
     from .api_anthropic import anthropic_messages_impl
+
     return await anthropic_messages_impl(raw_request)
 
 

@@ -535,7 +535,7 @@ class HttpServerManager:
                     ]
                 )
                 generation_params.update_it2i(con_gen, text_uncon_gen, img_uncon_gen)
-                
+
             else:
                 # call t2i
                 prompt_condition, prompt_uncondition = self.tokenizer.get_query_for_t2i(prompt, input_image_num)

@@ -108,7 +108,10 @@ async def build_prompt_from_image_request(request: Union[ImageGenerationRequest,
     try:
         user_content = []
         if isinstance(request, ImageEditRequest):
-            [user_content.append({"type": "image_url", "image_url": {"url": image.image_url[:100]}}) for image in request.images]
+            [
+                user_content.append({"type": "image_url", "image_url": {"url": image.image_url[:100]}})
+                for image in request.images
+            ]
         user_content.append({"type": "text", "text": request.prompt})
         kwargs = {"conversation": [{"role": "user", "content": user_content}]}
         logger.info(f"kwargs: {kwargs}")

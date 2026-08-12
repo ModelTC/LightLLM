@@ -548,14 +548,14 @@ class ModelCard(BaseModel):
 class ModelListResponse(BaseModel):
     object: str = "list"
     data: List[ModelCard]
-    
+
 
 class ImageGenerationRequest(BaseModel):
     model: str = "default"
     prompt: str
     size: str = "1024x1024"
     n: Literal[1] = 1
-    output_format: Literal["jpeg"] = "jpeg"
+    output_format: ImageType = "jpeg"
     response_format: Literal["b64_json"] = "b64_json"
     watermark: Optional[bool] = False
 
@@ -565,7 +565,7 @@ class ImageGenerationRequest(BaseModel):
     def parse_size(self):
         width = -1
         height = -1
-        try: 
+        try:
             if "x" in self.size:
                 width, height = self.size.split("x")
             else:
@@ -577,6 +577,7 @@ class ImageGenerationRequest(BaseModel):
             image_type=self.output_format,
             height=height,
             width=width,
+            cfg_norm="none",
         )
         return self
 
