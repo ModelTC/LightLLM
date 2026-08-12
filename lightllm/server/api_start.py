@@ -256,6 +256,12 @@ def _launch_subprocesses(args: StartArgs):
         per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
         args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
 
+    if args.run_mode == "decode":
+        # PD Decode 节点只接收 prompt 末尾位置的 linear attention state，不具备
+        # 中间大页边界对应的 state。因此 Decode 节点必须使用默认值关闭大页功能，
+        # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
+        args.linear_att_page_block_num = 10000000
+
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
