@@ -623,6 +623,13 @@ class RawImageURL(BaseModel):
 class ImageEditRequest(ImageGenerationRequest):
     images: List[RawImageURL]
 
+    @model_validator(mode="after")
+    def parse_size(self):
+        # auto resolution will update the height and width to the first ref image.
+        if self.size == "auto":
+            self.size = f"-1x-1"
+        return super().parse_size()
+
 
 class ImageEditResponse(ImageGenerationResponse):
     pass
