@@ -5,6 +5,7 @@ import torch
 
 EPLB_IMBALANCE_THRESHOLD = 1.05
 EPLB_REBALANCE_GAIN_THRESHOLD = 0.05
+_INT32_MAX = torch.iinfo(torch.int32).max
 
 
 def build_initial_redundant_expert_ids(
@@ -42,47 +43,66 @@ def build_logical_to_physical_map(
         assert num_ranks % node_world_size == 0
     experts_per_rank = num_logical_experts // num_ranks
     physical_experts_per_rank = experts_per_rank + redundant_experts_per_rank
+    assert num_ranks * physical_experts_per_rank - 1 <= _INT32_MAX, "EPLB physical expert ID exceeds int32"
     max_replicas = num_ranks
 
-    global_logical_to_physical = torch.full(
-        (num_logical_experts, max_replicas),
-        -1,
-        dtype=torch.int64,
+    # Placement is constructed on CPU by the planner.  Keep all of the
+    # metadata construction vectorized: committing a multi-layer rebalance
+    # must not spend milliseconds per layer in Python scalar extraction.
+    placement = redundant_expert_ids.to(dtype=torch.int64, device="cpu")
+    if redundant_experts_per_rank > 1:
+        sorted_placement = placement.sort(dim=1).values
+        assert not torch.any(sorted_placement[:, 1:] == sorted_placement[:, :-1])
+    assert torch.all((placement >= 0) & (placement < num_logical_experts))
+
+    global_logical_to_physical = torch.full((num_logical_experts, max_replicas), -1, dtype=torch.int32)
+    expert_ids = torch.arange(num_logical_experts, dtype=torch.int64)
+    owner_rank = expert_ids // experts_per_rank
+    global_logical_to_physical[:, 0] = (owner_rank * physical_experts_per_rank + expert_ids % experts_per_rank).to(
+        torch.int32
     )
-    global_replica_count = torch.ones((num_logical_experts,), dtype=torch.int64)
 
-    for expert_id in range(num_logical_experts):
-        owner_rank = expert_id // experts_per_rank
-        local_slot = expert_id % experts_per_rank
-        global_logical_to_physical[expert_id, 0] = owner_rank * physical_experts_per_rank + local_slot
+    flat_expert_ids = placement.reshape(-1)
+    global_replica_count = torch.ones((num_logical_experts,), dtype=torch.int32)
+    if flat_expert_ids.numel():
+        # Stable ordering by logical expert preserves the old nested-loop
+        # order (rank-major then slot-major) within every expert's replica
+        # list.  The primary copy always occupies slot zero.
+        order = torch.argsort(flat_expert_ids, stable=True)
+        sorted_expert_ids = flat_expert_ids[order]
+        sorted_positions = torch.arange(sorted_expert_ids.numel(), dtype=torch.int64)
+        group_start = torch.where(
+            torch.cat((torch.ones(1, dtype=torch.bool), sorted_expert_ids[1:] != sorted_expert_ids[:-1])),
+            sorted_positions,
+            0,
+        )
+        group_start = torch.cummax(group_start, dim=0).values
+        replica_indices = sorted_positions - group_start + 1
+        redundant_counts = torch.bincount(flat_expert_ids, minlength=num_logical_experts)
+        assert int(redundant_counts.max().item()) < max_replicas, "an expert can have at most one replica per rank"
+        global_replica_count += redundant_counts.to(torch.int32)
 
-    for rank in range(num_ranks):
-        assert torch.unique(redundant_expert_ids[rank]).numel() == redundant_experts_per_rank
-        for slot in range(redundant_experts_per_rank):
-            expert_id = int(redundant_expert_ids[rank, slot].item())
-            assert 0 <= expert_id < num_logical_experts
-            replica_index = int(global_replica_count[expert_id].item())
-            assert replica_index < max_replicas, "an expert can have at most one replica per rank"
-            physical_id = rank * physical_experts_per_rank + experts_per_rank + slot
-            global_logical_to_physical[expert_id, replica_index] = physical_id
-            global_replica_count[expert_id] += 1
+        ranks = torch.arange(num_ranks, dtype=torch.int64).repeat_interleave(redundant_experts_per_rank)
+        slots = torch.arange(redundant_experts_per_rank, dtype=torch.int64).repeat(num_ranks)
+        physical_ids = ranks * physical_experts_per_rank + experts_per_rank + slots
+        global_logical_to_physical[sorted_expert_ids, replica_indices] = physical_ids[order].to(torch.int32)
 
     if source_rank is None:
         return global_logical_to_physical, global_replica_count
 
     logical_to_physical = torch.full_like(global_logical_to_physical, -1)
-    replica_count = torch.empty_like(global_replica_count)
     source_node = source_rank // node_world_size
-    for expert_id in range(num_logical_experts):
-        global_count = int(global_replica_count[expert_id].item())
-        replicas = global_logical_to_physical[expert_id, :global_count]
-        replica_ranks = torch.div(replicas, physical_experts_per_rank, rounding_mode="floor")
-        local_replicas = replicas[torch.div(replica_ranks, node_world_size, rounding_mode="floor") == source_node]
-        selected = local_replicas if local_replicas.numel() else replicas
-        logical_to_physical[expert_id, : selected.numel()] = selected
-        replica_count[expert_id] = selected.numel()
-
-    return logical_to_physical, replica_count
+    replica_slots = torch.arange(max_replicas, dtype=torch.int32).unsqueeze(0)
+    valid = replica_slots < global_replica_count.unsqueeze(1)
+    replica_ranks = torch.div(global_logical_to_physical, physical_experts_per_rank, rounding_mode="floor")
+    local = valid & (torch.div(replica_ranks, node_world_size, rounding_mode="floor") == source_node)
+    selected = torch.where(local.any(dim=1, keepdim=True), local, valid)
+    selected_positions = selected.to(torch.int32).cumsum(dim=1) - 1
+    rows = torch.arange(num_logical_experts, dtype=torch.int64).unsqueeze(1).expand_as(global_logical_to_physical)
+    logical_to_physical[rows[selected], selected_positions[selected].to(torch.int64)] = global_logical_to_physical[
+        selected
+    ]
+    return logical_to_physical, selected.sum(dim=1, dtype=torch.int32)
 
 
 def estimate_rank_load(
@@ -118,15 +138,15 @@ def estimate_rank_load(
     return rank_load.squeeze(0) if squeeze_sample else rank_load
 
 
-def select_improving_placements(
+def _select_improving_placements_with_loads(
     expert_load: torch.Tensor,
     current_placement: torch.Tensor,
     candidate_placement: torch.Tensor,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
     rebalance_gain_threshold: float = EPLB_REBALANCE_GAIN_THRESHOLD,
-) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float | int]]:
-    """Select strictly better layers, gated by full-model imbalance and gain."""
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float | int], torch.Tensor, torch.Tensor]:
+    """Select better layers and return current/final rank loads without re-estimation."""
     if not 0.0 <= rebalance_gain_threshold <= 1.0:
         raise ValueError("rebalance_gain_threshold must be between 0.0 and 1.0")
     assert current_placement.shape == candidate_placement.shape
@@ -138,13 +158,17 @@ def select_improving_placements(
     else:
         current_critical = current_rank_load.max(dim=2).values.sum(dim=0)
         candidate_critical = candidate_rank_load.max(dim=2).values.sum(dim=0)
-    # A changed layer must reduce its own aggregate critical load. The
-    # fixed imbalance gate and configurable gain gate are evaluated only
-    # after all changes are combined, so a hot individual layer cannot churn the whole model.
+    # A changed layer must reduce its own aggregate critical load.  The
+    # The fixed 1.05 imbalance gate and configurable gain gate (estimated
+    # critical-load reduction ratio) are evaluated only after all changes are
+    # combined, so a hot individual layer cannot churn the whole model.
     improved = candidate_critical < current_critical
     selected = current_placement.clone()
     selected[improved] = candidate_placement[improved]
-    selected_rank_load = estimate_rank_load(expert_load, selected, expert_alignment, node_world_size)
+    if current_rank_load.ndim == 2:
+        selected_rank_load = torch.where(improved[:, None], candidate_rank_load, current_rank_load)
+    else:
+        selected_rank_load = torch.where(improved[None, :, None], candidate_rank_load, current_rank_load)
     model_current_critical = current_critical.sum()
     if expert_load.ndim == 2:
         model_current_mean = current_rank_load.mean(dim=1).sum()
@@ -166,8 +190,34 @@ def select_improving_placements(
         "candidate_changed_layer_count": int(improved.sum().item()),
     }
     if model_ratio >= EPLB_IMBALANCE_THRESHOLD and candidate_rebalance_gain >= rebalance_gain_threshold:
-        return selected, improved, metrics
-    return current_placement.clone(), torch.zeros_like(improved), metrics
+        return selected, improved, metrics, current_rank_load, selected_rank_load
+    return (
+        current_placement.clone(),
+        torch.zeros_like(improved),
+        metrics,
+        current_rank_load,
+        current_rank_load,
+    )
+
+
+def select_improving_placements(
+    expert_load: torch.Tensor,
+    current_placement: torch.Tensor,
+    candidate_placement: torch.Tensor,
+    expert_alignment: int | None = None,
+    node_world_size: int | None = None,
+    rebalance_gain_threshold: float = EPLB_REBALANCE_GAIN_THRESHOLD,
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float | int]]:
+    """Select strictly better layers, gated by full-model imbalance and estimated critical-load reduction gain."""
+    selected, improved, metrics, _current_load, _final_load = _select_improving_placements_with_loads(
+        expert_load,
+        current_placement,
+        candidate_placement,
+        expert_alignment=expert_alignment,
+        node_world_size=node_world_size,
+        rebalance_gain_threshold=rebalance_gain_threshold,
+    )
+    return selected, improved, metrics
 
 
 def plan_redundant_experts(
@@ -183,9 +233,7 @@ def plan_redundant_experts(
         assert expert_alignment > 0
     use_legacy_topology_preference = expert_load.ndim < 4
     legacy_node_world_size = node_world_size if use_legacy_topology_preference else None
-    source_load, _squeeze_sample, node_world_size = _as_source_node_load(
-        expert_load, num_ranks, node_world_size
-    )
+    source_load, _squeeze_sample, node_world_size = _as_source_node_load(expert_load, num_ranks, node_world_size)
     num_samples, num_layers, num_nodes, num_logical_experts = source_load.shape
     assert num_logical_experts % num_ranks == 0
     assert redundant_experts_per_rank > 0
@@ -237,7 +285,9 @@ def plan_redundant_experts(
             raise RuntimeError("EPLB planner found no valid redundant expert placement")
 
         candidate_locations = locations.clone()
-        candidate_locations[layer_indices[:, None], torch.arange(num_logical_experts)[None, :], target_ranks[:, None]] = True
+        candidate_locations[
+            layer_indices[:, None], torch.arange(num_logical_experts)[None, :], target_ranks[:, None]
+        ] = True
         candidate_expert_rank = _expert_rank_load_all(
             load, candidate_locations, num_nodes, node_world_size, expert_alignment
         )

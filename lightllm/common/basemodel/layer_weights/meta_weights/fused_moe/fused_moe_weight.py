@@ -95,7 +95,8 @@ class FusedMoeWeight(BaseWeightTpl):
         self.eplb_experts_logical_to_physical_map: Optional[torch.Tensor] = None
         # [n_routed_experts], Stores the number of valid physical replicas for each logical expert.
         self.eplb_experts_logical_replica_count: Optional[torch.Tensor] = None
-        # [], CUDA scalar flag controlling whether the current prefill contributes to EPLB load counters.
+        # [], Compatibility flag for the public dynamic EPLB map API.  Service
+        # inference selects specialized record/no-record launches on the host.
         self.eplb_experts_record_load_tensor: Optional[torch.Tensor] = None
 
         if args.enable_prefill_eplb:

@@ -60,7 +60,9 @@ def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
             self.enable_ep_moe = enable_ep_moe
 
     monkeypatch.setattr(manager_module, "FusedMoeWeight", FakeFusedMoeWeight)
-    first, alternate, aliased = FakeFusedMoeWeight(3), FakeFusedMoeWeight(1), FakeFusedMoeWeight(2)
+    first = FakeFusedMoeWeight(3)
+    alternate = FakeFusedMoeWeight(1)
+    aliased = FakeFusedMoeWeight(2)
     disabled = FakeFusedMoeWeight(0, enable_ep_moe=False)
     model = SimpleNamespace(
         trans_layers_weight=[
@@ -829,7 +831,6 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     manager.node_world_size = 2
     manager.num_logical_experts = 4
     manager.redundant_experts_per_rank = 1
-    manager.rebalance_gain_threshold = 0.05
     manager.current_placement = build_initial_redundant_expert_ids(4, 4, 1).unsqueeze(0)
     manager.evaluation_group = object()
     manager._evaluation_lock = threading.Lock()
@@ -847,24 +848,12 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", all_reduce)
     monkeypatch.setattr(manager_module.torch.cuda, "set_device", lambda _device: None)
-    monkeypatch.setattr(
-        manager_module, "plan_redundant_experts", lambda load, *_args, **_kwargs: manager.current_placement
-    )
-    monkeypatch.setattr(
-        manager_module,
-        "select_improving_placements",
-        lambda load, *_args, **_kwargs: (
-            manager.current_placement,
-            torch.tensor([False]),
-            {
-                "model_imbalance_ratio": 1.0,
-                "candidate_model_imbalance_ratio": 1.0,
-                "candidate_relative_improvement": 0.0,
-                "candidate_changed_layer_count": 0,
-            },
-        ),
-    )
-    monkeypatch.setattr(manager_module, "estimate_rank_load", lambda *_args, **_kwargs: torch.ones((1, 1, 4)))
+
+    def plan_and_broadcast(global_load):
+        seen["global_load"] = global_load.clone()
+        return {"kind": "insufficient"}
+
+    manager._plan_and_broadcast = plan_and_broadcast
 
     manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})())
 
@@ -872,6 +861,8 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     assert seen["before"].shape == (1, 1, 2, 4)
     assert torch.equal(seen["before"][:, :, 0], torch.zeros_like(local))
     assert torch.equal(seen["before"][:, :, 1], local)
+    assert torch.equal(seen["global_load"][:, :, 0], torch.full_like(local, 100))
+    assert torch.equal(seen["global_load"][:, :, 1], local)
     assert manager._evaluation_error is None
 
 
@@ -924,13 +915,55 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
     impl.eplb_experts_logical_to_physical_map = object()
     topk_ids = torch.tensor([[3, 127]], dtype=torch.int32)
     monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), topk_ids))
-    monkeypatch.setattr(deepgemm_module, "eplb_map", lambda *_args, **_kwargs: pytest.fail("decode must not map"))
+    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", lambda *_args, **_kwargs: pytest.fail("decode must not map"))
 
     _, selected, origin = impl._select_experts(
         torch.empty((1, 4)), torch.empty((1, 128)), None, 2, False, False, 0, 0, "softmax", is_prefill=False
     )
 
     assert selected.data_ptr() == origin.data_ptr()
+
+
+def test_select_experts_and_quant_input_keeps_prefill_ids_logical(monkeypatch):
+    from lightllm.common.basemodel.triton_kernel.fused_moe import topk_select
+
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.routed_scaling_factor = 1.0
+    impl.quant_method = object()
+    impl.eplb_experts_logical_to_physical_map = object()
+    logical_ids = torch.tensor([[3, 127]], dtype=torch.int32)
+    monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), logical_ids))
+    monkeypatch.setattr(
+        deepgemm_module, "eplb_map_fast", lambda *_args, **_kwargs: pytest.fail("selection must not map")
+    )
+    monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
+
+    weights, topk_idx, qinput = impl.select_experts_and_quant_input(
+        torch.empty((1, 4)),
+        torch.empty((1, 128)),
+        None,
+        object(),
+        False,
+        2,
+        False,
+        0,
+        0,
+        "softmax",
+    )
+
+    assert weights.tolist() == [[1.0, 1.0]]
+    assert topk_idx.dtype is torch.long
+    assert topk_idx.tolist() == [[3, 127]]
+    assert qinput == "qinput"
+
+
+def test_prepare_prefill_topk_ids_returns_identity_without_eplb(monkeypatch):
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.eplb_experts_logical_to_physical_map = None
+    logical_ids = torch.tensor([[1, 2]], dtype=torch.int64)
+    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", lambda *_args, **_kwargs: pytest.fail("must not map"))
+
+    assert impl._prepare_prefill_topk_ids(logical_ids) is logical_ids
 
 
 def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_routing_stream(monkeypatch):
@@ -982,7 +1015,6 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
     impl.ep_balance_counters = None
     impl.eplb_experts_logical_to_physical_map = object()
     impl.eplb_experts_logical_replica_count = object()
-    impl.eplb_experts_record_load_tensor = object()
     impl.routed_expert_counter_tensor = torch.zeros((3, 4), dtype=torch.int64)
     impl.eplb_recording = False
     impl.eplb_recorded_sample_count = 0
@@ -996,7 +1028,7 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
         order.append("map")
         topk_ids.add_(10)
 
-    monkeypatch.setattr(deepgemm_module, "eplb_map", map_in_place)
+    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", map_in_place)
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
     monkeypatch.setattr(deepgemm_module, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
     monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
@@ -1037,8 +1069,9 @@ def test_configure_eplb_keeps_recording_disabled_until_manager_arms_it(monkeypat
     monkeypatch.setattr(deepgemm_module, "is_sm100_gpu", lambda: False)
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.eplb_recording = False
-    logical_to_physical = torch.empty((4, 2), dtype=torch.int64)
-    replica_count = torch.ones(4, dtype=torch.int64)
+    impl.n_routed_experts = 4
+    logical_to_physical = torch.empty((4, 2), dtype=torch.int32)
+    replica_count = torch.ones(4, dtype=torch.int32)
     record_load = torch.zeros((), dtype=torch.int32)
 
     impl.configure_eplb(logical_to_physical, replica_count, record_load)
@@ -1076,11 +1109,11 @@ def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
     def select(**_kwargs):
         return torch.ones((1, 2)), torch.tensor([[3, 4]], dtype=torch.int32)
 
-    def map_in_place(topk_ids, *_args):
+    def map_in_place(topk_ids, *_args, **_kwargs):
         topk_ids.add_(10)
 
     monkeypatch.setattr(topk_select, "select_experts", select)
-    monkeypatch.setattr(deepgemm_module, "eplb_map", map_in_place)
+    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", map_in_place)
     clone_calls = []
     original_clone = torch.Tensor.clone
 
@@ -1125,6 +1158,76 @@ def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
     assert result.tolist() == [[13, 14]]
     assert captured[0].tolist() == [[3, 4]]
     assert len(clone_calls) == 2  # EPLB preserves logical IDs, then the test captures a stable copy.
+
+
+def test_fused_experts_with_topk_prefill_eplb_maps_and_records_in_place(monkeypatch):
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.eplb_experts_logical_to_physical_map = object()
+    impl.eplb_experts_logical_replica_count = object()
+    impl.routed_expert_counter_tensor = torch.zeros((3, 4), dtype=torch.int64)
+    impl.eplb_recording = True
+    impl.eplb_recorded_sample_count = 4
+    calls, fused_calls = [], []
+
+    def map_in_place(topk_ids, logical_map, replica_count, counter, sample_index, *, record_load):
+        calls.append((topk_ids, logical_map, replica_count, counter, sample_index, record_load))
+        topk_ids.add_(10)
+
+    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", map_in_place)
+    impl._fused_experts = lambda **kwargs: fused_calls.append(kwargs) or "out"
+    input_tensor, w13, w2 = object(), object(), object()
+    topk_weights = torch.ones((1, 2))
+    topk_ids = torch.tensor([[1, 2]], dtype=torch.int32)
+
+    assert impl.fused_experts_with_topk(input_tensor, w13, w2, topk_weights, topk_ids, is_prefill=True) == "out"
+    assert calls == [
+        (
+            topk_ids,
+            impl.eplb_experts_logical_to_physical_map,
+            impl.eplb_experts_logical_replica_count,
+            impl.routed_expert_counter_tensor,
+            1,
+            True,
+        )
+    ]
+    assert impl.eplb_recorded_sample_count == 5
+    assert topk_ids.tolist() == [[11, 12]]
+    assert fused_calls == [
+        {
+            "input_tensor": input_tensor,
+            "w13": w13,
+            "w2": w2,
+            "topk_weights": topk_weights,
+            "topk_ids": topk_ids,
+            "is_prefill": True,
+        }
+    ]
+
+
+def test_fused_experts_with_topk_prefill_eplb_maps_without_recording(monkeypatch):
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.eplb_experts_logical_to_physical_map = object()
+    impl.eplb_experts_logical_replica_count = object()
+    impl.routed_expert_counter_tensor = torch.zeros((3, 4), dtype=torch.int64)
+    impl.eplb_recording = False
+    impl.eplb_recorded_sample_count = 4
+    calls = []
+    monkeypatch.setattr(
+        deepgemm_module,
+        "eplb_map_fast",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or args[0].add_(10),
+    )
+    impl._fused_experts = lambda **kwargs: kwargs["topk_ids"]
+    topk_ids = torch.tensor([[1, 2]], dtype=torch.int32)
+
+    assert (
+        impl.fused_experts_with_topk(object(), object(), object(), torch.ones((1, 2)), topk_ids, is_prefill=True)
+        is topk_ids
+    )
+    assert calls[0][0][4] == 0
+    assert calls[0][1] == {"record_load": False}
+    assert impl.eplb_recorded_sample_count == 4
+    assert topk_ids.tolist() == [[11, 12]]
 
 
 def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(monkeypatch):
@@ -2163,7 +2266,7 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
     assert "rebalance_gain_threshold=0.0700" in logs[0]
     assert not manager.initial_sampling_complete
     assert weight.fuse_moe_impl.eplb_recording
-    assert weight.eplb_experts_record_load_tensor.item() == 1
+    assert weight.eplb_experts_record_load_tensor.item() == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
