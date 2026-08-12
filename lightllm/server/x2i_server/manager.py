@@ -72,22 +72,26 @@ class X2IManager:
         self.rng_state_cache = RngStateCache()
 
     async def wait_to_model_ready(self):
-        
+
         if self.use_naive_x2i:
             from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
 
             self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
-           
+
         else:
             # x2v server use separate processes
             from lightllm.server.x2i_server.lightx2v.adapter import start_x2v_process
 
             x2v_world_size = get_x2v_world_size(self.args)
 
-            assert self.x2i_server_used_gpus >= x2v_world_size, "x2i_server_used_gpus must be greater than x2v_world_size"
+            assert (
+                self.x2i_server_used_gpus >= x2v_world_size
+            ), "x2i_server_used_gpus must be greater than x2v_world_size"
 
             if self.x2i_server_used_gpus < x2v_world_size or self.x2i_server_used_gpus % x2v_world_size != 0:
-                logger.warning(f"x2i_server_used_gpus {self.x2i_server_used_gpus} is not divisible by x2v_world_size {x2v_world_size}")
+                logger.warning(
+                    f"x2i_server_used_gpus {self.x2i_server_used_gpus} is not divisible by x2v_world_size {x2v_world_size}"
+                )
 
             x2v_dp_size = self.x2i_server_used_gpus // x2v_world_size
 
@@ -96,18 +100,30 @@ class X2IManager:
                 from_port_num=15000,
             )
 
-            cuda_visible_devices =  [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES").strip().split(",") if x.strip()]
+            cuda_visible_devices = [
+                x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES").strip().split(",") if x.strip()
+            ]
 
-            logger.info(f"x2v_dp_nccl_ports: {x2v_dp_nccl_ports}, x2v_world_size: {x2v_world_size}, x2v_dp_size: {x2v_dp_size}")
+            logger.info(
+                f"x2v_dp_nccl_ports: {x2v_dp_nccl_ports}, x2v_world_size: {x2v_world_size}, x2v_dp_size: {x2v_dp_size}"
+            )
 
             funcs = [start_x2v_process] * x2v_dp_size * x2v_world_size
-            args = [(self.args, rank, x2v_world_size, x2v_dp_nccl_ports[dp_rank]) 
-                        for dp_rank in range(x2v_dp_size) 
-                            for rank in range(x2v_world_size)]
+            args = [
+                (self.args, rank, x2v_world_size, x2v_dp_nccl_ports[dp_rank])
+                for dp_rank in range(x2v_dp_size)
+                for rank in range(x2v_world_size)
+            ]
 
-            envs = [{"CUDA_VISIBLE_DEVICES": ",".join(cuda_visible_devices[dp_rank * x2v_world_size: (dp_rank + 1) * x2v_world_size])} 
-                        for dp_rank in range(x2v_dp_size)
-                            for _ in range(x2v_world_size)]
+            envs = [
+                {
+                    "CUDA_VISIBLE_DEVICES": ",".join(
+                        cuda_visible_devices[dp_rank * x2v_world_size : (dp_rank + 1) * x2v_world_size]
+                    )
+                }
+                for dp_rank in range(x2v_dp_size)
+                for _ in range(x2v_world_size)
+            ]
 
             start_submodule_processes(funcs, args, envs)
 
@@ -138,10 +154,16 @@ class X2IManager:
                         x2i_param.past_kvcache.get_all(), x2i_param.past_kvcache.token_len, self.use_naive_x2i
                     )
 
-                    past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                        x2i_param.past_kvcache_text.get_all(), x2i_param.past_kvcache_text.token_len, self.use_naive_x2i
-                    ) if self.enable_cfg else None
-                    
+                    past_kv_cache_text = (
+                        self.past_kv_cache_client.get_kv_cache_for_x2i(
+                            x2i_param.past_kvcache_text.get_all(),
+                            x2i_param.past_kvcache_text.token_len,
+                            self.use_naive_x2i,
+                        )
+                        if self.enable_cfg
+                        else None
+                    )
+
                     is_t2i = x2i_param.past_kvcache_img.is_empty()
 
                     past_kv_cache_img = None
@@ -197,18 +219,19 @@ def get_enable_cfg(args: StartArgs) -> bool:
     if not hasattr(args, "x2v_gen_model_config") or not args.x2v_gen_model_config:
         return True
     import json
+
     with open(args.x2v_gen_model_config, "r") as f:
-            config_json = json.load(f)
+        config_json = json.load(f)
     return config_json.get("enable_cfg", True)
 
 
 def get_x2v_world_size(args: StartArgs) -> int:
     import json
+
     with open(args.x2v_gen_model_config, "r") as f:
         config_json = json.load(f)
-    
-    return (config_json.get("parallel", {}).get("cfg_p_size", 1) * 
-            config_json.get("parallel", {}).get("seq_p_size", 1))
+
+    return config_json.get("parallel", {}).get("cfg_p_size", 1) * config_json.get("parallel", {}).get("seq_p_size", 1)
 
 
 def setup_devices(args: StartArgs):
@@ -224,7 +247,7 @@ def setup_devices(args: StartArgs):
     if len(devices) < llm_need_gpus + x2i_need_gpus:
         raise ValueError(f"devices {devices} not enough, need {llm_need_gpus} and {x2i_need_gpus}")
 
-    # os.environ["CUDA_VISIBLE_DEVICES"] = 
+    # os.environ["CUDA_VISIBLE_DEVICES"] =
     cuda_visible_devices = ",".join(map(str, devices[llm_need_gpus : llm_need_gpus + x2i_need_gpus]))
     logger.info(
         f"setup devices for x2i server: {cuda_visible_devices}, "

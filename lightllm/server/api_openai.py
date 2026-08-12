@@ -1543,10 +1543,8 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
 
 
 def _images_to_image_generation_response(
-    images: List[bytes], 
-    request: ImageGenerationRequest, 
-    x2i_params: X2IParams,
-    output_image_tokens: int) -> ImageGenerationResponse:
+    images: List[bytes], request: ImageGenerationRequest, x2i_params: X2IParams, output_image_tokens: int
+) -> ImageGenerationResponse:
 
     return ImageGenerationResponse(
         data=[ImageB64(b64_json=_raw_image_to_data_url(image, request.output_format)) for image in images],
@@ -1556,11 +1554,11 @@ def _images_to_image_generation_response(
             input_tokens=x2i_params.total_prompt_tokens,
             input_tokens_details=ImageInputTokensDetails(
                 image_tokens=x2i_params.total_image_tokens,
-                text_tokens=x2i_params.total_prompt_tokens - x2i_params.total_image_tokens
+                text_tokens=x2i_params.total_prompt_tokens - x2i_params.total_image_tokens,
             ),
             output_tokens=output_image_tokens,
-            total_tokens=x2i_params.total_prompt_tokens + output_image_tokens
-        )
+            total_tokens=x2i_params.total_prompt_tokens + output_image_tokens,
+        ),
     )
 
 
@@ -1582,6 +1580,8 @@ async def image_generation_impl(request: ImageGenerationRequest | ImageEditReque
     images = await g_objs.httpserver_manager.generate_image(
         prompt, x2i_params, MultimodalParams(images=images), request=raw_request, input_image_num=len(images)
     )
-    output_image_tokens = g_objs.httpserver_manager.tokenizer.get_image_token_length_by_size(x2i_params.width, x2i_params.height)
+    output_image_tokens = g_objs.httpserver_manager.tokenizer.get_image_token_length_by_size(
+        x2i_params.width, x2i_params.height
+    )
 
     return _images_to_image_generation_response(images, request, x2i_params, output_image_tokens)

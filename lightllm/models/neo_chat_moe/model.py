@@ -87,8 +87,9 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         return token_num
 
     def get_image_token_length_by_size(self, width: int, height: int):
-        assert width > 0 and height > 0 and width % self.patch_size == 0 and height % self.patch_size == 0, \
-            "width and height should be greater than 0 and divisible by patch_size"
+        assert (
+            width > 0 and height > 0 and width % self.patch_size == 0 and height % self.patch_size == 0
+        ), "width and height should be greater than 0 and divisible by patch_size"
 
         grid_h, grid_w = width // self.patch_size, width // self.patch_size
         token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
@@ -134,8 +135,9 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
 
     def _build_t2i_query(self, msg, thinking_content=""):
         prompt = self.tokenizer.apply_chat_template(
-            conversation=[{"role": "user", "content": msg}], tokenize=False, add_generation_prompt=True)
-        
+            conversation=[{"role": "user", "content": msg}], tokenize=False, add_generation_prompt=True
+        )
+
         return prompt + thinking_content + IMG_START_TOKEN
 
     def fix_prompt(self, prompt: str, img_len: int):
