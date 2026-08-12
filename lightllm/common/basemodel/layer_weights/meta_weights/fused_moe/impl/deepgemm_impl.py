@@ -1,5 +1,8 @@
+import threading
+
 import torch
 from typing import Optional, Tuple, Any
+from deep_ep import ElasticBuffer
 from .triton_impl import FuseMoeTriton
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.quantize_method import WeightPack
@@ -18,6 +21,26 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import s
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
 from lightllm.utils.device_utils import is_sm100_gpu
+
+
+# Dispatch policy mapping is launched after the caller has captured its
+# overlap event.  One routing stream per device lets that mapping wait for the
+# captured inputs without serializing subsequent compute-stream microbatches.
+_PREFILL_ROUTING_STREAMS = {}
+_PREFILL_ROUTING_STREAMS_LOCK = threading.Lock()
+
+
+def _get_prefill_routing_stream(device: torch.device):
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    key = (device.type, device_index)
+    with _PREFILL_ROUTING_STREAMS_LOCK:
+        stream = _PREFILL_ROUTING_STREAMS.get(key)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            _PREFILL_ROUTING_STREAMS[key] = stream
+        return stream
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
@@ -60,6 +83,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         shared_expert_gate: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
+        route_prefill: bool = True,
     ):
         """Select experts and return topk weights and ids."""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
@@ -82,7 +106,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         origin_topk_ids = topk_ids
         if self.eplb_experts_logical_to_physical_map is not None:
-            if is_prefill is True:
+            if route_prefill and is_prefill is True:
                 if preserve_logical_ids:
                     origin_topk_ids = topk_ids.clone()
                 sample_index = 0
@@ -128,6 +152,72 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             ep_balance_counters=self.ep_balance_counters,
         )
         return output
+
+    def fused_experts_with_topk(
+        self,
+        input_tensor: torch.Tensor,
+        w13: WeightPack,
+        w2: WeightPack,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_prefill: Optional[bool] = None,
+    ):
+        if is_prefill is True:
+            topk_ids = self._prepare_prefill_topk_ids(topk_ids)
+        return self._fused_experts(
+            input_tensor=input_tensor,
+            w13=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=is_prefill,
+        )
+
+    def _prepare_prefill_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        if self.eplb_experts_logical_to_physical_map is None:
+            return topk_ids
+        if topk_ids.dtype != torch.int32 or not topk_ids.is_contiguous():
+            topk_ids = topk_ids.to(dtype=torch.int32).contiguous()
+        sample_index = 0
+        if self.eplb_recording:
+            sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
+            self.eplb_recorded_sample_count += 1
+        eplb_map(
+            topk_ids,
+            self.eplb_experts_logical_to_physical_map,
+            self.eplb_experts_logical_replica_count,
+            self.routed_expert_counter_tensor,
+            self.eplb_experts_record_load_tensor,
+            sample_index,
+        )
+        return topk_ids
+
+    def _prepare_prefill_dispatch_topk_ids(
+        self,
+        topk_ids: torch.Tensor,
+        overlap_event: Optional[Any],
+    ) -> Tuple[torch.Tensor, Optional[Any]]:
+        """Prepare dispatch IDs and the event which makes them visible to DeepEP.
+
+        Policy-free dispatch deliberately retains the original path: it only
+        performs the existing long conversion and forwards the caller event.
+        A policy needs an in-place CUDA map, however.  Run that map and the
+        final conversion on a shared routing stream after the caller's input
+        event, then hand DeepEP an event captured after both operations.
+        """
+        if self.eplb_experts_logical_to_physical_map is None:
+            return topk_ids.to(torch.long), overlap_event
+
+        source_event = overlap_event
+        if source_event is None:
+            source_event = ElasticBuffer.capture()
+        routing_stream = _get_prefill_routing_stream(topk_ids.device)
+        with torch.cuda.stream(routing_stream):
+            source_event.current_stream_wait()
+            topk_ids = self._prepare_prefill_topk_ids(topk_ids)
+            topk_ids = topk_ids.to(torch.long)
+            dispatch_event = ElasticBuffer.capture()
+        return topk_ids, dispatch_event
 
     def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
         """Return the cached local-primary view used by all decode paths."""
@@ -222,6 +312,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
             is_prefill=True,
+            route_prefill=False,
         )
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
@@ -233,6 +324,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_weights: torch.Tensor,
         overlap_event: Optional[Any] = None,
     ):
+        topk_idx, dispatch_event = self._prepare_prefill_dispatch_topk_ids(topk_idx, overlap_event)
         buffer = dist_group_manager.ep_buffer
         num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
@@ -243,7 +335,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             expert_alignment=128,
             num_sms=get_ep_num_sms(),
-            previous_event=overlap_event,
+            previous_event=dispatch_event,
             async_with_compute_stream=True,
             allocate_on_comm_stream=True,
             do_cpu_sync=True,

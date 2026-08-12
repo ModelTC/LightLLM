@@ -60,9 +60,7 @@ def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
             self.enable_ep_moe = enable_ep_moe
 
     monkeypatch.setattr(manager_module, "FusedMoeWeight", FakeFusedMoeWeight)
-    first = FakeFusedMoeWeight(3)
-    alternate = FakeFusedMoeWeight(1)
-    aliased = FakeFusedMoeWeight(2)
+    first, alternate, aliased = FakeFusedMoeWeight(3), FakeFusedMoeWeight(1), FakeFusedMoeWeight(2)
     disabled = FakeFusedMoeWeight(0, enable_ep_moe=False)
     model = SimpleNamespace(
         trans_layers_weight=[
@@ -933,6 +931,106 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
     )
 
     assert selected.data_ptr() == origin.data_ptr()
+
+
+def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_routing_stream(monkeypatch):
+    class Buffer:
+        def dispatch(self, _qinput, **kwargs):
+            calls.append(kwargs)
+            return (
+                (torch.empty((4, 2)),),
+                "recv_idx",
+                "recv_weight",
+                SimpleNamespace(num_recv_tokens_per_expert_list=[4]),
+                SimpleNamespace(current_stream_wait=lambda: None),
+            )
+
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.total_expert_num_contain_redundancy = 128
+    impl.ep_balance_counters = None
+    impl.eplb_experts_logical_to_physical_map = None
+    calls = []
+    caller_event = object()
+    monkeypatch.setattr(
+        deepgemm_module, "_get_prefill_routing_stream", lambda _device: pytest.fail("must not create routing stream")
+    )
+    monkeypatch.setattr(deepgemm_module.ElasticBuffer, "capture", lambda: pytest.fail("must not capture routing event"))
+    monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
+    monkeypatch.setattr(deepgemm_module, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
+    monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
+
+    impl.dispatch("qinput", torch.tensor([[1, 2]], dtype=torch.int32), torch.ones((1, 2)), caller_event)
+
+    assert calls[0]["previous_event"] is caller_event
+    assert calls[0]["topk_idx"].dtype is torch.long
+
+
+def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
+    class Buffer:
+        def dispatch(self, _qinput, **kwargs):
+            calls.append(kwargs)
+            return (
+                (torch.empty((4, 2)),),
+                "recv_idx",
+                "recv_weight",
+                SimpleNamespace(num_recv_tokens_per_expert_list=[4]),
+                SimpleNamespace(current_stream_wait=lambda: None),
+            )
+
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.total_expert_num_contain_redundancy = 130
+    impl.ep_balance_counters = None
+    impl.eplb_experts_logical_to_physical_map = object()
+    impl.eplb_experts_logical_replica_count = object()
+    impl.eplb_experts_record_load_tensor = object()
+    impl.routed_expert_counter_tensor = torch.zeros((3, 4), dtype=torch.int64)
+    impl.eplb_recording = False
+    impl.eplb_recorded_sample_count = 0
+    mapped = []
+    calls = []
+
+    def map_in_place(topk_ids, *_args, **_kwargs):
+        mapped.append(topk_ids)
+        assert topk_ids.dtype is torch.int32
+        assert topk_ids.is_contiguous()
+        order.append("map")
+        topk_ids.add_(10)
+
+    monkeypatch.setattr(deepgemm_module, "eplb_map", map_in_place)
+    monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
+    monkeypatch.setattr(deepgemm_module, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
+    monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
+    order = []
+    source_event = SimpleNamespace(current_stream_wait=lambda: order.append("source_wait"))
+    dispatch_event = object()
+
+    @contextmanager
+    def fake_routing_stream(_stream):
+        yield
+
+    original_to = torch.Tensor.to
+
+    def observe_long_conversion(tensor, *args, **kwargs):
+        dtype = kwargs.get("dtype", args[0] if args else None)
+        if dtype is torch.long:
+            order.append("long")
+        return original_to(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(deepgemm_module, "_get_prefill_routing_stream", lambda _device: object())
+    monkeypatch.setattr(torch.cuda, "stream", fake_routing_stream)
+    monkeypatch.setattr(torch.Tensor, "to", observe_long_conversion)
+    monkeypatch.setattr(deepgemm_module.ElasticBuffer, "capture", lambda: order.append("capture") or dispatch_event)
+    logical_ids = torch.tensor([[1, 2]], dtype=torch.int64)
+
+    result = impl.dispatch("qinput", logical_ids, torch.ones((1, 2)), source_event)
+
+    assert len(mapped) == 1
+    assert order == ["source_wait", "map", "long", "capture"]
+    assert calls[0]["topk_idx"].dtype is torch.long
+    assert calls[0]["topk_idx"].tolist() == [[11, 12]]
+    assert calls[0]["previous_event"] is dispatch_event
+    assert calls[0]["num_experts"] == 130
+    assert result[3] == [4]
 
 
 def test_configure_eplb_keeps_recording_disabled_until_manager_arms_it(monkeypatch):
