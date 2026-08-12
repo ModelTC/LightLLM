@@ -572,13 +572,12 @@ async def _dispatch_chat_request(chat_request: Any, raw_request: Request, main_c
     runtime = g_objs.visual_proxy_runtime
     if runtime is None:
         raise VisualChatProxyError("Visual proxy runtime is not initialized")
-    async with runtime.request_slot():
-        return await visual_chat_completions_impl(
-            request=chat_request,
-            raw_request=raw_request,
-            runtime=runtime,
-            main_chat_handler=main_chat_handler,
-        )
+    return await visual_chat_completions_impl(
+        request=chat_request,
+        raw_request=raw_request,
+        runtime=runtime,
+        main_chat_handler=main_chat_handler,
+    )
 
 
 async def responses_impl(raw_request: Request) -> Response:
