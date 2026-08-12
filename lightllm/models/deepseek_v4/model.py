@@ -435,7 +435,11 @@ class DeepSeekV4Tokenizer:
         effort = kwargs.get("reasoning_effort")
         if thinking and effort is None:
             effort = "high"
-        if effort not in ("max", "high", None):
+        if effort == "xhigh":
+            effort = "max"
+        elif effort in {"minimal", "low", "medium"}:
+            effort = "high"
+        elif effort not in {"max", "high", None}:
             effort = None
         encoding = self._get_encoding_module()
         prompt = encoding.encode_messages(

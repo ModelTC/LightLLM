@@ -224,7 +224,9 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
-    reasoning_effort: Optional[Literal["none", "low", "medium", "high", "max"]] = None
+    reasoning_effort: Optional[
+        Literal["none", "off", "disabled", "minimal", "low", "medium", "high", "max", "xhigh"]
+    ] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
