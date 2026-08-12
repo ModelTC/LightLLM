@@ -12,6 +12,7 @@ from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerFo
 
 def _manager() -> HttpServerManagerForPDMaster:
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.pd_manager = MagicMock()
     manager.id_gen = MagicMock()
     manager.id_gen.generate_id.return_value = 800
     manager.metric_client = MagicMock()

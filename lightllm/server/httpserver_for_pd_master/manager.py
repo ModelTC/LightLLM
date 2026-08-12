@@ -256,6 +256,8 @@ class HttpServerManagerForPDMaster:
                     metadata["prompt_tokens"] = prompt_tokens
                     if iter_index == 0 and origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                        prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
+                        self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     if pending_prefill_load_chars is not None:
                         p_node.dispatched_prompt_chars = max(
