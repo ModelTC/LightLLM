@@ -19,8 +19,15 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
+from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_fast
 from lightllm.utils.device_utils import is_sm100_gpu
+
+
+# On H200 GLM-style grouped routing, the fused no-record kernel wins through
+# 2048 tokens but loses occupancy to the separate select+map path for longer
+# prefills. Recording still benefits from fusing the counter atomic, so it is
+# deliberately not subject to this cutoff.
+EPLB_GROUPED_TOPK_FUSION_MAX_NO_RECORD_TOKENS = 2048
 
 
 # Dispatch policy mapping is launched after the caller has captured its
@@ -49,8 +56,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         self.eplb_experts_logical_to_physical_map = None
         self.eplb_experts_logical_replica_count = None
         self.eplb_experts_record_load_tensor = None
-        # These host-side values select ring-buffer rows.  The CUDA flag remains
-        # the ordering-safe source of truth for whether the kernel records.
+        # The service fast path uses this host bool as the recording source of
+        # truth.  The CUDA scalar is retained only for the public dynamic API
+        # (and its CUDA-graph compatibility contract).
         self.eplb_recorded_sample_count = 0
         self.eplb_recording = False
         self.ep_balance_counters = None
@@ -64,6 +72,21 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
     ) -> None:
         # Keep this guard for callers that bypass startup argument validation.
         assert not is_sm100_gpu(), "EPLB does not support SM100"
+        counter = getattr(self, "routed_expert_counter_tensor", None)
+        assert logical_to_physical_map.is_contiguous()
+        assert logical_replica_count.is_contiguous()
+        assert record_load_tensor.is_contiguous()
+        assert logical_to_physical_map.dtype == logical_replica_count.dtype == torch.int32
+        assert record_load_tensor.dtype == torch.int32
+        assert logical_to_physical_map.shape[0] == logical_replica_count.numel() == self.n_routed_experts
+        assert logical_to_physical_map.shape[1] > 0
+        assert record_load_tensor.numel() == 1
+        assert logical_to_physical_map.device == logical_replica_count.device == record_load_tensor.device
+        if counter is not None:
+            assert logical_to_physical_map.is_cuda and counter.is_cuda
+            assert counter.is_contiguous() and counter.dtype == torch.int64
+            assert counter.ndim == 2 and counter.shape[1] == self.n_routed_experts
+            assert logical_to_physical_map.device == counter.device
         self.eplb_experts_logical_to_physical_map = logical_to_physical_map
         self.eplb_experts_logical_replica_count = logical_replica_count
         self.eplb_experts_record_load_tensor = record_load_tensor
@@ -87,40 +110,79 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
     ):
         """Select experts and return topk weights and ids."""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
-        from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=input_tensor,
-            router_logits=router_logits,
-            correction_bias=correction_bias,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            scoring_func=scoring_func,
+        eplb_active = self.eplb_experts_logical_to_physical_map is not None
+        # For grouped prefill, selecting logical IDs, then launching a second
+        # kernel to count and remap them is avoidable.  Keep every observable
+        # logical-ID path on the generic implementation: callbacks and
+        # autotune need logical routing IDs, and per-expert scales index them.
+        fused_eplb_grouped_topk = (
+            is_prefill is True
+            and route_prefill
+            and eplb_active
+            and use_grouped_topk
+            and per_expert_scale is None
+            and not preserve_logical_ids
+            and not Autotuner.is_autotune_warmup()
+            and (self.eplb_recording or router_logits.shape[0] <= EPLB_GROUPED_TOPK_FUSION_MAX_NO_RECORD_TOKENS)
         )
+        if fused_eplb_grouped_topk:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
+
+            group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
+            sample_index = 0
+            if self.eplb_recording:
+                sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
+                self.eplb_recorded_sample_count += 1
+            topk_weights, topk_ids = triton_grouped_topk_eplb(
+                hidden_states=input_tensor,
+                gating_output=router_logits,
+                correction_bias=correction_bias,
+                topk=top_k,
+                renormalize=renormalize,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                scoring_func=scoring_func,
+                logical_to_physical_map=self.eplb_experts_logical_to_physical_map,
+                logical_replica_count=self.eplb_experts_logical_replica_count,
+                expert_counter=self.routed_expert_counter_tensor,
+                sample_index=sample_index,
+                record_load=self.eplb_recording,
+                group_score_used_topk_num=group_score_topk_num,
+            )
+        else:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
+
+            topk_weights, topk_ids = select_experts(
+                hidden_states=input_tensor,
+                router_logits=router_logits,
+                correction_bias=correction_bias,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                scoring_func=scoring_func,
+            )
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         origin_topk_ids = topk_ids
-        if self.eplb_experts_logical_to_physical_map is not None:
-            if route_prefill and is_prefill is True:
-                if preserve_logical_ids:
-                    origin_topk_ids = topk_ids.clone()
-                sample_index = 0
-                if self.eplb_recording:
-                    sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
-                    self.eplb_recorded_sample_count += 1
-                eplb_map(
-                    topk_ids,
-                    self.eplb_experts_logical_to_physical_map,
-                    self.eplb_experts_logical_replica_count,
-                    self.routed_expert_counter_tensor,
-                    self.eplb_experts_record_load_tensor,
-                    sample_index,
-                )
+        if route_prefill and is_prefill is True and eplb_active and not fused_eplb_grouped_topk:
+            if preserve_logical_ids:
+                origin_topk_ids = topk_ids.clone()
+            sample_index = 0
+            if self.eplb_recording:
+                sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
+                self.eplb_recorded_sample_count += 1
+            eplb_map_fast(
+                topk_ids,
+                self.eplb_experts_logical_to_physical_map,
+                self.eplb_experts_logical_replica_count,
+                self.routed_expert_counter_tensor,
+                sample_index,
+                record_load=self.eplb_recording,
+            )
         return topk_weights, topk_ids, origin_topk_ids
 
     def _fused_experts(
@@ -133,7 +195,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-        if is_prefill is False and self.eplb_experts_logical_to_physical_map is not None:
+        if is_prefill is False:
             w13 = self._primary_weight_pack(w13)
             w2 = self._primary_weight_pack(w2)
             num_experts = self.n_routed_experts
@@ -182,13 +244,13 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         if self.eplb_recording:
             sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
             self.eplb_recorded_sample_count += 1
-        eplb_map(
+        eplb_map_fast(
             topk_ids,
             self.eplb_experts_logical_to_physical_map,
             self.eplb_experts_logical_replica_count,
             self.routed_expert_counter_tensor,
-            self.eplb_experts_record_load_tensor,
             sample_index,
+            record_load=self.eplb_recording,
         )
         return topk_ids
 
@@ -277,11 +339,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_idx=topk_idx,
             x=hidden_states,
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
-            num_experts=(
-                self.n_routed_experts
-                if self.eplb_experts_logical_to_physical_map is not None
-                else self.total_expert_num_contain_redundancy
-            ),
+            # Decode is deliberately isolated from EPLB's physical redundant
+            # rows: DeepEP sees the original logical expert IDs.
+            num_experts=self.n_routed_experts,
             use_fp8=use_fp8_w8a8,
             async_finish=False,
             return_recv_hook=True,
@@ -373,8 +433,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         dtype: torch.dtype,
         expected_m: int,
     ):
-        if self.eplb_experts_logical_to_physical_map is not None:
-            w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
+        w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         return masked_group_gemm(

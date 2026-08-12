@@ -65,19 +65,25 @@ def build_transfer_plan(
 ) -> List[TransferStep]:
     assert tuple(current.shape) == tuple(target.shape) == (world_size, current.shape[1])
     experts_per_rank = num_logical_experts // world_size
+    current_rows = current.tolist()
+    target_rows = target.tolist()
+    # A logical expert has one primary row and at most one redundant row per
+    # rank, so this source list is already unique.  Build it once instead of
+    # allocating/sorting a set for every destination slot.
+    candidates_by_expert = [
+        [(expert // experts_per_rank, expert % experts_per_rank)] for expert in range(num_logical_experts)
+    ]
+    for rank, row in enumerate(current_rows):
+        for slot, expert in enumerate(row):
+            candidates_by_expert[expert].append((rank, experts_per_rank + slot))
     source_load = [0] * world_size
     plan = []
     for dst_rank in range(world_size):
-        for dst_slot in range(current.shape[1]):
-            expert = int(target[dst_rank, dst_slot])
-            if expert == int(current[dst_rank, dst_slot]):
+        for dst_slot, expert in enumerate(target_rows[dst_rank]):
+            if expert == current_rows[dst_rank][dst_slot]:
                 continue
-            candidates = [(expert // experts_per_rank, expert % experts_per_rank)]
-            for rank in range(world_size):
-                for slot in torch.nonzero(current[rank] == expert).flatten().tolist():
-                    candidates.append((rank, experts_per_rank + int(slot)))
-            candidates = sorted(
-                set(candidates),
+            src_rank, src_row = min(
+                candidates_by_expert[expert],
                 key=lambda item: (
                     item[0] // node_world_size != dst_rank // node_world_size,
                     source_load[item[0]],
@@ -85,7 +91,6 @@ def build_transfer_plan(
                     item[1],
                 ),
             )
-            src_rank, src_row = candidates[0]
             source_load[src_rank] += 1
             plan.append(TransferStep(dst_rank, dst_slot, src_rank, src_row))
     return plan
