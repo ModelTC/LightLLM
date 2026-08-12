@@ -200,11 +200,15 @@ class PDDecodeNode(ChunkedPrefillBackend):
     ):
         # 确定传输设备
         if req_obj.pd_trans_device_id == -1:
-            if not hasattr(self, "pd_iter_device_id"):
-                self.pd_iter_device_id = 0
-            req_obj.pd_trans_device_id = self.pd_iter_device_id
-            # only self.is_master_in_dp will be used.
-            self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
+            if self.is_deepseek_v4:
+                # DSV4 packed cache belongs to this DP rank; its unpack kernel must run on the owner GPU.
+                req_obj.pd_trans_device_id = self.dp_rank_in_node
+            else:
+                if not hasattr(self, "pd_iter_device_id"):
+                    self.pd_iter_device_id = 0
+                req_obj.pd_trans_device_id = self.pd_iter_device_id
+                # only self.is_master_in_dp will be used.
+                self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
         if page_kind not in ("kv", "linear_att_state"):
             raise ValueError(f"unknown PD trans page kind {page_kind}")

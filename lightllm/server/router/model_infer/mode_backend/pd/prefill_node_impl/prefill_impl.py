@@ -100,10 +100,14 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
     ) -> PDChunckedTransTask:
         # 确定传输设备
         if req_obj.pd_trans_device_id == -1:
-            if not hasattr(self, "pd_iter_device_id"):
-                self.pd_iter_device_id = 0
-            req_obj.pd_trans_device_id = self.pd_iter_device_id
-            self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
+            if self.is_deepseek_v4:
+                # DSV4 packed cache belongs to this DP rank; its pack kernel must run on the owner GPU.
+                req_obj.pd_trans_device_id = self.dp_rank_in_node
+            else:
+                if not hasattr(self, "pd_iter_device_id"):
+                    self.pd_iter_device_id = 0
+                req_obj.pd_trans_device_id = self.pd_iter_device_id
+                self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
         pd_decode_node_info = req_obj.sampling_param.pd_decode_node
         if page_kind == "kv":
