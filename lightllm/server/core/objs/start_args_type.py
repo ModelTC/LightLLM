@@ -49,7 +49,7 @@ class StartArgs:
     visual_circuit_failure_threshold: int = field(default=5)
     visual_circuit_recovery_seconds: float = field(default=30.0)
     visual_agent_timeout: float = field(default=180.0)
-    visual_builtin_trace_format: str = field(default="xml", metadata={"choices": ["xml", "natural"]})
+    visual_builtin_trace_format: str = field(default="natural", metadata={"choices": ["xml", "natural"]})
     visual_max_images: int = field(default=8)
     visual_max_image_bytes: int = field(default=20 * 1024 * 1024)
     visual_max_total_image_bytes: int = field(default=40 * 1024 * 1024)

@@ -302,9 +302,16 @@ def test_stream_failure_does_not_complete_partial_item(partial_payload):
     assert event_types[-1] == "response.failed"
 
 
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "none", "minimal", "xhigh"])
-def test_reasoning_effort_is_rejected(effort):
-    with pytest.raises(ValueError, match="reasoning.effort is not supported"):
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_reasoning_effort_is_forwarded(effort):
+    request = _responses_to_chat_request({"input": "hi", "reasoning": {"effort": effort}})
+
+    assert request["reasoning_effort"] == effort
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "xhigh"])
+def test_unsupported_reasoning_effort_is_rejected(effort):
+    with pytest.raises(ValueError, match="reasoning.effort must be one of"):
         _responses_to_chat_request({"input": "hi", "reasoning": {"effort": effort}})
 
 

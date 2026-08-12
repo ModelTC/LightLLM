@@ -199,9 +199,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--builtin-trace-format",
         dest="visual_builtin_trace_format",
         choices=["xml", "natural"],
-        default="xml",
+        default="natural",
         help=(
             "Format used to preserve builtin vision_reader calls in the public reasoning field. "
+            "Natural language is the safe default; legacy XML remains available for compatibility. "
             "Both formats are replayed through the model's native chat template on later turns."
         ),
     )

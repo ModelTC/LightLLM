@@ -878,7 +878,8 @@ async def _openai_sse_to_anthropic_events(
     next_content_index = 0
 
     # Currently open content block, if any.
-    # current_open is either None or a tuple ("text"|"tool_use", anthropic_index).
+    # current_open is either None or a tuple
+    # ("thinking"|"text"|"tool_use", anthropic_index).
     current_open = None
 
     text_block_index = None  # Anthropic index of the active text block.
@@ -896,6 +897,19 @@ async def _openai_sse_to_anthropic_events(
         "length": "max_tokens",
         "tool_calls": "tool_use",
     }
+
+    def close_open_block():
+        nonlocal current_open
+        if current_open is None:
+            return []
+        events = [
+            _sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": current_open[1]},
+            )
+        ]
+        current_open = None
+        return events
 
     async for raw_chunk in openai_body_iterator:
         if not raw_chunk:
@@ -980,15 +994,38 @@ async def _openai_sse_to_anthropic_events(
                     },
                 )
 
+            # ---- Reasoning delta ----
+            reasoning_piece = delta.get("reasoning") or delta.get("reasoning_content")
+            if reasoning_piece:
+                if current_open is None or current_open[0] != "thinking":
+                    for event in close_open_block():
+                        yield event
+                    thinking_block_index = next_content_index
+                    next_content_index += 1
+                    current_open = ("thinking", thinking_block_index)
+                    yield _sse_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": thinking_block_index,
+                            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                        },
+                    )
+                yield _sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": thinking_block_index,
+                        "delta": {"type": "thinking_delta", "thinking": reasoning_piece},
+                    },
+                )
+
             # ---- Text delta ----
             content_piece = delta.get("content")
             if content_piece:
                 if current_open is None or current_open[0] != "text":
-                    if current_open is not None:
-                        yield _sse_event(
-                            "content_block_stop",
-                            {"type": "content_block_stop", "index": current_open[1]},
-                        )
+                    for event in close_open_block():
+                        yield event
                     text_block_index = next_content_index
                     next_content_index += 1
                     current_open = ("text", text_block_index)
@@ -1037,11 +1074,8 @@ async def _openai_sse_to_anthropic_events(
                         continue
                     # Close whatever block is currently open (text or a
                     # previous tool_use) before opening this one.
-                    if current_open is not None:
-                        yield _sse_event(
-                            "content_block_stop",
-                            {"type": "content_block_stop", "index": current_open[1]},
-                        )
+                    for event in close_open_block():
+                        yield event
                     state["anthropic_index"] = next_content_index
                     next_content_index += 1
                     current_open = ("tool_use", state["anthropic_index"])
@@ -1080,11 +1114,8 @@ async def _openai_sse_to_anthropic_events(
                     # reopen THIS block before emitting.
                     if new_args:
                         if current_open is None or current_open != ("tool_use", state["anthropic_index"]):
-                            if current_open is not None:
-                                yield _sse_event(
-                                    "content_block_stop",
-                                    {"type": "content_block_stop", "index": current_open[1]},
-                                )
+                            for event in close_open_block():
+                                yield event
                             current_open = ("tool_use", state["anthropic_index"])
                             yield _sse_event(
                                 "content_block_start",
@@ -1115,11 +1146,8 @@ async def _openai_sse_to_anthropic_events(
                 final_stop_reason = _OPENAI_TO_ANTHROPIC_STOP.get(finish_reason, "end_turn")
 
     # Close any still-open content block.
-    if current_open is not None:
-        yield _sse_event(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": current_open[1]},
-        )
+    for event in close_open_block():
+        yield event
 
     # message_delta carries the final stop_reason and cumulative output_tokens.
     if message_started:
@@ -1198,13 +1226,12 @@ async def _dispatch_chat_request(chat_request: Any, raw_request: Request, main_c
     runtime = g_objs.visual_proxy_runtime
     if runtime is None:
         raise VisualChatProxyError("Visual proxy runtime is not initialized")
-    async with runtime.request_slot():
-        return await visual_chat_completions_impl(
-            request=chat_request,
-            raw_request=raw_request,
-            runtime=runtime,
-            main_chat_handler=main_chat_handler,
-        )
+    return await visual_chat_completions_impl(
+        request=chat_request,
+        raw_request=raw_request,
+        runtime=runtime,
+        main_chat_handler=main_chat_handler,
+    )
 
 
 async def anthropic_messages_impl(raw_request: Request) -> Response:
