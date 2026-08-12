@@ -31,7 +31,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -64,11 +64,31 @@ MAX_AGENT_STEPS = 12
 MAX_REASONING_CONTEXT_BYTES = 256 * 1024
 BUILTIN_TRACE_FORMATS = {"xml", "natural"}
 THINKING_POLICIES = {"request", "force_on", "force_off"}
+ANTHROPIC_SEQUENTIAL_TOOL_PROMPT = (
+    "Call builtin vision_reader by itself and wait for its structured result before issuing any external "
+    "tool call. Never mix vision_reader with another tool in the same assistant turn."
+)
 _IMAGE_TAG_RE = re.compile(r"<\s*image[_-](\d+)\s*/?\s*>", re.IGNORECASE)
 _IMAGE_ALIAS_RE = re.compile(r"(?:image[_\s-]*|picture\s*)(\d+)", re.IGNORECASE)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _FUNCTION_RE = re.compile(r"<function=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</function>", re.DOTALL)
 _PARAM_RE = re.compile(r"<parameter=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
+_RAW_XML_TOOL_BLOCK_RE = re.compile(
+    r"<tool_call\b[^>]*>.*?</tool_call\s*>|<tool_response\b[^>]*>.*?</tool_response\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_RAW_DSML_TOOL_BLOCK_RE = re.compile(
+    r"<｜DSML｜tool_calls\b[^>]*>.*?</｜DSML｜tool_calls\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_RAW_FC_LINE_RE = re.compile(
+    r"(?:</?(?:tool_call|tool_response)\b|<function=|</function>|<parameter=|</parameter>|"
+    r"<｜DSML｜|\"?tool_calls\"?\s*:|[\"']type[\"']\s*:\s*[\"'](?:tool_use|tool_result)[\"']|"
+    r"[\"']tool_use_id[\"']\s*:|[\"']function[\"']\s*:|^\s*function\s*:|"
+    r"(?:recipient|to)\s*=\s*functions\.)",
+    re.IGNORECASE,
+)
+_PROVIDER_CONTROL_TAG_RE = re.compile(r"</?pcwpd_[A-Za-z0-9_.:-]+\s*>", re.IGNORECASE)
 _NATURAL_VISION_TRACE_RE = re.compile(r"^我(?:先|接着|随后)查看了图片\s+(<image_\d+/?>)，让内建读图能力完成这个任务：(.+?)(?:。)?$")
 _XML_BUILTIN_TRACE_PAIR_RE = re.compile(
     r"(<tool_call>\s*<function=vision_reader>\s*.*?</function>\s*</tool_call>)\s*"
@@ -150,7 +170,9 @@ BUILTIN_VISION_READER_TOOL = {
             "MUST be the exact XML tag visible in the conversation history, not a file path, URL, file:// URI, or "
             "base64 string. If no <image_n/> tag appears in the conversation history, do not call this builtin "
             "tool. For local files or URLs such as /tmp/slide.jpg, call an external/user-provided path-based image "
-            "tool if available, for example tools with parameters named image_path, path, url, or image_url."
+            "tool if available, for example tools with parameters named image_path, path, url, or image_url. "
+            "Call this builtin by itself and wait for its result before calling any external tool; never mix "
+            "builtin vision_reader and an external tool in the same assistant turn."
         ),
         "parameters": {
             "type": "object",
@@ -196,7 +218,7 @@ class VisualProxyCapacityError(VisualChatProxyError):
 @dataclass(frozen=True)
 class VisualProxySettings:
     remote_url: str
-    builtin_trace_format: str = "xml"
+    builtin_trace_format: str = "natural"
     thinking_policy: str = "request"
     empty_output_retries: int = 2
     trace_dump_dir: Optional[Path] = None
@@ -274,7 +296,7 @@ class VisualProxySettings:
 
         settings = cls(
             remote_url=remote_url,
-            builtin_trace_format=str(getattr(args, "visual_builtin_trace_format", "xml")),
+            builtin_trace_format=str(getattr(args, "visual_builtin_trace_format", "natural")),
             thinking_policy=str(
                 getattr(args, "visual_thinking_policy", None) or os.getenv("THINKING_POLICY", "request")
             ),
@@ -623,6 +645,7 @@ class ImageRegistry:
 
 
 MainChatHandler = Callable[[ChatCompletionRequest, Request], Awaitable[Union[ChatCompletionResponse, Response]]]
+StreamEventCallback = Callable[[str, str, bool], Awaitable[None]]
 
 
 def _request_dict(request: ChatCompletionRequest) -> dict[str, Any]:
@@ -666,7 +689,7 @@ def apply_visual_thinking_policy(
         raise ValueError("chat_template_kwargs.enable_thinking and chat_template_kwargs.thinking must agree")
     requested = enable_requested if enable_requested is not None else thinking_requested
     if requested is None and request.reasoning_effort is not None:
-        requested = request.reasoning_effort != "none"
+        requested = request.reasoning_effort not in {"none", "off", "disabled"}
 
     if settings.thinking_policy == "force_on":
         enable_thinking = True
@@ -680,7 +703,7 @@ def apply_visual_thinking_policy(
     template_kwargs["enable_thinking"] = enable_thinking
     template_kwargs["thinking"] = enable_thinking
     reasoning_effort = request.reasoning_effort
-    if enable_thinking and reasoning_effort in {None, "none"}:
+    if enable_thinking and reasoning_effort in {None, "none", "off", "disabled"}:
         reasoning_effort = "high"
     elif not enable_thinking:
         reasoning_effort = "none"
@@ -750,6 +773,91 @@ def _merge_reasoning_text(*values: Any) -> str:
         if text and text not in parts:
             parts.append(text)
     return "\n".join(parts)
+
+
+def strip_backend_special_tokens(text: str) -> str:
+    """Remove model/template boundary tokens that must not reach public output."""
+
+    for token in (
+        "<|im_end|>",
+        "<|im_start|>",
+        "<|endoftext|>",
+        "<｜end▁of▁sentence｜>",
+        "<｜begin▁of▁sentence｜>",
+    ):
+        text = text.replace(token, "")
+    return text.strip()
+
+
+def _remove_json_tool_call_objects(text: str) -> str:
+    """Remove valid JSON objects containing OpenAI or Anthropic tool envelopes."""
+
+    decoder = json.JSONDecoder()
+    search_from = 0
+    while True:
+        marker = re.search(
+            r'["\']tool_calls["\']\s*:|["\']type["\']\s*:\s*["\'](?:tool_use|tool_result)["\']|'
+            r'["\']tool_use_id["\']\s*:',
+            text[search_from:],
+            re.IGNORECASE,
+        )
+        if marker is None:
+            return text
+        marker_start = search_from + marker.start()
+        removed = False
+        for brace in reversed([index for index in range(marker_start + 1) if text[index] == "{"]):
+            try:
+                value, length = decoder.raw_decode(text[brace:])
+            except (json.JSONDecodeError, RecursionError):
+                continue
+            end = brace + length
+            is_control = isinstance(value, dict) and (
+                "tool_calls" in value
+                or value.get("type") in {"tool_use", "tool_result"}
+                or "tool_use_id" in value
+            )
+            if end < marker_start or not is_control:
+                continue
+            text = text[:brace] + text[end:]
+            search_from = max(0, brace - 1)
+            removed = True
+            break
+        if not removed:
+            line_start = text.rfind("\n", 0, marker_start) + 1
+            line_end = text.find("\n", marker_start)
+            if line_end < 0:
+                line_end = len(text)
+            text = text[:line_start] + text[line_end:]
+            search_from = line_start
+
+
+def sanitize_reasoning(text: Any) -> str:
+    """Keep natural reasoning while removing raw provider/tool protocol syntax."""
+
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    clean = strip_backend_special_tokens(text)
+    clean = clean.replace("<think>", "").replace("</think>", "")
+    clean = _PROVIDER_CONTROL_TAG_RE.sub("", clean)
+    clean = _RAW_XML_TOOL_BLOCK_RE.sub("\n", clean)
+    clean = _RAW_DSML_TOOL_BLOCK_RE.sub("\n", clean)
+    clean = _remove_json_tool_call_objects(clean)
+    clean = "\n".join(line for line in clean.splitlines() if not _RAW_FC_LINE_RE.search(line))
+    clean = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", clean)
+    return clean.strip()
+
+
+def reasoning_contains_raw_fc_serialization(text: Any) -> bool:
+    """Detect tool/provider control syntax that cannot be exposed as ordinary text."""
+
+    if not isinstance(text, str) or not text.strip():
+        return False
+    return bool(
+        _RAW_XML_TOOL_BLOCK_RE.search(text)
+        or _RAW_DSML_TOOL_BLOCK_RE.search(text)
+        or _RAW_FC_LINE_RE.search(text)
+        or _PROVIDER_CONTROL_TAG_RE.search(text)
+    )
 
 
 def _one_line_trace_text(value: str) -> str:
@@ -863,31 +971,17 @@ def _parse_xml_tool_call(xml: str) -> tuple[str, dict[str, str]]:
 
 
 def _parse_xml_builtin_trace(reasoning: str) -> tuple[list[dict[str, str]], str]:
-    has_trace_marker = any(
-        marker in reasoning
-        for marker in (
-            "<tool_call>",
-            "</tool_call>",
-            "<tool_response>",
-            "</tool_response>",
-        )
-    )
-    if not has_trace_marker:
-        return [], reasoning.strip()
+    # Only the proxy-owned vision_reader pair is replayable. Other tools may
+    # legitimately have raw serializations in historical reasoning; treating
+    # every <tool_response> as a builtin vision trace caused unrelated agent
+    # histories to fail with HTTP 400 before model inference.
+    has_builtin_marker = f"<function={VISION_READER_NAME}>" in reasoning
+    if not has_builtin_marker:
+        return [], sanitize_reasoning(reasoning)
     segments: list[dict[str, str]] = []
     cursor = 0
     for match in _XML_BUILTIN_TRACE_PAIR_RE.finditer(reasoning):
-        reasoning_before = reasoning[cursor : match.start()].strip()
-        if any(
-            marker in reasoning_before
-            for marker in (
-                "<tool_call>",
-                "</tool_call>",
-                "<tool_response>",
-                "</tool_response>",
-            )
-        ):
-            raise ValueError("Malformed XML builtin trace before vision_reader call")
+        reasoning_before = sanitize_reasoning(reasoning[cursor : match.start()])
         name, arguments = _parse_xml_tool_call(match.group(1))
         if name != VISION_READER_NAME:
             raise ValueError(f"Unsupported builtin trace function: {name!r}")
@@ -905,16 +999,8 @@ def _parse_xml_builtin_trace(reasoning: str) -> tuple[list[dict[str, str]], str]
             }
         )
         cursor = match.end()
-    trailing = reasoning[cursor:].strip()
-    if not segments or any(
-        marker in trailing
-        for marker in (
-            "<tool_call>",
-            "</tool_call>",
-            "<tool_response>",
-            "</tool_response>",
-        )
-    ):
+    trailing = sanitize_reasoning(reasoning[cursor:])
+    if not segments:
         raise ValueError("Malformed XML builtin vision_reader trace")
     return segments, trailing
 
@@ -958,7 +1044,15 @@ def expand_builtin_traces(
             raise ValueError("Visual reasoning history exceeds the configured size limit")
         segments, final_reasoning = parser(reasoning)
         if not segments:
-            expanded.append(copy.deepcopy(message))
+            clean_message = {
+                key: copy.deepcopy(value)
+                for key, value in message.items()
+                if key not in {"reasoning", "reasoning_content"}
+            }
+            clean_reasoning = sanitize_reasoning(final_reasoning)
+            if clean_reasoning:
+                clean_message["reasoning"] = clean_reasoning
+            expanded.append(clean_message)
             continue
         for segment in segments:
             tool_call = _trace_tool_call(segment["image"], segment["task"])
@@ -967,8 +1061,9 @@ def expand_builtin_traces(
                 "content": "",
                 "tool_calls": [tool_call],
             }
-            if segment["reasoning"]:
-                assistant_message["reasoning"] = segment["reasoning"]
+            clean_segment_reasoning = sanitize_reasoning(segment["reasoning"])
+            if clean_segment_reasoning:
+                assistant_message["reasoning"] = clean_segment_reasoning
             expanded.append(assistant_message)
             expanded.append(
                 {
@@ -981,8 +1076,9 @@ def expand_builtin_traces(
         trailing_message = {
             key: copy.deepcopy(value) for key, value in message.items() if key not in {"reasoning", "reasoning_content"}
         }
-        if final_reasoning:
-            trailing_message["reasoning"] = final_reasoning
+        clean_final_reasoning = sanitize_reasoning(final_reasoning)
+        if clean_final_reasoning:
+            trailing_message["reasoning"] = clean_final_reasoning
         if trailing_message.get("content") or trailing_message.get("reasoning") or trailing_message.get("tool_calls"):
             expanded.append(trailing_message)
     return expanded
@@ -1347,16 +1443,55 @@ def _usage_add(total: UsageInfo, current: UsageInfo) -> None:
 
 
 def _message_reasoning(message: ChatMessage) -> str:
-    return _merge_reasoning_text(message.reasoning, message.reasoning_content)
+    return sanitize_reasoning(_merge_reasoning_text(message.reasoning, message.reasoning_content))
+
+
+def _sanitize_model_message(message: ChatMessage) -> ChatMessage:
+    """Normalize one fresh model turn before it reaches history or the caller."""
+
+    data = message.model_dump(exclude_none=True)
+    raw_reasoning = _merge_reasoning_text(data.pop("reasoning", None), data.pop("reasoning_content", None))
+    clean_reasoning = sanitize_reasoning(raw_reasoning)
+    if clean_reasoning:
+        data["reasoning"] = clean_reasoning
+
+    content = data.get("content")
+    if isinstance(content, str):
+        # A model-emitted tool response envelope is not evidence that a tool
+        # ran. Reject it instead of exposing or caching a fabricated result.
+        if reasoning_contains_raw_fc_serialization(content):
+            raise VisualChatProxyError(
+                "Main model content contained raw function-calling syntax; response quarantined."
+            )
+        data["content"] = strip_backend_special_tokens(content)
+    return ChatMessage.model_validate(data)
+
+
+def _add_anthropic_sequential_tool_instruction(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Make the signed Anthropic assistant turn executable as one atomic tool step."""
+
+    prepared = copy.deepcopy(messages)
+    for message in prepared:
+        if message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if ANTHROPIC_SEQUENTIAL_TOOL_PROMPT not in content:
+                message["content"] = f"{content.rstrip()}\n\n{ANTHROPIC_SEQUENTIAL_TOOL_PROMPT}".lstrip()
+            return prepared
+    prepared.insert(0, {"role": "system", "content": ANTHROPIC_SEQUENTIAL_TOOL_PROMPT})
+    return prepared
 
 
 def _message_with_reasoning(message: ChatMessage, reasoning_context: list[str]) -> ChatMessage:
     data = message.model_dump(exclude_none=True)
-    reasoning = _merge_reasoning_text(
-        *reasoning_context,
-        data.get("reasoning"),
-        data.pop("reasoning_content", None),
+    # reasoning_context contains only proxy-owned builtin traces and already
+    # sanitized model reasoning. Preserve an explicitly requested legacy XML
+    # trace, while always cleaning the fresh model fields at this boundary.
+    model_reasoning = sanitize_reasoning(
+        _merge_reasoning_text(data.get("reasoning"), data.pop("reasoning_content", None))
     )
+    reasoning = _merge_reasoning_text(*reasoning_context, model_reasoning)
     if len(reasoning.encode("utf-8")) > MAX_REASONING_CONTEXT_BYTES:
         raise VisualChatProxyError("Visual reasoning context exceeds the configured size limit")
     if reasoning:
@@ -1384,6 +1519,253 @@ def _has_external_vision_reader(tools: list[dict[str, Any]]) -> bool:
     return False
 
 
+class _IncrementalReasoningSanitizer:
+    """Stream safe reasoning while retaining possible split control markers."""
+
+    _LINE_CONTROL_PREFIXES = (
+        "function:",
+        "recipient=functions.",
+        "recipient = functions.",
+        "to=functions.",
+        "to = functions.",
+        '"tool_calls":',
+        "'tool_calls':",
+    )
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._emitted = False
+
+    def _sanitize_stable_prefix(self, value: str) -> str:
+        if not value:
+            return ""
+        if not self._emitted:
+            clean = sanitize_reasoning(value)
+        else:
+            sentinel = "__LIGHTLLM_STREAM_PREFIX__"
+            clean = sanitize_reasoning(sentinel + value)
+            if clean.startswith(sentinel):
+                clean = clean[len(sentinel) :]
+        if clean:
+            self._emitted = True
+        return clean
+
+    def feed(self, value: Any) -> str:
+        if not isinstance(value, str) or not value:
+            return ""
+        self._buffer += value
+        marker_positions = [position for marker in ("<", "{") if (position := self._buffer.find(marker)) >= 0]
+        raw_line_marker = _RAW_FC_LINE_RE.search(self._buffer)
+        if raw_line_marker is not None:
+            marker_positions.append(raw_line_marker.start())
+        if marker_positions:
+            safe_end = min(marker_positions)
+        else:
+            line_start = self._buffer.rfind("\n") + 1
+            line = self._buffer[line_start:]
+            normalized_line = line.lstrip().lower()
+            could_be_control_prefix = bool(normalized_line) and any(
+                prefix.startswith(normalized_line) for prefix in self._LINE_CONTROL_PREFIXES
+            )
+            safe_end = line_start if could_be_control_prefix else len(self._buffer)
+        # Outer whitespace is removed by sanitize_reasoning at the end of a
+        # model turn. Retain it until a later non-whitespace token makes it
+        # provably interior, so concatenated deltas match the non-stream body.
+        while safe_end > 0 and self._buffer[safe_end - 1].isspace():
+            safe_end -= 1
+        if safe_end <= 0:
+            return ""
+        prefix = self._buffer[:safe_end]
+        self._buffer = self._buffer[safe_end:]
+        return self._sanitize_stable_prefix(prefix)
+
+    def finish(self) -> str:
+        raw = self._buffer
+        self._buffer = ""
+        return self._sanitize_stable_prefix(raw)
+
+
+async def _iter_openai_sse_payloads(body_iterator: Any) -> AsyncIterator[dict[str, Any]]:
+    """Decode complete JSON payloads from an OpenAI SSE body iterator."""
+
+    buffer = ""
+    async for raw_chunk in body_iterator:
+        if not raw_chunk:
+            continue
+        if isinstance(raw_chunk, (bytes, bytearray, memoryview)):
+            raw_chunk = bytes(raw_chunk).decode("utf-8", errors="replace")
+        buffer += str(raw_chunk).replace("\r\n", "\n")
+        while "\n\n" in buffer:
+            event, buffer = buffer.split("\n\n", 1)
+            data_lines = [line[5:].lstrip() for line in event.split("\n") if line.startswith("data:")]
+            if not data_lines:
+                continue
+            data = "\n".join(data_lines)
+            if data == "[DONE]":
+                continue
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                logger.debug("Skipping malformed main-model SSE payload: %r", data)
+                continue
+            if isinstance(payload, dict):
+                yield payload
+    if buffer.strip():
+        for line in buffer.splitlines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                yield payload
+
+
+async def _consume_main_model_stream(
+    response: CustomStreamingResponse,
+    *,
+    model: str,
+    callback: StreamEventCallback,
+    separate_from_prior_reasoning: bool,
+    stream_content: bool,
+) -> ChatCompletionResponse:
+    """Assemble one internal model turn while forwarding safe reasoning deltas."""
+
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_states: dict[int, dict[str, Any]] = {}
+    usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
+    finish_reason: Optional[str] = None
+    response_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sanitizer = _IncrementalReasoningSanitizer()
+    content_sanitizer = _IncrementalReasoningSanitizer()
+    emitted_reasoning = False
+    emitted_ready = False
+
+    async def emit_reasoning(value: str) -> None:
+        nonlocal emitted_reasoning
+        if not value:
+            return
+        await callback(
+            "reasoning",
+            value,
+            separate_from_prior_reasoning and not emitted_reasoning,
+        )
+        emitted_reasoning = True
+
+    async for payload in _iter_openai_sse_payloads(response.body_iterator):
+        if "error" in payload and not payload.get("choices"):
+            error = payload.get("error") or {}
+            message = error.get("message") if isinstance(error, dict) else str(error)
+            raise VisualChatProxyError(f"Main model stream failed: {message or 'unknown error'}")
+        if payload.get("id") is not None:
+            response_id = str(payload["id"])
+        if isinstance(payload.get("created"), int):
+            created = payload["created"]
+        raw_usage = payload.get("usage")
+        if isinstance(raw_usage, dict):
+            usage = UsageInfo.model_validate(raw_usage)
+        choices = payload.get("choices") or []
+        if not choices:
+            continue
+        if not emitted_ready:
+            await callback("ready", "1", False)
+            emitted_ready = True
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, dict):
+            continue
+        raw_reasoning = delta.get("reasoning")
+        if not isinstance(raw_reasoning, str):
+            raw_reasoning = delta.get("reasoning_content")
+        if isinstance(raw_reasoning, str) and raw_reasoning:
+            reasoning_parts.append(raw_reasoning)
+            await emit_reasoning(sanitizer.feed(raw_reasoning))
+        content = delta.get("content")
+        if isinstance(content, str):
+            content_parts.append(content)
+            if stream_content:
+                clean_content = content_sanitizer.feed(content)
+                if clean_content:
+                    await callback("content", clean_content, False)
+        for raw_call in delta.get("tool_calls") or []:
+            if not isinstance(raw_call, dict):
+                continue
+            index = raw_call.get("index")
+            if not isinstance(index, int):
+                index = len(tool_states)
+            state = tool_states.setdefault(
+                index,
+                {"id": None, "type": "function", "name": None, "arguments": []},
+            )
+            if raw_call.get("id"):
+                state["id"] = str(raw_call["id"])
+            if raw_call.get("type"):
+                state["type"] = raw_call["type"]
+            function = raw_call.get("function") or {}
+            if isinstance(function, dict):
+                if function.get("name"):
+                    state["name"] = str(function["name"])
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    state["arguments"].append(arguments)
+        if choice.get("finish_reason") is not None:
+            finish_reason = choice["finish_reason"]
+
+    await emit_reasoning(sanitizer.finish())
+    if stream_content:
+        clean_content = content_sanitizer.finish()
+        if clean_content:
+            await callback("content", clean_content, False)
+    tool_calls = []
+    for index in sorted(tool_states):
+        state = tool_states[index]
+        if not state["name"]:
+            raise VisualChatProxyError("Main model stream returned a tool call without a function name")
+        tool_calls.append(
+            {
+                "id": state["id"] or f"call_{uuid.uuid4().hex[:24]}",
+                "index": index,
+                "type": "function",
+                "function": {
+                    "name": state["name"],
+                    "arguments": "".join(state["arguments"]),
+                },
+            }
+        )
+    if tool_calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
+    message_data: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+    }
+    reasoning = sanitize_reasoning("".join(reasoning_parts))
+    if reasoning:
+        message_data["reasoning"] = reasoning
+    if tool_calls:
+        message_data["tool_calls"] = tool_calls
+    return ChatCompletionResponse(
+        id=response_id,
+        created=created,
+        model=model,
+        choices=[
+            ChatCompletionResponseChoice(
+                index=0,
+                message=ChatMessage.model_validate(message_data),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=usage,
+    )
+
+
 async def _run_agent_choice(
     *,
     request_payload: dict[str, Any],
@@ -1394,8 +1776,10 @@ async def _run_agent_choice(
     trace_id: str,
     trace_recorder: VisualTraceRecorder,
     user_question_depends_on_visual_content: bool,
+    stream_callback: Optional[StreamEventCallback] = None,
 ) -> Union[tuple[ChatCompletionResponseChoice, UsageInfo], Response]:
     payload = copy.deepcopy(request_payload)
+    is_anthropic_request = raw_request.url.path.rstrip("/") == "/v1/messages"
     public_separate_reasoning = payload.get("separate_reasoning")
     # Internal turns must keep reasoning structured so builtin traces survive
     # across agent steps. Apply the caller's merge preference only at the
@@ -1406,6 +1790,8 @@ async def _run_agent_choice(
     payload["tools"] = list(external_tools)
     if builtin_enabled:
         payload["tools"].append(copy.deepcopy(BUILTIN_VISION_READER_TOOL))
+        if is_anthropic_request:
+            payload["messages"] = _add_anthropic_sequential_tool_instruction(payload["messages"])
 
     original_tool_choice = payload.get("tool_choice", "auto")
     if builtin_enabled and original_tool_choice == "none":
@@ -1414,7 +1800,7 @@ async def _run_agent_choice(
         payload["tools"] = [copy.deepcopy(BUILTIN_VISION_READER_TOOL)]
         payload["tool_choice"] = "auto"
 
-    payload["stream"] = False
+    payload["stream"] = stream_callback is not None
     payload["n"] = 1
     reasoning_context: list[str] = []
     aggregate_usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
@@ -1451,6 +1837,21 @@ async def _run_agent_choice(
                     error={"type": type(exc).__name__, "message": str(exc)},
                 )
             raise
+        if stream_callback is not None and isinstance(response, CustomStreamingResponse):
+            response = await _consume_main_model_stream(
+                response,
+                model=str(payload.get("model") or "default"),
+                callback=stream_callback,
+                separate_from_prior_reasoning=bool(reasoning_context),
+                stream_content=prior_builtin_evidence or successful_builtin_calls > 0,
+            )
+        elif stream_callback is not None and isinstance(response, ChatCompletionResponse) and response.choices:
+            # Keep test/custom handlers compatible while production uses the
+            # true streaming path returned by chat_completions_impl.
+            await stream_callback("ready", "1", False)
+            fallback_reasoning = _message_reasoning(response.choices[0].message)
+            if fallback_reasoning:
+                await stream_callback("reasoning", fallback_reasoning, bool(reasoning_context))
         if trace_recorder.enabled and isinstance(response, ChatCompletionResponse):
             trace_recorder.event(
                 "main_model_response",
@@ -1472,7 +1873,7 @@ async def _run_agent_choice(
             raise VisualChatProxyError("Main model returned no choices")
 
         choice = response.choices[0]
-        message = choice.message
+        message = _sanitize_model_message(choice.message)
         tool_calls = list(message.tool_calls or [])
         builtin_calls = []
         external_calls = []
@@ -1481,6 +1882,15 @@ async def _run_agent_choice(
                 builtin_calls.append(tool_call)
             else:
                 external_calls.append(tool_call)
+
+        if is_anthropic_request and builtin_calls and external_calls:
+            # Anthropic signs one assistant content-block sequence atomically.
+            # Executing only the server-owned call would make it impossible
+            # for the caller to return a complete matching tool_result turn.
+            raise VisualChatProxyError(
+                "Anthropic response mixed builtin and external tool calls; "
+                "response quarantined before tool execution."
+            )
 
         builtin_results: list[tuple[Any, str, str, str, str, str, bool]] = []
         for builtin_call_index, tool_call in enumerate(builtin_calls):
@@ -1559,21 +1969,25 @@ async def _run_agent_choice(
                 succeeded,
             ) in enumerate(builtin_results):
                 if succeeded:
-                    reasoning_context.append(
-                        _format_builtin_trace(
-                            runtime.settings.builtin_trace_format,
-                            image_label,
-                            task,
-                            trace_result,
-                            existing_reasoning,
-                            offset,
-                        )
+                    builtin_trace = _format_builtin_trace(
+                        runtime.settings.builtin_trace_format,
+                        image_label,
+                        task,
+                        trace_result,
+                        existing_reasoning,
+                        offset,
                     )
+                    if stream_callback is not None:
+                        await stream_callback("reasoning", builtin_trace, bool(existing_reasoning))
+                    reasoning_context.append(builtin_trace)
                 else:
                     # Invalid calls must remain visible, but they cannot form a
                     # replayable trace because image/task may be absent. Keep
                     # the error as ordinary reasoning and let the model retry.
-                    reasoning_context.append(_one_line_trace_text(result))
+                    invalid_trace = _one_line_trace_text(result)
+                    if stream_callback is not None:
+                        await stream_callback("reasoning", invalid_trace, bool(existing_reasoning))
+                    reasoning_context.append(invalid_trace)
                 existing_reasoning = "\n".join(reasoning_context)
                 if succeeded:
                     successful_builtin_calls += 1
@@ -1689,94 +2103,133 @@ async def _run_agent_choice(
     raise VisualChatProxyError(f"Visual agent loop exceeded max steps ({MAX_AGENT_STEPS})")
 
 
-def _stream_response(response: ChatCompletionResponse) -> CustomStreamingResponse:
+def _true_stream_response(
+    *,
+    request_payload: dict[str, Any],
+    registry: ImageRegistry,
+    raw_request: Request,
+    runtime: VisualProxyRuntime,
+    main_chat_handler: MainChatHandler,
+    trace_id: str,
+    trace_recorder: VisualTraceRecorder,
+    user_question_depends_on_visual_content: bool,
+    requested_n: int,
+) -> CustomStreamingResponse:
+    """Run the agent loop lazily and emit each safe reasoning delta immediately."""
+
+    response_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    model = str(request_payload.get("model") or "default")
+    separate_reasoning = request_payload.get("separate_reasoning") is not False
+
+    def encode_choice(index: int, delta: dict[str, Any], finish_reason: Optional[str] = None) -> str:
+        return "data: " + json.dumps(
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": index,
+                        "delta": delta,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ) + "\n\n"
+
     async def chunks():
-        base = {
-            "id": response.id,
-            "object": "chat.completion.chunk",
-            "created": response.created,
-            "model": response.model,
-        }
-        for choice in response.choices:
-            yield "data: " + json.dumps(
-                {
-                    **base,
-                    "choices": [
-                        {
-                            "index": choice.index,
-                            "delta": {"role": "assistant", "content": ""},
-                            "finish_reason": None,
-                        }
-                    ],
-                },
-                ensure_ascii=False,
-            ) + "\n\n"
-            message = choice.message
-            if message.reasoning:
-                yield "data: " + json.dumps(
-                    {
-                        **base,
-                        "choices": [
-                            {
-                                "index": choice.index,
-                                "delta": {"reasoning": message.reasoning},
-                                "finish_reason": None,
-                            }
-                        ],
-                    },
-                    ensure_ascii=False,
-                ) + "\n\n"
-            if message.content:
-                yield "data: " + json.dumps(
-                    {
-                        **base,
-                        "choices": [
-                            {
-                                "index": choice.index,
-                                "delta": {"content": message.content},
-                                "finish_reason": None,
-                            }
-                        ],
-                    },
-                    ensure_ascii=False,
-                ) + "\n\n"
-            if message.tool_calls:
-                streamed_calls = []
-                for index, call in enumerate(message.tool_calls):
-                    call_data = call.model_dump(exclude_none=True)
-                    call_data["index"] = call.index if call.index is not None else index
-                    streamed_calls.append(call_data)
-                yield "data: " + json.dumps(
-                    {
-                        **base,
-                        "choices": [
-                            {
-                                "index": choice.index,
-                                "delta": {"tool_calls": streamed_calls},
-                                "finish_reason": None,
-                            }
-                        ],
-                    },
-                    ensure_ascii=False,
-                ) + "\n\n"
-            yield "data: " + json.dumps(
-                {
-                    **base,
-                    "choices": [
-                        {
-                            "index": choice.index,
-                            "delta": {},
-                            "finish_reason": choice.finish_reason,
-                        }
-                    ],
-                },
-                ensure_ascii=False,
-            ) + "\n\n"
+        aggregate_usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
+        for index in range(requested_n):
+            queue: asyncio.Queue[tuple[str, str, bool]] = asyncio.Queue()
+
+            async def callback(kind: str, value: str, separate: bool) -> None:
+                if value:
+                    await queue.put((kind, value, separate))
+
+            async def run_choice_with_timeout():
+                try:
+                    return await asyncio.wait_for(
+                        _run_agent_choice(
+                            request_payload=request_payload,
+                            registry=registry,
+                            raw_request=raw_request,
+                            runtime=runtime,
+                            main_chat_handler=main_chat_handler,
+                            trace_id=f"{trace_id}-{index}",
+                            trace_recorder=trace_recorder,
+                            user_question_depends_on_visual_content=user_question_depends_on_visual_content,
+                            stream_callback=callback,
+                        ),
+                        timeout=runtime.settings.agent_timeout,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise VisualProxyTimeoutError("Visual agent loop timed out") from exc
+
+            task = asyncio.create_task(
+                run_choice_with_timeout()
+            )
+            try:
+                role_emitted = False
+                reasoning_started = False
+                streamed_content = ""
+                while not task.done() or not queue.empty():
+                    try:
+                        kind, value, separate = await asyncio.wait_for(queue.get(), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        continue
+                    if not role_emitted:
+                        yield encode_choice(index, {"role": "assistant", "content": ""})
+                        role_emitted = True
+                    if kind == "ready":
+                        continue
+                    if kind == "reasoning":
+                        if separate and reasoning_started:
+                            value = "\n" + value
+                        reasoning_started = True
+                        field = "reasoning" if separate_reasoning else "content"
+                        if field == "content":
+                            streamed_content += value
+                        yield encode_choice(index, {field: value})
+                    elif kind == "content":
+                        streamed_content += value
+                        yield encode_choice(index, {"content": value})
+                result = await task
+                if not role_emitted:
+                    yield encode_choice(index, {"role": "assistant", "content": ""})
+            finally:
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+            if isinstance(result, Response):
+                raise VisualChatProxyError(
+                    f"Main model returned HTTP response status {result.status_code} during visual streaming"
+                )
+            choice, usage = result
+            _usage_add(aggregate_usage, usage)
+            public_message = choice.message
+            remaining_content = public_message.content or ""
+            if streamed_content and remaining_content.startswith(streamed_content):
+                remaining_content = remaining_content[len(streamed_content) :]
+            if remaining_content:
+                yield encode_choice(index, {"content": remaining_content})
+            for call_index, call in enumerate(public_message.tool_calls or []):
+                call_data = call.model_dump(exclude_none=True)
+                call_data["index"] = call.index if call.index is not None else call_index
+                yield encode_choice(index, {"tool_calls": [call_data]})
+            yield encode_choice(index, {}, choice.finish_reason or "stop")
+
         yield "data: " + json.dumps(
             {
-                **base,
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
                 "choices": [],
-                "usage": response.usage.model_dump(exclude_none=True),
+                "usage": aggregate_usage.model_dump(exclude_none=True),
             },
             ensure_ascii=False,
         ) + "\n\n"
@@ -1842,6 +2295,19 @@ async def _visual_chat_completions_impl(
         requested_n,
     )
 
+    if request.stream:
+        return _true_stream_response(
+            request_payload=request_payload,
+            registry=registry,
+            raw_request=raw_request,
+            runtime=runtime,
+            main_chat_handler=main_chat_handler,
+            trace_id=trace_id,
+            trace_recorder=trace_recorder,
+            user_question_depends_on_visual_content=user_question_depends_on_visual_content,
+            requested_n=requested_n,
+        )
+
     async def run_choices() -> Union[tuple[list[ChatCompletionResponseChoice], UsageInfo], Response]:
         choices: list[ChatCompletionResponseChoice] = []
         aggregate_usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
@@ -1883,8 +2349,6 @@ async def _visual_chat_completions_impl(
             "proxy_final_response",
             response=response.model_dump(mode="json", exclude_none=True),
         )
-    if request.stream:
-        return _stream_response(response)
     return response
 
 
@@ -1917,6 +2381,9 @@ async def visual_chat_completions_impl(
         runtime.settings.trace_dump_dir,
         trace_request,
     )
+    request_slot = runtime.request_slot()
+    await request_slot.__aenter__()
+    deferred_stream = False
     try:
         response = await _visual_chat_completions_impl(
             request=request,
@@ -1926,6 +2393,48 @@ async def visual_chat_completions_impl(
             trace_id=trace_id,
             trace_recorder=recorder,
         )
+        if isinstance(response, CustomStreamingResponse):
+            original_iterator = response.body_iterator
+
+            async def traced_stream():
+                try:
+                    async for chunk in original_iterator:
+                        yield chunk
+                except ClientDisconnected as exc:
+                    if recorder.enabled:
+                        recorder.finish_error(exc, traceback.format_exc())
+                    return
+                except (GeneratorExit, asyncio.CancelledError) as exc:
+                    if recorder.enabled:
+                        recorder.finish_error(exc, traceback.format_exc())
+                    return
+                except BaseException as exc:
+                    if recorder.enabled:
+                        recorder.finish_error(exc, traceback.format_exc())
+                    logger.exception("Visual proxy stream failed after response start")
+                    error_data = json.dumps(
+                        {
+                            "error": {
+                                "message": str(exc),
+                                "type": "server_error",
+                                "code": "visual_proxy_stream_error",
+                            }
+                        },
+                        ensure_ascii=False,
+                    )
+                    yield f"data: {error_data}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                else:
+                    if recorder.enabled:
+                        recorder.finish_success({"stream": True, "completed": True})
+                finally:
+                    await recorder.flush()
+                    await request_slot.__aexit__(None, None, None)
+
+            response.body_iterator = traced_stream()
+            deferred_stream = True
+            return response
         if recorder.enabled:
             recorder.finish_success(_response_for_trace(response))
         return response
@@ -1934,4 +2443,6 @@ async def visual_chat_completions_impl(
             recorder.finish_error(exc, traceback.format_exc())
         raise
     finally:
-        await recorder.flush()
+        if not deferred_stream:
+            await recorder.flush()
+            await request_slot.__aexit__(None, None, None)
