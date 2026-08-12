@@ -90,6 +90,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 uri,
                 max_size=get_lightllm_websocket_max_message_size(),
                 max_queue=(2048 * 1024, 2048 * 1023),  # 关键修改
+                # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
+                ping_interval=None,
             ) as websocket:
 
                 sock = websocket.transport.get_extra_info("socket")
@@ -239,12 +241,34 @@ async def _pd_process_generate(
 
 # 转发token的task
 async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
+    max_message_size = get_lightllm_websocket_max_message_size()
+
     while True:
         handle_list = await forwarding_queue.wait_to_get_all_data()
 
         if handle_list:
             load_info: dict = _get_load_info()
-            await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
+            pending_handle_lists = [handle_list]
+            while pending_handle_lists:
+                token_list = pending_handle_lists.pop()
+                payload = pickle.dumps((ObjType.TOKEN_PACKS, token_list, load_info))
+                if len(payload) <= max_message_size:
+                    await websocket.send(payload)
+                    continue
+
+                if len(token_list) == 1:
+                    raise ValueError(
+                        f"single PD token pack is {len(payload)} bytes, exceeding websocket limit "
+                        f"{max_message_size}"
+                    )
+
+                split_index = len(token_list) // 2
+                logger.warning(
+                    f"PD token pack is {len(payload)} bytes with {len(token_list)} items, exceeding websocket "
+                    f"limit {max_message_size}; splitting it"
+                )
+                # 栈后进先出，先压后半段，保持 token 的原始发送顺序。
+                pending_handle_lists.extend((token_list[split_index:], token_list[:split_index]))
 
 
 async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
