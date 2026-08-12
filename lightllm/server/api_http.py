@@ -390,15 +390,14 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             runtime = g_objs.visual_proxy_runtime
             if runtime is None:
                 raise VisualChatProxyError("Visual proxy runtime is not initialized")
-            async with runtime.request_slot():
-                resp = await visual_chat_completions_impl(
-                    request=request,
-                    raw_request=raw_request,
-                    runtime=runtime,
-                    main_chat_handler=chat_completions_impl,
-                )
-                if isinstance(resp, ChatCompletionResponse):
-                    resp = JSONResponse(resp.model_dump(mode="json", exclude_none=True))
+            resp = await visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=chat_completions_impl,
+            )
+            if isinstance(resp, ChatCompletionResponse):
+                resp = JSONResponse(resp.model_dump(mode="json", exclude_none=True))
         else:
             resp = await chat_completions_impl(request, raw_request)
     except VisualProxyCapacityError as e:
