@@ -190,7 +190,7 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
         if "thinking" in chat_template_kwargs:
             return chat_template_kwargs["thinking"] is True
         if request.reasoning_effort is not None:
-            return request.reasoning_effort != "none"
+            return request.reasoning_effort not in {"none", "off", "disabled"}
         return True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
         # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
