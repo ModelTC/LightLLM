@@ -37,7 +37,7 @@ class CacheAwareConfig:
     # 前缀匹配成功率阈值：matched_char_count / input_char_count 超过该值才路由到命中节点。
     cache_threshold: float = 0.5
     # cache 命中节点的在途量超过最空闲节点该倍数时，优先选择最空闲节点。
-    balance_rel_threshold: float = 1.8
+    balance_rel_threshold: float = 1.5
     # 前缀树允许的最大节点数（不含 root）。
     max_node_count: int = 1_000_000
     # 每次 LRU 驱逐的叶节点数量。
