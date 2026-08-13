@@ -337,7 +337,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
         )
 
         async with self._run_reqs_count_lock:
-            self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
+            prev = self.run_reqs_count_mark.get_value()
+            self.run_reqs_count_mark.set_value(prev + 1)
+            if prev == 0:
+                self.latest_success_infer_time_mark.set_value(int(time.time()))
 
         try:
             # RL：进入 generation admission。若当前处于 pause_generation / abort，

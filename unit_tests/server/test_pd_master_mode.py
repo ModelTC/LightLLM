@@ -184,7 +184,7 @@ def test_pd_manager_without_connected_nodes_is_healthy():
     assert asyncio.run(manager.check_pd_nodes_health()) is True
 
 
-def test_prefill_registration_resets_all_dispatched_prompt_chars():
+def test_prefill_registration_preserves_existing_inflight_prompt_chars():
     args = StartArgs()
     manager = PDManager(args)
 
@@ -205,13 +205,15 @@ def test_prefill_registration_resets_all_dispatched_prompt_chars():
 
     register_prefill(1, "10.0.0.1:8000")
     manager.prefill_nodes[0].dispatched_prompt_chars = 1234
+    manager.prefill_nodes[0].dispatched_req_num = 12
 
     register_prefill(2, "10.0.0.2:8000")
 
-    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [0, 0]
+    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [1234, 0]
+    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [12, 0]
 
 
-def test_prefill_reconnection_resets_all_dispatched_prompt_chars():
+def test_prefill_reconnection_preserves_other_nodes_inflight_prompt_chars():
     args = StartArgs()
     manager = PDManager(args)
 
@@ -231,11 +233,14 @@ def test_prefill_reconnection_resets_all_dispatched_prompt_chars():
     manager.register_pd(pd_info(2, "10.0.0.2:8000"), websocket=object())
     manager.prefill_nodes[0].dispatched_prompt_chars = 100
     manager.prefill_nodes[1].dispatched_prompt_chars = 200
+    manager.prefill_nodes[0].dispatched_req_num = 1
+    manager.prefill_nodes[1].dispatched_req_num = 2
 
     manager.register_pd(pd_info(3, "10.0.0.2:8000"), websocket=object())
 
     assert [node.client_ip_port for node in manager.prefill_nodes] == ["10.0.0.1:8000", "10.0.0.2:8000"]
-    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [0, 0]
+    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 0]
+    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 0]
 
 
 def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):

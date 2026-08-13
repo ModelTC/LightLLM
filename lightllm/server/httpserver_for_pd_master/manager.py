@@ -129,7 +129,10 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
+        was_idle = self.running_request_count == 0
         self.running_request_count += 1
+        if was_idle:
+            self.latest_success_infer_time = time.time()
         try:
             async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
                 async for result in generator:
@@ -157,50 +160,86 @@ class HttpServerManagerForPDMaster:
             self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
         )
 
+        origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
+        origin_group_request_id = self.id_gen.generate_id()
+
+        # Record one user request even when it is expanded into multiple independent
+        # n=1 requests below. The externally visible ids remain in the same request
+        # group so OpenAI streaming can derive choice_index from the sub request id.
+        await self._log_req_header(request, origin_group_request_id)
+        self.metric_client.counter_inc("lightllm_request_count")
+        self.metric_client.histogram_observe("lightllm_request_max_new_tokens", origin_sampling_params.max_new_tokens)
+
+        choice_count = origin_sampling_params.n
+        generators = []
+        for choice_index in range(choice_count):
+            choice_sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
+            choice_sampling_params.n = 1
+            choice_sampling_params.best_of = 1
+            generators.append(
+                self._generate_one(
+                    prompt,
+                    choice_sampling_params,
+                    multimodal_params,
+                    request,
+                    start_time,
+                    origin_group_request_id + choice_index,
+                )
+            )
+
+        async for result in self._merge_choice_generators(generators):
+            yield result
+        self.metric_client.counter_inc("lightllm_request_success")
+        return
+
+    async def _generate_one(
+        self,
+        prompt: str,
+        origin_sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        start_time: float,
+        origin_request_id: int,
+    ):
         # 先将请求根据max_new_tokens 参数进行分块操作，主要是 pd 分离场景中，
         # 只能使用保守调度，但是如果用户都设置一个很大的 max_new_tokens 值，会
         # 导致极大显存预留，照成系统的吞吐能力下降，所以我们将请求分割成几段进行
         # 推理，只要保证分块合理，实际分段推理是极少发生的情况，系统吞吐就不会受
         # 到影响。
-        origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
-        origin_group_request_id = self.id_gen.generate_id()
         max_new_tokens_list = self._split_max_new_tokens(max_new_tokens=origin_sampling_params.max_new_tokens)
 
-        block_group_request_id = origin_group_request_id
+        block_group_request_id = origin_request_id
         p_node = None
         d_node = None
+        pending_prefill_load_chars = None
 
         try:
-            # 记录请求到达的相关信息
-            await self._log_req_header(request, origin_group_request_id)
-            # 监控
-            self.metric_client.counter_inc("lightllm_request_count")
-            self.metric_client.histogram_observe(
-                "lightllm_request_max_new_tokens", origin_sampling_params.max_new_tokens
-            )
-
             p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
+            if not p_node or not d_node:
+                logger.error(f"{origin_request_id}: No p_node or d_node found")
+                raise Exception(f"{origin_request_id}: No p_node or d_node found")
 
             history_gen_token_strs = []
-
-            if not p_node or not d_node:
-                logger.error(f"{origin_group_request_id}: No p_node or d_node found")
-                raise Exception(f"{origin_group_request_id}: No p_node or d_node found")
-
             origin_prompt_cache_len = None
 
             for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_group_request_id}")
+                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = block_max_new_tokens
 
+                # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
+                # prompt 更新该节点的在途 prefill 负载，不会重新选点。
+                block_prompt = prompt + "".join(history_gen_token_strs)
+                pending_prefill_load_chars = len(block_prompt)
+                p_node.dispatched_prompt_chars += pending_prefill_load_chars
+                p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
                     start_time,
-                    prompt + "".join(history_gen_token_strs),
+                    block_prompt,
                     sampling_params,
                     multimodal_params,
                     request,
@@ -210,23 +249,33 @@ class HttpServerManagerForPDMaster:
                 async for sub_req_id, request_output, metadata, finish_status in results_generator:
                     # pd 分离模式下，返回的 metadata 可能序号信息可能存在不准确性。
                     assert sub_req_id == block_group_request_id
-                    if finish_status.get_finish_reason() == "length" and (not is_last_block):
+                    if finish_status.is_finished_length() and not is_last_block:
                         finish_status = FinishStatus()  # 转换为NoFinished
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
                     if iter_index == 0 and origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                        prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
+                        self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
-                    yield origin_group_request_id, request_output, metadata, finish_status
+                    if pending_prefill_load_chars is not None:
+                        p_node.dispatched_prompt_chars = max(
+                            0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
+                        )
+                        p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
+                        pending_prefill_load_chars = None
+                    yield origin_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
+                if finish_status.is_finished():
+                    break
 
         except (ClientDisconnected, BaseException) as e:
             logger.error(f"has exception {str(e)}")
 
             if isinstance(e, ClientDisconnected):
-                logger.warning(f"group_request_id: {origin_group_request_id} {e.reason}")
+                logger.warning(f"group_request_id: {origin_request_id} {e.reason}")
 
             try:
                 await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
@@ -235,8 +284,43 @@ class HttpServerManagerForPDMaster:
             raise e
 
         finally:
+            if p_node is not None and pending_prefill_load_chars is not None:
+                p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - pending_prefill_load_chars)
+                p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
             await self.remove_req(block_group_request_id)
         return
+
+    async def _merge_choice_generators(self, generators):
+        """Merge independent n=1 PD generators into one multi-choice stream."""
+        result_queue = asyncio.Queue()
+        generator_done = object()
+
+        async def forward_results(generator):
+            try:
+                async with aclosing(generator):
+                    async for result in generator:
+                        await result_queue.put(result)
+
+                await result_queue.put(generator_done)
+            except BaseException as error:
+                await result_queue.put(error)
+
+        tasks = [asyncio.create_task(forward_results(generator)) for generator in generators]
+        remaining_generators = len(tasks)
+
+        try:
+            while remaining_generators:
+                result = await result_queue.get()
+                if result is generator_done:
+                    remaining_generators -= 1
+                elif isinstance(result, BaseException):
+                    raise result
+                else:
+                    yield result
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _wait_for_event_or_disconnect(
         self,
@@ -446,7 +530,6 @@ class HttpServerManagerForPDMaster:
         )
         self.metric_client.histogram_observe("lightllm_request_first_token_duration", first_token_cost_ms / 1000.0)
         self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
-        self.metric_client.counter_inc("lightllm_request_success")
         self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
         return
 
@@ -667,12 +750,6 @@ class PDManager:
         if pd_client.mode == "prefill":
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
-            # dispatched_prompt_chars is the cumulative counter used by the
-            # CacheAware policy to balance request dispatch across prefill nodes.
-            # Reset all counters together when a node registers or reconnects so
-            # stale history does not bias CacheAware toward the zero-valued node.
-            for prefill_node in self.prefill_nodes:
-                prefill_node.dispatched_prompt_chars = 0
         elif pd_client.mode == "decode":
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)

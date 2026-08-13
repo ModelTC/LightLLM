@@ -1,9 +1,3 @@
-# Hypercorn options that are not exposed directly by LightLLM's CLI.
 h2_max_concurrent_streams = 2147483647
 keep_alive_max_requests = 2147483647
-
-# LightLLM controls these options via --host/--port, --httpserver_workers,
-# and LIGHTLMM_GUNICORN_KEEP_ALIVE respectively:
-# bind = "0.0.0.0:9080"
-# workers = 8
-# keep_alive_timeout = 2147483647
+keep_alive_timeout = 2147483647

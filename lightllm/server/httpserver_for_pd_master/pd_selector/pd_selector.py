@@ -26,6 +26,10 @@ class PDSelector:
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         raise NotImplementedError("Subclass must implement this method")
 
+    def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
+        """记录推理侧返回的 prompt cache 命中率；非 cache-aware 策略无需处理。"""
+        return
+
 
 class RandomSelector(PDSelector):
     """随机选择器"""
@@ -87,12 +91,12 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
         d_node = self._importance_sampling(self.decode_nodes)
 
-        # 累计派发字符数，供后续 cache-aware 做派发均衡判断。
-        p_node.dispatched_prompt_chars += len(prompt)
-
         logger.info(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
             f"d_node={d_node.client_ip_port}"
         )
 
         return p_node, d_node
+
+    def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
+        self.policy.record_prompt_cache_hit_rate(cache_hit_rate)

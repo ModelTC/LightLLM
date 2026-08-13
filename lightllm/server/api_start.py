@@ -8,7 +8,6 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
@@ -149,16 +148,17 @@ def _launch_subprocesses(args: StartArgs):
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     if args.enable_ep_moe:
-        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
         for backend in args.llm_prefill_att_backend:
-            assert backend in allowed_ep_att_backends, (
+            assert backend in allowed_ep_prefill_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
-                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is not supported."
             )
+        allowed_ep_decode_att_backends = {"auto", "fa3", "triton"}
         for backend in args.llm_decode_att_backend:
-            assert backend in allowed_ep_att_backends, (
+            assert backend in allowed_ep_decode_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
-                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+                f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
             )
 
     # mtp params check
@@ -261,6 +261,12 @@ def _launch_subprocesses(args: StartArgs):
         dp_size_in_node = max(1, args.dp // args.nnodes)
         per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
         args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
+
+    if args.run_mode == "decode":
+        # PD Decode 节点只接收 prompt 末尾位置的 linear attention state，不具备
+        # 中间大页边界对应的 state。因此 Decode 节点必须使用默认值关闭大页功能，
+        # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
+        args.linear_att_page_block_num = 10000000
 
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
@@ -398,13 +404,19 @@ def _launch_subprocesses(args: StartArgs):
     return process_manager
 
 
+def _hypercorn_config_args(args: StartArgs):
+    if args.hypercorn_config is not None:
+        return ["--config", args.hypercorn_config]
+    return ["--keep-alive", "10"]
+
+
 def normal_or_p_d_start(args: StartArgs):
     process_manager = _launch_subprocesses(args)
 
     # 启动 Hypercorn
     command = [
         "hypercorn",
-        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
+        *_hypercorn_config_args(args),
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
@@ -416,8 +428,6 @@ def normal_or_p_d_start(args: StartArgs):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     # 启动子进程
@@ -469,7 +479,7 @@ def pd_master_start(args: StartArgs):
 
     command = [
         "hypercorn",
-        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
+        *_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
@@ -481,8 +491,6 @@ def pd_master_start(args: StartArgs):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     http_server_process = subprocess.Popen(command)
@@ -559,7 +567,7 @@ def config_server_start(args):
 
     command = [
         "hypercorn",
-        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
+        *_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
@@ -571,8 +579,6 @@ def config_server_start(args):
         "--error-logfile",
         "-",
         "lightllm.server.config_server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     http_server_process = subprocess.Popen(command)

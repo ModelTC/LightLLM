@@ -22,8 +22,10 @@ class Quantcfg:
     def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None):
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
-        self.expert_dtype = expert_dtype
-        self.network_config_ = network_config
+        self.start_args_expert_dtype = expert_dtype
+        self.config_expert_dtype = network_config.get("expert_dtype", None)
+        # Parse quant_cfg first so model config only fills missing per-layer fused_moe entries;
+        # an explicit startup argument is applied afterward and overrides every layer.
         self._parse_custom_cfg(custom_cfg_path)
         self._parse_network_config(network_config)
 
@@ -43,6 +45,7 @@ class Quantcfg:
             self.quantized_weight = False
             self.static_activation = False
             self.hf_quantization_config = None
+            self._mapping_expert_quant_method()
             return
         self.quantized_weight = True
         activation_scheme = network_config.get("activation_scheme", "dynamic")
@@ -50,6 +53,30 @@ class Quantcfg:
         self.hf_quantization_config = hf_quantization_config
         self.hf_quantization_method = hf_quantization_config["quant_method"]
         self._mapping_quant_method()
+
+    def _mapping_expert_quant_method(self):
+        expert_dtype = self.start_args_expert_dtype or self.config_expert_dtype
+        if expert_dtype is None:
+            return
+
+        target = self._get_expert_quant_type(expert_dtype)
+        for layer_num in range(self.layer_num):
+            layer_quant_cfg = self.quant_cfg[layer_num]
+            if self.start_args_expert_dtype is not None:
+                # 优先级 1：启动参数显式指定 expert_dtype，覆盖其他来源的配置。
+                layer_quant_cfg["fused_moe"] = target
+            elif "fused_moe" in layer_quant_cfg:
+                # 优先级 2：未指定启动参数时，保留 quant_cfg 中已有的逐层配置。
+                continue
+            else:
+                # 优先级 3：前两个来源均未指定时，使用 config.json 中的 expert_dtype。
+                layer_quant_cfg["fused_moe"] = target
+
+        source = "startup arguments" if self.start_args_expert_dtype is not None else "model config"
+        logger.info(
+            f"select fused_moe quant way from {source} expert_dtype=`{expert_dtype}`: {target}; "
+            "priority is startup arguments > quant_cfg > model config."
+        )
 
     def _mapping_quant_method(self):
         if self.hf_quantization_method == "fp8":
@@ -62,19 +89,8 @@ class Quantcfg:
                 else:
                     self.quant_type = "fp8w8a8-b128-vllm"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
+            self._mapping_expert_quant_method()
 
-            # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，
-            # 按其值给 fused_moe 选用对应的 deepgemm 量化方法。
-            expert_dtype = self.expert_dtype or self.network_config_.get("expert_dtype", None)
-            if expert_dtype is None:
-                return
-            target = self._get_expert_quant_type(expert_dtype)
-            for layer_num in range(self.layer_num):
-                if self.expert_dtype is not None:
-                    self.quant_cfg[layer_num]["fused_moe"] = target
-                else:
-                    self.quant_cfg[layer_num].setdefault("fused_moe", target)
-            logger.info(f"select fused_moe quant way from expert_dtype=`{expert_dtype}`: {target}")
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):

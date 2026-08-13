@@ -3,9 +3,13 @@ from .gdn import (
     LinearAttPrefillAttState,
     LinearAttDecodeAttState,
 )
+from .flashqla import FlashQlaLinearAttBackend
+from .triton import TritonLinearAttBackend
 
 __all__ = [
     "LinearAttBackend",
     "LinearAttPrefillAttState",
     "LinearAttDecodeAttState",
+    "FlashQlaLinearAttBackend",
+    "TritonLinearAttBackend",
 ]

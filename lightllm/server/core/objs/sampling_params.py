@@ -20,6 +20,7 @@ GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_L
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
+MAX_SEED = (1 << 63) - 1
 
 
 class StopSequence(ctypes.Structure):
@@ -344,7 +345,8 @@ class SamplingParams(ctypes.Structure):
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
-        self.seed = kwargs.get("seed", -1)
+        # ctypes silently wraps overflowing integers assigned to c_int64.
+        self.seed = self._normalize_and_verify_seed(kwargs.get("seed"))
         prompt_logprobs = kwargs.get("prompt_logprobs", None)
         self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
 
@@ -452,6 +454,13 @@ class SamplingParams(ctypes.Structure):
         self._verify_grammar_constraint()
 
         return
+
+    @staticmethod
+    def _normalize_and_verify_seed(seed: Optional[int]) -> int:
+        seed = -1 if seed is None else seed
+        if not -1 <= seed <= MAX_SEED:
+            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {seed}")
+        return seed
 
     def _verify_grammar_constraint(self):
         if self.guided_grammar.length != 0:

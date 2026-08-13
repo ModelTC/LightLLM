@@ -28,8 +28,9 @@ class Qwen3MOEModel(Qwen3TpPartModel):
         # Only initialize DeepEP group for MoE models with num_experts
         if "num_experts" in self.config and self.config["num_experts"] > 0:
             dist_group_manager.new_deepep_group(
-                self.config["num_experts"],
-                self.config["hidden_size"],
-                self.config.get("num_experts_per_tok", 1),
-                self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+                n_routed_experts=self.config["num_experts"],
+                hidden_size=self.config["hidden_size"],
+                expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
+                num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
+                moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
             )

@@ -1,11 +1,11 @@
 import dataclasses
 import torch
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
 from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
@@ -13,7 +13,9 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent impo
 from lightllm.common.basemodel.triton_kernel.linear_att.spec_state_params import (
     build_dynamic_spec_linear_att_state_params,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import fused_recurrent_gated_delta_rule
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
+    fused_recurrent_gated_delta_rule,
+)
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -22,10 +24,15 @@ if TYPE_CHECKING:
     from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerWeight
 
 
-class LinearAttBackend(BaseAttBackend):
+class LinearAttBackend(BaseAttBackend, ABC):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
+        self.prefill_kernel = self.get_prefill_kernel()
+
+    @abstractmethod
+    def get_prefill_kernel(self):
+        pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
 
@@ -54,13 +61,7 @@ class LinearAttBackend(BaseAttBackend):
 
         # SSM state dtype optimization
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        start_args = get_env_start_args()
-        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.linear_att_ssm_data_type, torch.bfloat16)
-
-        # Pre-compute whether dtype conversion is needed
-        # GDN kernel output dtype is self.data_type
-        # Conversion needed only if SSM state uses different dtype
-        self.needs_ssm_dtype_conversion = get_llm_data_type() != self.ssm_state_dtype
+        self.ssm_state_dtype = ssm_dtype_dict.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
         return
 
     def _split_qkvzba(self, mixed_qkvzba):
@@ -178,7 +179,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
         initial_state = ssm_states[self.b_ssm_buffer_idx]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
-        core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
+        core_attn_out, last_recurrent_state = backend.prefill_kernel(
             q=query,
             k=key,
             v=value,
@@ -187,13 +188,12 @@ class LinearAttPrefillAttState(BasePrefillAttState):
             initial_state=initial_state,
             output_final_state=True,
             cu_seqlens=infer_state.b1_cu_q_seq_len,
-            head_first=False,
             use_qk_l2norm_in_kernel=True,
         )
-        if backend.needs_ssm_dtype_conversion:
-            ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state.to(backend.ssm_state_dtype, copy=False)
-        else:
-            ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state
+        # The chunk kernel accumulates the recurrent state in float32 even when
+        # the state cache is configured as bfloat16. Advanced indexing does
+        # not perform an implicit dtype conversion for index_put.
+        ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
         return core_attn_out
 
 

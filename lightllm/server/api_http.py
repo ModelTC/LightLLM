@@ -37,7 +37,7 @@ from typing import AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
 from .multimodal_params import MultimodalParams
@@ -52,6 +52,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from dataclasses import asdict, dataclass, is_dataclass
 
+from .api_errors import create_error_response, create_server_busy_response
 from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
     ChatCompletionRequest,
@@ -153,22 +154,20 @@ class _AccessLogMiddleware:
 app.add_middleware(_AccessLogMiddleware)
 
 
-def create_error_response(
-    status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
-) -> JSONResponse:
-    if err_type is None:
-        if status_code.value >= 500:
-            err_type = "InternalServerError"
-        elif status_code == HTTPStatus.NOT_FOUND:
-            err_type = "NotFoundError"
-        else:
-            err_type = "BadRequestError"
+@app.exception_handler(ServerBusyError)
+async def server_busy_exception_handler(request: Request, exc: ServerBusyError) -> JSONResponse:
+    logger.warning(str(exc))
 
-    g_objs.metric_client.counter_inc("lightllm_request_failure")
-    return JSONResponse(
-        {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
-        status_code=status_code.value,
-    )
+    # Streaming responses can raise during their first body iteration, after
+    # the route handler has already returned. Preserve the Anthropic error
+    # envelope for that deferred failure path as well.
+    if request.url.path == "/v1/messages":
+        from .api_anthropic import _anthropic_error_response
+
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus(exc.status_code), str(exc))
+
+    return create_server_busy_response(exc)
 
 
 @app.get("/liveness")
@@ -294,8 +293,8 @@ async def generate(request: Request) -> Response:
     try:
         return await g_objs.g_generate_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
@@ -316,8 +315,8 @@ async def generate_stream(request: Request) -> Response:
     try:
         return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
@@ -337,6 +336,9 @@ async def get_score(request: Request) -> Response:
 
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -372,7 +374,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
         logger.warning(str(e))
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -392,7 +394,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
         logger.warning(str(e))
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -405,10 +407,14 @@ async def anthropic_messages(raw_request: Request) -> Response:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
-    from .api_anthropic import anthropic_messages_impl
+    from .api_anthropic import _anthropic_error_response, anthropic_messages_impl
 
     try:
         return await anthropic_messages_impl(raw_request)
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus(e.status_code), str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -425,8 +431,8 @@ async def openai_responses(raw_request: Request) -> Response:
     try:
         return await responses_impl(raw_request)
     except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        logger.warning(str(e))
+        return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:

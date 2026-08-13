@@ -159,7 +159,8 @@ class StartArgs:
     vit_quant_cfg: Optional[str] = field(default=None)
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     llm_prefill_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default_factory=lambda: ["auto"],
+        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla"]},
     )
     llm_decode_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}

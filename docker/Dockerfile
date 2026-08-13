@@ -7,9 +7,9 @@ ARG VLLM_VERSION=0.21.0
 ARG NIXL_REF=v1.2.0
 ARG FLASH_MLA_REF=47c35a7
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
-ARG DEEPEP_REF=099d5f2bad488b9c534ea785062b12f2e91d1d41
+ARG DEEPEP_REF=60d44037a702f651a6e18bd4aea65ed8409051c2
 ARG DEEPEP_NCCL_VERSION=2.30.4
-ARG DEEPEP_NVSHMEM_VERSION=3.3.24
+ARG FLASHQLA_VERSION=0.1.2
 ARG TARGETPLATFORM
 ARG ENABLE_DEEPEP=1
 ARG ENABLE_NIXL=1
@@ -58,6 +58,7 @@ RUN pip install --no-cache-dir \
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
     -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130
+RUN PIP_NO_INDEX=0 pip install --no-cache-dir "flash-qla==${FLASHQLA_VERSION}" -i https://pypi.org/simple
 RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cuda/targets/x86_64-linux/include${CPATH:+:${CPATH}} && \
     git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
     cd /root/FlashMLA && \
@@ -72,8 +73,8 @@ ENV CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/
 
 RUN if [ "${ENABLE_CACHE}" = "1" ]; then \
-      apt-get update && apt-get install -y libboost-dev && rm -rf /var/lib/apt/lists/*; \
-      LIGHTMEM_REF=5900baf92d85ef4dbda6124093506b0af906011a; \
+      apt-get update && apt-get install -y libboost-dev zlib1g-dev && rm -rf /var/lib/apt/lists/*; \
+      LIGHTMEM_REF=9f9817b0ec6ae7055dea0542a63f66de2685ed90; \
       pip install --no-deps -v "git+https://github.com/ModelTC/LightMem.git@${LIGHTMEM_REF}#egg=light_mem"; \
     fi
 
@@ -93,8 +94,7 @@ RUN if [ "${ENABLE_DEEPEP}" = "1" ]; then \
       set -e; \
       ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so; \
       python -m pip install --upgrade --no-deps \
-        "nvidia-nccl-cu13==${DEEPEP_NCCL_VERSION}" \
-        "nvidia-nvshmem-cu13==${DEEPEP_NVSHMEM_VERSION}"; \
+        "nvidia-nccl-cu13==${DEEPEP_NCCL_VERSION}"; \
       cd /root && git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout ${DEEPEP_REF}; \
       ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so; \
       ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so.2 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so; \
