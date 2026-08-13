@@ -121,7 +121,7 @@ class ReqSamplingParamsManager:
             dtype=torch.int64,
             device="cuda",
         )
-        self.req_to_next_token_probs = (
+        self.req_to_next_token_scores = (
             torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32)
             if get_env_start_args().mtp_dynamic_verify
             else None
@@ -143,9 +143,9 @@ class ReqSamplingParamsManager:
     def init_req_sampling_params(self, req: "InferReq"):
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
-        if self.req_to_next_token_probs is not None:
-            self.req_to_next_token_probs[req.req_idx].fill_(0.0)
-            self.req_to_next_token_probs[req.req_idx][0:1].fill_(1.0)
+        if self.req_to_next_token_scores is not None:
+            self.req_to_next_token_scores[req.req_idx].fill_(0.0)
+            self.req_to_next_token_scores[req.req_idx][0:1].fill_(1.0)
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
         self.req_to_frequency_penalty[req.req_idx].fill_(shm_param.frequency_penalty)
         self.req_to_repetition_penalty[req.req_idx].fill_(shm_param.repetition_penalty)

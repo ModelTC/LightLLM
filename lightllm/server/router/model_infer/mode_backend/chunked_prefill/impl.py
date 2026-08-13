@@ -2,6 +2,7 @@ import torch
 import time
 import torch.distributed as dist
 from typing import List
+from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -11,6 +12,7 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 )
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
@@ -206,7 +208,7 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             # mtp kv fill
             spec_engine = self.spec_engine
-            spec_engine.build_initial_draft_state(
+            spec_engine.build_draft_state_from_prefill(
                 target_model_input=model_input,
                 target_model_output=model_output,
                 next_token_ids=next_token_ids,
@@ -245,78 +247,136 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack: OverlapEventPack,
         decode_reqs: List[InferReq],
     ):
-        """Run the shared speculative draft-and-verify decode flow."""
+        """Run the speculative draft-and-verify decode flow."""
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         spec_engine = self.spec_engine
+        req_num = len(decode_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            spec_plan = spec_engine.plan_decode(model_input=model_input, req_num=len(decode_reqs))
+            spec_plan = spec_engine.plan_decode(model_input=model_input, decode_reqs=decode_reqs)
 
-            model_input, selected_row_mask = spec_engine.prepare_decode_model_input(
+            model_input, async_selected_row_mask_cpu = spec_engine.prepare_decode_model_input(
                 model_input=model_input,
-                req_num=len(decode_reqs),
+                req_num=req_num,
                 plan=spec_plan,
             )
-            selected_row_mask_cpu = spec_engine.async_copy_selected_row_mask(selected_row_mask)
 
             model_output = self.model.forward(model_input)
-
+            if async_selected_row_mask_cpu is not None:
+                async_selected_row_mask_cpu.wait()
+                run_reqs = spec_plan.filter_reqs(
+                    reqs=run_reqs,
+                    selected_row_mask_cpu=async_selected_row_mask_cpu.tensor,
+                )
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
                 self.eos_id,
-                selected_row_mask=selected_row_mask,
             )
             next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
-            spec_decode_state = spec_engine.run_decode_speculative_forward(
-                model_input=model_input,
-                model_output=model_output,
-                run_reqs=run_reqs,
-                req_num=len(decode_reqs),
-                plan=spec_plan,
-                selected_row_mask_cpu=selected_row_mask_cpu,
+            b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
+            mtp_accept_len, accepted_index = spec_engine.verify_tokens(
+                next_token_ids=next_token_ids,
+                b_req_idx=model_input.b_req_idx,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                b_mtp_index=model_input.b_mtp_index,
+            )
+            accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="accepted_index",
+                gpu_tensor=accepted_index,
+            )
+            mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="mtp_accept_len",
+                gpu_tensor=mtp_accept_len,
+            )
+
+            verify_event = torch.cuda.Event()
+            verify_event.record()
+
+            proposal = spec_engine.propose_next(
+                main_model_input=model_input,
+                main_model_output=model_output,
+                next_token_ids=next_token_ids,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                draft_step=spec_plan.draft_step,
+                accept_len=mtp_accept_len,
+            )
+            spec_engine.scatter_next_tokens(
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                all_next_token_ids=proposal.token_ids,
+                b_req_idx=model_input.b_req_idx,
+                spec_accept_len=mtp_accept_len,
+                schedule_scores=proposal.schedule_scores,
+            )
+
+            (
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+            ) = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids=next_token_ids,
                 next_token_logprobs=next_token_logprobs,
                 next_token_ranks=next_token_ranks,
-                copy_next_token_infos=self._async_copy_next_token_infos_to_pin_mem,
             )
+
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=model_input.b_req_idx,
+                next_token_ids=next_token_ids,
+                mask=accepted_index == 1,
+            )
+
+            sync_event = torch.cuda.Event()
+            sync_event.record()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        run_reqs, verify_ok_reqs = spec_engine.resolve_decode_pre_post_reqs(
-            state=spec_decode_state,
+        run_reqs, verify_ok_reqs = spec_engine.resolve_decode_reqs(
+            plan=spec_plan,
+            verify_event=verify_event,
+            run_reqs=run_reqs,
             decode_reqs=decode_reqs,
+            accepted_index_cpu=accepted_index_cpu,
         )
-        self._update_spec_verify_token_num(
-            decode_reqs=decode_reqs,
-            selected_run_reqs=run_reqs if self.enable_dynamic_spec else None,
-        )
+
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
-        spec_post_state = spec_engine.finish_decode_post(
-            state=spec_decode_state,
-            req_num=len(decode_reqs),
-        )
-        self._update_spec_accept_ratio(
-            decode_reqs=decode_reqs,
-            spec_accept_len_cpu=spec_post_state.spec_accept_len_cpu,
+        sync_event.synchronize()
+
+        spec_engine.update_planner_feedback(
+            plan=spec_plan,
+            proposal=proposal,
+            req_num=req_num,
+            accept_lengths_cpu=mtp_accept_len_cpu,
         )
 
+        spec_engine.record_request_spec_metrics(
+            decode_reqs=decode_reqs,
+            accept_lengths_cpu=mtp_accept_len_cpu,
+            verified_row_reqs=run_reqs if self.enable_dynamic_spec else None,
+        )
+
+        select_mask = accepted_index_cpu.to(dtype=torch.bool)
         self._post_handle(
             run_reqs=verify_ok_reqs,
-            next_token_ids=spec_post_state.next_token_ids,
-            next_token_logprobs=spec_post_state.next_token_logprobs,
-            next_token_ranks=spec_post_state.next_token_ranks,
+            next_token_ids=next_token_ids_cpu[select_mask],
+            next_token_logprobs=next_token_logprobs_cpu[select_mask],
+            next_token_ranks=next_token_ranks_cpu[select_mask],
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        if len(spec_post_state.need_free_mem_indexes) > 0:
-            g_infer_context.req_manager.mem_manager.free(spec_post_state.need_free_mem_indexes)
+        spec_engine.free_unused_decode_mem(
+            model_input=model_input,
+            selected_row_mask_cpu=(
+                async_selected_row_mask_cpu.tensor if async_selected_row_mask_cpu is not None else None
+            ),
+            accepted_index_cpu=accepted_index_cpu,
+            extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
+        )
 
         # 第四阶段
         event_pack.notify_pre_post_handle()

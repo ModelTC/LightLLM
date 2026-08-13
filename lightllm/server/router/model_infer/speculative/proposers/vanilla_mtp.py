@@ -19,7 +19,20 @@ class VanillaMTPProposer(BaseSpecProposer):
       draft forward
     """
 
-    def build_initial_draft_state(
+    def get_draft_steps(self):
+        return tuple(range(self.backend.max_draft_step + 1))
+
+    def get_draft_cost_ms(
+        self,
+        draft_infer_costs,
+        req_num: int,
+        verify_batch_size: int,
+        draft_step: int,
+    ) -> float:
+        # Each selected MTP module processes the complete target verify batch.
+        return draft_infer_costs.get(verify_batch_size) * draft_step
+
+    def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
@@ -31,7 +44,6 @@ class VanillaMTPProposer(BaseSpecProposer):
         source_model_output = target_model_output
         draft_next_token_ids = next_token_ids
         for draft_model in self.backend.draft_models:
-            assert source_model_output.spec_hidden is not None
             draft_model_input = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input,
                 b_next_token_ids=draft_next_token_ids,
@@ -40,7 +52,7 @@ class VanillaMTPProposer(BaseSpecProposer):
             source_model_output = draft_model.forward(draft_model_input)
             draft_next_token_ids = self.backend._gen_argmax_token_ids(source_model_output)
 
-    def build_initial_draft_state_overlap(
+    def build_draft_state_from_prefill_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
@@ -59,8 +71,6 @@ class VanillaMTPProposer(BaseSpecProposer):
         draft_next_token_ids1 = next_token_ids1
 
         for draft_model in self.backend.draft_models:
-            assert source_model_output0.spec_hidden is not None
-            assert source_model_output1.spec_hidden is not None
             draft_model_input0 = prepare_mtp_prefill_inputs(
                 model_input=draft_model_input0,
                 b_next_token_ids=draft_next_token_ids0,
@@ -87,12 +97,19 @@ class VanillaMTPProposer(BaseSpecProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        assert 0 <= draft_step <= self.backend.max_draft_step
         draft_model_input = main_model_input
         draft_next_token_ids = next_token_ids
         draft_hidden = main_model_output.spec_hidden if draft_step > 0 else None
         all_next_token_ids = [next_token_ids]
-        draft_probs = [] if self.enable_dynamic_spec else None
+        schedule_scores = (
+            torch.empty(
+                (next_token_ids.shape[0], draft_step),
+                dtype=torch.float32,
+                device=next_token_ids.device,
+            )
+            if self.enable_dynamic_spec
+            else None
+        )
 
         for step in range(draft_step):
             draft_model = self.backend.draft_models[step]
@@ -100,10 +117,9 @@ class VanillaMTPProposer(BaseSpecProposer):
             draft_model_input.mtp_draft_input_hiddens = draft_hidden
             draft_model_output = draft_model.forward(draft_model_input)
             draft_hidden = draft_model_output.spec_hidden
-            assert draft_hidden is not None
             if self.enable_dynamic_spec:
                 draft_next_token_ids, draft_prob = self.backend._gen_argmax_token_ids_and_prob(draft_model_output)
-                draft_probs.append(draft_prob)
+                schedule_scores[:, step] = draft_prob
             else:
                 draft_next_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
             all_next_token_ids.append(draft_next_token_ids)
@@ -111,5 +127,5 @@ class VanillaMTPProposer(BaseSpecProposer):
         return SpecProposal(
             token_ids=torch.stack(all_next_token_ids, dim=1),
             extra_mem_indexes_cpu=None,
-            draft_probs=draft_probs,
+            schedule_scores=schedule_scores,
         )

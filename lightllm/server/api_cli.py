@@ -761,8 +761,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--mtp_dynamic_verify",
         action="store_true",
-        help="""Compatibility switch for dynamic speculative scheduling.
-        DSpark enables this scheduling mode automatically.""",
+        help="""Enable dynamic speculative scheduling.""",
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",

@@ -52,7 +52,6 @@ class Qwen3EagleModel(LlamaTpPartModel):
         self.mem_manager = self.main_model.mem_manager
 
     def _init_weights(self, start_layer_index=None):
-        assert start_layer_index is None
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
         )
@@ -73,7 +72,6 @@ class Qwen3EagleModel(LlamaTpPartModel):
             self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
 
     def _init_infer_layer(self, start_layer_index=None):
-        assert start_layer_index is None
         total_pre_layers_num = len(self.main_model.layers_infer)
         total_pre_layers_num += sum(
             len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models

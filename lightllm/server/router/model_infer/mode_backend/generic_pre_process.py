@@ -229,10 +229,11 @@ def build_spec_shared_group_markers(b_mtp_index: torch.Tensor) -> torch.Tensor:
     # Each logical request starts at row index 0. Only the final row of each
     # speculative query group stores its group size; earlier rows store zero.
     max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
+    mtp_indexes = b_mtp_index.tolist()
     b_mark_shared_group = []
     group_start = 0
-    for group_end in range(1, len(b_mtp_index) + 1):
-        reaches_request_boundary = group_end == len(b_mtp_index) or b_mtp_index[group_end] == 0
+    for group_end in range(1, len(mtp_indexes) + 1):
+        reaches_request_boundary = group_end == len(mtp_indexes) or mtp_indexes[group_end] == 0
         reaches_size_limit = group_end - group_start == max_batch_shared_group_size
         if not reaches_request_boundary and not reaches_size_limit:
             continue
@@ -242,6 +243,6 @@ def build_spec_shared_group_markers(b_mtp_index: torch.Tensor) -> torch.Tensor:
         b_mark_shared_group.append(group_size)
         group_start = group_end
 
-    assert len(b_mark_shared_group) == len(b_mtp_index)
+    assert len(b_mark_shared_group) == len(mtp_indexes)
     b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
     return b_mark_shared_group

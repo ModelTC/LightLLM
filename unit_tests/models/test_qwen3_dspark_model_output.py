@@ -5,6 +5,7 @@ import torch
 
 from lightllm.common.basemodel import batch_objs
 from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
+from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dspark import model_output as dspark_model_output
 from lightllm.models.qwen3_dspark.layer_weights import pre_and_post_layer_weight as dspark_pre_post_weight
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
@@ -61,8 +62,16 @@ def test_dspark_no_ref_conversion_dispatches_to_dspark_fields(monkeypatch):
     assert all(converted != original for converted, original in zip(converted_ptrs, original_ptrs))
 
 
-def test_confidence_head_does_not_inherit_model_quantization(monkeypatch):
-    captured_kwargs = {}
+@pytest.mark.parametrize(
+    "head_config",
+    [
+        {"enable_confidence_head": True},
+        {"markov_rank": 4, "markov_head_type": "gated"},
+        {"markov_rank": 4, "markov_head_type": "rnn"},
+    ],
+)
+def test_biased_dspark_heads_do_not_inherit_model_quantization(monkeypatch, head_config):
+    captured_kwargs = []
 
     def init_base_weight(self, data_type, network_config, quant_cfg):
         self.data_type_ = data_type
@@ -70,28 +79,44 @@ def test_confidence_head_does_not_inherit_model_quantization(monkeypatch):
 
     class RecordingROWMMWeight:
         def __init__(self, **kwargs):
-            captured_kwargs.update(kwargs)
+            captured_kwargs.append(kwargs)
+
+    class StubWeight:
+        def __init__(self, **kwargs):
+            pass
 
     monkeypatch.setattr(
         dspark_pre_post_weight.Qwen3DFlashPreAndPostLayerWeight,
         "__init__",
         init_base_weight,
     )
+    monkeypatch.setattr(dspark_pre_post_weight, "EmbeddingWeight", StubWeight)
+    monkeypatch.setattr(dspark_pre_post_weight, "LMHeadWeight", StubWeight)
     monkeypatch.setattr(dspark_pre_post_weight, "ROWMMWeight", RecordingROWMMWeight)
 
     quant_method = object()
     quant_cfg = SimpleNamespace(get_quant_method=lambda *_: quant_method)
+    network_config = {
+        "hidden_size": 16,
+        "vocab_size": 32,
+        **head_config,
+    }
     dspark_pre_post_weight.Qwen3DSparkPreAndPostLayerWeight(
         data_type=torch.bfloat16,
-        network_config={
-            "hidden_size": 16,
-            "vocab_size": 32,
-            "enable_confidence_head": True,
-        },
+        network_config=network_config,
         quant_cfg=quant_cfg,
     )
 
-    assert captured_kwargs["quant_method"] is None
+    assert captured_kwargs
+    assert all(kwargs["quant_method"] is None for kwargs in captured_kwargs)
+
+
+def test_fixed_dspark_does_not_require_confidence_head(monkeypatch):
+    monkeypatch.setattr(Qwen3DFlashModel, "_verify_params", lambda self: None)
+    model = Qwen3DSparkModel.__new__(Qwen3DSparkModel)
+    model.config = {"enable_confidence_head": False}
+
+    model._verify_params()
 
 
 def test_qwen35_dspark_uses_training_rope_layout(monkeypatch):
@@ -170,5 +195,79 @@ def test_vanilla_markov_local_sampling_matches_full_logits():
         prev_token_ids = torch.argmax(base_logits[:, step_idx] + markov_bias, dim=-1)
         expected_tokens.append(prev_token_ids)
     expected_tokens = torch.stack(expected_tokens, dim=1)
+
+    torch.testing.assert_close(sampled_tokens, expected_tokens)
+
+
+def test_vanilla_markov_tp4_sampling_matches_full_logits(monkeypatch):
+    torch.manual_seed(0)
+    post_infer = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
+    post_infer.block_size_ = 3
+    post_infer.markov_rank_ = 4
+    post_infer.markov_head_type_ = "vanilla"
+    post_infer.tp_world_size_ = 4
+    post_infer.alloc_tensor = torch.empty
+
+    vocab_size = 11
+    request_count = 2
+    split_indexes = torch.linspace(0, vocab_size, post_infer.tp_world_size_ + 1, dtype=torch.int64)
+    tp_rank = 2
+    local_start = int(split_indexes[tp_rank])
+    local_end = int(split_indexes[tp_rank + 1])
+
+    base_logits = torch.randn(request_count, post_infer.block_size_, vocab_size)
+    markov_w1 = torch.randn(vocab_size, post_infer.markov_rank_)
+    markov_w2 = torch.randn(vocab_size, post_infer.markov_rank_)
+    anchor_token_ids = torch.tensor([1, 7])
+
+    class MarkovEmbedding:
+        weight = markov_w1
+
+    class MarkovLMHead:
+        weight = markov_w2[local_start:local_end]
+        tp_vocab_start_id = local_start
+
+    layer_weight = SimpleNamespace(
+        markov_w1_weight_=MarkovEmbedding(),
+        markov_w2_weight_=MarkovLMHead(),
+    )
+    local_logits = base_logits[:, :, local_start:local_end].reshape(-1, local_end - local_start).T.contiguous()
+
+    expected_tokens = []
+    prev_token_ids = anchor_token_ids
+    for step_idx in range(post_infer.block_size_):
+        scores = base_logits[:, step_idx] + torch.nn.functional.linear(markov_w1[prev_token_ids], markov_w2)
+        prev_token_ids = torch.argmax(scores, dim=-1)
+        expected_tokens.append(prev_token_ids)
+    expected_tokens = torch.stack(expected_tokens, dim=1)
+
+    step = 0
+
+    def gather_tp_winners(output, local_winners, group, async_op):
+        nonlocal step
+        prev_tokens = anchor_token_ids if step == 0 else expected_tokens[:, step - 1]
+        scores = base_logits[:, step] + torch.nn.functional.linear(markov_w1[prev_tokens], markov_w2)
+        winners = []
+        for rank in range(post_infer.tp_world_size_):
+            start = int(split_indexes[rank])
+            end = int(split_indexes[rank + 1])
+            values, indexes = scores[:, start:end].max(dim=-1)
+            winners.append(torch.stack((values, (indexes + start).float()), dim=-1))
+        torch.testing.assert_close(local_winners, winners[tp_rank])
+        output.copy_(torch.stack(winners).reshape_as(output))
+        step += 1
+
+    monkeypatch.setattr(
+        "lightllm.models.qwen3_dspark.layer_infer.post_layer_infer.all_gather_into_tensor",
+        gather_tp_winners,
+    )
+
+    sampled_tokens = post_infer._sample_markov(
+        local_logits=local_logits,
+        block_hidden=torch.empty(request_count, post_infer.block_size_, 0),
+        infer_state=SimpleNamespace(dist_group=None),
+        anchor_token_ids=anchor_token_ids,
+        layer_weight=layer_weight,
+    )
 
     torch.testing.assert_close(sampled_tokens, expected_tokens)

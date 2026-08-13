@@ -1,6 +1,5 @@
 import torch
-from typing import List, Tuple, Optional
-from lightllm.common.basemodel.triton_kernel.dynamic_spec_utils import trim_post_sample_tensors
+from typing import List, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
@@ -9,12 +8,7 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-def sample(
-    logits: torch.Tensor,
-    reqs: List[InferReq],
-    eos_id: List[int] = [2],
-    selected_row_mask: Optional[torch.Tensor] = None,
-):
+def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
     (
         b_req_idx,
         b_temperatures,
@@ -33,34 +27,6 @@ def sample(
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
-    if selected_row_mask is not None:
-        (
-            b_req_idx,
-            b_temperatures,
-            b_top_ps,
-            b_top_ks,
-            b_length_penalty_param,
-            b_mask_eos_reqs,
-        ) = trim_post_sample_tensors(
-            dynamic_batch_size=logits.shape[0],
-            selected_row_mask=selected_row_mask,
-            b_req_idx=b_req_idx,
-            b_temperatures=b_temperatures,
-            b_top_ps=b_top_ps,
-            b_top_ks=b_top_ks,
-            b_length_penalty_param=b_length_penalty_param,
-            b_mask_eos_reqs=b_mask_eos_reqs,
-        )
-        if (
-            has_invalid_token_ids
-            or exist_req_use_random_seed
-            or sampling_params_manager.penalty_counter_mode == "cpu_counter"
-        ):
-            reqs = _get_selected_reqs(reqs=reqs, selected_row_mask=selected_row_mask)
-        if has_invalid_token_ids:
-            invalid_token_ids, cu_invalid_token_num, has_invalid_token_ids = _get_invalid_token_tensors(reqs=reqs)
-        if exist_req_use_random_seed:
-            exist_req_use_random_seed = any(req.generator is not None for req in reqs)
 
     # 这里需要区分历史token的频率惩罚类的系数的生效模式，目前支持两种在线统计方式:
     # 一种是基于 cpu 的，每个 req 对象利用其上绑定的dict对象out_token_id_count，每生成一个token就进行相应
@@ -264,38 +230,4 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
-    )
-
-
-def _get_selected_reqs(reqs: List[InferReq], selected_row_mask: torch.Tensor):
-    selected_row_mask_cpu = selected_row_mask.detach().cpu().tolist()
-    return [req_obj for req_obj, selected in zip(reqs, selected_row_mask_cpu) if int(selected) != 0]
-
-
-def _get_invalid_token_tensors(reqs: List[InferReq]):
-    invalid_token_ids: List[int] = []
-    has_invalid_token_ids = False
-    cu_invalid_token_num = [0]
-    invalid_token_num_start = 0
-
-    for req_obj in reqs:
-        invalid_token_num_start += len(req_obj.sampling_param.invalid_token_ids)
-        cu_invalid_token_num.append(invalid_token_num_start)
-        if len(req_obj.sampling_param.invalid_token_ids) > 0:
-            has_invalid_token_ids = True
-            invalid_token_ids.extend(req_obj.sampling_param.invalid_token_ids)
-
-    if not has_invalid_token_ids:
-        return None, None, False
-
-    invalid_token_ids_cpu = g_pin_mem_manager.gen_from_list(
-        key="invalid_token_ids", data=invalid_token_ids, dtype=torch.int32
-    )
-    cu_invalid_token_num_cpu = g_pin_mem_manager.gen_from_list(
-        key="cu_invalid_token_num", data=cu_invalid_token_num, dtype=torch.int32
-    )
-    return (
-        invalid_token_ids_cpu.cuda(non_blocking=True),
-        cu_invalid_token_num_cpu.cuda(non_blocking=True),
-        True,
     )

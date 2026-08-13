@@ -22,21 +22,35 @@ class DFlashProposer(BaseSpecProposer):
       `SpecProposal.extra_mem_indexes_cpu`
     """
 
+    def get_draft_steps(self):
+        return (self.backend.max_draft_step,)
+
+    def get_draft_cost_ms(
+        self,
+        draft_infer_costs,
+        req_num: int,
+        verify_batch_size: int,
+        draft_step: int,
+    ) -> float:
+        block_size = self.backend.draft_models[0].block_size
+        # Block drafting first commits all verified rows, then generates one
+        # complete checkpoint-defined block for each request.
+        extend_cost_ms = draft_infer_costs.estimate(verify_batch_size)
+        block_cost_ms = draft_infer_costs.get(req_num * block_size)
+        return extend_cost_ms + block_cost_ms
+
     @torch.no_grad()
-    def build_initial_draft_state(
+    def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
         target_hidden = target_model_output.spec_hidden
-        assert target_hidden is not None
         if target_hidden.numel() == 0:
             return
 
         draft_model = self.backend.draft_models[0]
-        assert target_model_input.input_ids is not None
-        assert target_model_input.input_ids.shape[0] == target_hidden.shape[0]
         draft_input = copy.copy(target_model_input)
         # DFlash consumes target hidden states directly on this prefill path.
         draft_input.mtp_draft_input_hiddens = target_hidden
@@ -52,20 +66,15 @@ class DFlashProposer(BaseSpecProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        assert 0 <= draft_step <= self.backend.max_draft_step
-        assert accept_len is not None, "DFlash proposal requires target accept lengths"
-
         num_reqs = int(b_req_mtp_start_loc.shape[0])
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        assert accept_len.shape[0] == num_reqs
         token_ids = next_token_ids.new_full(
             (next_token_ids.shape[0], draft_step + 1),
             fill_value=1,
         )
         token_ids[:, 0] = next_token_ids
 
-        assert main_model_output is not None and main_model_output.spec_hidden is not None
         self.extend_draft_kv_cache(
             main_model_input=main_model_input,
             target_hidden=main_model_output.spec_hidden,
@@ -95,38 +104,27 @@ class DFlashProposer(BaseSpecProposer):
             flat_token_ids, flat_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_model_output)
         else:
             flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
-        assert flat_token_ids.numel() == num_reqs * block_size
         block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
-        # Standard DFlash has one leading bonus row; DeepSpec checkpoints do not.
-        bonus_rows = block_size - self.backend.max_draft_step
-        assert bonus_rows in (0, 1), (
-            f"DFlash block_size={block_size} must equal mtp_step={self.backend.max_draft_step} "
-            f"or mtp_step + 1={self.backend.max_draft_step + 1}"
-        )
-        token_ids[selected_rows, 1:] = block_token_ids[:, bonus_rows : bonus_rows + draft_step]
+        token_ids[selected_rows, 1:] = block_token_ids[:, :draft_step]
 
-        draft_probs = None
+        schedule_scores = None
         if self.enable_dynamic_spec:
             block_token_probs = flat_token_probs.reshape(num_reqs, block_size)
-            selected_token_probs = block_token_probs[:, bonus_rows : bonus_rows + draft_step]
-            draft_probs = [
-                self.scatter_selected_step_probs(
-                    selected_rows=selected_rows,
-                    selected_probs=selected_token_probs[:, step],
-                    verify_row_count=next_token_ids.shape[0],
-                )
-                for step in range(draft_step)
-            ]
+            selected_token_probs = block_token_probs[:, :draft_step]
+            schedule_scores = self.scatter_selected_step_probs(
+                selected_rows=selected_rows,
+                selected_probs=selected_token_probs,
+                verify_row_count=next_token_ids.shape[0],
+            )
         return SpecProposal(
             token_ids=token_ids,
             extra_mem_indexes_cpu=draft_mem_indexes_cpu,
-            draft_probs=draft_probs,
+            schedule_scores=schedule_scores,
         )
 
     def extend_draft_kv_cache(self, main_model_input: ModelInput, target_hidden: torch.Tensor) -> None:
         draft_model = self.backend.draft_models[0]
         batch_size = int(target_hidden.shape[0])
-        assert batch_size == main_model_input.b_req_idx.shape[0]
 
         draft_kv_input = copy.copy(main_model_input)
         draft_kv_input.batch_size = batch_size
@@ -156,7 +154,6 @@ class DFlashProposer(BaseSpecProposer):
             device=target_hidden.device,
         )
         draft_kv_input.b_position_delta = None
-        draft_kv_input.b_prefill_has_output_cpu = [False for _ in range(batch_size)]
         draft_kv_input.mtp_draft_input_hiddens = target_hidden
         draft_model.forward(draft_kv_input)
 
@@ -168,9 +165,7 @@ class DFlashProposer(BaseSpecProposer):
         num_reqs: int,
     ):
         draft_model = self.backend.draft_models[0]
-        num_reqs = int(num_reqs)
         block_size = int(draft_model.block_size)
-        assert selected_rows.shape[0] == num_reqs
         draft_mem_indexes_cpu = self.alloc_extra_mem_indexes(num_reqs * block_size)
 
         draft_input_ids = next_token_ids.new_full(
@@ -193,7 +188,6 @@ class DFlashProposer(BaseSpecProposer):
         draft_input.batch_size = draft_input.total_token_num
         draft_input.max_q_seq_len = 1
         draft_input.max_kv_seq_len = main_model_input.max_kv_seq_len + block_size
-        draft_input.max_cache_len = draft_input.max_kv_seq_len
         draft_input.draft_step = block_size - 1
         draft_input.b_req_idx = (
             main_model_input.b_req_idx.index_select(0, selected_rows).repeat_interleave(block_size).contiguous()

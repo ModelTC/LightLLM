@@ -20,10 +20,6 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
     post_layer_infer_class = Qwen3DSparkPostLayerInfer
     infer_state_class = Qwen3DSparkInferStateInfo
 
-    def _verify_params(self):
-        super()._verify_params()
-        assert self.config.get("enable_confidence_head", False), "DSpark requires enable_confidence_head=true"
-
     def _token_forward(self, infer_state: Qwen3DSparkInferStateInfo):
         model_output = super()._token_forward(infer_state)
         if infer_state.is_cuda_graph:
@@ -49,8 +45,6 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
             model_output.draft_token_ids = model_output.draft_token_ids[:origin_batch_size]
         if model_output.confidence_logits is not None:
             confidence_rows = model_output.confidence_logits.shape[0]
-            assert padded_batch_size % confidence_rows == 0
             rows_per_confidence = padded_batch_size // confidence_rows
-            assert origin_batch_size % rows_per_confidence == 0
             model_output.confidence_logits = model_output.confidence_logits[: origin_batch_size // rows_per_confidence]
         return model_output

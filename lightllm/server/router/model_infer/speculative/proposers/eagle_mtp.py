@@ -11,7 +11,23 @@ from lightllm.server.router.model_infer.speculative.proposers.base import BaseSp
 class RecurrentEagleMTPProposer(BaseSpecProposer):
     """Shared draft-state setup for recurrent Eagle MTP proposers."""
 
-    def build_initial_draft_state(
+    def get_draft_steps(self):
+        return tuple(range(1, self.backend.max_draft_step + 1))
+
+    def get_draft_cost_ms(
+        self,
+        draft_infer_costs,
+        req_num: int,
+        verify_batch_size: int,
+        draft_step: int,
+    ) -> float:
+        # The mandatory extend processes all verified rows and produces the
+        # first candidate. Later recurrent forwards process one row per request.
+        extend_cost_ms = draft_infer_costs.estimate(verify_batch_size)
+        decode_cost_ms = draft_infer_costs.get(req_num) * (draft_step - 1)
+        return extend_cost_ms + decode_cost_ms
+
+    def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
@@ -19,7 +35,6 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
     ) -> None:
         from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
 
-        assert target_model_output.spec_hidden is not None
         draft_model_input = prepare_mtp_prefill_inputs(
             model_input=target_model_input,
             b_next_token_ids=next_token_ids,
@@ -27,7 +42,7 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
         )
         self.backend.draft_models[0].forward(draft_model_input)
 
-    def build_initial_draft_state_overlap(
+    def build_draft_state_from_prefill_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
@@ -38,8 +53,6 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
     ) -> None:
         from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
 
-        assert target_model_output0.spec_hidden is not None
-        assert target_model_output1.spec_hidden is not None
         draft_model_input0 = prepare_mtp_prefill_inputs(
             model_input=target_model_input0,
             b_next_token_ids=next_token_ids0,
@@ -70,8 +83,6 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
     ) -> ModelInput:
         new_input = copy.copy(base_input)
         batch_size = int(input_ids.shape[0])
-        assert batch_size == int(draft_hidden.shape[0])
-        assert batch_size == int(base_input.b_seq_len.shape[0])
         new_input.is_prefill = True
         new_input.batch_size = batch_size
         new_input.total_token_num = batch_size
@@ -169,7 +180,6 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
         HOLD rows required to keep the two microbatches shape-compatible).
         """
 
-        assert 0 <= draft_step <= self.backend.max_draft_step
         verify_width = self.backend.max_draft_step + 1
         inputs = (main_model_input0, main_model_input1)
         outputs = (main_model_output0, main_model_output1)
@@ -184,13 +194,8 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
         for model_input, model_output, token_ids, real_rows, accept_len in zip(
             inputs, outputs, next_ids, real_verify_rows, accept_lens
         ):
-            assert model_output.spec_hidden is not None
-            assert model_input.batch_size % verify_width == 0
-            assert real_rows % verify_width == 0
-            assert token_ids.shape[0] == model_input.batch_size
             request_capacity = model_input.batch_size // verify_width
             real_request_num = real_rows // verify_width
-            assert accept_len.shape[0] == request_capacity
             starts = torch.arange(
                 0,
                 model_input.batch_size,
@@ -243,7 +248,6 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
             selected_output = ModelOutput(logits=extend_output.logits.index_select(0, selected))
             step_token_ids = self._gen_argmax_token_ids(selected_output)
             draft_next_token_ids.append(step_token_ids)
-            assert extend_output.spec_hidden is not None
             draft_hiddens.append(extend_output.spec_hidden.index_select(0, selected))
             selected_seq_lens.append(model_input.b_seq_len.index_select(0, selected) + 1)
             selected_req_idxs.append(model_input.b_req_idx.index_select(0, selected))
@@ -309,7 +313,6 @@ class RecurrentEagleMTPProposer(BaseSpecProposer):
                 step_token_ids = self._gen_argmax_token_ids(step_output)
                 draft_next_token_ids[index] = step_token_ids
                 draft_hiddens[index] = step_output.spec_hidden
-                assert draft_hiddens[index] is not None
                 selected_seq_lens[index] = selected_seq_lens[index] + 1
                 real_request_num = real_request_nums[index]
                 if real_request_num > 0:
@@ -329,6 +332,108 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
     hidden back into the same draft model.
     """
 
+    def propose_next_overlap(
+        self,
+        main_model_input0: ModelInput,
+        main_model_output0: ModelOutput,
+        next_token_ids0: torch.Tensor,
+        real_verify_rows0: int,
+        accept_len0: torch.Tensor,
+        main_model_input1: ModelInput,
+        main_model_output1: ModelOutput,
+        next_token_ids1: torch.Tensor,
+        real_verify_rows1: int,
+        accept_len1: torch.Tensor,
+        draft_step: int,
+    ) -> SpecProposal:
+        """Run the fixed-layout Eagle MTP decode for two DP microbatches.
+
+        DPEP overlap requires every rank to keep the target verify layout
+        throughout draft decode.  Each logical request therefore remains a
+        contiguous group of ``draft_step + 1`` rows; accepted rows are not
+        compacted into a one-row recurrent batch on this path.
+        """
+
+        verify_width = self.backend.max_draft_step + 1
+        model_inputs = (main_model_input0, main_model_input1)
+        real_verify_rows = (int(real_verify_rows0), int(real_verify_rows1))
+        real_request_nums = tuple(row_count // verify_width for row_count in real_verify_rows)
+        request_capacities = tuple(model_input.batch_size // verify_width for model_input in model_inputs)
+        total_real_requests = sum(real_request_nums)
+
+        token_id_steps = [
+            torch.cat(
+                [
+                    next_token_ids0[:real_verify_rows0],
+                    next_token_ids1[:real_verify_rows1],
+                ],
+                dim=0,
+            )
+        ]
+        if draft_step == 0:
+            return SpecProposal(
+                token_ids=token_id_steps[0].unsqueeze(1),
+                extra_mem_indexes_cpu=None,
+            )
+
+        extra_mem_indexes_cpu = self.alloc_extra_mem_indexes(total_real_requests * draft_step)
+        extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids0.device, non_blocking=True)
+        split = real_request_nums[0] * draft_step
+        microbatch_mem_indexes = (
+            extra_mem_indexes[:split],
+            extra_mem_indexes[split:],
+        )
+
+        draft_token_ids = [next_token_ids0, next_token_ids1]
+        draft_hiddens = [main_model_output0.spec_hidden, main_model_output1.spec_hidden]
+        draft_model = self.backend.draft_models[0]
+        hold_mem_index = self.backend.model.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX
+
+        for step in range(draft_step):
+            for index, model_input in enumerate(model_inputs):
+                model_input.input_ids = draft_token_ids[index]
+                model_input.mtp_draft_input_hiddens = draft_hiddens[index]
+
+            draft_outputs = draft_model.microbatch_overlap_decode(*model_inputs)
+
+            for index, (model_input, draft_output) in enumerate(zip(model_inputs, draft_outputs)):
+                model_input.b_seq_len += 1
+                model_input.max_kv_seq_len += 1
+
+                real_request_num = real_request_nums[index]
+                mem_start = step * real_request_num
+                step_mem_indexes = microbatch_mem_indexes[index][mem_start : mem_start + real_request_num]
+                step_mem_indexes = self._pad_step_mem_indexes(
+                    real_mem_indexes=step_mem_indexes,
+                    request_capacity=request_capacities[index],
+                    hold_mem_index=hold_mem_index,
+                )
+                model_input.mem_indexes = torch.cat(
+                    [
+                        model_input.mem_indexes.view(-1, verify_width)[:, 1:],
+                        step_mem_indexes.view(-1, 1),
+                    ],
+                    dim=1,
+                ).view(-1)
+
+                draft_token_ids[index] = self._gen_argmax_token_ids(draft_output)
+                draft_hiddens[index] = draft_output.spec_hidden
+
+            token_id_steps.append(
+                torch.cat(
+                    [
+                        draft_token_ids[0][:real_verify_rows0],
+                        draft_token_ids[1][:real_verify_rows1],
+                    ],
+                    dim=0,
+                )
+            )
+
+        return SpecProposal(
+            token_ids=torch.stack(token_id_steps, dim=1),
+            extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+        )
+
     def propose_next(
         self,
         main_model_input: ModelInput,
@@ -338,9 +443,6 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        assert 0 <= draft_step <= self.backend.max_draft_step
-        assert accept_len is not None
-        assert main_model_output is not None and main_model_output.spec_hidden is not None
         verify_row_count = int(next_token_ids.shape[0])
         num_reqs = int(b_req_mtp_start_loc.shape[0])
         selected_rows = self.select_accepted_tail_rows(
@@ -352,7 +454,15 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
             fill_value=1,
         )
         proposal_token_ids[:, 0].copy_(next_token_ids)
-        draft_probs = [] if self.enable_dynamic_spec else None
+        schedule_scores = (
+            torch.zeros(
+                (verify_row_count, draft_step),
+                dtype=torch.float32,
+                device=next_token_ids.device,
+            )
+            if self.enable_dynamic_spec
+            else None
+        )
 
         draft_model = self.backend.draft_models[0]
         extend_input = self.make_verify_extend_input(
@@ -366,31 +476,28 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
             return SpecProposal(
                 token_ids=proposal_token_ids,
                 extra_mem_indexes_cpu=None,
-                draft_probs=draft_probs,
+                schedule_scores=schedule_scores,
             )
 
         selected_logits = extend_output.logits.index_select(0, selected_rows)
         selected_output = ModelOutput(logits=selected_logits)
         if self.enable_dynamic_spec:
             draft_next_token_ids, selected_prob = self._gen_argmax_token_ids_and_prob(selected_output)
-            draft_probs.append(
-                self.scatter_selected_step_probs(
-                    selected_rows=selected_rows,
-                    selected_probs=selected_prob,
-                    verify_row_count=verify_row_count,
-                )
+            schedule_scores[:, 0] = self.scatter_selected_step_probs(
+                selected_rows=selected_rows,
+                selected_probs=selected_prob,
+                verify_row_count=verify_row_count,
             )
         else:
             draft_next_token_ids = self._gen_argmax_token_ids(selected_output)
         proposal_token_ids[selected_rows, 1] = draft_next_token_ids
-        assert extend_output.spec_hidden is not None
         draft_hidden = extend_output.spec_hidden.index_select(0, selected_rows)
 
         if draft_step == 1:
             return SpecProposal(
                 token_ids=proposal_token_ids,
                 extra_mem_indexes_cpu=None,
-                draft_probs=draft_probs,
+                schedule_scores=schedule_scores,
             )
 
         eagle_mem_indexes_cpu = self.alloc_extra_mem_indexes(num_reqs * (draft_step - 1))
@@ -422,22 +529,19 @@ class EagleMTPProposer(RecurrentEagleMTPProposer):
             draft_output = draft_model.forward(draft_input)
             if self.enable_dynamic_spec:
                 draft_next_token_ids, selected_prob = self._gen_argmax_token_ids_and_prob(draft_output)
-                draft_probs.append(
-                    self.scatter_selected_step_probs(
-                        selected_rows=selected_rows,
-                        selected_probs=selected_prob,
-                        verify_row_count=verify_row_count,
-                    )
+                schedule_scores[:, step] = self.scatter_selected_step_probs(
+                    selected_rows=selected_rows,
+                    selected_probs=selected_prob,
+                    verify_row_count=verify_row_count,
                 )
             else:
                 draft_next_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids[selected_rows, step + 1] = draft_next_token_ids
             draft_hidden = draft_output.spec_hidden
-            assert draft_hidden is not None
             selected_seq_len = selected_seq_len + 1
 
         return SpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=eagle_mem_indexes_cpu,
-            draft_probs=draft_probs,
+            schedule_scores=schedule_scores,
         )

@@ -33,6 +33,17 @@ class _RecordingSpecEngine:
         self.scatter_args = kwargs
 
 
+def test_padded_token_ids_support_empty_dp_rank():
+    padded_token_ids = DPChunkedPrefillBackend._build_padded_next_token_ids(
+        token_ids=None,
+        batch_size=4,
+        copy_len=0,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.equal(padded_token_ids, torch.zeros(4, dtype=torch.int64))
+
+
 def test_dp_eagle_uses_common_extend_then_unit_decode_proposer():
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.max_draft_step = 7
@@ -64,7 +75,7 @@ def test_dp_eagle_uses_common_extend_then_unit_decode_proposer():
     assert torch.equal(extra_mem, torch.tensor([123], dtype=torch.int32))
 
 
-def test_dp_overlap_eagle_keeps_target_padding_out_of_recurrent_decode():
+def test_dp_overlap_eagle_passes_both_fixed_verify_layouts_to_proposer():
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.max_draft_step = 7
     backend.spec_engine = _RecordingSpecEngine()

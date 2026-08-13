@@ -163,7 +163,7 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
         draft_models=[draft_model],
         _gen_argmax_token_ids_and_prob=lambda _: (flat_token_ids, flat_token_probs),
     )
-    proposer = DFlashProposer(SimpleNamespace(backend=backend, enable_dynamic_spec=True))
+    proposer = DFlashProposer(backend=backend, enable_dynamic_spec=True)
     proposer.extend_draft_kv_cache = lambda **_: None
     proposer.select_accepted_tail_rows = lambda **_: selected_rows
     proposer.build_block_draft_input = lambda **_: (SimpleNamespace(), torch.tensor([10, 11]))
@@ -177,13 +177,14 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
         accept_len=torch.tensor([1, 1]),
     )
 
-    expected_blocks = flat_token_ids.reshape(2, block_size)[:, 1:3]
+    expected_blocks = flat_token_ids.reshape(2, block_size)[:, :2]
     torch.testing.assert_close(proposal.token_ids[selected_rows, 1:], expected_blocks)
-    assert len(proposal.draft_probs) == 2
-    for step, probs in enumerate(proposal.draft_probs):
-        expected_probs = torch.zeros(verify_row_count)
-        expected_probs[selected_rows] = flat_token_probs.reshape(2, block_size)[:, step + 1]
-        torch.testing.assert_close(probs, expected_probs)
+    assert proposal.schedule_scores.shape == (verify_row_count, 2)
+    for step in range(2):
+        scores = proposal.schedule_scores[:, step]
+        expected_scores = torch.zeros(verify_row_count)
+        expected_scores[selected_rows] = flat_token_probs.reshape(2, block_size)[:, step]
+        torch.testing.assert_close(scores, expected_scores)
 
 
 def test_hidden_collector_reads_target_layer_ids(monkeypatch):

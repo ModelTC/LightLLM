@@ -1,72 +1,65 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 if TYPE_CHECKING:
-    from lightllm.server.router.model_infer.speculative.engine import SpecEngine
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
 @dataclass
 class SpecProposal:
-    """Draft proposal returned by a proposer.
+    """Candidate tokens and scheduling metadata produced by a proposer.
 
-    `token_ids` is the LightLLM service equivalent of DeepSpec's
-    DraftProposal.verify_input_ids.  It contains the target model's freshly
-    sampled token in column 0, followed by draft candidates:
-
-        token_ids: [verify_batch, draft_step + 1]
-
-    With fixed scheduling, `draft_step == backend.max_draft_step`. Dynamic speculative
-    scheduling may make it shorter, and the engine pads before scatter.
-
-    `draft_probs` is intentionally narrower than DeepSpec's full
-    [B, K, vocab] probability tensor. The current dynamic scheduler only needs
-    the selected-token probability from each draft step:
-
-        draft_probs[i]: [verify_batch]
-
-    `schedule_probs` optionally overrides `draft_probs` for dynamic verify
-    row selection.  It can be a list of per-step vectors or a dense
-    [verify_batch, draft_step] matrix.  DSpark uses confidence-head conditional
-    acceptance probabilities here; the engine scatters them into the same
-    per-request buffer and the dynamic selector converts them to prefix
-    survival probabilities.
-
-    `extra_mem_indexes_cpu` records draft-only KV slots allocated by recurrent
-    or block proposers.  Eagle3 uses these slots for recurrent draft tokens;
-    DFlash uses them for current-block scratch query/mask K/V:
-
-        extra_mem_indexes_cpu: [slot_count]
-
+    `token_ids` has shape `[verify_batch, draft_step + 1]`; column 0 contains
+    target-model tokens and the remaining columns contain draft candidates.
+    `schedule_scores`, when present, has shape `[verify_batch, draft_step]`.
+    Each column contains the proposer-specific score used by dynamic scheduling:
+    selected-token probability for standard proposers, or confidence-head
+    probability for DSpark.
+    `schedule_scores_cpu` is the asynchronous CPU copy consumed by planners
+    that use proposal scores directly.
+    `extra_mem_indexes_cpu` tracks temporary KV slots owned by the proposal.
     """
 
     token_ids: torch.Tensor
     extra_mem_indexes_cpu: Optional[torch.Tensor]
-    draft_probs: Optional[List[torch.Tensor]] = None
-    schedule_probs: Optional[Union[List[torch.Tensor], torch.Tensor]] = None
+    schedule_scores: Optional[torch.Tensor] = None
+    schedule_scores_cpu: Optional[torch.Tensor] = None
 
 
 class BaseSpecProposer:
     """Base class for algorithm-specific draft proposal generation.
 
-    A proposer owns the draft-side state transition.  The target model gives it
+    A proposer owns the draft-side state transition. The target model gives it
     the current target token ids plus captured target hidden features through
-    SpecEngine.prepare_draft_* methods.  The proposer returns candidate ids
+    the prefill-state and proposal hooks. The proposer returns candidate ids
     but does not verify acceptance; verification is handled by SpecEngine.
     """
 
-    def __init__(self, engine: "SpecEngine") -> None:
-        self.engine = engine
-        self.backend = engine.backend
+    def __init__(self, *, backend: "ModeBackend", enable_dynamic_spec: bool) -> None:
+        self.backend = backend
+        self.enable_dynamic_spec = bool(enable_dynamic_spec)
 
-    @property
-    def enable_dynamic_spec(self) -> bool:
-        return self.engine.enable_dynamic_spec
+    def get_draft_steps(self) -> Tuple[int, ...]:
+        """Return the draft configurations supported by this proposer."""
+
+        raise NotImplementedError
+
+    def get_draft_cost_ms(
+        self,
+        draft_infer_costs,
+        req_num: int,
+        verify_batch_size: int,
+        draft_step: int,
+    ) -> float:
+        """Return the complete draft cost for one ``(N, B, d)`` configuration."""
+
+        raise NotImplementedError
 
     def select_accepted_tail_rows(self, b_req_mtp_start_loc: torch.Tensor, accept_len: torch.Tensor) -> torch.Tensor:
         return (b_req_mtp_start_loc + accept_len - 1).to(torch.long)
@@ -88,15 +81,23 @@ class BaseSpecProposer:
     def alloc_extra_mem_indexes(self, token_count: int) -> torch.Tensor:
         """Allocate draft-owned temporary KV slots."""
 
-        return self.engine.alloc_extra_mem_indexes(token_count)
+        token_count = int(token_count)
+        if token_count == 0:
+            return torch.empty((0,), dtype=torch.int32, device="cpu")
 
-    def build_initial_draft_state(
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_count)
+        return g_infer_context.req_manager.mem_manager.alloc(token_count)
+
+    def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        """Build initial draft KV/state before the first decode verify step.
+        """Build draft KV/state from target prefill before the first decode verify.
 
         Inputs:
         - `target_model_input`: target prompt ModelInput. Its request order and
@@ -113,7 +114,7 @@ class BaseSpecProposer:
 
         raise NotImplementedError
 
-    def build_initial_draft_state_overlap(
+    def build_draft_state_from_prefill_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
@@ -122,7 +123,7 @@ class BaseSpecProposer:
         target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
-        """Build initial draft state for two overlapped prefill microbatches."""
+        """Build draft state from two overlapped target-prefill microbatches."""
 
         raise NotImplementedError
 

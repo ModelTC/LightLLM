@@ -1,5 +1,4 @@
 import os
-from collections import Counter
 
 import numpy as np
 import torch
@@ -325,7 +324,9 @@ class ModeBackend:
 
         for i in range(draft_model_count):
             draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
-            if is_chained_draft:
+            if is_chained_draft or (
+                self.enable_decode_microbatch_overlap and spec_mode in ("eagle_with_att", "eagle_no_att")
+            ):
                 draft_decode_batch_multiplier = self.max_draft_step + 1
             elif spec_mode in ("dspark", "dflash"):
                 block_size = int(draft_model_cfg["block_size"])
@@ -814,9 +815,9 @@ class ModeBackend:
     def _post_handle(
         self,
         run_reqs: List[InferReq],
-        next_token_ids: List[int],
-        next_token_logprobs: List[float],
-        next_token_ranks: List[int],
+        next_token_ids: torch.Tensor,
+        next_token_logprobs: torch.Tensor,
+        next_token_ranks: torch.Tensor,
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
@@ -825,6 +826,10 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
+        next_token_ids = next_token_ids.tolist()
+        next_token_logprobs = next_token_logprobs.tolist()
+        next_token_ranks = next_token_ranks.tolist()
+
         for req_obj, next_token_id, next_token_logprob, next_token_rank, pack in zip(
             run_reqs, next_token_ids, next_token_logprobs, next_token_ranks, run_reqs_update_packs
         ):
@@ -854,36 +859,6 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _trans_req_ids_to_req_objs(self, req_ids: List[int]) -> List[InferReq]:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
-
-    def _update_spec_accept_ratio(
-        self,
-        decode_reqs: List[InferReq],
-        spec_accept_len_cpu: torch.Tensor,
-    ):
-        if self.is_master_in_dp:
-            for req, accept_len in zip(decode_reqs, spec_accept_len_cpu):
-                req.update_spec_accepted_token_num(accept_token_num=accept_len - 1)
-
-        return
-
-    def _update_spec_verify_token_num(
-        self, decode_reqs: List[InferReq], selected_run_reqs: Optional[List[InferReq]] = None
-    ):
-        if not self.is_master_in_dp:
-            return
-
-        if selected_run_reqs is None:
-            for req in decode_reqs:
-                req.update_spec_verify_token_num(verify_token_num=req.mtp_step + 1)
-                req.update_spec_verify_step_num(verify_step_num=1)
-            return
-
-        verify_rows_by_req = Counter(req.req_idx for req in selected_run_reqs)
-        for req in decode_reqs:
-            verify_token_num = verify_rows_by_req[req.req_idx]
-            if verify_token_num > 0:
-                req.update_spec_verify_token_num(verify_token_num=verify_token_num)
-                req.update_spec_verify_step_num(verify_step_num=1)
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits

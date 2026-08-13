@@ -59,7 +59,6 @@ class Qwen3DFlashModel(LlamaTpPartModel):
             raise NotImplementedError("Qwen3 DFlash decode requires FA3")
 
     def _init_infer_layer(self, start_layer_index=None):
-        assert start_layer_index is None
         self.draft_layer_start = len(self.main_model.layers_infer)
         self.draft_layer_start += sum(
             len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models
@@ -67,7 +66,6 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         super()._init_infer_layer(start_layer_index=self.draft_layer_start)
 
     def _init_weights(self, start_layer_index=None):
-        assert start_layer_index is None
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type,
             network_config=self.config,

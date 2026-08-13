@@ -98,15 +98,16 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     req_to_next_token_ids_stride,
     all_next_token_ids,
     all_next_token_ids_stride,
-    req_to_next_token_probs,
-    req_to_next_token_probs_stride,
-    all_next_token_probs,
-    all_next_token_probs_stride,
+    req_to_next_token_scores,
+    req_to_next_token_scores_stride,
+    schedule_scores,
+    schedule_scores_stride,
     spec_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
-    mtp_step,
-    HAS_NEXT_TOKEN_PROBS: tl.constexpr,
+    proposal_width,
+    verify_width,
+    HAS_NEXT_TOKEN_SCORES: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
 
@@ -115,27 +116,32 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     accept_len = tl.load(spec_accept_len + cur_index)
     cur_req_idx = tl.load(b_req_idx + req_start_loc)
     offset = tl.arange(0, BLOCK_SIZE)
+    selected_row = req_start_loc + accept_len - 1
 
-    if HAS_NEXT_TOKEN_PROBS:
-        cur_next_token_probs = tl.load(
-            all_next_token_probs + (req_start_loc + accept_len - 1) * all_next_token_probs_stride + offset,
-            mask=offset < mtp_step,
+    if HAS_NEXT_TOKEN_SCORES:
+        # schedule_scores omits the guaranteed target column. Insert its 1.0
+        # here and clear the unused tail of the fixed-width request buffer.
+        schedule_offset = tl.maximum(offset - 1, 0)
+        draft_scores = tl.load(
+            schedule_scores + selected_row * schedule_scores_stride + schedule_offset,
+            mask=(offset > 0) & (offset < proposal_width),
             other=0.0,
         )
+        next_token_scores = tl.where(offset == 0, 1.0, draft_scores)
         tl.store(
-            req_to_next_token_probs + cur_req_idx * req_to_next_token_probs_stride + offset,
-            cur_next_token_probs,
-            mask=offset < mtp_step,
+            req_to_next_token_scores + cur_req_idx * req_to_next_token_scores_stride + offset,
+            next_token_scores,
+            mask=offset < verify_width,
         )
     scatter_next_token_ids = tl.load(
-        all_next_token_ids + (req_start_loc + accept_len - 1) * all_next_token_ids_stride + offset,
-        mask=offset < mtp_step,
-        other=0,
+        all_next_token_ids + selected_row * all_next_token_ids_stride + offset,
+        mask=offset < proposal_width,
+        other=1,
     )
     tl.store(
         req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + offset,
         scatter_next_token_ids,
-        mask=offset < mtp_step,
+        mask=offset < verify_width,
     )
     return
 
@@ -146,30 +152,30 @@ def mtp_scatter_next_token_ids(
     all_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     spec_accept_len: torch.Tensor,
-    req_to_next_token_probs: Optional[torch.Tensor] = None,
-    all_next_token_probs: Optional[torch.Tensor] = None,
+    req_to_next_token_scores: Optional[torch.Tensor] = None,
+    schedule_scores: Optional[torch.Tensor] = None,
 ):
     verify_width = req_to_next_token_ids.shape[1]
     BLOCK_SIZE = 16
     assert verify_width <= BLOCK_SIZE, f"verify_width must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
-    mtp_step = all_next_token_ids.shape[1]
-    if req_to_next_token_probs is not None:
-        assert all_next_token_probs is not None
-        assert all_next_token_probs.shape == all_next_token_ids.shape
+    proposal_width = all_next_token_ids.shape[1]
+    assert proposal_width <= verify_width
+    if req_to_next_token_scores is not None:
+        assert schedule_scores is not None
+        assert schedule_scores.shape == (all_next_token_ids.shape[0], proposal_width - 1)
 
-    HAS_NEXT_TOKEN_PROBS = req_to_next_token_probs is not None
+    HAS_NEXT_TOKEN_SCORES = req_to_next_token_scores is not None
     # Triton launch arguments cannot be None; static verification uses an unused placeholder.
-    req_to_next_token_probs_arg = (
-        req_to_next_token_probs if req_to_next_token_probs is not None else req_to_next_token_ids
+    req_to_next_token_scores_arg = (
+        req_to_next_token_scores if req_to_next_token_scores is not None else req_to_next_token_ids
     )
-    req_to_next_token_probs_stride = (
-        req_to_next_token_probs.stride(0) if req_to_next_token_probs is not None else req_to_next_token_ids.stride(0)
+    req_to_next_token_scores_stride = (
+        req_to_next_token_scores.stride(0) if req_to_next_token_scores is not None else req_to_next_token_ids.stride(0)
     )
-    all_next_token_probs_arg = all_next_token_probs if all_next_token_probs is not None else all_next_token_ids
-    all_next_token_probs_stride = (
-        all_next_token_probs.stride(0) if all_next_token_probs is not None else all_next_token_ids.stride(0)
-    )
+    has_schedule_scores = schedule_scores is not None and schedule_scores.numel() > 0
+    schedule_scores_arg = schedule_scores if has_schedule_scores else req_to_next_token_scores_arg
+    schedule_scores_stride = schedule_scores.stride(0) if has_schedule_scores else 0
 
     grid = (num_reqs,)
     num_warps = 1
@@ -178,15 +184,16 @@ def mtp_scatter_next_token_ids(
         req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
         all_next_token_ids=all_next_token_ids,
         all_next_token_ids_stride=all_next_token_ids.stride(0),
-        req_to_next_token_probs=req_to_next_token_probs_arg,
-        req_to_next_token_probs_stride=req_to_next_token_probs_stride,
-        all_next_token_probs=all_next_token_probs_arg,
-        all_next_token_probs_stride=all_next_token_probs_stride,
+        req_to_next_token_scores=req_to_next_token_scores_arg,
+        req_to_next_token_scores_stride=req_to_next_token_scores_stride,
+        schedule_scores=schedule_scores_arg,
+        schedule_scores_stride=schedule_scores_stride,
         spec_accept_len=spec_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
-        mtp_step=mtp_step,
-        HAS_NEXT_TOKEN_PROBS=HAS_NEXT_TOKEN_PROBS,
+        proposal_width=proposal_width,
+        verify_width=verify_width,
+        HAS_NEXT_TOKEN_SCORES=HAS_NEXT_TOKEN_SCORES,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
         num_stages=1,
@@ -487,13 +494,13 @@ def prepare_dynamic_spec_model_input(
     model_input: ModelInput,
     req_num: int,
     dynamic_batch_size: int,
-    req_to_next_token_probs: torch.Tensor,
+    req_to_next_token_scores: torch.Tensor,
     pre_draft_step: Optional[int] = None,
 ):
     req_num = int(req_num)
     dynamic_batch_size = int(dynamic_batch_size)
     assert not model_input.is_prefill, "prepare_dynamic_spec_model_input only supports decode inputs"
-    assert req_to_next_token_probs is not None
+    assert req_to_next_token_scores is not None
     assert dynamic_batch_size >= req_num
     assert dynamic_batch_size <= model_input.batch_size
     max_draft_step = int(model_input.draft_step)
@@ -508,7 +515,7 @@ def prepare_dynamic_spec_model_input(
     selected_row_mask = sample_dynamic_spec_row_mask(
         dynamic_batch_size=dynamic_batch_size,
         b_req_idx=model_input.b_req_idx,
-        req_to_next_token_probs=req_to_next_token_probs,
+        req_to_next_token_scores=req_to_next_token_scores,
         max_draft_step=max_draft_step,
         pre_draft_step=pre_draft_step,
     )

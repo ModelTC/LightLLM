@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 
@@ -18,26 +17,27 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
     from that corrected state.
     """
 
-    def __init__(self, engine) -> None:
-        super().__init__(engine)
-        self._confidence_draft_prune = (
-            os.getenv(
-                # Dynamic Eagle3 already ranks target verify rows by proposal
-                # confidence.  Apply the same budget to deep draft frontiers by
-                # default; static Eagle3 is explicitly excluded below.
-                "LIGHTLLM_EAGLE3_CONFIDENCE_DRAFT_PRUNE",
-                "1",
-            ).lower()
-            in {"1", "true", "yes", "on"}
-        )
-        self._draft_prune_safety_factor = max(
-            0.0,
-            float(os.getenv("LIGHTLLM_EAGLE3_DRAFT_PRUNE_SAFETY_FACTOR", "1.10")),
-        )
-        self._draft_prune_min_depth = max(
-            2,
-            int(os.getenv("LIGHTLLM_EAGLE3_DRAFT_PRUNE_MIN_DEPTH", "4")),
-        )
+    _DRAFT_PRUNE_SAFETY_FACTOR = 1.10
+    _DRAFT_PRUNE_MIN_DEPTH = 4
+
+    def get_draft_cost_ms(
+        self,
+        draft_infer_costs,
+        req_num: int,
+        verify_batch_size: int,
+        draft_step: int,
+    ) -> float:
+        draft_cost_ms = draft_infer_costs.estimate(verify_batch_size)
+        active_count = req_num
+        draft_row_budget = max(1, verify_batch_size - req_num)
+        for step in range(1, draft_step):
+            active_count = self._get_pruned_active_count(
+                current_count=active_count,
+                draft_row_budget=draft_row_budget,
+                next_depth=step + 1,
+            )
+            draft_cost_ms += draft_infer_costs.get(active_count)
+        return draft_cost_ms
 
     def _get_pruned_active_count(
         self,
@@ -45,14 +45,14 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
         draft_row_budget: int,
         next_depth: int,
     ) -> int:
-        if not self._confidence_draft_prune or next_depth < self._draft_prune_min_depth or current_count <= 1:
+        if next_depth < self._DRAFT_PRUNE_MIN_DEPTH or current_count <= 1:
             return current_count
 
         # A selected token at depth d consumes all d prefix draft rows from
         # that request.  Therefore at most L/d chains can reach depth d when
-        # the next target verify has L draft-row slots.  Keep a configurable
-        # safety margin, then retain the highest-survival chain frontiers.
-        active_count = math.ceil(self._draft_prune_safety_factor * max(1, draft_row_budget) / next_depth)
+        # the next target verify has L draft-row slots.  Keep a small safety
+        # margin, then retain the highest-survival chain frontiers.
+        active_count = math.ceil(self._DRAFT_PRUNE_SAFETY_FACTOR * max(1, draft_row_budget) / next_depth)
         return min(current_count, max(1, active_count))
 
     def _map_draft_token_ids(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
@@ -67,9 +67,6 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        assert 0 <= draft_step <= self.backend.max_draft_step
-        assert accept_len is not None, "Eagle3 proposal requires target accept lengths"
-        assert main_model_output is not None and main_model_output.spec_hidden is not None
         verify_row_count = next_token_ids.shape[0]
         num_reqs = b_req_mtp_start_loc.shape[0]
         proposal_token_ids = next_token_ids.new_full(
@@ -78,7 +75,15 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
         )
         proposal_token_ids[:, 0].copy_(next_token_ids)
         collect_dynamic_probs = self.enable_dynamic_spec
-        draft_probs = [] if collect_dynamic_probs else None
+        schedule_scores = (
+            torch.zeros(
+                (verify_row_count, draft_step),
+                dtype=torch.float32,
+                device=next_token_ids.device,
+            )
+            if collect_dynamic_probs
+            else None
+        )
 
         target_hidden = main_model_output.spec_hidden
 
@@ -100,7 +105,7 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             return SpecProposal(
                 token_ids=proposal_token_ids,
                 extra_mem_indexes_cpu=None,
-                draft_probs=draft_probs,
+                schedule_scores=schedule_scores,
             )
 
         draft_logits = draft_model_output.logits.index_select(0, selected_rows)
@@ -108,24 +113,22 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             draft_next_token_ids, selected_draft_prob = self._gen_argmax_token_ids_and_prob(
                 ModelOutput(logits=draft_logits)
             )
-            draft_prob = self.scatter_selected_step_probs(
+            schedule_scores[:, 0] = self.scatter_selected_step_probs(
                 selected_rows=selected_rows,
                 selected_probs=selected_draft_prob,
                 verify_row_count=verify_row_count,
             )
-            draft_probs.append(draft_prob)
             chain_survival = selected_draft_prob.float().clamp(0.01, 0.99)
         else:
             draft_next_token_ids = self._gen_argmax_token_ids(ModelOutput(logits=draft_logits))
             chain_survival = None
-        assert draft_model_output.spec_hidden is not None
         draft_hidden = draft_model_output.spec_hidden.index_select(0, selected_rows)
         proposal_token_ids[selected_rows, 1] = draft_next_token_ids
         if draft_step == 1:
             return SpecProposal(
                 token_ids=proposal_token_ids,
                 extra_mem_indexes_cpu=None,
-                draft_probs=draft_probs,
+                schedule_scores=schedule_scores,
             )
 
         eagle_mem_indexes_cpu = self.alloc_extra_mem_indexes(num_reqs * (draft_step - 1))
@@ -154,7 +157,6 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
                 else int(selected_rows.shape[0])
             )
             if active_count < int(selected_rows.shape[0]):
-                assert chain_survival is not None
                 keep_rows = torch.topk(
                     chain_survival,
                     k=active_count,
@@ -189,22 +191,20 @@ class Eagle3Proposer(RecurrentEagleMTPProposer):
             draft_output = draft_model.forward(draft_input)
             if collect_dynamic_probs:
                 draft_next_token_ids, selected_draft_prob = self._gen_argmax_token_ids_and_prob(draft_output)
-                draft_prob = self.scatter_selected_step_probs(
+                schedule_scores[:, step] = self.scatter_selected_step_probs(
                     selected_rows=selected_rows,
                     selected_probs=selected_draft_prob,
                     verify_row_count=verify_row_count,
                 )
-                draft_probs.append(draft_prob)
                 chain_survival = chain_survival * selected_draft_prob.float().clamp(0.01, 0.99)
             else:
                 draft_next_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids[selected_rows, step + 1] = draft_next_token_ids
             draft_hidden = draft_output.spec_hidden
-            assert draft_hidden is not None
             selected_seq_len = selected_seq_len + 1
 
         return SpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=eagle_mem_indexes_cpu,
-            draft_probs=draft_probs,
+            schedule_scores=schedule_scores,
         )

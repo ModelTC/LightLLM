@@ -1,81 +1,62 @@
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Tuple
+from collections import Counter
+from typing import List, Optional, Tuple
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
+    linear_att_spec_state_index_update,
     mtp_scatter_next_token_ids,
     mtp_verify,
 )
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 from lightllm.server.router.model_infer.speculative.planner import (
-    DSparkDynamicSpecPlanner,
-    DynamicSpecPlanner,
-    Eagle3DynamicSpecPlanner,
+    DSparkPlanner,
     FixedSpecPlanner,
+    LightSpecPlanner,
     SpecDecodePlan,
 )
 from lightllm.server.router.model_infer.speculative.proposers import build_spec_proposer
 from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
-from lightllm.server.router.model_infer.speculative.runner import (
-    SpecDecodeForwardState,
-    SpecDecodePostState,
-    SpecDecodeRunner,
-)
 
 
 class SpecEngine:
-    """Coordinates speculative decoding for one model backend.
+    """Owns speculative planning, verification, and proposal generation.
 
-    The engine handles the common decode flow, while each proposer owns its
-    algorithm-specific draft-state update and proposal generation.
-
-    Each decode iteration:
-    1. the target model samples tokens and returns captured hidden states;
-    2. verification computes the accepted prefix against the previous proposal;
-    3. the proposer updates draft state and generates the next proposal;
-    4. the proposal is stored in per-request buffers for the next iteration.
+    The model backend controls target forward, sampling, stream synchronization,
+    and request post-processing. Each proposer owns its algorithm-specific draft
+    state and proposal generation.
     """
 
     def __init__(self, backend, spec_mode: str, enable_dynamic_spec: bool) -> None:
         self.backend = backend
         self.spec_mode = spec_mode
         self.enable_dynamic_spec = enable_dynamic_spec
-        self.proposer = build_spec_proposer(engine=self)
-        self.decode_runner = SpecDecodeRunner(engine=self)
+        self.proposer = build_spec_proposer(
+            spec_mode=spec_mode,
+            backend=backend,
+            enable_dynamic_spec=enable_dynamic_spec,
+        )
         self.planner = self._build_decode_planner()
         self._register_cuda_graph_costs()
-        self._dynamic_accept_stats_calls = 0
 
-    def alloc_extra_mem_indexes(self, token_count: int) -> torch.Tensor:
-        """Allocate speculative draft-owned temporary KV slots."""
+    # Prefill draft-state initialization.
 
-        token_count = int(token_count)
-        assert token_count >= 0
-        if token_count == 0:
-            return torch.empty((0,), dtype=torch.int32, device="cpu")
-
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_count)
-        return g_infer_context.req_manager.mem_manager.alloc(token_count)
-
-    def build_initial_draft_state(
+    def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        self.proposer.build_initial_draft_state(
+        self.proposer.build_draft_state_from_prefill(
             target_model_input=target_model_input,
             target_model_output=target_model_output,
             next_token_ids=next_token_ids,
         )
 
-    def build_initial_draft_state_overlap(
+    def build_draft_state_from_prefill_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
@@ -84,7 +65,7 @@ class SpecEngine:
         target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
-        self.proposer.build_initial_draft_state_overlap(
+        self.proposer.build_draft_state_from_prefill_overlap(
             target_model_input0=target_model_input0,
             target_model_output0=target_model_output0,
             next_token_ids0=next_token_ids0,
@@ -93,56 +74,30 @@ class SpecEngine:
             next_token_ids1=next_token_ids1,
         )
 
-    def plan_decode(self, model_input: ModelInput, req_num: int) -> SpecDecodePlan:
+    # Decode planning and target verification.
+
+    def plan_decode(self, model_input: ModelInput, decode_reqs: List) -> SpecDecodePlan:
         """Return the fixed or dynamic speculative plan for one decode iteration."""
 
+        req_num = len(decode_reqs)
+        if isinstance(self.planner, LightSpecPlanner):
+            # Prefill initializes draft cache but does not create a proposal.
+            # After one decode, cur_output_len > 1 and the request owns the
+            # previous iteration's candidates.
+            proposal_req_num = sum(req.cur_output_len > 1 for req in decode_reqs)
+            return self.planner.plan(
+                req_num=req_num,
+                original_batch_size=model_input.batch_size,
+                proposal_req_num=proposal_req_num,
+            )
         return self.planner.plan(req_num=req_num, original_batch_size=model_input.batch_size)
-
-    def run_decode_speculative_forward(
-        self,
-        model_input: ModelInput,
-        model_output: ModelOutput,
-        run_reqs: List,
-        req_num: int,
-        plan: SpecDecodePlan,
-        selected_row_mask_cpu: Optional[torch.Tensor],
-        next_token_ids: torch.Tensor,
-        next_token_logprobs: torch.Tensor,
-        next_token_ranks: torch.Tensor,
-        copy_next_token_infos: Callable[
-            [torch.Tensor, torch.Tensor, torch.Tensor],
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        ],
-    ) -> SpecDecodeForwardState:
-        return self.decode_runner.run_speculative_forward(
-            model_input=model_input,
-            model_output=model_output,
-            run_reqs=run_reqs,
-            req_num=req_num,
-            plan=plan,
-            selected_row_mask_cpu=selected_row_mask_cpu,
-            next_token_ids=next_token_ids,
-            next_token_logprobs=next_token_logprobs,
-            next_token_ranks=next_token_ranks,
-            copy_next_token_infos=copy_next_token_infos,
-        )
-
-    def resolve_decode_pre_post_reqs(self, state: SpecDecodeForwardState, decode_reqs: List):
-        return self.decode_runner.resolve_pre_post_reqs(state=state, decode_reqs=decode_reqs)
-
-    def finish_decode_post(
-        self,
-        state: SpecDecodeForwardState,
-        req_num: int,
-    ) -> SpecDecodePostState:
-        return self.decode_runner.finish_post(state=state, req_num=req_num)
 
     def prepare_decode_model_input(
         self,
         model_input: ModelInput,
         req_num: int,
         plan: SpecDecodePlan,
-    ):
+    ) -> Tuple[ModelInput, Optional[AsyncPinnedCpuTensor]]:
         """Apply target verify-row compaction when the dynamic planner selects it."""
 
         if not plan.is_dynamic:
@@ -151,143 +106,66 @@ class SpecEngine:
         if plan.dynamic_batch_size == model_input.batch_size:
             return model_input, None
 
-        self._clear_stale_dynamic_token_probs(pre_draft_step=plan.pre_draft_step)
-
         from lightllm.common.basemodel.triton_kernel.mtp_utils import prepare_dynamic_spec_model_input
 
         model_input, selected_row_mask = prepare_dynamic_spec_model_input(
             model_input=model_input,
             req_num=req_num,
             dynamic_batch_size=plan.dynamic_batch_size,
-            req_to_next_token_probs=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_probs,
+            req_to_next_token_scores=(
+                self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_scores
+            ),
             pre_draft_step=plan.pre_draft_step,
         )
-        return model_input, selected_row_mask
-
-    def async_copy_selected_row_mask(self, selected_row_mask: Optional[torch.Tensor]):
-        if selected_row_mask is None:
-            return None
-        return g_pin_mem_manager.async_copy_from_gpu_tensor(
+        selected_row_mask_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor_with_event(
             key="selected_row_mask",
             gpu_tensor=selected_row_mask,
         )
+        return model_input, selected_row_mask_cpu
 
-    def build_decode_req_lists(
+    def verify_tokens(
         self,
-        original_run_reqs,
-        selected_row_mask_cpu: Optional[torch.Tensor],
+        next_token_ids: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
+        b_mtp_index: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        accept_lengths, accepted_index = mtp_verify(
+            req_to_next_token_ids=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            new_next_token_ids=next_token_ids,
+            b_req_idx=b_req_idx,
+        )
+        if self.backend.is_linear_att_mixed_model:
+            assert b_mtp_index is not None
+            linear_att_spec_state_index_update(
+                req_to_mtp_state_index=self.backend.model.req_manager.req_to_mtp_state_index,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                b_req_idx=b_req_idx,
+                b_mtp_index=b_mtp_index,
+                accepted_index=accepted_index,
+                verify_width=self.backend.max_draft_step + 1,
+            )
+        return accept_lengths, accepted_index
+
+    def resolve_decode_reqs(
+        self,
+        plan: SpecDecodePlan,
+        verify_event: torch.cuda.Event,
+        run_reqs: List,
+        decode_reqs: List,
         accepted_index_cpu: torch.Tensor,
-    ):
-        """Build post-handle request lists after optional verify-row compaction."""
+    ) -> Tuple[List, List]:
+        """Return requests ready for pre/post handling after verification."""
 
-        if selected_row_mask_cpu is not None:
-            run_reqs = [req for req, selected in zip(original_run_reqs, selected_row_mask_cpu.tolist()) if selected]
-        else:
-            run_reqs = original_run_reqs
+        if plan.skip_verify_sync:
+            return decode_reqs, decode_reqs
 
+        verify_event.synchronize()
         verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
         return run_reqs, verify_ok_reqs
 
-    def build_decode_free_mem_indexes_cpu(
-        self,
-        model_input: ModelInput,
-        selected_row_mask_cpu: Optional[torch.Tensor],
-        accepted_index_cpu: torch.Tensor,
-    ) -> torch.Tensor:
-        mem_indexes_cpu = model_input.mem_indexes_cpu
-        if selected_row_mask_cpu is None:
-            return mem_indexes_cpu[accepted_index_cpu == 0]
-
-        selected_mask = selected_row_mask_cpu.to(dtype=torch.bool)
-        accepted_mask = accepted_index_cpu.to(dtype=torch.bool)
-        selected_mem_indexes_cpu = mem_indexes_cpu[selected_mask]
-        assert selected_mem_indexes_cpu.shape[0] == accepted_mask.shape[0]
-
-        unselected_mem_indexes_cpu = mem_indexes_cpu[~selected_mask]
-        rejected_selected_mem_indexes_cpu = selected_mem_indexes_cpu[~accepted_mask]
-        if len(unselected_mem_indexes_cpu) == 0:
-            return rejected_selected_mem_indexes_cpu
-        if len(rejected_selected_mem_indexes_cpu) == 0:
-            return unselected_mem_indexes_cpu
-        return torch.cat([unselected_mem_indexes_cpu, rejected_selected_mem_indexes_cpu], dim=0)
-
-    def update_dynamic_accept_stats(
-        self,
-        req_num: int,
-        accepted_index_cpu: torch.Tensor,
-        spec_accept_len_cpu: torch.Tensor,
-        dynamic_batch_size: int,
-        pre_draft_step: int,
-    ) -> None:
-        assert accepted_index_cpu.shape[0] == dynamic_batch_size
-        assert spec_accept_len_cpu.shape[0] == req_num
-        accept_lengths = spec_accept_len_cpu.numpy()
-        accept_count = int(accept_lengths.sum())
-        total_count = int(dynamic_batch_size)
-        is_full_verify = dynamic_batch_size == req_num * (self.backend.max_draft_step + 1)
-
-        # The first target decode has no preceding draft proposal, so every
-        # request structurally accepts only its base token.  Treating that
-        # cold-start iteration as a K-wide acceptance sample makes a highly
-        # predictable workload look maximally hard and can collapse the
-        # controller before the first real proposal is verified.
-        self._dynamic_accept_stats_calls += 1
-        if self._dynamic_accept_stats_calls == 1:
-            return
-
-        if self.spec_mode == "eagle3":
-            self.planner.update_req_num_to_dynamic_batch_size_to_accept_ratio(
-                req_num=req_num,
-                dynamic_batch_size=dynamic_batch_size,
-                accept_ratio=accept_count / total_count,
-                pre_draft_step=pre_draft_step,
-            )
-            if is_full_verify:
-                self.planner.update_full_verify_tokens_per_req(
-                    accept_count / req_num,
-                    req_num=req_num,
-                )
-            self.planner.update_observed_iteration_stats(
-                tokens_per_req=accept_count / req_num,
-                verify_rows_per_req=dynamic_batch_size / req_num,
-                is_full_verify=is_full_verify,
-                req_num=req_num,
-            )
-            # Confidence-selected rows bias the survival curve upward, so only
-            # full-width verification provides valid Eagle3 prefix samples.
-            if is_full_verify:
-                self.planner.update_verified_batch_prefix_stats(
-                    verify_and_accept_lengths=[
-                        (self.backend.max_draft_step + 1, int(accept_len)) for accept_len in accept_lengths
-                    ],
-                )
-        else:
-            self.planner.update_req_num_to_dynamic_batch_size_to_accept_ratio(
-                req_num=req_num,
-                dynamic_batch_size=dynamic_batch_size,
-                accept_ratio=accept_count / total_count,
-            )
-            verify_rows_per_req = max(1, int(round(dynamic_batch_size / req_num)))
-            for accept_len in accept_lengths:
-                self.planner.update_verified_prefix_stats(
-                    verify_len=verify_rows_per_req,
-                    accept_len=int(accept_len),
-                )
-
-    def needs_schedule_probs_cpu(self) -> bool:
-        """Whether this planner consumes proposal confidence on the CPU."""
-
-        return self.enable_dynamic_spec and self.spec_mode == "dspark"
-
-    def update_dynamic_schedule_stats(
-        self,
-        req_num: int,
-        schedule_probs_cpu: torch.Tensor,
-    ) -> None:
-        self.planner.update_predicted_schedule_probs(
-            schedule_probs=schedule_probs_cpu,
-            req_num=req_num,
-        )
+    # Draft proposal generation and persistence.
 
     def propose_next(
         self,
@@ -321,6 +199,9 @@ class SpecEngine:
         accept_len1: torch.Tensor,
         draft_step: int,
     ) -> SpecProposal:
+        # TODO: DP overlap currently disables dynamic drafting and always uses
+        # max_draft_step. Share the score-feedback path with propose_next when
+        # dynamic overlap is supported.
         return self.proposer.propose_next_overlap(
             main_model_input0=main_model_input0,
             main_model_output0=main_model_output0,
@@ -335,77 +216,13 @@ class SpecEngine:
             draft_step=draft_step,
         )
 
-    def verify_target_tokens(
-        self,
-        new_next_token_ids: torch.Tensor,
-        b_req_idx: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        return mtp_verify(
-            req_to_next_token_ids=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            new_next_token_ids=new_next_token_ids,
-            b_req_idx=b_req_idx,
-        )
-
-    def build_all_next_token_probs(
-        self,
-        proposal: SpecProposal,
-        draft_step: int,
-    ) -> Optional[torch.Tensor]:
-        """Build selected-token probabilities for dynamic speculative scatter.
-
-        Output shape is [verify_batch, max_draft_step + 1].  Column 0 is the target
-        token probability, fixed to 1 because the target sample is always the
-        base accepted position.  Draft columns store selected-token
-        probabilities from each proposer step.
-        """
-
-        if not self.enable_dynamic_spec:
-            return None
-
-        schedule_probs = proposal.schedule_probs if proposal.schedule_probs is not None else proposal.draft_probs
-        assert schedule_probs is not None
-
-        verify_row_count = proposal.token_ids.shape[0]
-        all_next_token_probs = torch.zeros(
-            size=(verify_row_count, self.backend.max_draft_step + 1),
-            dtype=torch.float32,
-            device=proposal.token_ids.device,
-        )
-        all_next_token_probs[:, 0] = 1.0
-
-        if isinstance(schedule_probs, torch.Tensor):
-            assert schedule_probs.shape == (verify_row_count, draft_step)
-            if draft_step > 0:
-                all_next_token_probs[:, 1 : draft_step + 1] = schedule_probs
-            return all_next_token_probs
-
-        assert len(schedule_probs) == draft_step
-        for step_idx, step_probs in enumerate(schedule_probs):
-            all_next_token_probs[:, step_idx + 1] = step_probs
-        return all_next_token_probs
-
-    def pad_all_next_token_ids(self, token_ids: torch.Tensor, draft_step: int) -> torch.Tensor:
-        """Pad a shorter dynamic proposal to the configured speculative width."""
-
-        if not self.enable_dynamic_spec or draft_step >= self.backend.max_draft_step:
-            return token_ids
-
-        append_next_token_ids = torch.ones(
-            size=(token_ids.shape[0], self.backend.max_draft_step - draft_step),
-            dtype=token_ids.dtype,
-            device=token_ids.device,
-        )
-        return torch.cat([token_ids, append_next_token_ids], dim=-1)
-
     def scatter_next_tokens(
         self,
         b_req_mtp_start_loc: torch.Tensor,
         all_next_token_ids: torch.Tensor,
         b_req_idx: torch.Tensor,
         spec_accept_len: torch.Tensor,
-        all_next_token_probs: Optional[torch.Tensor] = None,
+        schedule_scores: Optional[torch.Tensor] = None,
     ) -> None:
         mtp_scatter_next_token_ids(
             req_to_next_token_ids=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -413,43 +230,94 @@ class SpecEngine:
             all_next_token_ids=all_next_token_ids,
             b_req_idx=b_req_idx,
             spec_accept_len=spec_accept_len,
-            req_to_next_token_probs=(
-                self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_probs
-                if all_next_token_probs is not None
+            req_to_next_token_scores=(
+                self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_scores
+                if schedule_scores is not None
                 else None
             ),
-            all_next_token_probs=all_next_token_probs,
+            schedule_scores=schedule_scores,
         )
 
-    def scatter_token_id_steps(
+    # Planner feedback, request metrics, and resource cleanup.
+
+    def update_planner_feedback(
         self,
-        token_id_steps: List[torch.Tensor],
-        b_req_mtp_start_loc: torch.Tensor,
-        b_req_idx: torch.Tensor,
-        spec_accept_len: torch.Tensor,
-        row_count: Optional[int] = None,
-    ) -> torch.Tensor:
-        """Stack proposal token columns and scatter them for the next verify."""
+        plan: SpecDecodePlan,
+        proposal: SpecProposal,
+        req_num: int,
+        accept_lengths_cpu: torch.Tensor,
+    ) -> None:
+        """Feed iteration-level observations into the dynamic planner."""
 
-        all_next_token_ids = torch.stack(token_id_steps, dim=1)
-        if row_count is not None:
-            all_next_token_ids = all_next_token_ids[: int(row_count), :]
-        self.scatter_next_tokens(
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            all_next_token_ids=all_next_token_ids,
-            b_req_idx=b_req_idx,
-            spec_accept_len=spec_accept_len,
+        if not self.enable_dynamic_spec:
+            return
+
+        self.planner.update_feedback(
+            plan=plan,
+            req_num=req_num,
+            accept_lengths=accept_lengths_cpu,
+            schedule_scores=proposal.schedule_scores_cpu,
         )
-        return all_next_token_ids
+
+    def record_request_spec_metrics(
+        self,
+        decode_reqs: List,
+        accept_lengths_cpu: torch.Tensor,
+        verified_row_reqs: Optional[List] = None,
+    ) -> None:
+        """Accumulate user-visible speculative metrics on each request."""
+
+        if not self.backend.is_master_in_dp:
+            return
+
+        accept_lengths = accept_lengths_cpu.tolist()
+        assert len(accept_lengths) == len(decode_reqs)
+        verify_rows_by_req = None if verified_row_reqs is None else Counter(req.req_idx for req in verified_row_reqs)
+        for req, accept_len in zip(decode_reqs, accept_lengths):
+            req.update_spec_accepted_token_num(accept_token_num=accept_len - 1)
+            verify_token_num = req.mtp_step + 1 if verify_rows_by_req is None else verify_rows_by_req[req.req_idx]
+            if verify_token_num > 0:
+                req.update_spec_verify_token_num(verify_token_num=verify_token_num)
+                req.update_spec_verify_step_num(verify_step_num=1)
+
+    def free_unused_decode_mem(
+        self,
+        model_input: ModelInput,
+        selected_row_mask_cpu: Optional[torch.Tensor],
+        accepted_index_cpu: torch.Tensor,
+        extra_mem_indexes_cpu: Optional[torch.Tensor],
+    ) -> None:
+        """Free rejected target KV slots and draft-only temporary slots."""
+
+        mem_indexes_cpu = model_input.mem_indexes_cpu
+        if selected_row_mask_cpu is None:
+            free_mask = accepted_index_cpu == 0
+        else:
+            selected_mask = selected_row_mask_cpu.to(dtype=torch.bool)
+            free_mask = selected_mask.logical_not()
+            free_mask[selected_mask] = accepted_index_cpu == 0
+        need_free_mem_indexes = mem_indexes_cpu[free_mask]
+
+        if extra_mem_indexes_cpu is not None:
+            need_free_mem_indexes = torch.cat([need_free_mem_indexes, extra_mem_indexes_cpu], dim=0)
+        if len(need_free_mem_indexes) > 0:
+            self.backend.model.req_manager.mem_manager.free(need_free_mem_indexes)
+
+    # Construction helpers.
 
     def _build_decode_planner(self):
         if not self.enable_dynamic_spec:
             return FixedSpecPlanner(max_draft_step=self.backend.max_draft_step)
         if self.spec_mode == "dspark":
-            return DSparkDynamicSpecPlanner(max_draft_step=self.backend.max_draft_step)
-        if self.spec_mode == "eagle3":
-            return Eagle3DynamicSpecPlanner(max_draft_step=self.backend.max_draft_step)
-        return DynamicSpecPlanner(max_draft_step=self.backend.max_draft_step)
+            return DSparkPlanner(
+                max_draft_step=self.backend.max_draft_step,
+                draft_cost_provider=self.proposer,
+            )
+
+        return LightSpecPlanner(
+            max_draft_step=self.backend.max_draft_step,
+            draft_cost_provider=self.proposer,
+        )
 
     def _register_cuda_graph_costs(self) -> None:
         if not self.enable_dynamic_spec:
@@ -464,8 +332,6 @@ class SpecEngine:
                     is_draft_model=False,
                 )
 
-        if self.spec_mode == "dspark":
-            return
         for draft_model in self.backend.draft_models:
             draft_graph = draft_model.graph
             if draft_graph is None:
@@ -476,10 +342,3 @@ class SpecEngine:
                     infer_cost_ms=infer_cost_ms,
                     is_draft_model=True,
                 )
-
-    def _clear_stale_dynamic_token_probs(self, pre_draft_step: int) -> None:
-        # Columns after the previous draft length are stale and must not be
-        # sampled by dynamic row compaction in the current target forward.
-        self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_probs[
-            :, (pre_draft_step + 1) :
-        ].fill_(0.0)

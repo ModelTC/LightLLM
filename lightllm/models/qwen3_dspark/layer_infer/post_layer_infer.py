@@ -47,7 +47,6 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
             gate = torch.sigmoid(layer_weight.markov_gate_proj_weight_.mm(gate_input))
             return state, gate * prev_embeddings
 
-        assert self.markov_head_type_ == "rnn"
         if state is None:
             state = torch.zeros_like(prev_embeddings)
         joint_input = torch.cat([state, prev_embeddings, hidden_states], dim=-1)

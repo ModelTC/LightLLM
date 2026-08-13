@@ -47,7 +47,8 @@ class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
                     weight_names="markov_head.gate_proj.weight",
                     bias_names="markov_head.gate_proj.bias",
                     data_type=self.data_type_,
-                    quant_method=self.quant_cfg.get_quant_method(0, "markov_head.gate_proj"),
+                    # W8A8 MM does not support the Markov projection bias.
+                    quant_method=None,
                     tp_rank=0,
                     tp_world_size=1,
                 )
@@ -58,7 +59,7 @@ class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
                     weight_names="markov_head.joint_proj.weight",
                     bias_names="markov_head.joint_proj.bias",
                     data_type=self.data_type_,
-                    quant_method=self.quant_cfg.get_quant_method(0, "markov_head.joint_proj"),
+                    quant_method=None,
                     tp_rank=0,
                     tp_world_size=1,
                 )
