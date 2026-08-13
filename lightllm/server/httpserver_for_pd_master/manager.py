@@ -152,7 +152,7 @@ class HttpServerManagerForPDMaster:
         await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
-        input_token_num = self.tokens(prompt, multimodal_params, sampling_params)
+        input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
         fake_prompt_ids = [0 for _ in range(input_token_num)]
         from lightllm.server.httpserver.manager import HttpServerManager
 
