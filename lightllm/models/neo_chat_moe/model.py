@@ -77,8 +77,8 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
             height=height,
             width=width,
             factor=int(self.patch_size // self.downsample_ratio),
-            min_pixels=img.extra_params["min_pixels"],
-            max_pixels=img.extra_params["max_pixels"],
+            min_pixels=img.extra_params.get("min_pixels", self.min_pixel),
+            max_pixels=img.extra_params.get("max_pixels", self.max_pixel),
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
         token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
