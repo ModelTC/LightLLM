@@ -32,6 +32,7 @@ from lightllm.common.basemodel.hidden_collector import (
     HiddenCollector,
     unpad_collected_hidden,
 )
+from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import (
     set_model_init_status,
@@ -85,13 +86,14 @@ class TpPartBaseModel:
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.data_type = get_llm_data_type()
-        self.decode_batch_multiplier = kvargs.get("decode_batch_multiplier", 1)
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
         self.graph_max_batch_size = (
             self.graph_max_batch_size // 2
             if get_env_start_args().enable_decode_microbatch_overlap
             else self.graph_max_batch_size
         )
+        self.mtp_manager = MtpManager.get_instance()
+        self.decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
         self.graph_max_batch_size = self.graph_max_batch_size * self.decode_batch_multiplier
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)

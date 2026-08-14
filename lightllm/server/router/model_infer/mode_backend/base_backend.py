@@ -126,7 +126,6 @@ class ModeBackend:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
-        target_decode_batch_multiplier = self.args.mtp_step + 1 if self.args.mtp_mode is not None else 1
         model_kvargs = {
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,
@@ -146,7 +145,6 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
-            "decode_batch_multiplier": target_decode_batch_multiplier,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -324,15 +322,6 @@ class ModeBackend:
 
         for i in range(draft_model_count):
             draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
-            if is_chained_draft or (
-                self.enable_decode_microbatch_overlap and spec_mode in ("eagle_with_att", "eagle_no_att")
-            ):
-                draft_decode_batch_multiplier = self.max_draft_step + 1
-            elif spec_mode in ("dspark", "dflash"):
-                block_size = int(draft_model_cfg["block_size"])
-                draft_decode_batch_multiplier = block_size
-            else:
-                draft_decode_batch_multiplier = 1
             draft_model_kvargs = {
                 "weight_dir": draft_model_dirs[i],
                 "max_total_token_num": self.model.mem_manager.size,
@@ -354,7 +343,6 @@ class ModeBackend:
                 "run_mode": "normal",
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
-                "decode_batch_multiplier": draft_decode_batch_multiplier,
             }
 
             draft_model_class = get_draft_model_class(
