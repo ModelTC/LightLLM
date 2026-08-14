@@ -61,6 +61,24 @@ def test_decode_cuda_graph_grow_step_size(monkeypatch, dynamic_verify, is_draft_
     assert MtpManager.get_instance().get_decode_cuda_graph_grow_step_size(is_draft_model) == expected
 
 
+@pytest.mark.parametrize(
+    "spec_mode,is_draft_model,expected",
+    [
+        (None, False, 0),
+        ("eagle3", False, 7),
+        ("eagle3", True, 0),
+        ("vanilla_with_att", True, 0),
+        ("dspark", True, 6),
+        ("dflash", True, 6),
+    ],
+)
+def test_decode_draft_step(monkeypatch, spec_mode, is_draft_model, expected):
+    args = SimpleNamespace(mtp_mode=spec_mode, mtp_step=7, mtp_dynamic_verify=False)
+    monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
+
+    assert MtpManager.get_instance().get_decode_draft_step(is_draft_model) == expected
+
+
 def test_get_instance_returns_singleton(monkeypatch):
     args = SimpleNamespace(mtp_mode="eagle3", mtp_step=7, mtp_dynamic_verify=False)
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)

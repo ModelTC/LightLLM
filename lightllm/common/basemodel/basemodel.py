@@ -426,7 +426,6 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
-        infer_state.draft_step = model_input.draft_step
 
         if infer_state.is_prefill:
             infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)

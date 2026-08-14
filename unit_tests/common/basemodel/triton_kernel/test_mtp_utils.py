@@ -6,8 +6,16 @@ if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
 from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.common.basemodel.triton_kernel import mtp_utils
 from lightllm.utils.envs_utils import get_env_start_args
+
+
+@pytest.fixture(autouse=True)
+def _reset_mtp_manager():
+    MtpManager._instance = None
+    yield
+    MtpManager._instance = None
 
 
 def test_compact_dynamic_spec_model_input(monkeypatch):
@@ -43,7 +51,6 @@ def test_compact_dynamic_spec_model_input(monkeypatch):
         mem_indexes=torch.arange(12, dtype=torch.int32, device="cuda") + 100,
         mem_indexes_cpu=torch.arange(12, dtype=torch.int32, device="cpu") + 100,
         is_prefill=False,
-        draft_step=3,
         multimodal_params=[{"row": i, "images": [], "audios": []} for i in range(12)],
         mtp_draft_input_hiddens=(torch.arange(12 * 5, dtype=torch.float32, device="cuda").reshape(12, 5) + 0.5),
     )
@@ -117,7 +124,6 @@ def test_compaction_rebuilds_b_mark_shared_group_by_max_batch_shared_group_size(
         b_mark_shared_group=torch.tensor([0, 0, 0, 0, 5], dtype=torch.int32, device="cuda"),
         mem_indexes=torch.arange(5, dtype=torch.int32, device="cuda"),
         mem_indexes_cpu=torch.arange(5, dtype=torch.int32, device="cpu"),
-        draft_step=4,
         is_prefill=False,
         multimodal_params=[{"images": [], "audios": []} for _ in range(5)],
     )
@@ -127,6 +133,7 @@ def test_compaction_rebuilds_b_mark_shared_group_by_max_batch_shared_group_size(
         model_input=model_input,
         selected_row_mask=selected_row_mask,
         dynamic_batch_size=5,
+        max_draft_step=4,
     )
     torch.cuda.synchronize()
 

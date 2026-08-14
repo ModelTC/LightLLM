@@ -39,9 +39,10 @@ class BaseAttBackend:
     def create_att_decode_state(self) -> "BaseDecodeAttState":
         raise NotImplementedError("not impl")
 
-    def uses_dynamic_spec_verify_layout(self, infer_state: "InferStateInfo") -> bool:
+    def uses_dynamic_spec_verify_layout(self) -> bool:
         args = get_env_start_args()
-        if infer_state.draft_step == 0 or not args.mtp_dynamic_verify:
+        draft_step = self.model.mtp_manager.get_decode_draft_step(self.model.is_mtp_draft_model)
+        if draft_step == 0 or not args.mtp_dynamic_verify:
             return False
 
         # Target verification may compact each request to a different row count.

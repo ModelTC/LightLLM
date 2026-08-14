@@ -53,7 +53,7 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
         ("dspark", True, 7, True, False),
         ("dflash", False, 7, True, True),
         ("dflash", True, 7, True, False),
-        ("vanilla_with_att", True, 7, True, True),
+        ("vanilla_with_att", True, 0, True, False),
         ("eagle3", True, 0, True, False),
         ("eagle3", False, 7, False, False),
     ],
@@ -74,11 +74,11 @@ def test_attention_backend_selects_dynamic_spec_layout(
     backend = SimpleNamespace(
         model=SimpleNamespace(
             is_mtp_draft_model=is_draft_model,
+            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
         )
     )
-    infer_state = SimpleNamespace(draft_step=draft_step)
 
-    assert BaseAttBackend.uses_dynamic_spec_verify_layout(backend, infer_state) is expected
+    assert BaseAttBackend.uses_dynamic_spec_verify_layout(backend) is expected
 
 
 @pytest.mark.parametrize(

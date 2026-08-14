@@ -59,3 +59,8 @@ class MtpManager:
             if self.args.mtp_dynamic_verify:
                 return 1
             return self.get_decode_batch_multiplier(is_draft_model=False)
+
+    def get_decode_draft_step(self, is_draft_model: bool) -> int:
+        """Return the number of extra decode rows processed per request."""
+
+        return self.get_decode_batch_multiplier(is_draft_model) - 1

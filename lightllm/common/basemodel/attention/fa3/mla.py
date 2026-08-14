@@ -113,9 +113,9 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
 
     def init_state(self):
         self.backend: MlaFa3AttBackend = self.backend
-        draft_step = self.infer_state.draft_step
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         decode_rows_per_request = draft_step + 1
-        uses_dynamic_spec_verify_layout = self.backend.uses_dynamic_spec_verify_layout(self.infer_state)
+        uses_dynamic_spec_verify_layout = self.backend.uses_dynamic_spec_verify_layout()
 
         if draft_step > 0 and not uses_dynamic_spec_verify_layout:
             assert self.infer_state.batch_size % decode_rows_per_request == 0, (

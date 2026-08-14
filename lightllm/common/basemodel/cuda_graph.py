@@ -246,8 +246,6 @@ class CudaGraph:
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
-        draft_step = model.mtp_manager.get_decode_batch_multiplier(model.is_mtp_draft_model) - 1
-
         # decode cuda graph init
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
             seq_len = 2
@@ -274,7 +272,6 @@ class CudaGraph:
                 b_mtp_index=b_mtp_index,
                 b_mark_shared_group=b_mark_shared_group,
                 b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
-                draft_step=draft_step,
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                 **model._gen_special_model_input(batch_size),
@@ -306,8 +303,6 @@ class CudaGraph:
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
-        draft_step = model.mtp_manager.get_decode_batch_multiplier(model.is_mtp_draft_model) - 1
-
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
             decode_batches = []
             for micro_batch_index in [0, 1]:
@@ -337,7 +332,6 @@ class CudaGraph:
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
                     b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
-                    draft_step=draft_step,
                     multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                     **model._gen_special_model_input(batch_size),
                 )

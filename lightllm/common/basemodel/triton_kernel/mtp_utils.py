@@ -4,6 +4,7 @@ import triton.language as tl
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.common.basemodel.triton_kernel.dynamic_spec_utils import sample_dynamic_spec_row_mask
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
@@ -382,6 +383,7 @@ def _compact_decode_model_input(
     model_input: ModelInput,
     selected_row_mask: torch.Tensor,
     dynamic_batch_size: int,
+    max_draft_step: int,
 ) -> ModelInput:
     assert not model_input.is_prefill
     assert selected_row_mask.is_cuda
@@ -474,7 +476,7 @@ def _compact_decode_model_input(
     model_input.b_shared_seq_len = out_b_shared_seq_len
     model_input.b_mark_shared_group = _rebuild_mtp_group_markers(
         out_b_req_idx,
-        max_request_rows=model_input.draft_step + 1,
+        max_request_rows=max_draft_step + 1,
     )
 
     if model_input.mtp_draft_input_hiddens is not None:
@@ -503,7 +505,7 @@ def prepare_dynamic_spec_model_input(
     assert req_to_next_token_scores is not None
     assert dynamic_batch_size >= req_num
     assert dynamic_batch_size <= model_input.batch_size
-    max_draft_step = int(model_input.draft_step)
+    max_draft_step = MtpManager.get_instance().get_decode_draft_step(is_draft_model=False)
     pre_draft_step = max_draft_step if pre_draft_step is None else int(pre_draft_step)
     assert 0 <= pre_draft_step <= max_draft_step
     assert model_input.batch_size == req_num * (max_draft_step + 1)
@@ -524,6 +526,7 @@ def prepare_dynamic_spec_model_input(
         model_input=model_input,
         selected_row_mask=selected_row_mask,
         dynamic_batch_size=dynamic_batch_size,
+        max_draft_step=max_draft_step,
     )
     # Keep CPU mem_indexes unfiltered here. Copying selected_row_mask back to
     # CPU in this hot path synchronizes the overlap stream; the router frees

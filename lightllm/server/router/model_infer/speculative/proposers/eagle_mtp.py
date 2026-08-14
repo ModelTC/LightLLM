@@ -178,7 +178,6 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
         )
         draft_input.b_mark_shared_group = torch.ones_like(draft_input.b_req_idx)
         draft_input.b_shared_seq_len = None
-        draft_input.draft_step = 0
         if len(draft_input.multimodal_params) != request_count:
             empty_multimodal_params = {"images": [], "audios": []}
             draft_input.multimodal_params = [empty_multimodal_params] * request_count
@@ -315,7 +314,6 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
             )
             model_input.b_mark_shared_group = torch.ones_like(model_input.b_req_idx)
             model_input.b_shared_seq_len = None
-            model_input.draft_step = 0
             if len(model_input.multimodal_params) != model_input.batch_size:
                 empty_multimodal_params = {"images": [], "audios": []}
                 model_input.multimodal_params = [empty_multimodal_params] * model_input.batch_size

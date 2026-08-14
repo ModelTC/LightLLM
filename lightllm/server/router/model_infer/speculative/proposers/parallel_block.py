@@ -92,7 +92,6 @@ class ParallelBlockProposer(BaseSpecProposer):
         draft_input.batch_size = draft_input.total_token_num
         draft_input.max_q_seq_len = 1
         draft_input.max_kv_seq_len = main_model_input.max_kv_seq_len + block_size
-        draft_input.draft_step = block_size - 1
         draft_input.b_req_idx = (
             main_model_input.b_req_idx.index_select(0, accepted_tail_rows).repeat_interleave(block_size).contiguous()
         )

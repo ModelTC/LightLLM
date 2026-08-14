@@ -206,7 +206,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        draft_step = self.infer_state.draft_step
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
 
         if draft_step == 0:
             self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -215,7 +215,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
 
         batch_size = self.infer_state.batch_size
         device = self.infer_state.b_req_idx.device
-        if self.backend.uses_dynamic_spec_verify_layout(self.infer_state):
+        if self.backend.uses_dynamic_spec_verify_layout():
             (
                 self.b1_spec_cu_q_seq_len,
                 self.b_conv_buffer_idx,
@@ -263,7 +263,8 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
 
-        if self.infer_state.draft_step > 0:
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+        if draft_step > 0:
             core_attn_out = self._gdn_spec_kernel(
                 mixed_qkv,
                 conv_states,
@@ -355,7 +356,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             mixed_qkv,
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
-            mtp_step=infer_state.draft_step,
+            mtp_step=backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model),
             bias=layer_weight.linear_conv1d.bias,
             activation=backend.activation,
             conv_state_indices=self.b_conv_buffer_idx,

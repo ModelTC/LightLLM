@@ -161,7 +161,6 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
-        draft_step=get_env_start_args().mtp_step,
         is_prefill=False,
         multimodal_params=multimodal_params,
     )

@@ -53,8 +53,6 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
-    # Maximum number of extra query rows per request.
-    draft_step: int = 0
 
     def to_cuda(self):
         self.check_input()

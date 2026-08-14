@@ -112,7 +112,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             assert att_control.tp_alibi is not None
             return self._alibi_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
-            draft_step = self.infer_state.draft_step
+            draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
 
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
