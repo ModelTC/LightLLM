@@ -24,21 +24,25 @@ class CudaGraph:
 
     @staticmethod
     def gen_cuda_graph_batch_sizes(
-        max_batch_size: int = 8,
+        batch_step_size_before_split: int,
+        split_batch_size: int,
+        batch_step_size_after_split: int,
+        max_batch_size: int,
         tp_world_size: int = 1,
-        batch_multiplier: int = 1,
     ):
         args = get_env_start_args()
 
-        # gen cuda graph batch_sizes
-        # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
-        # and [graph_split_batch_size + graph_grow_step_size,
-        # if the batch_multiplier is not 1, then the batch_sizes will be multiply of batch_multiplier
+        # Generate CUDA Graph batch sizes in two phases with independent steps:
+        # use batch_step_size_before_split up to split_batch_size, then use
+        # batch_step_size_after_split above it. For example, given
+        # batch_step_size_before_split=8, split_batch_size=32,
+        # batch_step_size_after_split=16, and max_batch_size=80, the result is
+        # [8, 16, 24, 32, 48, 64, 80]. max_batch_size is always included.
 
-        split_size = args.graph_split_batch_size * batch_multiplier
-        grow_size = args.graph_grow_step_size * batch_multiplier
-        batch_sizes = [i * batch_multiplier for i in range(1, args.graph_split_batch_size + 1)]
-        batch_sizes.extend(range(split_size + grow_size, max_batch_size, grow_size))
+        batch_sizes = list(range(batch_step_size_before_split, split_batch_size + 1, batch_step_size_before_split))
+        batch_sizes.extend(
+            range(split_batch_size + batch_step_size_after_split, max_batch_size, batch_step_size_after_split)
+        )
         batch_sizes = sorted({size for size in batch_sizes if size < max_batch_size} | {max_batch_size})
 
         if args.enable_tpsp_mix_mode:
@@ -48,10 +52,12 @@ class CudaGraph:
 
     def __init__(
         self,
+        batch_step_size_before_split: int,
+        split_batch_size: int,
+        batch_step_size_after_split: int,
         max_batch_size=8,
         max_len_in_batch=8192,
         tp_world_size: int = 1,
-        batch_multiplier: int = 1,
         capture_infer_cost: bool = False,
     ):
         self.graph = {}
@@ -66,9 +72,11 @@ class CudaGraph:
         self.infer_cost_ms_by_batch_size = {}
 
         self.cuda_graph_batch_sizes = self.gen_cuda_graph_batch_sizes(
+            batch_step_size_before_split=batch_step_size_before_split,
+            split_batch_size=split_batch_size,
+            batch_step_size_after_split=batch_step_size_after_split,
             max_batch_size=self.max_batch_size,
             tp_world_size=self.tp_world_size,
-            batch_multiplier=batch_multiplier,
         )
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 
@@ -238,7 +246,7 @@ class CudaGraph:
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
-        draft_step = model.decode_batch_multiplier - 1
+        draft_step = model.mtp_manager.get_decode_batch_multiplier(model.is_mtp_draft_model) - 1
 
         # decode cuda graph init
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
@@ -298,7 +306,7 @@ class CudaGraph:
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
-        draft_step = model.decode_batch_multiplier - 1
+        draft_step = model.mtp_manager.get_decode_batch_multiplier(model.is_mtp_draft_model) - 1
 
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
             decode_batches = []

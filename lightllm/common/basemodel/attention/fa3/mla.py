@@ -24,7 +24,7 @@ class MlaFa3AttBackend(BaseAttBackend):
             max_att_batch_size = model.graph_max_batch_size
             if not get_env_start_args().mtp_dynamic_verify:
                 # FA3 merges each fixed speculative block into one attention sequence.
-                max_att_batch_size //= model.decode_batch_multiplier
+                max_att_batch_size //= model.mtp_manager.get_decode_batch_multiplier(model.is_mtp_draft_model)
 
             buffer_count = 2 if model.args.enable_decode_microbatch_overlap else 1
             self._shared_page_table_buffer = [

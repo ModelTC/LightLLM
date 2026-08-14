@@ -93,8 +93,9 @@ class TpPartBaseModel:
             else self.graph_max_batch_size
         )
         self.mtp_manager = MtpManager.get_instance()
-        self.decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
-        self.graph_max_batch_size = self.graph_max_batch_size * self.decode_batch_multiplier
+        self.graph_max_batch_size = self.graph_max_batch_size * self.mtp_manager.get_decode_batch_multiplier(
+            self.is_mtp_draft_model
+        )
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -275,17 +276,18 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
-        batch_multiplier = (
-            1 if self.args.mtp_dynamic_verify and not self.is_mtp_draft_model else self.decode_batch_multiplier
-        )
+        decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
         self.graph = (
             None
             if self.disable_cudagraph
             else CudaGraph(
+                batch_step_size_before_split=cuda_graph_grow_step_size,
+                split_batch_size=self.args.graph_split_batch_size * decode_batch_multiplier,
+                batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
-                batch_multiplier=batch_multiplier,
                 capture_infer_cost=self.args.mtp_dynamic_verify,
             )
         )
@@ -346,15 +348,19 @@ class TpPartBaseModel:
 
         from lightllm.utils.sgl_utils import fa3_decode_autotune
 
-        batch_multiplier = (
-            1 if self.args.mtp_dynamic_verify and not self.is_mtp_draft_model else self.decode_batch_multiplier
-        )
+        decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+        cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
         cuda_graph_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
+            batch_step_size_before_split=cuda_graph_grow_step_size,
+            split_batch_size=self.args.graph_split_batch_size * decode_batch_multiplier,
+            batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
             max_batch_size=self.graph_max_batch_size,
             tp_world_size=self.tp_world_size_,
-            batch_multiplier=batch_multiplier,
         )
-        fa3_decode_autotune(self, cuda_graph_batch_sizes, batch_multiplier=batch_multiplier)
+        cuda_graph_batch_sizes = [
+            batch_size for batch_size in cuda_graph_batch_sizes if batch_size % decode_batch_multiplier == 0
+        ]
+        fa3_decode_autotune(self, cuda_graph_batch_sizes, batch_multiplier=decode_batch_multiplier)
         return
 
     def _init_custom(self):

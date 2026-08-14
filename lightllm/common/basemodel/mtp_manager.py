@@ -36,7 +36,7 @@ class MtpManager:
 
         # Chained MTP runs every draft module over the expanded verify layout.
         if spec_mode in self._CHAINED_DRAFT_MODES:
-            return verify_width
+            return 1
 
         # Recurrent EAGLE draft models decode one row per logical request.
         if spec_mode in self._RECURRENT_DRAFT_MODES:
@@ -47,3 +47,15 @@ class MtpManager:
             return self.args.mtp_step
 
         return 1
+
+    def get_decode_cuda_graph_grow_step_size(self, is_draft_model: bool) -> int:
+        """Return the batch-size stride used to capture decode CUDA Graphs."""
+
+        # Draft model CUDA Graphs follow the drafter's physical decode layout.
+        if is_draft_model:
+            return self.get_decode_batch_multiplier(is_draft_model=True)
+        # Main model CUDA Graphs use unit growth for dynamically compacted verify rows.
+        else:
+            if self.args.mtp_dynamic_verify:
+                return 1
+            return self.get_decode_batch_multiplier(is_draft_model=False)
