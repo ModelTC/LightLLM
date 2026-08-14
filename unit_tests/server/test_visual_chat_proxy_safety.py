@@ -236,7 +236,7 @@ def test_visual_request_matches_nova_formal_profile():
                 ],
             }
         ],
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "temperature": 0.0,
         "chat_template_kwargs": {"enable_thinking": False},
     }
