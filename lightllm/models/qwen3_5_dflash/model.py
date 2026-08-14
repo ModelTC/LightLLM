@@ -8,7 +8,7 @@ from lightllm.models.qwen3_5_dflash.layer_weights.pre_and_post_layer_weight impo
 
 @DraftModelRegistry(model_type=("qwen3_5", "qwen3_5_text"), spec_modes="dflash")
 class Qwen3_5DFlashModel(Qwen3DFlashModel):
-    """Qwen3.5 DFlash draft model."""
+    """Adapter for a Qwen3 DFlash checkpoint paired with a Qwen3.5 target."""
 
     pre_and_post_weight_class = Qwen35DFlashPreAndPostLayerWeight
 
@@ -38,7 +38,7 @@ class Qwen3_5DFlashModel(Qwen3DFlashModel):
             target_mem_manager.head_dim,
         )
         assert draft_kv_shape == target_kv_shape, (
-            "Qwen3.5 block draft requires matching draft and target KV shapes, "
+            "Qwen3.5 parallel block drafter requires matching draft and target KV shapes, "
             f"got draft={draft_kv_shape}, target={target_kv_shape}."
         )
         super()._init_mem_manager()

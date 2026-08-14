@@ -29,8 +29,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
             if spec_mode in ("dspark", "dflash"):
-                raise NotImplementedError("DP backend does not support DFlash/DSpark block draft mode yet.")
-            self.uses_recurrent_draft = spec_mode in (
+                raise NotImplementedError("DP backend does not support DFlash/DSpark parallel block drafting yet.")
+            self.uses_autoregressive_drafter = spec_mode in (
                 "eagle_with_att",
                 "eagle_no_att",
                 "eagle3",
@@ -43,13 +43,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                 self.decode = self.decode_overlap_mtp
                 self._draft_decode_overlap_func = (
                     self._draft_decode_eagle_overlap
-                    if self.uses_recurrent_draft
+                    if self.uses_autoregressive_drafter
                     else self._draft_decode_vanilla_overlap
                 )
             else:
                 self.decode = self.decode_mtp
                 self._draft_decode_func = (
-                    self._draft_decode_eagle if self.uses_recurrent_draft else self._draft_decode_vanilla
+                    self._draft_decode_eagle if self.uses_autoregressive_drafter else self._draft_decode_vanilla
                 )
         else:
             if self.enable_prefill_microbatch_overlap:
@@ -680,7 +680,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         # DP keeps the target verify layout padded for collective shape
         # agreement.  The proposer still follows the common topology: one
-        # full-row extend, followed by recurrent decode over one row per
+        # full-row extend, followed by autoregressive drafting over one row per
         # (real or HOLD) request.
         proposal = self.spec_engine.propose_next(
             main_model_input=model_input,

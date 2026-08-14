@@ -5,7 +5,7 @@ from lightllm.models.registry import DraftModelRegistry
 
 @DraftModelRegistry(model_type=("qwen3_5", "qwen3_5_text"), spec_modes="dspark")
 class Qwen3_5DSparkModel(Qwen3DSparkModel):
-    """Qwen3 DSpark draft model paired with a Qwen3.5 target."""
+    """Adapter for the current Qwen3 DSpark checkpoint with a Qwen3.5 target."""
 
     def _init_config(self):
         super()._init_config()
@@ -15,8 +15,7 @@ class Qwen3_5DSparkModel(Qwen3DSparkModel):
         if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
             self.config["rope_theta"] = rope_parameters["rope_theta"]
 
-        # DeepSpec trains this Qwen3 draft with ordinary 1D full-head RoPE. Do
-        # not pass the Qwen3.5 target's MRoPE layout into the draft backbone.
+        # Match the draft checkpoint's 1D full-head RoPE layout.
         self.config["rope_scaling"] = None
         self.config["partial_rotary_factor"] = 1.0
 
@@ -34,7 +33,7 @@ class Qwen3_5DSparkModel(Qwen3DSparkModel):
             target_mem_manager.head_dim,
         )
         assert draft_kv_shape == target_kv_shape, (
-            "Qwen3.5 block draft requires matching draft and target KV shapes, "
+            "Qwen3.5 parallel block drafter requires matching draft and target KV shapes, "
             f"got draft={draft_kv_shape}, target={target_kv_shape}."
         )
         super()._init_mem_manager()

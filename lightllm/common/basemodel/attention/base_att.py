@@ -45,7 +45,7 @@ class BaseAttBackend:
             return False
 
         # Target verification may compact each request to a different row count.
-        # Block draft forwards still use their checkpoint-defined fixed layout.
+        # Parallel block drafter forwards still use their checkpoint-defined fixed layout.
         return args.mtp_mode not in ("dspark", "dflash") or not self.model.is_mtp_draft_model
 
     def _find_layer_index(

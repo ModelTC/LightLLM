@@ -65,12 +65,11 @@ class LightSpecPlanner:
 
     LightSpec evaluates a runtime configuration as ``(N, B, d)``: logical
     requests, physical target rows, and draft configuration. Planning follows
-    the paper's budget-then-fill order. It first chooses ``B`` for the proposal
-    produced by ``pre_draft_step``, then keeps that ``B`` fixed while choosing
-    the ``draft_step`` that will produce the next proposal. Candidate identities
-    and per-request verify widths belong to the GPU Fill stage, not this planner.
-    The next draft depth bounds the next iteration's verify budget; it does not
-    need to reproduce the verify budget consumed in the current iteration.
+    the paper's budget-then-fill order. It chooses the current ``B`` within the
+    proposal produced by ``pre_draft_step``. The next ``draft_step`` is selected
+    from self-consistent ``(B, d)`` configurations for the following iteration,
+    so a short current proposal cannot prevent the planner from drafting deeper
+    again. Candidate identities belong to the GPU Fill stage.
 
     Each configuration minimizes estimated milliseconds per committed token:
     ``(target_cost(B) + draft_cost(N, B, d)) / expected_progress(N, B, d)``.
@@ -99,6 +98,10 @@ class LightSpecPlanner:
         # complete batch. The draft configuration is part of the key because a
         # deeper candidate pool may improve Fill even at the same (N, B).
         self.progress_ema_by_config: Dict[Tuple[int, int, int], _EMAValue] = {}
+        # Full-width verification provides an unbiased survival probability
+        # for every draft depth. It is the fallback for configurations that
+        # have not produced their own progress observation yet.
+        self.prefix_survival_by_depth: List[Optional[_EMAValue]] = [None] * self.max_draft_step
 
         # The current verify width is bounded by the proposal built last time.
         self.pre_draft_step = self.max_draft_step
@@ -147,10 +150,7 @@ class LightSpecPlanner:
             for dynamic_batch_size in batch_sizes
         ]
         dynamic_batch_size = batch_sizes[np.argmin(costs)]
-        draft_step = self._select_draft_step(
-            req_num=req_num,
-            dynamic_batch_size=dynamic_batch_size,
-        )
+        draft_step = self._select_draft_step(req_num=req_num)
 
         self.pre_draft_step = draft_step
         return SpecDecodePlan(
@@ -202,25 +202,44 @@ class LightSpecPlanner:
         config = (int(req_num), int(dynamic_batch_size), int(verified_draft_step))
         progress = float(accept_lengths.sum()) / dynamic_batch_size
         if config not in self.progress_ema_by_config:
-            init_progress = progress if not self.progress_ema_by_config else self._estimate_nearby_progress(*config)
             self.progress_ema_by_config[config] = _EMAValue(
                 decay=0.9,
-                init_value=init_progress,
+                init_value=progress,
             )
         self.progress_ema_by_config[config].update(progress)
 
-    def _select_draft_step(self, req_num: int, dynamic_batch_size: int) -> int:
+        if dynamic_batch_size == req_num * (verified_draft_step + 1):
+            for depth in range(1, verified_draft_step + 1):
+                survival = float(np.mean(accept_lengths > depth))
+                survival_ema = self.prefix_survival_by_depth[depth - 1]
+                if survival_ema is None:
+                    survival_ema = _EMAValue(decay=0.9, init_value=survival)
+                    self.prefix_survival_by_depth[depth - 1] = survival_ema
+                survival_ema.update(survival)
+
+    def _select_draft_step(self, req_num: int) -> int:
+        """Choose the best self-consistent next proposal depth.
+
+        The current target batch is bounded by ``pre_draft_step``, but the
+        proposal generated now is consumed by the next iteration. Evaluate
+        each candidate depth with the verify widths that depth can create so a
+        short current proposal cannot permanently prevent deeper drafting.
+        """
+
         best_cost_ms = float("inf")
         best_draft_step = self.draft_steps[0]
         for draft_step in self.draft_steps:
-            cost_ms = self._get_cost_ms(
-                req_num=req_num,
-                dynamic_batch_size=dynamic_batch_size,
-                draft_step=draft_step,
-            )
-            if cost_ms < best_cost_ms:
-                best_cost_ms = cost_ms
-                best_draft_step = draft_step
+            max_batch_size = req_num * (draft_step + 1)
+            batch_sizes = self.target_infer_costs.get_batch_size_keys_between(req_num, max_batch_size)
+            for dynamic_batch_size in batch_sizes:
+                cost_ms = self._get_cost_ms(
+                    req_num=req_num,
+                    dynamic_batch_size=dynamic_batch_size,
+                    draft_step=draft_step,
+                )
+                if cost_ms < best_cost_ms:
+                    best_cost_ms = cost_ms
+                    best_draft_step = draft_step
         return best_draft_step
 
     def _get_cost_ms(self, req_num: int, dynamic_batch_size: int, draft_step: int) -> float:
@@ -245,36 +264,23 @@ class LightSpecPlanner:
     def _estimate_progress(self, req_num: int, dynamic_batch_size: int, draft_step: int) -> float:
         config = (int(req_num), int(dynamic_batch_size), int(draft_step))
         ema = self.progress_ema_by_config.get(config)
-        return ema.get() if ema is not None else self._estimate_nearby_progress(*config)
+        return ema.get() if ema is not None else self._estimate_prefix_progress(*config)
 
-    def _estimate_nearby_progress(self, req_num: int, dynamic_batch_size: int, draft_step: int) -> float:
-        if not self.progress_ema_by_config:
+    def _estimate_prefix_progress(self, req_num: int, dynamic_batch_size: int, draft_step: int) -> float:
+        if not any(self.prefix_survival_by_depth):
             return 1.0
 
-        rows_per_req = dynamic_batch_size / req_num
-
-        def distance(config: Tuple[int, int, int]):
-            observed_req_num, observed_batch_size, observed_draft_step = config
-            width_distance = (observed_batch_size / observed_req_num - rows_per_req) / (self.max_draft_step + 1)
-            draft_distance = (observed_draft_step - draft_step) / max(self.max_draft_step, 1)
-            request_distance = (observed_req_num - req_num) / max(observed_req_num, req_num)
-            return width_distance ** 2 + draft_distance ** 2 + request_distance ** 2
-
-        nearest_config = min(self.progress_ema_by_config, key=distance)
-        observed_req_num, observed_batch_size, _ = nearest_config
-        observed_rows_per_req = observed_batch_size / observed_req_num
-        observed_progress_per_req = observed_rows_per_req * self.progress_ema_by_config[nearest_config].get()
-
-        # Fill keeps the highest-survival rows when B shrinks. Transfer the
-        # neighbor's committed progress per request, then normalize it for the
-        # target B. Copying rho directly would predict that useful progress
-        # falls in proportion to B and make B=N an artificial absorbing state.
-        estimated_progress_per_req = min(
-            max(observed_progress_per_req, 1.0),
-            rows_per_req,
-            draft_step + 1,
-        )
-        return estimated_progress_per_req / rows_per_req
+        remaining_draft_rows = dynamic_batch_size - req_num
+        expected_tokens = float(req_num)
+        for depth in range(min(draft_step, self.max_draft_step)):
+            selected_rows = min(req_num, remaining_draft_rows)
+            if selected_rows <= 0:
+                break
+            survival_ema = self.prefix_survival_by_depth[depth]
+            survival = 1.0 if survival_ema is None else survival_ema.get()
+            expected_tokens += selected_rows * survival
+            remaining_draft_rows -= selected_rows
+        return expected_tokens / dynamic_batch_size
 
 
 class DSparkPlanner:
@@ -474,8 +480,9 @@ class _InferCostMsTable:
     def get_batch_size_keys_between(self, batch_size1: int, batch_size2: int) -> List[int]:
         start = min(int(batch_size1), int(batch_size2))
         end = max(int(batch_size1), int(batch_size2))
-        batch_sizes = list(self.infer_cost_ms_table.irange(minimum=start, maximum=end, inclusive=(True, True)))
-        return batch_sizes or [end]
+        batch_sizes = set(self.infer_cost_ms_table.irange(minimum=start, maximum=end, inclusive=(True, True)))
+        batch_sizes.update((start, end))
+        return sorted(batch_sizes)
 
 
 class _EMAValue:

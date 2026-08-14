@@ -119,7 +119,7 @@ def test_fixed_dspark_does_not_require_confidence_head(monkeypatch):
     model._verify_params()
 
 
-def test_qwen35_dspark_uses_training_rope_layout(monkeypatch):
+def test_qwen35_dspark_adapter_uses_current_checkpoint_rope_layout(monkeypatch):
     def init_dspark_config(self):
         self.config = {
             "dflash_config": {"mask_token_id": 1},

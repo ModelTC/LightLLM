@@ -1,60 +1,18 @@
 from __future__ import annotations
 
-import copy
-
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.speculative.proposers.parallel_block import ParallelBlockProposer
 
 
-class DFlashProposer(BaseSpecProposer):
-    """Non-causal block proposer for DFlash.
+class DFlashProposer(ParallelBlockProposer):
+    """DFlash block-diffusion proposer.
 
-    DFlash remains a non-causal block-prefill draft model, not a recurrent
-    token decoder.  The service flow is:
-    - verify target tokens
-    - extend the DFlash draft KV cache with target hidden rows
-    - draft a new non-causal block from the accepted tail row
-    The memory lifecycle stays in the normal decode free path:
-    - rejected target token slots are freed by the normal decode free path
-    - current-block scratch KV uses extra mem slots returned through
-      `SpecProposal.extra_mem_indexes_cpu`
+    The drafter predicts a complete token block in one parallel forward from
+    the accepted-tail anchor and mask-token positions.
     """
-
-    def get_draft_steps(self):
-        return (self.backend.max_draft_step,)
-
-    def get_draft_cost_ms(
-        self,
-        draft_infer_costs,
-        req_num: int,
-        verify_batch_size: int,
-        draft_step: int,
-    ) -> float:
-        block_size = self.backend.draft_models[0].block_size
-        # Block drafting first commits all verified rows, then generates one
-        # complete checkpoint-defined block for each request.
-        extend_cost_ms = draft_infer_costs.estimate(verify_batch_size)
-        block_cost_ms = draft_infer_costs.get(req_num * block_size)
-        return extend_cost_ms + block_cost_ms
-
-    @torch.no_grad()
-    def build_draft_state_from_prefill(
-        self,
-        target_model_input: ModelInput,
-        target_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-    ) -> None:
-        target_hidden = target_model_output.spec_hidden
-        if target_hidden.numel() == 0:
-            return
-
-        draft_model = self.backend.draft_models[0]
-        draft_input = copy.copy(target_model_input)
-        # DFlash consumes target hidden states directly on this prefill path.
-        draft_input.mtp_draft_input_hiddens = target_hidden
-        draft_model.forward(draft_input)
 
     @torch.no_grad()
     def propose_next(
@@ -66,151 +24,48 @@ class DFlashProposer(BaseSpecProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        num_reqs = int(b_req_mtp_start_loc.shape[0])
+        request_count = int(b_req_mtp_start_loc.shape[0])
+        verify_row_count = int(next_token_ids.shape[0])
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        token_ids = next_token_ids.new_full(
-            (next_token_ids.shape[0], draft_step + 1),
+        proposal_token_ids = next_token_ids.new_full(
+            (verify_row_count, draft_step + 1),
             fill_value=1,
         )
-        token_ids[:, 0] = next_token_ids
+        proposal_token_ids[:, 0] = next_token_ids
 
+        # One accepted-tail anchor expands to a complete block-diffusion draft.
+        accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
+        draft_input, extra_mem_indexes_cpu = self.build_block_draft_input(
+            main_model_input=main_model_input,
+            next_token_ids=next_token_ids,
+            accepted_tail_rows=accepted_tail_rows,
+            request_count=request_count,
+        )
         self.extend_draft_kv_cache(
             main_model_input=main_model_input,
             target_hidden=main_model_output.spec_hidden,
         )
-
-        if draft_step == 0:
-            return SpecProposal(
-                token_ids=token_ids,
-                extra_mem_indexes_cpu=None,
-            )
-
-        # DFlash drafts from the accepted tail row of each request; one anchor
-        # row expands to a complete non-causal draft block.
-        selected_rows = self.select_accepted_tail_rows(
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            accept_len=accept_len,
-        )
-        draft_input, draft_mem_indexes_cpu = self.build_block_draft_input(
-            main_model_input=main_model_input,
-            next_token_ids=next_token_ids,
-            selected_rows=selected_rows,
-            num_reqs=num_reqs,
-        )
-        draft_model_output = draft_model.forward(draft_input)
+        draft_output = draft_model.forward(draft_input)
 
         if self.enable_dynamic_spec:
-            flat_token_ids, flat_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_model_output)
+            flat_draft_token_ids, flat_draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
         else:
-            flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
-        block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
-        token_ids[selected_rows, 1:] = block_token_ids[:, :draft_step]
+            flat_draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
+        block_draft_token_ids = flat_draft_token_ids.reshape(request_count, block_size)
+        proposal_token_ids[accepted_tail_rows, 1:] = block_draft_token_ids[:, :draft_step]
 
         schedule_scores = None
         if self.enable_dynamic_spec:
-            block_token_probs = flat_token_probs.reshape(num_reqs, block_size)
-            selected_token_probs = block_token_probs[:, :draft_step]
-            schedule_scores = self.scatter_selected_step_probs(
-                selected_rows=selected_rows,
-                selected_probs=selected_token_probs,
-                verify_row_count=next_token_ids.shape[0],
+            block_draft_token_probs = flat_draft_token_probs.reshape(request_count, block_size)
+            schedule_scores = torch.zeros(
+                (verify_row_count, draft_step),
+                dtype=torch.float32,
+                device=next_token_ids.device,
             )
+            schedule_scores[accepted_tail_rows] = block_draft_token_probs[:, :draft_step].float()
         return SpecProposal(
-            token_ids=token_ids,
-            extra_mem_indexes_cpu=draft_mem_indexes_cpu,
+            token_ids=proposal_token_ids,
+            extra_mem_indexes_cpu=extra_mem_indexes_cpu,
             schedule_scores=schedule_scores,
         )
-
-    def extend_draft_kv_cache(self, main_model_input: ModelInput, target_hidden: torch.Tensor) -> None:
-        draft_model = self.backend.draft_models[0]
-        batch_size = int(target_hidden.shape[0])
-
-        draft_kv_input = copy.copy(main_model_input)
-        draft_kv_input.batch_size = batch_size
-        draft_kv_input.total_token_num = batch_size
-        empty_multimodal_params = {"images": [], "audios": []}
-        draft_kv_input.multimodal_params = [empty_multimodal_params] * batch_size
-        # This hidden-commit prefill path does not consume token ids, but
-        # InferState uses input_ids.shape[0] to build position ids. Keep it
-        # aligned with the fixed-shape target verify batch.
-        draft_kv_input.input_ids = torch.empty(
-            (batch_size,),
-            dtype=torch.int64,
-            device=target_hidden.device,
-        )
-        draft_kv_input.max_q_seq_len = 1
-        draft_kv_input.prefix_total_token_num = 0
-        draft_kv_input.is_prefill = True
-        # Match Eagle3's fixed verify commit: write every speculative row and
-        # let the accepted-tail sequence length select the valid prefix. Rejected
-        # suffix slots are ignored and released by the normal verify free path.
-        # Keeping the batch shape static avoids torch.nonzero's implicit D2H
-        # synchronization and lets the host enqueue the draft work immediately.
-        draft_kv_input.b_ready_cache_len = main_model_input.b_seq_len - 1
-        draft_kv_input.b_prefill_start_loc = torch.arange(
-            batch_size,
-            dtype=torch.int32,
-            device=target_hidden.device,
-        )
-        draft_kv_input.b_position_delta = None
-        draft_kv_input.mtp_draft_input_hiddens = target_hidden
-        draft_model.forward(draft_kv_input)
-
-    def build_block_draft_input(
-        self,
-        main_model_input: ModelInput,
-        next_token_ids: torch.Tensor,
-        selected_rows: torch.Tensor,
-        num_reqs: int,
-    ):
-        draft_model = self.backend.draft_models[0]
-        block_size = int(draft_model.block_size)
-        draft_mem_indexes_cpu = self.alloc_extra_mem_indexes(num_reqs * block_size)
-
-        draft_input_ids = next_token_ids.new_full(
-            (num_reqs * block_size,),
-            fill_value=draft_model.mask_token_id,
-        )
-        # Each block is [accepted_token, mask, ..., mask], matching DeepSpec's
-        # draft input.  The proposer later maps the block logits back to
-        # [base_token + draft_tokens] for target verification.
-        draft_input_ids[::block_size] = next_token_ids.index_select(0, selected_rows)
-
-        block_offsets = torch.arange(
-            block_size,
-            dtype=main_model_input.b_seq_len.dtype,
-            device=next_token_ids.device,
-        )
-        draft_input = copy.copy(main_model_input)
-        draft_input.input_ids = draft_input_ids
-        draft_input.total_token_num = draft_input.input_ids.shape[0]
-        draft_input.batch_size = draft_input.total_token_num
-        draft_input.max_q_seq_len = 1
-        draft_input.max_kv_seq_len = main_model_input.max_kv_seq_len + block_size
-        draft_input.draft_step = block_size - 1
-        draft_input.b_req_idx = (
-            main_model_input.b_req_idx.index_select(0, selected_rows).repeat_interleave(block_size).contiguous()
-        )
-        draft_input.b_mtp_index = torch.zeros_like(draft_input.b_req_idx)
-        # b_seq_len is real metadata, not cosmetic: copy_kv_index_to_req and
-        # FA3 use it to place scratch KV and compute the block cache length.
-        draft_input.b_seq_len = (
-            (main_model_input.b_seq_len.index_select(0, selected_rows)[:, None] + block_offsets[None, :] + 1)
-            .reshape(-1)
-            .contiguous()
-        )
-        if main_model_input.b_position_delta is not None:
-            draft_input.b_position_delta = (
-                main_model_input.b_position_delta.index_select(0, selected_rows)
-                .repeat_interleave(block_size)
-                .contiguous()
-            )
-        else:
-            draft_input.b_position_delta = torch.zeros_like(draft_input.b_req_idx)
-        draft_input.mem_indexes = draft_mem_indexes_cpu.cuda(non_blocking=True)
-        draft_input.b_mark_shared_group = torch.zeros_like(draft_input.b_req_idx)
-        draft_input.b_mark_shared_group[block_size - 1 :: block_size] = block_size
-        empty_multimodal_params = {"images": [], "audios": []}
-        draft_input.multimodal_params = [empty_multimodal_params] * draft_input.batch_size
-        return draft_input, draft_mem_indexes_cpu

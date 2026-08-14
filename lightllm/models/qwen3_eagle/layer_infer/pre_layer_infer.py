@@ -17,7 +17,7 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
     ) -> None:
         target_hiddens = infer_state.mtp_draft_input_hiddens
         # Target verification provides concatenated auxiliary-layer hiddens (N * H).
-        # Recurrent draft steps feed the previous draft output, which is already H.
+        # Autoregressive draft steps feed the previous draft output, which is already H.
         if target_hiddens.shape[-1] != self.hidden_size_:
             target_hiddens = layer_weight.fc_weight_.mm(target_hiddens)
         infer_state.eagle_draft_hidden_states = target_hiddens

@@ -745,7 +745,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=None,
         help="""Speculative decoding mode.
         *_with_att and *_no_att select attention or non-attention draft models;
-        eagle3 uses a recurrent EAGLE3 draft; dspark and dflash use block draft models.""",
+        eagle3 uses autoregressive EAGLE-3 drafting; dflash uses block-diffusion drafting;
+        dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(
         "--mtp_draft_model_dir",

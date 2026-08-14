@@ -9,12 +9,17 @@ from lightllm.server.router.model_infer.speculative.planner import (
     FixedSpecPlanner,
     LightSpecPlanner,
     SpecDecodePlan,
+    _InferCostMsTable,
 )
 from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
 from lightllm.server.router.model_infer.speculative.proposers.dspark import DSparkProposer
 from lightllm.server.router.model_infer.speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import EagleMTPProposer
+from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import (
+    AutoregressiveEagleProposer,
+    EagleMTPProposer,
+)
+from lightllm.server.router.model_infer.speculative.proposers.parallel_block import ParallelBlockProposer
 from lightllm.server.router.model_infer.speculative.proposers.vanilla_mtp import VanillaMTPProposer
 
 
@@ -78,6 +83,14 @@ def test_fixed_planner_returns_static_plan():
     assert not plan.skip_verify_sync
 
 
+def test_infer_cost_candidates_include_feasible_boundaries():
+    costs = _InferCostMsTable()
+    costs.update(batch_size=4, infer_cost_ms=1.0)
+    costs.update(batch_size=8, infer_cost_ms=2.0)
+
+    assert costs.get_batch_size_keys_between(5, 10) == [5, 8, 10]
+
+
 def test_engine_routes_only_dspark_to_the_confidence_planner():
     assert isinstance(build_planner("eagle3", enable_dynamic_spec=False), FixedSpecPlanner)
     assert isinstance(build_planner("dspark"), DSparkPlanner)
@@ -89,6 +102,14 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
     eagle_planner = build_planner("eagle3")
     assert isinstance(eagle_planner, LightSpecPlanner)
     assert eagle_planner.draft_steps == (1, 2, 3)
+
+
+def test_proposer_families_use_drafter_standard_abstractions():
+    assert issubclass(EagleMTPProposer, AutoregressiveEagleProposer)
+    assert issubclass(Eagle3Proposer, AutoregressiveEagleProposer)
+    assert issubclass(DFlashProposer, ParallelBlockProposer)
+    assert issubclass(DSparkProposer, ParallelBlockProposer)
+    assert not issubclass(DSparkProposer, DFlashProposer)
 
 
 def test_dynamic_plan_filters_selected_rows():
@@ -312,22 +333,23 @@ def test_eagle_cost_provider_prices_extend_and_decode_separately():
     assert draft_cost_ms == 1.5
 
 
-def test_eagle3_cost_provider_accounts_for_pruned_recurrent_rows():
-    planner = build_lightspec_planner(
-        max_draft_step=7,
-        proposer_class=Eagle3Proposer,
-    )
-    for batch_size in (2, 4, 8, 16):
-        planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=True)
+def test_autoregressive_eagle_cost_provider_prices_extend_and_decode_rows():
+    for proposer_class in (EagleMTPProposer, Eagle3Proposer):
+        planner = build_lightspec_planner(
+            max_draft_step=7,
+            proposer_class=proposer_class,
+        )
+        for batch_size in (2, 4, 8, 16):
+            planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=True)
 
-    draft_cost_ms = planner.draft_cost_provider.get_draft_cost_ms(
-        draft_infer_costs=planner.draft_infer_costs,
-        req_num=8,
-        verify_batch_size=16,
-        draft_step=7,
-    )
+        draft_cost_ms = planner.draft_cost_provider.get_draft_cost_ms(
+            draft_infer_costs=planner.draft_infer_costs,
+            req_num=8,
+            verify_batch_size=16,
+            draft_step=7,
+        )
 
-    assert draft_cost_ms == 42.0
+        assert draft_cost_ms == 64.0
 
 
 def test_block_cost_provider_prices_commit_and_complete_block():
@@ -365,7 +387,7 @@ def test_lightspec_records_one_batch_observation_per_configuration():
     )
 
     assert planner.progress_ema_by_config[(2, 4, 1)].get() == 1.0
-    assert np.isclose(planner.progress_ema_by_config[(2, 4, 3)].get(), 0.95)
+    assert planner.progress_ema_by_config[(2, 4, 3)].get() == 0.5
     assert planner.progress_ema_by_config[(2, 4, 1)].get_count() == 1
     assert planner.progress_ema_by_config[(2, 4, 3)].get_count() == 1
 
@@ -383,7 +405,7 @@ def test_lightspec_high_concurrency_does_not_multiply_ema_updates():
     assert planner.progress_ema_by_config[(128, 128, 1)].get_count() == 1
 
 
-def test_lightspec_transfers_committed_progress_to_a_nearby_verify_shape():
+def test_lightspec_estimates_unseen_shapes_from_prefix_survival():
     planner = build_lightspec_planner()
     planner.update_verified_batch(
         accept_lengths=[2, 1],
@@ -395,6 +417,38 @@ def test_lightspec_transfers_committed_progress_to_a_nearby_verify_shape():
     assert planner._estimate_progress(req_num=2, dynamic_batch_size=4, draft_step=3) == 0.75
     assert planner._estimate_progress(req_num=2, dynamic_batch_size=2, draft_step=3) == 1.0
     assert planner._estimate_progress(req_num=2, dynamic_batch_size=4, draft_step=2) == 0.75
+
+
+def test_lightspec_does_not_transfer_deep_progress_to_short_drafts():
+    planner = build_lightspec_planner()
+    planner.update_verified_batch(
+        accept_lengths=[4, 2],
+        req_num=2,
+        dynamic_batch_size=8,
+        verified_draft_step=3,
+    )
+
+    assert np.isclose(planner._estimate_progress(req_num=2, dynamic_batch_size=6, draft_step=2), 5 / 6)
+
+
+def test_lightspec_short_current_proposal_can_recover_to_a_deeper_draft():
+    planner = build_lightspec_planner(proposer_class=EagleMTPProposer)
+    for batch_size, target_cost in ((2, 1.0), (4, 1.1), (6, 1.2), (8, 1.3)):
+        planner.update_infer_cost(batch_size, target_cost, is_draft_model=False)
+        planner.update_infer_cost(batch_size, 0.01, is_draft_model=True)
+    planner.update_verified_batch(
+        accept_lengths=[4, 4],
+        req_num=2,
+        dynamic_batch_size=8,
+        verified_draft_step=3,
+    )
+    planner.pre_draft_step = 1
+
+    plan = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=2)
+
+    assert plan.dynamic_batch_size <= 4
+    assert plan.pre_draft_step == 1
+    assert plan.draft_step == 3
 
 
 def test_engine_skips_feedback_for_a_mixed_proposal_batch():

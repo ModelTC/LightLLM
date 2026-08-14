@@ -61,23 +61,6 @@ class BaseSpecProposer:
 
         raise NotImplementedError
 
-    def select_accepted_tail_rows(self, b_req_mtp_start_loc: torch.Tensor, accept_len: torch.Tensor) -> torch.Tensor:
-        return (b_req_mtp_start_loc + accept_len - 1).to(torch.long)
-
-    def scatter_selected_step_probs(
-        self,
-        selected_rows: torch.Tensor,
-        selected_probs: torch.Tensor,
-        verify_row_count: int,
-    ) -> torch.Tensor:
-        out = torch.zeros(
-            (verify_row_count, *selected_probs.shape[1:]),
-            dtype=torch.float32,
-            device=selected_probs.device,
-        )
-        out[selected_rows] = selected_probs.float()
-        return out
-
     def alloc_extra_mem_indexes(self, token_count: int) -> torch.Tensor:
         """Allocate draft-owned temporary KV slots."""
 
@@ -106,10 +89,8 @@ class BaseSpecProposer:
           by the selected speculative algorithm.
         - `next_token_ids`: first accepted target token, shape [run_req_num].
 
-        This hook only prepares draft-side state.  It intentionally does not
-        scatter proposal tokens; the first decode iteration verifies as having
-        no draft candidates and produces the first proposal through
-        `propose_next`.
+        This hook only prepares draft-side state. It does not create proposal
+        tokens; the first decode iteration creates them through `propose_next`.
         """
 
         raise NotImplementedError
@@ -138,20 +119,11 @@ class BaseSpecProposer:
     ) -> SpecProposal:
         """Generate candidate tokens after one target decode forward.
 
-        Inputs:
-        - `main_model_input`: target decode ModelInput. In the fixed layout its
-          batch is laid out as [req0-main, req0-draft1, ...]. Dynamic scheduling may
-          compact this batch before target forward.
-        - `next_token_ids`: target sampled ids for rows in `main_model_input`,
-          shape [verify_batch].
-        - `b_req_mtp_start_loc`: start row for each logical request inside the
-          speculative verify batch, shape [logical_req_num].
-        - `draft_step`: number of candidate draft tokens to produce.
-        - `accept_len`: optional accepted-prefix length from the just-finished
-          target forward. Stateful block proposers use it to commit the
-          accepted target-hidden segment before preparing the next block.
+        `main_model_input` contains the target verify rows, possibly compacted
+        by dynamic scheduling. `b_req_mtp_start_loc` identifies each logical
+        request's first row.
 
-        Returns a SpecProposal whose `token_ids[:, 0]` is `next_token_ids`.
+        Column 0 of the returned proposal must equal `next_token_ids`.
         """
 
         raise NotImplementedError

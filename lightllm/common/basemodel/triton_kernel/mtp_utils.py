@@ -528,8 +528,9 @@ def prepare_dynamic_spec_model_input(
     # Keep CPU mem_indexes unfiltered here. Copying selected_row_mask back to
     # CPU in this hot path synchronizes the overlap stream; the router frees
     # unselected/rejected CPU mem indexes after its existing async mask copy is
-    # consumed.  Decode only needs b_position_delta on device, so placeholder
-    # multimodal metadata keeps padded ModelInput checks shape-consistent.
+    # consumed. Decode and draft-cache commit use the compacted
+    # b_position_delta, so placeholder multimodal metadata only needs to keep
+    # ModelInput shapes consistent.
     if model_input.multimodal_params is not None:
         # Read-only placeholders: avoid rebuilding hundreds of nested Python
         # objects on every compacted decode iteration.

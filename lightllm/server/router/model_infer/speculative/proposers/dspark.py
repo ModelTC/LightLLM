@@ -5,15 +5,15 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
-from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
+from lightllm.server.router.model_infer.speculative.proposers.parallel_block import ParallelBlockProposer
 
 
-class DSparkProposer(DFlashProposer):
-    """DSpark block proposer.
+class DSparkProposer(ParallelBlockProposer):
+    """DSpark semi-autoregressive parallel-block proposer.
 
-    DSpark shares DFlash's target-hidden KV injection and non-causal block
-    backbone. Its post layer returns Markov-corrected logits and optional
-    confidence logits, so the proposer follows the same token path as DFlash.
+    A parallel DFlash-style backbone generates the block features in one pass;
+    a lightweight sequential Markov head adds intra-block token dependency.
+    The confidence head supplies per-position scheduling scores.
     """
 
     @torch.no_grad()
@@ -26,8 +26,8 @@ class DSparkProposer(DFlashProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> SpecProposal:
-        num_reqs = int(b_req_mtp_start_loc.shape[0])
-        verify_row_count = next_token_ids.shape[0]
+        request_count = int(b_req_mtp_start_loc.shape[0])
+        verify_row_count = int(next_token_ids.shape[0])
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
         proposal_token_ids = next_token_ids.new_full(
@@ -36,7 +36,7 @@ class DSparkProposer(DFlashProposer):
         )
         proposal_token_ids[:, 0] = next_token_ids
         schedule_scores = (
-            torch.empty(
+            torch.zeros(
                 (verify_row_count, draft_step),
                 dtype=torch.float32,
                 device=next_token_ids.device,
@@ -45,47 +45,39 @@ class DSparkProposer(DFlashProposer):
             else None
         )
 
+        accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
+        draft_input, extra_mem_indexes_cpu = self.build_block_draft_input(
+            main_model_input=main_model_input,
+            next_token_ids=next_token_ids,
+            accepted_tail_rows=accepted_tail_rows,
+            request_count=request_count,
+        )
         self.extend_draft_kv_cache(
             main_model_input=main_model_input,
             target_hidden=main_model_output.spec_hidden,
         )
+        draft_output = draft_model.forward(draft_input)
 
-        if draft_step == 0:
-            return SpecProposal(
-                token_ids=proposal_token_ids,
-                extra_mem_indexes_cpu=None,
-                schedule_scores=schedule_scores,
-            )
-
-        selected_rows = self.select_accepted_tail_rows(
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            accept_len=accept_len,
-        )
-        draft_input, draft_mem_indexes_cpu = self.build_block_draft_input(
-            main_model_input=main_model_input,
-            next_token_ids=next_token_ids,
-            selected_rows=selected_rows,
-            num_reqs=num_reqs,
-        )
-        draft_model_output = draft_model.forward(draft_input)
-
-        if draft_model_output.draft_token_ids is None:
-            flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
+        if draft_output.draft_token_ids is None:
+            flat_draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
         else:
-            flat_token_ids = draft_model_output.draft_token_ids
-        block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
-        proposal_token_ids[selected_rows, 1:] = block_token_ids[:, :draft_step]
+            flat_draft_token_ids = draft_output.draft_token_ids
+        block_draft_token_ids = flat_draft_token_ids.reshape(request_count, block_size)
+        proposal_token_ids[accepted_tail_rows, 1:] = block_draft_token_ids[:, :draft_step]
 
         if self.enable_dynamic_spec:
-            confidence_logits = draft_model_output.confidence_logits
+            confidence_logits = draft_output.confidence_logits
             if confidence_logits is None:
                 raise RuntimeError("DSpark dynamic verify requires confidence head logits")
             # Match the clamp used by the GPU dynamic row selector before it
             # converts conditional confidence to prefix survival probability.
-            schedule_scores = self.scatter_selected_step_probs(
-                selected_rows=selected_rows,
-                selected_probs=confidence_logits[:, :draft_step].sigmoid().clamp(min=0.01, max=0.99),
-                verify_row_count=verify_row_count,
+            schedule_scores[accepted_tail_rows] = (
+                confidence_logits[:, :draft_step]
+                .sigmoid()
+                .clamp(
+                    min=0.01,
+                    max=0.99,
+                )
             )
 
         schedule_scores_cpu = None
@@ -97,7 +89,7 @@ class DSparkProposer(DFlashProposer):
 
         return SpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=draft_mem_indexes_cpu,
+            extra_mem_indexes_cpu=extra_mem_indexes_cpu,
             schedule_scores=schedule_scores,
             schedule_scores_cpu=schedule_scores_cpu,
         )

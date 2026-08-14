@@ -150,9 +150,9 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
     block_size = 4
     max_draft_step = 3
     verify_row_count = 5
-    selected_rows = torch.tensor([0, 3])
-    flat_token_ids = torch.arange(2 * block_size)
-    flat_token_probs = torch.arange(2 * block_size, dtype=torch.float32) / 10
+    accepted_tail_rows = torch.tensor([0, 3])
+    flat_draft_token_ids = torch.arange(2 * block_size)
+    flat_draft_token_probs = torch.arange(2 * block_size, dtype=torch.float32) / 10
 
     draft_model = SimpleNamespace(
         block_size=block_size,
@@ -161,11 +161,10 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
     backend = SimpleNamespace(
         max_draft_step=max_draft_step,
         draft_models=[draft_model],
-        _gen_argmax_token_ids_and_prob=lambda _: (flat_token_ids, flat_token_probs),
+        _gen_argmax_token_ids_and_prob=lambda _: (flat_draft_token_ids, flat_draft_token_probs),
     )
     proposer = DFlashProposer(backend=backend, enable_dynamic_spec=True)
     proposer.extend_draft_kv_cache = lambda **_: None
-    proposer.select_accepted_tail_rows = lambda **_: selected_rows
     proposer.build_block_draft_input = lambda **_: (SimpleNamespace(), torch.tensor([10, 11]))
 
     proposal = proposer.propose_next(
@@ -177,14 +176,81 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
         accept_len=torch.tensor([1, 1]),
     )
 
-    expected_blocks = flat_token_ids.reshape(2, block_size)[:, :2]
-    torch.testing.assert_close(proposal.token_ids[selected_rows, 1:], expected_blocks)
+    expected_blocks = flat_draft_token_ids.reshape(2, block_size)[:, :2]
+    torch.testing.assert_close(proposal.token_ids[accepted_tail_rows, 1:], expected_blocks)
     assert proposal.schedule_scores.shape == (verify_row_count, 2)
     for step in range(2):
         scores = proposal.schedule_scores[:, step]
         expected_scores = torch.zeros(verify_row_count)
-        expected_scores[selected_rows] = flat_token_probs.reshape(2, block_size)[:, step]
+        expected_scores[accepted_tail_rows] = flat_draft_token_probs.reshape(2, block_size)[:, step]
         torch.testing.assert_close(scores, expected_scores)
+
+
+def test_dflash_reuses_decode_input_for_kv_commit():
+    forwarded_inputs = []
+    draft_model = SimpleNamespace(forward=forwarded_inputs.append)
+    proposer = DFlashProposer(
+        backend=SimpleNamespace(draft_models=[draft_model]),
+        enable_dynamic_spec=False,
+    )
+    input_ids = torch.arange(4)
+    multimodal_params = [{"images": [], "audios": []}] * 4
+    position_delta = torch.zeros(4, dtype=torch.int32)
+    model_input = SimpleNamespace(
+        batch_size=4,
+        total_token_num=20,
+        prefix_total_token_num=None,
+        input_ids=input_ids,
+        b_seq_len=torch.tensor([10, 11, 12, 13], dtype=torch.int32),
+        b_position_delta=position_delta,
+        multimodal_params=multimodal_params,
+        is_prefill=False,
+    )
+    target_hidden = torch.empty(4, 16)
+
+    proposer.extend_draft_kv_cache(model_input, target_hidden)
+
+    assert len(forwarded_inputs) == 1
+    assert forwarded_inputs[0] is model_input
+    assert model_input.input_ids is input_ids
+    assert model_input.multimodal_params is multimodal_params
+    assert model_input.total_token_num == model_input.batch_size
+    assert model_input.prefix_total_token_num == 0
+    assert model_input.is_prefill
+    torch.testing.assert_close(model_input.b_ready_cache_len, model_input.b_seq_len - 1)
+    torch.testing.assert_close(model_input.b_prefill_start_loc, torch.arange(4, dtype=torch.int32))
+    assert model_input.b_position_delta is position_delta
+    assert model_input.mtp_draft_input_hiddens is target_hidden
+
+
+def test_dflash_expands_position_delta_with_request_block_rows():
+    block_size = 3
+    proposer = DFlashProposer(
+        backend=SimpleNamespace(
+            draft_models=[SimpleNamespace(block_size=block_size, mask_token_id=99)],
+        ),
+        enable_dynamic_spec=False,
+    )
+    proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
+    model_input = SimpleNamespace(
+        b_req_idx=torch.tensor([10, 10, 11, 12, 12], dtype=torch.int32),
+        b_seq_len=torch.tensor([4, 5, 7, 8, 9], dtype=torch.int32),
+        b_position_delta=torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32),
+        max_kv_seq_len=9,
+    )
+
+    draft_input, _ = proposer.build_block_draft_input(
+        main_model_input=model_input,
+        next_token_ids=torch.arange(5, dtype=torch.int64),
+        accepted_tail_rows=torch.tensor([1, 4]),
+        request_count=2,
+    )
+
+    assert torch.equal(
+        draft_input.b_position_delta,
+        torch.tensor([11, 11, 11, 21, 21, 21], dtype=torch.int32),
+    )
+    assert torch.equal(draft_input.b_seq_len, torch.tensor([6, 7, 8, 10, 11, 12], dtype=torch.int32))
 
 
 def test_hidden_collector_reads_target_layer_ids(monkeypatch):

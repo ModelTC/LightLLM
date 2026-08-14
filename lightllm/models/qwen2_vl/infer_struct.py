@@ -17,10 +17,14 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         rope_scaling = model.config.get("rope_scaling", {})
         self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
         InferStateInfo.init_some_extra_state(self, model)
-        if self.is_prefill:
+        if self.is_prefill and self.b_position_delta is None:
             self.position_ids = self.get_mrope_position(self.multimodal_params)
         else:
             b_position_delta = self.b_position_delta.to(dtype=self.position_ids.dtype)
+            if self.is_prefill:
+                # Speculative draft commits use one prefill row per verified
+                # token, whose decode-time MRoPE offset is already available.
+                assert b_position_delta.shape == self.position_ids.shape
             position_ids = self.position_ids + b_position_delta
             self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
 

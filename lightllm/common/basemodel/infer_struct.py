@@ -38,7 +38,7 @@ class InferStateInfo:
         self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
         self.b_mtp_index: torch.Tensor = None
-        # only for mrope model in decode phase used.
+        # MRoPE position offset propagated from ModelInput.
         self.b_position_delta: torch.Tensor = None
 
         self.b_seq_len: torch.Tensor = None

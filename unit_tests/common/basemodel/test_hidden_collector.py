@@ -37,11 +37,11 @@ def test_hidden_collector_selects_implementation():
 def test_draft_hidden_collector_follows_spec_mode():
     model = SimpleNamespace(is_mtp_draft_model=True)
 
-    recurrent_collector = HiddenCollector(model=model, spec_mode="eagle3")
-    block_collector = HiddenCollector(model=model, spec_mode="dspark")
+    autoregressive_collector = HiddenCollector(model=model, spec_mode="eagle3")
+    parallel_block_collector = HiddenCollector(model=model, spec_mode="dspark")
 
-    assert isinstance(recurrent_collector.collectors[0], FinalHiddenCollector)
-    assert isinstance(block_collector.collectors[0], NoopHiddenCollector)
+    assert isinstance(autoregressive_collector.collectors[0], FinalHiddenCollector)
+    assert isinstance(parallel_block_collector.collectors[0], NoopHiddenCollector)
 
 
 def test_hidden_collector_supports_single_and_overlap_forward():
