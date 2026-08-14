@@ -188,6 +188,172 @@ def test_visual_trace_format_defaults_to_natural():
     assert settings.builtin_trace_format == "natural"
 
 
+def test_visual_request_matches_nova_formal_profile():
+    captured = {}
+
+    class FakeRuntime:
+        settings = visual_chat_proxy.VisualProxySettings(
+            remote_url="http://127.0.0.1:18180/v1/chat/completions",
+            remote_model="vision-model",
+        )
+
+        async def post_json(self, payload, raw_request, trace_id):
+            captured.update(payload)
+            return {
+                "choices": [
+                    {"message": {"content": "The title is LightLLM."}}
+                ]
+            }
+
+    image = visual_chat_proxy.RegisteredImage(
+        tag="<image_1/>",
+        source="data:image/png;base64,AAAA",
+        origin="user",
+    )
+
+    result = asyncio.run(
+        visual_chat_proxy.call_visual_remote(
+            runtime=FakeRuntime(),
+            model="agent-model",
+            image=image,
+            task="read the title",
+            trace_id="nova-profile",
+        )
+    )
+
+    assert result == "The title is LightLLM."
+    assert captured == {
+        "model": "vision-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "read the title"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 4096,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def test_visual_response_falls_back_to_clean_reasoning_like_nova():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "reasoning_content": "<|im_start|>The chart peaks in June.<|im_end|>",
+                }
+            }
+        ]
+    }
+
+    assert visual_chat_proxy._remote_content(response) == "The chart peaks in June."
+
+
+def test_visual_stream_assembles_same_result_and_requests_streaming():
+    captured = {}
+    streamed = []
+
+    class FakeRuntime:
+        settings = visual_chat_proxy.VisualProxySettings(
+            remote_url="http://127.0.0.1:18180/v1/chat/completions",
+            remote_model="vision-model",
+        )
+
+        async def stream_json(self, payload, raw_request, trace_id):
+            captured.update(payload)
+            yield {"choices": [{"delta": {"content": "  The title "}}]}
+            assert "".join(streamed) == "The title"
+            yield {"choices": [{"delta": {"content": "is LightLLM.<|im_"}}]}
+            yield {"choices": [{"delta": {"content": "end|>  "}}]}
+
+    async def collect(value):
+        streamed.append(value)
+
+    image = visual_chat_proxy.RegisteredImage(
+        tag="<image_1/>",
+        source="data:image/png;base64,AAAA",
+        origin="user",
+    )
+    result = asyncio.run(
+        visual_chat_proxy.call_visual_remote(
+            runtime=FakeRuntime(),
+            model="agent-model",
+            image=image,
+            task="read the title",
+            trace_id="visual-stream",
+            result_callback=collect,
+        )
+    )
+
+    assert result == "The title is LightLLM."
+    assert "".join(streamed) == result
+    assert captured["stream"] is True
+    assert captured["messages"][0]["content"][0] == {
+        "type": "text",
+        "text": "read the title",
+    }
+
+
+def test_visual_stream_buffers_reasoning_fallback_until_content_priority_is_known():
+    streamed = []
+
+    class FakeRuntime:
+        settings = visual_chat_proxy.VisualProxySettings(
+            remote_url="http://127.0.0.1:18180/v1/chat/completions"
+        )
+
+        async def stream_json(self, payload, raw_request, trace_id):
+            yield {"choices": [{"delta": {"reasoning_content": "fallback "}}]}
+            assert streamed == []
+            yield {"choices": [{"delta": {"reasoning_content": "answer"}}]}
+
+    async def collect(value):
+        streamed.append(value)
+
+    result = asyncio.run(
+        visual_chat_proxy.call_visual_remote(
+            runtime=FakeRuntime(),
+            model="agent-model",
+            image=visual_chat_proxy.RegisteredImage(
+                tag="<image_1/>",
+                source="data:image/png;base64,AAAA",
+                origin="user",
+            ),
+            task="inspect",
+            trace_id="visual-reasoning-stream",
+            result_callback=collect,
+        )
+    )
+
+    assert result == "fallback answer"
+    assert "".join(streamed) == result
+
+
+def test_builtin_tool_definition_matches_nova_profile():
+    function = visual_chat_proxy.BUILTIN_VISION_READER_TOOL["function"]
+
+    assert function["description"] == (
+        "BUILTIN tag-based vision reader. Call it before answering anything that depends on an image, "
+        "screenshot, chart, table, UI, OCR, object count, color, position, layout, or PDF appearance. "
+        "The image argument must be an exact <image_n/> tag already visible in the conversation, never a "
+        "path, URL, file URI, or base64 value."
+    )
+    assert function["parameters"]["properties"]["image"]["description"] == (
+        "An exact conversation image tag such as <image_1/>."
+    )
+    assert function["parameters"]["properties"]["task"]["description"] == (
+        "The visual inspection task or question."
+    )
+
+
 def test_explicit_legacy_xml_trace_remains_replayable_at_public_boundary():
     trace = visual_chat_proxy._format_xml_builtin_trace(
         "<image_1/>", "read the title", "The title is LightLLM."
@@ -359,7 +525,11 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
         iterator = first_turn() if len(main_requests) == 1 else second_turn()
         return CustomStreamingResponse(iterator, media_type="text/event-stream")
 
-    async def fake_visual_remote(**_kwargs):
+    async def fake_visual_remote(**kwargs):
+        callback = kwargs.get("result_callback")
+        if callback is not None:
+            await callback("The title ")
+            await callback("is LightLLM.")
         return "The title is LightLLM."
 
     monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_visual_remote)
@@ -429,13 +599,18 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
     body = asyncio.run(run_test())
 
     assert "I am inspecting the image now." in body
-    assert "读图结果：The title is LightLLM." in body
     assert "The visual evidence is sufficient." in body
     assert '"content": "The title is LightLLM."' in body
     assert '"name": "vision_reader"' not in body
     assert body.endswith("data: [DONE]\n\n")
     assert len(main_requests) == 2
     assert all(item.stream is True for item in main_requests)
+    tool_results = [
+        message.content
+        for message in main_requests[1].messages
+        if message.role == "tool" and message.name == "vision_reader"
+    ]
+    assert tool_results == ["The title is LightLLM."]
     assert runtime._request_semaphore._value == runtime.settings.max_inflight_requests
 
     payloads = [
@@ -466,6 +641,214 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
     )
     assert streamed_reasoning == expected_reasoning
     assert streamed_content == "The title is LightLLM."
+
+
+def test_empty_output_retry_does_not_replay_rejected_assistant_turn(monkeypatch):
+    main_requests = []
+
+    async def fake_main(request, _raw_request):
+        main_requests.append(request)
+        if len(main_requests) == 1:
+            return ChatCompletionResponse(
+                model="agent",
+                choices=[
+                    ChatCompletionResponseChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=ChatMessage(
+                            role="assistant",
+                            content="",
+                            reasoning="discarded retry reasoning",
+                        ),
+                    )
+                ],
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        if len(main_requests) == 2:
+            return ChatCompletionResponse(
+                model="agent",
+                choices=[
+                    ChatCompletionResponseChoice(
+                        index=0,
+                        finish_reason="tool_calls",
+                        message=ChatMessage(
+                            role="assistant",
+                            content="",
+                            tool_calls=[
+                                _tool_call(
+                                    "vision_reader",
+                                    {"image": "<image_1/>", "task": "inspect the image"},
+                                    "builtin_1",
+                                )
+                            ],
+                        ),
+                    )
+                ],
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        return ChatCompletionResponse(
+            model="agent",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=ChatMessage(
+                        role="assistant",
+                        content="done",
+                        reasoning="accepted reasoning",
+                    ),
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def fake_visual_remote(**_kwargs):
+        return "No relevant visual content."
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_visual_remote)
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Do not inspect this image."},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    raw_request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(
+        visual_chat_proxy.VisualProxySettings(remote_url="http://127.0.0.1:18180/generate"),
+        client=object(),
+    )
+
+    response = asyncio.run(
+        visual_chat_proxy.visual_chat_completions_impl(
+            request=request,
+            raw_request=raw_request,
+            runtime=runtime,
+            main_chat_handler=fake_main,
+        )
+    )
+
+    second_history = [message.model_dump(exclude_none=True) for message in main_requests[1].messages]
+    assert not any("discarded retry reasoning" in json.dumps(message) for message in second_history)
+    assert second_history[-1] == visual_chat_proxy._build_empty_output_retry_feedback()
+    assert "discarded retry reasoning" not in (response.choices[0].message.reasoning or "")
+    assert "accepted reasoning" in (response.choices[0].message.reasoning or "")
+
+
+def test_visual_guardrail_does_not_replay_rejected_assistant_turn(monkeypatch):
+    main_requests = []
+
+    async def fake_main(request, _raw_request):
+        main_requests.append(request)
+        if len(main_requests) == 1:
+            return ChatCompletionResponse(
+                model="agent",
+                choices=[
+                    ChatCompletionResponseChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=ChatMessage(
+                            role="assistant",
+                            content="The image is red.",
+                            reasoning="discarded visual guess",
+                        ),
+                    )
+                ],
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        if len(main_requests) == 2:
+            return ChatCompletionResponse(
+                model="agent",
+                choices=[
+                    ChatCompletionResponseChoice(
+                        index=0,
+                        finish_reason="tool_calls",
+                        message=ChatMessage(
+                            role="assistant",
+                            content="",
+                            tool_calls=[
+                                _tool_call(
+                                    "vision_reader",
+                                    {"image": "<image_1/>", "task": "identify the color"},
+                                    "builtin_1",
+                                )
+                            ],
+                        ),
+                    )
+                ],
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        return ChatCompletionResponse(
+            model="agent",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=ChatMessage(role="assistant", content="The image is blue."),
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def fake_visual_remote(**_kwargs):
+        return "The image is blue."
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_visual_remote)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What color is this image?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    raw_request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(
+        visual_chat_proxy.VisualProxySettings(remote_url="http://127.0.0.1:18180/generate"),
+        client=object(),
+    )
+
+    response = asyncio.run(
+        visual_chat_proxy.visual_chat_completions_impl(
+            request=request,
+            raw_request=raw_request,
+            runtime=runtime,
+            main_chat_handler=fake_main,
+        )
+    )
+
+    second_history = [message.model_dump(exclude_none=True) for message in main_requests[1].messages]
+    assert not any("discarded visual guess" in json.dumps(message) for message in second_history)
+    assert not any("The image is red." in json.dumps(message) for message in second_history[:-1])
+    assert second_history[-1] == visual_chat_proxy._build_output_guardrail_feedback(
+        ["<image_1/>"], "The image is red."
+    )
+    assert "discarded visual guess" not in (response.choices[0].message.reasoning or "")
+    assert response.choices[0].message.content == "The image is blue."
 
 
 def test_anthropic_stream_maps_proxy_reasoning_to_thinking_deltas():
