@@ -1674,7 +1674,7 @@ async def call_visual_remote(
                 ],
             },
         ],
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "temperature": 0.0,
         "chat_template_kwargs": {"enable_thinking": False},
     }
