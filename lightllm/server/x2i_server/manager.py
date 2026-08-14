@@ -9,7 +9,7 @@ import torch
 import time
 import multiprocessing as mp
 import os
-from typing import List
+from typing import List, Any
 from lightllm.server.core.objs import StartArgs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -21,6 +21,8 @@ from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICach
 from lightllm.utils.dist_utils import set_current_device_id
 from lightllm.utils.start_utils import start_submodule_processes
 from lightllm.utils.net_utils import alloc_can_use_network_port
+from lightllm.utils.envs_utils import get_env_start_args
+
 from .past_kv_cache_client import PastKVCacheClient
 from .rng_state_cache import RngStateCache
 
@@ -82,7 +84,7 @@ class X2IManager:
             # x2v server use separate processes
             from lightllm.server.x2i_server.lightx2v.adapter import start_x2v_process
 
-            x2v_world_size = get_x2v_world_size(self.args)
+            x2v_world_size = get_x2v_world_size()
 
             assert (
                 self.x2i_server_used_gpus >= x2v_world_size
@@ -215,23 +217,52 @@ class X2IManager:
         pass
 
 
-def get_enable_cfg(args: StartArgs) -> bool:
-    if not hasattr(args, "x2v_gen_model_config") or not args.x2v_gen_model_config:
-        return True
-    import json
+class X2VConfig:
+    _data = None
 
-    with open(args.x2v_gen_model_config, "r") as f:
-        config_json = json.load(f)
-    return config_json.get("enable_cfg", True)
+    @staticmethod
+    def get(args: StartArgs = None):
+        if X2VConfig._data is None:
+            args = args or get_env_start_args()
+            if not hasattr(args, "x2v_gen_model_config") or not args.x2v_gen_model_config:
+                return None
+            import json
+            with open(args.x2v_gen_model_config, "r") as f:
+                X2VConfig._data = json.load(f)
+            logger.info(f"lightllm get x2v config: {X2VConfig._data}")
+        return X2VConfig._data
+
+    @staticmethod
+    def get_value(key: str, default: Any = None):
+        conf = X2VConfig.get()
+        if not conf:
+            return default
+        return conf.get(key, default)
 
 
-def get_x2v_world_size(args: StartArgs) -> int:
-    import json
+def get_enable_cfg() -> bool:
+    return X2VConfig.get_value("enable_cfg", True)
 
-    with open(args.x2v_gen_model_config, "r") as f:
-        config_json = json.load(f)
 
-    return config_json.get("parallel", {}).get("cfg_p_size", 1) * config_json.get("parallel", {}).get("seq_p_size", 1)
+def get_x2v_world_size() -> int:
+    cfg_p_size = X2VConfig.get_value("parallel", {}).get("cfg_p_size", 1)
+    seq_p_size = X2VConfig.get_value("parallel", {}).get("seq_p_size", 1)
+    return cfg_p_size * seq_p_size
+
+
+def get_default_image_config() -> dict:
+    default_config = {}
+    for key in ["timestep_shift", "cfg_interval", "cfg_scale", "cfg_norm"]:
+        value = X2VConfig.get_value(key)
+        if value:
+            default_config[key] = value
+    return default_config
+
+
+def get_min_max_pixels() -> tuple[int, int]:
+    min_pixels = X2VConfig.get_value("min_pixels", 2048 * 2048)
+    max_pixels = X2VConfig.get_value("max_pixels", 4096 * 4096)
+    return min_pixels, max_pixels
 
 
 def setup_devices(args: StartArgs):

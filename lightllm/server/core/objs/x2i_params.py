@@ -70,7 +70,6 @@ class X2IParams(ctypes.Structure):
         ("cfg_interval", ctypes.c_float * 2),
         ("timestep_shift", ctypes.c_float),
         ("cfg_norm", ctypes.c_int),
-        ("timestep_shift", ctypes.c_float),
         ("past_kvcache", PastKVCachePageList),
         ("past_kvcache_text", PastKVCachePageList),
         ("past_kvcache_img", PastKVCachePageList),
@@ -152,14 +151,14 @@ class X2IParams(ctypes.Structure):
             kwargs["cfg_norm"] = CfgNormType.from_str(image_config.cfg_norm)
         self.init(**kwargs)
 
-    def update_hw(self, width: int, height: int):
+    def update_hw(self, width: int, height: int, min_pixels: int = 512 * 512, max_pixels: int = 4096 * 4096):
         if not self.dynamic_resolution:
             return
         if self.has_updated_hw:
             return
         from lightllm.models.neo_chat_moe.vision_process import smart_resize
 
-        h, w = smart_resize(height, width, factor=32, min_pixels=512 * 512, max_pixels=4096 * 4096)
+        h, w = smart_resize(height, width, factor=32, min_pixels=min_pixels, max_pixels=max_pixels)
         self.width = w
         self.height = h
         self.has_updated_hw = True

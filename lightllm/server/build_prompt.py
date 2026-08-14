@@ -114,7 +114,7 @@ async def build_prompt_from_image_request(request: Union[ImageGenerationRequest,
             ]
         user_content.append({"type": "text", "text": request.prompt})
         kwargs = {"conversation": [{"role": "user", "content": user_content}]}
-        logger.info(f"kwargs: {kwargs}")
+        # logger.info(f"kwargs: {kwargs}")
 
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True)
 

@@ -91,7 +91,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
             width > 0 and height > 0 and width % self.patch_size == 0 and height % self.patch_size == 0
         ), "width and height should be greater than 0 and divisible by patch_size"
 
-        grid_h, grid_w = width // self.patch_size, width // self.patch_size
+        grid_h, grid_w = height // self.patch_size, width // self.patch_size
         token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
         return token_num
 

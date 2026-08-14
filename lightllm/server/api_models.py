@@ -509,7 +509,9 @@ class ImageConfig(BaseModel):
             base = self._aspect_ratio_to_resolution[self.aspect_ratio][self.image_size]
             w, h = base
 
-        h, w = smart_resize(h, w, factor=32, min_pixels=1024 * 1024, max_pixels=4096 * 4096)
+        from lightllm.server.x2i_server.manager import get_min_max_pixels
+        min_pixels, max_pixels = get_min_max_pixels()
+        h, w = smart_resize(h, w, factor=32, min_pixels=min_pixels, max_pixels=max_pixels)
         return w, h
 
 
@@ -573,12 +575,14 @@ class ImageGenerationRequest(BaseModel):
         except ValueError:
             raise ValueError(f"Invalid size: {self.size}")
 
-        self.img_config = ImageConfig(
-            image_type=self.output_format,
-            height=height,
-            width=width,
-            cfg_norm="none",
-        )
+        from lightllm.server.x2i_server.manager import get_default_image_config
+        conf = get_default_image_config()
+        conf.update({
+            "image_type": self.output_format,
+            "height": height,
+            "width": width,
+        })
+        self.img_config = ImageConfig(**conf)
         return self
 
 

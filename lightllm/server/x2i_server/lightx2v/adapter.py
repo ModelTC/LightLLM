@@ -170,7 +170,7 @@ class LightX2VServer:
                     f"fallback to current global rng"
                 )
         logger.info(f"seed: {seed} param.seed: {param.seed} first_image: {param.first_image} session_id: {session_id}")
-        image = self.pipe.generate(
+        image = await asyncio.to_thread(self.pipe.generate,
             seed=seed,
             save_result_path="",
             target_shape=[param.height, param.width],

@@ -506,12 +506,19 @@ class HttpServerManager:
                 return metadata
 
         try:
+            from lightllm.server.x2i_server.manager import get_min_max_pixels
+            min_pixels, max_pixels = get_min_max_pixels()
+            sample_params_kwargs = {
+                "img_gen_prefill": True,
+                "min_pixels": min_pixels,
+                "max_pixels": max_pixels,
+            }
             # 1. construct 3 or 2 generate based on the multimodel_parmas
             sample_params = SamplingParams()
-            sample_params.init(self.tokenizer, **{"img_gen_prefill": True})
+            sample_params.init(self.tokenizer, **sample_params_kwargs)
 
             sample_params1 = SamplingParams()
-            sample_params1.init(self.tokenizer, **{"img_gen_prefill": True})
+            sample_params1.init(self.tokenizer, **sample_params_kwargs)
 
             img_len = len(multimodal_params.images)
             image_guidance_scale = generation_params.image_guidance_scale
@@ -526,7 +533,7 @@ class HttpServerManager:
                     prompt
                 )
                 sample_params2 = SamplingParams()
-                sample_params2.init(self.tokenizer, **{"img_gen_prefill": True})
+                sample_params2.init(self.tokenizer, **sample_params_kwargs)
                 (con_gen, text_uncon_gen, img_uncon_gen) = await asyncio.gather(
                     *[
                         generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
@@ -557,7 +564,7 @@ class HttpServerManager:
                 if input_image_num > 0:
                     # for it2i, the output image size is the same as the input image size
                     generation_params.update_hw(
-                        multimodal_params.images[0].image_w, multimodal_params.images[0].image_h
+                        multimodal_params.images[0].image_w, multimodal_params.images[0].image_h, min_pixels, max_pixels
                     )
             # use the first request id as the gen image request id
             x2i_req_id = generate_req_ids[0]

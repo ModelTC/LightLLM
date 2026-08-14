@@ -396,9 +396,9 @@ def normal_or_p_d_start(args):
         )
 
     if args.enable_multimodal_x2i:
-        from .x2i_server.manager import get_enable_cfg
-
-        args.x2i_enable_cfg = get_enable_cfg(args)
+        from .x2i_server.manager import get_enable_cfg, X2VConfig
+        X2VConfig.get(args)
+        args.x2i_enable_cfg = get_enable_cfg()
 
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
