@@ -1,5 +1,6 @@
 import threading
 import time
+import inspect
 from collections import deque
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -17,10 +18,30 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.mode_backend import eplb_manager as manager_module
-from lightllm.server.router.model_infer.mode_backend import eplb_transfer as transfer_module
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import deepgemm_impl as deepgemm_module
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import fused_moe_weight as fused_weight_module
+from lightllm.server.router.model_infer.mode_backend import (
+    eplb_manager as manager_module,
+)
+from lightllm.server.router.model_infer.mode_backend import (
+    eplb_transfer as transfer_module,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
+    deepgemm_impl as deepgemm_module,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    EPLBState,
+    ExpertParallelState,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
+    create_fuse_moe_impl,
+    FuseMoeMarlin,
+    FuseMoeTriton,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.base_impl import (
+    FuseMoeBaseImpl,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
+    fused_moe_weight as fused_weight_module,
+)
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
     build_transfer_plan,
@@ -28,6 +49,63 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     extract_expert_tensors,
 )
 from lightllm.utils import envs_utils
+
+
+def _test_parallel_state(
+    *,
+    eplb=False,
+    logical_experts=128,
+    world_size=16,
+    redundant_experts_per_rank=1,
+    route_counter=None,
+    recording=False,
+    recorded_sample_count=0,
+):
+    eplb_state = None
+    if eplb:
+        if route_counter is None:
+            route_counter = torch.zeros((2, logical_experts), dtype=torch.int64)
+        eplb_state = EPLBState(
+            redundant_experts_per_rank=redundant_experts_per_rank,
+            logical_to_physical_map=torch.zeros((logical_experts, 2), dtype=torch.int32),
+            logical_replica_count=torch.ones(logical_experts, dtype=torch.int32),
+            route_counter=route_counter,
+            recording=recording,
+            recorded_sample_count=recorded_sample_count,
+        )
+    return ExpertParallelState(
+        logical_experts=logical_experts,
+        world_size=world_size,
+        eplb=eplb_state,
+    )
+
+
+def _validated_expert_parallel_state(
+    *,
+    eplb=True,
+    n_routed_experts=4,
+    world_size=2,
+    redundant_experts_per_rank=1,
+    device="cpu",
+):
+    runtime = None
+    if eplb:
+        runtime = EPLBState(
+            redundant_experts_per_rank=redundant_experts_per_rank,
+            logical_to_physical_map=torch.empty((n_routed_experts, 2), dtype=torch.int32, device=device),
+            logical_replica_count=torch.ones(n_routed_experts, dtype=torch.int32, device=device),
+            route_counter=torch.zeros((2, n_routed_experts), dtype=torch.int64, device=device),
+        )
+    return ExpertParallelState(
+        logical_experts=n_routed_experts,
+        world_size=world_size,
+        eplb=runtime,
+    )
+
+
+def _set_expert_parallel_state(impl, state):
+    impl.expert_parallel_state = state
+    impl.eplb_state = state.eplb
 
 
 def _manual_runtime_rank_load(source_load, placement, node_world_size, alignment):
@@ -51,6 +129,150 @@ def _manual_runtime_rank_load(source_load, placement, node_world_size, alignment
                     rank = physical_id // physical_experts_per_rank
                     raw[:, layer, rank, expert] += source_load[:, layer, source_node, expert] / count
     return (torch.ceil(raw / alignment) * alignment).sum(dim=3)
+
+
+def test_base_and_triton_have_only_common_constructor_parameters():
+    assert list(inspect.signature(FuseMoeBaseImpl.__init__).parameters) == [
+        "self",
+        "n_routed_experts",
+        "num_fused_shared_experts",
+        "routed_scaling_factor",
+        "quant_method",
+    ]
+    assert "__init__" not in FuseMoeTriton.__dict__
+
+
+def test_base_call_template_forwards_selection_and_capture_callback():
+    class Impl(FuseMoeBaseImpl):
+        def _select_experts(
+            self,
+            input_tensor,
+            router_logits,
+            correction_bias,
+            top_k,
+            renormalize,
+            use_grouped_topk,
+            topk_group,
+            num_expert_group,
+            scoring_func,
+            per_expert_scale=None,
+            shared_expert_gate=None,
+            is_prefill=None,
+            preserve_logical_ids=False,
+        ):
+            seen["select"] = {"preserve_logical_ids": preserve_logical_ids}
+            return "weights", "physical_ids", "logical_ids"
+
+        def _fused_experts(
+            self,
+            input_tensor,
+            w13,
+            w2,
+            topk_weights,
+            topk_ids,
+            router_logits=None,
+            is_prefill=None,
+        ):
+            seen["fused"] = {"topk_ids": topk_ids}
+            return "output"
+
+    seen, captured = {}, []
+    impl = Impl(4, 0, 1.0, SimpleNamespace())
+    result = impl(
+        "input",
+        "logits",
+        "w13",
+        "w2",
+        None,
+        "softmax",
+        2,
+        False,
+        False,
+        0,
+        0,
+        moe_capture_callback=captured.append,
+    )
+    assert result == "output"
+    assert captured == ["logical_ids"]
+    assert seen["select"]["preserve_logical_ids"]
+    assert seen["fused"]["topk_ids"] == "physical_ids"
+    assert not hasattr(impl, "workspace")
+    with pytest.raises(TypeError):
+        FuseMoeBaseImpl(4, 0, 1.0, SimpleNamespace())
+
+
+def test_parallel_state_validates_layout_and_eplb_tensor_shapes():
+    with pytest.raises(ValueError, match="divide evenly"):
+        ExpertParallelState(logical_experts=7, world_size=2)
+    with pytest.raises(ValueError, match="logical expert count"):
+        ExpertParallelState(
+            4,
+            2,
+            EPLBState(
+                redundant_experts_per_rank=1,
+                logical_to_physical_map=torch.zeros((3, 2), dtype=torch.int32),
+                logical_replica_count=torch.ones(3, dtype=torch.int32),
+                route_counter=torch.zeros((2, 3), dtype=torch.int64),
+            ),
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        EPLBState(
+            redundant_experts_per_rank=1,
+            logical_to_physical_map=torch.zeros((4, 2), dtype=torch.int32),
+            logical_replica_count=torch.ones(4, dtype=torch.int32),
+            route_counter=torch.zeros((0, 4), dtype=torch.int64),
+        )
+    with pytest.raises(ValueError, match="cannot be negative"):
+        EPLBState(
+            redundant_experts_per_rank=1,
+            logical_to_physical_map=torch.zeros((4, 2), dtype=torch.int32),
+            logical_replica_count=torch.ones(4, dtype=torch.int32),
+            route_counter=torch.zeros((1, 4), dtype=torch.int64),
+            recorded_sample_count=-1,
+        )
+    state = _validated_expert_parallel_state(eplb=True)
+    assert state.primary_experts_per_rank == 2
+    assert state.total_physical_experts == 6
+    assert not hasattr(state.eplb, "record_load")
+
+
+def test_factory_selects_all_paths_and_requires_ep_state(monkeypatch):
+    monkeypatch.setattr(deepgemm_module, "is_sm100_gpu", lambda: False)
+    plain_quant = SimpleNamespace(method_name="none")
+    marlin_quant = SimpleNamespace(method_name="awq_marlin")
+    state = _validated_expert_parallel_state(eplb=False)
+    ep_impl = create_fuse_moe_impl(
+        n_routed_experts=4,
+        num_fused_shared_experts=0,
+        routed_scaling_factor=1.0,
+        quant_method=plain_quant,
+        expert_parallel_state=state,
+    )
+    assert ep_impl.expert_parallel_state is state
+    assert state.eplb is None
+    assert not hasattr(ep_impl, "route_counter")
+    assert isinstance(
+        create_fuse_moe_impl(
+            n_routed_experts=4,
+            num_fused_shared_experts=0,
+            routed_scaling_factor=1.0,
+            quant_method=plain_quant,
+        ),
+        FuseMoeTriton,
+    )
+    assert isinstance(
+        create_fuse_moe_impl(
+            n_routed_experts=4,
+            num_fused_shared_experts=0,
+            routed_scaling_factor=1.0,
+            quant_method=marlin_quant,
+        ),
+        FuseMoeMarlin,
+    )
+    assert "enable_ep_moe" not in inspect.signature(create_fuse_moe_impl).parameters
+    assert issubclass(deepgemm_module.FuseMoeDeepGEMM, FuseMoeBaseImpl)
+    assert not issubclass(deepgemm_module.FuseMoeDeepGEMM, FuseMoeTriton)
+    assert issubclass(FuseMoeMarlin, FuseMoeTriton)
 
 
 def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
@@ -468,9 +690,24 @@ def test_source_node_estimate_matches_local_first_runtime_replica_sharing():
 def test_source_node_planner_constraints_and_real_critical_improvement():
     source_load = torch.tensor(
         [
-            [[[697, 451, 383, 536, 349, 404, 854, 425], [861, 103, 166, 612, 444, 263, 910, 392]]],
-            [[[944, 457, 338, 108, 63, 525, 48, 216], [439, 117, 837, 550, 833, 201, 729, 5]]],
-            [[[749, 159, 18, 723, 12, 700, 419, 51], [112, 135, 8, 840, 40, 970, 90, 683]]],
+            [
+                [
+                    [697, 451, 383, 536, 349, 404, 854, 425],
+                    [861, 103, 166, 612, 444, 263, 910, 392],
+                ]
+            ],
+            [
+                [
+                    [944, 457, 338, 108, 63, 525, 48, 216],
+                    [439, 117, 837, 550, 833, 201, 729, 5],
+                ]
+            ],
+            [
+                [
+                    [749, 159, 18, 723, 12, 700, 419, 51],
+                    [112, 135, 8, 840, 40, 970, 90, 683],
+                ]
+            ],
         ],
         dtype=torch.int64,
     )
@@ -500,11 +737,14 @@ def test_source_node_select_uses_the_same_runtime_critical_prediction():
         source_load, current, candidate, expert_alignment=128, node_world_size=2
     )
     assert torch.equal(
-        estimate_rank_load(source_load, selected, 128, 2), _manual_runtime_rank_load(source_load, selected, 2, 128)
+        estimate_rank_load(source_load, selected, 128, 2),
+        _manual_runtime_rank_load(source_load, selected, 2, 128),
     )
 
 
-def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twenty(monkeypatch):
+def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twenty(
+    monkeypatch,
+):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     counter = torch.tensor([[10, 20, 30, 40], [0, 0, 0, 0]], dtype=torch.int64)
     manager.weights = [
@@ -512,8 +752,14 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
             "Weight",
             (),
             {
-                "routed_expert_counter_tensor": counter,
-                "fuse_moe_impl": type("Impl", (), {"eplb_recorded_sample_count": 1})(),
+                "expert_parallel_state": _test_parallel_state(
+                    eplb=True,
+                    route_counter=counter,
+                    recording=False,
+                    recorded_sample_count=1,
+                    logical_experts=4,
+                    world_size=1,
+                ),
             },
         )()
     ]
@@ -534,7 +780,11 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
     manager._set_recording = lambda enabled: recordings.append(enabled)
     manager._reset_recorded_samples = lambda: resets.append(True)
     monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(True))
-    monkeypatch.setattr(manager_module.torch.cuda, "synchronize", lambda: pytest.fail("step must not synchronize CUDA"))
+    monkeypatch.setattr(
+        manager_module.torch.cuda,
+        "synchronize",
+        lambda: pytest.fail("step must not synchronize CUDA"),
+    )
 
     manager.step()
     assert manager.prefill_steps == 19
@@ -556,8 +806,14 @@ def test_eplb_step_does_not_start_a_second_evaluation_while_one_is_pending(monke
             "Weight",
             (),
             {
-                "routed_expert_counter_tensor": counter,
-                "fuse_moe_impl": type("Impl", (), {"eplb_recorded_sample_count": 1})(),
+                "expert_parallel_state": _test_parallel_state(
+                    eplb=True,
+                    route_counter=counter,
+                    recording=False,
+                    recorded_sample_count=1,
+                    logical_experts=4,
+                    world_size=1,
+                ),
             },
         )()
     ]
@@ -582,7 +838,9 @@ def test_eplb_step_does_not_start_a_second_evaluation_while_one_is_pending(monke
     assert started == []
 
 
-def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_window(monkeypatch):
+def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_window(
+    monkeypatch,
+):
     class DoneThread:
         def join(self):
             pass
@@ -606,6 +864,7 @@ def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_
     manager.rebalanced = True
     manager.initial_sampling_complete = True
     manager.weights = []
+    manager._eplb_states = []
     recordings, logs = [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
     monkeypatch.setattr(manager_module.logger, "info", lambda *args: logs.append(args))
@@ -620,7 +879,9 @@ def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_
     assert manager.sampling_interval == 80
 
 
-def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(monkeypatch):
+def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(
+    monkeypatch,
+):
     class DoneThread:
         def join(self):
             pass
@@ -647,6 +908,7 @@ def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(
     }
     manager.global_rank = 1
     manager.weights = []
+    manager._eplb_states = []
     recordings, starts = [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
     manager._start_evaluation = lambda: starts.append(True)
@@ -721,6 +983,7 @@ def test_evaluation_state_is_cleared_before_second_round(monkeypatch):
     manager.rebalanced = False
     manager.initial_sampling_complete = True
     manager.weights = []
+    manager._eplb_states = []
     manager._set_recording = lambda _enabled: None
     monkeypatch.setattr(manager_module.threading, "Thread", PendingThread)
     monkeypatch.setattr(manager_module.torch.cuda, "Event", Event)
@@ -747,12 +1010,19 @@ def test_manager_collects_recent_ring_samples_in_chronological_order(monkeypatch
             "Weight",
             (),
             {
-                "routed_expert_counter_tensor": counter,
-                "fuse_moe_impl": type("Impl", (), {"eplb_recorded_sample_count": 5})(),
+                "expert_parallel_state": _test_parallel_state(
+                    eplb=True,
+                    route_counter=counter,
+                    recording=False,
+                    recorded_sample_count=5,
+                    logical_experts=2,
+                    world_size=1,
+                ),
             },
         )()
         for counter in counters
     ]
+    manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
     manager.evaluation_group = object()
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **kwargs: None)
 
@@ -782,12 +1052,19 @@ def test_manager_collects_only_two_recent_sparse_samples(monkeypatch):
             "Weight",
             (),
             {
-                "routed_expert_counter_tensor": counter,
-                "fuse_moe_impl": type("Impl", (), {"eplb_recorded_sample_count": 2})(),
+                "expert_parallel_state": _test_parallel_state(
+                    eplb=True,
+                    route_counter=counter,
+                    recording=False,
+                    recorded_sample_count=2,
+                    logical_experts=2,
+                    world_size=1,
+                ),
             },
         )()
         for counter in counters
     ]
+    manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
     manager.evaluation_group = object()
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **kwargs: None)
 
@@ -800,7 +1077,11 @@ def test_manager_collects_only_two_recent_sparse_samples(monkeypatch):
 
 
 def test_eplb_counter_capacity_covers_default_dense_interval(monkeypatch):
-    args = type("Args", (), {"enable_prefill_eplb": True, "eplb_num_redundant_experts_per_rank": 2})()
+    args = type(
+        "Args",
+        (),
+        {"enable_prefill_eplb": True, "eplb_num_redundant_experts_per_rank": 2},
+    )()
     weight = object.__new__(fused_weight_module.FusedMoeWeight)
     weight.n_routed_experts = 4
     weight.global_world_size = 2
@@ -818,14 +1099,51 @@ def test_eplb_counter_capacity_covers_default_dense_interval(monkeypatch):
 
     monkeypatch.setattr(fused_weight_module.torch, "zeros", cpu_zeros)
 
-    weight._init_redundancy_expert_params()
+    weight._init_expert_parallel_state()
 
-    assert weight.routed_expert_counter_tensor.shape == (40, 4)
+    assert weight.expert_parallel_state.eplb.route_counter.shape == (40, 4)
+
+
+def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
+    args = type(
+        "Args",
+        (),
+        {"enable_prefill_eplb": False, "eplb_num_redundant_experts_per_rank": 2},
+    )()
+    weight = object.__new__(fused_weight_module.FusedMoeWeight)
+    weight.n_routed_experts = 4
+    weight.global_world_size = 2
+    weight.global_rank_ = 0
+    weight.enable_ep_moe = True
+    monkeypatch.setattr(fused_weight_module, "get_env_start_args", lambda: args)
+
+    weight._init_expert_parallel_state()
+
+    assert weight.expert_parallel_state is not None
+    assert weight.expert_parallel_state.eplb is None
+    assert weight.expert_parallel_state.total_physical_experts == weight.n_routed_experts
+    assert weight._initial_redundant_expert_ids == []
+    assert not hasattr(weight, "route_counter")
+    assert not hasattr(weight, "routed_expert_counter_tensor")
 
 
 def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.weights = [type("Weight", (), {"routed_expert_counter_tensor": torch.zeros((1, 4))})()]
+    manager.weights = [
+        type(
+            "Weight",
+            (),
+            {
+                "expert_parallel_state": _test_parallel_state(
+                    eplb=True,
+                    route_counter=torch.zeros((1, 4), dtype=torch.int64),
+                    logical_experts=4,
+                    world_size=1,
+                )
+            },
+        )()
+    ]
+    manager._eplb_states = [manager.weights[0].expert_parallel_state.eplb]
     manager.global_rank = 2
     manager.world_size = 4
     manager.node_world_size = 2
@@ -889,18 +1207,30 @@ def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeyp
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.quant_method = type("Quant", (), {"method_name": "fp8"})()
     impl.n_routed_experts = 128
-    impl.eplb_experts_logical_to_physical_map = object()
+    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     impl._select_experts = lambda **_kwargs: (
         torch.ones((1, 2)),
         torch.tensor([[0, 127]], dtype=torch.int32),
         torch.tensor([[0, 127]], dtype=torch.int32),
     )
     calls = []
-    monkeypatch.setattr(deepgemm_module, "get_deepep_num_max_dispatch_tokens_per_rank_decode", lambda: 16)
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_deepep_num_max_dispatch_tokens_per_rank_decode",
+        lambda: 16,
+    )
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_low_latency_buffer", Buffer())
 
     result = impl.low_latency_dispatch(
-        torch.empty((1, 4)), torch.empty((1, 128)), None, False, 2, False, 0, 0, "softmax"
+        torch.empty((1, 4)),
+        torch.empty((1, 128)),
+        None,
+        False,
+        2,
+        False,
+        0,
+        0,
+        "softmax",
     )
 
     assert result[2].tolist() == [[0, 127]]
@@ -912,13 +1242,26 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
-    impl.eplb_experts_logical_to_physical_map = object()
+    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     topk_ids = torch.tensor([[3, 127]], dtype=torch.int32)
     monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), topk_ids))
-    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", lambda *_args, **_kwargs: pytest.fail("decode must not map"))
+    monkeypatch.setattr(
+        deepgemm_module,
+        "eplb_map_fast",
+        lambda *_args, **_kwargs: pytest.fail("decode must not map"),
+    )
 
     _, selected, origin = impl._select_experts(
-        torch.empty((1, 4)), torch.empty((1, 128)), None, 2, False, False, 0, 0, "softmax", is_prefill=False
+        torch.empty((1, 4)),
+        torch.empty((1, 128)),
+        None,
+        2,
+        False,
+        False,
+        0,
+        0,
+        "softmax",
+        is_prefill=False,
     )
 
     assert selected.data_ptr() == origin.data_ptr()
@@ -930,11 +1273,17 @@ def test_select_experts_and_quant_input_keeps_prefill_ids_logical(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
     impl.quant_method = object()
-    impl.eplb_experts_logical_to_physical_map = object()
+    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     logical_ids = torch.tensor([[3, 127]], dtype=torch.int32)
-    monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), logical_ids))
     monkeypatch.setattr(
-        deepgemm_module, "eplb_map_fast", lambda *_args, **_kwargs: pytest.fail("selection must not map")
+        topk_select,
+        "select_experts",
+        lambda **_kwargs: (torch.ones((1, 2)), logical_ids),
+    )
+    monkeypatch.setattr(
+        deepgemm_module,
+        "eplb_map_fast",
+        lambda *_args, **_kwargs: pytest.fail("selection must not map"),
     )
     monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
 
@@ -959,14 +1308,20 @@ def test_select_experts_and_quant_input_keeps_prefill_ids_logical(monkeypatch):
 
 def test_prepare_prefill_topk_ids_returns_identity_without_eplb(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.eplb_experts_logical_to_physical_map = None
+    _set_expert_parallel_state(impl, _test_parallel_state())
     logical_ids = torch.tensor([[1, 2]], dtype=torch.int64)
-    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", lambda *_args, **_kwargs: pytest.fail("must not map"))
+    monkeypatch.setattr(
+        deepgemm_module,
+        "eplb_map_fast",
+        lambda *_args, **_kwargs: pytest.fail("must not map"),
+    )
 
     assert impl._prepare_prefill_topk_ids(logical_ids) is logical_ids
 
 
-def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_routing_stream(monkeypatch):
+def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_routing_stream(
+    monkeypatch,
+):
     class Buffer:
         def dispatch(self, _qinput, **kwargs):
             calls.append(kwargs)
@@ -979,20 +1334,34 @@ def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_rout
             )
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.total_expert_num_contain_redundancy = 128
+    _set_expert_parallel_state(impl, _test_parallel_state())
     impl.ep_balance_counters = None
-    impl.eplb_experts_logical_to_physical_map = None
     calls = []
     caller_event = object()
     monkeypatch.setattr(
-        deepgemm_module, "_get_prefill_routing_stream", lambda _device: pytest.fail("must not create routing stream")
+        deepgemm_module,
+        "_get_prefill_routing_stream",
+        lambda _device: pytest.fail("must not create routing stream"),
     )
-    monkeypatch.setattr(deepgemm_module.ElasticBuffer, "capture", lambda: pytest.fail("must not capture routing event"))
+    monkeypatch.setattr(
+        deepgemm_module.ElasticBuffer,
+        "capture",
+        lambda: pytest.fail("must not capture routing event"),
+    )
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
-    monkeypatch.setattr(deepgemm_module, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_deepep_num_max_dispatch_tokens_per_rank_prefill",
+        lambda: 16,
+    )
     monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
 
-    impl.dispatch("qinput", torch.tensor([[1, 2]], dtype=torch.int32), torch.ones((1, 2)), caller_event)
+    impl.dispatch(
+        "qinput",
+        torch.tensor([[1, 2]], dtype=torch.int32),
+        torch.ones((1, 2)),
+        caller_event,
+    )
 
     assert calls[0]["previous_event"] is caller_event
     assert calls[0]["topk_idx"].dtype is torch.long
@@ -1011,13 +1380,17 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
             )
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.total_expert_num_contain_redundancy = 130
+    _set_expert_parallel_state(
+        impl,
+        _test_parallel_state(
+            eplb=True,
+            logical_experts=128,
+            world_size=2,
+            redundant_experts_per_rank=1,
+            route_counter=torch.zeros((3, 128), dtype=torch.int64),
+        ),
+    )
     impl.ep_balance_counters = None
-    impl.eplb_experts_logical_to_physical_map = object()
-    impl.eplb_experts_logical_replica_count = object()
-    impl.routed_expert_counter_tensor = torch.zeros((3, 4), dtype=torch.int64)
-    impl.eplb_recording = False
-    impl.eplb_recorded_sample_count = 0
     mapped = []
     calls = []
 
@@ -1030,7 +1403,11 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
 
     monkeypatch.setattr(deepgemm_module, "eplb_map_fast", map_in_place)
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
-    monkeypatch.setattr(deepgemm_module, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_deepep_num_max_dispatch_tokens_per_rank_prefill",
+        lambda: 16,
+    )
     monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
     order = []
     source_event = SimpleNamespace(current_stream_wait=lambda: order.append("source_wait"))
@@ -1051,7 +1428,11 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
     monkeypatch.setattr(deepgemm_module, "_get_prefill_routing_stream", lambda _device: object())
     monkeypatch.setattr(torch.cuda, "stream", fake_routing_stream)
     monkeypatch.setattr(torch.Tensor, "to", observe_long_conversion)
-    monkeypatch.setattr(deepgemm_module.ElasticBuffer, "capture", lambda: order.append("capture") or dispatch_event)
+    monkeypatch.setattr(
+        deepgemm_module.ElasticBuffer,
+        "capture",
+        lambda: order.append("capture") or dispatch_event,
+    )
     logical_ids = torch.tensor([[1, 2]], dtype=torch.int64)
 
     result = impl.dispatch("qinput", logical_ids, torch.ones((1, 2)), source_event)
@@ -1065,31 +1446,34 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
     assert result[3] == [4]
 
 
-def test_configure_eplb_keeps_recording_disabled_until_manager_arms_it(monkeypatch):
+def test_deepgemm_constructor_configures_eplb_and_keeps_recording_disabled(monkeypatch):
     monkeypatch.setattr(deepgemm_module, "is_sm100_gpu", lambda: False)
-    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.eplb_recording = False
-    impl.n_routed_experts = 4
-    logical_to_physical = torch.empty((4, 2), dtype=torch.int32)
-    replica_count = torch.ones(4, dtype=torch.int32)
-    record_load = torch.zeros((), dtype=torch.int32)
-
-    impl.configure_eplb(logical_to_physical, replica_count, record_load)
-
-    assert impl.eplb_experts_logical_to_physical_map is logical_to_physical
-    assert not impl.eplb_recording
-    assert record_load.item() == 0
+    state = _validated_expert_parallel_state(device="cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        with pytest.raises(ValueError, match="must be CUDA"):
+            deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
+        return
+    impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
+    assert impl.expert_parallel_state is state
+    assert not state.eplb.recording
+    assert not hasattr(state.eplb, "record_load")
 
 
-def test_configure_eplb_rejects_sm100(monkeypatch):
+def test_deepgemm_constructor_rejects_sm100_eplb(monkeypatch):
     monkeypatch.setattr(deepgemm_module, "is_sm100_gpu", lambda: True)
-    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    state = _validated_expert_parallel_state(device="cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        with pytest.raises(ValueError, match="must be CUDA"):
+            deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
+        return
 
-    with pytest.raises(AssertionError, match="EPLB does not support SM100"):
-        impl.configure_eplb(
-            torch.empty((4, 2), dtype=torch.int64),
-            torch.ones(4, dtype=torch.int64),
-            torch.zeros((), dtype=torch.int32),
+    with pytest.raises(RuntimeError, match="EPLB does not support SM100"):
+        deepgemm_module.FuseMoeDeepGEMM(
+            4,
+            0,
+            1.0,
+            SimpleNamespace(),
+            expert_parallel_state=state,
         )
 
 
@@ -1098,12 +1482,13 @@ def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
-    impl.eplb_experts_logical_to_physical_map = object()
-    impl.eplb_experts_logical_replica_count = object()
-    impl.eplb_experts_record_load_tensor = object()
-    impl.routed_expert_counter_tensor = torch.zeros((2, 128), dtype=torch.int64)
-    impl.eplb_recording = False
-    impl.eplb_recorded_sample_count = 0
+    _set_expert_parallel_state(
+        impl,
+        _test_parallel_state(
+            eplb=True,
+            route_counter=torch.zeros((2, 128), dtype=torch.int64),
+        ),
+    )
     impl._fused_experts = lambda **kwargs: kwargs["topk_ids"]
 
     def select(**_kwargs):
@@ -1162,11 +1547,17 @@ def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
 
 def test_fused_experts_with_topk_prefill_eplb_maps_and_records_in_place(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.eplb_experts_logical_to_physical_map = object()
-    impl.eplb_experts_logical_replica_count = object()
-    impl.routed_expert_counter_tensor = torch.zeros((3, 4), dtype=torch.int64)
-    impl.eplb_recording = True
-    impl.eplb_recorded_sample_count = 4
+    _set_expert_parallel_state(
+        impl,
+        _test_parallel_state(
+            eplb=True,
+            logical_experts=4,
+            world_size=1,
+            route_counter=torch.zeros((3, 4), dtype=torch.int64),
+            recording=True,
+            recorded_sample_count=4,
+        ),
+    )
     calls, fused_calls = [], []
 
     def map_in_place(topk_ids, logical_map, replica_count, counter, sample_index, *, record_load):
@@ -1183,14 +1574,14 @@ def test_fused_experts_with_topk_prefill_eplb_maps_and_records_in_place(monkeypa
     assert calls == [
         (
             topk_ids,
-            impl.eplb_experts_logical_to_physical_map,
-            impl.eplb_experts_logical_replica_count,
-            impl.routed_expert_counter_tensor,
+            impl.eplb_state.logical_to_physical_map,
+            impl.eplb_state.logical_replica_count,
+            impl.eplb_state.route_counter,
             1,
             True,
         )
     ]
-    assert impl.eplb_recorded_sample_count == 5
+    assert impl.eplb_state.recorded_sample_count == 5
     assert topk_ids.tolist() == [[11, 12]]
     assert fused_calls == [
         {
@@ -1206,11 +1597,16 @@ def test_fused_experts_with_topk_prefill_eplb_maps_and_records_in_place(monkeypa
 
 def test_fused_experts_with_topk_prefill_eplb_maps_without_recording(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.eplb_experts_logical_to_physical_map = object()
-    impl.eplb_experts_logical_replica_count = object()
-    impl.routed_expert_counter_tensor = torch.zeros((3, 4), dtype=torch.int64)
-    impl.eplb_recording = False
-    impl.eplb_recorded_sample_count = 4
+    _set_expert_parallel_state(
+        impl,
+        _test_parallel_state(
+            eplb=True,
+            logical_experts=4,
+            world_size=1,
+            route_counter=torch.zeros((3, 4), dtype=torch.int64),
+            recorded_sample_count=4,
+        ),
+    )
     calls = []
     monkeypatch.setattr(
         deepgemm_module,
@@ -1226,15 +1622,15 @@ def test_fused_experts_with_topk_prefill_eplb_maps_without_recording(monkeypatch
     )
     assert calls[0][0][4] == 0
     assert calls[0][1] == {"record_load": False}
-    assert impl.eplb_recorded_sample_count == 4
+    assert impl.eplb_state.recorded_sample_count == 4
     assert topk_ids.tolist() == [[11, 12]]
 
 
-def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(monkeypatch):
+def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(
+    monkeypatch,
+):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.redundancy_expert_num = 2
-    impl.ep_n_routed_experts = 8
-    impl.eplb_experts_logical_to_physical_map = object()
+    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True, logical_experts=8, world_size=1))
     captured = {}
 
     def masked(*args, **kwargs):
@@ -1245,20 +1641,26 @@ def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(mo
         return "out"
 
     monkeypatch.setattr(deepgemm_module, "masked_group_gemm", masked)
-    pack = lambda: type("Pack", (), {"weight": torch.empty((10, 4)), "weight_scale": torch.empty((10, 1))})()
+    pack = lambda: type(
+        "Pack",
+        (),
+        {"weight": torch.empty((10, 4)), "weight_scale": torch.empty((10, 1))},
+    )()
 
     assert impl.masked_group_gemm((torch.empty((1, 4)),), pack(), pack(), torch.empty(8), torch.float16, 1) == "out"
     assert captured["w13"].shape[0] == captured["w2"].shape[0] == 8
     assert captured["w13_scale"].shape[0] == captured["w2_scale"].shape[0] == 8
 
 
-def test_decode_fused_experts_uses_cached_primary_weight_packs_and_logical_experts(monkeypatch):
+def test_decode_fused_experts_uses_cached_primary_weight_packs_and_logical_experts(
+    monkeypatch,
+):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.redundancy_expert_num = 2
-    impl.ep_n_routed_experts = 8
     impl.n_routed_experts = 128
-    impl.eplb_experts_logical_to_physical_map = object()
-    impl.total_expert_num_contain_redundancy = 160
+    _set_expert_parallel_state(
+        impl,
+        _test_parallel_state(eplb=True, logical_experts=128, world_size=16, redundant_experts_per_rank=2),
+    )
     impl.quant_method = object()
     impl.ep_balance_counters = None
     captured = []
@@ -1269,7 +1671,13 @@ def test_decode_fused_experts_uses_cached_primary_weight_packs_and_logical_exper
 
     monkeypatch.setattr(deepgemm_module, "fused_experts", fused)
     pack = lambda: type(
-        "Pack", (), {"weight": torch.empty((10, 4)), "weight_scale": torch.empty((10, 1)), "weight_zero_point": None}
+        "Pack",
+        (),
+        {
+            "weight": torch.empty((10, 4)),
+            "weight_scale": torch.empty((10, 1)),
+            "weight_zero_point": None,
+        },
     )()
     w13, w2 = pack(), pack()
 
@@ -1313,7 +1721,10 @@ def test_transfer_plan_cross_node_and_stable_source_load_tie_break():
     second = build_transfer_plan(current, target, 8, 4, 2)
     assert first == second
     selected = [step for step in first if step.dst_rank == 0]
-    assert [(step.src_rank, step.src_local_row) for step in selected] == [(2, 0), (3, 2)]
+    assert [(step.src_rank, step.src_local_row) for step in selected] == [
+        (2, 0),
+        (3, 2),
+    ]
 
 
 def test_extract_expert_tensors_includes_weight_scale_and_zero_point_in_order():
@@ -1325,7 +1736,12 @@ def test_extract_expert_tensors_includes_weight_scale_and_zero_point_in_order():
 
     weight = type("Weight", (), {"w13": Pack(1), "w2": Pack(10, scale=False, zero=False)})()
     tensors = extract_expert_tensors(weight)
-    assert [name for name, _ in tensors] == ["w13.weight", "w13.weight_scale", "w13.weight_zero_point", "w2.weight"]
+    assert [name for name, _ in tensors] == [
+        "w13.weight",
+        "w13.weight_scale",
+        "w13.weight_zero_point",
+        "w2.weight",
+    ]
 
 
 def test_commit_staging_rows_only_overwrites_redundant_rows():
@@ -1359,7 +1775,16 @@ def test_commit_staging_rows_merges_contiguous_changed_slots():
             self.length = length
 
         def copy_(self, source, **_kwargs):
-            copies.append((self.owner, self.start, self.length, source.owner, source.start, source.length))
+            copies.append(
+                (
+                    self.owner,
+                    self.start,
+                    self.length,
+                    source.owner,
+                    source.start,
+                    source.length,
+                )
+            )
 
     class Tensor:
         def __init__(self, owner, rows):
@@ -1369,12 +1794,19 @@ def test_commit_staging_rows_merges_contiguous_changed_slots():
         def narrow(self, _dim, start, length):
             return View(self.owner, start, length)
 
-    commit_staging_rows(Tensor("live", 20), Tensor("staging", 4), experts_per_rank=10, changed_dst_slots=(3, 1, 2))
+    commit_staging_rows(
+        Tensor("live", 20),
+        Tensor("staging", 4),
+        experts_per_rank=10,
+        changed_dst_slots=(3, 1, 2),
+    )
 
     assert copies == [("live", 11, 3, "staging", 1, 3)]
 
 
-def test_manager_inflight_ready_gate_commits_ordered_prefix_and_propagates_worker_error(monkeypatch):
+def test_manager_inflight_ready_gate_commits_ordered_prefix_and_propagates_worker_error(
+    monkeypatch,
+):
     class Transfer:
         def __init__(self):
             self.pending = [(0, 0), (1, 1), (2, 2)]
@@ -1474,7 +1906,9 @@ def test_manager_inflight_ready_gate_commits_ordered_prefix_and_propagates_worke
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(monkeypatch):
+def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
+    monkeypatch,
+):
     class Transfer:
         def __init__(self, live, staging):
             self.live = live
@@ -1574,7 +2008,9 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
     monkeypatch.setattr(transfer_module.torch.cuda, "Event", Event)
     monkeypatch.setattr(transfer_module.torch.cuda, "current_stream", lambda: object())
     monkeypatch.setattr(
-        transfer_module.dist, "barrier", lambda **kwargs: operations.append(("barrier", kwargs["group"]))
+        transfer_module.dist,
+        "barrier",
+        lambda **kwargs: operations.append(("barrier", kwargs["group"])),
     )
 
     transfer.start([(0, []), (1, []), (2, [])])
@@ -1614,6 +2050,7 @@ def test_manager_rearms_after_rebalance_only_for_continuous_interval_one(rebalan
     manager.sampling_interval = 1
     manager._sampling_pending = False
     manager.weights = []
+    manager._eplb_states = []
     manager.target_placement = torch.zeros(1)
     manager.in_flight_started_at = 0
     manager.global_rank = 1
@@ -1635,7 +2072,11 @@ def test_manager_keeps_recording_closed_after_insufficient_interval_window(monke
     manager._evaluation_lock = threading.Lock()
     manager._evaluation_error = None
     manager._evaluation_thread = DoneThread()
-    manager._evaluation_result = {"kind": "insufficient", "minimum_layer_samples": 1, "minimum": 2}
+    manager._evaluation_result = {
+        "kind": "insufficient",
+        "minimum_layer_samples": 1,
+        "minimum": 2,
+    }
     manager.global_rank = 1
     manager.step_interval = 20
     manager.sampling_interval = 20
@@ -1643,6 +2084,7 @@ def test_manager_keeps_recording_closed_after_insufficient_interval_window(monke
     manager.rebalanced = True
     manager.initial_sampling_complete = True
     manager.weights = []
+    manager._eplb_states = []
     recordings = []
     manager._set_recording = lambda enabled: recordings.append(enabled)
 
@@ -1675,6 +2117,7 @@ def test_first_no_improvement_switches_to_sparse_sampling_window(monkeypatch):
     manager.rebalanced = False
     manager.initial_sampling_complete = False
     manager.weights = []
+    manager._eplb_states = []
     recordings = []
     manager._set_recording = lambda enabled: recordings.append(enabled)
 
@@ -1723,6 +2166,7 @@ def test_no_improvement_exponentially_backs_off_sampling_interval_at_cap():
     manager.rebalanced = True
     manager.initial_sampling_complete = True
     manager.weights = []
+    manager._eplb_states = []
 
     for expected_interval in (80, 320, 320):
         manager.evaluation_in_flight = True
@@ -1814,6 +2258,7 @@ def test_first_rebalance_completion_switches_to_sparse_step_nineteen_arm(monkeyp
     manager.sampling_interval = manager.step_interval
     manager._sampling_pending = False
     manager.weights = []
+    manager._eplb_states = []
     manager.target_placement = torch.zeros(1)
     manager.in_flight_started_at = 0
     manager.global_rank = 1
@@ -1962,7 +2407,9 @@ def test_nixl_remote_read_cache_reuses_exact_batch_key_and_releases_on_shutdown(
     assert agent.removed_agents == ["remote-1"]
 
 
-def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(monkeypatch):
+def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
+    monkeypatch,
+):
     class Tensor:
         nbytes = 8
 
@@ -2046,7 +2493,10 @@ def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(m
     key_a = ((source_a.data_ptr(), destination_a.data_ptr()),)
     key_b = ((source_b.data_ptr(), destination_b.data_ptr()),)
     stale_key = ((700, 800),)
-    transfer._push_descriptor_cache = {key_a: (object(), object()), stale_key: (object(), object())}
+    transfer._push_descriptor_cache = {
+        key_a: (object(), object()),
+        stale_key: (object(), object()),
+    }
     generation = [entries_a, copies_a]
 
     def copy_batch(_batch):
@@ -2149,7 +2599,9 @@ def test_nixl_ipc_metadata_exports_staging_per_local_target(monkeypatch):
     assert [name for name, _ in transfer._ipc_staging[1][0]] == ["w13.weight"]
 
 
-def test_nixl_copy_batch_source_pushes_local_rows_and_keeps_remote_ucx_reads(monkeypatch):
+def test_nixl_copy_batch_source_pushes_local_rows_and_keeps_remote_ucx_reads(
+    monkeypatch,
+):
     class Stream:
         def __init__(self):
             self.synchronized = 0
@@ -2225,10 +2677,13 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
         (),
         {
             "n_routed_experts": 4,
-            "redundancy_expert_num": 2,
-            "routed_expert_counter_tensor": torch.zeros((2, 4), dtype=torch.int64),
-            "eplb_experts_record_load_tensor": torch.zeros((), dtype=torch.int32),
-            "fuse_moe_impl": type("Impl", (), {"eplb_recorded_sample_count": 0, "eplb_recording": False})(),
+            "expert_parallel_state": _test_parallel_state(
+                eplb=True,
+                logical_experts=4,
+                world_size=2,
+                redundant_experts_per_rank=2,
+                route_counter=torch.zeros((2, 4), dtype=torch.int64),
+            ),
         },
     )()
     transfer = object()
@@ -2259,14 +2714,19 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
     monkeypatch.setattr(manager_module.logger, "info", lambda message: logs.append(message))
     manager = manager_module.EPLBManager(type("Model", (), {})())
     assert manager.transfer is transfer
-    assert (manager.evaluation_group, manager.control_group, manager.transfer_group) == tuple(groups)
+    assert (
+        manager.evaluation_group,
+        manager.control_group,
+        manager.transfer_group,
+    ) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 3
     assert transfer_calls == [([weight], groups[2], 0, 2)]
     assert manager.rebalance_gain_threshold == 0.07
     assert "rebalance_gain_threshold=0.0700" in logs[0]
     assert not manager.initial_sampling_complete
-    assert weight.fuse_moe_impl.eplb_recording
-    assert weight.eplb_experts_record_load_tensor.item() == 0
+    assert weight.expert_parallel_state.eplb.recording
+    assert manager._eplb_states[0] is weight.expert_parallel_state.eplb
+    assert not hasattr(weight.expert_parallel_state.eplb, "record_load")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
@@ -2279,7 +2739,14 @@ def test_eplb_record_flag_controls_counter_without_changing_mapping():
     expert_counter = torch.zeros((2, 4), dtype=torch.int64, device="cuda")
     record_load = torch.ones((), dtype=torch.int32, device="cuda")
 
-    eplb_map(topk_ids, logical_to_physical, replica_count, expert_counter, record_load, sample_index=0)
+    eplb_map(
+        topk_ids,
+        logical_to_physical,
+        replica_count,
+        expert_counter,
+        record_load,
+        sample_index=0,
+    )
     torch.cuda.synchronize()
     assert torch.equal(topk_ids.cpu(), torch.tensor([[0, 1], [4, 2]]))
     assert torch.equal(expert_counter.cpu(), torch.tensor([[2, 1, 1, 0], [0, 0, 0, 0]]))
@@ -2289,13 +2756,27 @@ def test_eplb_record_flag_controls_counter_without_changing_mapping():
     expert_counter.zero_()
     record_load.fill_(1)
     graph_topk_ids.copy_(logical_topk_ids)
-    eplb_map(graph_topk_ids, logical_to_physical, replica_count, expert_counter, record_load, sample_index=1)
+    eplb_map(
+        graph_topk_ids,
+        logical_to_physical,
+        replica_count,
+        expert_counter,
+        record_load,
+        sample_index=1,
+    )
     torch.cuda.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         graph_topk_ids.copy_(logical_topk_ids)
-        eplb_map(graph_topk_ids, logical_to_physical, replica_count, expert_counter, record_load, sample_index=1)
+        eplb_map(
+            graph_topk_ids,
+            logical_to_physical,
+            replica_count,
+            expert_counter,
+            record_load,
+            sample_index=1,
+        )
 
     expert_counter.zero_()
     graph.replay()
@@ -2312,7 +2793,14 @@ def test_eplb_record_flag_controls_counter_without_changing_mapping():
 
     topk_ids.copy_(torch.tensor([[0, 1], [0, 2]], dtype=torch.int64, device="cuda"))
     record_load.fill_(0)
-    eplb_map(topk_ids, logical_to_physical, replica_count, expert_counter, record_load, sample_index=0)
+    eplb_map(
+        topk_ids,
+        logical_to_physical,
+        replica_count,
+        expert_counter,
+        record_load,
+        sample_index=0,
+    )
     torch.cuda.synchronize()
     assert torch.equal(topk_ids.cpu(), torch.tensor([[0, 1], [4, 2]]))
     assert torch.equal(expert_counter.cpu(), torch.zeros((2, 4), dtype=torch.int64))

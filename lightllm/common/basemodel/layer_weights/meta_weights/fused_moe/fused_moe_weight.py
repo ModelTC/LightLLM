@@ -1,14 +1,22 @@
 import torch
 import threading
 from typing import Dict, Any, Optional, Tuple, List
-from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import (
+    BaseWeightTpl,
+)
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
     get_row_slice_mixin,
     get_col_slice_mixin,
     SliceMixinTpl,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
+    create_fuse_moe_impl,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    EPLBState,
+    ExpertParallelState,
+)
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
     build_initial_redundant_expert_ids,
@@ -16,7 +24,11 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
 )
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_env_start_args, get_prefill_eplb_step_interval
-from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_node_world_size
+from lightllm.utils.dist_utils import (
+    get_global_world_size,
+    get_global_rank,
+    get_node_world_size,
+)
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -55,27 +67,23 @@ class FusedMoeWeight(BaseWeightTpl):
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
         self.quant_method = quant_method
-        assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
+        assert num_fused_shared_experts in [
+            0,
+            1,
+        ], "num_fused_shared_experts can only support 0 or 1 now."
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
-        self._init_redundancy_expert_params()
-        self._init_parallel_params()
-        self.fuse_moe_impl = select_fuse_moe_impl(self.quant_method, self.enable_ep_moe)(
+        self._init_expert_parallel_state()
+        self._init_weight_partition()
+        self.fuse_moe_impl = create_fuse_moe_impl(
             n_routed_experts=self.n_routed_experts,
             num_fused_shared_experts=self.num_fused_shared_experts,
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
-            redundancy_expert_num=self.redundancy_expert_num,
-            routed_expert_counter_tensor=self.routed_expert_counter_tensor,
+            expert_parallel_state=self.expert_parallel_state,
         )
-        if self.eplb_experts_logical_to_physical_map is not None:
-            self.fuse_moe_impl.configure_eplb(
-                self.eplb_experts_logical_to_physical_map,
-                self.eplb_experts_logical_replica_count,
-                self.eplb_experts_record_load_tensor,
-            )
         self.lock = threading.Lock()
         self._create_weight()
 
@@ -88,91 +96,90 @@ class FusedMoeWeight(BaseWeightTpl):
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.scoring_func = network_config.get("scoring_func", "softmax")
 
-    def _init_redundancy_expert_params(self):
+    def _init_expert_parallel_state(self):
         args = get_env_start_args()
-        # [n_routed_experts, global_world_size], Maps each logical expert to its primary
-        # and redundant physical expert IDs.
-        self.eplb_experts_logical_to_physical_map: Optional[torch.Tensor] = None
-        # [n_routed_experts], Stores the number of valid physical replicas for each logical expert.
-        self.eplb_experts_logical_replica_count: Optional[torch.Tensor] = None
-        # [], Compatibility flag for the public dynamic EPLB map API.  Service
-        # inference selects specialized record/no-record launches on the host.
-        self.eplb_experts_record_load_tensor: Optional[torch.Tensor] = None
-
+        self.expert_parallel_state: Optional[ExpertParallelState] = None
+        # Initial placement metadata is used only while loading checkpoint rows.
+        # Rebalancing changes live redundant rows and must not update this metadata.
+        self._initial_redundant_expert_ids = []
+        self._initial_redundant_expert_idx_to_local_idx = {}
+        eplb = None
         if args.enable_prefill_eplb:
             assert self.enable_ep_moe, "prefill EPLB requires --enable_ep_moe"
             redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
             assert redundant_experts_per_rank > 0, "--eplb_num_redundant_experts_per_rank must be greater than 0"
-            self.redundancy_expert_num = redundant_experts_per_rank
             all_initial_ids = build_initial_redundant_expert_ids(
                 self.n_routed_experts,
                 self.global_world_size,
-                self.redundancy_expert_num,
+                redundant_experts_per_rank,
             )
-            self.redundancy_expert_ids = all_initial_ids[self.global_rank_].tolist()
-            assert len(self.redundancy_expert_ids) == self.redundancy_expert_num
+            self._initial_redundant_expert_ids = all_initial_ids[self.global_rank_].tolist()
             logical_to_physical, logical_replica_count = build_logical_to_physical_map(
                 all_initial_ids,
                 self.n_routed_experts,
                 source_rank=self.global_rank_,
                 node_world_size=get_node_world_size(),
             )
-            self.eplb_experts_logical_to_physical_map = logical_to_physical.cuda()
-            self.eplb_experts_logical_replica_count = logical_replica_count.cuda()
-            self.eplb_experts_record_load_tensor = torch.zeros((), dtype=torch.int32, device="cuda")
-        else:
-            self.redundancy_expert_num = 0
-            self.redundancy_expert_ids = []
-
-        assert len(self.redundancy_expert_ids) == self.redundancy_expert_num
-        if args.enable_prefill_eplb:
             # The initial dense window needs room for the common two prefill
             # dispatches per manager step.  In steady sparse mode the reset
             # ring only uses its newest roughly two rows; the full capacity is
             # not copied to the planner.
-            sample_capacity = 2 * get_prefill_eplb_step_interval()
-            counter_shape = (sample_capacity, self.n_routed_experts)
-        else:
-            counter_shape = (self.n_routed_experts,)
-        # Keep int64: the dispatch-token limit is runtime-configurable, so an
-        # int32 counter cannot be proven safe for a ring row (or its Gloo sum).
-        self.routed_expert_counter_tensor = torch.zeros(counter_shape, dtype=torch.int64, device="cuda")
+            eplb = EPLBState(
+                redundant_experts_per_rank=redundant_experts_per_rank,
+                logical_to_physical_map=logical_to_physical.cuda(),
+                logical_replica_count=logical_replica_count.cuda(),
+                route_counter=torch.zeros(
+                    (2 * get_prefill_eplb_step_interval(), self.n_routed_experts),
+                    dtype=torch.int64,
+                    device="cuda",
+                ),
+            )
+        assert len(self._initial_redundant_expert_ids) == (0 if eplb is None else eplb.redundant_experts_per_rank)
+        if self.enable_ep_moe:
+            self.expert_parallel_state = ExpertParallelState(
+                logical_experts=self.n_routed_experts,
+                world_size=self.global_world_size,
+                eplb=eplb,
+            )
 
-    def _init_parallel_params(self):
+    def _init_weight_partition(self):
         if self.enable_ep_moe:
             self.tp_rank_ = 0
             self.tp_world_size_ = 1
         self.row_slicer = get_row_slice_mixin(
-            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
+            self.quant_method.method_name,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
         )
         self.col_slicer = get_col_slice_mixin(
-            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
+            self.quant_method.method_name,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
         )
         self.local_n_routed_experts = self.n_routed_experts + self.num_fused_shared_experts
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
+            eplb = self.expert_parallel_state.eplb
+            redundant_experts_per_rank = 0 if eplb is None else eplb.redundant_experts_per_rank
             logger.debug(
                 f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
-                f"redundancy_expertids: {self.redundancy_expert_ids}"
+                f"initial_redundant_expert_ids: {self._initial_redundant_expert_ids}"
             )
-            self.local_n_routed_experts = self.n_routed_experts // self.global_world_size + self.redundancy_expert_num
-            n_experts_per_rank = self.n_routed_experts // self.global_world_size
+            n_experts_per_rank = self.expert_parallel_state.primary_experts_per_rank
+            self.local_n_routed_experts = n_experts_per_rank + redundant_experts_per_rank
             start_expert_id = self.global_rank_ * n_experts_per_rank
-            self.local_expert_ids = (
-                list(range(start_expert_id, start_expert_id + n_experts_per_rank)) + self.redundancy_expert_ids
-            )
             self.expert_idx_to_local_idx = {
-                expert_idx: expert_idx - start_expert_id for expert_idx in self.local_expert_ids[:n_experts_per_rank]
+                expert_idx: expert_idx - start_expert_id
+                for expert_idx in range(start_expert_id, start_expert_id + n_experts_per_rank)
             }
-            self.redundancy_expert_idx_to_local_idx = {
-                redundancy_expert_idx: n_experts_per_rank + i
-                for (i, redundancy_expert_idx) in enumerate(self.redundancy_expert_ids)
+            self._initial_redundant_expert_idx_to_local_idx = {
+                redundant_expert_idx: n_experts_per_rank + i
+                for (i, redundant_expert_idx) in enumerate(self._initial_redundant_expert_ids)
             }
         else:
             self.local_expert_ids = list(range(self.n_routed_experts + self.num_fused_shared_experts))
             self.expert_idx_to_local_idx = {expert_idx: i for (i, expert_idx) in enumerate(self.local_expert_ids)}
-            self.rexpert_idx_to_local_idx = {}
 
     def experts(
         self,
@@ -260,7 +267,11 @@ class FusedMoeWeight(BaseWeightTpl):
         )
 
     def masked_group_gemm(
-        self, recv_x: Tuple[torch.Tensor], masked_m: torch.Tensor, dtype: torch.dtype, expected_m: int
+        self,
+        recv_x: Tuple[torch.Tensor],
+        masked_m: torch.Tensor,
+        dtype: torch.dtype,
+        expected_m: int,
     ):
         assert self.enable_ep_moe, "masked_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.masked_group_gemm(
@@ -330,8 +341,8 @@ class FusedMoeWeight(BaseWeightTpl):
         self._load_e_score_correction_bias(weights)
         self._load_per_expert_scale(weights)
         self._load_weight(self.expert_idx_to_local_idx, weights)
-        if self.redundancy_expert_num > 0:
-            self._load_weight(self.redundancy_expert_idx_to_local_idx, weights)
+        if self.expert_parallel_state is not None and self.expert_parallel_state.eplb is not None:
+            self._load_weight(self._initial_redundant_expert_idx_to_local_idx, weights)
 
     def verify_load(self):
         weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
