@@ -14,6 +14,10 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
     build_transfer_plan,
 )
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    EPLBState,
+    ExpertParallelState,
+)
 
 pytest.importorskip("nixl", reason="NIXL package is required")
 
@@ -36,7 +40,16 @@ def _free_port():
 class _FakeWeight:
     def __init__(self, rank, layer_index, row_elements):
         self.n_routed_experts = 32
-        self.redundancy_expert_num = 16
+        self.expert_parallel_state = ExpertParallelState(
+            logical_experts=32,
+            world_size=2,
+            eplb=EPLBState(
+                redundant_experts_per_rank=16,
+                logical_to_physical_map=torch.zeros((32, 2), dtype=torch.int32, device="cuda"),
+                logical_replica_count=torch.ones(32, dtype=torch.int32, device="cuda"),
+                route_counter=torch.zeros((1, 32), dtype=torch.int64, device="cuda"),
+            ),
+        )
         base = rank * 100 + layer_index * 100
         self.w13 = self._pack(base, row_elements)
         self.w2 = self._pack(base + 10, row_elements)
@@ -80,7 +93,11 @@ def _run_layers(
         for layer_index, buffer_index in pending:
             assert layer_index == layer_plans[committed][0]
             before_commit_callback(layer_index)
-            transfer.commit(layer_index, buffer_index, lambda layer_index=layer_index: callback(layer_index))
+            transfer.commit(
+                layer_index,
+                buffer_index,
+                lambda layer_index=layer_index: callback(layer_index),
+            )
             committed += 1
     transfer.finish()
 
@@ -159,6 +176,7 @@ def _eplb_worker(rank, port, queue):
     weights = [_FakeWeight(rank, layer_index, row_elements) for layer_index in range(layer_count)]
     transfer = NixlEPLBTransfer(weights, transfer_group, rank, world_size=2)
     assert transfer.staging_depth == 8
+    assert transfer._eplb_states[0] is weights[0].expert_parallel_state.eplb
     assert all(tensor.is_cuda for staging in transfer.staging for _, tensor in staging)
 
     wrap_layer_plans = [(layer_index, plan) for layer_index in range(layer_count)]
@@ -167,7 +185,12 @@ def _eplb_worker(rank, port, queue):
         if rank == 0 and layer_index == 0:
             time.sleep(0.1)
 
-    _run_layers(transfer, control_group, wrap_layer_plans, before_commit_callback=delay_rank_zero_first_commit)
+    _run_layers(
+        transfer,
+        control_group,
+        wrap_layer_plans,
+        before_commit_callback=delay_rank_zero_first_commit,
+    )
     torch.cuda.synchronize()
     _assert_correctness(weights, rank, source_rows_by_dst_slot)
     layer_plans = wrap_layer_plans[:benchmark_layer_count]

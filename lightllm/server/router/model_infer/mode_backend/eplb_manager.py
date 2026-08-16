@@ -6,7 +6,9 @@ import torch
 import torch.distributed as dist
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import (
+    FusedMoeWeight,
+)
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
     build_initial_redundant_expert_ids,
     build_logical_to_physical_map,
@@ -17,7 +19,11 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
     build_transfer_plan,
 )
-from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_node_world_size
+from lightllm.utils.dist_utils import (
+    get_global_rank,
+    get_global_world_size,
+    get_node_world_size,
+)
 from lightllm.utils.envs_utils import (
     enable_eplb_rebalance_once,
     get_eplb_rebalance_gain_threshold,
@@ -62,10 +68,28 @@ class EPLBManager:
 
     def __init__(self, model: TpPartBaseModel):
         self.weights = _find_fused_moe_weights(model)
-        assert self.weights, "EPLB requires at least one EP MoE layer"
+        if not self.weights:
+            raise ValueError("EPLB requires at least one EP MoE layer")
         self.global_rank = get_global_rank()
         self.world_size = get_global_world_size()
         self.node_world_size = get_node_world_size()
+        self._expert_parallel_states = []
+        self._eplb_states = []
+        for layer_index, weight in enumerate(self.weights):
+            expert_parallel_state = getattr(weight, "expert_parallel_state", None)
+            if expert_parallel_state is None or expert_parallel_state.eplb is None:
+                raise ValueError(f"EPLB layer {layer_index} requires an EPLB parallel state")
+            if expert_parallel_state.world_size != self.world_size:
+                raise ValueError(f"EPLB layer {layer_index} has an incompatible expert-parallel world size")
+            self._expert_parallel_states.append(expert_parallel_state)
+            self._eplb_states.append(expert_parallel_state.eplb)
+        reference_state = self._expert_parallel_states[0]
+        reference_redundant_experts = self._eplb_states[0].redundant_experts_per_rank
+        for layer_index, (state, eplb_state) in enumerate(zip(self._expert_parallel_states, self._eplb_states)):
+            if state.logical_experts != reference_state.logical_experts:
+                raise ValueError(f"EPLB layer {layer_index} has an incompatible logical expert count")
+            if eplb_state.redundant_experts_per_rank != reference_redundant_experts:
+                raise ValueError(f"EPLB layer {layer_index} has an incompatible redundant expert count")
         self.step_interval = get_prefill_eplb_step_interval()
         self.rebalance_gain_threshold = get_eplb_rebalance_gain_threshold()
         self.sampling_interval = self.step_interval
@@ -73,11 +97,8 @@ class EPLBManager:
         self.prefill_steps = 0
         self.rebalanced = False
         self.initial_sampling_complete = False
-        routed = {weight.n_routed_experts for weight in self.weights}
-        redundant = {weight.redundancy_expert_num for weight in self.weights}
-        assert len(routed) == len(redundant) == 1
-        self.num_logical_experts = routed.pop()
-        self.redundant_experts_per_rank = redundant.pop()
+        self.num_logical_experts = reference_state.logical_experts
+        self.redundant_experts_per_rank = reference_redundant_experts
         initial = build_initial_redundant_expert_ids(
             self.num_logical_experts, self.world_size, self.redundant_experts_per_rank
         )
@@ -117,15 +138,15 @@ class EPLBManager:
             )
 
     def _set_recording(self, enabled: bool):
-        for weight in self.weights:
-            weight.fuse_moe_impl.eplb_recording = enabled
+        for state in self._eplb_states:
+            state.recording = enabled
 
     def _reset_recorded_samples(self):
-        counters = [weight.routed_expert_counter_tensor for weight in self.weights]
+        counters = [state.route_counter for state in self._eplb_states]
         if counters:
             torch._foreach_zero_(counters)
-        for weight in self.weights:
-            weight.fuse_moe_impl.eplb_recorded_sample_count = 0
+        for state in self._eplb_states:
+            state.recorded_sample_count = 0
 
     def _control_count(self, value: int) -> torch.Tensor:
         """Return the main-thread-only reusable control collective scalar."""
@@ -159,15 +180,18 @@ class EPLBManager:
         return counter.index_select(0, indices)
 
     def _collect_local_samples(self) -> torch.Tensor:
-        counters = [weight.routed_expert_counter_tensor for weight in self.weights]
+        counters = [state.route_counter for state in self._eplb_states]
         capacities = [counter.shape[0] for counter in counters]
         if len(set(capacities)) != 1 or any(counter.ndim != 2 for counter in counters):
             raise RuntimeError("EPLB sample capacities differ between layers")
-        counts = [weight.fuse_moe_impl.eplb_recorded_sample_count for weight in self.weights]
+        counts = [state.recorded_sample_count for state in self._eplb_states]
         if len(set(counts)) != 1:
             raise RuntimeError("EPLB recorded sample counts differ between layers")
         sample_count = counts[0]
-        metadata = torch.tensor([sample_count, -sample_count, capacities[0], -capacities[0]], dtype=torch.int64)
+        metadata = torch.tensor(
+            [sample_count, -sample_count, capacities[0], -capacities[0]],
+            dtype=torch.int64,
+        )
         dist.all_reduce(metadata, op=dist.ReduceOp.MIN, group=self.evaluation_group)
         if metadata[0] != -metadata[1] or metadata[2] != -metadata[3]:
             raise RuntimeError("EPLB recorded sample count or capacity differs between ranks")
@@ -178,7 +202,7 @@ class EPLBManager:
         return self._recent_ring_samples(counter_samples, sample_count).cpu()
 
     def _commit_layer_metadata(self, layer_index: int):
-        weight = self.weights[layer_index]
+        eplb_state = self._eplb_states[layer_index]
         metadata = self.target_metadata[layer_index] if self.target_metadata is not None else None
         if metadata is None:
             # Unit tests and external callers may still construct a legacy
@@ -190,8 +214,8 @@ class EPLBManager:
                 node_world_size=self.node_world_size,
             )
         logical_to_physical, replica_count = metadata
-        weight.eplb_experts_logical_to_physical_map.copy_(logical_to_physical, non_blocking=True)
-        weight.eplb_experts_logical_replica_count.copy_(replica_count, non_blocking=True)
+        eplb_state.logical_to_physical_map.copy_(logical_to_physical, non_blocking=True)
+        eplb_state.logical_replica_count.copy_(replica_count, non_blocking=True)
 
     def _finish_rebalance(self):
         self.current_placement = self.target_placement
@@ -222,7 +246,11 @@ class EPLBManager:
                 raise RuntimeError(
                     f"EPLB pending layer {layer_index} does not match expected {self.in_flight_layers[0]}"
                 )
-            self.transfer.commit(layer_index, buffer_index, lambda: self._commit_layer_metadata(layer_index))
+            self.transfer.commit(
+                layer_index,
+                buffer_index,
+                lambda: self._commit_layer_metadata(layer_index),
+            )
             self.in_flight_layers.pop(0)
         if not self.in_flight_layers:
             self.transfer.finish()
@@ -248,7 +276,7 @@ class EPLBManager:
                     expert_alignment=EPLB_EXPERT_ALIGNMENT,
                     node_world_size=self.node_world_size,
                 )
-                placement, improved, metrics, before_load, after_load = _select_improving_placements_with_loads(
+                (placement, improved, metrics, before_load, after_load,) = _select_improving_placements_with_loads(
                     global_load,
                     self.current_placement,
                     candidate,
@@ -274,14 +302,17 @@ class EPLBManager:
     def _evaluate_after_event(self, event: torch.cuda.Event):
         """Run the CPU/Gloo planning phase after the frozen CUDA counters are ready."""
         try:
-            torch.cuda.set_device(self.weights[0].routed_expert_counter_tensor.device)
+            torch.cuda.set_device(self._eplb_states[0].route_counter.device)
             event.synchronize()
             local_load = self._collect_local_samples()
             num_nodes = self.world_size // self.node_world_size
             # Preserve source nodes until physical-replica loads are combined;
             # DeepEP applies expert alignment after traffic from all sources
             # reaches each destination expert.
-            global_load = torch.zeros((*local_load.shape[:2], num_nodes, local_load.shape[2]), dtype=local_load.dtype)
+            global_load = torch.zeros(
+                (*local_load.shape[:2], num_nodes, local_load.shape[2]),
+                dtype=local_load.dtype,
+            )
             global_load[:, :, self.global_rank // self.node_world_size] = local_load
             dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.evaluation_group)
             result = self._plan_and_broadcast(global_load)
