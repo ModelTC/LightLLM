@@ -52,8 +52,10 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
         ("dspark", True, 7, True, False),
         ("dflash", False, 7, True, True),
         ("dflash", True, 7, True, False),
+        ("vanilla_with_att", True, 7, True, False),
         ("vanilla_with_att", True, 0, True, False),
         ("eagle3", True, 0, True, False),
+        ("eagle3", False, 7, True, True),
         ("eagle3", False, 7, False, False),
     ],
 )

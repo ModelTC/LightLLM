@@ -42,12 +42,10 @@ class BaseAttBackend:
     def uses_dynamic_spec_verify_layout(self) -> bool:
         args = get_env_start_args()
         draft_step = self.model.mtp_manager.get_decode_draft_step(self.model.is_mtp_draft_model)
-        if draft_step == 0 or not args.mtp_dynamic_verify:
-            return False
-
-        # Target verification may compact each request to a different row count.
-        # Parallel block drafter forwards still use their checkpoint-defined fixed layout.
-        return args.mtp_mode not in ("dspark", "dflash") or not self.model.is_mtp_draft_model
+        is_main_model = not self.model.is_mtp_draft_model
+        has_decode_draft_step = draft_step > 0
+        dynamic_verify_enabled = args.mtp_dynamic_verify
+        return is_main_model and has_decode_draft_step and dynamic_verify_enabled
 
     def _find_layer_index(
         self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]

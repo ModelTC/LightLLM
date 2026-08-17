@@ -114,46 +114,60 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def init_state(self):
         self.backend: MlaFa3AttBackend = self.backend
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
-        decode_rows_per_request = draft_step + 1
-        uses_dynamic_spec_verify_layout = self.backend.uses_dynamic_spec_verify_layout()
-
-        if draft_step > 0 and not uses_dynamic_spec_verify_layout:
-            assert self.infer_state.batch_size % decode_rows_per_request == 0, (
-                "FA3 fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-                f"got batch_size={self.infer_state.batch_size}, draft_step={draft_step}."
-            )
-
-        # 修正 mtp 在 fa3 下的输入。
-        if uses_dynamic_spec_verify_layout:
-            (b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len,) = build_dynamic_spec_fa3_decode_params(
-                b_req_idx=self.infer_state.b_req_idx,
-                b_seq_len=self.infer_state.b_seq_len,
-                b_mark_shared_group=self.infer_state.b_mark_shared_group,
-                att_batch_size=self.infer_state.batch_size,
-                hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
-            )
+        if self.backend.uses_dynamic_spec_verify_layout():
+            b_att_req_idx = self._init_dynamic_spec_verify_state(draft_step)
         elif draft_step > 0:
-            b_q_seq_len = torch.full(
-                (self.infer_state.b_seq_len.shape[0] // decode_rows_per_request,),
-                fill_value=decode_rows_per_request,
-                dtype=torch.int32,
-                device=self.infer_state.b_seq_len.device,
-            )
-            b_kv_seq_len = self.infer_state.b_seq_len[draft_step::decode_rows_per_request]
-            b_att_req_idx = self.infer_state.b_req_idx[draft_step::decode_rows_per_request]
-            self.b_att_seq_len = b_kv_seq_len.contiguous()
+            b_att_req_idx = self._init_fixed_spec_decode_state(draft_step)
         else:
-            b_att_req_idx = self.infer_state.b_req_idx
-            self.b_att_seq_len = self.infer_state.b_seq_len
+            b_att_req_idx = self._init_normal_decode_state()
 
-        if draft_step > 0:
-            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
-            self.cu_seqlens_q = b1_cu_q_seq_len.int()
-            self.cu_seqlens_k = b1_cu_kv_seq_len.int()
-        else:
-            self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
-            self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
+        self._init_page_table(b_att_req_idx)
 
+    def _init_dynamic_spec_verify_state(self, draft_step: int) -> torch.Tensor:
+        b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len = build_dynamic_spec_fa3_decode_params(
+            b_req_idx=self.infer_state.b_req_idx,
+            b_seq_len=self.infer_state.b_seq_len,
+            b_mark_shared_group=self.infer_state.b_mark_shared_group,
+            att_batch_size=self.infer_state.batch_size,
+            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+        )
+        self._init_spec_decode_cu_seqlens(b_q_seq_len, b_kv_seq_len)
+        self.decode_max_q_seq_len = draft_step + 1
+        return b_att_req_idx
+
+    def _init_fixed_spec_decode_state(self, draft_step: int) -> torch.Tensor:
+        mtp_size = draft_step + 1
+        assert self.infer_state.batch_size % mtp_size == 0, (
+            "FA3 fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
+            f"got batch_size={self.infer_state.batch_size}, draft_step={draft_step}."
+        )
+
+        b_q_seq_len = torch.full(
+            (self.infer_state.b_seq_len.shape[0] // mtp_size,),
+            fill_value=mtp_size,
+            dtype=torch.int32,
+            device=self.infer_state.b_seq_len.device,
+        )
+        b_kv_seq_len = self.infer_state.b_seq_len[draft_step::mtp_size]
+        b_att_req_idx = self.infer_state.b_req_idx[draft_step::mtp_size]
+        self.b_att_seq_len = b_kv_seq_len.contiguous()
+        self._init_spec_decode_cu_seqlens(b_q_seq_len, b_kv_seq_len)
+        self.decode_max_q_seq_len = mtp_size
+        return b_att_req_idx
+
+    def _init_normal_decode_state(self) -> torch.Tensor:
+        self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
+        self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
+        self.b_att_seq_len = self.infer_state.b_seq_len
+        self.decode_max_q_seq_len = 1
+        return self.infer_state.b_req_idx
+
+    def _init_spec_decode_cu_seqlens(self, b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor):
+        b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
+        self.cu_seqlens_q = b1_cu_q_seq_len.int()
+        self.cu_seqlens_k = b1_cu_kv_seq_len.int()
+
+    def _init_page_table(self, b_att_req_idx: torch.Tensor):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
         # 可以使用 cuda graph的时候从 buffer中申请
@@ -177,8 +191,6 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
             req_to_token_indexs=model.req_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
         )
-        self.decode_max_q_seq_len = decode_rows_per_request
-        return
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFa3DecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
