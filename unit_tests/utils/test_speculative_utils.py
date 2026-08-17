@@ -8,7 +8,6 @@ import torch
 import lightllm.common.basemodel.attention.base_att as base_att_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-from lightllm.common.basemodel.hidden_collector import HiddenCollector
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
@@ -254,10 +253,16 @@ def test_dflash_expands_position_delta_with_request_block_rows():
 
 
 def test_hidden_collector_reads_target_layer_ids(monkeypatch):
+    config_reads = []
+
+    def get_config_dict(path):
+        config_reads.append(path)
+        return {"target_layer_ids": [1, 20, 36]}, {}
+
     monkeypatch.setattr(
         hidden_collector_module.PretrainedConfig,
         "get_config_dict",
-        lambda _: ({"target_layer_ids": [1, 20, 36]}, {}),
+        get_config_dict,
     )
     monkeypatch.setattr(
         hidden_collector_module,
@@ -266,9 +271,12 @@ def test_hidden_collector_reads_target_layer_ids(monkeypatch):
     )
     model = SimpleNamespace(is_mtp_draft_model=False, layers_num=40)
 
-    collector = HiddenCollector(model=model, spec_mode="dspark")
+    collector = hidden_collector_module.LayerHiddenCollector(model=model)
+    new_collector = collector.new_instance()
 
-    assert collector.collectors[0].layer_ids == frozenset((1, 20, 36))
+    assert collector.layer_ids == frozenset((1, 20, 36))
+    assert new_collector.layer_ids == collector.layer_ids
+    assert config_reads == ["/models/dspark"]
 
 
 def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):

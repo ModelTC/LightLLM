@@ -1,10 +1,16 @@
 from typing import ClassVar, Optional
 
+from lightllm.common.basemodel.hidden_collector import (
+    FinalHiddenCollector,
+    HiddenCollector,
+    LayerHiddenCollector,
+    NoopHiddenCollector,
+)
 from lightllm.utils.envs_utils import get_env_start_args
 
 
 class MtpManager:
-    """Manage the physical decode layout for main and draft models."""
+    """Manage MTP layout policy and model-local helper construction."""
 
     _instance: ClassVar[Optional["MtpManager"]] = None
     _CHAINED_DRAFT_MODES = ("vanilla_with_att", "vanilla_no_att")
@@ -64,3 +70,23 @@ class MtpManager:
         """Return the number of extra decode rows processed per request."""
 
         return self.get_decode_batch_multiplier(is_draft_model) - 1
+
+    def create_hidden_collector(
+        self,
+        model,
+    ) -> HiddenCollector:
+        """Create a model-local hidden-collector prototype for the configured MTP mode."""
+
+        spec_mode = self.args.mtp_mode
+        collector_kwargs = {}
+        if spec_mode is None:
+            collector_type = NoopHiddenCollector
+        elif model.is_mtp_draft_model:
+            collector_type = NoopHiddenCollector if spec_mode in self._BLOCK_DRAFT_MODES else FinalHiddenCollector
+        elif spec_mode in ("eagle3", *self._BLOCK_DRAFT_MODES):
+            collector_type = LayerHiddenCollector
+            collector_kwargs.update(model=model)
+        else:
+            collector_type = FinalHiddenCollector
+
+        return collector_type(**collector_kwargs)

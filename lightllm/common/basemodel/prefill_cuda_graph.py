@@ -89,7 +89,22 @@ class PrefillCudaGraph:
         graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
         graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]
 
-        self.graph[handle_token_num] = (infer_state, graph_input_tensors, graph_out_tensors)
+        graph_hidden_collector = infer_state.hidden_collector
+        hidden_tensor_count, hidden_tensor_nbytes = graph_hidden_collector.release_graph_tensor_ownership()
+        logger.info(
+            f"Prefill CUDA Graph hidden collector 已完成 capture 状态托管："
+            f"handle_token_num={handle_token_num}, "
+            f"collector={graph_hidden_collector.__class__.__name__}, "
+            f"no_ref_tensor_count={hidden_tensor_count}, "
+            f"no_ref_tensor_nbytes={hidden_tensor_nbytes}。"
+            f"这些 tensor 的固定地址由 graph memory pool 管理，collector 仅保留无所有权引用供 replay 使用。"
+        )
+        self.graph[handle_token_num] = (
+            infer_state,
+            graph_input_tensors,
+            graph_out_tensors,
+            graph_hidden_collector,
+        )
         self.replay(input_tensors, infer_state)
 
         return graph_out_tensors
@@ -133,12 +148,19 @@ class PrefillCudaGraph:
 
     def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo) -> List[torch.Tensor]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
+        graph_infer_state, graph_input_tensors, graph_output_tensors, graph_hidden_collector = self.graph[
+            handle_token_num
+        ]
         graph_infer_state: InferStateInfo = graph_infer_state
         for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
             graph_in_tensor.copy_(in_tensor)
 
         graph_infer_state.copy_for_prefill_cuda_graph(new_infer_state=infer_state)
+        # 首次 capture 后 replay 时，infer_state 与 graph_infer_state 是同一对象，
+        # 需要先创建运行时实例，避免 finish 清空 graph 中保存的 capture collector。
+        if infer_state.hidden_collector is graph_hidden_collector:
+            infer_state.hidden_collector = graph_hidden_collector.new_instance()
+        infer_state.hidden_collector.restore_graph_state(graph_hidden_collector)
         graph_infer_state.prefill_replay(infer_state)
 
         return graph_output_tensors

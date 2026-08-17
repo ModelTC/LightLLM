@@ -29,7 +29,7 @@ from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.hidden_collector import (
-    HiddenCollector,
+    NoopHiddenCollector,
     unpad_collected_hidden,
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
@@ -367,14 +367,7 @@ class TpPartBaseModel:
         pass
 
     def _init_hidden_collector(self):
-        microbatch_count = (
-            2 if self.args.enable_prefill_microbatch_overlap or self.args.enable_decode_microbatch_overlap else 1
-        )
-        self.hidden_collector = HiddenCollector(
-            model=self,
-            spec_mode=self.args.mtp_mode,
-            microbatch_count=microbatch_count,
-        )
+        self.hidden_collector_prototype = self.mtp_manager.create_hidden_collector(model=self)
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
@@ -388,6 +381,7 @@ class TpPartBaseModel:
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
+        infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_token_healing = self.is_token_healing
@@ -698,19 +692,21 @@ class TpPartBaseModel:
 
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_tensors = [input_embs]
-        hidden_collector = HiddenCollector() if Autotuner.is_autotune_warmup() else self.hidden_collector
+        if Autotuner.is_autotune_warmup():
+            infer_state.hidden_collector = NoopHiddenCollector()
 
-        def prefill_func(input_tensors, infer_state):
+        def prefill_func(input_tensors, _infer_state):
+            hidden_collector = _infer_state.hidden_collector
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
-                _input_embs = layer.context_forward(_input_embs, infer_state, self.trans_layers_weight[i])
+                _input_embs = layer.context_forward(_input_embs, _infer_state, self.trans_layers_weight[i])
                 hidden_collector.add(
                     layer_index=i,
                     hidden=_input_embs,
                 )
 
-            return hidden_collector.prefill_outputs(_input_embs)
+            return [_input_embs]
 
         handle_token_num = infer_state.input_ids.shape[0]
 
@@ -742,11 +738,9 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
-        spec_hidden = hidden_collector.finish(
-            infer_state=infer_state,
-            final_hidden=last_input_embs,
-            forward_outputs=output_tensors,
-        )
+        hidden_collector = infer_state.hidden_collector
+        hidden_collector.add_final_hidden(last_input_embs)
+        spec_hidden = hidden_collector.finish(infer_state=infer_state)
         model_output = ModelOutput(
             logits=predict_logits,
             spec_hidden=spec_hidden,
@@ -759,6 +753,7 @@ class TpPartBaseModel:
         return model_output
 
     def _token_forward(self, infer_state: InferStateInfo):
+        hidden_collector = infer_state.hidden_collector
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
@@ -767,17 +762,15 @@ class TpPartBaseModel:
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
-            self.hidden_collector.add(layer_index=i, hidden=input_embs)
+            hidden_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         predict_logits: torch.Tensor = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
-        spec_hidden = self.hidden_collector.finish(
-            infer_state=infer_state,
-            final_hidden=last_input_embs,
-        )
+        hidden_collector.add_final_hidden(last_input_embs)
+        spec_hidden = hidden_collector.finish(infer_state=infer_state)
         model_output = ModelOutput(logits=predict_logits.contiguous(), spec_hidden=spec_hidden)
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
@@ -980,6 +973,8 @@ class TpPartBaseModel:
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
         g_cache_manager.cache_env_in()
+        hidden_collector0 = infer_state.hidden_collector
+        hidden_collector1 = infer_state1.hidden_collector
 
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
             infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
@@ -1000,14 +995,13 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
-            self.hidden_collector.add(
+            hidden_collector0.add(
                 layer_index=i,
                 hidden=input_embs,
             )
-            self.hidden_collector.add(
+            hidden_collector1.add(
                 layer_index=i,
                 hidden=input_embs1,
-                microbatch_index=1,
             )
 
         # 折叠模式调用完infer_state 和 infer_state1 上的hook函数后，input_embs 和 input_embs1 才具备正确的运算数据。
@@ -1025,15 +1019,10 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        spec_hidden = self.hidden_collector.finish(
-            infer_state=infer_state,
-            final_hidden=last_input_embs,
-        )
-        spec_hidden1 = self.hidden_collector.finish(
-            infer_state=infer_state1,
-            final_hidden=last_input_embs1,
-            microbatch_index=1,
-        )
+        hidden_collector0.add_final_hidden(last_input_embs)
+        hidden_collector1.add_final_hidden(last_input_embs1)
+        spec_hidden = hidden_collector0.finish(infer_state=infer_state)
+        spec_hidden1 = hidden_collector1.finish(infer_state=infer_state1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
             spec_hidden=spec_hidden,
@@ -1049,6 +1038,8 @@ class TpPartBaseModel:
 
     @final
     def _overlap_tpsp_token_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
+        hidden_collector0 = infer_state.hidden_collector
+        hidden_collector1 = infer_state1.hidden_collector
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
             infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
         )
@@ -1059,14 +1050,13 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
-            self.hidden_collector.add(
+            hidden_collector0.add(
                 layer_index=i,
                 hidden=input_embs,
             )
-            self.hidden_collector.add(
+            hidden_collector1.add(
                 layer_index=i,
                 hidden=input_embs1,
-                microbatch_index=1,
             )
 
         # 折叠模式调用完infer_state 上的hook函数后，input_embs 和 input_embs 才具备正确的运算数据。
@@ -1080,15 +1070,10 @@ class TpPartBaseModel:
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        spec_hidden = self.hidden_collector.finish(
-            infer_state=infer_state,
-            final_hidden=last_input_embs,
-        )
-        spec_hidden1 = self.hidden_collector.finish(
-            infer_state=infer_state1,
-            final_hidden=last_input_embs1,
-            microbatch_index=1,
-        )
+        hidden_collector0.add_final_hidden(last_input_embs)
+        hidden_collector1.add_final_hidden(last_input_embs1)
+        spec_hidden = hidden_collector0.finish(infer_state=infer_state)
+        spec_hidden1 = hidden_collector1.finish(infer_state=infer_state1)
         model_output = ModelOutput(logits=predict_logits.contiguous(), spec_hidden=spec_hidden)
         model_output1 = ModelOutput(logits=predict_logits1.contiguous(), spec_hidden=spec_hidden1)
 

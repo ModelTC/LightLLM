@@ -71,6 +71,10 @@ class InferStateInfo:
         # 在一些细节场景下需要有该信息区分一些资源的申请和管理。
         self.microbatch_index: int = 0
 
+        # 当前 forward 独占的 hidden state 收集器。普通推理使用短生命周期实例；
+        # Prefill CUDA Graph 使用随 graph infer state 长期保存的实例。
+        self.hidden_collector = None
+
         # 衍生使用的管理变量，为了方便扩展接入其他的高性能attention推理算子，在
         # inferstate 基类上添加下面的标记变量，用于扩展。
         # b 开头的tensor变量其shape为[batch_size,]
