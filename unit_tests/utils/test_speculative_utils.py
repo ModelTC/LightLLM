@@ -8,6 +8,8 @@ import torch
 import lightllm.common.basemodel.attention.base_att as base_att_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
+from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
@@ -80,6 +82,76 @@ def test_attention_backend_selects_dynamic_spec_layout(
     )
 
     assert BaseAttBackend.uses_dynamic_spec_verify_layout(backend) is expected
+
+
+@pytest.mark.parametrize(
+    "mtp_mode, is_draft_model, expected",
+    [
+        (None, False, True),
+        ("dflash", False, True),
+        ("dflash", True, False),
+        ("dspark", True, False),
+        ("eagle3", True, True),
+        ("vanilla_with_att", True, True),
+    ],
+)
+def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected):
+    monkeypatch.setattr(
+        base_att_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(mtp_mode=mtp_mode),
+    )
+    backend = SimpleNamespace(model=SimpleNamespace(is_mtp_draft_model=is_draft_model))
+
+    assert BaseAttBackend.uses_causal_attention(backend) is expected
+
+
+@pytest.mark.parametrize("state_class", [Fa3PrefillAttState, MlaFa3PrefillAttState])
+def test_fa3_prefill_state_owns_causality(state_class):
+    infer_state = SimpleNamespace(
+        b1_cu_q_seq_len=torch.tensor([0, 1, 2], dtype=torch.int32),
+        b1_cu_kv_seq_len=torch.tensor([0, 3, 7], dtype=torch.int32),
+        b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
+        batch_size=2,
+        max_kv_seq_len=4,
+        input_ids=torch.empty(2, dtype=torch.int64),
+        req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4)),
+    )
+    state = state_class(
+        backend=SimpleNamespace(uses_causal_attention=lambda: False),
+        infer_state=infer_state,
+    )
+
+    state.init_state()
+
+    assert state.causal is False
+
+
+@pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
+def test_fa3_decode_state_owns_causality(state_class):
+    infer_state = SimpleNamespace(
+        b1_cu_q_seq_len=torch.tensor([0, 1, 2], dtype=torch.int32),
+        b1_cu_kv_seq_len=torch.tensor([0, 3, 7], dtype=torch.int32),
+        b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
+        b_seq_len=torch.tensor([3, 4], dtype=torch.int32),
+    )
+    model = SimpleNamespace(
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+    )
+    state = state_class(
+        backend=SimpleNamespace(
+            model=model,
+            uses_causal_attention=lambda: False,
+            uses_dynamic_spec_verify_layout=lambda: False,
+        ),
+        infer_state=infer_state,
+    )
+    state._init_page_table = lambda _: None
+
+    state.init_state()
+
+    assert state.causal is False
 
 
 @pytest.mark.parametrize(

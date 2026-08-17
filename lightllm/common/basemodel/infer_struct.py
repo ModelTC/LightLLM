@@ -48,9 +48,6 @@ class InferStateInfo:
         # 的sum值, 其值等于 sum(b_ready_cache_len)
         self.prefix_total_token_num: int = None
         self.is_prefill: bool = None
-        # Specialized models override attention causality explicitly.
-        self.prefill_causal: bool = True
-        self.decode_causal: bool = True
 
         self.mem_manager: MemoryManager = None
         self.req_manager: ReqManager = None

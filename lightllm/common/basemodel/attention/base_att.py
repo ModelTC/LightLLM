@@ -47,6 +47,11 @@ class BaseAttBackend:
         dynamic_verify_enabled = args.mtp_dynamic_verify
         return is_main_model and has_decode_draft_step and dynamic_verify_enabled
 
+    def uses_causal_attention(self) -> bool:
+        args = get_env_start_args()
+        is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash")
+        return not is_parallel_block_draft
+
     def _find_layer_index(
         self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]
     ) -> int:

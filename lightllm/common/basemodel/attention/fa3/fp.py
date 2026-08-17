@@ -51,8 +51,10 @@ class Fa3PrefillAttState(BasePrefillAttState):
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
+    causal: bool = None
 
     def init_state(self):
+        self.causal = self.backend.uses_causal_attention()
         self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
         self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
         self.page_table = torch.empty(
@@ -111,7 +113,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=self.infer_state.prefill_causal,
+            causal=self.causal,
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
@@ -130,9 +132,11 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     b_att_seq_len: torch.Tensor = None
     # 在是否开启mtp 的不同模式下，其设置不同的值，可以加速算子的运行。
     decode_max_q_seq_len: int = None
+    causal: bool = None
 
     def init_state(self):
         self.backend: Fa3AttBackend = self.backend
+        self.causal = self.backend.uses_causal_attention()
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if self.backend.uses_dynamic_spec_verify_layout():
             b_att_req_idx = self._init_dynamic_spec_verify_state(draft_step)
@@ -263,7 +267,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.decode_max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=self.infer_state.decode_causal,
+            causal=self.causal,
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
