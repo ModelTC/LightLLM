@@ -258,7 +258,6 @@ class CudaGraph:
             )
             b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
             b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-            b_mark_shared_group = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
 
             model_input = ModelInput(
                 batch_size=batch_size,
@@ -270,7 +269,6 @@ class CudaGraph:
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
-                b_mark_shared_group=b_mark_shared_group,
                 b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
@@ -317,7 +315,6 @@ class CudaGraph:
                 )
                 b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
                 b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-                b_mark_shared_group = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
 
                 micro_batch = ModelInput(
                     is_prefill=False,
@@ -327,7 +324,6 @@ class CudaGraph:
                     max_kv_seq_len=max_len_in_batch,
                     input_ids=input_ids,
                     b_mtp_index=b_mtp_index,
-                    b_mark_shared_group=b_mark_shared_group,
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,

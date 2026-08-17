@@ -1,7 +1,13 @@
+from dataclasses import dataclass
+from typing import List, Optional
+
 import torch
-from dataclasses import dataclass, field
-from typing import Optional
-from typing import List
+
+from lightllm.utils.envs_utils import (
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_triton_mtp_kernel,
+    get_env_start_args,
+)
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -72,11 +78,13 @@ class ModelInput:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_position_delta is not None:
             self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
+            assert self.is_prefill is False, "b_position_delta should only be used in decode phase."
         else:
             assert self.is_prefill is True, "decode ModelInput should provide b_position_delta."
 
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
+        self._ensure_decode_group_metadata()
         if self.b_mark_shared_group is not None:
             self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
         if self.b_shared_seq_len is not None:
@@ -91,6 +99,21 @@ class ModelInput:
             assert (
                 self.input_ids.dtype == torch.int64
             ), f"model input_ids must use torch.int64, got {self.input_ids.dtype}"
+
+    def _ensure_decode_group_metadata(self):
+        """按 decode 模式补齐能够安全降级的 attention 分组信息。"""
+        if self.is_prefill:
+            return
+
+        if enable_diverse_mode_gqa_decode_fast_kernel():
+            # 缺少共享信息时退化为互不共享前缀的单行组，不改变 attention 结果。
+            if self.b_mark_shared_group is None:
+                self.b_mark_shared_group = torch.ones_like(self.b_req_idx, dtype=torch.int32)
+            if self.b_shared_seq_len is None:
+                self.b_shared_seq_len = torch.zeros_like(self.b_req_idx, dtype=torch.int32)
+        elif get_env_start_args().mtp_dynamic_verify or enable_triton_mtp_kernel():
+            if self.b_mark_shared_group is None:
+                self.b_mark_shared_group = torch.ones_like(self.b_req_idx, dtype=torch.int32)
 
 
 @dataclass
