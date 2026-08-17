@@ -1,8 +1,11 @@
+import threading
+
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
 
+from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
@@ -17,6 +20,8 @@ class BaseAttBackend:
     """
 
     _instances = {}
+    _workspace_buffers = {}
+    _workspace_buffer_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
         """
@@ -32,6 +37,23 @@ class BaseAttBackend:
 
     def __init__(self, model: "TpPartBaseModel"):
         self.model = model
+
+    @staticmethod
+    def get_gpu_workspace_buffer(key_name: str, workspace_size: int, dtype: torch.dtype = torch.int8) -> torch.Tensor:
+        """Return a process-local workspace shared by key name and CUDA device."""
+        if not key_name:
+            raise ValueError("workspace key_name must not be empty")
+        if workspace_size <= 0:
+            raise ValueError(f"workspace_size must be positive, got {workspace_size}")
+
+        device_id = get_current_device_id()
+        buffer_key = (device_id, key_name, workspace_size, dtype)
+        with BaseAttBackend._workspace_buffer_lock:
+            workspace_buffer = BaseAttBackend._workspace_buffers.get(buffer_key)
+            if workspace_buffer is None:
+                workspace_buffer = torch.empty(workspace_size, dtype=dtype, device=device_id)
+                BaseAttBackend._workspace_buffers[buffer_key] = workspace_buffer
+            return workspace_buffer
 
     def create_att_prefill_state(self) -> "BasePrefillAttState":
         raise NotImplementedError("not impl")
