@@ -1204,7 +1204,9 @@ class TpPartBaseModel:
                     multimodal_params=[{"images": [], "audios": []}],
                     **self._gen_special_model_input(total_token_num),
                 )
-                model_output = self.forward(model_input)
+                model_output = self.forward(
+                    model_input,
+                )
                 del model_output
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
