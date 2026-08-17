@@ -40,6 +40,7 @@ from lightllm.models.llama.yarn_rotary_utils import (
     linear_ramp_mask,
 )
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.config_utils import normalize_deepseek_v4_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -57,6 +58,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     pre_layer_infer_class = DeepseekV4PreLayerInfer
     post_layer_infer_class = DeepseekV4PostLayerInfer
     transformer_layer_infer_class = DeepseekV4TransformerLayerInfer
+
+    def _init_config(self):
+        super()._init_config()
+        normalize_deepseek_v4_config(self.config)
+        return
 
     infer_state_class = DeepseekV4InferStateInfo
 
@@ -423,9 +429,11 @@ class DeepSeekV4Tokenizer:
                 msgs.insert(0, {"role": "system", "content": "", "tools": wrapped_tools})
 
         if thinking is None:
-            thinking = bool(enable_thinking) if enable_thinking is not None else False
+            thinking = bool(enable_thinking) if enable_thinking is not None else True
         thinking_mode = "thinking" if thinking else "chat"
         effort = kwargs.get("reasoning_effort")
+        if thinking and effort is None:
+            effort = "high"
         if effort not in ("max", "high", None):
             effort = None
         encoding = self._get_encoding_module()
