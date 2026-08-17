@@ -1,4 +1,5 @@
 import torch
+from vllm._tilelang_ops import compute_num_split
 
 try:
     import vllm.model_executor.layers.mhc  # noqa: F401
@@ -8,6 +9,19 @@ except Exception as e:
 
 # vllm DeepseekV4DecoderLayer.hc_post_alpha
 HC_POST_ALPHA = 2.0
+
+
+def mhc_warmup_token_sizes(max_tokens, hidden_size, hc_mult):
+    """Choose one token count for every reachable mHC split-K variant."""
+    block_size = 64
+    token_sizes_by_split = {}
+
+    max_grid_size = (max_tokens + block_size - 1) // block_size
+    for grid_size in range(1, max_grid_size + 1):
+        n_splits = compute_num_split(block_size, hc_mult * hidden_size, grid_size)
+        token_sizes_by_split.setdefault(n_splits, min(grid_size * block_size, max_tokens))
+
+    return sorted(token_sizes_by_split.values())
 
 
 def hc_pre(residual, hc_fn, hc_scale, hc_base, rms_eps, hc_eps, sinkhorn_iters, norm_weight, norm_eps):

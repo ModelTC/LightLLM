@@ -140,6 +140,7 @@ class TpPartBaseModel:
 
         self._autotune_warmup()
         self._full_att_decode_autotune()
+        self._kernel_warmup()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
@@ -349,6 +350,10 @@ class TpPartBaseModel:
 
     def _init_custom(self):
         pass
+
+    def _kernel_warmup(self):
+        """Warm model-specific kernels before CUDA graph capture."""
+        return
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):

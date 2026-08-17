@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import json
 import os
+import time
 
 import torch
 from lightllm.models.registry import ModelRegistry
@@ -29,6 +30,11 @@ from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_clas
 from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DSV4_NSA_BACKENDS
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+from lightllm.models.deepseek_v4.layer_infer.hyper_connection import (
+    hc_head,
+    hc_post,
+    mhc_warmup_token_sizes,
+)
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
@@ -149,6 +155,64 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
             num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
             moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+        )
+        return
+
+    @torch.no_grad()
+    def _kernel_warmup(self):
+        if self.is_mtp_draft_model:
+            return
+
+        layer_infer = self.layers_infer[0]
+        layer_weight = self.trans_layers_weight[0]
+        hidden_size = self.config["hidden_size"]
+        hc_mult = self.config["hc_mult"]
+        split_token_sizes = mhc_warmup_token_sizes(
+            max_tokens=self.batch_max_tokens,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+        )
+        token_sizes = sorted(set(split_token_sizes + [size for size in (1, 8, 17) if size <= self.batch_max_tokens]))
+
+        started = time.perf_counter()
+        logger.info(
+            "warming DeepSeek-V4 mHC TileLang kernels for token sizes %s",
+            token_sizes,
+        )
+        residual = torch.zeros(
+            max(token_sizes),
+            hc_mult,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        for token_size in split_token_sizes:
+            layer_infer._hc_attn_in(residual[:token_size], layer_weight)
+
+        for token_size in (size for size in (1, 8, 17) if size <= self.batch_max_tokens):
+            hc_state = layer_infer._hc_attn_in(residual[:token_size], layer_weight)
+            hc_state = layer_infer._hc_ffn_in(*hc_state, layer_weight)
+
+        streams = hc_post(*hc_state)
+        hc_head(
+            streams,
+            self.pre_post_weight.hc_head_fn_.weight,
+            self.pre_post_weight.hc_head_scale_.weight,
+            self.pre_post_weight.hc_head_base_.weight,
+            hc_mult,
+            hidden_size,
+            self.config["rms_norm_eps"],
+            self.config.get("hc_eps", 1e-6),
+            torch.empty,
+        )
+
+        torch.cuda.synchronize()
+        del residual, hc_state, streams
+        torch.cuda.empty_cache()
+        logger.info(
+            "DeepSeek-V4 mHC TileLang warmup finished in %.2f seconds (%d split-K variants)",
+            time.perf_counter() - started,
+            len(split_token_sizes),
         )
         return
 
