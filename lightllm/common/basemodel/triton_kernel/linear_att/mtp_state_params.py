@@ -4,7 +4,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _build_dynamic_spec_linear_att_state_params_kernel(
+def _build_dynamic_mtp_linear_att_state_params_kernel(
     b_req_idx,
     b_mtp_index,
     req_to_mtp_state_index,
@@ -47,13 +47,13 @@ def _build_dynamic_spec_linear_att_state_params_kernel(
     tl.store(out_num_accepted_tokens + sequence_index, accepted_state_index + 1, mask=is_start)
 
 
-def build_dynamic_spec_linear_att_state_params(
+def build_dynamic_mtp_linear_att_state_params(
     b_req_idx: torch.Tensor,
     b_mtp_index: torch.Tensor,
     req_to_mtp_state_index: torch.Tensor,
     hold_req_id: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Convert compact speculative-verify rows to variable-length GDN sequences.
+    """Convert compact MTP verify rows to variable-length GDN sequences.
 
     Rows remain request-major after dynamic verification trimming, but each request can
     contribute a different number of rows. ``b_mtp_index`` starts at zero for
@@ -95,7 +95,7 @@ def build_dynamic_spec_linear_att_state_params(
     b_conv_buffer_idx = torch.empty_like(b_req_idx)
     b_num_accepted_tokens = torch.empty_like(b_req_idx)
 
-    _build_dynamic_spec_linear_att_state_params_kernel[(1,)](
+    _build_dynamic_mtp_linear_att_state_params_kernel[(1,)](
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         req_to_mtp_state_index=req_to_mtp_state_index,

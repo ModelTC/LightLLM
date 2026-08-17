@@ -10,8 +10,8 @@ from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import c
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.spec_state_params import (
-    build_dynamic_spec_linear_att_state_params,
+from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
+    build_dynamic_mtp_linear_att_state_params,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
     fused_recurrent_gated_delta_rule,
@@ -202,46 +202,63 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
 
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
-    b1_spec_cu_q_seq_len: torch.Tensor = None
+    b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
-
         if draft_step == 0:
-            self.b_conv_buffer_idx = self.infer_state.b_req_idx
-            self.b_ssm_buffer_idx = self.infer_state.b_req_idx
-            return
-
-        batch_size = self.infer_state.batch_size
-        device = self.infer_state.b_req_idx.device
-        if self.backend.uses_dynamic_spec_verify_layout():
-            (
-                self.b1_spec_cu_q_seq_len,
-                self.b_conv_buffer_idx,
-                self.b_num_accepted_tokens,
-            ) = build_dynamic_spec_linear_att_state_params(
-                b_req_idx=self.infer_state.b_req_idx,
-                b_mtp_index=self.infer_state.b_mtp_index,
-                req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
-                hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-            )
+            self._init_normal_decode_state()
+        elif self.backend.uses_dynamic_spec_verify_layout():
+            self._init_dynamic_mtp_decode_state(draft_step + 1)
         else:
-            assert batch_size % (draft_step + 1) == 0, (
-                "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-                f"got batch_size={batch_size}, draft_step={draft_step}."
-            )
-            att_batch_size = batch_size // (draft_step + 1)
-            self.b1_spec_cu_q_seq_len = torch.arange(
-                0, batch_size + 1, draft_step + 1, dtype=torch.int32, device=device
-            )
-            self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, draft_step + 1)[:, 0].contiguous()
-            self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
+            self._init_fixed_mtp_decode_state(draft_step)
 
+    def _init_normal_decode_state(self):
+        self.b_conv_buffer_idx = self.infer_state.b_req_idx
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
+
+    def _init_dynamic_mtp_decode_state(self, mtp_size: int):
+        (
+            self.b1_mtp_cu_q_seq_len,
+            self.b_conv_buffer_idx,
+            self.b_num_accepted_tokens,
+        ) = build_dynamic_mtp_linear_att_state_params(
+            b_req_idx=self.infer_state.b_req_idx,
+            b_mtp_index=self.infer_state.b_mtp_index,
+            req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
+            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
+        )
+        self._init_mtp_ssm_buffer_idx(mtp_size)
+
+    def _init_fixed_mtp_decode_state(self, draft_step: int):
+        mtp_size = draft_step + 1
+        batch_size = self.infer_state.batch_size
+        assert batch_size % mtp_size == 0, (
+            "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
+            f"got batch_size={batch_size}, draft_step={draft_step}."
+        )
+
+        att_batch_size = batch_size // mtp_size
+        self.b1_mtp_cu_q_seq_len = torch.arange(
+            0,
+            batch_size + 1,
+            mtp_size,
+            dtype=torch.int32,
+            device=self.infer_state.b_req_idx.device,
+        )
+        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
+        self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
+        self._init_mtp_ssm_buffer_idx(mtp_size)
+
+    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
         # Each request owns one recurrent-state slot per verify row.
-        state_offsets = torch.arange(draft_step + 1, device=device, dtype=self.infer_state.b_req_idx.dtype)
-        self.b_ssm_buffer_idx = self.b_conv_buffer_idx[:, None] * (draft_step + 1) + state_offsets[None, :]
-        return
+        state_offsets = torch.arange(
+            mtp_size,
+            device=self.infer_state.b_req_idx.device,
+            dtype=self.infer_state.b_req_idx.dtype,
+        )
+        self.b_ssm_buffer_idx = self.b_conv_buffer_idx[:, None] * mtp_size + state_offsets[None, :]
 
     def decode_att(
         self,
@@ -265,7 +282,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
 
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
-            core_attn_out = self._gdn_spec_kernel(
+            core_attn_out = self._gdn_mtp_kernel(
                 mixed_qkv,
                 conv_states,
                 ssm_states,
@@ -335,7 +352,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
         return core_attn_out, z
 
-    def _gdn_spec_kernel(
+    def _gdn_mtp_kernel(
         self,
         mixed_qkv: torch.Tensor,
         conv_states: torch.Tensor,
@@ -345,14 +362,14 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
-        from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_spec import (
-            causal_conv1d_update as causal_conv1d_update_spec,
+        from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
+            causal_conv1d_update as causal_conv1d_update_mtp,
         )
 
         backend: LinearAttBackend = self.backend
 
-        cu_seqlens_q = self.b1_spec_cu_q_seq_len
-        mixed_qkv = causal_conv1d_update_spec(
+        cu_seqlens_q = self.b1_mtp_cu_q_seq_len
+        mixed_qkv = causal_conv1d_update_mtp(
             mixed_qkv,
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
