@@ -252,13 +252,15 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        # Each request owns one recurrent-state slot per verify row.
+        att_batch_size = self.b_conv_buffer_idx.shape[0]
+        # Each request owns mtp_size consecutive recurrent-state slots.
+        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
         state_offsets = torch.arange(
             mtp_size,
             device=self.infer_state.b_req_idx.device,
             dtype=self.infer_state.b_req_idx.dtype,
-        )
-        self.b_ssm_buffer_idx = self.b_conv_buffer_idx[:, None] * mtp_size + state_offsets[None, :]
+        ).view(1, mtp_size)
+        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
 
     def decode_att(
         self,
