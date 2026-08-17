@@ -62,7 +62,7 @@ def test_dp_eagle_uses_common_extend_then_unit_decode_proposer():
         model_output=model_output,
         next_token_ids=next_token_ids,
         b_req_mtp_start_loc=real_start_locs,
-        spec_accept_len=real_accept_len,
+        mtp_accept_len=real_accept_len,
         req_num=8,
     )
 
@@ -101,7 +101,7 @@ def test_dp_overlap_eagle_passes_both_fixed_verify_layouts_to_proposer():
         model_output1=model_output1,
         b_req_idx=b_req_idx,
         next_token_ids=next_token_ids,
-        spec_accept_len=accept_len,
+        mtp_accept_len=accept_len,
         b_req_mtp_start_loc=start_locs,
         req_num0=8,
         req_num1=16,

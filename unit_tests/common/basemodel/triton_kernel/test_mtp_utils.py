@@ -18,7 +18,7 @@ def _reset_mtp_manager():
     MtpManager._instance = None
 
 
-def test_compact_dynamic_spec_model_input(monkeypatch):
+def test_compact_dynamic_mtp_model_input(monkeypatch):
     monkeypatch.setenv(
         "LIGHTLLM_START_ARGS",
         json.dumps(
@@ -64,7 +64,7 @@ def test_compact_dynamic_spec_model_input(monkeypatch):
         device="cuda",
     )
 
-    compacted_input, selected_row_mask = mtp_utils.prepare_dynamic_spec_model_input(
+    compacted_input, selected_row_mask = mtp_utils.prepare_dynamic_mtp_model_input(
         model_input=model_input,
         req_num=3,
         dynamic_batch_size=8,
@@ -164,7 +164,7 @@ def test_mtp_verify_scatter_and_start_locations():
         device="cuda",
     )
 
-    spec_accept_len, accepted_index = mtp_utils.mtp_verify(
+    mtp_accept_len, accepted_index = mtp_utils.mtp_verify(
         req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx
     )
     mtp_utils.mtp_scatter_next_token_ids(
@@ -172,14 +172,14 @@ def test_mtp_verify_scatter_and_start_locations():
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         all_next_token_ids=all_next_token_ids,
         b_req_idx=b_req_idx,
-        spec_accept_len=spec_accept_len,
+        mtp_accept_len=mtp_accept_len,
         req_to_next_token_scores=req_to_next_token_scores,
         schedule_scores=schedule_scores,
     )
     torch.cuda.synchronize()
 
     assert torch.equal(b_req_mtp_start_loc.cpu(), torch.tensor([0, 2], dtype=torch.int64))
-    assert torch.equal(spec_accept_len.cpu(), torch.tensor([1, 1], dtype=torch.int32))
+    assert torch.equal(mtp_accept_len.cpu(), torch.tensor([1, 1], dtype=torch.int32))
     assert torch.equal(accepted_index.cpu(), torch.tensor([1, 0, 1, 0, 0], dtype=torch.int32))
     assert torch.equal(
         req_to_next_token_ids.cpu(),
@@ -206,7 +206,7 @@ def test_mtp_scatter_handles_zero_draft_step():
         b_req_mtp_start_loc=torch.tensor([0], dtype=torch.int32, device="cuda"),
         all_next_token_ids=torch.tensor([[42]], dtype=torch.int64, device="cuda"),
         b_req_idx=torch.tensor([0], dtype=torch.int32, device="cuda"),
-        spec_accept_len=torch.tensor([1], dtype=torch.int32, device="cuda"),
+        mtp_accept_len=torch.tensor([1], dtype=torch.int32, device="cuda"),
         req_to_next_token_scores=req_to_next_token_scores,
         schedule_scores=torch.empty((1, 0), dtype=torch.float32, device="cuda"),
     )

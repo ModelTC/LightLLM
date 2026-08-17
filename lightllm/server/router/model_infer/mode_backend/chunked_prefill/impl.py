@@ -306,7 +306,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 all_next_token_ids=proposal.token_ids,
                 b_req_idx=model_input.b_req_idx,
-                spec_accept_len=mtp_accept_len,
+                mtp_accept_len=mtp_accept_len,
                 schedule_scores=proposal.schedule_scores,
             )
 

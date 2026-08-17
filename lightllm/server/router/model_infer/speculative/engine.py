@@ -7,7 +7,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
-    linear_att_spec_state_index_update,
+    linear_att_mtp_state_index_update,
     mtp_scatter_next_token_ids,
     mtp_verify,
 )
@@ -106,9 +106,9 @@ class SpecEngine:
         if plan.dynamic_batch_size == model_input.batch_size:
             return model_input, None
 
-        from lightllm.common.basemodel.triton_kernel.mtp_utils import prepare_dynamic_spec_model_input
+        from lightllm.common.basemodel.triton_kernel.mtp_utils import prepare_dynamic_mtp_model_input
 
-        model_input, selected_row_mask = prepare_dynamic_spec_model_input(
+        model_input, selected_row_mask = prepare_dynamic_mtp_model_input(
             model_input=model_input,
             req_num=req_num,
             dynamic_batch_size=plan.dynamic_batch_size,
@@ -138,7 +138,7 @@ class SpecEngine:
         )
         if self.backend.is_linear_att_mixed_model:
             assert b_mtp_index is not None
-            linear_att_spec_state_index_update(
+            linear_att_mtp_state_index_update(
                 req_to_mtp_state_index=self.backend.model.req_manager.req_to_mtp_state_index,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=b_req_idx,
@@ -221,7 +221,7 @@ class SpecEngine:
         b_req_mtp_start_loc: torch.Tensor,
         all_next_token_ids: torch.Tensor,
         b_req_idx: torch.Tensor,
-        spec_accept_len: torch.Tensor,
+        mtp_accept_len: torch.Tensor,
         schedule_scores: Optional[torch.Tensor] = None,
     ) -> None:
         mtp_scatter_next_token_ids(
@@ -229,7 +229,7 @@ class SpecEngine:
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             all_next_token_ids=all_next_token_ids,
             b_req_idx=b_req_idx,
-            spec_accept_len=spec_accept_len,
+            mtp_accept_len=mtp_accept_len,
             req_to_next_token_scores=(
                 self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_scores
                 if schedule_scores is not None

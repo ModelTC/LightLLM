@@ -34,7 +34,7 @@ def _fwd_kernel_cumprod_scores(
     return
 
 
-def sample_dynamic_spec_row_mask(
+def sample_dynamic_mtp_row_mask(
     dynamic_batch_size: int,
     b_req_idx: torch.Tensor,
     req_to_next_token_scores: torch.Tensor,

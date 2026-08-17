@@ -3,9 +3,9 @@ import pytest
 import triton
 import numpy as np
 
-from lightllm.common.basemodel.triton_kernel.dynamic_spec_utils import (
+from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import (
     _fwd_kernel_cumprod_scores,
-    sample_dynamic_spec_row_mask,
+    sample_dynamic_mtp_row_mask,
 )
 
 
@@ -140,7 +140,7 @@ def test_sample_select_count():
     )
     all_num = req_num * (max_draft_step + 1)
     for dynamic_batch_size in [3, 8, all_num]:
-        select = sample_dynamic_spec_row_mask(
+        select = sample_dynamic_mtp_row_mask(
             dynamic_batch_size=dynamic_batch_size,
             b_req_idx=b_req_idx,
             req_to_next_token_scores=scores.clone(),
@@ -163,7 +163,7 @@ def test_sample_accepts_numpy_scalar_dynamic_batch_size():
             [1.0, 0.99, 0.99, 0.99],
         ],
     )
-    select = sample_dynamic_spec_row_mask(
+    select = sample_dynamic_mtp_row_mask(
         dynamic_batch_size=np.int64(8),
         b_req_idx=b_req_idx,
         req_to_next_token_scores=scores,
@@ -185,7 +185,7 @@ def test_sample_topk_by_cumprod_score():
     )
     flat_scores = _flat_cumprod_scores(b_req_idx, scores, max_draft_step)
     for dynamic_batch_size in [1, 4, 8, 12]:
-        select = sample_dynamic_spec_row_mask(
+        select = sample_dynamic_mtp_row_mask(
             dynamic_batch_size=dynamic_batch_size,
             b_req_idx=b_req_idx,
             req_to_next_token_scores=scores.clone(),
@@ -205,7 +205,7 @@ def test_sample_picks_highest_cumprod_rows():
         ],
     )
     flat_scores = _flat_cumprod_scores(b_req_idx, scores, max_draft_step)
-    select = sample_dynamic_spec_row_mask(
+    select = sample_dynamic_mtp_row_mask(
         dynamic_batch_size=2,
         b_req_idx=b_req_idx,
         req_to_next_token_scores=scores.clone(),
@@ -221,7 +221,7 @@ def test_sample_single_request():
     max_draft_step = 2
     scores, b_req_idx = _make_batch_scores(1, max_draft_step, rows=[[1.0, 0.5, 0.25]])
     flat_scores = _flat_cumprod_scores(b_req_idx, scores, max_draft_step)
-    select = sample_dynamic_spec_row_mask(
+    select = sample_dynamic_mtp_row_mask(
         dynamic_batch_size=2,
         b_req_idx=b_req_idx,
         req_to_next_token_scores=scores.clone(),

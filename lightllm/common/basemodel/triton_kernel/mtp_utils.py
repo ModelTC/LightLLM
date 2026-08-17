@@ -5,7 +5,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.mtp_manager import MtpManager
-from lightllm.common.basemodel.triton_kernel.dynamic_spec_utils import sample_dynamic_spec_row_mask
+from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import sample_dynamic_mtp_row_mask
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
@@ -14,7 +14,7 @@ def _fwd_kernel_mtp_verify(
     req_to_next_token_ids,
     req_to_next_token_ids_stride,
     new_next_token_ids,
-    spec_accept_len,
+    mtp_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
     accepted_index,
@@ -43,7 +43,7 @@ def _fwd_kernel_mtp_verify(
     mismatch_positions = tl.where(match_mask, BLOCK_SIZE, offset)
     first_mismatch_pos = tl.min(mismatch_positions)
     accept_len = first_mismatch_pos + 1
-    tl.store(spec_accept_len + cur_index, accept_len)
+    tl.store(mtp_accept_len + cur_index, accept_len)
     accpeted_index = tl.where((offset < accept_len), 1, 0)
     tl.store(accepted_index + req_offset, accpeted_index, mask=offset < req_mtp_num)
     return
@@ -63,7 +63,7 @@ def mtp_verify(
         new_next_token_ids: (batch_size,)
         b_req_idx: (batch_size,)
     Returns:
-        spec_accept_len: (num_reqs,)
+        mtp_accept_len: (num_reqs,)
         accepted_index: (batch_size,)
         accepted_index: [1, 0, 1, 1, 0], 0 means the token is not accepted, 1 means the token is accepted.
     """
@@ -72,7 +72,7 @@ def mtp_verify(
     assert verify_width <= BLOCK_SIZE, f"verify_width must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
     req_mtp_all_num = b_req_idx.shape[0]
-    spec_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=req_to_next_token_ids.device)
+    mtp_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=req_to_next_token_ids.device)
     accepted_index = torch.empty((req_mtp_all_num,), dtype=torch.int32, device=req_to_next_token_ids.device)
 
     grid = (num_reqs,)
@@ -81,7 +81,7 @@ def mtp_verify(
         req_to_next_token_ids=req_to_next_token_ids,
         req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
         new_next_token_ids=new_next_token_ids,
-        spec_accept_len=spec_accept_len,
+        mtp_accept_len=mtp_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
         accepted_index=accepted_index,
@@ -90,7 +90,7 @@ def mtp_verify(
         num_warps=num_warps,
         num_stages=1,
     )
-    return spec_accept_len, accepted_index
+    return mtp_accept_len, accepted_index
 
 
 @triton.jit
@@ -103,7 +103,7 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     req_to_next_token_scores_stride,
     schedule_scores,
     schedule_scores_stride,
-    spec_accept_len,
+    mtp_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
     proposal_width,
@@ -114,7 +114,7 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
 
     cur_index = tl.program_id(0)
     req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
-    accept_len = tl.load(spec_accept_len + cur_index)
+    accept_len = tl.load(mtp_accept_len + cur_index)
     cur_req_idx = tl.load(b_req_idx + req_start_loc)
     offset = tl.arange(0, BLOCK_SIZE)
     selected_row = req_start_loc + accept_len - 1
@@ -152,7 +152,7 @@ def mtp_scatter_next_token_ids(
     b_req_mtp_start_loc: torch.Tensor,
     all_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
-    spec_accept_len: torch.Tensor,
+    mtp_accept_len: torch.Tensor,
     req_to_next_token_scores: Optional[torch.Tensor] = None,
     schedule_scores: Optional[torch.Tensor] = None,
 ):
@@ -189,7 +189,7 @@ def mtp_scatter_next_token_ids(
         req_to_next_token_scores_stride=req_to_next_token_scores_stride,
         schedule_scores=schedule_scores_arg,
         schedule_scores_stride=schedule_scores_stride,
-        spec_accept_len=spec_accept_len,
+        mtp_accept_len=mtp_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
         proposal_width=proposal_width,
@@ -202,7 +202,7 @@ def mtp_scatter_next_token_ids(
 
 
 @triton.jit
-def _fwd_kernel_compact_dynamic_spec_model_input(
+def _fwd_kernel_compact_dynamic_mtp_model_input(
     input_ids,
     out_input_ids,
     b_req_idx,
@@ -440,7 +440,7 @@ def _compact_decode_model_input(
     dummy_1d = model_input.b_req_idx
     BLOCK_SIZE = triton.next_power_of_2(old_batch_size)
     grid = (1,)
-    _fwd_kernel_compact_dynamic_spec_model_input[grid](
+    _fwd_kernel_compact_dynamic_mtp_model_input[grid](
         input_ids=model_input.input_ids if model_input.input_ids is not None else dummy_1d,
         out_input_ids=out_input_ids if out_input_ids is not None else dummy_1d,
         b_req_idx=model_input.b_req_idx,
@@ -492,7 +492,7 @@ def _compact_decode_model_input(
     return model_input
 
 
-def prepare_dynamic_spec_model_input(
+def prepare_dynamic_mtp_model_input(
     model_input: ModelInput,
     req_num: int,
     dynamic_batch_size: int,
@@ -501,7 +501,7 @@ def prepare_dynamic_spec_model_input(
 ):
     req_num = int(req_num)
     dynamic_batch_size = int(dynamic_batch_size)
-    assert not model_input.is_prefill, "prepare_dynamic_spec_model_input only supports decode inputs"
+    assert not model_input.is_prefill, "prepare_dynamic_mtp_model_input only supports decode inputs"
     assert req_to_next_token_scores is not None
     assert dynamic_batch_size >= req_num
     assert dynamic_batch_size <= model_input.batch_size
@@ -514,7 +514,7 @@ def prepare_dynamic_spec_model_input(
     # All compaction work stays on the current CUDA stream and needs no host sync.
     model_input.to_cuda()
 
-    selected_row_mask = sample_dynamic_spec_row_mask(
+    selected_row_mask = sample_dynamic_mtp_row_mask(
         dynamic_batch_size=dynamic_batch_size,
         b_req_idx=model_input.b_req_idx,
         req_to_next_token_scores=req_to_next_token_scores,
@@ -607,7 +607,7 @@ def _fwd_kernel_linear_att_mtp_state_index_update(
     return
 
 
-def linear_att_spec_state_index_update(
+def linear_att_mtp_state_index_update(
     req_to_mtp_state_index: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
     b_req_idx: torch.Tensor,
@@ -657,13 +657,13 @@ def test_mtp_verify():
     all_next_token_ids = torch.tensor(
         [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int64, device="cuda"
     )
-    spec_accept_len, accepted_index = mtp_verify(
+    mtp_accept_len, accepted_index = mtp_verify(
         req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx
     )
     mtp_scatter_next_token_ids(
-        req_to_next_token_ids, b_req_mtp_start_loc, all_next_token_ids, b_req_idx, spec_accept_len
+        req_to_next_token_ids, b_req_mtp_start_loc, all_next_token_ids, b_req_idx, mtp_accept_len
     )
-    print(spec_accept_len)
+    print(mtp_accept_len)
     print(req_to_next_token_ids)
     print(accepted_index)
 
