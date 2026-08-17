@@ -39,7 +39,7 @@ def _rms_norm_fwd_fused(
         mask = cols < N
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=mask).to(tl.float32)
-        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X + cols * x_stride1, mask=mask, other=0.0).to(tl.float32)
         x_hat = x * rstd
         y = x_hat
         if HAS_WEIGHT:
