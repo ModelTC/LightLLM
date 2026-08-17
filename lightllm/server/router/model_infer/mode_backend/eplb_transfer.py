@@ -102,31 +102,11 @@ class _EPLBTransferBase:
     staging_depth = 1
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
-        if not weights:
-            raise ValueError("EPLB transfer requires at least one fused-MoE weight")
-        self._expert_parallel_states = []
-        self._eplb_states = []
-        for layer_index, weight in enumerate(weights):
-            expert_parallel_state = getattr(weight, "expert_parallel_state", None)
-            if expert_parallel_state is None or expert_parallel_state.eplb is None:
-                raise ValueError(f"EPLB transfer layer {layer_index} requires an EPLB parallel state")
-            if expert_parallel_state.world_size != world_size:
-                raise ValueError(f"EPLB transfer layer {layer_index} has an incompatible expert-parallel world size")
-            self._expert_parallel_states.append(expert_parallel_state)
-            self._eplb_states.append(expert_parallel_state.eplb)
-        reference_state = self._expert_parallel_states[0]
-        reference_redundant_experts = self._eplb_states[0].redundant_experts_per_rank
-        for layer_index, (state, eplb_state) in enumerate(zip(self._expert_parallel_states, self._eplb_states)):
-            if state.logical_experts != reference_state.logical_experts:
-                raise ValueError(f"EPLB transfer layer {layer_index} has an incompatible logical expert count")
-            if state.primary_experts_per_rank != reference_state.primary_experts_per_rank:
-                raise ValueError(f"EPLB transfer layer {layer_index} has an incompatible primary expert count")
-            if eplb_state.redundant_experts_per_rank != reference_redundant_experts:
-                raise ValueError(f"EPLB transfer layer {layer_index} has an incompatible redundant expert count")
+        self._eplb_states = [weight.expert_parallel_state.eplb for weight in weights]
         self.transfer_group = transfer_group
         self.global_rank = global_rank
         self.world_size = world_size
-        self.experts_per_rank = self._expert_parallel_states[0].primary_experts_per_rank
+        self.experts_per_rank = weights[0].expert_parallel_state.primary_experts_per_rank
         self.device = weights[0].w13.weight.device
         self.live = [extract_expert_tensors(weight) for weight in weights]
         self._validate_live_layout(weights)
@@ -135,11 +115,7 @@ class _EPLBTransferBase:
             [
                 (
                     name,
-                    torch.empty(
-                        (redundant_slots,) + tuple(tensor.shape[1:]),
-                        dtype=tensor.dtype,
-                        device=tensor.device,
-                    ),
+                    torch.empty((redundant_slots,) + tuple(tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device),
                 )
                 for name, tensor in self.live[0]
             ]
@@ -162,10 +138,8 @@ class _EPLBTransferBase:
         redundant_slots = self._eplb_states[0].redundant_experts_per_rank
         for layer_index, (state, tensors) in enumerate(zip(self._eplb_states, self.live)):
             layout = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in tensors]
-            if layout != reference:
-                raise ValueError(f"EPLB layer {layer_index} has incompatible expert tensor layout")
-            if state.redundant_experts_per_rank != redundant_slots:
-                raise ValueError("EPLB redundant slot count must match")
+            assert layout == reference, f"EPLB layer {layer_index} has incompatible expert tensor layout"
+            assert state.redundant_experts_per_rank == redundant_slots, "EPLB redundant slot count must match"
 
     def _copy_layer(self, layer_index: int, plan: Sequence[TransferStep], staging) -> None:
         raise NotImplementedError
@@ -193,10 +167,7 @@ class _EPLBTransferBase:
                 torch.cuda.set_device(self.device)
                 for batch_start in range(0, len(layer_plans), self.staging_depth):
                     batch = []
-                    for plan_index in range(
-                        batch_start,
-                        min(batch_start + self.staging_depth, len(layer_plans)),
-                    ):
+                    for plan_index in range(batch_start, min(batch_start + self.staging_depth, len(layer_plans))):
                         layer_index, plan = layer_plans[plan_index]
                         buffer_index = plan_index % self.staging_depth
                         release = self._release[buffer_index]
@@ -208,14 +179,7 @@ class _EPLBTransferBase:
                         self._changed_dst_slots[buffer_index] = tuple(
                             step.dst_slot for step in plan if step.dst_rank == self.global_rank
                         )
-                        batch.append(
-                            (
-                                layer_index,
-                                plan,
-                                buffer_index,
-                                self.staging[buffer_index],
-                            )
-                        )
+                        batch.append((layer_index, plan, buffer_index, self.staging[buffer_index]))
                     if batch_start > 0 and self._needs_staging_reuse_barrier:
                         # All destinations must finish consuming the prior IPC staging generation
                         # before a source can reuse the peer buffer for this batch.
@@ -291,11 +255,7 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                 except Exception as exc:
                     raise RuntimeError("NIXL EPLB backend requires the nixl package for cross-node transfer") from exc
                 agent_name = f"lightllm-eplb-{socket.gethostname()}-{os.getpid()}-rank-{global_rank}"
-                config = nixl.nixl_agent_config(
-                    enable_prog_thread=True,
-                    enable_listen_thread=False,
-                    backends=["UCX"],
-                )
+                config = nixl.nixl_agent_config(enable_prog_thread=True, enable_listen_thread=False, backends=["UCX"])
                 self._nixl_agent = nixl.nixl_agent(agent_name, config)
                 reg_tensors = [tensor for layer in self.live for _, tensor in layer] + [
                     tensor for staging in self.staging for _, tensor in staging
@@ -336,15 +296,7 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         for target_rank in self._same_node_ranks - {self.global_rank}:
             exports[target_rank] = {
                 "staging": [
-                    [
-                        (
-                            name,
-                            tuple(tensor.shape),
-                            tensor.dtype,
-                            reduce_tensor(tensor)[1],
-                        )
-                        for name, tensor in staging
-                    ]
+                    [(name, tuple(tensor.shape), tensor.dtype, reduce_tensor(tensor)[1]) for name, tensor in staging]
                     for staging in self.staging
                 ],
             }
@@ -464,15 +416,9 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         key = tuple((source.data_ptr(), destination.data_ptr()) for destination, source in copies)
         cached = self._push_descriptor_cache.get(key)
         if cached is None:
-            src_ptrs = torch.tensor(
-                [source.data_ptr() for _, source in copies],
-                dtype=torch.int64,
-                device=self.device,
-            )
+            src_ptrs = torch.tensor([source.data_ptr() for _, source in copies], dtype=torch.int64, device=self.device)
             dst_ptrs = torch.tensor(
-                [destination.data_ptr() for destination, _ in copies],
-                dtype=torch.int64,
-                device=self.device,
+                [destination.data_ptr() for destination, _ in copies], dtype=torch.int64, device=self.device
             )
             cached = (src_ptrs, dst_ptrs)
             self._push_descriptor_cache[key] = cached
@@ -537,21 +483,13 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                         )
                     )
                     remote_descs.append(
-                        (
-                            remote_ptr + first.src_local_row * remote_nbytes,
-                            run_len * remote_nbytes,
-                            remote_device,
-                        )
+                        (remote_ptr + first.src_local_row * remote_nbytes, run_len * remote_nbytes, remote_device)
                     )
             local_dlist = self._nixl_agent.prep_xfer_dlist(
-                "NIXL_INIT_AGENT",
-                self._nixl_agent.get_xfer_descs(local_descs, "VRAM"),
-                backends=["UCX"],
+                "NIXL_INIT_AGENT", self._nixl_agent.get_xfer_descs(local_descs, "VRAM"), backends=["UCX"]
             )
             remote_dlist = self._nixl_agent.prep_xfer_dlist(
-                self._remote_agents[src_rank],
-                self._nixl_agent.get_xfer_descs(remote_descs, "VRAM"),
-                backends=["UCX"],
+                self._remote_agents[src_rank], self._nixl_agent.get_xfer_descs(remote_descs, "VRAM"), backends=["UCX"]
             )
             xfer = self._nixl_agent.make_prepped_xfer(
                 "READ",
