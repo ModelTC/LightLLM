@@ -6,7 +6,7 @@ from deep_ep import ElasticBuffer
 from .base_impl import FuseMoeBaseImpl
 from ..expert_parallel_state import ExpertParallelState
 from lightllm.distributed import dist_group_manager
-from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
+from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
@@ -18,9 +18,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     chunked_expanded_moe_forward,
     quantize_fused_experts_input,
 )
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
-    silu_and_mul_fwd,
-)
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_fast
 from lightllm.utils.device_utils import is_sm100_gpu
@@ -54,43 +52,17 @@ def _get_prefill_routing_stream(device: torch.device):
 
 
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
-    def __init__(
-        self,
-        n_routed_experts: int,
-        num_fused_shared_experts: int,
-        routed_scaling_factor: float,
-        quant_method: QuantizationMethod,
-        *,
-        expert_parallel_state: ExpertParallelState,
-    ):
-        super().__init__(
-            n_routed_experts,
-            num_fused_shared_experts,
-            routed_scaling_factor,
-            quant_method,
-        )
-        if expert_parallel_state.logical_experts != n_routed_experts:
-            raise ValueError("DeepGEMM layout must cover exactly the logical routed experts")
+    def __init__(self, *args, expert_parallel_state: ExpertParallelState, **kwargs):
+        super().__init__(*args, **kwargs)
         self.expert_parallel_state = expert_parallel_state
         self.eplb_state = expert_parallel_state.eplb
         if self.eplb_state is not None:
-            if not all(
-                tensor.is_cuda
-                for tensor in (
-                    self.eplb_state.logical_to_physical_map,
-                    self.eplb_state.logical_replica_count,
-                    self.eplb_state.route_counter,
-                )
-            ):
-                raise ValueError("DeepGEMM EPLB state tensors must be CUDA tensors")
-            if is_sm100_gpu():
-                raise RuntimeError("EPLB does not support SM100")
+            assert not is_sm100_gpu(), "EPLB does not support SM100"
         self.ep_balance_counters = None
         self._primary_weight_pack_cache = {}
 
     def _next_eplb_sample_index(self) -> int:
         eplb = self.eplb_state
-        assert eplb is not None
         if not eplb.recording:
             return 0
         sample_index = eplb.recorded_sample_count % eplb.route_counter.shape[0]
@@ -133,9 +105,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             and (eplb.recording or router_logits.shape[0] <= EPLB_GROUPED_TOPK_FUSION_MAX_NO_RECORD_TOKENS)
         )
         if fused_eplb_grouped_topk:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import (
-                triton_grouped_topk_eplb,
-            )
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
 
             group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
             sample_index = self._next_eplb_sample_index()
@@ -156,9 +126,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 group_score_used_topk_num=group_score_topk_num,
             )
         else:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import (
-                select_experts,
-            )
+            from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
             topk_weights, topk_ids = select_experts(
                 hidden_states=input_tensor,
@@ -294,17 +262,16 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         cache_key = id(weight_pack)
         primary = cache.get(cache_key)
         if primary is None:
+            primary_experts_per_rank = self.expert_parallel_state.primary_experts_per_rank
             primary = WeightPack(
-                weight=weight_pack.weight[: self.expert_parallel_state.primary_experts_per_rank],
+                weight=weight_pack.weight[:primary_experts_per_rank],
                 weight_scale=(
-                    weight_pack.weight_scale[: self.expert_parallel_state.primary_experts_per_rank]
+                    weight_pack.weight_scale[:primary_experts_per_rank]
                     if weight_pack.weight_scale is not None
                     else None
                 ),
                 weight_zero_point=(
-                    getattr(weight_pack, "weight_zero_point", None)[
-                        : self.expert_parallel_state.primary_experts_per_rank
-                    ]
+                    getattr(weight_pack, "weight_zero_point", None)[:primary_experts_per_rank]
                     if getattr(weight_pack, "weight_zero_point", None) is not None
                     else None
                 ),
@@ -340,7 +307,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
-        (recv_x, masked_m, handle, event, hook,) = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
+        recv_x, masked_m, handle, event, hook = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
             topk_idx=topk_idx,
             x=hidden_states,
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
@@ -427,14 +394,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                     compute_load=compute_load,
                 )
 
-        return (
-            recv_x,
-            recv_topk_idx,
-            recv_topk_weights,
-            handle.num_recv_tokens_per_expert_list,
-            handle,
-            hook,
-        )
+        return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
     def masked_group_gemm(
         self,
@@ -517,13 +477,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_weights: torch.Tensor,
         handle: Any,
     ):
-        (combined_x, event_overlap, hook,) = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
-            gemm_out_b,
-            topk_idx,
-            topk_weights,
-            handle,
-            async_finish=False,
-            return_recv_hook=True,
+        combined_x, event_overlap, hook = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
+            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
         )
         return combined_x, hook
 

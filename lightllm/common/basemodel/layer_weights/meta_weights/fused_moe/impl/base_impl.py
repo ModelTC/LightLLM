@@ -84,7 +84,6 @@ class FuseMoeBaseImpl(ABC):
         is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return top-k weights, execution IDs, and logical IDs for capture."""
         pass
 
     @abstractmethod
@@ -98,5 +97,4 @@ class FuseMoeBaseImpl(ABC):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ) -> torch.Tensor:
-        """Apply selected experts and return the fused-MoE output."""
         pass

@@ -1,7 +1,6 @@
 import torch
 from .triton_impl import FuseMoeTriton
 from lightllm.common.quantization.quantize_method import (
-    QuantizationMethod,
     WeightPack,
 )
 from lightllm.common.quantization.awq import (
@@ -12,26 +11,14 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
-    def __init__(
-        self,
-        n_routed_experts: int,
-        num_fused_shared_experts: int,
-        routed_scaling_factor: float,
-        quant_method: QuantizationMethod,
-    ):
-        super().__init__(
-            n_routed_experts,
-            num_fused_shared_experts,
-            routed_scaling_factor,
-            quant_method,
-        )
-        self.workspace = self._create_workspace()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.workspace = self.create_workspace()
 
-    def _create_workspace(self):
+    def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM
 
-        if not HAS_VLLM:
-            raise RuntimeError("moe awq marlin quantization requires kernels of vllm")
+        assert HAS_VLLM, "moe awq marlin quantization requires kernels of vllm"
         from vllm.model_executor.layers.quantization.utils.marlin_utils import (
             marlin_make_workspace_new,
         )
@@ -48,20 +35,11 @@ class FuseMoeMarlin(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-        w1_weight, w1_scale, w1_zero_point = (
-            w13.weight,
-            w13.weight_scale,
-            w13.weight_zero_point,
-        )
-        w2_weight, w2_scale, w2_zero_point = (
-            w2.weight,
-            w2.weight_scale,
-            w2.weight_zero_point,
-        )
 
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-            fused_marlin_moe,
-        )
+        w1_weight, w1_scale, w1_zero_point = w13.weight, w13.weight_scale, w13.weight_zero_point
+        w2_weight, w2_scale, w2_zero_point = w2.weight, w2.weight_scale, w2.weight_zero_point
+
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 
         self.quant_method: AWQMARLINW4A16QuantizationMethod = self.quant_method
 

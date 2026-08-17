@@ -22,9 +22,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         preserve_logical_ids: bool = False,
     ):
         """Select experts and return topk weights and ids."""
-        from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import (
-            select_experts,
-        )
+        from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
             hidden_states=input_tensor,
@@ -70,9 +68,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = w13_weight.dtype == torch.float8_e4m3fn
 
-        from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import (
-            fused_experts,
-        )
+        from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import fused_experts
 
         fused_experts(
             hidden_states=input_tensor,

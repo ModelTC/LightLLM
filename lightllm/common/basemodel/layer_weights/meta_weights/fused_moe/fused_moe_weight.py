@@ -1,18 +1,14 @@
 import torch
 import threading
 from typing import Dict, Any, Optional, Tuple, List
-from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import (
-    BaseWeightTpl,
-)
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
     get_row_slice_mixin,
     get_col_slice_mixin,
     SliceMixinTpl,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
-    create_fuse_moe_impl,
-)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import create_fuse_moe_impl
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
     EPLBState,
     ExpertParallelState,
@@ -24,11 +20,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
 )
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_env_start_args, get_prefill_eplb_step_interval
-from lightllm.utils.dist_utils import (
-    get_global_world_size,
-    get_global_rank,
-    get_node_world_size,
-)
+from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_node_world_size
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -67,10 +59,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
         self.quant_method = quant_method
-        assert num_fused_shared_experts in [
-            0,
-            1,
-        ], "num_fused_shared_experts can only support 0 or 1 now."
+        assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
@@ -134,7 +123,6 @@ class FusedMoeWeight(BaseWeightTpl):
                     device="cuda",
                 ),
             )
-        assert len(self._initial_redundant_expert_ids) == (0 if eplb is None else eplb.redundant_experts_per_rank)
         if self.enable_ep_moe:
             self.expert_parallel_state = ExpertParallelState(
                 logical_experts=self.n_routed_experts,
@@ -147,14 +135,10 @@ class FusedMoeWeight(BaseWeightTpl):
             self.tp_rank_ = 0
             self.tp_world_size_ = 1
         self.row_slicer = get_row_slice_mixin(
-            self.quant_method.method_name,
-            tp_rank=self.tp_rank_,
-            tp_world_size=self.tp_world_size_,
+            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
         )
         self.col_slicer = get_col_slice_mixin(
-            self.quant_method.method_name,
-            tp_rank=self.tp_rank_,
-            tp_world_size=self.tp_world_size_,
+            self.quant_method.method_name, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
         )
         self.local_n_routed_experts = self.n_routed_experts + self.num_fused_shared_experts
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
@@ -267,11 +251,7 @@ class FusedMoeWeight(BaseWeightTpl):
         )
 
     def masked_group_gemm(
-        self,
-        recv_x: Tuple[torch.Tensor],
-        masked_m: torch.Tensor,
-        dtype: torch.dtype,
-        expected_m: int,
+        self, recv_x: Tuple[torch.Tensor], masked_m: torch.Tensor, dtype: torch.dtype, expected_m: int
     ):
         assert self.enable_ep_moe, "masked_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.masked_group_gemm(
@@ -341,7 +321,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self._load_e_score_correction_bias(weights)
         self._load_per_expert_scale(weights)
         self._load_weight(self.expert_idx_to_local_idx, weights)
-        if self.expert_parallel_state is not None and self.expert_parallel_state.eplb is not None:
+        if self._initial_redundant_expert_idx_to_local_idx:
             self._load_weight(self._initial_redundant_expert_idx_to_local_idx, weights)
 
     def verify_load(self):
