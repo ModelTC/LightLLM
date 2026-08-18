@@ -353,6 +353,27 @@ def test_hidden_collector_reads_target_layer_ids(monkeypatch):
     assert config_reads == ["/models/dspark"]
 
 
+@pytest.mark.parametrize(
+    "mtp_mode, mtp_step, expected_layer_num",
+    [
+        (None, 0, 0),
+        ("vanilla_no_att", 7, 0),
+        ("eagle_no_att", 7, 0),
+        ("vanilla_with_att", 7, 7),
+        ("eagle_with_att", 7, 1),
+    ],
+)
+def test_fixed_added_mtp_kv_layer_num_by_mode(monkeypatch, mtp_mode, mtp_step, expected_layer_num):
+    monkeypatch.setattr(
+        envs_utils,
+        "get_env_start_args",
+        lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_step=mtp_step),
+    )
+    envs_utils.get_added_mtp_kv_layer_num.cache_clear()
+
+    assert envs_utils.get_added_mtp_kv_layer_num() == expected_layer_num
+
+
 def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"num_hidden_layers": 5}))

@@ -252,22 +252,38 @@ def enable_cpu_cache_numa_interleave() -> bool:
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
     args = get_env_start_args()
-    if args.mtp_mode == "eagle_with_att":
-        return 1
-    if args.mtp_mode == "vanilla_with_att":
-        return args.mtp_step
-    if args.mtp_mode not in ("eagle3", "dspark", "dflash"):
-        return 0
+    mtp_mode = args.mtp_mode
 
-    draft_model_dir = args.mtp_draft_model_dir[0]
+    if mtp_mode is None:
+        return 0
+    if mtp_mode == "vanilla_no_att":
+        return 0
+    if mtp_mode == "eagle_no_att":
+        return 0
+    if mtp_mode == "vanilla_with_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_with_att":
+        return 1
+    if mtp_mode == "eagle3":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dspark":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+
+    raise ValueError(f"unsupported mtp_mode: {mtp_mode}")
+
+
+def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
     # Use the effective draft backbone config when the checkpoint stores it nested.
     draft_config.update(draft_config.get("dflash_config", {}))
     # A draft model may contain multiple attention layers; each layer needs a
     # separate KV-cache slot after the target model's layers.
-    total_added_mtp_kv_layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
-    return int(total_added_mtp_kv_layer_num)
+    layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
+    assert layer_num is not None, f"missing num_hidden_layers or n_layer in draft config: {draft_model_dir}"
+    return int(layer_num)
 
 
 @lru_cache(maxsize=None)
