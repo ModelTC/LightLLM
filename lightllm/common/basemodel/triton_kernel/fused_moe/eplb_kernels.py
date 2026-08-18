@@ -26,8 +26,16 @@ def _eplb_push_copy_kernel(
 @torch.no_grad()
 def eplb_push_copy(src_ptrs: torch.Tensor, dst_ptrs: torch.Tensor, bytes_per_descriptor: int) -> None:
     """Copy 16-byte-aligned expert rows from source to destination pointers."""
-    block_size = 256
-    items_per_program = 8
+    if bytes_per_descriptor <= 64 * 1024:
+        block_size = 128
+        num_warps = 4
+    elif bytes_per_descriptor >= 4 * 1024 * 1024 and src_ptrs.numel() > 1:
+        block_size = 512
+        num_warps = 8
+    else:
+        block_size = 256
+        num_warps = 4
+    items_per_program = 4
     words_per_program = block_size * items_per_program
     _eplb_push_copy_kernel[(triton.cdiv(bytes_per_descriptor // 8, words_per_program), src_ptrs.numel())](
         src_ptrs,
@@ -35,7 +43,7 @@ def eplb_push_copy(src_ptrs: torch.Tensor, dst_ptrs: torch.Tensor, bytes_per_des
         bytes_per_descriptor,
         BLOCK_SIZE=block_size,
         ITEMS_PER_PROGRAM=items_per_program,
-        num_warps=4,
+        num_warps=num_warps,
     )
 
 
@@ -51,6 +59,7 @@ def _eplb_map_kernel(
     counter_num_experts: tl.constexpr,
     topk_num: tl.constexpr,
     map_slots: tl.constexpr,
+    SINGLE_TOKEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -58,16 +67,24 @@ def _eplb_map_kernel(
     logical_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
 
     record_mask = mask & (tl.load(record_load_ptr) != 0)
-    tl.atomic_add(expert_counter_ptr + sample_index * counter_num_experts + logical_id, 1, mask=record_mask)
-
-    replica_count = tl.load(
-        logical_replica_count_ptr + logical_id,
-        mask=mask,
-        other=1,
+    tl.atomic_add(
+        expert_counter_ptr + sample_index * counter_num_experts + logical_id,
+        1,
+        mask=record_mask,
+        sem="relaxed",
     )
-    token_index = (offsets // topk_num).to(tl.uint32)
-    hashed = token_index * 2654435769
-    replica_index = hashed % replica_count.to(tl.uint32)
+
+    if SINGLE_TOKEN:
+        replica_index = 0
+    else:
+        replica_count = tl.load(
+            logical_replica_count_ptr + logical_id,
+            mask=mask,
+            other=1,
+        )
+        token_index = (offsets // topk_num).to(tl.uint32)
+        hashed = token_index * 2654435769
+        replica_index = hashed % replica_count.to(tl.uint32)
     physical_id = tl.load(
         logical_to_physical_ptr + logical_id * map_slots + replica_index,
         mask=mask,
@@ -84,15 +101,19 @@ def _eplb_map_no_record_kernel(
     total_assignment_num,
     topk_num: tl.constexpr,
     map_slots: tl.constexpr,
+    SINGLE_TOKEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Map logical ids without carrying any sampling state in the ABI."""
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < total_assignment_num
     logical_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
-    token_index = (offsets // topk_num).to(tl.uint32)
-    replica_index = (token_index * 2654435769) % replica_count.to(tl.uint32)
+    if SINGLE_TOKEN:
+        replica_index = 0
+    else:
+        replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
+        token_index = (offsets // topk_num).to(tl.uint32)
+        replica_index = (token_index * 2654435769) % replica_count.to(tl.uint32)
     physical_id = tl.load(
         logical_to_physical_ptr + logical_id * map_slots + replica_index,
         mask=mask,
@@ -112,13 +133,62 @@ def _eplb_map_record_kernel(
     counter_num_experts: tl.constexpr,
     topk_num: tl.constexpr,
     map_slots: tl.constexpr,
+    SINGLE_TOKEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Map logical ids and unconditionally record the sampled load."""
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < total_assignment_num
     logical_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    tl.atomic_add(expert_counter_ptr + sample_index * counter_num_experts + logical_id, 1, mask=mask)
+    tl.atomic_add(
+        expert_counter_ptr + sample_index * counter_num_experts + logical_id,
+        1,
+        mask=mask,
+        sem="relaxed",
+    )
+    if SINGLE_TOKEN:
+        replica_index = 0
+    else:
+        replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
+        token_index = (offsets // topk_num).to(tl.uint32)
+        replica_index = (token_index * 2654435769) % replica_count.to(tl.uint32)
+    physical_id = tl.load(
+        logical_to_physical_ptr + logical_id * map_slots + replica_index,
+        mask=mask,
+        other=-1,
+    )
+    tl.store(topk_ids_ptr + offsets, physical_id, mask=mask)
+
+
+@triton.jit
+def _eplb_map_record_histogram_kernel(
+    topk_ids_ptr,
+    logical_to_physical_ptr,
+    logical_replica_count_ptr,
+    expert_counter_ptr,
+    sample_index,
+    total_assignment_num,
+    counter_num_experts: tl.constexpr,
+    histogram_bins: tl.constexpr,
+    topk_num: tl.constexpr,
+    map_slots: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total_assignment_num
+    logical_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
+
+    histogram = tl.histogram(logical_id, histogram_bins)
+    bins = tl.arange(0, histogram_bins)
+    valid_count = tl.minimum(total_assignment_num - tl.program_id(0) * BLOCK_SIZE, BLOCK_SIZE)
+    histogram -= tl.where(bins == 0, BLOCK_SIZE - valid_count, 0)
+    tl.atomic_add(
+        expert_counter_ptr + sample_index * counter_num_experts + bins,
+        histogram,
+        mask=(bins < counter_num_experts) & (histogram != 0),
+        sem="relaxed",
+    )
+
     replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
     token_index = (offsets // topk_num).to(tl.uint32)
     replica_index = (token_index * 2654435769) % replica_count.to(tl.uint32)
@@ -128,6 +198,22 @@ def _eplb_map_record_kernel(
         other=-1,
     )
     tl.store(topk_ids_ptr + offsets, physical_id, mask=mask)
+
+
+def _map_launch_config(total_assignment_num: int):
+    block_size = min(256, triton.next_power_of_2(total_assignment_num))
+    num_warps = 1 if block_size <= 32 else 2 if block_size <= 64 else 4
+    return block_size, num_warps
+
+
+def _record_histogram_block_size(total_assignment_num: int, counter_num_experts: int) -> int:
+    if total_assignment_num < 16 * counter_num_experts:
+        return 0
+    if total_assignment_num < 16 * 1024:
+        return 128
+    if total_assignment_num < 32 * 1024:
+        return 256
+    return 512
 
 
 @torch.no_grad()
@@ -149,7 +235,7 @@ def eplb_map(
     total_assignment_num = topk_ids.numel()
     if total_assignment_num == 0:
         return
-    block_size = 256
+    block_size, num_warps = _map_launch_config(total_assignment_num)
     _eplb_map_kernel[(triton.cdiv(total_assignment_num, block_size),)](
         topk_ids,
         logical_to_physical_map,
@@ -161,8 +247,9 @@ def eplb_map(
         counter_num_experts=expert_counter.shape[1],
         topk_num=topk_ids.shape[1],
         map_slots=logical_to_physical_map.shape[1],
+        SINGLE_TOKEN=topk_ids.shape[0] == 1,
         BLOCK_SIZE=block_size,
-        num_warps=4,
+        num_warps=num_warps,
     )
 
 
@@ -180,30 +267,49 @@ def eplb_map_fast(
     total_assignment_num = topk_ids.numel()
     if total_assignment_num == 0:
         return
-    block_size = 256
-    grid = (triton.cdiv(total_assignment_num, block_size),)
     if record_load:
-        _eplb_map_record_kernel[grid](
-            topk_ids,
-            logical_to_physical_map,
-            logical_replica_count,
-            expert_counter,
-            sample_index,
-            total_assignment_num,
-            counter_num_experts=expert_counter.shape[1],
-            topk_num=topk_ids.shape[1],
-            map_slots=logical_to_physical_map.shape[1],
-            BLOCK_SIZE=block_size,
-            num_warps=4,
-        )
+        block_size = _record_histogram_block_size(total_assignment_num, expert_counter.shape[1])
+        if block_size:
+            _eplb_map_record_histogram_kernel[(triton.cdiv(total_assignment_num, block_size),)](
+                topk_ids,
+                logical_to_physical_map,
+                logical_replica_count,
+                expert_counter,
+                sample_index,
+                total_assignment_num,
+                counter_num_experts=expert_counter.shape[1],
+                histogram_bins=triton.next_power_of_2(expert_counter.shape[1]),
+                topk_num=topk_ids.shape[1],
+                map_slots=logical_to_physical_map.shape[1],
+                BLOCK_SIZE=block_size,
+                num_warps=8 if block_size == 512 else 4,
+            )
+        else:
+            block_size, num_warps = _map_launch_config(total_assignment_num)
+            _eplb_map_record_kernel[(triton.cdiv(total_assignment_num, block_size),)](
+                topk_ids,
+                logical_to_physical_map,
+                logical_replica_count,
+                expert_counter,
+                sample_index,
+                total_assignment_num,
+                counter_num_experts=expert_counter.shape[1],
+                topk_num=topk_ids.shape[1],
+                map_slots=logical_to_physical_map.shape[1],
+                SINGLE_TOKEN=topk_ids.shape[0] == 1,
+                BLOCK_SIZE=block_size,
+                num_warps=num_warps,
+            )
     else:
-        _eplb_map_no_record_kernel[grid](
+        block_size, num_warps = _map_launch_config(total_assignment_num)
+        _eplb_map_no_record_kernel[(triton.cdiv(total_assignment_num, block_size),)](
             topk_ids,
             logical_to_physical_map,
             logical_replica_count,
             total_assignment_num,
             topk_num=topk_ids.shape[1],
             map_slots=logical_to_physical_map.shape[1],
+            SINGLE_TOKEN=topk_ids.shape[0] == 1,
             BLOCK_SIZE=block_size,
-            num_warps=4,
+            num_warps=num_warps,
         )
