@@ -117,12 +117,6 @@ def get_eplb_rebalance_gain_threshold() -> float:
 
 
 @lru_cache(maxsize=None)
-def enable_eplb_rebalance_once() -> bool:
-    """True stops after the first effective rebalance; False keeps attempting at each step interval."""
-    return enable_env_vars("LIGHTLLM_EPLB_REBALANCE_ONCE")
-
-
-@lru_cache(maxsize=None)
 def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 

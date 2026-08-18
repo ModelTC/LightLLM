@@ -249,30 +249,6 @@ def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
     assert manager_module._find_fused_moe_weights(model) == [alternate, aliased, first]
 
 
-def test_eplb_rebalance_once_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("LIGHTLLM_EPLB_REBALANCE_ONCE", raising=False)
-    envs_utils.enable_eplb_rebalance_once.cache_clear()
-    envs_utils.enable_env_vars.cache_clear()
-
-    try:
-        assert not envs_utils.enable_eplb_rebalance_once()
-    finally:
-        envs_utils.enable_eplb_rebalance_once.cache_clear()
-        envs_utils.enable_env_vars.cache_clear()
-
-
-def test_eplb_rebalance_once_can_be_enabled(monkeypatch):
-    monkeypatch.setenv("LIGHTLLM_EPLB_REBALANCE_ONCE", "TRUE")
-    envs_utils.enable_eplb_rebalance_once.cache_clear()
-    envs_utils.enable_env_vars.cache_clear()
-
-    try:
-        assert envs_utils.enable_eplb_rebalance_once()
-    finally:
-        envs_utils.enable_eplb_rebalance_once.cache_clear()
-        envs_utils.enable_env_vars.cache_clear()
-
-
 def test_get_eplb_rebalance_gain_threshold_defaults_to_five_percent(monkeypatch):
     monkeypatch.delenv("LIGHTLLM_EPLB_REBALANCE_GAIN_THRESHOLD", raising=False)
     envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
@@ -716,7 +692,6 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
     ]
     manager.rebalanced = True
     manager.initial_sampling_complete = True
-    manager.rebalance_once = False
     manager.in_flight = False
     manager.prefill_steps = 18
     manager.step_interval = 20
@@ -769,7 +744,6 @@ def test_eplb_step_does_not_start_a_second_evaluation_while_one_is_pending(monke
         )()
     ]
     manager.rebalanced = False
-    manager.rebalance_once = False
     manager.in_flight = False
     manager.prefill_steps = 1
     manager.step_interval = 2
@@ -811,7 +785,6 @@ def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_
     manager.global_rank = 0
     manager.step_interval = 20
     manager.sampling_interval = 20
-    manager.rebalance_once = False
     manager.rebalanced = True
     manager.initial_sampling_complete = True
     manager.weights = []
@@ -841,7 +814,6 @@ def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(
     manager.in_flight = False
     manager.rebalanced = False
     manager.initial_sampling_complete = False
-    manager.rebalance_once = False
     manager.prefill_steps = 1
     manager.step_interval = 1
     manager.sampling_interval = 1
@@ -930,7 +902,6 @@ def test_evaluation_state_is_cleared_before_second_round(monkeypatch):
     manager.global_rank = 1
     manager.step_interval = 1
     manager.sampling_interval = 1
-    manager.rebalance_once = False
     manager.rebalanced = False
     manager.initial_sampling_complete = True
     manager.weights = []
@@ -1133,20 +1104,6 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     assert torch.equal(seen["global_load"][:, :, 0], torch.full_like(local, 100))
     assert torch.equal(seen["global_load"][:, :, 1], local)
     assert manager._evaluation_error is None
-
-
-def test_eplb_step_stops_after_completed_rebalance_in_once_mode():
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager.evaluation_in_flight = False
-    manager.rebalanced = True
-    manager.initial_sampling_complete = True
-    manager.rebalance_once = True
-    manager.prefill_steps = 0
-
-    manager.step()
-
-    assert manager.prefill_steps == 0
 
 
 def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeypatch):
@@ -1965,11 +1922,9 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
     transfer.finish()
 
 
-@pytest.mark.parametrize(("rebalance_once", "expected_calls"), [(True, [False]), (False, [True])])
-def test_manager_rearms_after_rebalance_only_for_continuous_interval_one(rebalance_once, expected_calls):
+def test_manager_rearms_after_rebalance_for_interval_one():
     recording_calls = []
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.rebalance_once = rebalance_once
     manager.rebalanced = False
     manager.initial_sampling_complete = True
     manager.step_interval = 1
@@ -1984,7 +1939,7 @@ def test_manager_rearms_after_rebalance_only_for_continuous_interval_one(rebalan
     manager._finish_rebalance()
     assert manager.in_flight is False
     assert manager.rebalanced
-    assert recording_calls == expected_calls
+    assert recording_calls == [True]
     assert not manager._sampling_pending
 
 
@@ -2006,7 +1961,6 @@ def test_manager_keeps_recording_closed_after_insufficient_interval_window(monke
     manager.global_rank = 1
     manager.step_interval = 20
     manager.sampling_interval = 20
-    manager.rebalance_once = False
     manager.rebalanced = True
     manager.initial_sampling_complete = True
     manager.weights = []
@@ -2039,7 +1993,6 @@ def test_first_no_improvement_switches_to_sparse_sampling_window(monkeypatch):
     manager.global_rank = 1
     manager.step_interval = 20
     manager.sampling_interval = 20
-    manager.rebalance_once = False
     manager.rebalanced = False
     manager.initial_sampling_complete = False
     manager.weights = []
@@ -2058,7 +2011,6 @@ def test_dense_initial_window_evaluates_only_at_step_twenty(monkeypatch):
     manager.in_flight = False
     manager.rebalanced = False
     manager.initial_sampling_complete = False
-    manager.rebalance_once = False
     manager.prefill_steps = 0
     manager.step_interval = 20
     manager.sampling_interval = 320
@@ -2088,7 +2040,6 @@ def test_no_improvement_exponentially_backs_off_sampling_interval_at_cap():
     manager.global_rank = 1
     manager.step_interval = 20
     manager.sampling_interval = 20
-    manager.rebalance_once = False
     manager.rebalanced = True
     manager.initial_sampling_complete = True
     manager.weights = []
@@ -2114,7 +2065,6 @@ def test_sparse_backoff_arms_and_evaluates_only_at_new_interval_boundary(monkeyp
     manager.in_flight = False
     manager.rebalanced = True
     manager.initial_sampling_complete = True
-    manager.rebalance_once = False
     manager.prefill_steps = 18
     manager.step_interval = 20
     manager.sampling_interval = 80
@@ -2177,7 +2127,6 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
 
 def test_first_rebalance_completion_switches_to_sparse_step_nineteen_arm(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.rebalance_once = False
     manager.rebalanced = False
     manager.initial_sampling_complete = True
     manager.step_interval = 20
@@ -2621,7 +2570,6 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
     monkeypatch.setattr(manager_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(manager_module, "get_prefill_eplb_step_interval", lambda: 20)
     monkeypatch.setattr(manager_module, "get_eplb_rebalance_gain_threshold", lambda: 0.07)
-    monkeypatch.setattr(manager_module, "enable_eplb_rebalance_once", lambda: False)
 
     def new_group(*args, **kwargs):
         new_group_calls.append((args, kwargs))

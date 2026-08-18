@@ -23,13 +23,6 @@ from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_fast
 
 
-# On H200 GLM-style grouped routing, the fused no-record kernel wins through
-# 2048 tokens but loses occupancy to the separate select+map path for longer
-# prefills. Recording still benefits from fusing the counter atomic, so it is
-# deliberately not subject to this cutoff.
-EPLB_GROUPED_TOPK_FUSION_MAX_NO_RECORD_TOKENS = 2048
-
-
 # Dispatch policy mapping is launched after the caller has captured its
 # overlap event.  One routing stream per device lets that mapping wait for the
 # captured inputs without serializing subsequent compute-stream microbatches.
@@ -42,6 +35,9 @@ def _get_prefill_routing_stream(device: torch.device):
     if device_index is None:
         device_index = torch.cuda.current_device()
     key = (device.type, device_index)
+    stream = _PREFILL_ROUTING_STREAMS.get(key)
+    if stream is not None:
+        return stream
     with _PREFILL_ROUTING_STREAMS_LOCK:
         stream = _PREFILL_ROUTING_STREAMS.get(key)
         if stream is None:
@@ -99,7 +95,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             and per_expert_scale is None
             and not preserve_logical_ids
             and not Autotuner.is_autotune_warmup()
-            and (eplb.recording or router_logits.shape[0] <= EPLB_GROUPED_TOPK_FUSION_MAX_NO_RECORD_TOKENS)
         )
         if fused_eplb_grouped_topk:
             from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
