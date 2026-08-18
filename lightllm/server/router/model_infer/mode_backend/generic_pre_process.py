@@ -138,7 +138,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
     elif get_env_start_args().mtp_dynamic_verify or enable_triton_mtp_kernel():
         b_shared_seq_len = None
-        b_mark_shared_group = build_spec_shared_group_markers(b_mtp_index=b_mtp_index)
+        b_mark_shared_group = build_mtp_shared_group_markers(b_req_idx=b_req_idx)
     else:
         b_shared_seq_len = None
         b_mark_shared_group = None
@@ -224,24 +224,38 @@ def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Te
     return b_shared_seq_len, b_mark_shared_group
 
 
-def build_spec_shared_group_markers(b_mtp_index: torch.Tensor) -> torch.Tensor:
-    # Each logical request starts at row index 0. Only the final row of each
-    # speculative query group stores its group size; earlier rows store zero.
+def build_mtp_shared_group_markers(b_req_idx: torch.Tensor) -> torch.Tensor:
+    """Build MTP row-group markers from consecutive request indexes.
+
+    Rows belonging to the same request form one MTP group. Only the final row
+    of a group stores the group size; all earlier rows store zero. A request
+    with more rows than the attention kernel supports is split into multiple
+    adjacent groups.
+
+    Example with ``max_batch_shared_group_size == 3``::
+
+        b_req_idx:           [7, 7, 7, 7, 11, 11, 20]
+        MTP groups:          [7, 7, 7] [7] [11, 11] [20]
+        b_mark_shared_group: [0, 0, 3, 1,  0,  2,  1]
+
+    The request id itself is not written to the result; it is only used to
+    detect where one request ends and the next request begins.
+    """
     max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
-    mtp_indexes = b_mtp_index.tolist()
-    b_mark_shared_group = []
+    assert max_batch_shared_group_size > 0
+
+    req_indexes = b_req_idx.tolist()
+    b_mark_shared_group = [0] * len(req_indexes)
     group_start = 0
-    for group_end in range(1, len(mtp_indexes) + 1):
-        reaches_request_boundary = group_end == len(mtp_indexes) or mtp_indexes[group_end] == 0
-        reaches_size_limit = group_end - group_start == max_batch_shared_group_size
-        if not reaches_request_boundary and not reaches_size_limit:
+    for row_index, req_idx in enumerate(req_indexes):
+        is_request_end = row_index == len(req_indexes) - 1 or req_indexes[row_index + 1] != req_idx
+        group_size = row_index - group_start + 1
+        reaches_size_limit = group_size == max_batch_shared_group_size
+        if not is_request_end and not reaches_size_limit:
             continue
 
-        group_size = group_end - group_start
-        b_mark_shared_group.extend([0] * (group_size - 1))
-        b_mark_shared_group.append(group_size)
-        group_start = group_end
+        b_mark_shared_group[row_index] = group_size
+        group_start = row_index + 1
 
-    assert len(b_mark_shared_group) == len(mtp_indexes)
-    b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
+    b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device=b_req_idx.device)
     return b_mark_shared_group

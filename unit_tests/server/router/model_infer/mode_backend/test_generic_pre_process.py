@@ -4,22 +4,20 @@ import torch
 from lightllm.server.router.model_infer.mode_backend import generic_padded_pre_process, generic_pre_process
 
 
-def test_spec_shared_group_markers_split_requests_and_size_limit(monkeypatch):
+def test_mtp_shared_group_markers_split_requests_and_size_limit(monkeypatch):
     monkeypatch.setattr(generic_pre_process, "get_diverse_max_batch_shared_group_size", lambda: 2)
-    b_mtp_index = torch.tensor([0, 1, 2, 0, 1, 0], dtype=torch.int32)
+    b_req_idx = torch.tensor([7, 7, 7, 11, 11, 20], dtype=torch.int32)
 
-    markers = generic_pre_process.build_spec_shared_group_markers(b_mtp_index=b_mtp_index)
+    markers = generic_pre_process.build_mtp_shared_group_markers(b_req_idx=b_req_idx)
 
     assert markers.tolist() == [0, 2, 1, 0, 2, 1]
 
 
-def test_spec_shared_group_markers_include_padded_request_rows(monkeypatch):
+def test_mtp_shared_group_markers_detect_request_boundaries(monkeypatch):
     monkeypatch.setattr(generic_pre_process, "get_diverse_max_batch_shared_group_size", lambda: 8)
-    # The last two groups represent padded requests. Their request ids are both
-    # HOLD_REQUEST_ID, so mtp_index resets define the actual group boundaries.
-    b_mtp_index = torch.tensor([0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=torch.int32)
+    b_req_idx = torch.tensor([7, 7, 7, 11, 11, 11, 20, 20, 20], dtype=torch.int32)
 
-    markers = generic_pre_process.build_spec_shared_group_markers(b_mtp_index=b_mtp_index)
+    markers = generic_pre_process.build_mtp_shared_group_markers(b_req_idx=b_req_idx)
 
     assert markers.tolist() == [0, 0, 3, 0, 0, 3, 0, 0, 3]
 
