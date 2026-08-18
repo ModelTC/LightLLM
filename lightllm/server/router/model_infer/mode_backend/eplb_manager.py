@@ -1,6 +1,6 @@
 import threading
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.distributed as dist
@@ -71,7 +71,6 @@ class EPLBManager:
         self.sampling_interval = self.step_interval
         self.prefill_steps = 0
         self.rebalanced = False
-        self.initial_sampling_complete = False
         routed = {weight.expert_parallel_state.logical_experts for weight in self.weights}
         redundant = {state.redundant_experts_per_rank for state in self._eplb_states}
         assert len(routed) == len(redundant) == 1
@@ -90,9 +89,12 @@ class EPLBManager:
         self._evaluation_result = None
         self._evaluation_error = None
         self._evaluation_thread = None
-        # Before the first sufficient evaluation, collect a dense interval so
-        # the planner has representative load.  A planned or no-improvement
-        # result switches continuous mode to sparse; insufficient retries dense.
+        # A fresh manager starts with one continuous base window. After a
+        # sufficient evaluation, steady state returns to the cheap sparse
+        # probe. An insufficient sparse probe schedules one fresh continuous
+        # base window before the next fixed sampling boundary.
+        self._continuous_collection_start_step: Optional[int] = None
+        self._continuous_collection_end_step: Optional[int] = self.step_interval
         self._sampling_pending = False
         self._reset_recorded_samples()
         self._set_recording(True)
@@ -132,14 +134,25 @@ class EPLBManager:
             tensor = self._control_ready_count = torch.empty(1, dtype=torch.int32)
         return tensor.fill_(value)
 
-    def _sampling_dense(self) -> bool:
-        return not self.initial_sampling_complete
+    def _clear_continuous_collection(self):
+        self._continuous_collection_start_step = None
+        self._continuous_collection_end_step = None
 
-    def _prepare_next_sampling_window(self):
-        """Reset and arm the next dense or interval-one sampling window."""
+    def _begin_continuous_collection(self):
+        minimum_end = self.prefill_steps + self.step_interval
+        collection_end = -(-minimum_end // self.sampling_interval) * self.sampling_interval
         self._reset_recorded_samples()
         self._sampling_pending = False
-        self._set_recording(self._sampling_dense() or self.sampling_interval == 1)
+        self._continuous_collection_start_step = collection_end - self.step_interval
+        self._continuous_collection_end_step = collection_end
+        self._set_recording(self._continuous_collection_start_step == self.prefill_steps)
+
+    def _prepare_next_sampling_window(self):
+        """Clear the current window and arm the next sparse sampling window."""
+        self._clear_continuous_collection()
+        self._reset_recorded_samples()
+        self._sampling_pending = False
+        self._set_recording(self.sampling_interval == 1)
 
     @staticmethod
     def _recent_ring_samples(counter: torch.Tensor, recorded_sample_count: int) -> torch.Tensor:
@@ -161,6 +174,7 @@ class EPLBManager:
         if len(set(counts)) != 1:
             raise RuntimeError("EPLB recorded sample counts differ between layers")
         sample_count = counts[0]
+        # Validate the metadata before copying the newest rows to the CPU.
         metadata = torch.tensor([sample_count, -sample_count, capacities[0], -capacities[0]], dtype=torch.int64)
         dist.all_reduce(metadata, op=dist.ReduceOp.MIN, group=self.evaluation_group)
         if metadata[0] != -metadata[1] or metadata[2] != -metadata[3]:
@@ -341,13 +355,32 @@ class EPLBManager:
         self.evaluation_in_flight = False
         self._evaluation_thread = None
         if result["kind"] == "insufficient":
+            from_continuous_window = self._continuous_collection_end_step is not None
+            if from_continuous_window:
+                self.sampling_interval = min(self.sampling_interval * 4, self.step_interval * 16)
+                self._prepare_next_sampling_window()
+            else:
+                self._begin_continuous_collection()
             if self.global_rank == 0:
-                logger.info(
-                    "eplb skip rearrangement: minimum_layer_samples=%s required=%s",
-                    result["minimum_layer_samples"],
-                    result["minimum"],
-                )
-            self._prepare_next_sampling_window()
+                if from_continuous_window:
+                    logger.info(
+                        "eplb insufficient samples: prefill_steps=%s minimum_layer_samples=%s required=%s "
+                        "next_sampling_interval=%s",
+                        self.prefill_steps,
+                        result["minimum_layer_samples"],
+                        result["minimum"],
+                        self.sampling_interval,
+                    )
+                else:
+                    logger.info(
+                        "eplb insufficient samples: prefill_steps=%s minimum_layer_samples=%s required=%s "
+                        "scheduled_fresh_window_start=%s scheduled_fresh_window_end=%s",
+                        self.prefill_steps,
+                        result["minimum_layer_samples"],
+                        result["minimum"],
+                        self._continuous_collection_start_step,
+                        self._continuous_collection_end_step,
+                    )
             return False
         if result["kind"] == "no_improvement":
             self.sampling_interval = min(self.sampling_interval * 4, self.step_interval * 16)
@@ -362,7 +395,6 @@ class EPLBManager:
                     result["candidate_changed_layer_count"],
                     self.sampling_interval,
                 )
-            self.initial_sampling_complete = True
             self._prepare_next_sampling_window()
             return False
         self._start_rebalance(result)
@@ -390,8 +422,8 @@ class EPLBManager:
                         self.node_world_size,
                     )
                     layer_plans.append((layer_index, plan))
-        self.initial_sampling_complete = True
         self.sampling_interval = self.step_interval
+        self._clear_continuous_collection()
         self._reset_recorded_samples()
         self.target_placement = placement
         self.target_metadata = result.get("metadata")
@@ -429,9 +461,12 @@ class EPLBManager:
         if self.in_flight or self.evaluation_in_flight:
             return
         self.prefill_steps += 1
-        if self._sampling_dense():
-            phase = self.prefill_steps % self.step_interval
-            if phase == 0:
+        continuous_start = self._continuous_collection_start_step
+        continuous_end = self._continuous_collection_end_step
+        if continuous_end is not None:
+            if continuous_start is not None and self.prefill_steps == continuous_start:
+                self._set_recording(True)
+            if self.prefill_steps >= continuous_end:
                 self._start_evaluation()
             return
         sampling_interval = self.sampling_interval

@@ -691,7 +691,6 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
         )()
     ]
     manager.rebalanced = True
-    manager.initial_sampling_complete = True
     manager.in_flight = False
     manager.prefill_steps = 18
     manager.step_interval = 20
@@ -701,6 +700,8 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
     manager.global_rank = 1
     manager.evaluation_in_flight = False
     manager._sampling_pending = False
+    manager._continuous_collection_start_step = None
+    manager._continuous_collection_end_step = None
 
     recordings, resets, started = [], [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
@@ -786,7 +787,6 @@ def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_
     manager.step_interval = 20
     manager.sampling_interval = 20
     manager.rebalanced = True
-    manager.initial_sampling_complete = True
     manager.weights = []
     manager._eplb_states = []
     recordings, logs = [], []
@@ -813,7 +813,6 @@ def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.in_flight = False
     manager.rebalanced = False
-    manager.initial_sampling_complete = False
     manager.prefill_steps = 1
     manager.step_interval = 1
     manager.sampling_interval = 1
@@ -903,7 +902,6 @@ def test_evaluation_state_is_cleared_before_second_round(monkeypatch):
     manager.step_interval = 1
     manager.sampling_interval = 1
     manager.rebalanced = False
-    manager.initial_sampling_complete = True
     manager.weights = []
     manager._eplb_states = []
     manager._set_recording = lambda _enabled: None
@@ -946,10 +944,16 @@ def test_manager_collects_recent_ring_samples_in_chronological_order(monkeypatch
     ]
     manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
     manager.evaluation_group = object()
-    monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **kwargs: None)
+    metadata_sizes = []
+
+    def all_reduce(metadata, **_kwargs):
+        metadata_sizes.append(metadata.numel())
+
+    monkeypatch.setattr(manager_module.dist, "all_reduce", all_reduce)
 
     samples = manager._collect_local_samples()
 
+    assert metadata_sizes == [4]
     assert torch.equal(
         samples,
         torch.tensor(
@@ -1069,6 +1073,7 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     manager.global_rank = 2
     manager.world_size = 4
     manager.node_world_size = 2
+    manager.step_interval = 20
     manager.num_logical_experts = 4
     manager.redundant_experts_per_rank = 1
     manager.current_placement = build_initial_redundant_expert_ids(4, 4, 1).unsqueeze(0)
@@ -1098,11 +1103,12 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})())
 
     assert seen["group"] is manager.evaluation_group
+    expected_local = local
     assert seen["before"].shape == (1, 1, 2, 4)
-    assert torch.equal(seen["before"][:, :, 0], torch.zeros_like(local))
-    assert torch.equal(seen["before"][:, :, 1], local)
-    assert torch.equal(seen["global_load"][:, :, 0], torch.full_like(local, 100))
-    assert torch.equal(seen["global_load"][:, :, 1], local)
+    assert torch.equal(seen["before"][:, :, 0], torch.zeros_like(expected_local))
+    assert torch.equal(seen["before"][:, :, 1], expected_local)
+    assert torch.equal(seen["global_load"][:, :, 0], torch.full_like(expected_local, 100))
+    assert torch.equal(seen["global_load"][:, :, 1], expected_local)
     assert manager._evaluation_error is None
 
 
@@ -1926,10 +1932,10 @@ def test_manager_rearms_after_rebalance_for_interval_one():
     recording_calls = []
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.rebalanced = False
-    manager.initial_sampling_complete = True
     manager.step_interval = 1
     manager.sampling_interval = 1
     manager._sampling_pending = False
+    manager._continuous_collection_start_step = 0
     manager.weights = []
     manager._eplb_states = []
     manager.target_placement = torch.zeros(1)
@@ -1941,9 +1947,50 @@ def test_manager_rearms_after_rebalance_for_interval_one():
     assert manager.rebalanced
     assert recording_calls == [True]
     assert not manager._sampling_pending
+    assert manager._continuous_collection_start_step is None
 
 
-def test_manager_keeps_recording_closed_after_insufficient_interval_window(monkeypatch):
+def test_manager_sparse_insufficient_schedules_bounded_fresh_window(monkeypatch):
+    class DoneThread:
+        def join(self):
+            pass
+
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.evaluation_in_flight = True
+    manager._evaluation_lock = threading.Lock()
+    manager._evaluation_error = None
+    manager._evaluation_thread = DoneThread()
+    manager._evaluation_result = {
+        "kind": "insufficient",
+        "minimum_layer_samples": 1,
+        "minimum": 2,
+    }
+    manager.global_rank = 0
+    manager.step_interval = 20
+    manager.sampling_interval = 20
+    manager.rebalanced = True
+    manager.prefill_steps = 37
+    manager.weights = []
+    manager._eplb_states = []
+    manager._continuous_collection_start_step = None
+    manager._continuous_collection_end_step = None
+    recordings, resets, logs = [], [], []
+    manager._set_recording = lambda enabled: recordings.append(enabled)
+    manager._reset_recorded_samples = lambda: resets.append(True)
+    monkeypatch.setattr(manager_module.logger, "info", lambda *args: logs.append(args))
+
+    assert not manager._poll_evaluation()
+    assert not hasattr(manager, "_retained_local_samples")
+    assert manager._continuous_collection_start_step == 40
+    assert manager._continuous_collection_end_step == 60
+    assert recordings == [False]
+    assert resets == [True]
+    assert manager.sampling_interval == 20
+    assert "insufficient samples" in logs[0][0]
+    assert "scheduled_fresh_window" in logs[0][0]
+
+
+def test_manager_full_window_insufficient_clears_and_backs_off():
     class DoneThread:
         def join(self):
             pass
@@ -1962,15 +2009,72 @@ def test_manager_keeps_recording_closed_after_insufficient_interval_window(monke
     manager.step_interval = 20
     manager.sampling_interval = 20
     manager.rebalanced = True
-    manager.initial_sampling_complete = True
+    manager.prefill_steps = 60
     manager.weights = []
     manager._eplb_states = []
-    recordings = []
+    manager._continuous_collection_start_step = 40
+    manager._continuous_collection_end_step = 60
+    recordings, resets = [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
+    manager._reset_recorded_samples = lambda: resets.append(True)
 
     assert not manager._poll_evaluation()
+    assert not hasattr(manager, "_retained_local_samples")
+    assert manager._continuous_collection_start_step is None
+    assert manager._continuous_collection_end_step is None
+    assert manager.sampling_interval == 80
     assert recordings == [False]
-    assert manager.sampling_interval == 20
+    assert resets == [True]
+
+
+def test_begin_continuous_collection_uses_full_window_at_fixed_boundary(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.in_flight = False
+    manager.evaluation_in_flight = False
+    manager.prefill_steps = 36
+    manager.step_interval = 20
+    manager.sampling_interval = 20
+    manager._sampling_pending = True
+    recordings, resets, starts = [], [], []
+    manager._set_recording = lambda enabled: recordings.append(enabled)
+    manager._reset_recorded_samples = lambda: resets.append(True)
+    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(True))
+
+    # The window is never truncated to the next boundary: it waits until 40,
+    # records a full 20 fresh steps, then evaluates at the boundary at 60.
+    manager._begin_continuous_collection()
+    assert manager._continuous_collection_start_step == 40
+    assert manager._continuous_collection_end_step == 60
+    assert recordings == [False]
+    assert resets == [True]
+    assert not manager._sampling_pending
+
+    for _ in range(4):
+        manager.step()
+    assert manager.prefill_steps == 40
+    assert recordings == [False, True]
+    assert starts == []
+    for _ in range(19):
+        manager.step()
+    assert starts == []
+    manager.step()  # 60: the full window ends and triggers the evaluation.
+    assert starts == [True]
+
+
+def test_begin_continuous_collection_preserves_full_window_at_sparse_boundary():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.prefill_steps = 80
+    manager.step_interval = 20
+    manager.sampling_interval = 80
+    manager._sampling_pending = False
+    recordings = []
+    manager._set_recording = lambda enabled: recordings.append(enabled)
+    manager._reset_recorded_samples = lambda: None
+
+    manager._begin_continuous_collection()
+    assert manager._continuous_collection_start_step == 140
+    assert manager._continuous_collection_end_step == 160
+    assert recordings == [False]
 
 
 def test_first_no_improvement_switches_to_sparse_sampling_window(monkeypatch):
@@ -1994,23 +2098,24 @@ def test_first_no_improvement_switches_to_sparse_sampling_window(monkeypatch):
     manager.step_interval = 20
     manager.sampling_interval = 20
     manager.rebalanced = False
-    manager.initial_sampling_complete = False
+    manager._continuous_collection_start_step = 0
     manager.weights = []
     manager._eplb_states = []
     recordings = []
     manager._set_recording = lambda enabled: recordings.append(enabled)
 
     assert not manager._poll_evaluation()
-    assert manager.initial_sampling_complete
+    assert manager._continuous_collection_start_step is None
     assert recordings == [False]
     assert manager.sampling_interval == 80
 
 
-def test_dense_initial_window_evaluates_only_at_step_twenty(monkeypatch):
+def test_continuous_collection_evaluates_only_after_one_full_base_window(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.in_flight = False
     manager.rebalanced = False
-    manager.initial_sampling_complete = False
+    manager._continuous_collection_start_step = 0
+    manager._continuous_collection_end_step = 20
     manager.prefill_steps = 0
     manager.step_interval = 20
     manager.sampling_interval = 320
@@ -2041,7 +2146,6 @@ def test_no_improvement_exponentially_backs_off_sampling_interval_at_cap():
     manager.step_interval = 20
     manager.sampling_interval = 20
     manager.rebalanced = True
-    manager.initial_sampling_complete = True
     manager.weights = []
     manager._eplb_states = []
 
@@ -2064,11 +2168,12 @@ def test_sparse_backoff_arms_and_evaluates_only_at_new_interval_boundary(monkeyp
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.in_flight = False
     manager.rebalanced = True
-    manager.initial_sampling_complete = True
     manager.prefill_steps = 18
     manager.step_interval = 20
     manager.sampling_interval = 80
     manager._sampling_pending = False
+    manager._continuous_collection_start_step = None
+    manager._continuous_collection_end_step = None
     manager.evaluation_in_flight = False
     recordings, resets, starts = [], [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
@@ -2102,7 +2207,7 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
     manager.node_world_size = 1
     manager.step_interval = 20
     manager.sampling_interval = 320
-    manager.initial_sampling_complete = True
+    manager._continuous_collection_start_step = 0
     manager.global_rank = 1
     manager.transfer = type("Transfer", (), {"start": lambda self, plans: setattr(self, "plans", plans)})()
     manager._reset_recorded_samples = lambda: None
@@ -2123,12 +2228,12 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
 
     assert manager.sampling_interval == 20
     assert manager.in_flight
+    assert manager._continuous_collection_start_step is None
 
 
 def test_first_rebalance_completion_switches_to_sparse_step_nineteen_arm(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.rebalanced = False
-    manager.initial_sampling_complete = True
     manager.step_interval = 20
     manager.sampling_interval = manager.step_interval
     manager._sampling_pending = False
@@ -2597,7 +2702,8 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
     assert transfer_calls == [([weight], groups[2], 0, 2)]
     assert manager.rebalance_gain_threshold == 0.07
     assert "rebalance_gain_threshold=0.0700" in logs[0]
-    assert not manager.initial_sampling_complete
+    assert manager._continuous_collection_start_step is None
+    assert manager._continuous_collection_end_step == manager.step_interval
     assert weight.expert_parallel_state.eplb.recording
     assert manager._eplb_states[0] is weight.expert_parallel_state.eplb
     assert not hasattr(weight.expert_parallel_state.eplb, "record_load")

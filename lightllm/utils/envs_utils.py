@@ -107,9 +107,9 @@ def get_prefill_eplb_step_interval():
 
 @lru_cache(maxsize=None)
 def get_eplb_rebalance_gain_threshold() -> float:
-    """Return the EPLB gain threshold: estimated critical-load reduction ratio; 0.05 means 5%."""
+    """Return the EPLB gain threshold: estimated critical-load reduction ratio; 0.1 means 10%."""
     env_name = "LIGHTLLM_EPLB_REBALANCE_GAIN_THRESHOLD"
-    raw_value = os.getenv(env_name, "0.05")
+    raw_value = os.getenv(env_name, "0.1")
     value = float(raw_value)
     if not 0.0 <= value <= 1.0:
         raise ValueError(f"{env_name} must be a ratio between 0.0 and 1.0, got {raw_value!r}")
