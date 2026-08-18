@@ -28,13 +28,13 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = ControlState()
-        self.enable_dynamic_spec = False
+        self.enable_dynmaic_mtp = False
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode is not None:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.enable_dynamic_spec = get_env_start_args().mtp_dynamic_verify
+            self.enable_dynmaic_mtp = get_env_start_args().mtp_dynamic_verify
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
@@ -44,7 +44,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
     def init_custom(self):
         super().init_custom()
-        if self.enable_dynamic_spec:
+        if self.enable_dynmaic_mtp:
             self.spec_gloo_group = create_new_group_for_current_dp("gloo")
             logger.info(f"spec_gloo_group ranks {dist.get_rank(self.spec_gloo_group)}")
 
@@ -356,7 +356,7 @@ class ChunkedPrefillBackend(ModeBackend):
         spec_engine.record_request_spec_metrics(
             decode_reqs=decode_reqs,
             accept_lengths_cpu=mtp_accept_len_cpu,
-            verified_row_reqs=run_reqs if self.enable_dynamic_spec else None,
+            verified_row_reqs=run_reqs if self.enable_dynmaic_mtp else None,
         )
 
         select_mask = accepted_index_cpu.to(dtype=torch.bool)

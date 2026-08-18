@@ -71,7 +71,7 @@ def test_overlap_eagle_keeps_fixed_verify_layout():
         ),
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
-    proposer = EagleMTPProposer(backend=backend, enable_dynamic_spec=False)
+    proposer = EagleMTPProposer(backend=backend, enable_dynmaic_mtp=False)
     proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
     model_input0 = _target_input(batch_size=6)
     model_input1 = _target_input(batch_size=6)
@@ -114,7 +114,7 @@ def test_autoregressive_eagle_reuses_overlap_inputs():
         ),
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
-    proposer = AutoregressiveEagleProposer(backend=backend, enable_dynamic_spec=False)
+    proposer = AutoregressiveEagleProposer(backend=backend, enable_dynmaic_mtp=False)
     proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
     model_input0 = _target_input(batch_size=6)
     model_input1 = _target_input(batch_size=6)

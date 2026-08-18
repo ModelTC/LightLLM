@@ -236,7 +236,7 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
         draft_models=[draft_model],
         _gen_argmax_token_ids_and_prob=lambda _: (flat_draft_token_ids, flat_draft_token_probs),
     )
-    proposer = DFlashProposer(backend=backend, enable_dynamic_spec=True)
+    proposer = DFlashProposer(backend=backend, enable_dynmaic_mtp=True)
     proposer.extend_draft_kv_cache = lambda **_: None
     proposer.build_block_draft_input = lambda **_: (SimpleNamespace(), torch.tensor([10, 11]))
 
@@ -264,7 +264,7 @@ def test_dflash_reuses_decode_input_for_kv_commit():
     draft_model = SimpleNamespace(forward=forwarded_inputs.append)
     proposer = DFlashProposer(
         backend=SimpleNamespace(draft_models=[draft_model]),
-        enable_dynamic_spec=False,
+        enable_dynmaic_mtp=False,
     )
     input_ids = torch.arange(4)
     multimodal_params = [{"images": [], "audios": []}] * 4
@@ -302,7 +302,7 @@ def test_dflash_expands_position_delta_with_request_block_rows():
         backend=SimpleNamespace(
             draft_models=[SimpleNamespace(block_size=block_size, mask_token_id=99)],
         ),
-        enable_dynamic_spec=False,
+        enable_dynmaic_mtp=False,
     )
     proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
     model_input = SimpleNamespace(

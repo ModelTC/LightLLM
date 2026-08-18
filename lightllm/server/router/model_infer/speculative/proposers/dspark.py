@@ -41,7 +41,7 @@ class DSparkProposer(ParallelBlockProposer):
                 dtype=torch.float32,
                 device=next_token_ids.device,
             )
-            if self.enable_dynamic_spec
+            if self.enable_dynmaic_mtp
             else None
         )
 
@@ -65,7 +65,7 @@ class DSparkProposer(ParallelBlockProposer):
         block_draft_token_ids = flat_draft_token_ids.reshape(request_count, block_size)
         proposal_token_ids[accepted_tail_rows, 1:] = block_draft_token_ids[:, :draft_step]
 
-        if self.enable_dynamic_spec:
+        if self.enable_dynmaic_mtp:
             confidence_logits = draft_output.confidence_logits
             if confidence_logits is None:
                 raise RuntimeError("DSpark dynamic verify requires confidence head logits")

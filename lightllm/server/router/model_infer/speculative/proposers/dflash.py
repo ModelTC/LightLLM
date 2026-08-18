@@ -48,7 +48,7 @@ class DFlashProposer(ParallelBlockProposer):
         )
         draft_output = draft_model.forward(draft_input)
 
-        if self.enable_dynamic_spec:
+        if self.enable_dynmaic_mtp:
             flat_draft_token_ids, flat_draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
         else:
             flat_draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
@@ -56,7 +56,7 @@ class DFlashProposer(ParallelBlockProposer):
         proposal_token_ids[accepted_tail_rows, 1:] = block_draft_token_ids[:, :draft_step]
 
         schedule_scores = None
-        if self.enable_dynamic_spec:
+        if self.enable_dynmaic_mtp:
             block_draft_token_probs = flat_draft_token_probs.reshape(request_count, block_size)
             schedule_scores = torch.zeros(
                 (verify_row_count, draft_step),

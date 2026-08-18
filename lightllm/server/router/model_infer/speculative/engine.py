@@ -30,14 +30,14 @@ class SpecEngine:
     state and proposal generation.
     """
 
-    def __init__(self, backend, spec_mode: str, enable_dynamic_spec: bool) -> None:
+    def __init__(self, backend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
         self.backend = backend
         self.spec_mode = spec_mode
-        self.enable_dynamic_spec = enable_dynamic_spec
+        self.enable_dynmaic_mtp = enable_dynmaic_mtp
         self.proposer = build_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,
-            enable_dynamic_spec=enable_dynamic_spec,
+            enable_dynmaic_mtp=enable_dynmaic_mtp,
         )
         self.planner = self._build_decode_planner()
         self._register_cuda_graph_costs()
@@ -249,7 +249,7 @@ class SpecEngine:
     ) -> None:
         """Feed iteration-level observations into the dynamic planner."""
 
-        if not self.enable_dynamic_spec:
+        if not self.enable_dynmaic_mtp:
             return
 
         self.planner.update_feedback(
@@ -306,7 +306,7 @@ class SpecEngine:
     # Construction helpers.
 
     def _build_decode_planner(self):
-        if not self.enable_dynamic_spec:
+        if not self.enable_dynmaic_mtp:
             return FixedSpecPlanner(max_draft_step=self.backend.max_draft_step)
         if self.spec_mode == "dspark":
             return DSparkPlanner(
@@ -320,7 +320,7 @@ class SpecEngine:
         )
 
     def _register_cuda_graph_costs(self) -> None:
-        if not self.enable_dynamic_spec:
+        if not self.enable_dynmaic_mtp:
             return
 
         target_graph = self.backend.model.graph

@@ -41,9 +41,9 @@ class BaseSpecProposer:
     but does not verify acceptance; verification is handled by SpecEngine.
     """
 
-    def __init__(self, *, backend: "ModeBackend", enable_dynamic_spec: bool) -> None:
+    def __init__(self, *, backend: "ModeBackend", enable_dynmaic_mtp: bool) -> None:
         self.backend = backend
-        self.enable_dynamic_spec = bool(enable_dynamic_spec)
+        self.enable_dynmaic_mtp = bool(enable_dynmaic_mtp)
 
     def get_draft_steps(self) -> Tuple[int, ...]:
         """Return the draft configurations supported by this proposer."""

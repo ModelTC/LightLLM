@@ -127,7 +127,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
             fill_value=1,
         )
         proposal_token_ids[:, 0].copy_(next_token_ids)
-        collect_schedule_scores = self.enable_dynamic_spec
+        collect_schedule_scores = self.enable_dynmaic_mtp
         schedule_scores = (
             torch.zeros(
                 (verify_row_count, draft_step),

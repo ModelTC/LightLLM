@@ -303,7 +303,7 @@ class ModeBackend:
         self.spec_engine = SpecEngine(
             backend=self,
             spec_mode=self.args.mtp_mode,
-            enable_dynamic_spec=self.args.mtp_dynamic_verify,
+            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
         )
         return
 

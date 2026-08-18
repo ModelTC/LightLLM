@@ -99,7 +99,7 @@ class VanillaMTPProposer(BaseSpecProposer):
                 dtype=torch.float32,
                 device=next_token_ids.device,
             )
-            if self.enable_dynamic_spec
+            if self.enable_dynmaic_mtp
             else None
         )
 
@@ -109,7 +109,7 @@ class VanillaMTPProposer(BaseSpecProposer):
             main_model_input.mtp_draft_input_hiddens = draft_hidden
             draft_output = draft_model.forward(main_model_input)
             draft_hidden = draft_output.spec_hidden
-            if self.enable_dynamic_spec:
+            if self.enable_dynmaic_mtp:
                 draft_token_ids, draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
                 schedule_scores[:, step] = draft_token_probs
             else:

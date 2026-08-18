@@ -28,7 +28,7 @@ def build_draft_cost_provider(proposer_class, max_draft_step: int = 3, block_siz
         max_draft_step=max_draft_step,
         draft_models=[SimpleNamespace(block_size=block_size)],
     )
-    return proposer_class(backend=backend, enable_dynamic_spec=True)
+    return proposer_class(backend=backend, enable_dynmaic_mtp=True)
 
 
 def build_lightspec_planner(
@@ -57,10 +57,10 @@ def build_dspark_planner(max_draft_step: int = 3, block_size: int = 3):
     )
 
 
-def build_planner(spec_mode: str, enable_dynamic_spec: bool = True):
+def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
     engine = SpecEngine.__new__(SpecEngine)
     engine.spec_mode = spec_mode
-    engine.enable_dynamic_spec = enable_dynamic_spec
+    engine.enable_dynmaic_mtp = enable_dynmaic_mtp
     engine.backend = SimpleNamespace(
         max_draft_step=3,
         draft_models=[SimpleNamespace(block_size=3)],
@@ -92,7 +92,7 @@ def test_infer_cost_candidates_include_feasible_boundaries():
 
 
 def test_engine_routes_only_dspark_to_the_confidence_planner():
-    assert isinstance(build_planner("eagle3", enable_dynamic_spec=False), FixedSpecPlanner)
+    assert isinstance(build_planner("eagle3", enable_dynmaic_mtp=False), FixedSpecPlanner)
     assert isinstance(build_planner("dspark"), DSparkPlanner)
 
     dflash_planner = build_planner("dflash")
@@ -453,7 +453,7 @@ def test_lightspec_short_current_proposal_can_recover_to_a_deeper_draft():
 
 def test_engine_skips_feedback_for_a_mixed_proposal_batch():
     engine = SpecEngine.__new__(SpecEngine)
-    engine.enable_dynamic_spec = True
+    engine.enable_dynmaic_mtp = True
     engine.planner = build_lightspec_planner()
     plan = SpecDecodePlan(
         dynamic_batch_size=5,
@@ -488,7 +488,7 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
         schedule_scores_cpu=torch.from_numpy(confidence_probs),
     )
     engine = SpecEngine.__new__(SpecEngine)
-    engine.enable_dynamic_spec = True
+    engine.enable_dynmaic_mtp = True
     engine.planner = planner
 
     engine.update_planner_feedback(
