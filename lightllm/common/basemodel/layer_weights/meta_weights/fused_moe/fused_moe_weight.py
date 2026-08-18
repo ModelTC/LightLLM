@@ -94,9 +94,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self._initial_redundant_expert_idx_to_local_idx = {}
         eplb = None
         if args.enable_prefill_eplb:
-            assert self.enable_ep_moe, "prefill EPLB requires --enable_ep_moe"
             redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
-            assert redundant_experts_per_rank > 0, "--eplb_num_redundant_experts_per_rank must be greater than 0"
             all_initial_ids = build_initial_redundant_expert_ids(
                 self.n_routed_experts,
                 self.global_world_size,

@@ -21,7 +21,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_fast
-from lightllm.utils.device_utils import is_sm100_gpu
 
 
 # On H200 GLM-style grouped routing, the fused no-record kernel wins through
@@ -56,8 +55,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         super().__init__(*args, **kwargs)
         self.expert_parallel_state = expert_parallel_state
         self.eplb_state = expert_parallel_state.eplb
-        if self.eplb_state is not None:
-            assert not is_sm100_gpu(), "EPLB does not support SM100"
         self.ep_balance_counters = None
         self._primary_weight_pack_cache = {}
 
