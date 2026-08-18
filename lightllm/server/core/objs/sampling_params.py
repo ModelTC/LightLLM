@@ -66,30 +66,41 @@ class StopSequenceGroups(ctypes.Structure):
         elif isinstance(stop_sequences, str):
             stop_sequences = [stop_sequences]
 
-        groups: List[List[int]] = self.stop_sentences_to_token_ids(stop_sequences, tokenizer)
+        # 这里必须使用 (token_ids, 原始条目) 的配对结果：空条目（如 "" 或 []）会被过滤掉，
+        # 若还按原始下标去取 stop_sequences[group_idx]，后面的条目就会和 token id 组错位，
+        # 导致 sequence_str 挂到别的组上（丢失停止字符串，或凭空多出一个停止字符串）。
+        groups: List[Tuple[List[int], Union[List[int], str]]] = self._stop_sentences_to_token_id_pairs(
+            stop_sequences, tokenizer
+        )
         self.size = len(groups)
         assert self.size <= MAX_STOP_SEQUENCES, "Too many stop sequence groups."
 
-        for group_idx in range(self.size):
-            if isinstance(stop_sequences[group_idx], str):
-                self.groups[group_idx].initialize(groups[group_idx], sequence_str=stop_sequences[group_idx])
+        for group_idx, (token_ids, stop_info) in enumerate(groups):
+            if isinstance(stop_info, str):
+                self.groups[group_idx].initialize(token_ids, sequence_str=stop_info)
             else:
-                self.groups[group_idx].initialize(groups[group_idx])
+                self.groups[group_idx].initialize(token_ids)
 
-    def stop_sentences_to_token_ids(self, stop_sequences: List[Union[List[int], str]], tokenizer) -> List[List[int]]:
+    def _stop_sentences_to_token_id_pairs(
+        self, stop_sequences: List[Union[List[int], str]], tokenizer
+    ) -> List[Tuple[List[int], Union[List[int], str]]]:
+        """返回 (token_ids, 原始 stop 条目) 的列表，保证两者一一对应。"""
         new_stop_sequences = []
         for stop_info in stop_sequences:
             if isinstance(stop_info, str):
                 stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
                 if stop_str_ids is not None and len(stop_str_ids) > 0:
-                    new_stop_sequences.append(stop_str_ids)
+                    new_stop_sequences.append((stop_str_ids, stop_info))
             if isinstance(stop_info, list):
                 if all(isinstance(x, int) for x in stop_info):
                     if len(stop_info) > 0:
-                        new_stop_sequences.append(stop_info)
+                        new_stop_sequences.append((stop_info, stop_info))
                 else:
                     assert False, "stop_sequences item must be type List[int] when it is a list."
         return new_stop_sequences
+
+    def stop_sentences_to_token_ids(self, stop_sequences: List[Union[List[int], str]], tokenizer) -> List[List[int]]:
+        return [token_ids for token_ids, _ in self._stop_sentences_to_token_id_pairs(stop_sequences, tokenizer)]
 
     def _stop_str_to_token_ids(self, stop_str: str, tokenizer) -> List[int]:
         stop_str_ids = tokenizer.encode(stop_str, add_special_tokens=False)
