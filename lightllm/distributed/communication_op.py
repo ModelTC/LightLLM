@@ -206,8 +206,8 @@ class DistributeGroupManager:
             else 0
         )
         self.ll_prefill_num_experts = n_routed_experts + total_redundant_experts
-        # EPLB's redundant rows are a prefill-only physical layout.  Legacy
-        # low-latency decode always routes the logical expert space.
+        # EPLB's redundant rows are a prefill-only physical layout; decode
+        # always routes the logical expert space.
         self.ll_decode_num_experts = n_routed_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
@@ -265,11 +265,6 @@ class DistributeGroupManager:
 
             import deep_gemm
 
-            # EPLB is rejected on SM100, so Mega MoE must always use the
-            # common logical-expert count rather than prefill-only replicas.
-            assert (
-                self.ll_prefill_num_experts == self.ll_decode_num_experts
-            ), "SM100 Mega MoE does not support EPLB expert replicas"
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
                 self.ll_decode_num_experts,

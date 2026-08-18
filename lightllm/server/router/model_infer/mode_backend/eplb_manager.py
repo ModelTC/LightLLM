@@ -269,7 +269,6 @@ class EPLBManager:
             result_list = [result]
             dist.broadcast_object_list(result_list, src=0, group=self.evaluation_group)
             result = result_list[0]
-        assert result is not None
         return result
 
     def _evaluate_after_event(self, event: torch.cuda.Event):

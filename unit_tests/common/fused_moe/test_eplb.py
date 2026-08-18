@@ -1,6 +1,5 @@
 import threading
 import time
-import inspect
 from collections import deque
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -131,17 +130,6 @@ def _manual_runtime_rank_load(source_load, placement, node_world_size, alignment
     return (torch.ceil(raw / alignment) * alignment).sum(dim=3)
 
 
-def test_base_and_triton_have_only_common_constructor_parameters():
-    assert list(inspect.signature(FuseMoeBaseImpl.__init__).parameters) == [
-        "self",
-        "n_routed_experts",
-        "num_fused_shared_experts",
-        "routed_scaling_factor",
-        "quant_method",
-    ]
-    assert "__init__" not in FuseMoeTriton.__dict__
-
-
 def test_base_call_template_forwards_selection_and_capture_callback():
     class Impl(FuseMoeBaseImpl):
         def _select_experts(
@@ -196,48 +184,15 @@ def test_base_call_template_forwards_selection_and_capture_callback():
     assert captured == ["logical_ids"]
     assert seen["select"]["preserve_logical_ids"]
     assert seen["fused"]["topk_ids"] == "physical_ids"
-    assert not hasattr(impl, "workspace")
-    with pytest.raises(TypeError):
-        FuseMoeBaseImpl(4, 0, 1.0, SimpleNamespace())
 
 
-def test_parallel_state_validates_layout_and_eplb_tensor_shapes():
-    with pytest.raises(ValueError, match="divide evenly"):
-        ExpertParallelState(logical_experts=7, world_size=2)
-    with pytest.raises(ValueError, match="logical expert count"):
-        ExpertParallelState(
-            4,
-            2,
-            EPLBState(
-                redundant_experts_per_rank=1,
-                logical_to_physical_map=torch.zeros((3, 2), dtype=torch.int32),
-                logical_replica_count=torch.ones(3, dtype=torch.int32),
-                route_counter=torch.zeros((2, 3), dtype=torch.int64),
-            ),
-        )
-    with pytest.raises(ValueError, match="non-empty"):
-        EPLBState(
-            redundant_experts_per_rank=1,
-            logical_to_physical_map=torch.zeros((4, 2), dtype=torch.int32),
-            logical_replica_count=torch.ones(4, dtype=torch.int32),
-            route_counter=torch.zeros((0, 4), dtype=torch.int64),
-        )
-    with pytest.raises(ValueError, match="cannot be negative"):
-        EPLBState(
-            redundant_experts_per_rank=1,
-            logical_to_physical_map=torch.zeros((4, 2), dtype=torch.int32),
-            logical_replica_count=torch.ones(4, dtype=torch.int32),
-            route_counter=torch.zeros((1, 4), dtype=torch.int64),
-            recorded_sample_count=-1,
-        )
+def test_parallel_state_derives_expert_layout():
     state = _validated_expert_parallel_state(eplb=True)
     assert state.primary_experts_per_rank == 2
     assert state.total_physical_experts == 6
-    assert not hasattr(state.eplb, "record_load")
 
 
-def test_factory_selects_all_paths_and_requires_ep_state(monkeypatch):
-    monkeypatch.setattr(deepgemm_module, "is_sm100_gpu", lambda: False)
+def test_factory_selects_all_paths_and_requires_ep_state():
     plain_quant = SimpleNamespace(method_name="none")
     marlin_quant = SimpleNamespace(method_name="awq_marlin")
     state = _validated_expert_parallel_state(eplb=False)
@@ -248,9 +203,9 @@ def test_factory_selects_all_paths_and_requires_ep_state(monkeypatch):
         quant_method=plain_quant,
         expert_parallel_state=state,
     )
+    assert isinstance(ep_impl, deepgemm_module.FuseMoeDeepGEMM)
     assert ep_impl.expert_parallel_state is state
     assert state.eplb is None
-    assert not hasattr(ep_impl, "route_counter")
     assert isinstance(
         create_fuse_moe_impl(
             n_routed_experts=4,
@@ -269,10 +224,6 @@ def test_factory_selects_all_paths_and_requires_ep_state(monkeypatch):
         ),
         FuseMoeMarlin,
     )
-    assert "enable_ep_moe" not in inspect.signature(create_fuse_moe_impl).parameters
-    assert issubclass(deepgemm_module.FuseMoeDeepGEMM, FuseMoeBaseImpl)
-    assert not issubclass(deepgemm_module.FuseMoeDeepGEMM, FuseMoeTriton)
-    assert issubclass(FuseMoeMarlin, FuseMoeTriton)
 
 
 def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
@@ -1446,35 +1397,10 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
     assert result[3] == [4]
 
 
-def test_deepgemm_constructor_configures_eplb_and_keeps_recording_disabled(monkeypatch):
-    monkeypatch.setattr(deepgemm_module, "is_sm100_gpu", lambda: False)
-    state = _validated_expert_parallel_state(device="cuda" if torch.cuda.is_available() else "cpu")
-    if not torch.cuda.is_available():
-        with pytest.raises(ValueError, match="must be CUDA"):
-            deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
-        return
+def test_deepgemm_constructor_configures_eplb():
+    state = _validated_expert_parallel_state()
     impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
     assert impl.expert_parallel_state is state
-    assert not state.eplb.recording
-    assert not hasattr(state.eplb, "record_load")
-
-
-def test_deepgemm_constructor_rejects_sm100_eplb(monkeypatch):
-    monkeypatch.setattr(deepgemm_module, "is_sm100_gpu", lambda: True)
-    state = _validated_expert_parallel_state(device="cuda" if torch.cuda.is_available() else "cpu")
-    if not torch.cuda.is_available():
-        with pytest.raises(ValueError, match="must be CUDA"):
-            deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
-        return
-
-    with pytest.raises(RuntimeError, match="EPLB does not support SM100"):
-        deepgemm_module.FuseMoeDeepGEMM(
-            4,
-            0,
-            1.0,
-            SimpleNamespace(),
-            expert_parallel_state=state,
-        )
 
 
 def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):

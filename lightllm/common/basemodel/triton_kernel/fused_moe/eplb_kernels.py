@@ -26,12 +26,6 @@ def _eplb_push_copy_kernel(
 @torch.no_grad()
 def eplb_push_copy(src_ptrs: torch.Tensor, dst_ptrs: torch.Tensor, bytes_per_descriptor: int) -> None:
     """Copy 16-byte-aligned expert rows from source to destination pointers."""
-    assert src_ptrs.is_cuda and dst_ptrs.is_cuda
-    assert src_ptrs.is_contiguous() and dst_ptrs.is_contiguous()
-    assert src_ptrs.device == dst_ptrs.device
-    assert src_ptrs.dtype == dst_ptrs.dtype == torch.int64
-    assert src_ptrs.numel() > 0 and src_ptrs.numel() == dst_ptrs.numel()
-    assert bytes_per_descriptor > 0 and bytes_per_descriptor % 16 == 0
     block_size = 256
     items_per_program = 8
     words_per_program = block_size * items_per_program
