@@ -382,21 +382,44 @@ Performance Optimization Parameters
 
 .. option:: --llm_prefill_att_backend
 
-    Set the attention backend for the prefill phase. Available options:
+    Set the attention backend for the prefill phase. For hybrid linear-attention models such as Qwen3.5,
+    the first value selects the full-attention backend and the optional second value selects the
+    linear-attention backend. If the second value is omitted, it defaults to ``auto``.
+
+    Full-attention options:
 
     * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
     * ``fa3``: Use Flash-Attention 3 backend
     * ``flashinfer``: Use FlashInfer backend
     * ``triton``: Use Triton backend
+
+    Linear-attention options for Qwen3.5:
+
+    * ``auto``: Automatically select the best backend (default), with priority flashqla > triton
+    * ``flashqla``: Use FlashQLA backend
+    * ``triton``: Use Triton backend
+
+    Example: ``--llm_prefill_att_backend fa3 flashqla``.
 
 .. option:: --llm_decode_att_backend
 
-    Set the attention backend for the decode phase. Available options:
+    Set the attention backend for the decode phase. For hybrid linear-attention models such as Qwen3.5,
+    the first value selects the full-attention backend and the optional second value selects the
+    linear-attention backend. If the second value is omitted, it defaults to ``auto``.
+
+    Full-attention options:
 
     * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
     * ``fa3``: Use Flash-Attention 3 backend
     * ``flashinfer``: Use FlashInfer backend
     * ``triton``: Use Triton backend
+
+    Linear-attention options for Qwen3.5:
+
+    * ``auto``: Automatically select the best backend (default; currently selects triton)
+    * ``triton``: Use Triton backend
+
+    Example: ``--llm_decode_att_backend flashinfer triton``.
 
 .. option:: --llm_kv_type
 

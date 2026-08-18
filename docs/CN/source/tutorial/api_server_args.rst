@@ -381,21 +381,44 @@ PD 分离模式参数
 
 .. option:: --llm_prefill_att_backend
 
-    设置预填充（Prefill）阶段使用的注意力后端。可选值为：
+    设置预填充（Prefill）阶段使用的注意力后端。对于 Qwen3.5 等混合线性注意力模型，
+    第一个值用于选择全注意力后端，可选的第二个值用于选择线性注意力后端。
+    如果省略第二个值，则默认按 ``auto`` 处理。
+
+    全注意力后端可选值：
 
     * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
     * ``fa3``: 使用 Flash-Attention 3 后端
     * ``flashinfer``: 使用 FlashInfer 后端
     * ``triton``: 使用 Triton 后端
+
+    Qwen3.5 线性注意力后端可选值：
+
+    * ``auto``: 自动选择最佳后端（默认值），优先级为 flashqla > triton
+    * ``flashqla``: 使用 FlashQLA 后端
+    * ``triton``: 使用 Triton 后端
+
+    示例：``--llm_prefill_att_backend fa3 flashqla``。
 
 .. option:: --llm_decode_att_backend
 
-    设置解码（Decode）阶段使用的注意力后端。可选值为：
+    设置解码（Decode）阶段使用的注意力后端。对于 Qwen3.5 等混合线性注意力模型，
+    第一个值用于选择全注意力后端，可选的第二个值用于选择线性注意力后端。
+    如果省略第二个值，则默认按 ``auto`` 处理。
+
+    全注意力后端可选值：
 
     * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
     * ``fa3``: 使用 Flash-Attention 3 后端
     * ``flashinfer``: 使用 FlashInfer 后端
     * ``triton``: 使用 Triton 后端
+
+    Qwen3.5 线性注意力后端可选值：
+
+    * ``auto``: 自动选择最佳后端（默认值，当前选择 triton）
+    * ``triton``: 使用 Triton 后端
+
+    示例：``--llm_decode_att_backend flashinfer triton``。
     
 .. option:: --llm_kv_type
 

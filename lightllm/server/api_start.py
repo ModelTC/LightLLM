@@ -162,16 +162,17 @@ def _launch_subprocesses(args: StartArgs):
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     if args.enable_ep_moe:
-        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
         for backend in args.llm_prefill_att_backend:
-            assert backend in allowed_ep_att_backends, (
+            assert backend in allowed_ep_prefill_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
-                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is not supported."
             )
+        allowed_ep_decode_att_backends = {"auto", "fa3", "triton"}
         for backend in args.llm_decode_att_backend:
-            assert backend in allowed_ep_att_backends, (
+            assert backend in allowed_ep_decode_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
-                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+                f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
             )
 
     # mtp params check
@@ -269,6 +270,12 @@ def _launch_subprocesses(args: StartArgs):
         dp_size_in_node = max(1, args.dp // args.nnodes)
         per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
         args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
+
+    if args.run_mode == "decode":
+        # PD Decode 节点只接收 prompt 末尾位置的 linear attention state，不具备
+        # 中间大页边界对应的 state。因此 Decode 节点必须使用默认值关闭大页功能，
+        # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
+        args.linear_att_page_block_num = 10000000
 
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num

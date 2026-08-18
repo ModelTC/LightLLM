@@ -26,7 +26,11 @@ def _make_manager(monkeypatch):
     mgr.metric_client = SimpleNamespace(counter_inc=lambda *a, **k: None, histogram_observe=lambda *a, **k: None)
     mgr.tokens = lambda *a, **k: 10
     mgr._log_req_header = lambda *a, **k: asyncio.sleep(0)
-    p_node = SimpleNamespace(dispatched_prompt_chars=0)
+    mgr.recorded_cache_hit_rates = []
+    mgr.pd_manager = SimpleNamespace(
+        selector=SimpleNamespace(record_prompt_cache_hit_rate=mgr.recorded_cache_hit_rates.append)
+    )
+    p_node = SimpleNamespace(dispatched_prompt_chars=0, dispatched_req_num=0)
     mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, 1))
     mgr.remove_req = lambda *a, **k: asyncio.sleep(0)
     return mgr
@@ -38,10 +42,10 @@ def _collect(mgr, sampling_params, monkeypatch, split):
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         sub_req_id = sp.group_request_id
         hit = sp.max_new_tokens * 10
-        yield sub_req_id, "x", {"prompt_tokens": 10, "prompt_cache_len": hit}, FinishStatus()
+        yield sub_req_id, "x", {"prompt_tokens": 100, "prompt_cache_len": hit}, FinishStatus()
         for _ in range(2):
-            yield sub_req_id, "y", {"prompt_tokens": 10, "prompt_cache_len": 0}, FinishStatus()
-        yield sub_req_id, "z", {"prompt_tokens": 10, "prompt_cache_len": 0}, FinishStatus(FinishStatus.FINISHED_STOP)
+            yield sub_req_id, "y", {"prompt_tokens": 100, "prompt_cache_len": 0}, FinishStatus()
+        yield sub_req_id, "z", {"prompt_tokens": 100, "prompt_cache_len": 0}, FinishStatus(FinishStatus.FINISHED_STOP)
 
     monkeypatch.setattr(mgr, "_wait_to_token_package", fake_wait)
 
@@ -68,6 +72,7 @@ def test_single_block_prefill_hit_persists_past_decode_zeros(monkeypatch):
     sp.group_request_id = 0
     cached = _collect(mgr, sp, monkeypatch, split=[3])
     assert cached and all(c == 30 for c in cached), cached
+    assert mgr.recorded_cache_hit_rates == [pytest.approx(0.3)]
 
 
 def test_multi_block_keeps_first_block_hit(monkeypatch):
@@ -79,3 +84,4 @@ def test_multi_block_keeps_first_block_hit(monkeypatch):
     sp.group_request_id = 0
     cached = _collect(mgr, sp, monkeypatch, split=[3, 2])
     assert cached[-1] == 30, cached
+    assert mgr.recorded_cache_hit_rates == [pytest.approx(0.3)]
