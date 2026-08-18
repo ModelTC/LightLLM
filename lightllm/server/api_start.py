@@ -26,6 +26,7 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -85,6 +86,7 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
+        register_sysv_shm_for_cleanup(args.cpu_kv_cache_shm_id)
 
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789

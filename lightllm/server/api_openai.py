@@ -46,7 +46,6 @@ from .api_models import (
     CompletionChoice,
     CompletionLogprobs,
     CompletionStreamResponse,
-    CompletionStreamChoice,
     FunctionResponse,
     ToolCall,
     UsageInfo,
@@ -343,6 +342,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+    # Chat completions don't expose output-token logprobs. PD nodes use this
+    # transport-only marker to avoid forwarding unused per-token metadata.
+    sampling_params.return_output_logprobs = False
 
     sampling_params.verify()
     multimodal_params = MultimodalParams(**multimodal_params_dict)
@@ -839,6 +841,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+    sampling_params.return_output_logprobs = request.logprobs is not None
     sampling_params.verify()
 
     # v1/completions does not support multimodal inputs, so we use an empty MultimodalParams
@@ -935,19 +938,22 @@ async def _handle_streaming_completion(
                     prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
                 output_text = prompt_str + output_text
 
-            stream_choice = CompletionStreamChoice(
-                index=choice_index,
-                text=output_text,
-                finish_reason=current_finish_reason,
-                logprobs=None if request.logprobs is None else {},
-            )
-            stream_resp = CompletionStreamResponse(
-                id=group_request_id,
-                created=created_time,
-                model=request.model,
-                choices=[stream_choice],
-            )
-            yield f"data: {json.dumps(stream_resp.model_dump(), ensure_ascii=False)}\n\n"
+            stream_resp = {
+                "id": str(group_request_id),
+                "object": "text_completion",
+                "created": created_time,
+                "model": request.model,
+                "choices": [
+                    {
+                        "text": output_text,
+                        "index": int(choice_index),
+                        "logprobs": None if request.logprobs is None else {},
+                        "finish_reason": current_finish_reason,
+                    }
+                ],
+                "usage": None,
+            }
+            yield f"data: {json.dumps(stream_resp, ensure_ascii=False)}\n\n"
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
