@@ -1,6 +1,5 @@
 import torch
 import time
-import torch.distributed as dist
 from typing import List
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -16,7 +15,6 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
-from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
@@ -41,12 +39,6 @@ class ChunkedPrefillBackend(ModeBackend):
 
         self.classed_req_strict_prefill = False
         return
-
-    def init_custom(self):
-        super().init_custom()
-        if self.enable_dynmaic_mtp:
-            self.spec_gloo_group = create_new_group_for_current_dp("gloo")
-            logger.info(f"spec_gloo_group ranks {dist.get_rank(self.spec_gloo_group)}")
 
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
