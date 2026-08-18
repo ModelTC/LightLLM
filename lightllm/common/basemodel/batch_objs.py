@@ -43,7 +43,9 @@ class ModelInput:
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
-    # MRoPE position offset; preserve it across row-aligned input transforms.
+    # Request/row-aligned MRoPE position offset. Normal prompt prefill leaves
+    # it unset; decode and one-token-per-row MTP draft KV commits carry it.
+    # Row-aligned input transforms must preserve the tensor unchanged.
     b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
@@ -78,8 +80,10 @@ class ModelInput:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_position_delta is not None:
             self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
-            assert self.is_prefill is False, "b_position_delta should only be used in decode phase."
         else:
+            # Decode always needs the request-level MRoPE delta. Prefill may
+            # omit it for a normal prompt, while MTP draft KV commit prefill
+            # deliberately carries it because its rows use decode positions.
             assert self.is_prefill is True, "decode ModelInput should provide b_position_delta."
 
         if self.b_prefill_start_loc is not None:
