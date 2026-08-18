@@ -9,8 +9,8 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
     FixedSpecPlanner,
     LightSpecPlanner,
     SpecDecodePlan,
-    _InferCostMsTable,
 )
+from lightllm.server.router.model_infer.mtp_speculative.planner.base import _InferCostMsTable
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
