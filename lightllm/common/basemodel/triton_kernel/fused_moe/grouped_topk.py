@@ -208,12 +208,6 @@ def grouped_topk_eplb_kernel(
     gating_output_stride_m,
     gating_output_stride_n,
     correction_bias_ptr,
-    scores_buffer_ptr,
-    scores_stride_m,
-    scores_stride_n,
-    scores_stride_token_m,
-    scores_stride_group,
-    scores_stride_group_v,
     out_topk_weights,
     out_topk_weights_stride_m,
     out_topk_weights_stride_n,
@@ -227,101 +221,125 @@ def grouped_topk_eplb_kernel(
     group_num,
     group_expert_num,
     total_expert_num,
-    topk_num,
     group_topk_num,
     IS_SIGMOID: tl.constexpr,
     HAS_CORRECTION_BIAS: tl.constexpr,
-    EXPERT_BLOCK_SIZE: tl.constexpr,
     EXPERT_GROUP_NUM: tl.constexpr,
     EXPERT_GROUP_SIZE: tl.constexpr,
+    TOPK_NUM: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
     RENORMALIZE: tl.constexpr,
     GROUP_SCORE_USED_TOPK_NUM: tl.constexpr,
     COUNTER_NUM_EXPERTS: tl.constexpr,
     MAP_SLOTS: tl.constexpr,
     RECORD_LOAD: tl.constexpr,
 ):
-    """Grouped top-k with EPLB's logical-load accounting and ID remap fused in."""
+    """Grouped top-k, EPLB accounting, and replica mapping without a global score workspace."""
     token_index = tl.program_id(axis=0)
-    offs_n = tl.arange(0, EXPERT_BLOCK_SIZE)
+    offs_group = tl.arange(0, EXPERT_GROUP_NUM)
+    offs_group_v = tl.arange(0, EXPERT_GROUP_SIZE)
+    logical_ids = offs_group[:, None] * group_expert_num + offs_group_v[None, :]
+    valid_expert = (
+        (offs_group < group_num)[:, None]
+        & (offs_group_v < group_expert_num)[None, :]
+        & (logical_ids < total_expert_num)
+    )
     hidden_states = tl.load(
-        gating_output_ptr + token_index * gating_output_stride_m + offs_n,
-        mask=offs_n < total_expert_num,
-        other=-10000000.0,
+        gating_output_ptr + token_index * gating_output_stride_m + logical_ids * gating_output_stride_n,
+        mask=valid_expert,
+        other=-float("inf"),
     ).to(tl.float32)
+
     if IS_SIGMOID:
         old_scores = tl.sigmoid(hidden_states)
     else:
-        old_scores = tl.softmax(hidden_states)
+        group_max = tl.max(hidden_states, axis=1)
+        global_max = tl.max(group_max, axis=0)
+        numerators = tl.where(valid_expert, tl.exp(hidden_states - global_max), 0.0)
+        denominator = tl.sum(tl.sum(numerators, axis=1), axis=0)
+        old_scores = numerators / denominator
 
     if HAS_CORRECTION_BIAS:
-        scores = old_scores + tl.load(correction_bias_ptr + offs_n, mask=offs_n < total_expert_num, other=-10000000.0)
+        correction_bias = tl.load(correction_bias_ptr + logical_ids, mask=valid_expert, other=0.0)
+        scores = tl.where(valid_expert, old_scores + correction_bias, -float("inf"))
     else:
-        scores = old_scores
+        scores = tl.where(valid_expert, old_scores, -float("inf"))
 
-    offs_group = tl.arange(0, EXPERT_GROUP_NUM)
-    offs_group_v = tl.arange(0, EXPERT_GROUP_SIZE)
-    tl.store(scores_buffer_ptr + scores_stride_m * token_index + offs_n, scores, mask=offs_n < total_expert_num)
-    tl.debug_barrier()
-    group_scores = tl.load(
-        scores_buffer_ptr
-        + scores_stride_token_m * token_index
-        + offs_group[:, None] * scores_stride_group
-        + offs_group_v[None, :] * scores_stride_group_v,
-        mask=(offs_group < group_num)[:, None] & (offs_group_v < group_expert_num)[None, :],
-        other=-10000000.0,
-    )
-    group_value = tl.sum(
-        tl.where(
-            (offs_group < group_num)[:, None] & (offs_group_v < GROUP_SCORE_USED_TOPK_NUM)[None, :],
-            tl.sort(group_scores, dim=1, descending=True),
-            0.0,
-        ),
-        axis=1,
-    )
+    if GROUP_SCORE_USED_TOPK_NUM == 1:
+        group_value = tl.max(scores, axis=1)
+    elif GROUP_SCORE_USED_TOPK_NUM == 2:
+        first_score, first_index = tl.max(scores, axis=1, return_indices=True)
+        second_score = tl.max(
+            tl.where(offs_group_v[None, :] == first_index[:, None], -float("inf"), scores),
+            axis=1,
+        )
+        group_value = first_score + second_score
+    else:
+        sorted_group_scores = tl.sort(scores, dim=1, descending=True)
+        group_value = tl.sum(
+            tl.where(offs_group_v[None, :] < GROUP_SCORE_USED_TOPK_NUM, sorted_group_scores, 0.0),
+            axis=1,
+        )
+
     if EXPERT_GROUP_NUM > 1:
         sorted_group_value = tl.sort(group_value, descending=True)
     else:
         sorted_group_value = group_value
     group_topk_value = tl.sum(tl.where(offs_group == group_topk_num - 1, sorted_group_value, 0.0))
-    mask_group_scores = tl.where(
-        ((group_value >= group_topk_value)[:, None]) & ((offs_group_v < group_expert_num)[None, :]),
-        group_scores,
-        -10000000.0,
+    candidate_scores = tl.where(
+        (group_value >= group_topk_value)[:, None] & valid_expert,
+        scores,
+        -float("inf"),
+    )
+
+    sort_block_size: tl.constexpr = EXPERT_GROUP_NUM * EXPERT_GROUP_SIZE
+    flat_offsets = tl.arange(0, sort_block_size)
+    candidate_scores = tl.reshape(candidate_scores, (sort_block_size,))
+    topk_offsets = tl.arange(0, TOPK_BLOCK_SIZE)
+    selected_weights = tl.zeros((TOPK_BLOCK_SIZE,), tl.float32)
+    selected_physical_ids = tl.zeros((TOPK_BLOCK_SIZE,), tl.int32)
+    sum_scores = 0.0
+    hashed = token_index.to(tl.uint32) * 2654435769
+    for topk_index in range(TOPK_NUM):
+        selected_offset = tl.argmax(candidate_scores, axis=0)
+        selected_group = selected_offset // EXPERT_GROUP_SIZE
+        selected_group_offset = selected_offset % EXPERT_GROUP_SIZE
+        selected_logical_id = selected_group * group_expert_num + selected_group_offset
+        selected_hidden_state = tl.load(
+            gating_output_ptr + token_index * gating_output_stride_m + selected_logical_id * gating_output_stride_n
+        ).to(tl.float32)
+        if IS_SIGMOID:
+            selected_weight = tl.sigmoid(selected_hidden_state)
+        else:
+            selected_weight = tl.exp(selected_hidden_state - global_max) / denominator
+        sum_scores += selected_weight
+        topk_lane = topk_offsets == topk_index
+        selected_weights = tl.where(topk_lane, selected_weight, selected_weights)
+
+        if RECORD_LOAD:
+            tl.atomic_add(
+                expert_counter_ptr + sample_index * COUNTER_NUM_EXPERTS + selected_logical_id,
+                1,
+            )
+        replica_count = tl.load(logical_replica_count_ptr + selected_logical_id)
+        replica_index = hashed % replica_count.to(tl.uint32)
+        physical_id = tl.load(logical_to_physical_ptr + selected_logical_id * MAP_SLOTS + replica_index)
+        selected_physical_ids = tl.where(topk_lane, physical_id, selected_physical_ids)
+        candidate_scores = tl.where(flat_offsets == selected_offset, -float("inf"), candidate_scores)
+
+    topk_mask = topk_offsets < TOPK_NUM
+    if RENORMALIZE:
+        selected_weights /= sum_scores
+    tl.store(
+        out_topk_weights + token_index * out_topk_weights_stride_m + topk_offsets * out_topk_weights_stride_n,
+        selected_weights,
+        mask=topk_mask,
     )
     tl.store(
-        scores_buffer_ptr
-        + scores_stride_token_m * token_index
-        + offs_group[:, None] * scores_stride_group
-        + offs_group_v[None, :] * scores_stride_group_v,
-        mask_group_scores,
-        mask=((offs_group < group_num)[:, None]) & ((offs_group_v < group_expert_num)[None, :]),
-    )
-    tl.debug_barrier()
-    mask_scores = tl.load(
-        scores_buffer_ptr + scores_stride_m * token_index + offs_n, mask=offs_n < total_expert_num, other=-10000000.0
-    )
-    _, sorted_scores, sorted_indexes = argsort(mask_scores, old_scores, offs_n, descending=True)
-    topk_mask = offs_n < topk_num
-
-    if RENORMALIZE:
-        sum_scores = tl.sum(tl.where(topk_mask, sorted_scores, 0.0))
-        output_weights = sorted_scores / sum_scores
-    else:
-        output_weights = sorted_scores
-    tl.store(out_topk_weights + token_index * out_topk_weights_stride_m + offs_n, output_weights, mask=topk_mask)
-
-    logical_ids = sorted_indexes.to(tl.int32)
-    if RECORD_LOAD:
-        tl.atomic_add(expert_counter_ptr + sample_index * COUNTER_NUM_EXPERTS + logical_ids, 1, mask=topk_mask)
-    replica_count = tl.load(logical_replica_count_ptr + logical_ids, mask=topk_mask, other=1)
-    hashed = token_index.to(tl.uint32) * 2654435769
-    replica_index = hashed % replica_count.to(tl.uint32)
-    physical_ids = tl.load(
-        logical_to_physical_ptr + logical_ids * MAP_SLOTS + replica_index,
+        out_topk_ids + token_index * out_topk_ids_stride_m + topk_offsets * out_topk_ids_stride_n,
+        selected_physical_ids,
         mask=topk_mask,
-        other=-1,
     )
-    tl.store(out_topk_ids + token_index * out_topk_ids_stride_m + offs_n, physical_ids, mask=topk_mask)
 
 
 def triton_grouped_topk(
@@ -403,21 +421,19 @@ def triton_grouped_topk_eplb(
     record_load: bool,
     group_score_used_topk_num: int = 2,
 ):
-    """EPLB-only grouped-topk path; the regular kernel remains untouched."""
+    """EPLB grouped top-k using register-resident group selection and partial top-k."""
     token_num, total_expert_num = gating_output.shape
-    dtype = torch.float64 if gating_output.dtype == torch.float64 else torch.float32
-    scores_buffer = torch.empty((token_num, total_expert_num), dtype=dtype, device=gating_output.device)
     out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device=gating_output.device)
     out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device=gating_output.device)
     assert total_expert_num % num_expert_group == 0
-    num_warps = 4 if token_num <= 256 else 1
+    expert_group_num = triton.next_power_of_2(num_expert_group)
+    expert_group_size = triton.next_power_of_2(total_expert_num // num_expert_group)
+    sort_block_size = expert_group_num * expert_group_size
+    num_warps = min(max(1, sort_block_size // 256), 8)
     grouped_topk_eplb_kernel[(token_num,)](
         gating_output,
         *gating_output.stride(),
         correction_bias,
-        scores_buffer,
-        *scores_buffer.stride(),
-        *scores_buffer.view(token_num, num_expert_group, -1).stride(),
         out_topk_weights,
         *out_topk_weights.stride(),
         out_topk_ids,
@@ -429,13 +445,13 @@ def triton_grouped_topk_eplb(
         group_num=num_expert_group,
         group_expert_num=total_expert_num // num_expert_group,
         total_expert_num=total_expert_num,
-        topk_num=topk,
         group_topk_num=topk_group,
         IS_SIGMOID=scoring_func == "sigmoid",
         HAS_CORRECTION_BIAS=correction_bias is not None,
-        EXPERT_BLOCK_SIZE=triton.next_power_of_2(total_expert_num),
-        EXPERT_GROUP_NUM=triton.next_power_of_2(num_expert_group),
-        EXPERT_GROUP_SIZE=triton.next_power_of_2(total_expert_num // num_expert_group),
+        EXPERT_GROUP_NUM=expert_group_num,
+        EXPERT_GROUP_SIZE=expert_group_size,
+        TOPK_NUM=topk,
+        TOPK_BLOCK_SIZE=triton.next_power_of_2(topk),
         RENORMALIZE=renormalize,
         GROUP_SCORE_USED_TOPK_NUM=group_score_used_topk_num,
         COUNTER_NUM_EXPERTS=expert_counter.shape[1],

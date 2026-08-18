@@ -19,7 +19,6 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
 )
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_node_world_size
 from lightllm.utils.envs_utils import (
-    enable_eplb_rebalance_once,
     get_eplb_rebalance_gain_threshold,
     get_prefill_eplb_step_interval,
 )
@@ -70,7 +69,6 @@ class EPLBManager:
         self.step_interval = get_prefill_eplb_step_interval()
         self.rebalance_gain_threshold = get_eplb_rebalance_gain_threshold()
         self.sampling_interval = self.step_interval
-        self.rebalance_once = enable_eplb_rebalance_once()
         self.prefill_steps = 0
         self.rebalanced = False
         self.initial_sampling_complete = False
@@ -113,8 +111,7 @@ class EPLBManager:
                 f"layers={len(self.weights)} logical_experts={self.num_logical_experts} "
                 f"redundant_experts_per_rank={self.redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} "
-                f"rebalance_gain_threshold={self.rebalance_gain_threshold:.4f} "
-                f"rebalance_once={self.rebalance_once}"
+                f"rebalance_gain_threshold={self.rebalance_gain_threshold:.4f}"
             )
 
     def _set_recording(self, enabled: bool):
@@ -140,10 +137,6 @@ class EPLBManager:
 
     def _prepare_next_sampling_window(self):
         """Reset and arm the next dense or interval-one sampling window."""
-        if self.rebalance_once and self.rebalanced:
-            self._sampling_pending = False
-            self._set_recording(False)
-            return
         self._reset_recorded_samples()
         self._sampling_pending = False
         self._set_recording(self._sampling_dense() or self.sampling_interval == 1)
@@ -434,8 +427,6 @@ class EPLBManager:
 
     def step(self):
         if self.in_flight or self.evaluation_in_flight:
-            return
-        if self.rebalanced and self.rebalance_once:
             return
         self.prefill_steps += 1
         if self._sampling_dense():
