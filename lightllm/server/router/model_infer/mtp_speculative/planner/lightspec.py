@@ -60,7 +60,8 @@ class LightSpecPlanner:
         # The current verify width is bounded by the proposal built last time.
         self.pre_draft_step = self.max_draft_step
 
-    def plan(self, req_num: int, original_batch_size: int, proposal_req_num: int) -> SpecDecodePlan:
+    def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
+        req_num = len(decode_reqs)
         pre_draft_step = self.pre_draft_step
         if req_num == 0:
             self.pre_draft_step = self.max_draft_step
@@ -73,9 +74,10 @@ class LightSpecPlanner:
         # A request entering its first decode has only the guaranteed target
         # row. Existing requests additionally expose pre_draft_step candidates.
         # This bounds Verify by the candidate pool that physically exists.
-        available_batch_size = req_num + proposal_req_num * pre_draft_step
+        req_num_with_proposals = sum(req.cur_output_len > 1 for req in decode_reqs)
+        available_batch_size = req_num + req_num_with_proposals * pre_draft_step
         max_batch_size = min(original_batch_size, available_batch_size)
-        all_reqs_have_proposals = proposal_req_num == req_num
+        all_reqs_have_proposals = req_num_with_proposals == req_num
 
         if (
             not self.target_infer_costs.has_data()

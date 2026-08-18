@@ -79,18 +79,10 @@ class SpecEngine:
     def plan_decode(self, model_input: ModelInput, decode_reqs: List) -> SpecDecodePlan:
         """Return the fixed or dynamic speculative plan for one decode iteration."""
 
-        req_num = len(decode_reqs)
-        if isinstance(self.planner, LightSpecPlanner):
-            # Prefill initializes draft cache but does not create a proposal.
-            # After one decode, cur_output_len > 1 and the request owns the
-            # previous iteration's candidates.
-            proposal_req_num = sum(req.cur_output_len > 1 for req in decode_reqs)
-            return self.planner.plan(
-                req_num=req_num,
-                original_batch_size=model_input.batch_size,
-                proposal_req_num=proposal_req_num,
-            )
-        return self.planner.plan(req_num=req_num, original_batch_size=model_input.batch_size)
+        return self.planner.plan(
+            decode_reqs=decode_reqs,
+            original_batch_size=model_input.batch_size,
+        )
 
     def prepare_decode_model_input(
         self,

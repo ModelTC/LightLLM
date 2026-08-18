@@ -25,7 +25,8 @@ class DSparkPlanner:
         self.draft_infer_costs = _InferCostMsTable()
         self._pending_verify_batch_sizes = deque(maxlen=2)
 
-    def plan(self, req_num: int, original_batch_size: int) -> SpecDecodePlan:
+    def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
+        req_num = len(decode_reqs)
         if req_num == 0:
             return SpecDecodePlan(
                 dynamic_batch_size=0,

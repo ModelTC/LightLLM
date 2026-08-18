@@ -57,6 +57,14 @@ def build_dspark_planner(max_draft_step: int = 3, block_size: int = 3):
     )
 
 
+def build_decode_reqs(req_num: int, req_num_with_proposals: int | None = None):
+    if req_num_with_proposals is None:
+        req_num_with_proposals = req_num
+    return [SimpleNamespace(cur_output_len=2)] * req_num_with_proposals + [
+        SimpleNamespace(cur_output_len=1)
+    ] * (req_num - req_num_with_proposals)
+
+
 def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
     engine = SpecEngine.__new__(SpecEngine)
     engine.spec_mode = spec_mode
@@ -75,7 +83,7 @@ def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
 
 
 def test_fixed_planner_returns_static_plan():
-    plan = FixedSpecPlanner(max_draft_step=3).plan(req_num=4, original_batch_size=16)
+    plan = FixedSpecPlanner(max_draft_step=3).plan(decode_reqs=build_decode_reqs(4), original_batch_size=16)
 
     assert not plan.is_dynamic
     assert plan.dynamic_batch_size is None
@@ -187,9 +195,8 @@ def test_engine_records_request_spec_metrics_in_one_pass():
 
 def test_lightspec_stays_full_width_until_costs_are_profiled():
     plan = build_lightspec_planner().plan(
-        req_num=2,
+        decode_reqs=build_decode_reqs(2),
         original_batch_size=8,
-        proposal_req_num=2,
     )
 
     assert plan.dynamic_batch_size == 8
@@ -202,7 +209,7 @@ def test_lightspec_collects_full_width_progress_before_adapting():
         planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=False)
         planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=True)
 
-    plan = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=2)
+    plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=8)
 
     assert plan.dynamic_batch_size == 8
     assert plan.draft_step == plan.pre_draft_step == 3
@@ -222,7 +229,7 @@ def test_lightspec_selects_eagle_draft_depth_and_verify_capacity():
             verified_draft_step=3,
         )
 
-    plan = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=2)
+    plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=8)
 
     assert plan.dynamic_batch_size == 4
     assert plan.pre_draft_step == 3
@@ -246,7 +253,7 @@ def test_lightspec_compacts_block_verify_without_changing_draft_shape():
             verified_draft_step=7,
         )
 
-    plan = planner.plan(req_num=2, original_batch_size=16, proposal_req_num=2)
+    plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=16)
 
     assert plan.dynamic_batch_size < 16
     assert plan.draft_step == plan.pre_draft_step == 7
@@ -255,9 +262,9 @@ def test_lightspec_compacts_block_verify_without_changing_draft_shape():
 def test_lightspec_bounds_verify_to_existing_proposals():
     planner = build_lightspec_planner()
 
-    cold_start = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=0)
-    mixed_batch = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=1)
-    ready_batch = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=2)
+    cold_start = planner.plan(decode_reqs=build_decode_reqs(2, 0), original_batch_size=8)
+    mixed_batch = planner.plan(decode_reqs=build_decode_reqs(2, 1), original_batch_size=8)
+    ready_batch = planner.plan(decode_reqs=build_decode_reqs(2, 2), original_batch_size=8)
 
     assert cold_start.dynamic_batch_size == 2
     assert mixed_batch.dynamic_batch_size == 5
@@ -267,7 +274,7 @@ def test_lightspec_bounds_verify_to_existing_proposals():
     assert ready_batch.all_reqs_have_proposals
 
 
-def test_engine_counts_requests_with_a_previous_proposal():
+def test_engine_lets_planner_count_requests_with_a_previous_proposal():
     engine = SpecEngine.__new__(SpecEngine)
     engine.planner = build_lightspec_planner()
     model_input = SimpleNamespace(batch_size=8)
@@ -299,7 +306,7 @@ def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
         verified_draft_step=3,
     )
 
-    plan = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=2)
+    plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=8)
 
     assert planner.draft_steps == (1, 2, 3)
     assert plan.draft_step >= 1
@@ -444,7 +451,7 @@ def test_lightspec_short_current_proposal_can_recover_to_a_deeper_draft():
     )
     planner.pre_draft_step = 1
 
-    plan = planner.plan(req_num=2, original_batch_size=8, proposal_req_num=2)
+    plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=8)
 
     assert plan.dynamic_batch_size <= 4
     assert plan.pre_draft_step == 1
@@ -497,14 +504,14 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
         req_num=2,
         accept_lengths_cpu=torch.tensor([1, 1], dtype=torch.int32),
     )
-    first_plan = planner.plan(req_num=2, original_batch_size=8)
+    first_plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=8)
     engine.update_planner_feedback(
         plan=plan,
         proposal=proposal,
         req_num=2,
         accept_lengths_cpu=torch.tensor([1, 1], dtype=torch.int32),
     )
-    second_plan = planner.plan(req_num=2, original_batch_size=8)
+    second_plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=8)
 
     assert first_plan.dynamic_batch_size == 8
     assert second_plan.dynamic_batch_size == 4
