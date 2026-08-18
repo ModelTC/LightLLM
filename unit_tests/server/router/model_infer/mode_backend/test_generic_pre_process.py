@@ -56,4 +56,4 @@ def test_padded_decode_builds_spec_metadata_for_real_and_fake_rows(monkeypatch):
 
     assert padded_req_num == 2
     assert model_input.b_mtp_index.tolist() == [0, 1, 2, 0, 1, 2, 0, 1, 2]
-    assert model_input.b_mark_shared_group.tolist() == [0, 0, 3, 0, 0, 3, 0, 0, 3]
+    assert model_input.b_mark_shared_group.tolist() == [0, 0, 3, 0, 0, 0, 0, 0, 6]

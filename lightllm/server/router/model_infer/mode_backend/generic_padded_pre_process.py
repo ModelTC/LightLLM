@@ -215,21 +215,7 @@ def padded_prepare_decode_inputs(
             b_mark_shared_group = F.pad(b_mark_shared_group, (0, padded_row_count), value=1)
     elif get_env_start_args().mtp_dynamic_verify or enable_triton_mtp_kernel():
         b_shared_seq_len = None
-        real_row_count = b_req_idx.shape[0] - padded_row_count
-        b_mark_shared_group = build_mtp_shared_group_markers(b_req_idx=b_req_idx[:real_row_count])
-        if padded_row_count > 0:
-            # ModelInput must use HOLD_REQUEST_ID for every padded row, which
-            # makes adjacent fake requests indistinguishable by b_req_idx. Use
-            # local synthetic request ids only to preserve their MTP group
-            # boundaries while building the marker tensor.
-            mtp_size = args_mtp_step + 1
-            padded_b_req_idx = torch.arange(
-                padded_req_num,
-                dtype=b_req_idx.dtype,
-                device=b_req_idx.device,
-            ).repeat_interleave(mtp_size)
-            padded_group_markers = build_mtp_shared_group_markers(b_req_idx=padded_b_req_idx)
-            b_mark_shared_group = torch.cat((b_mark_shared_group, padded_group_markers))
+        b_mark_shared_group = build_mtp_shared_group_markers(b_req_idx=b_req_idx)
     else:
         b_shared_seq_len = None
         b_mark_shared_group = None
