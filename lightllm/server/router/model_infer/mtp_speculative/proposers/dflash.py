@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
-from lightllm.server.router.model_infer.speculative.proposers.parallel_block import ParallelBlockProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block import ParallelBlockProposer
 
 
 class DFlashProposer(ParallelBlockProposer):

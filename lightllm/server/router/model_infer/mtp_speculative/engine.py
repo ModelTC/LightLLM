@@ -12,14 +12,14 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_verify,
 )
 from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
-from lightllm.server.router.model_infer.speculative.planner import (
+from lightllm.server.router.model_infer.mtp_speculative.planner import (
     DSparkPlanner,
     FixedSpecPlanner,
     LightSpecPlanner,
     SpecDecodePlan,
 )
-from lightllm.server.router.model_infer.speculative.proposers import build_spec_proposer
-from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 class SpecEngine:

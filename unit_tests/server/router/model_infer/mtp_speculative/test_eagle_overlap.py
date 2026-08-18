@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelOutput
-from lightllm.server.router.model_infer.speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import (
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_mtp import (
     AutoregressiveEagleProposer,
     EagleMTPProposer,
 )

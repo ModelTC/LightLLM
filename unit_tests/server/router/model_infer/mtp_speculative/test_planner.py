@@ -3,24 +3,24 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from lightllm.server.router.model_infer.speculative.engine import SpecEngine
-from lightllm.server.router.model_infer.speculative.planner import (
+from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
+from lightllm.server.router.model_infer.mtp_speculative.planner import (
     DSparkPlanner,
     FixedSpecPlanner,
     LightSpecPlanner,
     SpecDecodePlan,
     _InferCostMsTable,
 )
-from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
-from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
-from lightllm.server.router.model_infer.speculative.proposers.dspark import DSparkProposer
-from lightllm.server.router.model_infer.speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import (
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_mtp import (
     AutoregressiveEagleProposer,
     EagleMTPProposer,
 )
-from lightllm.server.router.model_infer.speculative.proposers.parallel_block import ParallelBlockProposer
-from lightllm.server.router.model_infer.speculative.proposers.vanilla_mtp import VanillaMTPProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block import ParallelBlockProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_mtp import VanillaMTPProposer
 
 
 def build_draft_cost_provider(proposer_class, max_draft_step: int = 3, block_size: int = 3):

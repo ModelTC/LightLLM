@@ -8,7 +8,7 @@ import numpy as np
 from sortedcontainers import SortedDict
 
 if TYPE_CHECKING:
-    from lightllm.server.router.model_infer.speculative.proposers.base import BaseSpecProposer
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 
 
 @dataclass(frozen=True)

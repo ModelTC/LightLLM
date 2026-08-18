@@ -12,7 +12,7 @@ from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3Pre
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
-from lightllm.server.router.model_infer.speculative.proposers.dflash import DFlashProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
 from lightllm.utils import envs_utils
 
 

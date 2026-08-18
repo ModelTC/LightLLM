@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from lightllm.server.router.model_infer.speculative.proposers.eagle_mtp import AutoregressiveEagleProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_mtp import AutoregressiveEagleProposer
 
 
 class Eagle3Proposer(AutoregressiveEagleProposer):

@@ -36,7 +36,7 @@ from lightllm.utils.envs_utils import (
     get_radix_tree_merge_update_delta,
 )
 from lightllm.distributed import dist_group_manager
-from lightllm.server.router.model_infer.speculative import SpecEngine
+from lightllm.server.router.model_infer.mtp_speculative import SpecEngine
 from lightllm.distributed.communication_op import (
     all_gather_into_tensor,
     all_reduce,

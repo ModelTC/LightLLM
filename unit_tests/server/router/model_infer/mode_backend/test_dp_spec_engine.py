@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
-from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 class _RecordingSpecEngine:
