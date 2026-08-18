@@ -38,12 +38,14 @@ class LightSpecPlanner:
 
     def __init__(
         self,
+        spec_mode: str,
         max_draft_step: int,
         draft_cost_provider: "BaseSpecProposer",
     ) -> None:
+        self.spec_mode = spec_mode
         self.max_draft_step = int(max_draft_step)
         self.draft_cost_provider = draft_cost_provider
-        self.draft_steps = draft_cost_provider.get_draft_steps()
+        self.draft_steps = self.get_draft_steps()
 
         self.target_infer_costs = _InferCostMsTable()
         self.draft_infer_costs = _InferCostMsTable()
@@ -59,6 +61,17 @@ class LightSpecPlanner:
 
         # The current verify width is bounded by the proposal built last time.
         self.pre_draft_step = self.max_draft_step
+
+    def get_draft_steps(self) -> Tuple[int, ...]:
+        """Return the draft configurations supported by the current MTP mode."""
+
+        if self.spec_mode in ("vanilla_with_att", "vanilla_no_att"):
+            return tuple(range(self.max_draft_step + 1))
+        if self.spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3"):
+            return tuple(range(1, self.max_draft_step + 1))
+        if self.spec_mode == "dflash":
+            return (self.max_draft_step,)
+        raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
 
     def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
         req_num = len(decode_reqs)

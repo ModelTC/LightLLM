@@ -16,9 +16,6 @@ class ParallelBlockProposer(BaseSpecProposer):
     backbone forward.
     """
 
-    def get_draft_steps(self):
-        return (self.backend.max_draft_step,)
-
     def get_draft_cost_ms(
         self,
         draft_infer_costs,

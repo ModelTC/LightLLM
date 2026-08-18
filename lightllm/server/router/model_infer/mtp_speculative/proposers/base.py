@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -44,11 +44,6 @@ class BaseSpecProposer:
     def __init__(self, *, backend: "ModeBackend", enable_dynmaic_mtp: bool) -> None:
         self.backend = backend
         self.enable_dynmaic_mtp = bool(enable_dynmaic_mtp)
-
-    def get_draft_steps(self) -> Tuple[int, ...]:
-        """Return the draft configurations supported by this proposer."""
-
-        raise NotImplementedError
 
     def get_draft_cost_ms(
         self,

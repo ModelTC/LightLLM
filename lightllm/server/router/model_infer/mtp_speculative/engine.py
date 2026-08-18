@@ -307,6 +307,7 @@ class SpecEngine:
             )
 
         return LightSpecPlanner(
+            spec_mode=self.spec_mode,
             max_draft_step=self.backend.max_draft_step,
             draft_cost_provider=self.proposer,
         )

@@ -11,9 +11,6 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import Ba
 class AutoregressiveEagleProposer(BaseSpecProposer):
     """Shared autoregressive drafting flow for EAGLE-family proposers."""
 
-    def get_draft_steps(self):
-        return tuple(range(1, self.backend.max_draft_step + 1))
-
     def get_draft_cost_ms(
         self,
         draft_infer_costs,

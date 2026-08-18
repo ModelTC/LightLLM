@@ -36,7 +36,14 @@ def build_lightspec_planner(
     proposer_class=VanillaMTPProposer,
     block_size: int = 3,
 ):
+    spec_mode = {
+        VanillaMTPProposer: "vanilla_with_att",
+        EagleMTPProposer: "eagle_with_att",
+        Eagle3Proposer: "eagle3",
+        DFlashProposer: "dflash",
+    }[proposer_class]
     return LightSpecPlanner(
+        spec_mode=spec_mode,
         max_draft_step=max_draft_step,
         draft_cost_provider=build_draft_cost_provider(
             proposer_class=proposer_class,
@@ -102,6 +109,10 @@ def test_infer_cost_candidates_include_feasible_boundaries():
 def test_engine_routes_only_dspark_to_the_confidence_planner():
     assert isinstance(build_planner("eagle3", enable_dynmaic_mtp=False), FixedSpecPlanner)
     assert isinstance(build_planner("dspark"), DSparkPlanner)
+
+    vanilla_planner = build_planner("vanilla_with_att")
+    assert isinstance(vanilla_planner, LightSpecPlanner)
+    assert vanilla_planner.draft_steps == (0, 1, 2, 3)
 
     dflash_planner = build_planner("dflash")
     assert isinstance(dflash_planner, LightSpecPlanner)

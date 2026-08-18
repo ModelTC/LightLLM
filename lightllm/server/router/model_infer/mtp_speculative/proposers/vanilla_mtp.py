@@ -13,9 +13,6 @@ class VanillaMTPProposer(BaseSpecProposer):
     hidden state produced by module i - 1 and predicts the next candidate.
     """
 
-    def get_draft_steps(self):
-        return tuple(range(self.backend.max_draft_step + 1))
-
     def get_draft_cost_ms(
         self,
         draft_infer_costs,
