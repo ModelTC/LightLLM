@@ -855,14 +855,14 @@ class InferReq:
         self.shm_req.shm_logprobs.arr[index - 1] = (logprob, rank)
         return
 
-    def update_spec_accepted_token_num(self, accept_token_num: int):
+    def update_mtp_accepted_token_num(self, accept_token_num: int):
         # 用于统计 mtp 的接受率
         self.shm_req.mtp_accepted_token_num += accept_token_num
 
-    def update_spec_verify_token_num(self, verify_token_num: int):
+    def update_mtp_verify_token_num(self, verify_token_num: int):
         self.shm_req.mtp_verify_token_num += verify_token_num
 
-    def update_spec_verify_step_num(self, verify_step_num: int):
+    def update_mtp_verify_step_num(self, verify_step_num: int):
         self.shm_req.mtp_verify_step_num += verify_step_num
 
     def get_last_gen_token(self):

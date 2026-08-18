@@ -274,11 +274,11 @@ class SpecEngine:
         assert len(accept_lengths) == len(decode_reqs)
         verify_rows_by_req = None if verified_row_reqs is None else Counter(req.req_idx for req in verified_row_reqs)
         for req, accept_len in zip(decode_reqs, accept_lengths):
-            req.update_spec_accepted_token_num(accept_token_num=accept_len - 1)
+            req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
             verify_token_num = req.mtp_step + 1 if verify_rows_by_req is None else verify_rows_by_req[req.req_idx]
             if verify_token_num > 0:
-                req.update_spec_verify_token_num(verify_token_num=verify_token_num)
-                req.update_spec_verify_step_num(verify_step_num=1)
+                req.update_mtp_verify_token_num(verify_token_num=verify_token_num)
+                req.update_mtp_verify_step_num(verify_step_num=1)
 
     def free_unused_decode_mem(
         self,

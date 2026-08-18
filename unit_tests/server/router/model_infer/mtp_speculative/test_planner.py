@@ -154,13 +154,13 @@ def test_engine_records_request_spec_metrics_in_one_pass():
             self.verified = 0
             self.verify_steps = 0
 
-        def update_spec_accepted_token_num(self, accept_token_num: int):
+        def update_mtp_accepted_token_num(self, accept_token_num: int):
             self.accepted += accept_token_num
 
-        def update_spec_verify_token_num(self, verify_token_num: int):
+        def update_mtp_verify_token_num(self, verify_token_num: int):
             self.verified += verify_token_num
 
-        def update_spec_verify_step_num(self, verify_step_num: int):
+        def update_mtp_verify_step_num(self, verify_step_num: int):
             self.verify_steps += verify_step_num
 
     engine = SpecEngine.__new__(SpecEngine)
