@@ -1,6 +1,6 @@
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
-from lightllm.models.registry import DraftModelRegistry
+from lightllm.models.draft_registry import DraftModelRegistry
 
 
 @DraftModelRegistry(model_type=("qwen3_5", "qwen3_5_text"), spec_modes="dspark")

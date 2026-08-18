@@ -2,7 +2,7 @@ from typing import List
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
-from lightllm.models.registry import DraftModelRegistry
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
 from lightllm.models.qwen3_5_mtp.layer_weights.pre_and_post_layer_weight import Qwen3_5MTPPreAndPostLayerWeight
 from lightllm.models.qwen3_5_mtp.layer_weights.transformer_layer_weight import Qwen3_5MTPTransformerLayerWeight

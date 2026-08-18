@@ -1,6 +1,6 @@
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
-from lightllm.models.registry import DraftModelRegistry
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_5_dflash.layer_weights.pre_and_post_layer_weight import (
     Qwen35DFlashPreAndPostLayerWeight,
 )

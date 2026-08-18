@@ -1,7 +1,7 @@
 from typing import List
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
-from lightllm.models.registry import DraftModelRegistry
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight import (
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )

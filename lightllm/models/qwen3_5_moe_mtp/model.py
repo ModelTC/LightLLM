@@ -1,5 +1,5 @@
 from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
-from lightllm.models.registry import DraftModelRegistry
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_5_moe_mtp.layer_weights.transformer_layer_weight import (
     Qwen3_5MoeMTPTransformerLayerWeight,
 )

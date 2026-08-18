@@ -1,5 +1,5 @@
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
-from lightllm.models.registry import DraftModelRegistry
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_dspark.infer_struct import Qwen3DSparkInferStateInfo
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.model_output import DSparkModelOutput

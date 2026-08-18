@@ -1,6 +1,6 @@
 from typing import List
 from lightllm.models.mistral.model import MistralTpPartModel
-from lightllm.models.registry import DraftModelRegistry
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.mistral_mtp.layer_weights.pre_and_post_layer_weight import MistralMTPPreAndPostLayerWeight
 from lightllm.models.mistral_mtp.layer_infer.pre_layer_infer import MistralMTPPreLayerInfer
 from lightllm.models.mistral_mtp.layer_infer.post_layer_infer import MistralMTPPostLayerInfer

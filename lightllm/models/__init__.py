@@ -54,4 +54,5 @@ from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
 from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
-from .registry import get_draft_model_class, get_model, get_model_class
+from .draft_registry import get_draft_model_class
+from .registry import get_model, get_model_class
