@@ -118,6 +118,7 @@ class _PrefillTransModule:
         self.write_peer_kv_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
+        self.draining_queue = queue.Queue()
 
         self.page_index_queue = queue.Queue()
         for page_index in range(self.args.pd_kv_page_num):
@@ -135,6 +136,7 @@ class _PrefillTransModule:
             self.update_task_status_loop,
             self.success_loop,
             self.fail_loop,
+            self.drain_failed_xfer_loop,
         ]:
             threading.Thread(target=func, daemon=True).start()
         return
@@ -379,11 +381,12 @@ class _PrefillTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.success_queue.get()
-            # 写回后，回收页面
-            if trans_task.src_page_index is not None:
-                self.page_index_queue.put(trans_task.src_page_index)
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
+                trans_task.xfer_handle = None
+            if trans_task.src_page_index is not None:
+                self.page_index_queue.put(trans_task.src_page_index)
+                trans_task.src_page_index = None
 
             ret = trans_task.createRetObj()
             ret.first_gen_token_id = None
@@ -401,11 +404,13 @@ class _PrefillTransModule:
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
 
-            # 回收页面
-            if trans_task.src_page_index is not None:
-                self.page_index_queue.put(trans_task.src_page_index)
-            if trans_task.xfer_handle is not None:
-                self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            if trans_task.xfer_handle is None:
+                if trans_task.src_page_index is not None:
+                    self.page_index_queue.put(trans_task.src_page_index)
+                    trans_task.src_page_index = None
+                trans_task.transfer_quiesced = True
+            if trans_task.error_info is not None:
+                self.draining_queue.put(trans_task)
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
@@ -413,4 +418,55 @@ class _PrefillTransModule:
 
             if trans_task.error_info is not None:
                 self._abort(request_id=trans_task.request_id, error_info=trans_task.error_info)
-                self.transporter.send_error_info_to_decode_node(trans_task=trans_task)
+
+    @log_exception
+    def drain_failed_xfer_loop(self):
+        torch.cuda.set_device(self.device_id)
+        draining_tasks: Dict[str, PDChunckedTransTask] = {}
+        while True:
+            try:
+                trans_task = self.draining_queue.get(timeout=0.001)
+                draining_tasks[trans_task.get_key()] = trans_task
+            except queue.Empty:
+                pass
+
+            for key, trans_task in list(draining_tasks.items()):
+                try:
+                    status = self._try_finish_failed_xfer_drain(trans_task)
+                    if status is None:
+                        continue
+                except BaseException as e:
+                    if trans_task.transfer_quiesced:
+                        logger.error(
+                            f"failed to send quiesced ack, decode page remains quarantined: {trans_task.to_str()}"
+                        )
+                    else:
+                        logger.error(f"failed to drain xfer task, keeping page quarantined: {trans_task.to_str()}")
+                    logger.exception(str(e))
+                    continue
+
+                draining_tasks.pop(key, None)
+                logger.info(f"failed xfer task reached terminal state {status}: {trans_task.to_str()}")
+
+    def _try_finish_failed_xfer_drain(self, trans_task: PDChunckedTransTask) -> Optional[str]:
+        if trans_task.transfer_quiesced:
+            sent = self.transporter.send_error_info_to_decode_node(trans_task=trans_task)
+            if sent is False:
+                raise RuntimeError("failed to send quiesced transfer acknowledgement")
+            return "QUIESCED"
+
+        status = self.transporter.check_task_status(trans_task=trans_task)
+        if status not in ["DONE", "ERR"]:
+            return None
+
+        self.transporter.release_xfer_handle(trans_task.xfer_handle)
+        trans_task.xfer_handle = None
+        if trans_task.src_page_index is not None:
+            self.page_index_queue.put(trans_task.src_page_index)
+            trans_task.src_page_index = None
+
+        trans_task.transfer_quiesced = True
+        sent = self.transporter.send_error_info_to_decode_node(trans_task=trans_task)
+        if sent is False:
+            raise RuntimeError("failed to send quiesced transfer acknowledgement")
+        return status

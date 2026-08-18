@@ -176,6 +176,7 @@ class PDChunckedTransTask:
     start_trans_time: float = None  # 用于标记传输开始的时间。同时标记是否正在传输中
 
     error_info: Optional[str] = None
+    transfer_quiesced: bool = False
     transfer_time_out_secs: int = 66
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
