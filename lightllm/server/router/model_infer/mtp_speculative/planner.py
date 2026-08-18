@@ -32,7 +32,7 @@ class SpecDecodePlan:
     # False when the current batch contains requests without a proposal from
     # the previous iteration. Such an iteration does not represent one
     # well-defined LightSpec runtime configuration.
-    record_progress: bool = True
+    all_reqs_have_proposals: bool = True
 
     @property
     def is_dynamic(self) -> bool:
@@ -121,7 +121,7 @@ class LightSpecPlanner:
         # This bounds Verify by the candidate pool that physically exists.
         available_batch_size = req_num + proposal_req_num * pre_draft_step
         max_batch_size = min(original_batch_size, available_batch_size)
-        record_progress = proposal_req_num == req_num
+        all_reqs_have_proposals = proposal_req_num == req_num
 
         if (
             not self.target_infer_costs.has_data()
@@ -136,7 +136,7 @@ class LightSpecPlanner:
                 dynamic_batch_size=max_batch_size,
                 draft_step=self.max_draft_step,
                 pre_draft_step=pre_draft_step,
-                record_progress=record_progress,
+                all_reqs_have_proposals=all_reqs_have_proposals,
             )
 
         min_batch_size = req_num
@@ -157,7 +157,7 @@ class LightSpecPlanner:
             dynamic_batch_size=dynamic_batch_size,
             draft_step=draft_step,
             pre_draft_step=pre_draft_step,
-            record_progress=record_progress,
+            all_reqs_have_proposals=all_reqs_have_proposals,
         )
 
     def update_infer_cost(self, batch_size: int, infer_cost_ms: float, is_draft_model: bool) -> None:
@@ -172,12 +172,12 @@ class LightSpecPlanner:
         schedule_scores=None,
     ) -> None:
         # The progress EMA records one complete-batch sample for a single
-        # (N, B, d) configuration. record_progress is false if any request is
+        # (N, B, d) configuration. all_reqs_have_proposals is false if any request is
         # on its first decode and therefore has no preceding proposal; its
         # structural accept_len=1 would otherwise bias that configuration's
         # progress downward. Skip the mixed batch instead of partially
         # updating the batch-level statistic with different N/B semantics.
-        if not plan.record_progress:
+        if not plan.all_reqs_have_proposals:
             return
         self.update_verified_batch(
             accept_lengths=accept_lengths,

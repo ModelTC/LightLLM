@@ -262,9 +262,9 @@ def test_lightspec_bounds_verify_to_existing_proposals():
     assert cold_start.dynamic_batch_size == 2
     assert mixed_batch.dynamic_batch_size == 5
     assert ready_batch.dynamic_batch_size == 8
-    assert not cold_start.record_progress
-    assert not mixed_batch.record_progress
-    assert ready_batch.record_progress
+    assert not cold_start.all_reqs_have_proposals
+    assert not mixed_batch.all_reqs_have_proposals
+    assert ready_batch.all_reqs_have_proposals
 
 
 def test_engine_counts_requests_with_a_previous_proposal():
@@ -282,9 +282,9 @@ def test_engine_counts_requests_with_a_previous_proposal():
     )
 
     assert mixed_plan.dynamic_batch_size == 5
-    assert not mixed_plan.record_progress
+    assert not mixed_plan.all_reqs_have_proposals
     assert ready_plan.dynamic_batch_size == 8
-    assert ready_plan.record_progress
+    assert ready_plan.all_reqs_have_proposals
 
 
 def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
@@ -459,7 +459,7 @@ def test_engine_skips_feedback_for_a_mixed_proposal_batch():
         dynamic_batch_size=5,
         draft_step=3,
         pre_draft_step=3,
-        record_progress=False,
+        all_reqs_have_proposals=False,
     )
 
     engine.update_planner_feedback(
