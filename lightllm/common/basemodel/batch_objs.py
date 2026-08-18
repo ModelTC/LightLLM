@@ -188,10 +188,10 @@ class ModelMtpOutputCollector:
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
-    # Collector is finalized by HiddenCollector.finish_output before being
+    # MTP collector is finalized by HiddenCollector.finish_output before being
     # attached here. ModelOutput therefore owns a stable output view instead
     # of the mutable collector used while the forward is still running.
-    collector: Optional[ModelMtpOutputCollector] = None
+    mtp_collector: Optional[ModelMtpOutputCollector] = None
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
 
@@ -202,9 +202,9 @@ class ModelOutput:
     prompt_logics: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
-        if self.collector is None:
-            self.collector = ModelMtpOutputCollector()
+        if self.mtp_collector is None:
+            self.mtp_collector = ModelMtpOutputCollector()
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
-        self.collector.to_no_ref_tensor()
+        self.mtp_collector.to_no_ref_tensor()

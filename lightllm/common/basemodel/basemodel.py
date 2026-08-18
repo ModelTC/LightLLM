@@ -546,7 +546,7 @@ class TpPartBaseModel:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        new_model_output.collector = model_output.collector.unpad_decode(
+        new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
         )
@@ -558,7 +558,7 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        new_model_output.collector = padded_model_output.collector.unpad_prefill(
+        new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
         # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
@@ -746,7 +746,7 @@ class TpPartBaseModel:
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
-            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
 
@@ -775,7 +775,7 @@ class TpPartBaseModel:
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
-            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
         )
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
@@ -1028,12 +1028,12 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
-            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
-            collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
+            mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
             prompt_logics=infer_state1.prompt_logics,
         )
 
@@ -1077,11 +1077,11 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
-            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
-            collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
+            mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
         )
 
         if infer_state.is_cuda_graph:

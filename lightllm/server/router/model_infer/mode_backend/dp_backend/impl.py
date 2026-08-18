@@ -614,7 +614,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         all_next_token_ids = []
         # share some inference info with the main model
         draft_model_input = model_input
-        draft_hidden = model_output.collector.spec_hidden
+        draft_hidden = model_output.mtp_collector.spec_hidden
         draft_next_token_ids_gpu = self._build_padded_next_token_ids(
             token_ids=next_token_ids,
             batch_size=model_input.batch_size,
@@ -630,7 +630,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_input.mtp_draft_input_hiddens = draft_hidden
             # spec decode: MTP
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
-            draft_hidden = draft_model_output.collector.spec_hidden
+            draft_hidden = draft_model_output.mtp_collector.spec_hidden
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
             all_next_token_ids.append(draft_next_token_ids_gpu)
 
@@ -946,8 +946,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         all_next_token_ids.append(next_token_ids)
         # share some inference info with the main model
         draft_model_input0, draft_model_input1 = model_input0, model_input1
-        draft_hidden0 = model_output0.collector.spec_hidden
-        draft_hidden1 = model_output1.collector.spec_hidden
+        draft_hidden0 = model_output0.mtp_collector.spec_hidden
+        draft_hidden1 = model_output1.mtp_collector.spec_hidden
 
         draft_next_token_ids_gpu0 = self._build_padded_next_token_ids(
             token_ids=next_token_ids,
@@ -974,8 +974,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
                 draft_model_input0, draft_model_input1
             )
-            draft_hidden0 = draft_model_output0.collector.spec_hidden
-            draft_hidden1 = draft_model_output1.collector.spec_hidden
+            draft_hidden0 = draft_model_output0.mtp_collector.spec_hidden
+            draft_hidden1 = draft_model_output1.mtp_collector.spec_hidden
 
             draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
             draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)

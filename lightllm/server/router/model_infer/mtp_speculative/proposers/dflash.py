@@ -44,7 +44,7 @@ class DFlashProposer(ParallelBlockProposer):
         )
         self.extend_draft_kv_cache(
             main_model_input=main_model_input,
-            target_hidden=main_model_output.collector.spec_hidden,
+            target_hidden=main_model_output.mtp_collector.spec_hidden,
         )
         draft_output = draft_model.forward(draft_input)
 

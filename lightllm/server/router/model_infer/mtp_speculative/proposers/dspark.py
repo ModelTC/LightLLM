@@ -54,19 +54,19 @@ class DSparkProposer(ParallelBlockProposer):
         )
         self.extend_draft_kv_cache(
             main_model_input=main_model_input,
-            target_hidden=main_model_output.collector.spec_hidden,
+            target_hidden=main_model_output.mtp_collector.spec_hidden,
         )
         draft_output = draft_model.forward(draft_input)
 
-        if draft_output.collector.draft_token_ids is None:
+        if draft_output.mtp_collector.draft_token_ids is None:
             flat_draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
         else:
-            flat_draft_token_ids = draft_output.collector.draft_token_ids
+            flat_draft_token_ids = draft_output.mtp_collector.draft_token_ids
         block_draft_token_ids = flat_draft_token_ids.reshape(request_count, block_size)
         proposal_token_ids[accepted_tail_rows, 1:] = block_draft_token_ids[:, :draft_step]
 
         if self.enable_dynmaic_mtp:
-            confidence_logits = draft_output.collector.confidence_logits
+            confidence_logits = draft_output.mtp_collector.confidence_logits
             if confidence_logits is None:
                 raise RuntimeError("DSpark dynamic verify requires confidence head logits")
             # Match the clamp used by the GPU dynamic row selector before it

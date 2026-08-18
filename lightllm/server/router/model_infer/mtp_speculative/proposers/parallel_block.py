@@ -40,7 +40,7 @@ class ParallelBlockProposer(BaseSpecProposer):
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        target_hidden = target_model_output.collector.spec_hidden
+        target_hidden = target_model_output.mtp_collector.spec_hidden
         if target_hidden.numel() == 0:
             return
 

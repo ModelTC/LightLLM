@@ -23,7 +23,7 @@ class _DraftModel:
         return tuple(
             ModelOutput(
                 logits=torch.arange(model_input.batch_size, dtype=torch.float32).view(-1, 1),
-                collector=ModelMtpOutputCollector(spec_hidden=torch.ones((model_input.batch_size, 2))),
+                mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((model_input.batch_size, 2))),
             )
             for model_input in (input0, input1)
         )
@@ -34,7 +34,7 @@ class _DraftModel:
         return tuple(
             ModelOutput(
                 logits=torch.arange(model_input.batch_size, dtype=torch.float32).view(-1, 1),
-                collector=ModelMtpOutputCollector(spec_hidden=torch.ones((model_input.batch_size, 2))),
+                mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((model_input.batch_size, 2))),
             )
             for model_input in (input0, input1)
         )
@@ -79,14 +79,14 @@ def test_overlap_eagle_keeps_fixed_verify_layout():
     proposal = proposer.propose_next_overlap(
         main_model_input0=model_input0,
         main_model_output0=ModelOutput(
-            logits=torch.empty((6, 1)), collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
+            logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
         next_token_ids0=torch.arange(6, dtype=torch.int64),
         real_verify_rows0=3,
         accept_len0=torch.tensor([2, 1], dtype=torch.int32),
         main_model_input1=model_input1,
         main_model_output1=ModelOutput(
-            logits=torch.empty((6, 1)), collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
+            logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
         next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
         real_verify_rows1=6,
@@ -126,14 +126,14 @@ def test_autoregressive_eagle_reuses_overlap_inputs():
     proposal = proposer.propose_next_overlap(
         main_model_input0=model_input0,
         main_model_output0=ModelOutput(
-            logits=torch.empty((6, 1)), collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
+            logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
         next_token_ids0=torch.arange(6, dtype=torch.int64),
         real_verify_rows0=3,
         accept_len0=torch.tensor([2, 1], dtype=torch.int32),
         main_model_input1=model_input1,
         main_model_output1=ModelOutput(
-            logits=torch.empty((6, 1)), collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
+            logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
         next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
         real_verify_rows1=6,

@@ -34,7 +34,7 @@ class VanillaMTPProposer(BaseSpecProposer):
     ) -> None:
         from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
 
-        draft_hidden = target_model_output.collector.spec_hidden
+        draft_hidden = target_model_output.mtp_collector.spec_hidden
         draft_token_ids = next_token_ids
         for draft_model in self.backend.draft_models:
             prepare_mtp_prefill_inputs(
@@ -43,7 +43,7 @@ class VanillaMTPProposer(BaseSpecProposer):
                 mtp_draft_input_hiddens=draft_hidden,
             )
             draft_output = draft_model.forward(target_model_input)
-            draft_hidden = draft_output.collector.spec_hidden
+            draft_hidden = draft_output.mtp_collector.spec_hidden
             draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
 
     def build_draft_state_from_prefill_overlap(
@@ -58,8 +58,8 @@ class VanillaMTPProposer(BaseSpecProposer):
         from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
 
         draft_hiddens_by_batch = [
-            target_model_output0.collector.spec_hidden,
-            target_model_output1.collector.spec_hidden,
+            target_model_output0.mtp_collector.spec_hidden,
+            target_model_output1.mtp_collector.spec_hidden,
         ]
         draft_token_ids_by_batch = [next_token_ids0, next_token_ids1]
 
@@ -79,7 +79,7 @@ class VanillaMTPProposer(BaseSpecProposer):
                 target_model_input1,
             )
             for batch_index, draft_output in enumerate(draft_outputs):
-                draft_hiddens_by_batch[batch_index] = draft_output.collector.spec_hidden
+                draft_hiddens_by_batch[batch_index] = draft_output.mtp_collector.spec_hidden
                 draft_token_ids_by_batch[batch_index] = self.backend._gen_argmax_token_ids(draft_output)
 
     def propose_next(
@@ -93,7 +93,7 @@ class VanillaMTPProposer(BaseSpecProposer):
     ) -> SpecProposal:
         verify_row_count = int(next_token_ids.shape[0])
         draft_token_ids = next_token_ids
-        draft_hidden = main_model_output.collector.spec_hidden
+        draft_hidden = main_model_output.mtp_collector.spec_hidden
         proposal_token_ids = next_token_ids.new_empty((verify_row_count, draft_step + 1))
         proposal_token_ids[:, 0] = next_token_ids
         schedule_scores = (
@@ -111,7 +111,7 @@ class VanillaMTPProposer(BaseSpecProposer):
             main_model_input.input_ids = draft_token_ids
             main_model_input.mtp_draft_input_hiddens = draft_hidden
             draft_output = draft_model.forward(main_model_input)
-            draft_hidden = draft_output.collector.spec_hidden
+            draft_hidden = draft_output.mtp_collector.spec_hidden
             if self.enable_dynmaic_mtp:
                 draft_token_ids, draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
                 schedule_scores[:, step] = draft_token_probs
