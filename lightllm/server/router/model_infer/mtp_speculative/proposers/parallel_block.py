@@ -16,20 +16,6 @@ class ParallelBlockProposer(BaseSpecProposer):
     backbone forward.
     """
 
-    def get_draft_cost_ms(
-        self,
-        draft_infer_costs,
-        req_num: int,
-        verify_batch_size: int,
-        draft_step: int,
-    ) -> float:
-        block_size = self.backend.draft_models[0].block_size
-        # One forward commits verified rows; another generates one complete
-        # checkpoint-defined block per request.
-        extend_cost_ms = draft_infer_costs.estimate(verify_batch_size)
-        block_cost_ms = draft_infer_costs.get(req_num * block_size)
-        return extend_cost_ms + block_cost_ms
-
     @torch.no_grad()
     def build_draft_state_from_prefill(
         self,

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
@@ -23,45 +24,29 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_mtp import VanillaMTPProposer
 
 
-def build_draft_cost_provider(proposer_class, max_draft_step: int = 3, block_size: int = 3):
-    backend = SimpleNamespace(
-        max_draft_step=max_draft_step,
-        draft_models=[SimpleNamespace(block_size=block_size)],
-    )
-    return proposer_class(backend=backend, enable_dynmaic_mtp=True)
-
-
 def build_lightspec_planner(
     max_draft_step: int = 3,
-    proposer_class=VanillaMTPProposer,
+    spec_mode: str = "vanilla_with_att",
     block_size: int = 3,
 ):
-    spec_mode = {
-        VanillaMTPProposer: "vanilla_with_att",
-        EagleMTPProposer: "eagle_with_att",
-        Eagle3Proposer: "eagle3",
-        DFlashProposer: "dflash",
-    }[proposer_class]
+    backend = SimpleNamespace(
+        max_draft_step=max_draft_step,
+        model=SimpleNamespace(graph=None),
+        draft_models=[SimpleNamespace(block_size=block_size, graph=None)],
+    )
     return LightSpecPlanner(
         spec_mode=spec_mode,
-        max_draft_step=max_draft_step,
-        draft_cost_provider=build_draft_cost_provider(
-            proposer_class=proposer_class,
-            max_draft_step=max_draft_step,
-            block_size=block_size,
-        ),
+        backend=backend,
     )
 
 
 def build_dspark_planner(max_draft_step: int = 3, block_size: int = 3):
-    return DSparkPlanner(
+    backend = SimpleNamespace(
         max_draft_step=max_draft_step,
-        draft_cost_provider=build_draft_cost_provider(
-            proposer_class=DSparkProposer,
-            max_draft_step=max_draft_step,
-            block_size=block_size,
-        ),
+        model=SimpleNamespace(graph=None),
+        draft_models=[SimpleNamespace(block_size=block_size, graph=None)],
     )
+    return DSparkPlanner(backend=backend)
 
 
 def build_decode_reqs(req_num: int, req_num_with_proposals: int | None = None):
@@ -78,14 +63,9 @@ def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
     engine.enable_dynmaic_mtp = enable_dynmaic_mtp
     engine.backend = SimpleNamespace(
         max_draft_step=3,
-        draft_models=[SimpleNamespace(block_size=3)],
+        model=SimpleNamespace(graph=None),
+        draft_models=[SimpleNamespace(block_size=3, graph=None)],
     )
-    proposer_class = {
-        "dspark": DSparkProposer,
-        "dflash": DFlashProposer,
-        "eagle3": Eagle3Proposer,
-    }.get(spec_mode, VanillaMTPProposer)
-    engine.proposer = build_draft_cost_provider(proposer_class)
     return engine._build_decode_planner()
 
 
@@ -112,7 +92,13 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
 
     vanilla_planner = build_planner("vanilla_with_att")
     assert isinstance(vanilla_planner, LightSpecPlanner)
-    assert vanilla_planner.draft_steps == (0, 1, 2, 3)
+    assert vanilla_planner.draft_steps == (1, 2, 3)
+
+    vanilla_no_att_planner = build_planner("vanilla_no_att")
+    assert vanilla_no_att_planner.draft_steps == (0, 1, 2, 3)
+
+    eagle_no_att_planner = build_planner("eagle_no_att")
+    assert eagle_no_att_planner.draft_steps == (0, 1, 2, 3)
 
     dflash_planner = build_planner("dflash")
     assert isinstance(dflash_planner, LightSpecPlanner)
@@ -123,12 +109,49 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
     assert eagle_planner.draft_steps == (1, 2, 3)
 
 
+def test_dynamic_planner_registers_cuda_graph_costs_from_backend():
+    backend = SimpleNamespace(
+        max_draft_step=3,
+        model=SimpleNamespace(graph=SimpleNamespace(infer_cost_ms_by_batch_size={4: 1.2})),
+        draft_models=[
+            SimpleNamespace(
+                block_size=3,
+                graph=SimpleNamespace(infer_cost_ms_by_batch_size={4: 0.3}),
+            )
+        ],
+    )
+
+    planner = LightSpecPlanner(spec_mode="vanilla_with_att", backend=backend)
+
+    assert planner.target_infer_costs.estimate(4) == 1.2
+    assert planner.draft_infer_costs.estimate(4) == 0.3
+
+
 def test_proposer_families_use_drafter_standard_abstractions():
     assert issubclass(EagleMTPProposer, AutoregressiveEagleProposer)
     assert issubclass(Eagle3Proposer, AutoregressiveEagleProposer)
     assert issubclass(DFlashProposer, ParallelBlockProposer)
     assert issubclass(DSparkProposer, ParallelBlockProposer)
     assert not issubclass(DSparkProposer, DFlashProposer)
+
+
+def test_eagle_proposer_skips_draft_forward_for_zero_steps():
+    proposer = EagleMTPProposer(
+        backend=SimpleNamespace(draft_models=[]),
+        enable_dynmaic_mtp=True,
+    )
+    next_token_ids = torch.tensor([10, 11], dtype=torch.int64)
+
+    proposal = proposer.propose_next(
+        main_model_input=None,
+        main_model_output=None,
+        next_token_ids=next_token_ids,
+        b_req_mtp_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        draft_step=0,
+    )
+
+    assert proposal.token_ids.tolist() == [[10], [11]]
+    assert proposal.schedule_scores.shape == (2, 0)
 
 
 def test_dynamic_plan_filters_selected_rows():
@@ -215,10 +238,10 @@ def test_lightspec_stays_full_width_until_costs_are_profiled():
 
 
 def test_lightspec_collects_full_width_progress_before_adapting():
-    planner = build_lightspec_planner(proposer_class=EagleMTPProposer)
+    planner = build_lightspec_planner(spec_mode="eagle_with_att")
     for batch_size in (2, 4, 8):
-        planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=False)
-        planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=True)
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
+        planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
 
     plan = planner.plan(decode_reqs=build_decode_reqs(2), original_batch_size=8)
 
@@ -227,11 +250,11 @@ def test_lightspec_collects_full_width_progress_before_adapting():
 
 
 def test_lightspec_selects_eagle_draft_depth_and_verify_capacity():
-    planner = build_lightspec_planner(proposer_class=EagleMTPProposer)
+    planner = build_lightspec_planner(spec_mode="eagle_with_att")
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 10.0)):
-        planner.update_infer_cost(batch_size, target_cost, is_draft_model=False)
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
     for batch_size, draft_cost in ((2, 0.1), (4, 0.1), (8, 0.2)):
-        planner.update_infer_cost(batch_size, draft_cost, is_draft_model=True)
+        planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=draft_cost)
     for _ in range(8):
         planner.update_verified_batch(
             accept_lengths=[4, 4],
@@ -250,12 +273,12 @@ def test_lightspec_selects_eagle_draft_depth_and_verify_capacity():
 def test_lightspec_compacts_block_verify_without_changing_draft_shape():
     planner = build_lightspec_planner(
         max_draft_step=7,
-        proposer_class=DFlashProposer,
+        spec_mode="dflash",
         block_size=7,
     )
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 3.0), (16, 8.0)):
-        planner.update_infer_cost(batch_size, target_cost, is_draft_model=False)
-    planner.update_infer_cost(batch_size=14, infer_cost_ms=0.5, is_draft_model=True)
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
+    planner.draft_infer_costs.update(batch_size=14, infer_cost_ms=0.5)
     for _ in range(8):
         planner.update_verified_batch(
             accept_lengths=[3, 3],
@@ -306,10 +329,10 @@ def test_engine_lets_planner_count_requests_with_a_previous_proposal():
 
 
 def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
-    planner = build_lightspec_planner(proposer_class=EagleMTPProposer)
+    planner = build_lightspec_planner(spec_mode="eagle_with_att")
     for batch_size in (2, 4, 8):
-        planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=False)
-        planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=True)
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
+        planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
     planner.update_verified_batch(
         accept_lengths=[2, 2],
         req_num=2,
@@ -323,26 +346,40 @@ def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
     assert plan.draft_step >= 1
 
 
-def test_vanilla_cost_provider_prices_each_selected_mtp_module():
-    planner = build_lightspec_planner()
-    planner.update_infer_cost(batch_size=8, infer_cost_ms=0.25, is_draft_model=True)
+def test_vanilla_with_attention_planner_prices_extend_then_normal_batches():
+    planner = build_lightspec_planner(spec_mode="vanilla_with_att")
+    planner.draft_infer_costs.update(batch_size=2, infer_cost_ms=0.1)
 
-    draft_cost_ms = planner.draft_cost_provider.get_draft_cost_ms(
-        draft_infer_costs=planner.draft_infer_costs,
-        req_num=2,
+    draft_cost_ms = planner.get_draft_cost_ms(
+        req_num=4,
         verify_batch_size=8,
         draft_step=3,
     )
 
-    assert draft_cost_ms == 0.75
+    assert np.isclose(draft_cost_ms, 0.8)
+    with pytest.raises(AssertionError, match="requires draft_step to be greater than 0"):
+        planner.get_draft_cost_ms(req_num=4, verify_batch_size=8, draft_step=0)
 
 
-def test_eagle_cost_provider_prices_extend_and_decode_separately():
-    planner = build_lightspec_planner(proposer_class=EagleMTPProposer)
-    planner.update_infer_cost(batch_size=2, infer_cost_ms=0.25, is_draft_model=True)
+def test_no_attention_planner_prices_only_normal_request_batches():
+    for spec_mode in ("vanilla_no_att", "eagle_no_att"):
+        planner = build_lightspec_planner(spec_mode=spec_mode)
+        planner.draft_infer_costs.update(batch_size=2, infer_cost_ms=0.1)
 
-    draft_cost_ms = planner.draft_cost_provider.get_draft_cost_ms(
-        draft_infer_costs=planner.draft_infer_costs,
+        draft_cost_ms = planner.get_draft_cost_ms(
+            req_num=4,
+            verify_batch_size=8,
+            draft_step=3,
+        )
+
+        assert np.isclose(draft_cost_ms, 0.6)
+
+
+def test_eagle_planner_prices_extend_and_decode_separately():
+    planner = build_lightspec_planner(spec_mode="eagle_with_att")
+    planner.draft_infer_costs.update(batch_size=2, infer_cost_ms=0.25)
+
+    draft_cost_ms = planner.get_draft_cost_ms(
         req_num=2,
         verify_batch_size=8,
         draft_step=3,
@@ -351,17 +388,16 @@ def test_eagle_cost_provider_prices_extend_and_decode_separately():
     assert draft_cost_ms == 1.5
 
 
-def test_autoregressive_eagle_cost_provider_prices_extend_and_decode_rows():
-    for proposer_class in (EagleMTPProposer, Eagle3Proposer):
+def test_autoregressive_eagle_planner_prices_extend_and_decode_rows():
+    for spec_mode in ("eagle_with_att", "eagle3"):
         planner = build_lightspec_planner(
             max_draft_step=7,
-            proposer_class=proposer_class,
+            spec_mode=spec_mode,
         )
         for batch_size in (2, 4, 8, 16):
-            planner.update_infer_cost(batch_size, infer_cost_ms=float(batch_size), is_draft_model=True)
+            planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
 
-        draft_cost_ms = planner.draft_cost_provider.get_draft_cost_ms(
-            draft_infer_costs=planner.draft_infer_costs,
+        draft_cost_ms = planner.get_draft_cost_ms(
             req_num=8,
             verify_batch_size=16,
             draft_step=7,
@@ -370,22 +406,34 @@ def test_autoregressive_eagle_cost_provider_prices_extend_and_decode_rows():
         assert draft_cost_ms == 64.0
 
 
-def test_block_cost_provider_prices_commit_and_complete_block():
+def test_block_planner_prices_commit_and_complete_block():
     planner = build_lightspec_planner(
         max_draft_step=7,
-        proposer_class=DFlashProposer,
+        spec_mode="dflash",
         block_size=7,
     )
-    planner.update_infer_cost(batch_size=14, infer_cost_ms=0.7, is_draft_model=True)
+    planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=0.4)
 
-    draft_cost_ms = planner.draft_cost_provider.get_draft_cost_ms(
-        draft_infer_costs=planner.draft_infer_costs,
+    draft_cost_ms = planner.get_draft_cost_ms(
         req_num=2,
         verify_batch_size=16,
         draft_step=7,
     )
 
     assert np.isclose(draft_cost_ms, 1.5)
+
+
+def test_dspark_planner_prices_commit_and_complete_block():
+    planner = build_dspark_planner(max_draft_step=3, block_size=3)
+    planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=0.8)
+
+    draft_cost_ms = planner.get_draft_cost_ms(
+        req_num=4,
+        verify_batch_size=8,
+        draft_step=3,
+    )
+
+    assert np.isclose(draft_cost_ms, 2.0)
 
 
 def test_lightspec_records_one_batch_observation_per_configuration():
@@ -450,10 +498,10 @@ def test_lightspec_does_not_transfer_deep_progress_to_short_drafts():
 
 
 def test_lightspec_short_current_proposal_can_recover_to_a_deeper_draft():
-    planner = build_lightspec_planner(proposer_class=EagleMTPProposer)
+    planner = build_lightspec_planner(spec_mode="eagle_with_att")
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (6, 1.2), (8, 1.3)):
-        planner.update_infer_cost(batch_size, target_cost, is_draft_model=False)
-        planner.update_infer_cost(batch_size, 0.01, is_draft_model=True)
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
+        planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=0.01)
     planner.update_verified_batch(
         accept_lengths=[4, 4],
         req_num=2,
@@ -496,8 +544,8 @@ def test_engine_skips_feedback_for_a_mixed_proposal_batch():
 def test_dspark_applies_confidence_capacity_after_two_step_delay():
     planner = build_dspark_planner()
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 10.0)):
-        planner.update_infer_cost(batch_size, target_cost, is_draft_model=False)
-    planner.update_infer_cost(batch_size=6, infer_cost_ms=0.5, is_draft_model=True)
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
+    planner.draft_infer_costs.update(batch_size=6, infer_cost_ms=0.5)
     confidence_probs = np.asarray([[0.9, 0.9, 0.9]] * 2, dtype=np.float64)
     plan = SpecDecodePlan(dynamic_batch_size=8, draft_step=3, pre_draft_step=3)
     proposal = SpecProposal(
@@ -532,8 +580,8 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
 def test_dspark_uses_confidence_scores_without_acceptance_ema():
     planner = build_dspark_planner()
     for batch_size, target_cost in ((2, 1.0), (4, 1.2), (8, 10.0)):
-        planner.update_infer_cost(batch_size, target_cost, is_draft_model=False)
-    planner.update_infer_cost(batch_size=6, infer_cost_ms=0.5, is_draft_model=True)
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
+    planner.draft_infer_costs.update(batch_size=6, infer_cost_ms=0.5)
 
     low_confidence = np.cumprod(np.full((2, 3), 0.1), axis=1)
     high_confidence = np.cumprod(np.full((2, 3), 0.9), axis=1)

@@ -11,18 +11,6 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import Ba
 class AutoregressiveEagleProposer(BaseSpecProposer):
     """Shared autoregressive drafting flow for EAGLE-family proposers."""
 
-    def get_draft_cost_ms(
-        self,
-        draft_infer_costs,
-        req_num: int,
-        verify_batch_size: int,
-        draft_step: int,
-    ) -> float:
-        draft_cost_ms = draft_infer_costs.estimate(verify_batch_size)
-        if draft_step > 1:
-            draft_cost_ms += draft_infer_costs.get(req_num) * (draft_step - 1)
-        return draft_cost_ms
-
     def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
@@ -118,7 +106,6 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
 
         verify_row_count = int(next_token_ids.shape[0])
         request_count = int(b_req_mtp_start_loc.shape[0])
-        accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
         proposal_token_ids = next_token_ids.new_full(
             (verify_row_count, draft_step + 1),
             fill_value=1,
@@ -134,7 +121,14 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
             if collect_schedule_scores
             else None
         )
+        if draft_step == 0:
+            return SpecProposal(
+                token_ids=proposal_token_ids,
+                extra_mem_indexes_cpu=None,
+                schedule_scores=schedule_scores,
+            )
 
+        accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
         draft_model = self.backend.draft_models[0]
         position_delta = main_model_input.b_position_delta
         self.prepare_verify_extend_input(

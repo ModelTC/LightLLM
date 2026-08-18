@@ -45,17 +45,6 @@ class BaseSpecProposer:
         self.backend = backend
         self.enable_dynmaic_mtp = bool(enable_dynmaic_mtp)
 
-    def get_draft_cost_ms(
-        self,
-        draft_infer_costs,
-        req_num: int,
-        verify_batch_size: int,
-        draft_step: int,
-    ) -> float:
-        """Return the complete draft cost for one ``(N, B, d)`` configuration."""
-
-        raise NotImplementedError
-
     def alloc_extra_mem_indexes(self, token_count: int) -> torch.Tensor:
         """Allocate draft-owned temporary KV slots."""
 

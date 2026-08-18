@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -9,9 +9,6 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     _EMAValue,
     _InferCostMsTable,
 )
-
-if TYPE_CHECKING:
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 
 
 class LightSpecPlanner:
@@ -31,24 +28,25 @@ class LightSpecPlanner:
     / B`` per iteration, then smoothed with an EMA. It is never updated once per
     request; doing so would make adaptation depend on concurrency.
 
-    The proposer supplies its valid draft configurations and complete draft
-    cost. The planner therefore stays independent of the proposal algorithm and
-    its physical execution layout.
+    The current MTP mode determines both its valid draft configurations and
+    complete draft cost. The planner owns those scheduling inputs instead of
+    depending on the proposer implementation.
     """
 
     def __init__(
         self,
         spec_mode: str,
-        max_draft_step: int,
-        draft_cost_provider: "BaseSpecProposer",
+        backend,
     ) -> None:
         self.spec_mode = spec_mode
-        self.max_draft_step = int(max_draft_step)
-        self.draft_cost_provider = draft_cost_provider
+        self.backend = backend
+        self.max_draft_step = int(backend.max_draft_step)
+        self.block_size = int(backend.draft_models[0].block_size) if self.spec_mode == "dflash" else None
         self.draft_steps = self.get_draft_steps()
 
         self.target_infer_costs = _InferCostMsTable()
         self.draft_infer_costs = _InferCostMsTable()
+        self._register_cuda_graph_costs()
 
         # Each observation is the normalized committed progress U / B from one
         # complete batch. The draft configuration is part of the key because a
@@ -65,13 +63,44 @@ class LightSpecPlanner:
     def get_draft_steps(self) -> Tuple[int, ...]:
         """Return the draft configurations supported by the current MTP mode."""
 
-        if self.spec_mode in ("vanilla_with_att", "vanilla_no_att"):
+        if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
             return tuple(range(self.max_draft_step + 1))
-        if self.spec_mode in ("eagle_with_att", "eagle_no_att", "eagle3"):
+        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
             return tuple(range(1, self.max_draft_step + 1))
         if self.spec_mode == "dflash":
             return (self.max_draft_step,)
         raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
+
+    def get_draft_cost_ms(self, req_num: int, verify_batch_size: int, draft_step: int) -> float:
+        """Return the complete draft cost for one ``(N, B, d)`` configuration."""
+
+        if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
+            return self.draft_infer_costs.estimate(req_num) * draft_step
+        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
+            assert draft_step > 0, f"{self.spec_mode} requires draft_step to be greater than 0"
+            draft_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
+            if draft_step > 1:
+                draft_cost_ms += self.draft_infer_costs.estimate(req_num) * (draft_step - 1)
+            return draft_cost_ms
+        if self.spec_mode == "dflash":
+            assert self.block_size is not None
+            extend_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
+            block_cost_ms = self.draft_infer_costs.estimate(req_num * self.block_size)
+            return extend_cost_ms + block_cost_ms
+        raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
+
+    def _register_cuda_graph_costs(self) -> None:
+        target_graph = self.backend.model.graph
+        if target_graph is not None:
+            for batch_size, infer_cost_ms in target_graph.infer_cost_ms_by_batch_size.items():
+                self.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
+
+        for draft_model in self.backend.draft_models:
+            draft_graph = draft_model.graph
+            if draft_graph is None:
+                continue
+            for batch_size, infer_cost_ms in draft_graph.infer_cost_ms_by_batch_size.items():
+                self.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
 
     def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
         req_num = len(decode_reqs)
@@ -128,10 +157,6 @@ class LightSpecPlanner:
             pre_draft_step=pre_draft_step,
             all_reqs_have_proposals=all_reqs_have_proposals,
         )
-
-    def update_infer_cost(self, batch_size: int, infer_cost_ms: float, is_draft_model: bool) -> None:
-        cost_table = self.draft_infer_costs if is_draft_model else self.target_infer_costs
-        cost_table.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
 
     def update_feedback(
         self,
@@ -219,8 +244,7 @@ class LightSpecPlanner:
             dynamic_batch_size=dynamic_batch_size,
             draft_step=draft_step,
         )
-        total_time = self.target_infer_costs.get(dynamic_batch_size) + self.draft_cost_provider.get_draft_cost_ms(
-            draft_infer_costs=self.draft_infer_costs,
+        total_time = self.target_infer_costs.estimate(dynamic_batch_size) + self.get_draft_cost_ms(
             req_num=req_num,
             verify_batch_size=dynamic_batch_size,
             draft_step=draft_step,

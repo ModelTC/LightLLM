@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
 from lightllm.server.router.model_infer.mtp_speculative.planner.base import SpecDecodePlan, _InferCostMsTable
-
-if TYPE_CHECKING:
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 
 
 class DSparkPlanner:
@@ -18,11 +15,13 @@ class DSparkPlanner:
     the target verify capacity two iterations later.
     """
 
-    def __init__(self, max_draft_step: int, draft_cost_provider: "BaseSpecProposer") -> None:
-        self.max_draft_step = int(max_draft_step)
-        self.draft_cost_provider = draft_cost_provider
+    def __init__(self, backend) -> None:
+        self.backend = backend
+        self.max_draft_step = int(backend.max_draft_step)
+        self.block_size = int(backend.draft_models[0].block_size)
         self.target_infer_costs = _InferCostMsTable()
         self.draft_infer_costs = _InferCostMsTable()
+        self._register_cuda_graph_costs()
         self._pending_verify_batch_sizes = deque(maxlen=2)
 
     def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
@@ -50,9 +49,25 @@ class DSparkPlanner:
             pre_draft_step=self.max_draft_step,
         )
 
-    def update_infer_cost(self, batch_size: int, infer_cost_ms: float, is_draft_model: bool) -> None:
-        cost_table = self.draft_infer_costs if is_draft_model else self.target_infer_costs
-        cost_table.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
+    def get_draft_cost_ms(self, req_num: int, verify_batch_size: int, draft_step: int) -> float:
+        """Return the cost of committing verify rows and generating one complete block."""
+
+        extend_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
+        block_cost_ms = self.draft_infer_costs.estimate(req_num * self.block_size)
+        return extend_cost_ms + block_cost_ms
+
+    def _register_cuda_graph_costs(self) -> None:
+        target_graph = self.backend.model.graph
+        if target_graph is not None:
+            for batch_size, infer_cost_ms in target_graph.infer_cost_ms_by_batch_size.items():
+                self.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
+
+        for draft_model in self.backend.draft_models:
+            draft_graph = draft_model.graph
+            if draft_graph is None:
+                continue
+            for batch_size, infer_cost_ms in draft_graph.infer_cost_ms_by_batch_size.items():
+                self.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
 
     def update_feedback(
         self,
@@ -140,8 +155,7 @@ class DSparkPlanner:
         for dynamic_batch_size in sorted(candidate_batch_sizes):
             selected_draft_count = dynamic_batch_size - int(req_num)
             expected_tokens = float(req_num) + float(expected_accepts_by_count[selected_draft_count])
-            round_ms = self.target_infer_costs.get(dynamic_batch_size) + self.draft_cost_provider.get_draft_cost_ms(
-                draft_infer_costs=self.draft_infer_costs,
+            round_ms = self.target_infer_costs.estimate(dynamic_batch_size) + self.get_draft_cost_ms(
                 req_num=req_num,
                 verify_batch_size=dynamic_batch_size,
                 draft_step=self.max_draft_step,

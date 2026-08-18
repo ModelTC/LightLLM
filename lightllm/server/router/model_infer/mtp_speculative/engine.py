@@ -40,7 +40,6 @@ class SpecEngine:
             enable_dynmaic_mtp=enable_dynmaic_mtp,
         )
         self.planner = self._build_decode_planner()
-        self._register_cuda_graph_costs()
 
     # Prefill draft-state initialization.
 
@@ -301,37 +300,9 @@ class SpecEngine:
         if not self.enable_dynmaic_mtp:
             return FixedSpecPlanner(max_draft_step=self.backend.max_draft_step)
         if self.spec_mode == "dspark":
-            return DSparkPlanner(
-                max_draft_step=self.backend.max_draft_step,
-                draft_cost_provider=self.proposer,
-            )
+            return DSparkPlanner(backend=self.backend)
 
         return LightSpecPlanner(
             spec_mode=self.spec_mode,
-            max_draft_step=self.backend.max_draft_step,
-            draft_cost_provider=self.proposer,
+            backend=self.backend,
         )
-
-    def _register_cuda_graph_costs(self) -> None:
-        if not self.enable_dynmaic_mtp:
-            return
-
-        target_graph = self.backend.model.graph
-        if target_graph is not None:
-            for batch_size, infer_cost_ms in target_graph.infer_cost_ms_by_batch_size.items():
-                self.planner.update_infer_cost(
-                    batch_size=batch_size,
-                    infer_cost_ms=infer_cost_ms,
-                    is_draft_model=False,
-                )
-
-        for draft_model in self.backend.draft_models:
-            draft_graph = draft_model.graph
-            if draft_graph is None:
-                continue
-            for batch_size, infer_cost_ms in draft_graph.infer_cost_ms_by_batch_size.items():
-                self.planner.update_infer_cost(
-                    batch_size=batch_size,
-                    infer_cost_ms=infer_cost_ms,
-                    is_draft_model=True,
-                )

@@ -13,16 +13,6 @@ class VanillaMTPProposer(BaseSpecProposer):
     hidden state produced by module i - 1 and predicts the next candidate.
     """
 
-    def get_draft_cost_ms(
-        self,
-        draft_infer_costs,
-        req_num: int,
-        verify_batch_size: int,
-        draft_step: int,
-    ) -> float:
-        # Every selected MTP module processes the complete verify batch.
-        return draft_infer_costs.get(verify_batch_size) * draft_step
-
     def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
