@@ -1,8 +1,8 @@
 import torch
 
 from lightllm.distributed.communication_op import all_gather_into_tensor
+from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
-from lightllm.models.qwen3_dspark.infer_struct import Qwen3DSparkInferStateInfo
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import (
     Qwen3DSparkPreAndPostLayerWeight,
 )
@@ -84,7 +84,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         self,
         local_logits: torch.Tensor,
         block_hidden: torch.Tensor,
-        infer_state: Qwen3DSparkInferStateInfo,
+        infer_state: Qwen3DFlashInferStateInfo,
         anchor_token_ids: torch.Tensor,
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
     ) -> torch.Tensor:
@@ -140,7 +140,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
     def token_forward(
         self,
         input_embdings: torch.Tensor,
-        infer_state: Qwen3DSparkInferStateInfo,
+        infer_state: Qwen3DFlashInferStateInfo,
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
     ):
         if infer_state.is_prefill:
@@ -166,12 +166,15 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
                 anchor_token_ids=anchor_token_ids,
                 layer_weight=layer_weight,
             )
-            infer_state.draft_token_ids = sampled_tokens.reshape(-1)
-            infer_state.confidence_logits = self.predict_confidence_logits(
+            confidence_logits = self.predict_confidence_logits(
                 block_hidden,
                 anchor_token_ids=anchor_token_ids,
                 sampled_tokens=sampled_tokens,
                 layer_weight=layer_weight,
+            )
+            infer_state.hidden_collector.add_mtp_outputs(
+                draft_token_ids=sampled_tokens.reshape(-1),
+                confidence_logits=confidence_logits,
             )
             # Graph unpadding still uses the leading logits dimension when token ids are returned directly.
             return local_logits.new_empty((token_num, 1))
@@ -179,10 +182,14 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         logits = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
         block_logits = logits.reshape(num_reqs, self.block_size_, -1)
         sampled_tokens = torch.argmax(block_logits, dim=-1)
-        infer_state.confidence_logits = self.predict_confidence_logits(
+        confidence_logits = self.predict_confidence_logits(
             block_hidden,
             anchor_token_ids=anchor_token_ids,
             sampled_tokens=sampled_tokens,
             layer_weight=layer_weight,
+        )
+        infer_state.hidden_collector.add_mtp_outputs(
+            draft_token_ids=None,
+            confidence_logits=confidence_logits,
         )
         return logits

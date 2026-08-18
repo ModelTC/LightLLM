@@ -9,6 +9,7 @@ from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
     HiddenCollector,
     LayerHiddenCollector,
+    MtpHeadOutputCollector,
     NoopHiddenCollector,
 )
 
@@ -49,14 +50,14 @@ def test_final_hidden_collectors_are_independent_instances():
     infer_state = SimpleNamespace(need_dp_prefill_balance=False)
 
     collector0.add_final_hidden(hidden0)
-    collected = collector0.finish(infer_state=infer_state)
+    collected = collector0.finish_output(infer_state=infer_state).spec_hidden
     assert collected.data_ptr() == hidden0.data_ptr()
     assert collector0.final_hidden is None
 
     collector0.add_final_hidden(hidden0)
     collector1.add_final_hidden(hidden1)
-    collected0 = collector0.finish(infer_state=infer_state)
-    collected1 = collector1.finish(infer_state=infer_state)
+    collected0 = collector0.finish_output(infer_state=infer_state).spec_hidden
+    collected1 = collector1.finish_output(infer_state=infer_state).spec_hidden
     assert collected0.data_ptr() == hidden0.data_ptr()
     assert collected1.data_ptr() == hidden1.data_ptr()
 
@@ -74,8 +75,8 @@ def test_layer_hidden_collector_keeps_microbatch_state_separate(monkeypatch):
     collector0.add(layer_index=0, hidden=hidden0)
     collector1.add(layer_index=0, hidden=hidden1)
 
-    collected0 = collector0.finish(infer_state=infer_state)
-    collected1 = collector1.finish(infer_state=infer_state)
+    collected0 = collector0.finish_output(infer_state=infer_state).spec_hidden
+    collected1 = collector1.finish_output(infer_state=infer_state).spec_hidden
 
     assert torch.equal(collected0, hidden0)
     assert torch.equal(collected1, hidden1)
@@ -96,14 +97,32 @@ def test_noop_collector_keeps_normal_forward_output_minimal():
     collector.add(layer_index=0, hidden=final_hidden)
     collector.add_final_hidden(final_hidden)
 
-    assert collector.finish(infer_state=None) is None
+    assert collector.finish_output(infer_state=None).spec_hidden is None
+
+
+def test_mtp_head_output_collector_returns_and_clears_outputs():
+    collector = MtpHeadOutputCollector()
+    draft_token_ids = torch.arange(6)
+    confidence_logits = torch.arange(6).view(2, 3)
+
+    collector.add_mtp_outputs(
+        draft_token_ids=draft_token_ids,
+        confidence_logits=confidence_logits,
+    )
+    output = collector.finish_output(infer_state=None)
+
+    assert output.spec_hidden is None
+    assert output.draft_token_ids is draft_token_ids
+    assert output.confidence_logits is confidence_logits
+    assert collector.draft_token_ids is None
+    assert collector.confidence_logits is None
 
 
 def test_final_collector_returns_final_hidden_without_layer_bookkeeping():
     final_hidden = torch.randn(2, 3)
     collector = FinalHiddenCollector()
     collector.add_final_hidden(final_hidden)
-    collected = collector.finish(infer_state=None)
+    collected = collector.finish_output(infer_state=None).spec_hidden
 
     assert collected.data_ptr() == final_hidden.data_ptr()
 
@@ -121,14 +140,14 @@ def test_layer_collector_preserves_selected_layers_in_model_order(monkeypatch):
     collector.add(layer_index=2, hidden=layer2)
     layer0.fill_(9.0)
 
-    collected = collector.finish(infer_state=SimpleNamespace(need_dp_prefill_balance=False))
+    collected = collector.finish_output(infer_state=SimpleNamespace(need_dp_prefill_balance=False)).spec_hidden
 
     assert torch.equal(collected, torch.cat([torch.full((2, 2), 1.0), layer2], dim=-1))
     assert not collector.layer_hiddens
 
     collector.add(layer_index=0, hidden=layer0)
     collector.add(layer_index=2, hidden=layer2)
-    collected = collector.finish(infer_state=SimpleNamespace(need_dp_prefill_balance=False))
+    collected = collector.finish_output(infer_state=SimpleNamespace(need_dp_prefill_balance=False)).spec_hidden
 
     assert torch.equal(collected, torch.cat([layer0, layer2], dim=-1))
     assert not collector.layer_hiddens
@@ -143,7 +162,7 @@ def test_layer_collector_restores_graph_state_without_sharing_runtime_container(
     graph_collector.add(layer_index=0, hidden=torch.full((2, 3), 1.0))
     collector.restore_graph_state(graph_collector)
 
-    collected = collector.finish(infer_state=infer_state)
+    collected = collector.finish_output(infer_state=infer_state).spec_hidden
 
     assert torch.equal(collected, torch.full((2, 3), 1.0))
     assert not collector.layer_hiddens

@@ -30,7 +30,6 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.hidden_collector import (
     NoopHiddenCollector,
-    unpad_collected_hidden,
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
@@ -547,7 +546,10 @@ class TpPartBaseModel:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        new_model_output.spec_hidden = unpad_collected_hidden(new_model_output.spec_hidden, origin_batch_size)
+        new_model_output.collector = model_output.collector.unpad_decode(
+            padded_batch_size=padded_batch_size,
+            origin_batch_size=origin_batch_size,
+        )
         return new_model_output
 
     def _create_unpad_prefill_model_output(
@@ -556,7 +558,9 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        new_model_output.spec_hidden = unpad_collected_hidden(new_model_output.spec_hidden, origin_handle_token_num)
+        new_model_output.collector = padded_model_output.collector.unpad_prefill(
+            origin_handle_token_num=origin_handle_token_num
+        )
         # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
         # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
         if new_model_output.prompt_logics is not None:
@@ -740,10 +744,9 @@ class TpPartBaseModel:
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         hidden_collector = infer_state.hidden_collector
         hidden_collector.add_final_hidden(last_input_embs)
-        spec_hidden = hidden_collector.finish(infer_state=infer_state)
         model_output = ModelOutput(
-            logits=predict_logits,
-            spec_hidden=spec_hidden,
+            logits=predict_logits.contiguous(),
+            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
 
@@ -770,8 +773,10 @@ class TpPartBaseModel:
         )
 
         hidden_collector.add_final_hidden(last_input_embs)
-        spec_hidden = hidden_collector.finish(infer_state=infer_state)
-        model_output = ModelOutput(logits=predict_logits.contiguous(), spec_hidden=spec_hidden)
+        model_output = ModelOutput(
+            logits=predict_logits.contiguous(),
+            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+        )
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -1021,16 +1026,14 @@ class TpPartBaseModel:
 
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
-        spec_hidden = hidden_collector0.finish(infer_state=infer_state)
-        spec_hidden1 = hidden_collector1.finish(infer_state=infer_state1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
-            spec_hidden=spec_hidden,
+            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
-            spec_hidden=spec_hidden1,
+            collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
             prompt_logics=infer_state1.prompt_logics,
         )
 
@@ -1072,10 +1075,14 @@ class TpPartBaseModel:
 
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
-        spec_hidden = hidden_collector0.finish(infer_state=infer_state)
-        spec_hidden1 = hidden_collector1.finish(infer_state=infer_state1)
-        model_output = ModelOutput(logits=predict_logits.contiguous(), spec_hidden=spec_hidden)
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), spec_hidden=spec_hidden1)
+        model_output = ModelOutput(
+            logits=predict_logits.contiguous(),
+            collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+        )
+        model_output1 = ModelOutput(
+            logits=predict_logits1.contiguous(),
+            collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
+        )
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()

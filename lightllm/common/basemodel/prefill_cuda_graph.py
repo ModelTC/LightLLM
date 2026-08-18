@@ -157,7 +157,7 @@ class PrefillCudaGraph:
 
         graph_infer_state.copy_for_prefill_cuda_graph(new_infer_state=infer_state)
         # 首次 capture 后 replay 时，infer_state 与 graph_infer_state 是同一对象，
-        # 需要先创建运行时实例，避免 finish 清空 graph 中保存的 capture collector。
+        # 需要先创建运行时实例，避免 finish_output 清空 graph 中保存的 capture collector。
         if infer_state.hidden_collector is graph_hidden_collector:
             infer_state.hidden_collector = graph_hidden_collector.new_instance()
         infer_state.hidden_collector.restore_graph_state(graph_hidden_collector)

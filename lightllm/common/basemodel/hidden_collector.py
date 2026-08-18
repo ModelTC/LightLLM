@@ -7,21 +7,18 @@ from typing import List, Optional
 import torch
 from transformers.configuration_utils import PretrainedConfig
 
+from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-
-
-def unpad_collected_hidden(hidden: Optional[torch.Tensor], token_count: int) -> Optional[torch.Tensor]:
-    return None if hidden is None else hidden[:token_count]
 
 
 class HiddenCollector(ABC):
     """Hidden state 收集器的抽象基类。
 
     推理过程中，模型会在每一层计算完成后调用 :meth:`add`，并在一次 forward
-    结束时调用 :meth:`finish` 生成供投机解码使用的 ``spec_hidden``。不同投机
-    解码模式可以通过子类决定不收集 hidden、只返回最终层 hidden，或者收集若干
-    中间层 hidden。
+    结束时调用 :meth:`finish_output` 生成统一的辅助输出。不同投机解码模式可以
+    通过子类决定不收集 hidden、只返回最终层 hidden、收集若干中间层 hidden，
+    或同时收集 MTP head 生成的 token 与置信度。
 
     BaseModel 持有一个不承载推理状态的 prototype，每个 InferStateInfo 通过
     :meth:`new_instance` 获得独立收集器，使不同请求和 microbatch 的临时 hidden
@@ -46,7 +43,7 @@ class HiddenCollector(ABC):
 
         基类默认不恢复任何数据。需要中间层 hidden 的子类应只复制保存 tensor
         引用的容器，不复制 tensor 本身，使本次 infer state 可以读取 graph replay
-        更新后的固定地址，同时在 :meth:`finish` 后独立清理自己的容器。
+        更新后的固定地址，同时在 :meth:`finish_output` 后独立清理自己的容器。
 
         Args:
             graph_collector: capture 阶段保存在 Prefill CUDA Graph 中的只读 collector。
@@ -81,29 +78,42 @@ class HiddenCollector(ABC):
     def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
         """接收完成模型输出侧 gather 后的最终层 hidden tensor。
 
-        BaseModel 在 logits 计算完成后、调用 :meth:`finish` 前调用该接口。基类
+        BaseModel 在 logits 计算完成后、调用 :meth:`finish_output` 前调用该接口。基类
         默认不保存 tensor；需要直接返回最终层 hidden 的子类应重写该方法并保存
-        引用，随后在 :meth:`finish` 中消费和清理。
+        引用，随后在 :meth:`finish_output` 中消费和清理。
 
         Args:
             final_hidden: 已完成 TP/SP all-gather 和 DP unbalance 的最终层 hidden。
         """
         return
 
+    def add_mtp_outputs(
+        self,
+        draft_token_ids: Optional[torch.Tensor],
+        confidence_logits: Optional[torch.Tensor],
+    ) -> None:
+        """Collect optional token/confidence outputs produced by an MTP head.
+
+        Only draft models with a specialized output head should call this
+        hook. Raising here makes an incorrect collector selection fail fast
+        instead of silently dropping model outputs.
+        """
+
+        raise RuntimeError(f"{self.__class__.__name__} does not collect MTP head outputs")
+
     @abstractmethod
-    def finish(self, infer_state) -> Optional[torch.Tensor]:
-        """结束当前 microbatch 的收集并生成投机解码所需的 hidden tensor。
+    def finish_output(self, infer_state) -> ModelMtpOutputCollector:
+        """结束当前 microbatch 的收集并生成统一的 MTP 输出。
 
         子类应在此完成必要的拼接、TP/SP all-gather、DP unbalance 和 contiguous
-        转换，并在返回前清理当前实例的临时状态。该接口在每次 forward 结束时
-        调用一次；不需要向 drafter 提供 hidden 的实现应返回 ``None``。
+        转换，将结果封装为 :class:`ModelMtpOutputCollector`，并在返回前清理当前
+        实例的临时状态。不需要提供额外 MTP 输出的实现应返回一个空 collector。
 
         Args:
             infer_state: 当前 forward 的推理状态，包含通信拓扑、DP balance 等信息。
 
         Returns:
-            提供给投机解码 drafter 的连续 hidden tensor；当前模式不需要 hidden 时
-            返回 ``None``。
+            本次 forward 的 MTP 辅助输出；未启用 MTP 时返回内容为空的 collector。
         """
         raise NotImplementedError
 
@@ -114,8 +124,36 @@ class NoopHiddenCollector(HiddenCollector):
     def new_instance(self) -> HiddenCollector:
         return NoopHiddenCollector()
 
-    def finish(self, infer_state) -> Optional[torch.Tensor]:
-        return None
+    def finish_output(self, infer_state) -> ModelMtpOutputCollector:
+        return ModelMtpOutputCollector()
+
+
+class MtpHeadOutputCollector(NoopHiddenCollector):
+    """Collect outputs from an MTP draft head that does not expose hidden state."""
+
+    def __init__(self) -> None:
+        self.draft_token_ids: Optional[torch.Tensor] = None
+        self.confidence_logits: Optional[torch.Tensor] = None
+
+    def new_instance(self) -> HiddenCollector:
+        return MtpHeadOutputCollector()
+
+    def add_mtp_outputs(
+        self,
+        draft_token_ids: Optional[torch.Tensor],
+        confidence_logits: Optional[torch.Tensor],
+    ) -> None:
+        self.draft_token_ids = draft_token_ids
+        self.confidence_logits = confidence_logits
+
+    def finish_output(self, infer_state) -> ModelMtpOutputCollector:
+        output = ModelMtpOutputCollector(
+            draft_token_ids=self.draft_token_ids,
+            confidence_logits=self.confidence_logits,
+        )
+        self.draft_token_ids = None
+        self.confidence_logits = None
+        return output
 
 
 class FinalHiddenCollector(HiddenCollector):
@@ -130,11 +168,11 @@ class FinalHiddenCollector(HiddenCollector):
     def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
         self.final_hidden = final_hidden
 
-    def finish(self, infer_state) -> torch.Tensor:
+    def finish_output(self, infer_state) -> ModelMtpOutputCollector:
         assert self.final_hidden is not None
         final_hidden = self.final_hidden
         self.final_hidden = None
-        return final_hidden.contiguous()
+        return ModelMtpOutputCollector(spec_hidden=final_hidden.contiguous())
 
 
 class LayerHiddenCollector(HiddenCollector):
@@ -191,10 +229,10 @@ class LayerHiddenCollector(HiddenCollector):
             return self.layer_hiddens[0]
         return torch.cat(self.layer_hiddens, dim=-1)
 
-    def finish(self, infer_state) -> torch.Tensor:
+    def finish_output(self, infer_state) -> ModelMtpOutputCollector:
         local_hidden = self._local_hidden()
         self.layer_hiddens.clear()
         hidden = self.model.pre_infer._tpsp_allgather(input=local_hidden, infer_state=infer_state)
         if infer_state.need_dp_prefill_balance:
             hidden = infer_state._all_to_all_unbalance_get(data=hidden)
-        return hidden.contiguous()
+        return ModelMtpOutputCollector(spec_hidden=hidden.contiguous())

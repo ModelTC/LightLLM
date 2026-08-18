@@ -4,7 +4,12 @@ import pytest
 
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
-from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector, LayerHiddenCollector, NoopHiddenCollector
+from lightllm.common.basemodel.hidden_collector import (
+    FinalHiddenCollector,
+    LayerHiddenCollector,
+    MtpHeadOutputCollector,
+    NoopHiddenCollector,
+)
 from lightllm.common.basemodel.mtp_manager import MtpManager
 
 
@@ -96,7 +101,7 @@ def test_get_instance_returns_singleton(monkeypatch):
         ("eagle3", False, LayerHiddenCollector),
         ("dspark", False, LayerHiddenCollector),
         ("eagle3", True, FinalHiddenCollector),
-        ("dspark", True, NoopHiddenCollector),
+        ("dspark", True, MtpHeadOutputCollector),
     ],
 )
 def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, is_draft_model, expected_type):

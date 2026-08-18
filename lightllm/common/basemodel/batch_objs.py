@@ -1,3 +1,4 @@
+import copy
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -121,11 +122,76 @@ class ModelInput:
 
 
 @dataclass
+class ModelMtpOutputCollector:
+    """保存一次模型 forward 为 MTP 推理产生的可选输出。"""
+
+    # MTP drafter 使用的 hidden 特征。
+    # - Vanilla MTP、EAGLE 主模型收集最终层 hidden；对应 draft 模型也会返回最终层 hidden，
+    #   供串行的下一层 MTP 模块或下一步自回归 draft 使用。
+    # - EAGLE3、DFlash、DSpark 主模型收集 checkpoint 配置指定的若干 target layer hidden，
+    #   拼接后交给 draft 模型；EAGLE3 draft 模型还会返回最终层 hidden。
+    # - DFlash、DSpark 的 block draft 模型不需要返回 hidden，因此该字段为 None。
+    # - 未启用 MTP 时不收集投机特征，该字段同样为 None。
+    spec_hidden: Optional[torch.Tensor] = None
+
+    # DSpark block draft 模型直接生成的 token id，形状通常为
+    # [request_count * block_size]。
+    # - 仅 DSpark 启用 Markov head（markov_rank > 0）时由 head 直接生成并返回。
+    # - DSpark 未启用 Markov head 时为 None，调用方从普通 logits 执行 argmax。
+    # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
+    draft_token_ids: Optional[torch.Tensor] = None
+
+    # DSpark confidence head 输出的原始置信度 logits，形状通常为
+    # [request_count, block_size]，供动态 MTP verify 计算各 draft 位置的调度分数。
+    # - 仅 DSpark checkpoint 启用 confidence head 时返回；动态 verify 模式要求该字段存在。
+    # - 固定 verify 且未启用 confidence head 的 DSpark 模型可以返回 None。
+    # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
+    confidence_logits: Optional[torch.Tensor] = None
+
+    def to_no_ref_tensor(self) -> None:
+        if self.spec_hidden is not None:
+            self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)
+        if self.draft_token_ids is not None:
+            self.draft_token_ids = tensor_to_no_ref_tensor(self.draft_token_ids)
+        if self.confidence_logits is not None:
+            self.confidence_logits = tensor_to_no_ref_tensor(self.confidence_logits)
+
+    def unpad_decode(
+        self, padded_batch_size: int, origin_batch_size: int
+    ) -> "ModelMtpOutputCollector":
+        collector = copy.copy(self)
+        if collector.spec_hidden is not None:
+            collector.spec_hidden = collector.spec_hidden[:origin_batch_size]
+        if collector.draft_token_ids is not None:
+            collector.draft_token_ids = collector.draft_token_ids[:origin_batch_size]
+        if collector.confidence_logits is not None:
+            confidence_row_count = collector.confidence_logits.shape[0]
+            assert (
+                confidence_row_count > 0
+                and padded_batch_size % confidence_row_count == 0
+            )
+            rows_per_confidence = padded_batch_size // confidence_row_count
+            assert origin_batch_size % rows_per_confidence == 0
+            collector.confidence_logits = collector.confidence_logits[
+                : origin_batch_size // rows_per_confidence
+            ]
+        return collector
+
+    def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutputCollector":
+        collector = copy.copy(self)
+        if collector.spec_hidden is not None:
+            collector.spec_hidden = collector.spec_hidden[:origin_handle_token_num]
+        return collector
+
+
+@dataclass
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
-    # Hidden states collected for the active speculative strategy.
-    spec_hidden: Optional[torch.Tensor] = None
+    # Collector is finalized by HiddenCollector.finish_output before being
+    # attached here. ModelOutput therefore owns a stable output view instead
+    # of the mutable collector used while the forward is still running.
+    collector: Optional[ModelMtpOutputCollector] = None
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
 
@@ -135,7 +201,10 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
+    def __post_init__(self) -> None:
+        if self.collector is None:
+            self.collector = ModelMtpOutputCollector()
+
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
-        if self.spec_hidden is not None:
-            self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)
+        self.collector.to_no_ref_tensor()

@@ -1,10 +1,7 @@
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.draft_registry import DraftModelRegistry
-from lightllm.models.qwen3_dspark.infer_struct import Qwen3DSparkInferStateInfo
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
-from lightllm.models.qwen3_dspark.model_output import DSparkModelOutput
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import Qwen3DSparkPreAndPostLayerWeight
-from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 @DraftModelRegistry(model_type="qwen3", spec_modes="dspark")
@@ -18,33 +15,3 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
 
     pre_and_post_weight_class = Qwen3DSparkPreAndPostLayerWeight
     post_layer_infer_class = Qwen3DSparkPostLayerInfer
-    infer_state_class = Qwen3DSparkInferStateInfo
-
-    def _token_forward(self, infer_state: Qwen3DSparkInferStateInfo):
-        model_output = super()._token_forward(infer_state)
-        if infer_state.is_cuda_graph:
-            if infer_state.confidence_logits is not None:
-                infer_state.confidence_logits = tensor_to_no_ref_tensor(infer_state.confidence_logits)
-            if infer_state.draft_token_ids is not None:
-                infer_state.draft_token_ids = tensor_to_no_ref_tensor(infer_state.draft_token_ids)
-
-        return DSparkModelOutput(
-            logits=model_output.logits,
-            spec_hidden=model_output.spec_hidden,
-            confidence_logits=infer_state.confidence_logits,
-            draft_token_ids=infer_state.draft_token_ids,
-        )
-
-    def _create_unpad_decode_model_output(self, model_output: DSparkModelOutput, origin_batch_size: int):
-        padded_batch_size = model_output.logits.shape[0]
-        model_output = super()._create_unpad_decode_model_output(model_output, origin_batch_size)
-        if padded_batch_size == origin_batch_size:
-            return model_output
-
-        if model_output.draft_token_ids is not None:
-            model_output.draft_token_ids = model_output.draft_token_ids[:origin_batch_size]
-        if model_output.confidence_logits is not None:
-            confidence_rows = model_output.confidence_logits.shape[0]
-            rows_per_confidence = padded_batch_size // confidence_rows
-            model_output.confidence_logits = model_output.confidence_logits[: origin_batch_size // rows_per_confidence]
-        return model_output

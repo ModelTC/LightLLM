@@ -37,7 +37,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
         prepare_mtp_prefill_inputs(
             model_input=target_model_input,
             b_next_token_ids=next_token_ids,
-            mtp_draft_input_hiddens=target_model_output.spec_hidden,
+            mtp_draft_input_hiddens=target_model_output.collector.spec_hidden,
         )
         self.backend.draft_models[0].forward(target_model_input)
 
@@ -55,12 +55,12 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
         prepare_mtp_prefill_inputs(
             model_input=target_model_input0,
             b_next_token_ids=next_token_ids0,
-            mtp_draft_input_hiddens=target_model_output0.spec_hidden,
+            mtp_draft_input_hiddens=target_model_output0.collector.spec_hidden,
         )
         prepare_mtp_prefill_inputs(
             model_input=target_model_input1,
             b_next_token_ids=next_token_ids1,
-            mtp_draft_input_hiddens=target_model_output1.spec_hidden,
+            mtp_draft_input_hiddens=target_model_output1.collector.spec_hidden,
         )
         self.backend.draft_models[0].microbatch_overlap_prefill(target_model_input0, target_model_input1)
 
@@ -143,7 +143,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
         self.prepare_verify_extend_input(
             model_input=main_model_input,
             input_ids=next_token_ids,
-            target_hidden=main_model_output.spec_hidden,
+            target_hidden=main_model_output.collector.spec_hidden,
         )
         extend_output = draft_model.forward(main_model_input)
 
@@ -154,7 +154,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
         else:
             draft_token_ids = self._gen_argmax_token_ids(accepted_tail_output)
         proposal_token_ids[accepted_tail_rows, 1] = draft_token_ids
-        draft_hidden = extend_output.spec_hidden.index_select(0, accepted_tail_rows)
+        draft_hidden = extend_output.collector.spec_hidden.index_select(0, accepted_tail_rows)
 
         if draft_step == 1:
             return SpecProposal(
@@ -196,7 +196,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
             else:
                 draft_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids[accepted_tail_rows, step + 1] = draft_token_ids
-            draft_hidden = draft_output.spec_hidden
+            draft_hidden = draft_output.collector.spec_hidden
             draft_seq_lens.add_(1)
 
         return SpecProposal(
@@ -262,7 +262,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
             self.prepare_verify_extend_input(
                 model_input=model_input,
                 input_ids=token_ids,
-                target_hidden=model_output.spec_hidden,
+                target_hidden=model_output.collector.spec_hidden,
             )
 
         verify_row_count = real_verify_rows0 + real_verify_rows1
@@ -288,7 +288,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
             accepted_tail_output = ModelOutput(logits=extend_output.logits.index_select(0, accepted_tail_rows))
             draft_token_ids = self._gen_argmax_token_ids(accepted_tail_output)
             draft_token_ids_by_batch.append(draft_token_ids)
-            draft_hiddens_by_batch.append(extend_output.spec_hidden.index_select(0, accepted_tail_rows))
+            draft_hiddens_by_batch.append(extend_output.collector.spec_hidden.index_select(0, accepted_tail_rows))
             draft_seq_lens_by_batch.append(model_input.b_seq_len.index_select(0, accepted_tail_rows) + 1)
             draft_req_indices_by_batch.append(model_input.b_req_idx.index_select(0, accepted_tail_rows))
             proposal_rows = accepted_tail_rows[:real_request_count] + proposal_row_offsets[batch_index]
@@ -346,7 +346,7 @@ class AutoregressiveEagleProposer(BaseSpecProposer):
             for batch_index, draft_output in enumerate(draft_outputs):
                 draft_token_ids = self._gen_argmax_token_ids(draft_output)
                 draft_token_ids_by_batch[batch_index] = draft_token_ids
-                draft_hiddens_by_batch[batch_index] = draft_output.spec_hidden
+                draft_hiddens_by_batch[batch_index] = draft_output.collector.spec_hidden
                 draft_seq_lens_by_batch[batch_index].add_(1)
                 real_request_count = real_request_counts[batch_index]
                 proposal_token_ids[proposal_rows_by_batch[batch_index], step + 1] = draft_token_ids[:real_request_count]
@@ -406,7 +406,7 @@ class EagleMTPProposer(AutoregressiveEagleProposer):
         )
 
         draft_token_ids_by_batch = [next_token_ids0, next_token_ids1]
-        draft_hiddens_by_batch = [main_model_output0.spec_hidden, main_model_output1.spec_hidden]
+        draft_hiddens_by_batch = [main_model_output0.collector.spec_hidden, main_model_output1.collector.spec_hidden]
         draft_model = self.backend.draft_models[0]
         hold_mem_index = self.backend.model.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX
 
@@ -438,7 +438,7 @@ class EagleMTPProposer(AutoregressiveEagleProposer):
                 ).view(-1)
 
                 draft_token_ids_by_batch[batch_index] = self._gen_argmax_token_ids(draft_output)
-                draft_hiddens_by_batch[batch_index] = draft_output.spec_hidden
+                draft_hiddens_by_batch[batch_index] = draft_output.collector.spec_hidden
 
             proposal_token_ids[:real_verify_rows0, step + 1] = draft_token_ids_by_batch[0][:real_verify_rows0]
             proposal_token_ids[real_verify_rows0:, step + 1] = draft_token_ids_by_batch[1][:real_verify_rows1]

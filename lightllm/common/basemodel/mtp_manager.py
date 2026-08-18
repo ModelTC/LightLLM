@@ -4,6 +4,7 @@ from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
     HiddenCollector,
     LayerHiddenCollector,
+    MtpHeadOutputCollector,
     NoopHiddenCollector,
 )
 from lightllm.utils.envs_utils import get_env_start_args
@@ -82,7 +83,12 @@ class MtpManager:
         if spec_mode is None:
             collector_type = NoopHiddenCollector
         elif model.is_mtp_draft_model:
-            collector_type = NoopHiddenCollector if spec_mode in self._BLOCK_DRAFT_MODES else FinalHiddenCollector
+            if spec_mode == "dspark":
+                collector_type = MtpHeadOutputCollector
+            elif spec_mode in self._BLOCK_DRAFT_MODES:
+                collector_type = NoopHiddenCollector
+            else:
+                collector_type = FinalHiddenCollector
         elif spec_mode in ("eagle3", *self._BLOCK_DRAFT_MODES):
             collector_type = LayerHiddenCollector
             collector_kwargs.update(model=model)
