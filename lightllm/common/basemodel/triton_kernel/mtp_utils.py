@@ -16,14 +16,18 @@ def _fwd_kernel_mtp_verify(
     b_req_mtp_start_loc,
     b_req_idx,
     accepted_index,
-    req_mtp_all_num,
+    verify_batch_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
     req_nums = tl.num_programs(axis=0)
 
     req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
-    req_start_end = tl.load(b_req_mtp_start_loc + cur_index + 1, mask=cur_index + 1 < req_nums, other=req_mtp_all_num)
+    req_start_end = tl.load(
+        b_req_mtp_start_loc + cur_index + 1,
+        mask=cur_index + 1 < req_nums,
+        other=verify_batch_size,
+    )
     req_mtp_num = req_start_end - req_start_loc
     cur_req_idx = tl.load(b_req_idx + req_start_loc)
 
@@ -58,20 +62,21 @@ def mtp_verify(
     Args:
         req_to_next_token_ids: (max_req_num, verify_width)
         b_req_mtp_start_loc: (num_reqs,)
-        new_next_token_ids: (batch_size,)
-        b_req_idx: (batch_size,)
+        new_next_token_ids: (verify_batch_size,)
+        b_req_idx: (verify_batch_size,)
     Returns:
         mtp_accept_len: (num_reqs,)
-        accepted_index: (batch_size,)
+        accepted_index: (verify_batch_size,)
         accepted_index: [1, 0, 1, 1, 0], 0 means the token is not accepted, 1 means the token is accepted.
     """
     verify_width = req_to_next_token_ids.shape[1]
     BLOCK_SIZE = 16
     assert verify_width <= BLOCK_SIZE, f"verify_width must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
-    req_mtp_all_num = b_req_idx.shape[0]
+    verify_batch_size = b_req_idx.shape[0]
+    assert new_next_token_ids.shape == b_req_idx.shape
     mtp_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=req_to_next_token_ids.device)
-    accepted_index = torch.empty((req_mtp_all_num,), dtype=torch.int32, device=req_to_next_token_ids.device)
+    accepted_index = torch.empty((verify_batch_size,), dtype=torch.int32, device=req_to_next_token_ids.device)
 
     grid = (num_reqs,)
     num_warps = 1
@@ -83,7 +88,7 @@ def mtp_verify(
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
         accepted_index=accepted_index,
-        req_mtp_all_num=req_mtp_all_num,
+        verify_batch_size=verify_batch_size,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
         num_stages=1,
