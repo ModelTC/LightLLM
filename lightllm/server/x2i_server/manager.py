@@ -265,6 +265,17 @@ def get_min_max_pixels() -> tuple[int, int]:
     return min_pixels, max_pixels
 
 
+def get_input_min_max_pixels(input_image_num: int) -> tuple[int, int]:
+    min_pixels = X2VConfig.get_value("input_min_pixels", 2048 * 2048)
+    max_pixels = X2VConfig.get_value("input_max_pixels", 2048 * 2048)
+    total_pixels = X2VConfig.get_value("input_total_pixels", 5 * 2048 * 2048)
+
+    max_pixels = min(max_pixels, total_pixels // max(1, input_image_num))
+    min_pixels = min(min_pixels, max_pixels)
+
+    return min_pixels, max_pixels
+
+
 def setup_devices(args: StartArgs):
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     logger.info(f"current devices: {devices} {torch.cuda.device_count()}")

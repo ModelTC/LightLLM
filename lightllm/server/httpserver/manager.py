@@ -506,8 +506,8 @@ class HttpServerManager:
                 return metadata
 
         try:
-            from lightllm.server.x2i_server.manager import get_min_max_pixels
-            min_pixels, max_pixels = get_min_max_pixels()
+            from lightllm.server.x2i_server.manager import get_input_min_max_pixels
+            min_pixels, max_pixels = get_input_min_max_pixels(input_image_num)
             sample_params_kwargs = {
                 "img_gen_prefill": True,
                 "min_pixels": min_pixels,
