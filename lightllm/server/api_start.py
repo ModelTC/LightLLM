@@ -115,6 +115,17 @@ def _launch_subprocesses(args: StartArgs):
             f"graph_max_batch_size to 32"
         )
 
+    dp_size_in_node = max(1, args.dp // args.nnodes)
+    args.per_dp_running_max_req_size = args.running_max_req_size // dp_size_in_node
+    args.graph_max_batch_size = min(args.graph_max_batch_size, args.per_dp_running_max_req_size)
+    logger.info(
+        "set per-DP running request limit: global=%d, local_dp=%d, per_dp=%d, graph_max_batch_size=%d",
+        args.running_max_req_size,
+        dp_size_in_node,
+        args.per_dp_running_max_req_size,
+        args.graph_max_batch_size,
+    )
+
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
 
