@@ -43,7 +43,7 @@ class LightSpecPlanner(BaseMtpPlanner):
         self.backend = backend
         self.max_draft_step = int(backend.max_draft_step)
         self.block_size = int(backend.draft_models[0].block_size) if self.spec_mode == "dflash" else None
-        self.draft_steps = self.get_draft_steps()
+        self.draft_steps = self._get_draft_steps()
 
         self.target_infer_costs = _InferCostMsTable()
         self.draft_infer_costs = _InferCostMsTable()
@@ -60,48 +60,6 @@ class LightSpecPlanner(BaseMtpPlanner):
 
         # The current verify width is bounded by the proposal built last time.
         self.pre_draft_step = self.max_draft_step
-
-    def get_draft_steps(self) -> Tuple[int, ...]:
-        """Return the draft configurations supported by the current MTP mode."""
-
-        if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
-            return tuple(range(self.max_draft_step + 1))
-        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
-            return tuple(range(1, self.max_draft_step + 1))
-        if self.spec_mode == "dflash":
-            return (self.max_draft_step,)
-        raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
-
-    def get_draft_cost_ms(self, req_num: int, verify_batch_size: int, draft_step: int) -> float:
-        """Return the complete draft cost for one ``(N, B, d)`` configuration."""
-
-        if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
-            return self.draft_infer_costs.estimate(req_num) * draft_step
-        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
-            assert draft_step > 0, f"{self.spec_mode} requires draft_step to be greater than 0"
-            draft_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
-            if draft_step > 1:
-                draft_cost_ms += self.draft_infer_costs.estimate(req_num) * (draft_step - 1)
-            return draft_cost_ms
-        if self.spec_mode == "dflash":
-            assert self.block_size is not None
-            extend_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
-            block_cost_ms = self.draft_infer_costs.estimate(req_num * self.block_size)
-            return extend_cost_ms + block_cost_ms
-        raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
-
-    def _register_cuda_graph_costs(self) -> None:
-        target_graph = self.backend.model.graph
-        if target_graph is not None:
-            for batch_size, infer_cost_ms in target_graph.infer_cost_ms_by_batch_size.items():
-                self.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
-
-        for draft_model in self.backend.draft_models:
-            draft_graph = draft_model.graph
-            if draft_graph is None:
-                continue
-            for batch_size, infer_cost_ms in draft_graph.infer_cost_ms_by_batch_size.items():
-                self.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
 
     def plan(self, decode_reqs: List, origin_batch_size: int) -> SpecDecodePlan:
         req_num = len(decode_reqs)
@@ -150,7 +108,7 @@ class LightSpecPlanner(BaseMtpPlanner):
             all_reqs_have_proposals=all_reqs_have_proposals,
         )
 
-    def update_feedback(
+    def update_statics(
         self,
         plan: SpecDecodePlan,
         req_num: int,
@@ -165,14 +123,56 @@ class LightSpecPlanner(BaseMtpPlanner):
         # updating the batch-level statistic with different N/B semantics.
         if not plan.all_reqs_have_proposals:
             return
-        self.update_verified_batch(
+        self._update_verified_batch(
             accept_lengths=accept_lengths,
             req_num=req_num,
             dynamic_batch_size=plan.dynamic_batch_size,
             verified_draft_step=plan.pre_draft_step,
         )
 
-    def update_verified_batch(
+    def _get_draft_steps(self) -> Tuple[int, ...]:
+        """Return the draft configurations supported by the current MTP mode."""
+
+        if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
+            return tuple(range(self.max_draft_step + 1))
+        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
+            return tuple(range(1, self.max_draft_step + 1))
+        if self.spec_mode == "dflash":
+            return (self.max_draft_step,)
+        raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
+
+    def _get_draft_cost_ms(self, req_num: int, verify_batch_size: int, draft_step: int) -> float:
+        """Return the complete draft cost for one ``(N, B, d)`` configuration."""
+
+        if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
+            return self.draft_infer_costs.estimate(req_num) * draft_step
+        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
+            assert draft_step > 0, f"{self.spec_mode} requires draft_step to be greater than 0"
+            draft_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
+            if draft_step > 1:
+                draft_cost_ms += self.draft_infer_costs.estimate(req_num) * (draft_step - 1)
+            return draft_cost_ms
+        if self.spec_mode == "dflash":
+            assert self.block_size is not None
+            extend_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
+            block_cost_ms = self.draft_infer_costs.estimate(req_num * self.block_size)
+            return extend_cost_ms + block_cost_ms
+        raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
+
+    def _register_cuda_graph_costs(self) -> None:
+        target_graph = self.backend.model.graph
+        if target_graph is not None:
+            for batch_size, infer_cost_ms in target_graph.infer_cost_ms_by_batch_size.items():
+                self.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
+
+        for draft_model in self.backend.draft_models:
+            draft_graph = draft_model.graph
+            if draft_graph is None:
+                continue
+            for batch_size, infer_cost_ms in draft_graph.infer_cost_ms_by_batch_size.items():
+                self.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
+
+    def _update_verified_batch(
         self,
         accept_lengths,
         req_num: int,
@@ -244,7 +244,7 @@ class LightSpecPlanner(BaseMtpPlanner):
             dynamic_batch_size=dynamic_batch_size,
             draft_step=draft_step,
         )
-        total_time = self.target_infer_costs.estimate(dynamic_batch_size) + self.get_draft_cost_ms(
+        total_time = self.target_infer_costs.estimate(dynamic_batch_size) + self._get_draft_cost_ms(
             req_num=req_num,
             verify_batch_size=dynamic_batch_size,
             draft_step=draft_step,

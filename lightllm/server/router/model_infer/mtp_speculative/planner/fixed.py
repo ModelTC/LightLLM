@@ -19,7 +19,7 @@ class FixedSpecPlanner(BaseMtpPlanner):
             pre_draft_step=self.max_draft_step,
         )
 
-    def update_feedback(
+    def update_statics(
         self,
         plan: SpecDecodePlan,
         req_num: int,

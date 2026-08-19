@@ -46,7 +46,20 @@ class DSparkPlanner(BaseMtpPlanner):
             pre_draft_step=self.max_draft_step,
         )
 
-    def get_draft_cost_ms(self, req_num: int, verify_batch_size: int, draft_step: int) -> float:
+    def update_statics(
+        self,
+        plan: SpecDecodePlan,
+        req_num: int,
+        accept_lengths,
+        schedule_scores=None,
+    ) -> None:
+        if schedule_scores is not None:
+            self._update_confidence_probs(
+                confidence_probs=schedule_scores,
+                req_num=req_num,
+            )
+
+    def _get_draft_cost_ms(self, req_num: int, verify_batch_size: int, draft_step: int) -> float:
         """Return the cost of committing verify rows and generating one complete block."""
 
         extend_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
@@ -66,20 +79,7 @@ class DSparkPlanner(BaseMtpPlanner):
             for batch_size, infer_cost_ms in draft_graph.infer_cost_ms_by_batch_size.items():
                 self.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
 
-    def update_feedback(
-        self,
-        plan: SpecDecodePlan,
-        req_num: int,
-        accept_lengths,
-        schedule_scores=None,
-    ) -> None:
-        if schedule_scores is not None:
-            self.update_confidence_probs(
-                confidence_probs=schedule_scores,
-                req_num=req_num,
-            )
-
-    def update_confidence_probs(self, confidence_probs, req_num: int) -> None:
+    def _update_confidence_probs(self, confidence_probs, req_num: int) -> None:
         """Record a confidence-derived future capacity estimate.
 
         The current decode step still routes rows by the current probabilities
@@ -150,7 +150,7 @@ class DSparkPlanner(BaseMtpPlanner):
         for dynamic_batch_size in sorted(candidate_batch_sizes):
             selected_draft_count = dynamic_batch_size - int(req_num)
             expected_tokens = float(req_num) + float(expected_accepts_by_count[selected_draft_count])
-            round_ms = self.target_infer_costs.estimate(dynamic_batch_size) + self.get_draft_cost_ms(
+            round_ms = self.target_infer_costs.estimate(dynamic_batch_size) + self._get_draft_cost_ms(
                 req_num=req_num,
                 verify_batch_size=dynamic_batch_size,
                 draft_step=self.max_draft_step,

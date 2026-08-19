@@ -351,7 +351,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
 
-        spec_engine.update_planner_feedback(
+        spec_engine.update_planner_statics(
             plan=spec_plan,
             proposal=proposal,
             req_num=req_num,

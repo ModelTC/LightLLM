@@ -59,7 +59,7 @@ class BaseMtpPlanner(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_feedback(
+    def update_statics(
         self,
         plan: SpecDecodePlan,
         req_num: int,
@@ -87,7 +87,23 @@ class _InferCostMsTable:
     def update(self, batch_size: int, infer_cost_ms: float) -> None:
         self.infer_cost_ms_table[int(batch_size)] = float(infer_cost_ms)
 
-    def get(self, batch_size: int) -> float:
+    def estimate(self, batch_size: int) -> float:
+        """Estimate an uncaptured batch without applying the graph-miss penalty."""
+
+        batch_size = int(batch_size)
+        max_batch_size, max_cost_ms = self.infer_cost_ms_table.peekitem(-1)
+        if batch_size <= max_batch_size:
+            return self._get(batch_size)
+        return max_cost_ms * batch_size / max_batch_size
+
+    def get_batch_size_keys_between(self, batch_size1: int, batch_size2: int) -> List[int]:
+        start = min(int(batch_size1), int(batch_size2))
+        end = max(int(batch_size1), int(batch_size2))
+        batch_sizes = set(self.infer_cost_ms_table.irange(minimum=start, maximum=end, inclusive=(True, True)))
+        batch_sizes.update((start, end))
+        return sorted(batch_sizes)
+
+    def _get(self, batch_size: int) -> float:
         batch_size = int(batch_size)
 
         if len(self.infer_cost_ms_table) == 0:
@@ -104,22 +120,6 @@ class _InferCostMsTable:
 
         index = self.infer_cost_ms_table.bisect_left(batch_size)
         return self.infer_cost_ms_table.peekitem(index)[1]
-
-    def estimate(self, batch_size: int) -> float:
-        """Estimate an uncaptured batch without applying the graph-miss penalty."""
-
-        batch_size = int(batch_size)
-        max_batch_size, max_cost_ms = self.infer_cost_ms_table.peekitem(-1)
-        if batch_size <= max_batch_size:
-            return self.get(batch_size)
-        return max_cost_ms * batch_size / max_batch_size
-
-    def get_batch_size_keys_between(self, batch_size1: int, batch_size2: int) -> List[int]:
-        start = min(int(batch_size1), int(batch_size2))
-        end = max(int(batch_size1), int(batch_size2))
-        batch_sizes = set(self.infer_cost_ms_table.irange(minimum=start, maximum=end, inclusive=(True, True)))
-        batch_sizes.update((start, end))
-        return sorted(batch_sizes)
 
 
 class _EMAValue:

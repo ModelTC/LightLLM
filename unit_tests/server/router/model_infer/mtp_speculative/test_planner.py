@@ -135,7 +135,7 @@ def test_spec_engine_only_exposes_planning_and_proposal_interfaces():
         "plan_decode",
         "prepare_decode_model_input",
         "propose_next",
-        "update_planner_feedback",
+        "update_planner_statics",
     }
 
 
@@ -403,7 +403,7 @@ def test_lightspec_selects_eagle_draft_depth_and_verify_capacity():
     for batch_size, draft_cost in ((2, 0.1), (4, 0.1), (8, 0.2)):
         planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=draft_cost)
     for _ in range(8):
-        planner.update_verified_batch(
+        planner._update_verified_batch(
             accept_lengths=[4, 4],
             req_num=2,
             dynamic_batch_size=8,
@@ -427,7 +427,7 @@ def test_lightspec_compacts_block_verify_without_changing_draft_shape():
         planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
     planner.draft_infer_costs.update(batch_size=14, infer_cost_ms=0.5)
     for _ in range(8):
-        planner.update_verified_batch(
+        planner._update_verified_batch(
             accept_lengths=[3, 3],
             req_num=2,
             dynamic_batch_size=16,
@@ -480,7 +480,7 @@ def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
     for batch_size in (2, 4, 8):
         planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
         planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
-    planner.update_verified_batch(
+    planner._update_verified_batch(
         accept_lengths=[2, 2],
         req_num=2,
         dynamic_batch_size=8,
@@ -497,7 +497,7 @@ def test_vanilla_with_attention_planner_prices_extend_then_normal_batches():
     planner = build_lightspec_planner(spec_mode="vanilla_with_att")
     planner.draft_infer_costs.update(batch_size=2, infer_cost_ms=0.1)
 
-    draft_cost_ms = planner.get_draft_cost_ms(
+    draft_cost_ms = planner._get_draft_cost_ms(
         req_num=4,
         verify_batch_size=8,
         draft_step=3,
@@ -505,7 +505,7 @@ def test_vanilla_with_attention_planner_prices_extend_then_normal_batches():
 
     assert np.isclose(draft_cost_ms, 0.8)
     with pytest.raises(AssertionError, match="requires draft_step to be greater than 0"):
-        planner.get_draft_cost_ms(req_num=4, verify_batch_size=8, draft_step=0)
+        planner._get_draft_cost_ms(req_num=4, verify_batch_size=8, draft_step=0)
 
 
 def test_no_attention_planner_prices_only_normal_request_batches():
@@ -513,7 +513,7 @@ def test_no_attention_planner_prices_only_normal_request_batches():
         planner = build_lightspec_planner(spec_mode=spec_mode)
         planner.draft_infer_costs.update(batch_size=2, infer_cost_ms=0.1)
 
-        draft_cost_ms = planner.get_draft_cost_ms(
+        draft_cost_ms = planner._get_draft_cost_ms(
             req_num=4,
             verify_batch_size=8,
             draft_step=3,
@@ -526,7 +526,7 @@ def test_eagle_planner_prices_extend_and_decode_separately():
     planner = build_lightspec_planner(spec_mode="eagle_with_att")
     planner.draft_infer_costs.update(batch_size=2, infer_cost_ms=0.25)
 
-    draft_cost_ms = planner.get_draft_cost_ms(
+    draft_cost_ms = planner._get_draft_cost_ms(
         req_num=2,
         verify_batch_size=8,
         draft_step=3,
@@ -544,7 +544,7 @@ def test_autoregressive_eagle_planner_prices_extend_and_decode_rows():
         for batch_size in (2, 4, 8, 16):
             planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=float(batch_size))
 
-        draft_cost_ms = planner.get_draft_cost_ms(
+        draft_cost_ms = planner._get_draft_cost_ms(
             req_num=8,
             verify_batch_size=16,
             draft_step=7,
@@ -561,7 +561,7 @@ def test_block_planner_prices_commit_and_complete_block():
     )
     planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=0.4)
 
-    draft_cost_ms = planner.get_draft_cost_ms(
+    draft_cost_ms = planner._get_draft_cost_ms(
         req_num=2,
         verify_batch_size=16,
         draft_step=7,
@@ -574,7 +574,7 @@ def test_dspark_planner_prices_commit_and_complete_block():
     planner = build_dspark_planner(max_draft_step=3, block_size=3)
     planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=0.8)
 
-    draft_cost_ms = planner.get_draft_cost_ms(
+    draft_cost_ms = planner._get_draft_cost_ms(
         req_num=4,
         verify_batch_size=8,
         draft_step=3,
@@ -586,13 +586,13 @@ def test_dspark_planner_prices_commit_and_complete_block():
 def test_lightspec_records_one_batch_observation_per_configuration():
     planner = build_lightspec_planner()
 
-    planner.update_verified_batch(
+    planner._update_verified_batch(
         accept_lengths=[2, 2],
         req_num=2,
         dynamic_batch_size=4,
         verified_draft_step=1,
     )
-    planner.update_verified_batch(
+    planner._update_verified_batch(
         accept_lengths=[1, 1],
         req_num=2,
         dynamic_batch_size=4,
@@ -608,7 +608,7 @@ def test_lightspec_records_one_batch_observation_per_configuration():
 def test_lightspec_high_concurrency_does_not_multiply_ema_updates():
     planner = build_lightspec_planner()
 
-    planner.update_verified_batch(
+    planner._update_verified_batch(
         accept_lengths=[1] * 128,
         req_num=128,
         dynamic_batch_size=128,
@@ -620,7 +620,7 @@ def test_lightspec_high_concurrency_does_not_multiply_ema_updates():
 
 def test_lightspec_estimates_unseen_shapes_from_prefix_survival():
     planner = build_lightspec_planner()
-    planner.update_verified_batch(
+    planner._update_verified_batch(
         accept_lengths=[2, 1],
         req_num=2,
         dynamic_batch_size=8,
@@ -634,7 +634,7 @@ def test_lightspec_estimates_unseen_shapes_from_prefix_survival():
 
 def test_lightspec_does_not_transfer_deep_progress_to_short_drafts():
     planner = build_lightspec_planner()
-    planner.update_verified_batch(
+    planner._update_verified_batch(
         accept_lengths=[4, 2],
         req_num=2,
         dynamic_batch_size=8,
@@ -649,7 +649,7 @@ def test_lightspec_short_current_proposal_can_recover_to_a_deeper_draft():
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (6, 1.2), (8, 1.3)):
         planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
         planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=0.01)
-    planner.update_verified_batch(
+    planner._update_verified_batch(
         accept_lengths=[4, 4],
         req_num=2,
         dynamic_batch_size=8,
@@ -675,7 +675,7 @@ def test_engine_skips_feedback_for_a_mixed_proposal_batch():
         all_reqs_have_proposals=False,
     )
 
-    engine.update_planner_feedback(
+    engine.update_planner_statics(
         plan=plan,
         proposal=SpecProposal(
             token_ids=torch.empty((0,), dtype=torch.int64),
@@ -703,14 +703,14 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
     engine = SpecEngine.__new__(SpecEngine)
     engine.planner = planner
 
-    engine.update_planner_feedback(
+    engine.update_planner_statics(
         plan=plan,
         proposal=proposal,
         req_num=2,
         accept_lengths_cpu=torch.tensor([1, 1], dtype=torch.int32),
     )
     first_plan = planner.plan(decode_reqs=build_decode_reqs(2), origin_batch_size=8)
-    engine.update_planner_feedback(
+    engine.update_planner_statics(
         plan=plan,
         proposal=proposal,
         req_num=2,

@@ -110,18 +110,18 @@ class SpecEngine:
             accept_len=accept_len,
         )
 
-    # Planner feedback.
+    # Planner runtime statistics.
 
-    def update_planner_feedback(
+    def update_planner_statics(
         self,
         plan: SpecDecodePlan,
         proposal: SpecProposal,
         req_num: int,
         accept_lengths_cpu: torch.Tensor,
     ) -> None:
-        """Feed iteration-level observations into the current planner."""
+        """Update the current planner with iteration-level runtime statistics."""
 
-        self.planner.update_feedback(
+        self.planner.update_statics(
             plan=plan,
             req_num=req_num,
             accept_lengths=accept_lengths_cpu,
