@@ -58,6 +58,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att i
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import VanillaWithAttProposer
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 
 
 def build_lightspec_planner(
@@ -95,14 +96,15 @@ def build_decode_reqs(req_num: int, req_num_with_proposals: int | None = None):
 
 def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
     engine = SpecEngine.__new__(SpecEngine)
-    engine.spec_mode = spec_mode
-    engine.enable_dynmaic_mtp = enable_dynmaic_mtp
     engine.backend = SimpleNamespace(
         max_draft_step=3,
         model=SimpleNamespace(graph=None),
         draft_models=[SimpleNamespace(block_size=3, graph=None)],
     )
-    return engine._build_decode_planner()
+    return engine._build_mtp_planner(
+        spec_mode=spec_mode,
+        enable_dynmaic_mtp=enable_dynmaic_mtp,
+    )
 
 
 def test_fixed_planner_returns_static_plan():
@@ -121,6 +123,20 @@ def test_non_dp_engine_rejects_empty_decode_batch():
 
     with pytest.raises(AssertionError, match="requires at least one request"):
         engine.plan_decode(model_input=SimpleNamespace(batch_size=0), decode_reqs=[])
+
+
+def test_spec_engine_only_exposes_planning_and_proposal_interfaces():
+    public_methods = {
+        name for name, value in SpecEngine.__dict__.items() if callable(value) and not name.startswith("_")
+    }
+
+    assert public_methods == {
+        "build_draft_state_from_prefill",
+        "plan_decode",
+        "prepare_decode_model_input",
+        "propose_next",
+        "update_planner_feedback",
+    }
 
 
 def test_dp_planner_returns_fixed_backend_draft_step():
@@ -308,15 +324,15 @@ def test_dynamic_plan_filters_selected_rows():
 
 def test_dynamic_decode_frees_unselected_and_rejected_rows():
     freed = []
-    engine = SpecEngine.__new__(SpecEngine)
-    engine.backend = SimpleNamespace(
+    backend = SimpleNamespace(
         model=SimpleNamespace(
             req_manager=SimpleNamespace(mem_manager=SimpleNamespace(free=lambda indexes: freed.append(indexes.clone())))
         )
     )
     model_input = SimpleNamespace(mem_indexes_cpu=torch.tensor([10, 11, 12, 13]))
 
-    engine.free_unused_decode_mem(
+    mtp_utils.free_unused_mtp_decode_mem(
+        backend=backend,
         model_input=model_input,
         selected_row_mask_cpu=torch.tensor([1, 0, 1, 0], dtype=torch.bool),
         accepted_index_cpu=torch.tensor([1, 0], dtype=torch.int32),
@@ -327,7 +343,7 @@ def test_dynamic_decode_frees_unselected_and_rejected_rows():
     assert freed[0].tolist() == [11, 12, 13, 20]
 
 
-def test_engine_records_request_spec_metrics_in_one_pass():
+def test_records_request_mtp_metrics_in_one_pass():
     class MetricReq:
         def __init__(self, req_idx: int, mtp_step: int):
             self.req_idx = req_idx
@@ -345,12 +361,12 @@ def test_engine_records_request_spec_metrics_in_one_pass():
         def update_mtp_verify_step_num(self, verify_step_num: int):
             self.verify_steps += verify_step_num
 
-    engine = SpecEngine.__new__(SpecEngine)
-    engine.backend = SimpleNamespace(is_master_in_dp=True)
+    backend = SimpleNamespace(is_master_in_dp=True)
     req0 = MetricReq(req_idx=10, mtp_step=3)
     req1 = MetricReq(req_idx=11, mtp_step=3)
 
-    engine.record_request_spec_metrics(
+    mtp_utils.record_request_mtp_metrics(
+        backend=backend,
         decode_reqs=[req0, req1],
         accept_lengths_cpu=torch.tensor([2, 1], dtype=torch.int32),
         verified_row_reqs=[req0, req0, req1],
@@ -360,9 +376,11 @@ def test_engine_records_request_spec_metrics_in_one_pass():
     assert (req1.accepted, req1.verified, req1.verify_steps) == (0, 1, 1)
 
     fixed_req = MetricReq(req_idx=12, mtp_step=3)
-    engine.record_request_spec_metrics(
+    mtp_utils.record_request_mtp_metrics(
+        backend=backend,
         decode_reqs=[fixed_req],
         accept_lengths_cpu=torch.tensor([3], dtype=torch.int32),
+        verified_row_reqs=[fixed_req] * 4,
     )
     assert (fixed_req.accepted, fixed_req.verified, fixed_req.verify_steps) == (2, 4, 1)
 

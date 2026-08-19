@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-from collections import Counter
 from typing import List, Optional, Tuple
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.triton_kernel.mtp_utils import (
-    linear_att_mtp_state_index_update,
-    mtp_scatter_next_token_ids,
-    mtp_verify,
-)
 from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.planner import (
     BaseMtpPlanner,
@@ -24,23 +18,23 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import Ba
 
 
 class SpecEngine:
-    """Owns speculative planning, verification, and proposal generation.
+    """Owns non-DP MTP planning and draft proposal generation.
 
-    The model backend controls target forward, sampling, stream synchronization,
-    and request post-processing. Each proposer owns its algorithm-specific draft
-    state and proposal generation.
+    Target verification, request metrics, stream synchronization, and resource
+    cleanup are stateless operations exposed by ``mtp_speculative.utils``.
     """
 
     def __init__(self, backend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
         self.backend = backend
-        self.spec_mode = spec_mode
-        self.enable_dynmaic_mtp = enable_dynmaic_mtp
         self.proposer: BaseSpecProposer = build_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,
             enable_dynmaic_mtp=enable_dynmaic_mtp,
         )
-        self.planner: BaseMtpPlanner = self._build_decode_planner()
+        self.planner: BaseMtpPlanner = self._build_mtp_planner(
+            spec_mode=spec_mode,
+            enable_dynmaic_mtp=enable_dynmaic_mtp,
+        )
 
     # Prefill draft-state initialization.
 
@@ -56,7 +50,7 @@ class SpecEngine:
             next_token_ids=next_token_ids,
         )
 
-    # Decode planning and target verification.
+    # Decode planning.
 
     def plan_decode(self, model_input: ModelInput, decode_reqs: List) -> SpecDecodePlan:
         """Return the fixed or dynamic speculative plan for one decode iteration."""
@@ -96,49 +90,7 @@ class SpecEngine:
         )
         return model_input, selected_row_mask_cpu
 
-    def verify_tokens(
-        self,
-        next_token_ids: torch.Tensor,
-        b_req_idx: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-        b_mtp_index: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        accept_lengths, accepted_index = mtp_verify(
-            req_to_next_token_ids=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            new_next_token_ids=next_token_ids,
-            b_req_idx=b_req_idx,
-        )
-        if self.backend.is_linear_att_mixed_model:
-            assert b_mtp_index is not None
-            linear_att_mtp_state_index_update(
-                req_to_mtp_state_index=self.backend.model.req_manager.req_to_mtp_state_index,
-                b_req_mtp_start_loc=b_req_mtp_start_loc,
-                b_req_idx=b_req_idx,
-                b_mtp_index=b_mtp_index,
-                accepted_index=accepted_index,
-                verify_width=self.backend.max_draft_step + 1,
-            )
-        return accept_lengths, accepted_index
-
-    def resolve_decode_reqs(
-        self,
-        plan: SpecDecodePlan,
-        verify_event: torch.cuda.Event,
-        run_reqs: List,
-        decode_reqs: List,
-        accepted_index_cpu: torch.Tensor,
-    ) -> Tuple[List, List]:
-        """Return requests ready for pre/post handling after verification."""
-
-        if plan.skip_verify_sync:
-            return decode_reqs, decode_reqs
-
-        verify_event.synchronize()
-        verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
-        return run_reqs, verify_ok_reqs
-
-    # Draft proposal generation and persistence.
+    # Draft proposal generation.
 
     def propose_next(
         self,
@@ -158,29 +110,7 @@ class SpecEngine:
             accept_len=accept_len,
         )
 
-    def scatter_next_tokens(
-        self,
-        b_req_mtp_start_loc: torch.Tensor,
-        all_next_token_ids: torch.Tensor,
-        b_req_idx: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
-        schedule_scores: Optional[torch.Tensor] = None,
-    ) -> None:
-        mtp_scatter_next_token_ids(
-            req_to_next_token_ids=self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            all_next_token_ids=all_next_token_ids,
-            b_req_idx=b_req_idx,
-            mtp_accept_len=mtp_accept_len,
-            req_to_next_token_scores=(
-                self.backend.model.req_manager.req_sampling_params_manager.req_to_next_token_scores
-                if schedule_scores is not None
-                else None
-            ),
-            schedule_scores=schedule_scores,
-        )
-
-    # Planner feedback, request metrics, and resource cleanup.
+    # Planner feedback.
 
     def update_planner_feedback(
         self,
@@ -198,59 +128,9 @@ class SpecEngine:
             schedule_scores=proposal.schedule_scores_cpu,
         )
 
-    def record_request_spec_metrics(
-        self,
-        decode_reqs: List,
-        accept_lengths_cpu: torch.Tensor,
-        verified_row_reqs: Optional[List] = None,
-    ) -> None:
-        """Accumulate user-visible speculative metrics on each request."""
-
-        if not self.backend.is_master_in_dp:
-            return
-
-        accept_lengths = accept_lengths_cpu.tolist()
-        assert len(accept_lengths) == len(decode_reqs)
-        verify_rows_by_req = None if verified_row_reqs is None else Counter(req.req_idx for req in verified_row_reqs)
-        for req, accept_len in zip(decode_reqs, accept_lengths):
-            req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
-            verify_token_num = req.mtp_step + 1 if verify_rows_by_req is None else verify_rows_by_req[req.req_idx]
-            if verify_token_num > 0:
-                req.update_mtp_verify_token_num(verify_token_num=verify_token_num)
-                req.update_mtp_verify_step_num(verify_step_num=1)
-
-    def free_unused_decode_mem(
-        self,
-        model_input: ModelInput,
-        selected_row_mask_cpu: Optional[torch.Tensor],
-        accepted_index_cpu: torch.Tensor,
-        extra_mem_indexes_cpu: Optional[torch.Tensor],
-    ) -> None:
-        """Free rejected target KV slots and draft-only temporary slots."""
-
-        mem_indexes_cpu = model_input.mem_indexes_cpu
-        if selected_row_mask_cpu is None:
-            free_mask = accepted_index_cpu == 0
-        else:
-            selected_mask = selected_row_mask_cpu.to(dtype=torch.bool)
-            free_mask = selected_mask.logical_not()
-            free_mask[selected_mask] = accepted_index_cpu == 0
-        need_free_mem_indexes = mem_indexes_cpu[free_mask]
-
-        if extra_mem_indexes_cpu is not None:
-            need_free_mem_indexes = torch.cat([need_free_mem_indexes, extra_mem_indexes_cpu], dim=0)
-        if len(need_free_mem_indexes) > 0:
-            self.backend.model.req_manager.mem_manager.free(need_free_mem_indexes)
-
-    # Construction helpers.
-
-    def _build_decode_planner(self) -> BaseMtpPlanner:
-        if not self.enable_dynmaic_mtp:
+    def _build_mtp_planner(self, spec_mode: str, enable_dynmaic_mtp: bool) -> BaseMtpPlanner:
+        if not enable_dynmaic_mtp:
             return FixedSpecPlanner(max_draft_step=self.backend.max_draft_step)
-        if self.spec_mode == "dspark":
+        if spec_mode == "dspark":
             return DSparkPlanner(backend=self.backend)
-
-        return LightSpecPlanner(
-            spec_mode=self.spec_mode,
-            backend=self.backend,
-        )
+        return LightSpecPlanner(spec_mode=spec_mode, backend=self.backend)

@@ -13,6 +13,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
@@ -27,13 +28,11 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = ControlState()
-        self.enable_dynmaic_mtp = False
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         if get_env_start_args().mtp_mode is not None:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.enable_dynmaic_mtp = get_env_start_args().mtp_dynamic_verify
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
@@ -277,7 +276,8 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
-            mtp_accept_len, accepted_index = spec_engine.verify_tokens(
+            mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
+                backend=self,
                 next_token_ids=next_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
@@ -303,7 +303,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
             )
-            spec_engine.scatter_next_tokens(
+            mtp_utils.scatter_mtp_next_tokens(
+                backend=self,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 all_next_token_ids=proposal.token_ids,
                 b_req_idx=model_input.b_req_idx,
@@ -333,7 +334,7 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        run_reqs, verify_ok_reqs = spec_engine.resolve_decode_reqs(
+        run_reqs, verify_ok_reqs = mtp_utils.resolve_mtp_decode_reqs(
             plan=spec_plan,
             verify_event=verify_event,
             run_reqs=run_reqs,
@@ -354,10 +355,11 @@ class ChunkedPrefillBackend(ModeBackend):
             accept_lengths_cpu=mtp_accept_len_cpu,
         )
 
-        spec_engine.record_request_spec_metrics(
+        mtp_utils.record_request_mtp_metrics(
+            backend=self,
             decode_reqs=decode_reqs,
             accept_lengths_cpu=mtp_accept_len_cpu,
-            verified_row_reqs=run_reqs if self.enable_dynmaic_mtp else None,
+            verified_row_reqs=run_reqs,
         )
 
         select_mask = accepted_index_cpu.to(dtype=torch.bool)
@@ -370,7 +372,8 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        spec_engine.free_unused_decode_mem(
+        mtp_utils.free_unused_mtp_decode_mem(
+            backend=self,
             model_input=model_input,
             selected_row_mask_cpu=(
                 async_selected_row_mask_cpu.tensor if async_selected_row_mask_cpu is not None else None

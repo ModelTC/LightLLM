@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
+from lightllm.server.router.model_infer.mode_backend.dp_backend import impl as dp_backend_impl
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
@@ -15,7 +16,6 @@ class _RecordingSpecEngine:
     def __init__(self):
         self.propose_args = None
         self.propose_overlap_args = None
-        self.scatter_args = None
 
     def propose_next(self, **kwargs):
         self.propose_args = kwargs
@@ -34,8 +34,13 @@ class _RecordingSpecEngine:
             extra_mem_indexes_cpu=torch.tensor([456], dtype=torch.int32),
         )
 
-    def scatter_next_tokens(self, **kwargs):
-        self.scatter_args = kwargs
+
+def _capture_scatter_args(monkeypatch):
+    scatter_args = {}
+    monkeypatch.setattr(
+        dp_backend_impl.mtp_utils, "scatter_mtp_next_tokens", lambda **kwargs: scatter_args.update(kwargs)
+    )
+    return scatter_args
 
 
 def test_backends_initialize_their_own_spec_engine():
@@ -90,7 +95,8 @@ def test_padded_token_ids_support_empty_dp_rank():
     assert torch.equal(padded_token_ids, torch.zeros(4, dtype=torch.int64))
 
 
-def test_dp_eagle_uses_common_extend_then_unit_decode_proposer():
+def test_dp_eagle_uses_common_extend_then_unit_decode_proposer(monkeypatch):
+    scatter_args = _capture_scatter_args(monkeypatch)
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.max_draft_step = 7
     backend.spec_engine = _RecordingSpecEngine()
@@ -118,11 +124,12 @@ def test_dp_eagle_uses_common_extend_then_unit_decode_proposer():
     assert torch.equal(propose_args["next_token_ids"][:8], next_token_ids)
     assert torch.equal(propose_args["b_req_mtp_start_loc"], torch.tensor([0, 8], dtype=torch.int32))
     assert torch.equal(propose_args["accept_len"], torch.tensor([2, 1], dtype=torch.int32))
-    assert backend.spec_engine.scatter_args["all_next_token_ids"].shape == (8, 8)
+    assert scatter_args["all_next_token_ids"].shape == (8, 8)
     assert torch.equal(extra_mem, torch.tensor([123], dtype=torch.int32))
 
 
-def test_dp_vanilla_uses_dp_engine_proposer():
+def test_dp_vanilla_uses_dp_engine_proposer(monkeypatch):
+    scatter_args = _capture_scatter_args(monkeypatch)
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.max_draft_step = 7
     backend.spec_engine = _RecordingSpecEngine()
@@ -145,11 +152,12 @@ def test_dp_vanilla_uses_dp_engine_proposer():
     propose_args = backend.spec_engine.propose_args
     assert propose_args["next_token_ids"].shape == (16,)
     assert torch.equal(propose_args["next_token_ids"][:8], next_token_ids)
-    assert backend.spec_engine.scatter_args["all_next_token_ids"].shape == (8, 8)
+    assert scatter_args["all_next_token_ids"].shape == (8, 8)
     assert torch.equal(extra_mem, torch.tensor([123], dtype=torch.int32))
 
 
-def test_dp_overlap_eagle_passes_both_fixed_verify_layouts_to_proposer():
+def test_dp_overlap_eagle_passes_both_fixed_verify_layouts_to_proposer(monkeypatch):
+    scatter_args = _capture_scatter_args(monkeypatch)
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.max_draft_step = 7
     backend.spec_engine = _RecordingSpecEngine()
@@ -190,11 +198,12 @@ def test_dp_overlap_eagle_passes_both_fixed_verify_layouts_to_proposer():
     assert propose_args["real_verify_rows1"] == 16
     assert torch.equal(propose_args["accept_len0"], torch.tensor([2, 1], dtype=torch.int32))
     assert torch.equal(propose_args["accept_len1"], torch.tensor([3, 4], dtype=torch.int32))
-    assert backend.spec_engine.scatter_args["all_next_token_ids"].shape == (24, 8)
+    assert scatter_args["all_next_token_ids"].shape == (24, 8)
     assert torch.equal(extra_mem, torch.tensor([456], dtype=torch.int32))
 
 
-def test_dp_overlap_vanilla_delegates_both_microbatches_to_proposer():
+def test_dp_overlap_vanilla_delegates_both_microbatches_to_proposer(monkeypatch):
+    scatter_args = _capture_scatter_args(monkeypatch)
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.max_draft_step = 7
     backend.spec_engine = _RecordingSpecEngine()
@@ -230,5 +239,5 @@ def test_dp_overlap_vanilla_delegates_both_microbatches_to_proposer():
     assert propose_args["real_verify_rows1"] == 16
     assert propose_args["accept_len0"] is None
     assert propose_args["accept_len1"] is None
-    assert backend.spec_engine.scatter_args["all_next_token_ids"].shape == (24, 8)
+    assert scatter_args["all_next_token_ids"].shape == (24, 8)
     assert torch.equal(extra_mem, torch.tensor([456], dtype=torch.int32))

@@ -17,6 +17,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.dp_engine import DPSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from .control_state import DPControlState
 
 
@@ -546,7 +547,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     dtype=torch.int32,
                 ).cuda(non_blocking=True)
 
-                mtp_accept_len, accepted_index = self.spec_engine.verify_tokens(
+                mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
+                    backend=self,
                     next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
@@ -586,9 +588,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
-            self.spec_engine.record_request_spec_metrics(
+            mtp_utils.record_request_mtp_metrics(
+                backend=self,
                 decode_reqs=decode_reqs,
                 accept_lengths_cpu=mtp_accept_len_cpu,
+                verified_row_reqs=run_reqs,
             )
             verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
@@ -643,7 +647,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         )
 
         if req_num > 0:
-            self.spec_engine.scatter_next_tokens(
+            mtp_utils.scatter_mtp_next_tokens(
+                backend=self,
                 all_next_token_ids=proposal.token_ids[:req_num],
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx[:req_num],
@@ -698,7 +703,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         )
 
         if req_num > 0:
-            self.spec_engine.scatter_next_tokens(
+            mtp_utils.scatter_mtp_next_tokens(
+                backend=self,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 all_next_token_ids=proposal.token_ids[:req_num],
                 b_req_idx=model_input.b_req_idx[:req_num],
@@ -857,7 +863,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     if self.is_linear_att_mixed_model
                     else None
                 )
-                mtp_accept_len, accepted_index = self.spec_engine.verify_tokens(
+                mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
+                    backend=self,
                     next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
@@ -901,9 +908,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num0 + req_num1 > 0:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
-            self.spec_engine.record_request_spec_metrics(
+            mtp_utils.record_request_mtp_metrics(
+                backend=self,
                 decode_reqs=decode_reqs,
                 accept_lengths_cpu=mtp_accept_len_cpu,
+                verified_row_reqs=run_reqs,
             )
             verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
@@ -977,7 +986,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         )
 
         if req_num0 + req_num1 > 0:
-            self.spec_engine.scatter_next_tokens(
+            mtp_utils.scatter_mtp_next_tokens(
+                backend=self,
                 all_next_token_ids=proposal.token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=b_req_idx,
@@ -1049,7 +1059,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         )
 
         if req_num0 + req_num1 > 0:
-            self.spec_engine.scatter_next_tokens(
+            mtp_utils.scatter_mtp_next_tokens(
+                backend=self,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 all_next_token_ids=proposal.token_ids,
                 b_req_idx=b_req_idx,
