@@ -262,12 +262,13 @@ class ChunkedPrefillBackend(ModeBackend):
             )
 
             model_output = self.model.forward(model_input)
+            # 动态 MTP verify 可能只从原始物理 batch 中选择部分行参与 target forward。
+            # 等待异步回传的行选择掩码后，按相同掩码过滤 run_reqs，使请求列表的
+            # 长度和顺序与压缩后的 model_output.logits 保持一一对应，供后续采样使用。
             if async_selected_row_mask_cpu is not None:
                 async_selected_row_mask_cpu.wait()
-                run_reqs = spec_plan.filter_reqs(
-                    reqs=run_reqs,
-                    selected_row_mask_cpu=async_selected_row_mask_cpu.tensor,
-                )
+                selected_row_mask_cpu = async_selected_row_mask_cpu.tensor.tolist()
+                run_reqs = [req for req, selected in zip(run_reqs, selected_row_mask_cpu) if selected]
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
@@ -334,13 +335,15 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        run_reqs, verify_ok_reqs = mtp_utils.resolve_mtp_decode_reqs(
-            plan=spec_plan,
-            verify_event=verify_event,
-            run_reqs=run_reqs,
-            decode_reqs=decode_reqs,
-            accepted_index_cpu=accepted_index_cpu,
-        )
+        # 当 pre_draft_step == 0 时，上一轮没有生成 draft token，本轮每个请求
+        # 只有一个由 target model 产生且必然提交的 token，不存在需要根据
+        # accepted_index_cpu 剔除的 draft 行。因此这里可以直接使用 run_reqs，
+        # 无需等待 verify_event，避免一次不必要的 GPU/CPU 同步。
+        if spec_plan.skip_verify_sync:
+            verify_ok_reqs = run_reqs
+        else:
+            verify_event.synchronize()
+            verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
 
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 

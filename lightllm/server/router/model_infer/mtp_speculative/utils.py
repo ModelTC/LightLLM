@@ -11,14 +11,14 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
     mtp_verify,
 )
-from lightllm.server.router.model_infer.mtp_speculative.planner import SpecDecodePlan
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
 def verify_mtp_tokens(
-    backend,
+    backend: ModeBackend,
     next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
@@ -45,25 +45,8 @@ def verify_mtp_tokens(
     return accept_lengths, accepted_index
 
 
-def resolve_mtp_decode_reqs(
-    plan: SpecDecodePlan,
-    verify_event: torch.cuda.Event,
-    run_reqs: List,
-    decode_reqs: List,
-    accepted_index_cpu: torch.Tensor,
-) -> Tuple[List, List]:
-    """Return requests ready for pre/post handling after verification."""
-
-    if plan.skip_verify_sync:
-        return decode_reqs, decode_reqs
-
-    verify_event.synchronize()
-    verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
-    return run_reqs, verify_ok_reqs
-
-
 def scatter_mtp_next_tokens(
-    backend,
+    backend: ModeBackend,
     b_req_mtp_start_loc: torch.Tensor,
     all_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
@@ -87,7 +70,7 @@ def scatter_mtp_next_tokens(
 
 
 def record_request_mtp_metrics(
-    backend,
+    backend: ModeBackend,
     decode_reqs: List[InferReq],
     accept_lengths_cpu: torch.Tensor,
     verified_row_reqs: List[InferReq],
@@ -109,7 +92,7 @@ def record_request_mtp_metrics(
 
 
 def free_unused_mtp_decode_mem(
-    backend,
+    backend: ModeBackend,
     model_input: ModelInput,
     selected_row_mask_cpu: Optional[torch.Tensor],
     accepted_index_cpu: torch.Tensor,
@@ -135,7 +118,6 @@ def free_unused_mtp_decode_mem(
 __all__ = [
     "free_unused_mtp_decode_mem",
     "record_request_mtp_metrics",
-    "resolve_mtp_decode_reqs",
     "scatter_mtp_next_tokens",
     "verify_mtp_tokens",
 ]

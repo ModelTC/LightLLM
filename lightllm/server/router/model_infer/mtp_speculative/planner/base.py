@@ -37,9 +37,6 @@ class SpecDecodePlan:
     def skip_verify_sync(self) -> bool:
         return self.pre_draft_step == 0
 
-    def filter_reqs(self, reqs: List, selected_row_mask_cpu) -> List:
-        return [req for req, selected in zip(reqs, selected_row_mask_cpu.tolist()) if selected]
-
 
 class BaseMtpPlanner(ABC):
     """定义 SpecEngine 与不同 MTP 规划器之间的统一调用接口。"""

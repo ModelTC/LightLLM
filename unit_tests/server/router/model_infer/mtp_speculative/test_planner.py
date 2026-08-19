@@ -310,18 +310,6 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
     assert proposal.schedule_scores.shape == (2, 0)
 
 
-def test_dynamic_plan_filters_selected_rows():
-    plan = SpecDecodePlan(origin_batch_size=4, dynamic_batch_size=2, draft_step=3, pre_draft_step=3)
-    reqs = ["req0", "req0", "req1", "req1"]
-
-    selected_reqs = plan.filter_reqs(
-        reqs=reqs,
-        selected_row_mask_cpu=torch.tensor([1, 0, 1, 0], dtype=torch.int32),
-    )
-
-    assert selected_reqs == ["req0", "req1"]
-
-
 def test_dynamic_decode_frees_unselected_and_rejected_rows():
     freed = []
     backend = SimpleNamespace(
