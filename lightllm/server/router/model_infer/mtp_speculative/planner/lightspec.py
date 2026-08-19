@@ -121,14 +121,10 @@ class LightSpecPlanner:
         max_batch_size = min(original_batch_size, available_batch_size)
         all_reqs_have_proposals = req_num_with_proposals == req_num
 
-        if (
-            not self.target_infer_costs.has_data()
-            or not self.draft_infer_costs.has_data()
-            or not self.progress_ema_by_config
-        ):
+        if not self.progress_ema_by_config:
             # Costs come from CUDA Graph capture, while progress requires one
             # real verification batch. Keep the available proposal intact until
-            # both parts of J(N, B, d) have an observation.
+            # J(N, B, d) has a progress observation.
             self.pre_draft_step = self.max_draft_step
             return SpecDecodePlan(
                 dynamic_batch_size=max_batch_size,
@@ -202,6 +198,14 @@ class LightSpecPlanner:
             )
         self.progress_ema_by_config[config].update(progress)
 
+        # 只有完整 verify 布局 B = N * (d + 1) 才能统计各 draft 深度的前缀存活率。
+        # 如果 B 被动态压缩，较深位置的候选可能根本没有参与验证；此时把这些位置
+        # 当作未接受会系统性低估深层候选的效果。
+        #
+        # accept_lengths 包含每个请求必然提交的 1 个 target token，因此
+        # accept_lengths > depth 表示该请求至少接受了前 depth 个 draft token。
+        # survival 是第 depth 个 draft token 的前缀存活概率，并通过 EMA 平滑；
+        # planner 使用它估算尚未实际运行过的 (N, B, d) 配置能够提交多少 token。
         if dynamic_batch_size == req_num * (verified_draft_step + 1):
             for depth in range(1, verified_draft_step + 1):
                 survival = float(np.mean(accept_lengths > depth))

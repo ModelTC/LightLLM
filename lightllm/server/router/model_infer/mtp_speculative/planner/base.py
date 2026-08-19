@@ -48,9 +48,6 @@ class _InferCostMsTable:
     def update(self, batch_size: int, infer_cost_ms: float) -> None:
         self.infer_cost_ms_table[int(batch_size)] = float(infer_cost_ms)
 
-    def has_data(self) -> bool:
-        return len(self.infer_cost_ms_table) > 0
-
     def get(self, batch_size: int) -> float:
         batch_size = int(batch_size)
 

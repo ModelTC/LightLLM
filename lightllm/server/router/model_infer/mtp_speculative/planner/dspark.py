@@ -35,13 +35,12 @@ class DSparkPlanner:
 
         full_batch_size = original_batch_size
         dynamic_batch_size = full_batch_size
-        if self.target_infer_costs.has_data() and self.draft_infer_costs.has_data():
-            delayed_batch_size = self._pop_delayed_batch_size(
-                req_num=req_num,
-                max_batch_size=full_batch_size,
-            )
-            if delayed_batch_size is not None:
-                dynamic_batch_size = delayed_batch_size
+        delayed_batch_size = self._pop_delayed_batch_size(
+            req_num=req_num,
+            max_batch_size=full_batch_size,
+        )
+        if delayed_batch_size is not None:
+            dynamic_batch_size = delayed_batch_size
 
         return SpecDecodePlan(
             dynamic_batch_size=dynamic_batch_size,
@@ -92,8 +91,6 @@ class DSparkPlanner:
         """
 
         if req_num <= 0:
-            return
-        if not self.target_infer_costs.has_data() or not self.draft_infer_costs.has_data():
             return
 
         probs = np.asarray(confidence_probs, dtype=np.float64)
