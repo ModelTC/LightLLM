@@ -277,7 +277,7 @@ class TpPartBaseModel:
     def _init_cudagraph(self):
         self.graph = (
             None
-            if self.disable_cudagraph
+            if self.args.run_mode == "prefill" or self.disable_cudagraph
             else CudaGraph(
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
@@ -318,7 +318,7 @@ class TpPartBaseModel:
         Candidate batch sizes follow the same schedule as CUDA Graph capture.
         Actual benchmarking is delegated to ``fa3_decode_autotune`` in ``sgl_utils``.
         """
-        if self.disable_cudagraph:
+        if self.args.run_mode == "prefill" or self.disable_cudagraph:
             return
         # Only tune on the main model; MTP draft models skip this path.
         if getattr(self, "is_mtp_draft_model", False):

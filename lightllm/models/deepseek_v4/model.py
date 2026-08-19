@@ -93,6 +93,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_mem_manager(self):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
+        state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
@@ -102,7 +103,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             compress_rates=self._get_compress_rates(layer_num),
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
-            mtp_step=self.args.mtp_step,
+            mtp_step=state_mtp_step,
             cpu_cache_token_page_size=(
                 DSV4_CPU_CACHE_TOKEN_PAGE_SIZE
                 if self.args.cpu_cache_token_page_size is None
