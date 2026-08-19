@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -10,6 +10,9 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     _EMAValue,
     _InferCostMsTable,
 )
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
 class LightSpecPlanner(BaseMtpPlanner):
@@ -37,7 +40,7 @@ class LightSpecPlanner(BaseMtpPlanner):
     def __init__(
         self,
         spec_mode: str,
-        backend,
+        backend: ModeBackend,
     ) -> None:
         self.spec_mode = spec_mode
         self.backend = backend

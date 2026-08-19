@@ -7,7 +7,7 @@ import pickle
 
 from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Callable, Any, Union
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
@@ -24,6 +24,9 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 logger = init_logger(__name__)
 
@@ -44,15 +47,13 @@ class InferenceContext:
 
     def register(
         self,
-        backend,
+        backend: "ModeBackend",
         req_manager: Union[ReqManager, ReqManagerForMamba],
         radix_cache: Union[LinearAttPagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
     ):
         self.args = get_env_start_args()
-        from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-
         self.backend: ModeBackend = backend
         self.req_manager = req_manager
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager

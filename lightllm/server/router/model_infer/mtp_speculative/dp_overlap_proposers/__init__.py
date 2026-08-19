@@ -1,13 +1,14 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
     from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 
 
 def build_dp_overlap_spec_proposer(
     *,
     spec_mode: str,
-    backend,
+    backend: "ModeBackend",
     enable_dynmaic_mtp: bool,
 ) -> "BaseDpOverlapProposer":
     if spec_mode == "vanilla_with_att":

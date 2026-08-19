@@ -1,4 +1,6 @@
-from typing import Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -8,11 +10,14 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_proposers import buil
 from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.base import BaseDpProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+
 
 class DPSpecEngine:
     """普通 DP prefill/decode 使用的 MTP engine。"""
 
-    def __init__(self, backend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
+    def __init__(self, backend: ModeBackend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
         self.proposer: BaseDpProposer = build_dp_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,

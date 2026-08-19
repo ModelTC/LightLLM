@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 
@@ -11,6 +11,9 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     _InferCostMsTable,
 )
 
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+
 
 class DSparkPlanner(BaseMtpPlanner):
     """DSpark's confidence-based verify-capacity planner.
@@ -19,7 +22,7 @@ class DSparkPlanner(BaseMtpPlanner):
     the target verify capacity two iterations later.
     """
 
-    def __init__(self, backend) -> None:
+    def __init__(self, backend: ModeBackend) -> None:
         self.backend = backend
         self.max_draft_step = int(backend.max_draft_step)
         self.block_size = int(backend.draft_models[0].block_size)

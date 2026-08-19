@@ -1,4 +1,6 @@
-from typing import Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -11,11 +13,14 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers imp
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+
 
 class DPOverlapSpecEngine:
     """双 microbatch overlap draft 流程使用的 DP MTP engine。"""
 
-    def __init__(self, backend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
+    def __init__(self, backend: ModeBackend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
         self.proposer: BaseDpOverlapProposer = build_dp_overlap_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,

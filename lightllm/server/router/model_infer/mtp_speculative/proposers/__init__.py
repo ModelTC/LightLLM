@@ -1,10 +1,11 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
     from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 
 
-def build_spec_proposer(*, spec_mode: str, backend, enable_dynmaic_mtp: bool) -> "BaseSpecProposer":
+def build_spec_proposer(*, spec_mode: str, backend: "ModeBackend", enable_dynmaic_mtp: bool) -> "BaseSpecProposer":
     if spec_mode == "dspark":
         from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
 

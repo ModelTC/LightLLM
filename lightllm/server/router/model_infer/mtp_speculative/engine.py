@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 
@@ -16,6 +16,9 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
 from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
 
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+
 
 class SpecEngine:
     """Owns non-DP MTP planning and draft proposal generation.
@@ -24,7 +27,7 @@ class SpecEngine:
     cleanup are stateless operations exposed by ``mtp_speculative.utils``.
     """
 
-    def __init__(self, backend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
+    def __init__(self, backend: ModeBackend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
         self.backend = backend
         self.proposer: BaseSpecProposer = build_spec_proposer(
             spec_mode=spec_mode,
