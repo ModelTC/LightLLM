@@ -7,6 +7,7 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 
 
@@ -58,7 +59,7 @@ def build_parallel_block_draft_input(
 
     draft_model = proposer.backend.draft_models[0]
     block_size = int(draft_model.block_size)
-    extra_mem_indexes_cpu = proposer.alloc_extra_mem_indexes(request_count * block_size)
+    extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(request_count * block_size)
 
     block_input_ids = next_token_ids.new_full(
         (request_count * block_size,),

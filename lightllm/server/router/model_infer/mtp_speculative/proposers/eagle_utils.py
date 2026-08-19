@@ -8,6 +8,7 @@ from typing import Callable
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
 
 
@@ -135,7 +136,7 @@ def propose_next_eagle(
             schedule_scores=schedule_scores,
         )
 
-    extra_mem_indexes_cpu = proposer.alloc_extra_mem_indexes(request_count * (draft_step - 1))
+    extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(request_count * (draft_step - 1))
     extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids.device, non_blocking=True)
     draft_seq_lens = main_model_input.b_seq_len.index_select(0, accepted_tail_rows) + 1
     max_kv_seq_len = main_model_input.max_kv_seq_len

@@ -7,6 +7,7 @@ from typing import Callable
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
@@ -165,7 +166,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
             model_input.multimodal_params = [empty_multimodal_params] * model_input.batch_size
 
     total_real_request_count = sum(real_request_counts)
-    extra_mem_indexes_cpu = proposer.alloc_extra_mem_indexes(total_real_request_count * (draft_step - 1))
+    extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(total_real_request_count * (draft_step - 1))
     extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids0.device, non_blocking=True)
     hold_mem_index = proposer.backend.model.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX
 
@@ -228,7 +229,7 @@ def propose_next_dp_eagle_fixed_layout_overlap(
     proposal_token_ids[:real_verify_rows0, 0] = next_token_ids0[:real_verify_rows0]
     proposal_token_ids[real_verify_rows0:, 0] = next_token_ids1[:real_verify_rows1]
 
-    extra_mem_indexes_cpu = proposer.alloc_extra_mem_indexes(total_real_request_count * draft_step)
+    extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(total_real_request_count * draft_step)
     extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids0.device, non_blocking=True)
     split = real_request_counts[0] * draft_step
     extra_mem_indexes_by_batch = (

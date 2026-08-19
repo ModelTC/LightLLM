@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle3 import DpOverlapEagle3Proposer
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_with_att import (
     DpOverlapEagleWithAttProposer,
@@ -62,7 +63,7 @@ def _target_input(batch_size):
     )
 
 
-def test_overlap_eagle_keeps_fixed_verify_layout():
+def test_overlap_eagle_keeps_fixed_verify_layout(monkeypatch):
     draft_model = _DraftModel()
     backend = SimpleNamespace(
         max_draft_step=2,
@@ -75,7 +76,11 @@ def test_overlap_eagle_keeps_fixed_verify_layout():
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
     proposer = DpOverlapEagleWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
-    proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
+    monkeypatch.setattr(
+        mtp_utils,
+        "alloc_mem_indexes",
+        lambda token_count: torch.arange(token_count, dtype=torch.int32),
+    )
     model_input0 = _target_input(batch_size=6)
     model_input1 = _target_input(batch_size=6)
 
@@ -109,7 +114,7 @@ def test_overlap_eagle_keeps_fixed_verify_layout():
     assert torch.equal(model_input1.mem_indexes, torch.tensor([2, 2, 4, 5, 3, 5], dtype=torch.int32))
 
 
-def test_autoregressive_eagle_reuses_overlap_inputs():
+def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     draft_model = _DraftModel()
     backend = SimpleNamespace(
         max_draft_step=2,
@@ -122,7 +127,11 @@ def test_autoregressive_eagle_reuses_overlap_inputs():
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
     proposer = DpOverlapEagle3Proposer(backend=backend, enable_dynmaic_mtp=False)
-    proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
+    monkeypatch.setattr(
+        mtp_utils,
+        "alloc_mem_indexes",
+        lambda token_count: torch.arange(token_count, dtype=torch.int32),
+    )
     model_input0 = _target_input(batch_size=6)
     model_input1 = _target_input(batch_size=6)
 

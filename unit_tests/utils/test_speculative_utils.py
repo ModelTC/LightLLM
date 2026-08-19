@@ -13,6 +13,10 @@ from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, Ml
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block_utils import (
+    build_parallel_block_draft_input,
+)
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.utils import envs_utils
 
 
@@ -296,7 +300,7 @@ def test_dflash_reuses_decode_input_for_kv_commit():
     assert model_input.mtp_draft_input_hiddens is target_hidden
 
 
-def test_dflash_expands_position_delta_with_request_block_rows():
+def test_dflash_expands_position_delta_with_request_block_rows(monkeypatch):
     block_size = 3
     proposer = DFlashProposer(
         backend=SimpleNamespace(
@@ -304,7 +308,11 @@ def test_dflash_expands_position_delta_with_request_block_rows():
         ),
         enable_dynmaic_mtp=False,
     )
-    proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
+    monkeypatch.setattr(
+        mtp_utils,
+        "alloc_mem_indexes",
+        lambda token_count: torch.arange(token_count, dtype=torch.int32),
+    )
     model_input = SimpleNamespace(
         b_req_idx=torch.tensor([10, 10, 11, 12, 12], dtype=torch.int32),
         b_seq_len=torch.tensor([4, 5, 7, 8, 9], dtype=torch.int32),
@@ -312,7 +320,8 @@ def test_dflash_expands_position_delta_with_request_block_rows():
         max_kv_seq_len=9,
     )
 
-    draft_input, _ = proposer.build_block_draft_input(
+    draft_input, _ = build_parallel_block_draft_input(
+        proposer=proposer,
         main_model_input=model_input,
         next_token_ids=torch.arange(5, dtype=torch.int64),
         accepted_tail_rows=torch.tensor([1, 4]),

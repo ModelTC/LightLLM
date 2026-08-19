@@ -17,6 +17,20 @@ if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
+def alloc_mem_indexes(token_count: int) -> torch.Tensor:
+    """Allocate temporary KV slots owned by an MTP proposal."""
+
+    token_count = int(token_count)
+    if token_count == 0:
+        return torch.empty((0,), dtype=torch.int32, device="cpu")
+
+    from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+    if g_infer_context.radix_cache is not None:
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_count)
+    return g_infer_context.req_manager.mem_manager.alloc(token_count)
+
+
 def verify_mtp_tokens(
     backend: ModeBackend,
     next_token_ids: torch.Tensor,
@@ -116,6 +130,7 @@ def free_unused_mtp_decode_mem(
 
 
 __all__ = [
+    "alloc_mem_indexes",
     "free_unused_mtp_decode_mem",
     "record_request_mtp_metrics",
     "scatter_mtp_next_tokens",

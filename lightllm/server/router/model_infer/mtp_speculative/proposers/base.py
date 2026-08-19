@@ -46,19 +46,6 @@ class BaseSpecProposer(ABC):
         self.backend = backend
         self.enable_dynmaic_mtp = bool(enable_dynmaic_mtp)
 
-    def alloc_extra_mem_indexes(self, token_count: int) -> torch.Tensor:
-        """Allocate draft-owned temporary KV slots."""
-
-        token_count = int(token_count)
-        if token_count == 0:
-            return torch.empty((0,), dtype=torch.int32, device="cpu")
-
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_count)
-        return g_infer_context.req_manager.mem_manager.alloc(token_count)
-
     @abstractmethod
     def build_draft_state_from_prefill(
         self,
