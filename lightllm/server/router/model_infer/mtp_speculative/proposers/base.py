@@ -36,8 +36,8 @@ class SpecProposal:
 
     `token_ids` has shape `[verify_batch, draft_step + 1]`; column 0 contains
     target-model tokens and the remaining columns contain draft candidates.
-    `extra_mem_indexes_cpu` tracks temporary KV slots owned by the proposal;
-    each item describes one independently managed group of temporary indexes.
+    `extra_mem_indexes_cpu` uniformly tracks every KV slot considered for
+    release, including rejected target rows and proposal-owned temporary rows.
     Mode-specific scheduling metadata belongs to the corresponding subclass.
     """
 

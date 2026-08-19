@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     linear_att_mtp_state_index_update,
     mtp_scatter_next_token_ids,
@@ -124,15 +123,11 @@ def record_request_mtp_metrics(
 
 def free_mem_indexes(
     backend: ModeBackend,
-    mem_indexes_cpu: torch.Tensor,
     extra_mem_indexes_cpu: List[MtpMemIndexesToFree],
 ) -> None:
-    """Free regular KV indexes plus proposal-owned indexes selected by masks."""
+    """Free all KV indexes described by the unified MTP memory list."""
 
     mem_indexes_to_free = []
-    if mem_indexes_cpu.numel() > 0:
-        mem_indexes_to_free.append(mem_indexes_cpu)
-
     for extra_mem_to_free in extra_mem_indexes_cpu:
         extra_indexes_cpu = extra_mem_to_free.mem_indexes_cpu
         if extra_mem_to_free.free_mask_cpu is not None:
@@ -144,35 +139,9 @@ def free_mem_indexes(
         backend.model.req_manager.mem_manager.free(torch.cat(mem_indexes_to_free, dim=0))
 
 
-def free_unused_mtp_decode_mem(
-    backend: ModeBackend,
-    proposal: SpecProposal,
-    model_input: ModelInput,
-    selected_row_mask_cpu: Optional[torch.Tensor],
-    accepted_index_cpu: torch.Tensor,
-) -> None:
-    """Free rejected target KV slots and draft-only temporary slots."""
-
-    mem_indexes_cpu = model_input.mem_indexes_cpu
-    if selected_row_mask_cpu is None:
-        free_mask = accepted_index_cpu == 0
-    else:
-        selected_mask = selected_row_mask_cpu.to(dtype=torch.bool)
-        free_mask = selected_mask.logical_not()
-        free_mask[selected_mask] = accepted_index_cpu == 0
-    need_free_mem_indexes = mem_indexes_cpu[free_mask]
-
-    free_mem_indexes(
-        backend=backend,
-        mem_indexes_cpu=need_free_mem_indexes,
-        extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-    )
-
-
 __all__ = [
     "alloc_mem_indexes",
     "free_mem_indexes",
-    "free_unused_mtp_decode_mem",
     "record_request_mtp_metrics",
     "scatter_mtp_next_tokens",
     "verify_mtp_tokens",

@@ -48,8 +48,8 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
         b_position_delta=torch.arange(12, dtype=torch.int32, device="cuda") + 200,
         b_shared_seq_len=torch.tensor([0, 0, 0, 0, 7, 7, 7, 7, 9, 9, 9, 9], dtype=torch.int32, device="cuda"),
         b_mark_shared_group=torch.tensor([0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 4], dtype=torch.int32, device="cuda"),
-        mem_indexes=torch.arange(12, dtype=torch.int32, device="cuda") + 100,
-        mem_indexes_cpu=torch.arange(12, dtype=torch.int32, device="cpu") + 100,
+        mem_indexes=torch.arange(8, dtype=torch.int32, device="cuda") + 100,
+        mem_indexes_cpu=torch.arange(8, dtype=torch.int32, device="cpu") + 100,
         is_prefill=False,
         multimodal_params=[{"row": i, "images": [], "audios": []} for i in range(12)],
         mtp_draft_input_hiddens=(torch.arange(12 * 5, dtype=torch.float32, device="cuda").reshape(12, 5) + 0.5),
@@ -97,11 +97,11 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
         compacted_input.b_mark_shared_group.cpu(), torch.tensor([0, 0, 3, 1, 0, 0, 0, 4], dtype=torch.int32)
     )
     assert torch.equal(
-        compacted_input.mem_indexes.cpu(), torch.tensor([100, 101, 102, 104, 108, 109, 110, 111], dtype=torch.int32)
+        compacted_input.mem_indexes.cpu(), torch.tensor([100, 101, 102, 103, 104, 105, 106, 107], dtype=torch.int32)
     )
-    # The hot path intentionally keeps the CPU copy unfiltered to avoid a GPU-to-CPU
-    # synchronization. The router frees rejected indexes after its async mask copy.
-    assert torch.equal(compacted_input.mem_indexes_cpu, torch.arange(12, dtype=torch.int32) + 100)
+    # CPU/GPU mem indexes are trimmed by SpecEngine.prepare_decode_model_input
+    # before entering this lower-level row compaction helper.
+    assert torch.equal(compacted_input.mem_indexes_cpu, torch.arange(8, dtype=torch.int32) + 100)
 
     expected_hiddens = (torch.arange(12 * 5, dtype=torch.float32).reshape(12, 5) + 0.5)[expected_selected_rows]
     assert torch.equal(compacted_input.mtp_draft_input_hiddens.cpu(), expected_hiddens)

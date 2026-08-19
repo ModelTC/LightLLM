@@ -77,6 +77,20 @@ class SpecEngine:
             return model_input, None
 
         from lightllm.common.basemodel.triton_kernel.mtp_utils import prepare_dynamic_mtp_model_input
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        # mem_indexes 是本轮 decode 新申请、尚未绑定请求和 token 位置的 KV slot。
+        # 动态 verify 只需要保留 dynamic_batch_size 个任意 slot，因此 CPU 和已存在的
+        # GPU 索引都可以直接截取前缀，无需等待 selected_row_mask_cpu。多申请的 CPU
+        # 尾部索引在这里立即归还；后续 forward 会根据压缩后的 b_req_idx/b_seq_len
+        # 建立保留 slot 与实际请求位置之间的映射。该操作需要放在下方动态输入构建
+        # 之前，避免其内部 to_cuda 将原始完整 batch 的 mem indexes 全量复制到 GPU。
+        unused_mem_indexes_cpu = model_input.mem_indexes_cpu[plan.dynamic_batch_size :]
+        model_input.mem_indexes_cpu = model_input.mem_indexes_cpu[: plan.dynamic_batch_size]
+        if model_input.mem_indexes is not None:
+            model_input.mem_indexes = model_input.mem_indexes[: plan.dynamic_batch_size]
+        if unused_mem_indexes_cpu.numel() > 0:
+            g_infer_context.req_manager.mem_manager.free(unused_mem_indexes_cpu)
 
         model_input, selected_row_mask = prepare_dynamic_mtp_model_input(
             model_input=model_input,

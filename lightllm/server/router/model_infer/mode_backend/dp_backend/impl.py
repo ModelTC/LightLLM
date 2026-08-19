@@ -18,6 +18,7 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.dp_engine import DPSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from .control_state import DPControlState
 
 
@@ -600,7 +601,13 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第三阶段
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            need_free_mem_indexes = model_input.mem_indexes_cpu[0:req_num][accepted_index_cpu == 0]
+            extra_mem_indexes_cpu.insert(
+                0,
+                MtpMemIndexesToFree(
+                    mem_indexes_cpu=model_input.mem_indexes_cpu[0:req_num],
+                    free_mask_cpu=accepted_index_cpu == 0,
+                ),
+            )
 
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
@@ -613,7 +620,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
             mtp_utils.free_mem_indexes(
                 backend=self,
-                mem_indexes_cpu=need_free_mem_indexes,
                 extra_mem_indexes_cpu=extra_mem_indexes_cpu,
             )
 
@@ -924,7 +930,13 @@ class DPChunkedPrefillBackend(ModeBackend):
             mem_indexes_cpu = torch.cat(
                 (model_input0.mem_indexes_cpu[0:req_num0], model_input1.mem_indexes_cpu[0:req_num1]), dim=0
             )
-            need_free_mem_indexes = mem_indexes_cpu[accepted_index_cpu == 0]
+            extra_mem_indexes_cpu.insert(
+                0,
+                MtpMemIndexesToFree(
+                    mem_indexes_cpu=mem_indexes_cpu,
+                    free_mask_cpu=accepted_index_cpu == 0,
+                ),
+            )
 
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
@@ -937,7 +949,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
             mtp_utils.free_mem_indexes(
                 backend=self,
-                mem_indexes_cpu=need_free_mem_indexes,
                 extra_mem_indexes_cpu=extra_mem_indexes_cpu,
             )
             event_pack.notify_pre_post_handle()

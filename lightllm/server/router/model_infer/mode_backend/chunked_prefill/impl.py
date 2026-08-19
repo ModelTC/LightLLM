@@ -14,6 +14,7 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
@@ -267,8 +268,8 @@ class ChunkedPrefillBackend(ModeBackend):
             # 长度和顺序与压缩后的 model_output.logits 保持一一对应，供后续采样使用。
             if async_selected_row_mask_cpu is not None:
                 async_selected_row_mask_cpu.wait()
-                selected_row_mask_cpu = async_selected_row_mask_cpu.tensor.tolist()
-                run_reqs = [req for req, selected in zip(run_reqs, selected_row_mask_cpu) if selected]
+                selected_rows = async_selected_row_mask_cpu.tensor.tolist()
+                run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
@@ -374,14 +375,16 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        mtp_utils.free_unused_mtp_decode_mem(
-            backend=self,
-            proposal=proposal,
-            model_input=model_input,
-            selected_row_mask_cpu=(
-                async_selected_row_mask_cpu.tensor if async_selected_row_mask_cpu is not None else None
+        proposal.extra_mem_indexes_cpu.insert(
+            0,
+            MtpMemIndexesToFree(
+                mem_indexes_cpu=model_input.mem_indexes_cpu,
+                free_mask_cpu=accepted_index_cpu == 0,
             ),
-            accepted_index_cpu=accepted_index_cpu,
+        )
+        mtp_utils.free_mem_indexes(
+            backend=self,
+            extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
         )
 
         # 第四阶段

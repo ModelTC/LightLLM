@@ -213,8 +213,6 @@ def _fwd_kernel_compact_dynamic_mtp_model_input(
     out_b_seq_len,
     b_position_delta,
     out_b_position_delta,
-    mem_indexes,
-    out_mem_indexes,
     b_shared_seq_len,
     out_b_shared_seq_len,
     selected_mask,
@@ -222,7 +220,6 @@ def _fwd_kernel_compact_dynamic_mtp_model_input(
     batch_size,
     HAS_INPUT_IDS: tl.constexpr,
     HAS_B_POSITION_DELTA: tl.constexpr,
-    HAS_MEM_INDEXES: tl.constexpr,
     HAS_B_SHARED_SEQ_LEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -249,10 +246,6 @@ def _fwd_kernel_compact_dynamic_mtp_model_input(
     if HAS_B_POSITION_DELTA:
         position_delta = tl.load(b_position_delta + offsets, mask=mask, other=0)
         tl.store(out_b_position_delta + dst_pos, position_delta, mask=write_mask)
-
-    if HAS_MEM_INDEXES:
-        mem_index = tl.load(mem_indexes + offsets, mask=mask, other=0)
-        tl.store(out_mem_indexes + dst_pos, mem_index, mask=write_mask)
 
     if HAS_B_SHARED_SEQ_LEN:
         shared_seq_len = tl.load(b_shared_seq_len + offsets, mask=mask, other=0)
@@ -428,15 +421,6 @@ def _compact_decode_model_input(
             device=model_input.b_position_delta.device,
         )
 
-    out_mem_indexes = None
-    if model_input.mem_indexes is not None:
-        assert model_input.mem_indexes.is_cuda
-        out_mem_indexes = torch.empty(
-            (dynamic_batch_size,),
-            dtype=model_input.mem_indexes.dtype,
-            device=model_input.mem_indexes.device,
-        )
-
     dummy_1d = model_input.b_req_idx
     BLOCK_SIZE = triton.next_power_of_2(old_batch_size)
     grid = (1,)
@@ -451,8 +435,6 @@ def _compact_decode_model_input(
         out_b_seq_len=out_b_seq_len,
         b_position_delta=model_input.b_position_delta if model_input.b_position_delta is not None else dummy_1d,
         out_b_position_delta=out_b_position_delta if out_b_position_delta is not None else dummy_1d,
-        mem_indexes=model_input.mem_indexes if model_input.mem_indexes is not None else dummy_1d,
-        out_mem_indexes=out_mem_indexes if out_mem_indexes is not None else dummy_1d,
         b_shared_seq_len=model_input.b_shared_seq_len if model_input.b_shared_seq_len is not None else dummy_1d,
         out_b_shared_seq_len=out_b_shared_seq_len if out_b_shared_seq_len is not None else dummy_1d,
         selected_mask=selected_row_mask,
@@ -460,7 +442,6 @@ def _compact_decode_model_input(
         batch_size=old_batch_size,
         HAS_INPUT_IDS=model_input.input_ids is not None,
         HAS_B_POSITION_DELTA=model_input.b_position_delta is not None,
-        HAS_MEM_INDEXES=model_input.mem_indexes is not None,
         HAS_B_SHARED_SEQ_LEN=model_input.b_shared_seq_len is not None,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,
@@ -472,7 +453,6 @@ def _compact_decode_model_input(
     model_input.b_mtp_index = out_b_mtp_index
     model_input.b_seq_len = out_b_seq_len
     model_input.b_position_delta = out_b_position_delta
-    model_input.mem_indexes = out_mem_indexes
     model_input.b_shared_seq_len = out_b_shared_seq_len
     model_input.b_mark_shared_group = _rebuild_mtp_group_markers(
         out_b_req_idx,
@@ -513,6 +493,7 @@ def prepare_dynamic_mtp_model_input(
 
     # All compaction work stays on the current CUDA stream and needs no host sync.
     model_input.to_cuda()
+    assert model_input.mem_indexes.shape[0] == dynamic_batch_size
 
     selected_row_mask = sample_dynamic_mtp_row_mask(
         dynamic_batch_size=dynamic_batch_size,
@@ -528,12 +509,9 @@ def prepare_dynamic_mtp_model_input(
         dynamic_batch_size=dynamic_batch_size,
         max_draft_step=max_draft_step,
     )
-    # Keep CPU mem_indexes unfiltered here. Copying selected_row_mask back to
-    # CPU in this hot path synchronizes the overlap stream; the router frees
-    # unselected/rejected CPU mem indexes after its existing async mask copy is
-    # consumed. Decode and draft-cache commit use the compacted
-    # b_position_delta, so placeholder multimodal metadata only needs to keep
-    # ModelInput shapes consistent.
+    # Decode and draft-cache commit use the compacted b_position_delta, so
+    # placeholder multimodal metadata only needs to keep ModelInput shapes
+    # consistent.
     if model_input.multimodal_params is not None:
         # Read-only placeholders: avoid rebuilding hundreds of nested Python
         # objects on every compacted decode iteration.
