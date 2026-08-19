@@ -537,7 +537,7 @@ def test_engine_lets_planner_count_requests_with_a_previous_proposal():
 
 
 def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypatch):
-    from lightllm.common.basemodel.triton_kernel import mtp_utils as common_mtp_utils
+    from lightllm.common.basemodel.triton_kernel import dynamic_mtp_utils
     from lightllm.server.router.model_infer import infer_batch as infer_batch_module
     from lightllm.server.router.model_infer.mtp_speculative import engine as engine_module
 
@@ -551,7 +551,7 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
     )
     selected_row_mask = torch.tensor([1, 0, 1, 0], dtype=torch.int32)
     monkeypatch.setattr(
-        common_mtp_utils,
+        dynamic_mtp_utils,
         "prepare_dynamic_mtp_model_input",
         lambda model_input, **kwargs: (model_input, selected_row_mask),
     )

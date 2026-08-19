@@ -76,7 +76,7 @@ class SpecEngine:
         if plan.dynamic_batch_size == plan.origin_batch_size:
             return model_input, None
 
-        from lightllm.common.basemodel.triton_kernel.mtp_utils import prepare_dynamic_mtp_model_input
+        from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import prepare_dynamic_mtp_model_input
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
         # mem_indexes 是本轮 decode 新申请、尚未绑定请求和 token 位置的 KV slot。
