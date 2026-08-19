@@ -5,6 +5,42 @@ import pytest
 import torch
 
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
+from lightllm.server.router.model_infer.mtp_speculative.dp_planner import (
+    BaseDpPlanner,
+    FixedDpPlanner,
+    build_dp_planner,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_planner import (
+    BaseDpOverlapPlanner,
+    FixedDpOverlapPlanner,
+    build_dp_overlap_planner,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers import build_dp_spec_proposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.base import BaseDpProposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.eagle3 import DpEagle3Proposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.eagle_no_att import DpEagleNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.eagle_with_att import DpEagleWithAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.vanilla_no_att import DpVanillaNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.vanilla_with_att import (
+    DpVanillaWithAttProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers import (
+    build_dp_overlap_spec_proposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle3 import DpOverlapEagle3Proposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_no_att import (
+    DpOverlapEagleNoAttProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_with_att import (
+    DpOverlapEagleWithAttProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_no_att import (
+    DpOverlapVanillaNoAttProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_with_att import (
+    DpOverlapVanillaWithAttProposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative.planner import (
     BaseMtpPlanner,
     DSparkPlanner,
@@ -13,16 +49,15 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
     SpecDecodePlan,
 )
 from lightllm.server.router.model_infer.mtp_speculative.planner.base import _InferCostMsTable
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_mtp import (
-    AutoregressiveEagleProposer,
-    EagleMTPProposer,
-)
-from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block import ParallelBlockProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_mtp import VanillaMTPProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import EagleNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import VanillaWithAttProposer
 
 
 def build_lightspec_planner(
@@ -53,9 +88,9 @@ def build_dspark_planner(max_draft_step: int = 3, block_size: int = 3):
 def build_decode_reqs(req_num: int, req_num_with_proposals: int | None = None):
     if req_num_with_proposals is None:
         req_num_with_proposals = req_num
-    return [SimpleNamespace(cur_output_len=2)] * req_num_with_proposals + [
-        SimpleNamespace(cur_output_len=1)
-    ] * (req_num - req_num_with_proposals)
+    return [SimpleNamespace(cur_output_len=2)] * req_num_with_proposals + [SimpleNamespace(cur_output_len=1)] * (
+        req_num - req_num_with_proposals
+    )
 
 
 def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
@@ -79,6 +114,22 @@ def test_fixed_planner_returns_static_plan():
     assert plan.dynamic_batch_size is None
     assert plan.draft_step == plan.pre_draft_step == 3
     assert not plan.skip_verify_sync
+
+
+def test_dp_planner_returns_fixed_backend_draft_step():
+    planner = build_dp_planner(backend=SimpleNamespace(max_draft_step=4))
+
+    assert type(planner) is FixedDpPlanner
+    assert isinstance(planner, BaseDpPlanner)
+    assert planner.get_draft_step() == 4
+
+
+def test_dp_overlap_planner_returns_fixed_backend_draft_step():
+    planner = build_dp_overlap_planner(backend=SimpleNamespace(max_draft_step=5))
+
+    assert type(planner) is FixedDpOverlapPlanner
+    assert isinstance(planner, BaseDpOverlapPlanner)
+    assert planner.get_draft_step() == 5
 
 
 def test_infer_cost_candidates_include_feasible_boundaries():
@@ -135,16 +186,90 @@ def test_dynamic_planner_registers_cuda_graph_costs_from_backend():
     assert planner.draft_infer_costs.estimate(4) == 0.3
 
 
-def test_proposer_families_use_drafter_standard_abstractions():
-    assert issubclass(EagleMTPProposer, AutoregressiveEagleProposer)
-    assert issubclass(Eagle3Proposer, AutoregressiveEagleProposer)
-    assert issubclass(DFlashProposer, ParallelBlockProposer)
-    assert issubclass(DSparkProposer, ParallelBlockProposer)
-    assert not issubclass(DSparkProposer, DFlashProposer)
+def test_each_mode_proposer_only_inherits_its_base_interface():
+    proposer_types = (
+        VanillaWithAttProposer,
+        VanillaNoAttProposer,
+        EagleWithAttProposer,
+        EagleNoAttProposer,
+        Eagle3Proposer,
+        DFlashProposer,
+        DSparkProposer,
+    )
+    dp_proposer_types = (
+        DpVanillaWithAttProposer,
+        DpVanillaNoAttProposer,
+        DpEagleWithAttProposer,
+        DpEagleNoAttProposer,
+        DpEagle3Proposer,
+    )
+    dp_overlap_proposer_types = (
+        DpOverlapVanillaWithAttProposer,
+        DpOverlapVanillaNoAttProposer,
+        DpOverlapEagleWithAttProposer,
+        DpOverlapEagleNoAttProposer,
+        DpOverlapEagle3Proposer,
+    )
+
+    for proposer_type in proposer_types:
+        assert proposer_type.__bases__ == (BaseSpecProposer,)
+    for proposer_type in dp_proposer_types:
+        assert proposer_type.__bases__ == (BaseDpProposer,)
+    for proposer_type in dp_overlap_proposer_types:
+        assert proposer_type.__bases__ == (BaseDpOverlapProposer,)
+
+
+def test_each_mtp_mode_builds_its_own_proposer():
+    backend = SimpleNamespace()
+    proposer_types = {
+        "vanilla_with_att": VanillaWithAttProposer,
+        "vanilla_no_att": VanillaNoAttProposer,
+        "eagle_with_att": EagleWithAttProposer,
+        "eagle_no_att": EagleNoAttProposer,
+        "eagle3": Eagle3Proposer,
+        "dflash": DFlashProposer,
+        "dspark": DSparkProposer,
+    }
+
+    for spec_mode, proposer_type in proposer_types.items():
+        proposer = build_spec_proposer(spec_mode=spec_mode, backend=backend, enable_dynmaic_mtp=False)
+        assert type(proposer) is proposer_type
+
+
+def test_each_supported_dp_mtp_mode_builds_its_own_dp_proposer():
+    backend = SimpleNamespace()
+    proposer_types = {
+        "vanilla_with_att": DpVanillaWithAttProposer,
+        "vanilla_no_att": DpVanillaNoAttProposer,
+        "eagle_with_att": DpEagleWithAttProposer,
+        "eagle_no_att": DpEagleNoAttProposer,
+        "eagle3": DpEagle3Proposer,
+    }
+
+    for spec_mode, proposer_type in proposer_types.items():
+        proposer = build_dp_spec_proposer(spec_mode=spec_mode, backend=backend, enable_dynmaic_mtp=False)
+        assert type(proposer) is proposer_type
+        assert isinstance(proposer, BaseDpProposer)
+
+
+def test_each_supported_dp_overlap_mtp_mode_builds_its_own_proposer():
+    backend = SimpleNamespace()
+    proposer_types = {
+        "vanilla_with_att": DpOverlapVanillaWithAttProposer,
+        "vanilla_no_att": DpOverlapVanillaNoAttProposer,
+        "eagle_with_att": DpOverlapEagleWithAttProposer,
+        "eagle_no_att": DpOverlapEagleNoAttProposer,
+        "eagle3": DpOverlapEagle3Proposer,
+    }
+
+    for spec_mode, proposer_type in proposer_types.items():
+        proposer = build_dp_overlap_spec_proposer(spec_mode=spec_mode, backend=backend, enable_dynmaic_mtp=False)
+        assert type(proposer) is proposer_type
+        assert isinstance(proposer, BaseDpOverlapProposer)
 
 
 def test_eagle_proposer_skips_draft_forward_for_zero_steps():
-    proposer = EagleMTPProposer(
+    proposer = EagleNoAttProposer(
         backend=SimpleNamespace(draft_models=[]),
         enable_dynmaic_mtp=True,
     )

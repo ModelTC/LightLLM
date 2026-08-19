@@ -4,17 +4,34 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
-from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block import ParallelBlockProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block_utils import (
+    build_parallel_block_draft_input,
+    build_parallel_block_draft_state_from_prefill,
+    extend_parallel_block_draft_kv_cache,
+)
 
 
-class DSparkProposer(ParallelBlockProposer):
+class DSparkProposer(BaseSpecProposer):
     """DSpark semi-autoregressive parallel-block proposer.
 
     A parallel DFlash-style backbone generates the block features in one pass;
     a lightweight sequential Markov head adds intra-block token dependency.
     The confidence head supplies per-position scheduling scores.
     """
+
+    def build_draft_state_from_prefill(
+        self,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
+        next_token_ids: torch.Tensor,
+    ) -> None:
+        build_parallel_block_draft_state_from_prefill(
+            proposer=self,
+            target_model_input=target_model_input,
+            target_model_output=target_model_output,
+            next_token_ids=next_token_ids,
+        )
 
     @torch.no_grad()
     def propose_next(
@@ -46,13 +63,15 @@ class DSparkProposer(ParallelBlockProposer):
         )
 
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
-        draft_input, extra_mem_indexes_cpu = self.build_block_draft_input(
+        draft_input, extra_mem_indexes_cpu = build_parallel_block_draft_input(
+            proposer=self,
             main_model_input=main_model_input,
             next_token_ids=next_token_ids,
             accepted_tail_rows=accepted_tail_rows,
             request_count=request_count,
         )
-        self.extend_draft_kv_cache(
+        extend_parallel_block_draft_kv_cache(
+            proposer=self,
             main_model_input=main_model_input,
             target_hidden=main_model_output.mtp_collector.spec_hidden,
         )

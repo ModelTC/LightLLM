@@ -17,14 +17,24 @@ def build_spec_proposer(*, spec_mode: str, backend, enable_dynmaic_mtp: bool) ->
         from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 
         return Eagle3Proposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
-    if spec_mode in ("eagle_with_att", "eagle_no_att"):
-        from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_mtp import EagleMTPProposer
+    if spec_mode == "eagle_with_att":
+        from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 
-        return EagleMTPProposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
-    if spec_mode in ("vanilla_with_att", "vanilla_no_att"):
-        from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_mtp import VanillaMTPProposer
+        return EagleWithAttProposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
+    if spec_mode == "eagle_no_att":
+        from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import EagleNoAttProposer
 
-        return VanillaMTPProposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
+        return EagleNoAttProposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
+    if spec_mode == "vanilla_with_att":
+        from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import (
+            VanillaWithAttProposer,
+        )
+
+        return VanillaWithAttProposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
+    if spec_mode == "vanilla_no_att":
+        from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
+
+        return VanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
 
     raise ValueError(f"unsupported speculative mode: {spec_mode}")
 

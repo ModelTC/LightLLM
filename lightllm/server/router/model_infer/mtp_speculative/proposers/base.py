@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -32,7 +33,7 @@ class SpecProposal:
     schedule_scores_cpu: Optional[torch.Tensor] = None
 
 
-class BaseSpecProposer:
+class BaseSpecProposer(ABC):
     """Base class for algorithm-specific draft proposal generation.
 
     A proposer owns the draft-side state transition. The target model gives it
@@ -58,6 +59,7 @@ class BaseSpecProposer:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_count)
         return g_infer_context.req_manager.mem_manager.alloc(token_count)
 
+    @abstractmethod
     def build_draft_state_from_prefill(
         self,
         target_model_input: ModelInput,
@@ -79,19 +81,7 @@ class BaseSpecProposer:
 
         raise NotImplementedError
 
-    def build_draft_state_from_prefill_overlap(
-        self,
-        target_model_input0: ModelInput,
-        target_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
-        target_model_input1: ModelInput,
-        target_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
-    ) -> None:
-        """Build draft state from two overlapped target-prefill microbatches."""
-
-        raise NotImplementedError
-
+    @abstractmethod
     def propose_next(
         self,
         main_model_input: ModelInput,
@@ -109,23 +99,5 @@ class BaseSpecProposer:
 
         Column 0 of the returned proposal must equal `next_token_ids`.
         """
-
-        raise NotImplementedError
-
-    def propose_next_overlap(
-        self,
-        main_model_input0: ModelInput,
-        main_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
-        real_verify_rows0: int,
-        accept_len0: torch.Tensor,
-        main_model_input1: ModelInput,
-        main_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
-        real_verify_rows1: int,
-        accept_len1: torch.Tensor,
-        draft_step: int,
-    ) -> SpecProposal:
-        """Generate a proposal for two DP-overlapped microbatches."""
 
         raise NotImplementedError

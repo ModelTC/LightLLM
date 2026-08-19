@@ -15,6 +15,8 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.mtp_speculative.dp_engine import DPSpecEngine
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from .control_state import DPControlState
 
 
@@ -63,6 +65,22 @@ class DPChunkedPrefillBackend(ModeBackend):
                 self.decode = self.decode_normal
 
         self.classed_req_strict_prefill = False
+        return
+
+    def init_spec_engine(self):
+        engine_kwargs = dict(
+            backend=self,
+            spec_mode=self.args.mtp_mode,
+            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
+        )
+        self.spec_engine = DPSpecEngine(**engine_kwargs)
+        self.dp_overlap_spec_engine = DPOverlapSpecEngine(**engine_kwargs)
+        self.prefill_draft_engine = (
+            self.dp_overlap_spec_engine if self.enable_prefill_microbatch_overlap else self.spec_engine
+        )
+        self.decode_draft_engine = (
+            self.dp_overlap_spec_engine if self.enable_decode_microbatch_overlap else self.spec_engine
+        )
         return
 
     @staticmethod
@@ -458,7 +476,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 copy_len=req_num,
                 device=model_input.b_req_idx.device,
             )
-            self.spec_engine.build_draft_state_from_prefill(
+            self.prefill_draft_engine.build_draft_state_from_prefill(
                 target_model_input=model_input,
                 target_model_output=model_output,
                 next_token_ids=draft_next_token_ids_gpu,
@@ -611,38 +629,27 @@ class DPChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         req_num: int,
     ):
-        all_next_token_ids = []
-        # share some inference info with the main model
-        draft_model_input = model_input
-        draft_hidden = model_output.mtp_collector.spec_hidden
-        draft_next_token_ids_gpu = self._build_padded_next_token_ids(
+        padded_next_token_ids = self._build_padded_next_token_ids(
             token_ids=next_token_ids,
             batch_size=model_input.batch_size,
             copy_len=req_num,
             device=model_input.b_req_idx.device,
         )
-
-        all_next_token_ids.append(draft_next_token_ids_gpu)
-
-        # process the draft model output
-        for draft_model_idx in range(self.max_draft_step):
-            draft_model_input.input_ids = draft_next_token_ids_gpu
-            draft_model_input.mtp_draft_input_hiddens = draft_hidden
-            # spec decode: MTP
-            draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
-            draft_hidden = draft_model_output.mtp_collector.spec_hidden
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-            all_next_token_ids.append(draft_next_token_ids_gpu)
+        proposal = self.decode_draft_engine.propose_next(
+            main_model_input=model_input,
+            main_model_output=model_output,
+            next_token_ids=padded_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+        )
 
         if req_num > 0:
-            stacked_next_token_ids = torch.stack(all_next_token_ids, dim=1)[:req_num]
             self.spec_engine.scatter_next_tokens(
-                all_next_token_ids=stacked_next_token_ids,
+                all_next_token_ids=proposal.token_ids[:req_num],
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx[:req_num],
                 mtp_accept_len=mtp_accept_len,
             )
-        return None
+        return proposal.extra_mem_indexes_cpu
 
     def _draft_decode_eagle(
         self,
@@ -682,12 +689,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         # agreement.  The proposer still follows the common topology: one
         # full-row extend, followed by autoregressive drafting over one row per
         # (real or HOLD) request.
-        proposal = self.spec_engine.propose_next(
+        proposal = self.decode_draft_engine.propose_next(
             main_model_input=model_input,
             main_model_output=model_output,
             next_token_ids=padded_next_token_ids,
             b_req_mtp_start_loc=padded_start_locs,
-            draft_step=self.max_draft_step,
             accept_len=padded_accept_len,
         )
 
@@ -759,7 +765,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 source_start=req_num0,
             )
 
-            self.spec_engine.build_draft_state_from_prefill_overlap(
+            self.prefill_draft_engine.build_draft_state_from_prefill_overlap(
                 target_model_input0=model_input0,
                 target_model_output0=model_output0,
                 next_token_ids0=draft_next_token_ids_gpu0,
@@ -942,21 +948,14 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num0: int = 0,
         req_num1: int = 0,
     ):
-        all_next_token_ids = []
-        all_next_token_ids.append(next_token_ids)
-        # share some inference info with the main model
-        draft_model_input0, draft_model_input1 = model_input0, model_input1
-        draft_hidden0 = model_output0.mtp_collector.spec_hidden
-        draft_hidden1 = model_output1.mtp_collector.spec_hidden
-
-        draft_next_token_ids_gpu0 = self._build_padded_next_token_ids(
+        padded_next_token_ids0 = self._build_padded_next_token_ids(
             token_ids=next_token_ids,
             batch_size=model_input0.batch_size,
             copy_len=req_num0,
             device=model_input0.b_req_idx.device,
             source_start=0,
         )
-        draft_next_token_ids_gpu1 = self._build_padded_next_token_ids(
+        padded_next_token_ids1 = self._build_padded_next_token_ids(
             token_ids=next_token_ids,
             batch_size=model_input1.batch_size,
             copy_len=req_num1,
@@ -964,35 +963,27 @@ class DPChunkedPrefillBackend(ModeBackend):
             source_start=req_num0,
         )
 
-        # process the draft model output
-        for draft_model_idx in range(self.max_draft_step):
-            draft_model_input0.input_ids = draft_next_token_ids_gpu0
-            draft_model_input0.mtp_draft_input_hiddens = draft_hidden0
-            draft_model_input1.input_ids = draft_next_token_ids_gpu1
-            draft_model_input1.mtp_draft_input_hiddens = draft_hidden1
-
-            draft_model_output0, draft_model_output1 = self.draft_models[draft_model_idx].microbatch_overlap_decode(
-                draft_model_input0, draft_model_input1
-            )
-            draft_hidden0 = draft_model_output0.mtp_collector.spec_hidden
-            draft_hidden1 = draft_model_output1.mtp_collector.spec_hidden
-
-            draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
-            draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)
-            draft_next_token_ids = torch.cat(
-                (draft_next_token_ids_gpu0[0:req_num0], draft_next_token_ids_gpu1[0:req_num1]), dim=0
-            )
-            all_next_token_ids.append(draft_next_token_ids)
+        proposal = self.decode_draft_engine.propose_next_overlap(
+            main_model_input0=model_input0,
+            main_model_output0=model_output0,
+            next_token_ids0=padded_next_token_ids0,
+            real_verify_rows0=req_num0,
+            accept_len0=None,
+            main_model_input1=model_input1,
+            main_model_output1=model_output1,
+            next_token_ids1=padded_next_token_ids1,
+            real_verify_rows1=req_num1,
+            accept_len1=None,
+        )
 
         if req_num0 + req_num1 > 0:
-            stacked_next_token_ids = torch.stack(all_next_token_ids, dim=1)
             self.spec_engine.scatter_next_tokens(
-                all_next_token_ids=stacked_next_token_ids,
+                all_next_token_ids=proposal.token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=b_req_idx,
                 mtp_accept_len=mtp_accept_len,
             )
-        return None
+        return proposal.extra_mem_indexes_cpu
 
     def _draft_decode_eagle_overlap(
         self,
@@ -1044,7 +1035,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 mtp_accept_len[real_request_num0 : real_request_num0 + real_request_num1]
             )
 
-        proposal = self.spec_engine.propose_next_overlap(
+        proposal = self.decode_draft_engine.propose_next_overlap(
             main_model_input0=model_input0,
             main_model_output0=model_output0,
             next_token_ids0=padded_next_token_ids0,
@@ -1055,7 +1046,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             next_token_ids1=padded_next_token_ids1,
             real_verify_rows1=req_num1,
             accept_len1=padded_accept_len1,
-            draft_step=self.max_draft_step,
         )
 
         if req_num0 + req_num1 > 0:

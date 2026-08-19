@@ -12,6 +12,7 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
@@ -38,6 +39,14 @@ class ChunkedPrefillBackend(ModeBackend):
             self.decode = self.decode_normal
 
         self.classed_req_strict_prefill = False
+        return
+
+    def init_spec_engine(self):
+        self.spec_engine = SpecEngine(
+            backend=self,
+            spec_mode=self.args.mtp_mode,
+            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
+        )
         return
 
     def infer_loop(self):

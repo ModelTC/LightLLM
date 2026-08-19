@@ -36,7 +36,6 @@ from lightllm.utils.envs_utils import (
     get_radix_tree_merge_update_delta,
 )
 from lightllm.distributed import dist_group_manager
-from lightllm.server.router.model_infer.mtp_speculative import SpecEngine
 from lightllm.distributed.communication_op import (
     all_gather_into_tensor,
     all_reduce,
@@ -243,7 +242,9 @@ class ModeBackend:
         # 只会在 pd pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
-        self.init_spec_engine(model_kvargs)
+        if self.args.mtp_mode is not None:
+            self.init_mtp_draft_model(model_kvargs)
+            self.init_spec_engine()
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
@@ -295,17 +296,6 @@ class ModeBackend:
 
     def decode(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         raise NotImplementedError()
-
-    def init_spec_engine(self, main_kvargs: dict):
-        if self.args.mtp_mode is None:
-            return
-        self.init_mtp_draft_model(main_kvargs)
-        self.spec_engine = SpecEngine(
-            backend=self,
-            spec_mode=self.args.mtp_mode,
-            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
-        )
-        return
 
     def init_mtp_draft_model(self, main_kvargs: dict):
         self.max_draft_step = self.args.mtp_step

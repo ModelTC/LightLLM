@@ -20,7 +20,7 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
     SpecDecodePlan,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
 
 
 class SpecEngine:
@@ -35,7 +35,7 @@ class SpecEngine:
         self.backend = backend
         self.spec_mode = spec_mode
         self.enable_dynmaic_mtp = enable_dynmaic_mtp
-        self.proposer = build_spec_proposer(
+        self.proposer: BaseSpecProposer = build_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,
             enable_dynmaic_mtp=enable_dynmaic_mtp,
@@ -54,24 +54,6 @@ class SpecEngine:
             target_model_input=target_model_input,
             target_model_output=target_model_output,
             next_token_ids=next_token_ids,
-        )
-
-    def build_draft_state_from_prefill_overlap(
-        self,
-        target_model_input0: ModelInput,
-        target_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
-        target_model_input1: ModelInput,
-        target_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
-    ) -> None:
-        self.proposer.build_draft_state_from_prefill_overlap(
-            target_model_input0=target_model_input0,
-            target_model_output0=target_model_output0,
-            next_token_ids0=next_token_ids0,
-            target_model_input1=target_model_input1,
-            target_model_output1=target_model_output1,
-            next_token_ids1=next_token_ids1,
         )
 
     # Decode planning and target verification.
@@ -175,37 +157,6 @@ class SpecEngine:
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=draft_step,
             accept_len=accept_len,
-        )
-
-    def propose_next_overlap(
-        self,
-        main_model_input0: ModelInput,
-        main_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
-        real_verify_rows0: int,
-        accept_len0: torch.Tensor,
-        main_model_input1: ModelInput,
-        main_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
-        real_verify_rows1: int,
-        accept_len1: torch.Tensor,
-        draft_step: int,
-    ) -> SpecProposal:
-        # TODO: DP overlap currently disables dynamic drafting and always uses
-        # max_draft_step. Share the score-feedback path with propose_next when
-        # dynamic overlap is supported.
-        return self.proposer.propose_next_overlap(
-            main_model_input0=main_model_input0,
-            main_model_output0=main_model_output0,
-            next_token_ids0=next_token_ids0,
-            real_verify_rows0=real_verify_rows0,
-            accept_len0=accept_len0,
-            main_model_input1=main_model_input1,
-            main_model_output1=main_model_output1,
-            next_token_ids1=next_token_ids1,
-            real_verify_rows1=real_verify_rows1,
-            accept_len1=accept_len1,
-            draft_step=draft_step,
         )
 
     def scatter_next_tokens(

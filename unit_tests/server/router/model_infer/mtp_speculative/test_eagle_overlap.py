@@ -3,11 +3,11 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_mtp import (
-    AutoregressiveEagleProposer,
-    EagleMTPProposer,
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle3 import DpOverlapEagle3Proposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_with_att import (
+    DpOverlapEagleWithAttProposer,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 
 
 class _DraftModel:
@@ -38,6 +38,9 @@ class _DraftModel:
             )
             for model_input in (input0, input1)
         )
+
+    def map_draft_vocab_to_main_vocab(self, token_ids):
+        return token_ids
 
 
 def _target_input(batch_size):
@@ -71,7 +74,7 @@ def test_overlap_eagle_keeps_fixed_verify_layout():
         ),
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
-    proposer = EagleMTPProposer(backend=backend, enable_dynmaic_mtp=False)
+    proposer = DpOverlapEagleWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
     proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
     model_input0 = _target_input(batch_size=6)
     model_input1 = _target_input(batch_size=6)
@@ -118,7 +121,7 @@ def test_autoregressive_eagle_reuses_overlap_inputs():
         ),
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
-    proposer = AutoregressiveEagleProposer(backend=backend, enable_dynmaic_mtp=False)
+    proposer = DpOverlapEagle3Proposer(backend=backend, enable_dynmaic_mtp=False)
     proposer.alloc_extra_mem_indexes = lambda token_count: torch.arange(token_count, dtype=torch.int32)
     model_input0 = _target_input(batch_size=6)
     model_input1 = _target_input(batch_size=6)
