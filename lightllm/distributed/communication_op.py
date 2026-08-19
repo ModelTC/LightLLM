@@ -68,6 +68,10 @@ class CustomProcessGroup:
         self.backend_runtime = get_backend().runtime
 
     def _support_custom_allreduce(self) -> bool:
+        # SymmMem and FlashInfer all-reduce are CUDA/NVLink-only.  In
+        # particular, do not probe nvidia-smi while running on Ascend.
+        if get_env_start_args().hardware_platform != "cuda":
+            return False
         return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
 
     def init_symm_mem_reduce(self) -> None:
