@@ -61,9 +61,10 @@ class SpecEngine:
     def plan_decode(self, model_input: ModelInput, decode_reqs: List) -> SpecDecodePlan:
         """Return the fixed or dynamic speculative plan for one decode iteration."""
 
+        assert decode_reqs, "non-DP speculative decode requires at least one request"
         return self.planner.plan(
             decode_reqs=decode_reqs,
-            original_batch_size=model_input.batch_size,
+            origin_batch_size=model_input.batch_size,
         )
 
     def prepare_decode_model_input(
@@ -72,12 +73,10 @@ class SpecEngine:
         req_num: int,
         plan: SpecDecodePlan,
     ) -> Tuple[ModelInput, Optional[AsyncPinnedCpuTensor]]:
-        """Apply target verify-row compaction when the dynamic planner selects it."""
+        """Apply target verify-row compaction when the planned batch is smaller."""
 
-        if not plan.is_dynamic:
-            return model_input, None
-
-        if plan.dynamic_batch_size == model_input.batch_size:
+        assert model_input.batch_size == plan.origin_batch_size
+        if plan.dynamic_batch_size == plan.origin_batch_size:
             return model_input, None
 
         from lightllm.common.basemodel.triton_kernel.mtp_utils import prepare_dynamic_mtp_model_input
@@ -190,10 +189,7 @@ class SpecEngine:
         req_num: int,
         accept_lengths_cpu: torch.Tensor,
     ) -> None:
-        """Feed iteration-level observations into the dynamic planner."""
-
-        if not self.enable_dynmaic_mtp:
-            return
+        """Feed iteration-level observations into the current planner."""
 
         self.planner.update_feedback(
             plan=plan,

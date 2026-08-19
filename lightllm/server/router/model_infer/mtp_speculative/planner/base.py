@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 from sortedcontainers import SortedDict
 
@@ -11,18 +11,21 @@ from sortedcontainers import SortedDict
 class SpecDecodePlan:
     """Planner decision for one target decode iteration.
 
-    Fixed scheduling uses the full speculative-expanded target batch:
-    - dynamic_batch_size is None
-    - draft_step == max_draft_step
+    ``origin_batch_size`` records the physical target row count before planning,
+    while ``dynamic_batch_size`` is the row count selected for this target
+    forward. Fixed scheduling sets both values to the same size; dynamic
+    scheduling may reduce ``dynamic_batch_size`` before the forward. Therefore
+    both modes share the same plan representation without using ``None`` as a
+    mode marker.
 
-    Dynamic speculative scheduling may compact target rows before forward:
-    - dynamic_batch_size is the selected target row count
+    In addition:
     - draft_step is the candidate length to generate after target verify
     - pre_draft_step describes the previous iteration and controls whether
       GPU verify sync can be skipped
     """
 
-    dynamic_batch_size: Optional[int]
+    origin_batch_size: int
+    dynamic_batch_size: int
     draft_step: int
     pre_draft_step: int
     # False when the current batch contains requests without a proposal from
@@ -31,12 +34,8 @@ class SpecDecodePlan:
     all_reqs_have_proposals: bool = True
 
     @property
-    def is_dynamic(self) -> bool:
-        return self.dynamic_batch_size is not None
-
-    @property
     def skip_verify_sync(self) -> bool:
-        return self.is_dynamic and self.pre_draft_step == 0
+        return self.pre_draft_step == 0
 
     def filter_reqs(self, reqs: List, selected_row_mask_cpu) -> List:
         return [req for req, selected in zip(reqs, selected_row_mask_cpu.tolist()) if selected]
@@ -46,13 +45,14 @@ class BaseMtpPlanner(ABC):
     """定义 SpecEngine 与不同 MTP 规划器之间的统一调用接口。"""
 
     @abstractmethod
-    def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
+    def plan(self, decode_reqs: List, origin_batch_size: int) -> SpecDecodePlan:
         """为当前 decode 迭代生成执行计划。
 
         Args:
-            decode_reqs: 当前参与 decode 的逻辑请求列表。规划器可以读取请求的
-                输出进度，判断请求是否已经持有上一轮生成的 draft proposal。
-            original_batch_size: 进入动态压缩前的物理 verify 行数。
+            decode_reqs: 当前参与 decode 的非空逻辑请求列表。规划器可以读取
+                请求的输出进度，判断请求是否已经持有上一轮生成的
+                draft proposal。空 batch 只由 DP 专用 planner 处理。
+            origin_batch_size: 进入动态压缩前的物理 verify 行数。
 
         Returns:
             本轮 target verify 使用的动态 batch size、下一轮需要生成的 draft

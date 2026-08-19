@@ -28,16 +28,9 @@ class DSparkPlanner(BaseMtpPlanner):
         self._register_cuda_graph_costs()
         self._pending_verify_batch_sizes = deque(maxlen=2)
 
-    def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
+    def plan(self, decode_reqs: List, origin_batch_size: int) -> SpecDecodePlan:
         req_num = len(decode_reqs)
-        if req_num == 0:
-            return SpecDecodePlan(
-                dynamic_batch_size=0,
-                draft_step=self.max_draft_step,
-                pre_draft_step=self.max_draft_step,
-            )
-
-        full_batch_size = original_batch_size
+        full_batch_size = origin_batch_size
         dynamic_batch_size = full_batch_size
         delayed_batch_size = self._pop_delayed_batch_size(
             req_num=req_num,
@@ -47,6 +40,7 @@ class DSparkPlanner(BaseMtpPlanner):
             dynamic_batch_size = delayed_batch_size
 
         return SpecDecodePlan(
+            origin_batch_size=origin_batch_size,
             dynamic_batch_size=dynamic_batch_size,
             draft_step=self.max_draft_step,
             pre_draft_step=self.max_draft_step,

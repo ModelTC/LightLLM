@@ -11,9 +11,10 @@ class FixedSpecPlanner(BaseMtpPlanner):
     def __init__(self, max_draft_step: int) -> None:
         self.max_draft_step = int(max_draft_step)
 
-    def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
+    def plan(self, decode_reqs: List, origin_batch_size: int) -> SpecDecodePlan:
         return SpecDecodePlan(
-            dynamic_batch_size=None,
+            origin_batch_size=origin_batch_size,
+            dynamic_batch_size=origin_batch_size,
             draft_step=self.max_draft_step,
             pre_draft_step=self.max_draft_step,
         )
