@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -39,6 +40,47 @@ class SpecDecodePlan:
 
     def filter_reqs(self, reqs: List, selected_row_mask_cpu) -> List:
         return [req for req, selected in zip(reqs, selected_row_mask_cpu.tolist()) if selected]
+
+
+class BaseMtpPlanner(ABC):
+    """定义 SpecEngine 与不同 MTP 规划器之间的统一调用接口。"""
+
+    @abstractmethod
+    def plan(self, decode_reqs: List, original_batch_size: int) -> SpecDecodePlan:
+        """为当前 decode 迭代生成执行计划。
+
+        Args:
+            decode_reqs: 当前参与 decode 的逻辑请求列表。规划器可以读取请求的
+                输出进度，判断请求是否已经持有上一轮生成的 draft proposal。
+            original_batch_size: 进入动态压缩前的物理 verify 行数。
+
+        Returns:
+            本轮 target verify 使用的动态 batch size、下一轮需要生成的 draft
+            step，以及描述当前 proposal 布局的上一轮 draft step。
+        """
+
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_feedback(
+        self,
+        plan: SpecDecodePlan,
+        req_num: int,
+        accept_lengths,
+        schedule_scores=None,
+    ) -> None:
+        """在本轮 verify 完成后更新规划器的运行时统计。
+
+        Args:
+            plan: 本轮 decode 实际采用的执行计划，用于确定被验证的配置。
+            req_num: 本轮逻辑请求数量。
+            accept_lengths: 每个请求本轮提交的 token 数量，包含必然提交的
+                target token。
+            schedule_scores: proposer 可选提供的调度分数。LightSpec 主要使用
+                accept_lengths，DSpark 使用置信度分数，固定规划器忽略所有反馈。
+        """
+
+        raise NotImplementedError
 
 
 class _InferCostMsTable:

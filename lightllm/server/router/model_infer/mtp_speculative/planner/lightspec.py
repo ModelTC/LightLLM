@@ -5,13 +5,14 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
+    BaseMtpPlanner,
     SpecDecodePlan,
     _EMAValue,
     _InferCostMsTable,
 )
 
 
-class LightSpecPlanner:
+class LightSpecPlanner(BaseMtpPlanner):
     """Choose the current verify budget and the next draft configuration.
 
     LightSpec evaluates a runtime configuration as ``(N, B, d)``: logical

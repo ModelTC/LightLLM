@@ -6,6 +6,7 @@ import torch
 
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.planner import (
+    BaseMtpPlanner,
     DSparkPlanner,
     FixedSpecPlanner,
     LightSpecPlanner,
@@ -70,8 +71,10 @@ def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
 
 
 def test_fixed_planner_returns_static_plan():
-    plan = FixedSpecPlanner(max_draft_step=3).plan(decode_reqs=build_decode_reqs(4), original_batch_size=16)
+    planner = FixedSpecPlanner(max_draft_step=3)
+    plan = planner.plan(decode_reqs=build_decode_reqs(4), original_batch_size=16)
 
+    assert isinstance(planner, BaseMtpPlanner)
     assert not plan.is_dynamic
     assert plan.dynamic_batch_size is None
     assert plan.draft_step == plan.pre_draft_step == 3
@@ -87,11 +90,16 @@ def test_infer_cost_candidates_include_feasible_boundaries():
 
 
 def test_engine_routes_only_dspark_to_the_confidence_planner():
-    assert isinstance(build_planner("eagle3", enable_dynmaic_mtp=False), FixedSpecPlanner)
-    assert isinstance(build_planner("dspark"), DSparkPlanner)
+    fixed_planner = build_planner("eagle3", enable_dynmaic_mtp=False)
+    dspark_planner = build_planner("dspark")
+    assert isinstance(fixed_planner, FixedSpecPlanner)
+    assert isinstance(dspark_planner, DSparkPlanner)
+    assert isinstance(fixed_planner, BaseMtpPlanner)
+    assert isinstance(dspark_planner, BaseMtpPlanner)
 
     vanilla_planner = build_planner("vanilla_with_att")
     assert isinstance(vanilla_planner, LightSpecPlanner)
+    assert isinstance(vanilla_planner, BaseMtpPlanner)
     assert vanilla_planner.draft_steps == (1, 2, 3)
 
     vanilla_no_att_planner = build_planner("vanilla_no_att")

@@ -5,10 +5,14 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from lightllm.server.router.model_infer.mtp_speculative.planner.base import SpecDecodePlan, _InferCostMsTable
+from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
+    BaseMtpPlanner,
+    SpecDecodePlan,
+    _InferCostMsTable,
+)
 
 
-class DSparkPlanner:
+class DSparkPlanner(BaseMtpPlanner):
     """DSpark's confidence-based verify-capacity planner.
 
     DSpark always drafts a complete block. Confidence from one proposal selects

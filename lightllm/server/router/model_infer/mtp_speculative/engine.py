@@ -13,6 +13,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 )
 from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.planner import (
+    BaseMtpPlanner,
     DSparkPlanner,
     FixedSpecPlanner,
     LightSpecPlanner,
@@ -39,7 +40,7 @@ class SpecEngine:
             backend=backend,
             enable_dynmaic_mtp=enable_dynmaic_mtp,
         )
-        self.planner = self._build_decode_planner()
+        self.planner: BaseMtpPlanner = self._build_decode_planner()
 
     # Prefill draft-state initialization.
 
@@ -296,7 +297,7 @@ class SpecEngine:
 
     # Construction helpers.
 
-    def _build_decode_planner(self):
+    def _build_decode_planner(self) -> BaseMtpPlanner:
         if not self.enable_dynmaic_mtp:
             return FixedSpecPlanner(max_draft_step=self.backend.max_draft_step)
         if self.spec_mode == "dspark":
