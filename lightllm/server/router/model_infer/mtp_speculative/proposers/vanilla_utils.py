@@ -42,9 +42,9 @@ def fill_chained_mtp_draft_model_kv_state(
 
 def propose_next_chained_mtp(
     proposer: BaseSpecProposer,
-    main_model_input: ModelInput,
-    main_model_output: ModelOutput,
-    next_token_ids: torch.Tensor,
+    target_model_input: ModelInput,
+    target_model_output: ModelOutput,
+    target_next_token_ids: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
     draft_step: int,
     accept_len: torch.Tensor,
@@ -53,14 +53,14 @@ def propose_next_chained_mtp(
 
     request_count = int(b_req_mtp_start_loc.shape[0])
     accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
-    draft_token_ids = next_token_ids
-    draft_hidden = main_model_output.mtp_collector.spec_hidden
-    proposal_token_ids = next_token_ids.new_empty((request_count, draft_step))
+    draft_token_ids = target_next_token_ids
+    draft_hidden = target_model_output.mtp_collector.spec_hidden
+    proposal_token_ids = target_next_token_ids.new_empty((request_count, draft_step))
     schedule_scores = (
         torch.empty(
             (request_count, draft_step),
             dtype=torch.float32,
-            device=next_token_ids.device,
+            device=target_next_token_ids.device,
         )
         if proposer.enable_dynmaic_mtp
         else None
@@ -68,9 +68,9 @@ def propose_next_chained_mtp(
 
     for step in range(draft_step):
         draft_model = proposer.backend.draft_models[step]
-        main_model_input.input_ids = draft_token_ids
-        main_model_input.mtp_draft_input_hiddens = draft_hidden
-        draft_output = draft_model.forward(main_model_input)
+        target_model_input.input_ids = draft_token_ids
+        target_model_input.mtp_draft_input_hiddens = draft_hidden
+        draft_output = draft_model.forward(target_model_input)
         draft_hidden = draft_output.mtp_collector.spec_hidden
         if proposer.enable_dynmaic_mtp:
             draft_token_ids, draft_token_probs = proposer.backend._gen_argmax_token_ids_and_prob(draft_output)

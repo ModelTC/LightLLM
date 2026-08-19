@@ -359,9 +359,9 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
     next_token_ids = torch.tensor([10, 11], dtype=torch.int64)
 
     proposal = proposer.propose_next(
-        main_model_input=None,
-        main_model_output=None,
-        next_token_ids=next_token_ids,
+        target_model_input=None,
+        target_model_output=None,
+        target_next_token_ids=next_token_ids,
         b_req_mtp_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         draft_step=0,
     )

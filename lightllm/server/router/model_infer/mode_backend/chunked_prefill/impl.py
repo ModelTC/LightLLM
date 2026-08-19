@@ -304,9 +304,9 @@ class ChunkedPrefillBackend(ModeBackend):
             )
 
             proposal = spec_engine.propose_next(
-                main_model_input=model_input,
-                main_model_output=model_output,
-                next_token_ids=next_token_ids,
+                target_model_input=model_input,
+                target_model_output=model_output,
+                target_next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,

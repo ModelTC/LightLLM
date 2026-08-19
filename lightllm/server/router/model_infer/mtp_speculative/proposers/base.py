@@ -84,16 +84,16 @@ class BaseSpecProposer(ABC):
     @abstractmethod
     def propose_next(
         self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
+        target_model_input: ModelInput,  # batch_size = verify_batch_size
+        target_model_output: ModelOutput,  # logits: [verify_batch_size, vocab_size]
+        target_next_token_ids: torch.Tensor,  # [verify_batch_size]
+        b_req_mtp_start_loc: torch.Tensor,  # [req_num]
         draft_step: int,
-        accept_len: Optional[torch.Tensor] = None,
+        accept_len: Optional[torch.Tensor] = None,  # [req_num]
     ) -> SpecProposal:
         """Generate candidate tokens after one target decode forward.
 
-        `main_model_input` contains the target verify rows, possibly compacted
+        `target_model_input` contains the target verify rows, possibly compacted
         by dynamic scheduling. `b_req_mtp_start_loc` identifies each logical
         request's first row.
 

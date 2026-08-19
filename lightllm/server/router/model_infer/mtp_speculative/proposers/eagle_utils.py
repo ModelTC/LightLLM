@@ -80,9 +80,9 @@ def prepare_eagle_verify_extend_input(
 
 def propose_next_eagle(
     proposer: BaseSpecProposer,
-    main_model_input: ModelInput,
-    main_model_output: ModelOutput,
-    next_token_ids: torch.Tensor,
+    target_model_input: ModelInput,
+    target_model_output: ModelOutput,
+    target_next_token_ids: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
     draft_step: int,
     accept_len: torch.Tensor | None,
@@ -91,13 +91,13 @@ def propose_next_eagle(
     """运行 EAGLE extend 后接单 token decode 的通用 proposal 流程。"""
 
     request_count = int(b_req_mtp_start_loc.shape[0])
-    proposal_token_ids = next_token_ids.new_empty((request_count, draft_step))
+    proposal_token_ids = target_next_token_ids.new_empty((request_count, draft_step))
     collect_schedule_scores = proposer.enable_dynmaic_mtp
     schedule_scores = (
         torch.zeros(
             (request_count, draft_step),
             dtype=torch.float32,
-            device=next_token_ids.device,
+            device=target_next_token_ids.device,
         )
         if collect_schedule_scores
         else None
@@ -111,13 +111,13 @@ def propose_next_eagle(
 
     accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
     draft_model = proposer.backend.draft_models[0]
-    position_delta = main_model_input.b_position_delta
+    position_delta = target_model_input.b_position_delta
     prepare_eagle_verify_extend_input(
-        model_input=main_model_input,
-        input_ids=next_token_ids,
-        target_hidden=main_model_output.mtp_collector.spec_hidden,
+        model_input=target_model_input,
+        input_ids=target_next_token_ids,
+        target_hidden=target_model_output.mtp_collector.spec_hidden,
     )
-    extend_output = draft_model.forward(main_model_input)
+    extend_output = draft_model.forward(target_model_input)
 
     accepted_tail_output = ModelOutput(logits=extend_output.logits.index_select(0, accepted_tail_rows))
     if collect_schedule_scores:
@@ -144,13 +144,13 @@ def propose_next_eagle(
         )
 
     extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(request_count * (draft_step - 1))
-    extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids.device, non_blocking=True)
-    draft_seq_lens = main_model_input.b_seq_len.index_select(0, accepted_tail_rows) + 1
-    max_kv_seq_len = main_model_input.max_kv_seq_len
-    draft_input = copy.copy(main_model_input)
+    extra_mem_indexes = extra_mem_indexes_cpu.to(device=target_next_token_ids.device, non_blocking=True)
+    draft_seq_lens = target_model_input.b_seq_len.index_select(0, accepted_tail_rows) + 1
+    max_kv_seq_len = target_model_input.max_kv_seq_len
+    draft_input = copy.copy(target_model_input)
     draft_input.is_prefill = False
     draft_input.batch_size = request_count
-    draft_input.b_req_idx = main_model_input.b_req_idx.index_select(0, accepted_tail_rows)
+    draft_input.b_req_idx = target_model_input.b_req_idx.index_select(0, accepted_tail_rows)
     draft_input.b_mtp_index = torch.zeros_like(draft_input.b_req_idx)
     draft_input.b_seq_len = draft_seq_lens
     draft_input.b_position_delta = (

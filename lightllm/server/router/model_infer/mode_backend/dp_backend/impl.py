@@ -649,9 +649,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             device=model_input.b_req_idx.device,
         )
         proposal = self.decode_draft_engine.propose_next(
-            main_model_input=model_input,
-            main_model_output=model_output,
-            next_token_ids=padded_next_token_ids,
+            target_model_input=model_input,
+            target_model_output=model_output,
+            target_next_token_ids=padded_next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             accept_len=mtp_accept_len,
         )
@@ -706,9 +706,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         # full-row extend, followed by autoregressive drafting over one row per
         # (real or HOLD) request.
         proposal = self.decode_draft_engine.propose_next(
-            main_model_input=model_input,
-            main_model_output=model_output,
-            next_token_ids=padded_next_token_ids,
+            target_model_input=model_input,
+            target_model_output=model_output,
+            target_next_token_ids=padded_next_token_ids,
             b_req_mtp_start_loc=padded_start_locs,
             accept_len=padded_accept_len,
         )
@@ -993,14 +993,14 @@ class DPChunkedPrefillBackend(ModeBackend):
         )
 
         proposal = self.decode_draft_engine.propose_next_overlap(
-            main_model_input0=model_input0,
-            main_model_output0=model_output0,
-            next_token_ids0=padded_next_token_ids0,
+            target_model_input0=model_input0,
+            target_model_output0=model_output0,
+            target_next_token_ids0=padded_next_token_ids0,
             real_verify_rows0=req_num0,
             accept_len0=mtp_accept_len[:real_request_num0],
-            main_model_input1=model_input1,
-            main_model_output1=model_output1,
-            next_token_ids1=padded_next_token_ids1,
+            target_model_input1=model_input1,
+            target_model_output1=model_output1,
+            target_next_token_ids1=padded_next_token_ids1,
             real_verify_rows1=req_num1,
             accept_len1=mtp_accept_len[real_request_num0:],
         )
@@ -1067,14 +1067,14 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
 
         proposal = self.decode_draft_engine.propose_next_overlap(
-            main_model_input0=model_input0,
-            main_model_output0=model_output0,
-            next_token_ids0=padded_next_token_ids0,
+            target_model_input0=model_input0,
+            target_model_output0=model_output0,
+            target_next_token_ids0=padded_next_token_ids0,
             real_verify_rows0=req_num0,
             accept_len0=padded_accept_len0,
-            main_model_input1=model_input1,
-            main_model_output1=model_output1,
-            next_token_ids1=padded_next_token_ids1,
+            target_model_input1=model_input1,
+            target_model_output1=model_output1,
+            target_next_token_ids1=padded_next_token_ids1,
             real_verify_rows1=req_num1,
             accept_len1=padded_accept_len1,
         )

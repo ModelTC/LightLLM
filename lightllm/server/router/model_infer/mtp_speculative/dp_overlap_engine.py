@@ -48,26 +48,26 @@ class DPOverlapSpecEngine:
 
     def propose_next_overlap(
         self,
-        main_model_input0: ModelInput,
-        main_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
+        target_model_input0: ModelInput,  # batch_size = padded_verify_batch_size0
+        target_model_output0: ModelOutput,  # logits: [padded_verify_batch_size0, vocab_size]
+        target_next_token_ids0: torch.Tensor,  # [padded_verify_batch_size0]
         real_verify_rows0: int,
-        accept_len0: Optional[torch.Tensor],
-        main_model_input1: ModelInput,
-        main_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
+        accept_len0: Optional[torch.Tensor],  # [req_num0]
+        target_model_input1: ModelInput,  # batch_size = padded_verify_batch_size1
+        target_model_output1: ModelOutput,  # logits: [padded_verify_batch_size1, vocab_size]
+        target_next_token_ids1: torch.Tensor,  # [padded_verify_batch_size1]
         real_verify_rows1: int,
-        accept_len1: Optional[torch.Tensor],
+        accept_len1: Optional[torch.Tensor],  # [req_num1]
     ) -> SpecProposal:
         return self.proposer.propose_next_overlap(
-            main_model_input0=main_model_input0,
-            main_model_output0=main_model_output0,
-            next_token_ids0=next_token_ids0,
+            target_model_input0=target_model_input0,
+            target_model_output0=target_model_output0,
+            target_next_token_ids0=target_next_token_ids0,
             real_verify_rows0=real_verify_rows0,
             accept_len0=accept_len0,
-            main_model_input1=main_model_input1,
-            main_model_output1=main_model_output1,
-            next_token_ids1=next_token_ids1,
+            target_model_input1=target_model_input1,
+            target_model_output1=target_model_output1,
+            target_next_token_ids1=target_next_token_ids1,
             real_verify_rows1=real_verify_rows1,
             accept_len1=accept_len1,
             draft_step=self.planner.get_draft_step(),

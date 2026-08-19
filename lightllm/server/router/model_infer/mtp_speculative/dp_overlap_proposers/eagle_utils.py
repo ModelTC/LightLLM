@@ -60,14 +60,14 @@ def pad_dp_step_mem_indexes(
 
 def propose_next_dp_eagle_autoregressive_overlap(
     proposer: BaseDpOverlapProposer,
-    main_model_input0: ModelInput,
-    main_model_output0: ModelOutput,
-    next_token_ids0: torch.Tensor,
+    target_model_input0: ModelInput,
+    target_model_output0: ModelOutput,
+    target_next_token_ids0: torch.Tensor,
     real_verify_rows0: int,
     accept_len0: torch.Tensor | None,
-    main_model_input1: ModelInput,
-    main_model_output1: ModelOutput,
-    next_token_ids1: torch.Tensor,
+    target_model_input1: ModelInput,
+    target_model_output1: ModelOutput,
+    target_next_token_ids1: torch.Tensor,
     real_verify_rows1: int,
     accept_len1: torch.Tensor | None,
     draft_step: int,
@@ -76,9 +76,9 @@ def propose_next_dp_eagle_autoregressive_overlap(
     """运行 DP EAGLE extend 后接单 token overlap decode 的 proposal 流程。"""
 
     verify_width = proposer.backend.max_draft_step + 1
-    model_inputs = (main_model_input0, main_model_input1)
-    model_outputs = (main_model_output0, main_model_output1)
-    next_token_ids_by_batch = (next_token_ids0, next_token_ids1)
+    model_inputs = (target_model_input0, target_model_input1)
+    model_outputs = (target_model_output0, target_model_output1)
+    target_next_token_ids_by_batch = (target_next_token_ids0, target_next_token_ids1)
     real_verify_row_counts = (int(real_verify_rows0), int(real_verify_rows1))
     accept_lens_by_batch = (accept_len0, accept_len1)
     position_deltas_by_batch = tuple(model_input.b_position_delta for model_input in model_inputs)
@@ -90,7 +90,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
     for model_input, model_output, token_ids, real_verify_row_count, accept_len in zip(
         model_inputs,
         model_outputs,
-        next_token_ids_by_batch,
+        target_next_token_ids_by_batch,
         real_verify_row_counts,
         accept_lens_by_batch,
     ):
@@ -114,7 +114,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
         )
 
     total_real_request_count = sum(real_request_counts)
-    proposal_token_ids = next_token_ids0.new_empty((total_real_request_count, draft_step))
+    proposal_token_ids = target_next_token_ids0.new_empty((total_real_request_count, draft_step))
 
     draft_model = proposer.backend.draft_models[0]
     extend_outputs = draft_model.microbatch_overlap_prefill(*model_inputs)
@@ -163,7 +163,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
             model_input.multimodal_params = [empty_multimodal_params] * model_input.batch_size
 
     extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(total_real_request_count * (draft_step - 1))
-    extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids0.device, non_blocking=True)
+    extra_mem_indexes = extra_mem_indexes_cpu.to(device=target_next_token_ids0.device, non_blocking=True)
     hold_mem_index = proposer.backend.model.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX
 
     for step in range(1, draft_step):
@@ -205,14 +205,14 @@ def propose_next_dp_eagle_autoregressive_overlap(
 
 def propose_next_dp_eagle_fixed_layout_overlap(
     proposer: BaseDpOverlapProposer,
-    main_model_input0: ModelInput,
-    main_model_output0: ModelOutput,
-    next_token_ids0: torch.Tensor,
+    target_model_input0: ModelInput,
+    target_model_output0: ModelOutput,
+    target_next_token_ids0: torch.Tensor,
     real_verify_rows0: int,
     accept_len0: torch.Tensor,
-    main_model_input1: ModelInput,
-    main_model_output1: ModelOutput,
-    next_token_ids1: torch.Tensor,
+    target_model_input1: ModelInput,
+    target_model_output1: ModelOutput,
+    target_next_token_ids1: torch.Tensor,
     real_verify_rows1: int,
     accept_len1: torch.Tensor,
     draft_step: int,
@@ -221,31 +221,35 @@ def propose_next_dp_eagle_fixed_layout_overlap(
     """以 expanded verify-row layout 运行 decode，返回按真实请求压缩的 proposal。"""
 
     verify_width = proposer.backend.max_draft_step + 1
-    model_inputs = (main_model_input0, main_model_input1)
+    model_inputs = (target_model_input0, target_model_input1)
     real_verify_row_counts = (int(real_verify_rows0), int(real_verify_rows1))
     real_request_counts = tuple(row_count // verify_width for row_count in real_verify_row_counts)
     request_capacities_by_batch = tuple(model_input.batch_size // verify_width for model_input in model_inputs)
     total_real_request_count = sum(real_request_counts)
 
-    proposal_token_ids = next_token_ids0.new_empty((total_real_request_count, draft_step))
+    proposal_token_ids = target_next_token_ids0.new_empty((total_real_request_count, draft_step))
     proposal_row_offsets = (0, real_request_counts[0])
     accepted_tail_rows_by_batch = (
-        torch.arange(0, main_model_input0.batch_size, verify_width, device=next_token_ids0.device) + accept_len0 - 1,
-        torch.arange(0, main_model_input1.batch_size, verify_width, device=next_token_ids1.device) + accept_len1 - 1,
+        torch.arange(0, target_model_input0.batch_size, verify_width, device=target_next_token_ids0.device)
+        + accept_len0
+        - 1,
+        torch.arange(0, target_model_input1.batch_size, verify_width, device=target_next_token_ids1.device)
+        + accept_len1
+        - 1,
     )
 
     extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(total_real_request_count * draft_step)
-    extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids0.device, non_blocking=True)
+    extra_mem_indexes = extra_mem_indexes_cpu.to(device=target_next_token_ids0.device, non_blocking=True)
     split = real_request_counts[0] * draft_step
     extra_mem_indexes_by_batch = (
         extra_mem_indexes[:split],
         extra_mem_indexes[split:],
     )
 
-    draft_token_ids_by_batch = [next_token_ids0, next_token_ids1]
+    draft_token_ids_by_batch = [target_next_token_ids0, target_next_token_ids1]
     draft_hiddens_by_batch = [
-        main_model_output0.mtp_collector.spec_hidden,
-        main_model_output1.mtp_collector.spec_hidden,
+        target_model_output0.mtp_collector.spec_hidden,
+        target_model_output1.mtp_collector.spec_hidden,
     ]
     draft_model = proposer.backend.draft_models[0]
     hold_mem_index = proposer.backend.model.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX

@@ -50,9 +50,9 @@ class DSparkProposer(BaseSpecProposer):
     @torch.no_grad()
     def propose_next(
         self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
+        target_next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
@@ -65,15 +65,15 @@ class DSparkProposer(BaseSpecProposer):
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
         draft_input, extra_mem_indexes_cpu = build_parallel_block_draft_input(
             proposer=self,
-            main_model_input=main_model_input,
-            next_token_ids=next_token_ids,
+            target_model_input=target_model_input,
+            target_next_token_ids=target_next_token_ids,
             accepted_tail_rows=accepted_tail_rows,
             request_count=request_count,
         )
         extend_parallel_block_draft_kv_cache(
             proposer=self,
-            main_model_input=main_model_input,
-            target_hidden=main_model_output.mtp_collector.spec_hidden,
+            target_model_input=target_model_input,
+            target_hidden=target_model_output.mtp_collector.spec_hidden,
         )
         draft_output = draft_model.forward(draft_input)
 

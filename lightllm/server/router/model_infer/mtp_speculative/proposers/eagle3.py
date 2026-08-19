@@ -33,18 +33,18 @@ class Eagle3Proposer(BaseSpecProposer):
 
     def propose_next(
         self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
+        target_model_input: ModelInput,
+        target_model_output: ModelOutput,
+        target_next_token_ids: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> EagleSpecProposal:
         return propose_next_eagle(
             proposer=self,
-            main_model_input=main_model_input,
-            main_model_output=main_model_output,
-            next_token_ids=next_token_ids,
+            target_model_input=target_model_input,
+            target_model_output=target_model_output,
+            target_next_token_ids=target_next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=draft_step,
             accept_len=accept_len,

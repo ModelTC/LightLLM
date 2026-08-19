@@ -111,17 +111,17 @@ class SpecEngine:
 
     def propose_next(
         self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
+        target_model_input: ModelInput,  # batch_size = verify_batch_size
+        target_model_output: ModelOutput,  # logits: [verify_batch_size, vocab_size]
+        target_next_token_ids: torch.Tensor,  # [verify_batch_size]
+        b_req_mtp_start_loc: torch.Tensor,  # [req_num]
         draft_step: int,
-        accept_len: Optional[torch.Tensor] = None,
+        accept_len: Optional[torch.Tensor] = None,  # [req_num]
     ) -> SpecProposal:
         return self.proposer.propose_next(
-            main_model_input=main_model_input,
-            main_model_output=main_model_output,
-            next_token_ids=next_token_ids,
+            target_model_input=target_model_input,
+            target_model_output=target_model_output,
+            target_next_token_ids=target_next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=draft_step,
             accept_len=accept_len,

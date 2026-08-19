@@ -249,11 +249,11 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities(monkeypatch)
     monkeypatch.setattr(dflash_module, "extend_parallel_block_draft_kv_cache", lambda **_: None)
 
     proposal = proposer.propose_next(
-        main_model_input=SimpleNamespace(),
-        main_model_output=SimpleNamespace(
+        target_model_input=SimpleNamespace(),
+        target_model_output=SimpleNamespace(
             mtp_collector=SimpleNamespace(spec_hidden=torch.empty(verify_row_count, 1)),
         ),
-        next_token_ids=torch.arange(verify_row_count),
+        target_next_token_ids=torch.arange(verify_row_count),
         b_req_mtp_start_loc=torch.tensor([0, 3]),
         draft_step=2,
         accept_len=torch.tensor([1, 1]),
@@ -328,8 +328,8 @@ def test_dflash_expands_position_delta_with_request_block_rows(monkeypatch):
 
     draft_input, _ = build_parallel_block_draft_input(
         proposer=proposer,
-        main_model_input=model_input,
-        next_token_ids=torch.arange(5, dtype=torch.int64),
+        target_model_input=model_input,
+        target_next_token_ids=torch.arange(5, dtype=torch.int64),
         accepted_tail_rows=torch.tensor([1, 4]),
         request_count=2,
     )

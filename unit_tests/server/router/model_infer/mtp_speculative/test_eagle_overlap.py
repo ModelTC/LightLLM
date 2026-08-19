@@ -85,18 +85,18 @@ def test_overlap_eagle_keeps_fixed_verify_layout(monkeypatch):
     model_input1 = _target_input(batch_size=6)
 
     proposal = proposer.propose_next_overlap(
-        main_model_input0=model_input0,
-        main_model_output0=ModelOutput(
+        target_model_input0=model_input0,
+        target_model_output0=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        next_token_ids0=torch.arange(6, dtype=torch.int64),
+        target_next_token_ids0=torch.arange(6, dtype=torch.int64),
         real_verify_rows0=3,
         accept_len0=torch.tensor([2, 1], dtype=torch.int32),
-        main_model_input1=model_input1,
-        main_model_output1=ModelOutput(
+        target_model_input1=model_input1,
+        target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
+        target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
         real_verify_rows1=6,
         accept_len1=torch.tensor([1, 3], dtype=torch.int32),
         draft_step=2,
@@ -137,18 +137,18 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     model_input1 = _target_input(batch_size=6)
 
     proposal = proposer.propose_next_overlap(
-        main_model_input0=model_input0,
-        main_model_output0=ModelOutput(
+        target_model_input0=model_input0,
+        target_model_output0=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        next_token_ids0=torch.arange(6, dtype=torch.int64),
+        target_next_token_ids0=torch.arange(6, dtype=torch.int64),
         real_verify_rows0=3,
         accept_len0=torch.tensor([2, 1], dtype=torch.int32),
-        main_model_input1=model_input1,
-        main_model_output1=ModelOutput(
+        target_model_input1=model_input1,
+        target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
+        target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
         real_verify_rows1=6,
         accept_len1=torch.tensor([1, 3], dtype=torch.int32),
         draft_step=2,

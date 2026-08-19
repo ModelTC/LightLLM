@@ -44,34 +44,34 @@ def fill_dp_chained_mtp_draft_model_kv_state_overlap(
 
 def propose_next_dp_chained_mtp_overlap(
     proposer: BaseDpOverlapProposer,
-    main_model_input0: ModelInput,
-    main_model_output0: ModelOutput,
-    next_token_ids0: torch.Tensor,
+    target_model_input0: ModelInput,
+    target_model_output0: ModelOutput,
+    target_next_token_ids0: torch.Tensor,
     real_verify_rows0: int,
     accept_len0: torch.Tensor,
-    main_model_input1: ModelInput,
-    main_model_output1: ModelOutput,
-    next_token_ids1: torch.Tensor,
+    target_model_input1: ModelInput,
+    target_model_output1: ModelOutput,
+    target_next_token_ids1: torch.Tensor,
     real_verify_rows1: int,
     accept_len1: torch.Tensor,
     draft_step: int,
 ) -> VanillaSpecProposal:
     """为两个 DP microbatch 运行 decode，返回按真实请求压缩的 proposal。"""
 
-    model_inputs = (main_model_input0, main_model_input1)
+    model_inputs = (target_model_input0, target_model_input1)
     verify_width = proposer.backend.max_draft_step + 1
     real_verify_rows = (int(real_verify_rows0), int(real_verify_rows1))
     real_request_counts = tuple(row_count // verify_width for row_count in real_verify_rows)
     accepted_tail_rows = (
-        torch.arange(0, real_verify_rows0, verify_width, device=next_token_ids0.device) + accept_len0 - 1,
-        torch.arange(0, real_verify_rows1, verify_width, device=next_token_ids1.device) + accept_len1 - 1,
+        torch.arange(0, real_verify_rows0, verify_width, device=target_next_token_ids0.device) + accept_len0 - 1,
+        torch.arange(0, real_verify_rows1, verify_width, device=target_next_token_ids1.device) + accept_len1 - 1,
     )
-    draft_token_ids = [next_token_ids0, next_token_ids1]
+    draft_token_ids = [target_next_token_ids0, target_next_token_ids1]
     draft_hiddens = [
-        main_model_output0.mtp_collector.spec_hidden,
-        main_model_output1.mtp_collector.spec_hidden,
+        target_model_output0.mtp_collector.spec_hidden,
+        target_model_output1.mtp_collector.spec_hidden,
     ]
-    proposal_token_ids = next_token_ids0.new_empty((sum(real_request_counts), draft_step))
+    proposal_token_ids = target_next_token_ids0.new_empty((sum(real_request_counts), draft_step))
     request_offset = real_request_counts[0]
 
     for step in range(draft_step):

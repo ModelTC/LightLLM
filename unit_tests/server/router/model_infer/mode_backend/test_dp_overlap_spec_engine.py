@@ -22,7 +22,7 @@ class _RecordingSpecEngine:
 
     def propose_next(self, **kwargs):
         self.propose_args = kwargs
-        token_ids = kwargs["next_token_ids"].new_zeros((kwargs["b_req_mtp_start_loc"].shape[0], 7))
+        token_ids = kwargs["target_next_token_ids"].new_zeros((kwargs["b_req_mtp_start_loc"].shape[0], 7))
         return SpecProposal(
             token_ids=token_ids,
             extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=torch.tensor([123], dtype=torch.int32))],
@@ -31,7 +31,7 @@ class _RecordingSpecEngine:
     def propose_next_overlap(self, **kwargs):
         self.propose_overlap_args = kwargs
         request_count = (kwargs["real_verify_rows0"] + kwargs["real_verify_rows1"]) // 8
-        token_ids = kwargs["next_token_ids0"].new_zeros((request_count, 7))
+        token_ids = kwargs["target_next_token_ids0"].new_zeros((request_count, 7))
         return SpecProposal(
             token_ids=token_ids,
             extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=torch.tensor([456], dtype=torch.int32))],
@@ -129,8 +129,8 @@ def test_dp_eagle_uses_common_extend_then_unit_decode_proposer(monkeypatch):
     )
 
     propose_args = backend.spec_engine.propose_args
-    assert propose_args["next_token_ids"].shape == (16,)
-    assert torch.equal(propose_args["next_token_ids"][:8], next_token_ids)
+    assert propose_args["target_next_token_ids"].shape == (16,)
+    assert torch.equal(propose_args["target_next_token_ids"][:8], next_token_ids)
     assert torch.equal(propose_args["b_req_mtp_start_loc"], torch.tensor([0, 8], dtype=torch.int32))
     assert torch.equal(propose_args["accept_len"], torch.tensor([2, 1], dtype=torch.int32))
     assert scatter_args["proposal"].token_ids.shape == (1, 7)
@@ -160,8 +160,8 @@ def test_dp_vanilla_uses_dp_engine_proposer(monkeypatch):
     )
 
     propose_args = backend.spec_engine.propose_args
-    assert propose_args["next_token_ids"].shape == (16,)
-    assert torch.equal(propose_args["next_token_ids"][:8], next_token_ids)
+    assert propose_args["target_next_token_ids"].shape == (16,)
+    assert torch.equal(propose_args["target_next_token_ids"][:8], next_token_ids)
     assert scatter_args["proposal"].token_ids.shape == (8, 7)
     assert torch.equal(scatter_args["target_next_token_ids"], next_token_ids)
     _assert_all_mem_indexes_are_freed(extra_mem, torch.tensor([123], dtype=torch.int32))
@@ -203,8 +203,8 @@ def test_dp_overlap_eagle_passes_both_fixed_verify_layouts_to_proposer(monkeypat
     )
 
     propose_args = backend.dp_overlap_spec_engine.propose_overlap_args
-    assert propose_args["next_token_ids0"].shape == (16,)
-    assert propose_args["next_token_ids1"].shape == (16,)
+    assert propose_args["target_next_token_ids0"].shape == (16,)
+    assert propose_args["target_next_token_ids1"].shape == (16,)
     assert propose_args["real_verify_rows0"] == 8
     assert propose_args["real_verify_rows1"] == 16
     assert torch.equal(propose_args["accept_len0"], torch.tensor([2, 1], dtype=torch.int32))
@@ -245,8 +245,8 @@ def test_dp_overlap_vanilla_delegates_both_microbatches_to_proposer(monkeypatch)
     )
 
     propose_args = backend.dp_overlap_spec_engine.propose_overlap_args
-    assert propose_args["next_token_ids0"].shape == (16,)
-    assert propose_args["next_token_ids1"].shape == (16,)
+    assert propose_args["target_next_token_ids0"].shape == (16,)
+    assert propose_args["target_next_token_ids1"].shape == (16,)
     assert propose_args["real_verify_rows0"] == 8
     assert propose_args["real_verify_rows1"] == 16
     assert torch.equal(propose_args["accept_len0"], torch.tensor([2], dtype=torch.int32))
