@@ -472,7 +472,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
 
             # mtp kv fill
-            draft_next_token_ids_gpu = self._build_padded_next_token_ids(
+            target_next_token_ids_gpu = self._build_padded_next_token_ids(
                 token_ids=next_token_ids,
                 batch_size=model_input.batch_size,
                 copy_len=req_num,
@@ -481,7 +481,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             self.prefill_draft_engine.fill_draft_model_kv_state(
                 target_model_input=model_input,
                 target_model_output=model_output,
-                next_token_ids=draft_next_token_ids_gpu,
+                target_next_token_ids=target_next_token_ids_gpu,
             )
             if req_num > 0:
                 g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
@@ -770,14 +770,14 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                 )
 
-            draft_next_token_ids_gpu0 = self._build_padded_next_token_ids(
+            target_next_token_ids_gpu0 = self._build_padded_next_token_ids(
                 token_ids=next_token_ids,
                 batch_size=model_input0.batch_size,
                 copy_len=req_num0,
                 device=model_input0.b_req_idx.device,
                 source_start=0,
             )
-            draft_next_token_ids_gpu1 = self._build_padded_next_token_ids(
+            target_next_token_ids_gpu1 = self._build_padded_next_token_ids(
                 token_ids=next_token_ids,
                 batch_size=model_input1.batch_size,
                 copy_len=req_num1,
@@ -788,10 +788,10 @@ class DPChunkedPrefillBackend(ModeBackend):
             self.prefill_draft_engine.fill_draft_model_kv_state_overlap(
                 target_model_input0=model_input0,
                 target_model_output0=model_output0,
-                next_token_ids0=draft_next_token_ids_gpu0,
+                target_next_token_ids0=target_next_token_ids_gpu0,
                 target_model_input1=model_input1,
                 target_model_output1=model_output1,
-                next_token_ids1=draft_next_token_ids_gpu1,
+                target_next_token_ids1=target_next_token_ids_gpu1,
             )
 
             if req_num0 + req_num1 > 0 and g_infer_context.is_linear_att_mixed_model:

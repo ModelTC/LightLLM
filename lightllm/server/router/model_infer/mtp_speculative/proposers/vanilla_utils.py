@@ -21,14 +21,14 @@ def fill_chained_mtp_draft_model_kv_state(
     proposer: BaseSpecProposer,
     target_model_input: ModelInput,
     target_model_output: ModelOutput,
-    next_token_ids: torch.Tensor,
+    target_next_token_ids: torch.Tensor,
 ) -> None:
     """构建 Vanilla chained MTP 各级 draft model 的 prefill state。"""
 
     from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
 
     draft_hidden = target_model_output.mtp_collector.spec_hidden
-    draft_token_ids = next_token_ids
+    draft_token_ids = target_next_token_ids
     for draft_model in proposer.backend.draft_models:
         prepare_mtp_prefill_inputs(
             model_input=target_model_input,

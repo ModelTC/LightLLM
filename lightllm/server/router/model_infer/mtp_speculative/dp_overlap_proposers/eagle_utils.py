@@ -21,10 +21,10 @@ def fill_dp_eagle_draft_model_kv_state_overlap(
     proposer: BaseDpOverlapProposer,
     target_model_input0: ModelInput,
     target_model_output0: ModelOutput,
-    next_token_ids0: torch.Tensor,
+    target_next_token_ids0: torch.Tensor,
     target_model_input1: ModelInput,
     target_model_output1: ModelOutput,
-    next_token_ids1: torch.Tensor,
+    target_next_token_ids1: torch.Tensor,
 ) -> None:
     """使用两个 target prefill microbatch 初始化 EAGLE draft state。"""
 
@@ -32,12 +32,12 @@ def fill_dp_eagle_draft_model_kv_state_overlap(
 
     prepare_mtp_prefill_inputs(
         model_input=target_model_input0,
-        b_next_token_ids=next_token_ids0,
+        b_next_token_ids=target_next_token_ids0,
         mtp_draft_input_hiddens=target_model_output0.mtp_collector.spec_hidden,
     )
     prepare_mtp_prefill_inputs(
         model_input=target_model_input1,
-        b_next_token_ids=next_token_ids1,
+        b_next_token_ids=target_next_token_ids1,
         mtp_draft_input_hiddens=target_model_output1.mtp_collector.spec_hidden,
     )
     proposer.backend.draft_models[0].microbatch_overlap_prefill(target_model_input0, target_model_input1)

@@ -38,13 +38,13 @@ class DSparkProposer(BaseSpecProposer):
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
+        target_next_token_ids: torch.Tensor,
     ) -> None:
         fill_parallel_block_draft_model_kv_state(
             proposer=self,
             target_model_input=target_model_input,
             target_model_output=target_model_output,
-            next_token_ids=next_token_ids,
+            target_next_token_ids=target_next_token_ids,
         )
 
     @torch.no_grad()

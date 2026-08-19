@@ -14,10 +14,10 @@ class BaseDpOverlapProposer(BaseSpecProposer, ABC):
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
+        target_next_token_ids0: torch.Tensor,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
+        target_next_token_ids1: torch.Tensor,
     ) -> None:
         """Build draft state from two overlapped target-prefill microbatches."""
 

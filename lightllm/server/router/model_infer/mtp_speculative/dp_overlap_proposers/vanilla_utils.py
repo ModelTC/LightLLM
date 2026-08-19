@@ -13,10 +13,10 @@ def fill_dp_chained_mtp_draft_model_kv_state_overlap(
     proposer: BaseDpOverlapProposer,
     target_model_input0: ModelInput,
     target_model_output0: ModelOutput,
-    next_token_ids0: torch.Tensor,
+    target_next_token_ids0: torch.Tensor,
     target_model_input1: ModelInput,
     target_model_output1: ModelOutput,
-    next_token_ids1: torch.Tensor,
+    target_next_token_ids1: torch.Tensor,
 ) -> None:
     """为两个 DP microbatch 依次构建 Vanilla chained draft state。"""
 
@@ -27,7 +27,7 @@ def fill_dp_chained_mtp_draft_model_kv_state_overlap(
         target_model_output0.mtp_collector.spec_hidden,
         target_model_output1.mtp_collector.spec_hidden,
     ]
-    draft_token_ids = [next_token_ids0, next_token_ids1]
+    draft_token_ids = [target_next_token_ids0, target_next_token_ids1]
 
     for draft_model in proposer.backend.draft_models:
         for batch_index, model_input in enumerate(model_inputs):

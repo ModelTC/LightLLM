@@ -32,18 +32,18 @@ class DPOverlapSpecEngine:
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
+        target_next_token_ids0: torch.Tensor,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
+        target_next_token_ids1: torch.Tensor,
     ) -> None:
         self.proposer.fill_draft_model_kv_state_overlap(
             target_model_input0=target_model_input0,
             target_model_output0=target_model_output0,
-            next_token_ids0=next_token_ids0,
+            target_next_token_ids0=target_next_token_ids0,
             target_model_input1=target_model_input1,
             target_model_output1=target_model_output1,
-            next_token_ids1=next_token_ids1,
+            target_next_token_ids1=target_next_token_ids1,
         )
 
     def propose_next_overlap(

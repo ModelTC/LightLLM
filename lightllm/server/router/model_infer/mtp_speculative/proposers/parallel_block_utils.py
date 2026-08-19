@@ -16,7 +16,7 @@ def fill_parallel_block_draft_model_kv_state(
     proposer: BaseSpecProposer,
     target_model_input: ModelInput,
     target_model_output: ModelOutput,
-    next_token_ids: torch.Tensor,
+    target_next_token_ids: torch.Tensor,
 ) -> None:
     """使用 target hidden 初始化 parallel-block drafter 的 KV state。"""
 

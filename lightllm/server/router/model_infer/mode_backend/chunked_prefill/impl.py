@@ -212,7 +212,7 @@ class ChunkedPrefillBackend(ModeBackend):
             spec_engine.fill_draft_model_kv_state(
                 target_model_input=model_input,
                 target_model_output=model_output,
-                next_token_ids=next_token_ids,
+                target_next_token_ids=next_token_ids,
             )
             g_infer_context.copy_linear_att_state_to_cache_buffer(
                 b_req_idx=model_input.b_req_idx,

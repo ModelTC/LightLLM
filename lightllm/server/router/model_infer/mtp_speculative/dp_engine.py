@@ -29,12 +29,12 @@ class DPSpecEngine:
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
+        target_next_token_ids: torch.Tensor,
     ) -> None:
         self.proposer.fill_draft_model_kv_state(
             target_model_input=target_model_input,
             target_model_output=target_model_output,
-            next_token_ids=next_token_ids,
+            target_next_token_ids=target_next_token_ids,
         )
 
     def propose_next(

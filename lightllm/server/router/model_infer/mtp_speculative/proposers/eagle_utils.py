@@ -28,7 +28,7 @@ def fill_eagle_draft_model_kv_state(
     proposer: BaseSpecProposer,
     target_model_input: ModelInput,
     target_model_output: ModelOutput,
-    next_token_ids: torch.Tensor,
+    target_next_token_ids: torch.Tensor,
 ) -> None:
     """使用 target prefill 输出初始化 EAGLE draft state。"""
 
@@ -36,7 +36,7 @@ def fill_eagle_draft_model_kv_state(
 
     prepare_mtp_prefill_inputs(
         model_input=target_model_input,
-        b_next_token_ids=next_token_ids,
+        b_next_token_ids=target_next_token_ids,
         mtp_draft_input_hiddens=target_model_output.mtp_collector.spec_hidden,
     )
     proposer.backend.draft_models[0].forward(target_model_input)

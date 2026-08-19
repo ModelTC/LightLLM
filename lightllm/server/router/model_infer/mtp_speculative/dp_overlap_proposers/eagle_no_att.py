@@ -20,27 +20,27 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
+        target_next_token_ids: torch.Tensor,
     ) -> None:
-        fill_eagle_draft_model_kv_state(self, target_model_input, target_model_output, next_token_ids)
+        fill_eagle_draft_model_kv_state(self, target_model_input, target_model_output, target_next_token_ids)
 
     def fill_draft_model_kv_state_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
-        next_token_ids0: torch.Tensor,
+        target_next_token_ids0: torch.Tensor,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
-        next_token_ids1: torch.Tensor,
+        target_next_token_ids1: torch.Tensor,
     ) -> None:
         fill_dp_eagle_draft_model_kv_state_overlap(
             self,
             target_model_input0,
             target_model_output0,
-            next_token_ids0,
+            target_next_token_ids0,
             target_model_input1,
             target_model_output1,
-            next_token_ids1,
+            target_next_token_ids1,
         )
 
     def propose_next(

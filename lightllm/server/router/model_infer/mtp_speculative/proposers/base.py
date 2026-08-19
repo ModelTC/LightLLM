@@ -64,7 +64,7 @@ class BaseSpecProposer(ABC):
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
+        target_next_token_ids: torch.Tensor,
     ) -> None:
         """Build draft KV/state from target prefill before the first decode verify.
 
@@ -73,7 +73,7 @@ class BaseSpecProposer(ABC):
           mem_indexes are reused by the draft state builder.
         - `target_model_output`: target output containing the features needed
           by the selected speculative algorithm.
-        - `next_token_ids`: first accepted target token, shape [run_req_num].
+        - `target_next_token_ids`: first accepted target token, shape [run_req_num].
 
         This hook only prepares draft-side state. It does not create proposal
         tokens; the first decode iteration creates them through `propose_next`.
