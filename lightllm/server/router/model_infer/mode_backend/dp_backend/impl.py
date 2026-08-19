@@ -478,7 +478,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 copy_len=req_num,
                 device=model_input.b_req_idx.device,
             )
-            self.prefill_draft_engine.build_draft_state_from_prefill(
+            self.prefill_draft_engine.fill_draft_model_kv_state(
                 target_model_input=model_input,
                 target_model_output=model_output,
                 next_token_ids=draft_next_token_ids_gpu,
@@ -785,7 +785,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 source_start=req_num0,
             )
 
-            self.prefill_draft_engine.build_draft_state_from_prefill_overlap(
+            self.prefill_draft_engine.fill_draft_model_kv_state_overlap(
                 target_model_input0=model_input0,
                 target_model_output0=model_output0,
                 next_token_ids0=draft_next_token_ids_gpu0,

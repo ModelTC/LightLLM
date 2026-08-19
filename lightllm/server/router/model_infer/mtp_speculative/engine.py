@@ -41,13 +41,13 @@ class SpecEngine:
 
     # Prefill draft-state initialization.
 
-    def build_draft_state_from_prefill(
+    def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        self.proposer.build_draft_state_from_prefill(
+        self.proposer.fill_draft_model_kv_state(
             target_model_input=target_model_input,
             target_model_output=target_model_output,
             next_token_ids=next_token_ids,

@@ -137,7 +137,7 @@ def test_spec_engine_only_exposes_planning_and_proposal_interfaces():
     }
 
     assert public_methods == {
-        "build_draft_state_from_prefill",
+        "fill_draft_model_kv_state",
         "plan_decode",
         "prepare_decode_model_input",
         "propose_next",

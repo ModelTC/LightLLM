@@ -4,7 +4,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.base import BaseDpProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
     EagleSpecProposal,
-    build_eagle_draft_state_from_prefill,
+    fill_eagle_draft_model_kv_state,
     propose_next_eagle,
 )
 
@@ -12,13 +12,13 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils im
 class DpEagleWithAttProposer(BaseDpProposer):
     """普通 DP ``eagle_with_att`` proposer。"""
 
-    def build_draft_state_from_prefill(
+    def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        build_eagle_draft_state_from_prefill(self, target_model_input, target_model_output, next_token_ids)
+        fill_eagle_draft_model_kv_state(self, target_model_input, target_model_output, next_token_ids)
 
     def propose_next(
         self,

@@ -60,7 +60,7 @@ class BaseSpecProposer(ABC):
         self.enable_dynmaic_mtp = bool(enable_dynmaic_mtp)
 
     @abstractmethod
-    def build_draft_state_from_prefill(
+    def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,

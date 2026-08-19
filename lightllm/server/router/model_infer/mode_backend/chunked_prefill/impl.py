@@ -209,7 +209,7 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             # mtp kv fill
             spec_engine = self.spec_engine
-            spec_engine.build_draft_state_from_prefill(
+            spec_engine.fill_draft_model_kv_state(
                 target_model_input=model_input,
                 target_model_output=model_output,
                 next_token_ids=next_token_ids,

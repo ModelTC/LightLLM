@@ -12,7 +12,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import Ba
 
 
 @torch.no_grad()
-def build_parallel_block_draft_state_from_prefill(
+def fill_parallel_block_draft_model_kv_state(
     proposer: BaseSpecProposer,
     target_model_input: ModelInput,
     target_model_output: ModelOutput,

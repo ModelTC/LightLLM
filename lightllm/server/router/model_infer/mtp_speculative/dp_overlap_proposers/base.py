@@ -10,7 +10,7 @@ class BaseDpOverlapProposer(BaseSpecProposer, ABC):
     """DP proposer 的完整接口，扩展双 microbatch overlap 操作。"""
 
     @abstractmethod
-    def build_draft_state_from_prefill_overlap(
+    def fill_draft_model_kv_state_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,

@@ -28,7 +28,7 @@ class DPOverlapSpecEngine:
         )
         self.planner: BaseDpOverlapPlanner = build_dp_overlap_planner(backend=backend)
 
-    def build_draft_state_from_prefill_overlap(
+    def fill_draft_model_kv_state_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
@@ -37,7 +37,7 @@ class DPOverlapSpecEngine:
         target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
-        self.proposer.build_draft_state_from_prefill_overlap(
+        self.proposer.fill_draft_model_kv_state_overlap(
             target_model_input0=target_model_input0,
             target_model_output0=target_model_output0,
             next_token_ids0=next_token_ids0,

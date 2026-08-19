@@ -17,7 +17,7 @@ class VanillaSpecProposal(SpecProposal):
     schedule_scores: torch.Tensor | None = None
 
 
-def build_chained_mtp_draft_state_from_prefill(
+def fill_chained_mtp_draft_model_kv_state(
     proposer: BaseSpecProposer,
     target_model_input: ModelInput,
     target_model_output: ModelOutput,

@@ -12,7 +12,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block_utils import (
     build_parallel_block_draft_input,
-    build_parallel_block_draft_state_from_prefill,
+    fill_parallel_block_draft_model_kv_state,
     extend_parallel_block_draft_kv_cache,
 )
 
@@ -31,13 +31,13 @@ class DFlashProposer(BaseSpecProposer):
     the accepted-tail anchor and mask-token positions.
     """
 
-    def build_draft_state_from_prefill(
+    def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        build_parallel_block_draft_state_from_prefill(
+        fill_parallel_block_draft_model_kv_state(
             proposer=self,
             target_model_input=target_model_input,
             target_model_output=target_model_output,

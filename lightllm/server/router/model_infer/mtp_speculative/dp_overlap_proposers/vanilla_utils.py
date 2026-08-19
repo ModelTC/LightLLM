@@ -9,7 +9,7 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.bas
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
 
 
-def build_dp_chained_mtp_draft_state_from_prefill_overlap(
+def fill_dp_chained_mtp_draft_model_kv_state_overlap(
     proposer: BaseDpOverlapProposer,
     target_model_input0: ModelInput,
     target_model_output0: ModelOutput,

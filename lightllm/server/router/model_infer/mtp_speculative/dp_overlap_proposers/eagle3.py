@@ -3,12 +3,12 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_utils import (
-    build_dp_eagle_draft_state_from_prefill_overlap,
+    fill_dp_eagle_draft_model_kv_state_overlap,
     propose_next_dp_eagle_autoregressive_overlap,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
     EagleSpecProposal,
-    build_eagle_draft_state_from_prefill,
+    fill_eagle_draft_model_kv_state,
     propose_next_eagle,
 )
 
@@ -19,15 +19,15 @@ class DpOverlapEagle3Proposer(BaseDpOverlapProposer):
     def _map_draft_token_ids(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
         return self.backend.draft_models[0].map_draft_vocab_to_main_vocab(draft_token_ids)
 
-    def build_draft_state_from_prefill(
+    def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        build_eagle_draft_state_from_prefill(self, target_model_input, target_model_output, next_token_ids)
+        fill_eagle_draft_model_kv_state(self, target_model_input, target_model_output, next_token_ids)
 
-    def build_draft_state_from_prefill_overlap(
+    def fill_draft_model_kv_state_overlap(
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
@@ -36,7 +36,7 @@ class DpOverlapEagle3Proposer(BaseDpOverlapProposer):
         target_model_output1: ModelOutput,
         next_token_ids1: torch.Tensor,
     ) -> None:
-        build_dp_eagle_draft_state_from_prefill_overlap(
+        fill_dp_eagle_draft_model_kv_state_overlap(
             self,
             target_model_input0,
             target_model_output0,

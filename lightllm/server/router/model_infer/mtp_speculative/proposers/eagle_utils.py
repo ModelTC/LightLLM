@@ -24,7 +24,7 @@ class EagleSpecProposal(SpecProposal):
     schedule_scores: torch.Tensor | None = None
 
 
-def build_eagle_draft_state_from_prefill(
+def fill_eagle_draft_model_kv_state(
     proposer: BaseSpecProposer,
     target_model_input: ModelInput,
     target_model_output: ModelOutput,

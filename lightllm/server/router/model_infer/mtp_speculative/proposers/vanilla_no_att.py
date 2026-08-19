@@ -4,7 +4,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import (
     VanillaSpecProposal,
-    build_chained_mtp_draft_state_from_prefill,
+    fill_chained_mtp_draft_model_kv_state,
     propose_next_chained_mtp,
 )
 
@@ -12,13 +12,13 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils 
 class VanillaNoAttProposer(BaseSpecProposer):
     """不使用 attention KV cache 的 Vanilla chained MTP proposer。"""
 
-    def build_draft_state_from_prefill(
+    def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        build_chained_mtp_draft_state_from_prefill(
+        fill_chained_mtp_draft_model_kv_state(
             proposer=self,
             target_model_input=target_model_input,
             target_model_output=target_model_output,

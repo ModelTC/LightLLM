@@ -4,7 +4,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
     EagleSpecProposal,
-    build_eagle_draft_state_from_prefill,
+    fill_eagle_draft_model_kv_state,
     generate_eagle_token_ids,
     generate_eagle_token_ids_and_prob,
     propose_next_eagle,
@@ -23,13 +23,13 @@ class Eagle3Proposer(BaseSpecProposer):
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         return generate_eagle_token_ids_and_prob(self, model_output, self._map_draft_token_ids)
 
-    def build_draft_state_from_prefill(
+    def fill_draft_model_kv_state(
         self,
         target_model_input: ModelInput,
         target_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
     ) -> None:
-        build_eagle_draft_state_from_prefill(self, target_model_input, target_model_output, next_token_ids)
+        fill_eagle_draft_model_kv_state(self, target_model_input, target_model_output, next_token_ids)
 
     def propose_next(
         self,
