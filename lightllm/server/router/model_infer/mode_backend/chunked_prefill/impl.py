@@ -363,7 +363,7 @@ class ChunkedPrefillBackend(ModeBackend):
             backend=self,
             decode_reqs=decode_reqs,
             accept_lengths_cpu=mtp_accept_len_cpu,
-            verified_row_reqs=run_reqs,
+            verify_run_reqs=run_reqs,
         )
 
         select_mask = accepted_index_cpu.to(dtype=torch.bool)
@@ -376,8 +376,7 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        proposal.extra_mem_indexes_cpu.insert(
-            0,
+        proposal.extra_mem_indexes_cpu.append(
             MtpMemIndexesToFree(
                 mem_indexes_cpu=model_input.mem_indexes_cpu,
                 free_mask_cpu=accepted_index_cpu == 0,

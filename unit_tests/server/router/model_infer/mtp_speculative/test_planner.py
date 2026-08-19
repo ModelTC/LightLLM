@@ -420,7 +420,7 @@ def test_records_request_mtp_metrics_in_one_pass():
         backend=backend,
         decode_reqs=[req0, req1],
         accept_lengths_cpu=torch.tensor([2, 1], dtype=torch.int32),
-        verified_row_reqs=[req0, req0, req1],
+        verify_run_reqs=[req0, req0, req1],
     )
 
     assert (req0.accepted, req0.verified, req0.verify_steps) == (1, 2, 1)
@@ -431,7 +431,7 @@ def test_records_request_mtp_metrics_in_one_pass():
         backend=backend,
         decode_reqs=[fixed_req],
         accept_lengths_cpu=torch.tensor([3], dtype=torch.int32),
-        verified_row_reqs=[fixed_req] * 4,
+        verify_run_reqs=[fixed_req] * 4,
     )
     assert (fixed_req.accepted, fixed_req.verified, fixed_req.verify_steps) == (2, 4, 1)
 

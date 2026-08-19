@@ -593,7 +593,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 backend=self,
                 decode_reqs=decode_reqs,
                 accept_lengths_cpu=mtp_accept_len_cpu,
-                verified_row_reqs=run_reqs,
+                verify_run_reqs=run_reqs,
             )
             verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
@@ -601,8 +601,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第三阶段
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            extra_mem_indexes_cpu.insert(
-                0,
+            extra_mem_indexes_cpu.append(
                 MtpMemIndexesToFree(
                     mem_indexes_cpu=model_input.mem_indexes_cpu[0:req_num],
                     free_mask_cpu=accepted_index_cpu == 0,
@@ -924,7 +923,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 backend=self,
                 decode_reqs=decode_reqs,
                 accept_lengths_cpu=mtp_accept_len_cpu,
-                verified_row_reqs=run_reqs,
+                verify_run_reqs=run_reqs,
             )
             verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
@@ -934,8 +933,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             mem_indexes_cpu = torch.cat(
                 (model_input0.mem_indexes_cpu[0:req_num0], model_input1.mem_indexes_cpu[0:req_num1]), dim=0
             )
-            extra_mem_indexes_cpu.insert(
-                0,
+            extra_mem_indexes_cpu.append(
                 MtpMemIndexesToFree(
                     mem_indexes_cpu=mem_indexes_cpu,
                     free_mask_cpu=accepted_index_cpu == 0,

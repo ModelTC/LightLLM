@@ -99,7 +99,7 @@ def record_request_mtp_metrics(
     backend: ModeBackend,
     decode_reqs: List[InferReq],
     accept_lengths_cpu: torch.Tensor,
-    verified_row_reqs: List[InferReq],
+    verify_run_reqs: List[InferReq],
 ) -> None:
     """Accumulate user-visible MTP metrics on each request."""
 
@@ -108,10 +108,10 @@ def record_request_mtp_metrics(
 
     accept_lengths = accept_lengths_cpu.tolist()
     assert len(accept_lengths) == len(decode_reqs)
-    verify_rows_by_req = Counter(req.req_idx for req in verified_row_reqs)
+    verify_count_by_req_idx = Counter(req.req_idx for req in verify_run_reqs)
     for req, accept_len in zip(decode_reqs, accept_lengths):
         req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
-        verify_token_num = verify_rows_by_req[req.req_idx]
+        verify_token_num = verify_count_by_req_idx[req.req_idx]
         if verify_token_num > 0:
             req.update_mtp_verify_token_num(verify_token_num=verify_token_num)
             req.update_mtp_verify_step_num(verify_step_num=1)
