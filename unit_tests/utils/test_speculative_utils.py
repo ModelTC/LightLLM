@@ -12,7 +12,8 @@ from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3Pre
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers import dflash as dflash_module
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer, DFlashSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block_utils import (
     build_parallel_block_draft_input,
 )
@@ -223,7 +224,7 @@ def test_draft_model_registry_rejects_unsupported_mode(model_type, spec_mode):
         )
 
 
-def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
+def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities(monkeypatch):
     block_size = 4
     max_draft_step = 3
     verify_row_count = 5
@@ -241,18 +242,25 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities():
         _gen_argmax_token_ids_and_prob=lambda _: (flat_draft_token_ids, flat_draft_token_probs),
     )
     proposer = DFlashProposer(backend=backend, enable_dynmaic_mtp=True)
-    proposer.extend_draft_kv_cache = lambda **_: None
-    proposer.build_block_draft_input = lambda **_: (SimpleNamespace(), torch.tensor([10, 11]))
+    monkeypatch.setattr(
+        dflash_module,
+        "build_parallel_block_draft_input",
+        lambda **_: (SimpleNamespace(), torch.tensor([10, 11])),
+    )
+    monkeypatch.setattr(dflash_module, "extend_parallel_block_draft_kv_cache", lambda **_: None)
 
     proposal = proposer.propose_next(
         main_model_input=SimpleNamespace(),
-        main_model_output=SimpleNamespace(spec_hidden=torch.empty(verify_row_count, 1)),
+        main_model_output=SimpleNamespace(
+            mtp_collector=SimpleNamespace(spec_hidden=torch.empty(verify_row_count, 1)),
+        ),
         next_token_ids=torch.arange(verify_row_count),
         b_req_mtp_start_loc=torch.tensor([0, 3]),
         draft_step=2,
         accept_len=torch.tensor([1, 1]),
     )
 
+    assert isinstance(proposal, DFlashSpecProposal)
     expected_blocks = flat_draft_token_ids.reshape(2, block_size)[:, :2]
     torch.testing.assert_close(proposal.token_ids[accepted_tail_rows, 1:], expected_blocks)
     assert proposal.schedule_scores.shape == (verify_row_count, 2)

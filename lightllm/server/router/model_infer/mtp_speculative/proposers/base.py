@@ -14,23 +14,16 @@ if TYPE_CHECKING:
 
 @dataclass
 class SpecProposal:
-    """Candidate tokens and scheduling metadata produced by a proposer.
+    """Common candidate-token output produced by every MTP proposer.
 
     `token_ids` has shape `[verify_batch, draft_step + 1]`; column 0 contains
     target-model tokens and the remaining columns contain draft candidates.
-    `schedule_scores`, when present, has shape `[verify_batch, draft_step]`.
-    Each column contains the proposer-specific score used by dynamic scheduling:
-    selected-token probability for standard proposers, or confidence-head
-    probability for DSpark.
-    `schedule_scores_cpu` is the asynchronous CPU copy consumed by planners
-    that use proposal scores directly.
     `extra_mem_indexes_cpu` tracks temporary KV slots owned by the proposal.
+    Mode-specific scheduling metadata belongs to the corresponding subclass.
     """
 
     token_ids: torch.Tensor
     extra_mem_indexes_cpu: Optional[torch.Tensor]
-    schedule_scores: Optional[torch.Tensor] = None
-    schedule_scores_cpu: Optional[torch.Tensor] = None
 
 
 class BaseSpecProposer(ABC):

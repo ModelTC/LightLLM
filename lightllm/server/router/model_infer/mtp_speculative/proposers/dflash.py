@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
@@ -9,6 +11,13 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block
     build_parallel_block_draft_state_from_prefill,
     extend_parallel_block_draft_kv_cache,
 )
+
+
+@dataclass
+class DFlashSpecProposal(SpecProposal):
+    """DFlash proposal with optional block-token probabilities."""
+
+    schedule_scores: torch.Tensor | None = None
 
 
 class DFlashProposer(BaseSpecProposer):
@@ -40,7 +49,7 @@ class DFlashProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
-    ) -> SpecProposal:
+    ) -> DFlashSpecProposal:
         request_count = int(b_req_mtp_start_loc.shape[0])
         verify_row_count = int(next_token_ids.shape[0])
         draft_model = self.backend.draft_models[0]
@@ -83,7 +92,7 @@ class DFlashProposer(BaseSpecProposer):
                 device=next_token_ids.device,
             )
             schedule_scores[accepted_tail_rows] = block_draft_token_probs[:, :draft_step].float()
-        return SpecProposal(
+        return DFlashSpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=extra_mem_indexes_cpu,
             schedule_scores=schedule_scores,

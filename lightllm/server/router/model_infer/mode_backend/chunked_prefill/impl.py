@@ -296,6 +296,12 @@ class ChunkedPrefillBackend(ModeBackend):
             verify_event = torch.cuda.Event()
             verify_event.record()
 
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=model_input.b_req_idx,
+                next_token_ids=next_token_ids,
+                mask=accepted_index == 1,
+            )
+
             proposal = spec_engine.propose_next(
                 main_model_input=model_input,
                 main_model_output=model_output,
@@ -306,11 +312,10 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
+                proposal=proposal,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
-                all_next_token_ids=proposal.token_ids,
                 b_req_idx=model_input.b_req_idx,
                 mtp_accept_len=mtp_accept_len,
-                schedule_scores=proposal.schedule_scores,
             )
 
             (
@@ -321,12 +326,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ids=next_token_ids,
                 next_token_logprobs=next_token_logprobs,
                 next_token_ranks=next_token_ranks,
-            )
-
-            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
-                b_req_idx=model_input.b_req_idx,
-                next_token_ids=next_token_ids,
-                mask=accepted_index == 1,
             )
 
             sync_event = torch.cuda.Event()
@@ -377,12 +376,12 @@ class ChunkedPrefillBackend(ModeBackend):
 
         mtp_utils.free_unused_mtp_decode_mem(
             backend=self,
+            proposal=proposal,
             model_input=model_input,
             selected_row_mask_cpu=(
                 async_selected_row_mask_cpu.tensor if async_selected_row_mask_cpu is not None else None
             ),
             accepted_index_cpu=accepted_index_cpu,
-            extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
         )
 
         # 第四阶段

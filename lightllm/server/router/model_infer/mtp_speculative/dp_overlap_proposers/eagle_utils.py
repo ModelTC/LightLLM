@@ -9,8 +9,8 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
+    EagleSpecProposal,
     generate_eagle_token_ids,
     prepare_eagle_verify_extend_input,
 )
@@ -71,7 +71,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
     accept_len1: torch.Tensor | None,
     draft_step: int,
     map_draft_token_ids: Callable[[torch.Tensor], torch.Tensor],
-) -> SpecProposal:
+) -> EagleSpecProposal:
     """运行 DP EAGLE extend 后接单 token overlap decode 的 proposal 流程。"""
 
     verify_width = proposer.backend.max_draft_step + 1
@@ -143,9 +143,10 @@ def propose_next_dp_eagle_autoregressive_overlap(
         proposal_token_ids[proposal_rows, 1] = draft_token_ids[:real_request_count]
 
     if draft_step == 1:
-        return SpecProposal(
+        return EagleSpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=None,
+            schedule_scores=None,
         )
 
     for batch_index, model_input in enumerate(model_inputs):
@@ -197,9 +198,10 @@ def propose_next_dp_eagle_autoregressive_overlap(
             real_request_count = real_request_counts[batch_index]
             proposal_token_ids[proposal_rows_by_batch[batch_index], step + 1] = draft_token_ids[:real_request_count]
 
-    return SpecProposal(
+    return EagleSpecProposal(
         token_ids=proposal_token_ids,
         extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+        schedule_scores=None,
     )
 
 
@@ -215,7 +217,7 @@ def propose_next_dp_eagle_fixed_layout_overlap(
     real_verify_rows1: int,
     draft_step: int,
     map_draft_token_ids: Callable[[torch.Tensor], torch.Tensor],
-) -> SpecProposal:
+) -> EagleSpecProposal:
     """保持 expanded verify-row layout 运行 DP EAGLE overlap decode。"""
 
     verify_width = proposer.backend.max_draft_step + 1
@@ -282,7 +284,8 @@ def propose_next_dp_eagle_fixed_layout_overlap(
         proposal_token_ids[:real_verify_rows0, step + 1] = draft_token_ids_by_batch[0][:real_verify_rows0]
         proposal_token_ids[real_verify_rows0:, step + 1] = draft_token_ids_by_batch[1][:real_verify_rows1]
 
-    return SpecProposal(
+    return EagleSpecProposal(
         token_ids=proposal_token_ids,
         extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+        schedule_scores=None,
     )

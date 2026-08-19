@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import List
+from typing import TYPE_CHECKING, List
 
 from lightllm.server.router.model_infer.mtp_speculative.planner.base import BaseMtpPlanner, SpecDecodePlan
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 class FixedSpecPlanner(BaseMtpPlanner):
@@ -22,9 +25,9 @@ class FixedSpecPlanner(BaseMtpPlanner):
     def update_statics(
         self,
         plan: SpecDecodePlan,
+        proposal: SpecProposal,
         req_num: int,
         accept_lengths,
-        schedule_scores=None,
     ) -> None:
         """固定规划不根据运行反馈调整 batch size 或 draft step。"""
 

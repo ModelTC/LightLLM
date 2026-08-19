@@ -6,8 +6,8 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.van
     build_dp_chained_mtp_draft_state_from_prefill_overlap,
     propose_next_dp_chained_mtp_overlap,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import (
+    VanillaSpecProposal,
     build_chained_mtp_draft_state_from_prefill,
     propose_next_chained_mtp,
 )
@@ -51,7 +51,7 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
-    ) -> SpecProposal:
+    ) -> VanillaSpecProposal:
         return propose_next_chained_mtp(self, main_model_input, main_model_output, next_token_ids, draft_step)
 
     def propose_next_overlap(
@@ -67,7 +67,7 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         real_verify_rows1: int,
         accept_len1: torch.Tensor | None,
         draft_step: int,
-    ) -> SpecProposal:
+    ) -> VanillaSpecProposal:
         return propose_next_dp_chained_mtp_overlap(
             self,
             main_model_input0,

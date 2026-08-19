@@ -2,8 +2,8 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.base import BaseDpProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
+    EagleSpecProposal,
     build_eagle_draft_state_from_prefill,
     propose_next_eagle,
 )
@@ -28,7 +28,7 @@ class DpEagleNoAttProposer(BaseDpProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
-    ) -> SpecProposal:
+    ) -> EagleSpecProposal:
         return propose_next_eagle(
             self,
             main_model_input,

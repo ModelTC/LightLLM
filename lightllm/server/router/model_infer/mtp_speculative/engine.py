@@ -126,9 +126,9 @@ class SpecEngine:
 
         self.planner.update_statics(
             plan=plan,
+            proposal=proposal,
             req_num=req_num,
             accept_lengths=accept_lengths_cpu,
-            schedule_scores=proposal.schedule_scores_cpu,
         )
 
     def _build_mtp_planner(self, spec_mode: str, enable_dynmaic_mtp: bool) -> BaseMtpPlanner:

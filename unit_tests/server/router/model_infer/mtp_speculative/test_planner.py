@@ -51,12 +51,14 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
 from lightllm.server.router.model_infer.mtp_speculative.planner.base import _InferCostMsTable
 from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer, DFlashSpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer, DSparkSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import EagleNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import EagleSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import VanillaWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 
@@ -137,6 +139,58 @@ def test_spec_engine_only_exposes_planning_and_proposal_interfaces():
         "propose_next",
         "update_planner_statics",
     }
+
+
+def test_mode_proposals_own_their_schedule_metadata():
+    assert "schedule_scores" not in SpecProposal.__dataclass_fields__
+    assert "schedule_scores_cpu" not in SpecProposal.__dataclass_fields__
+
+    for proposal_type in (VanillaSpecProposal, EagleSpecProposal, DFlashSpecProposal, DSparkSpecProposal):
+        assert "schedule_scores" in proposal_type.__dataclass_fields__
+    assert "schedule_scores_cpu" not in VanillaSpecProposal.__dataclass_fields__
+    assert "schedule_scores_cpu" not in EagleSpecProposal.__dataclass_fields__
+    assert "schedule_scores_cpu" not in DFlashSpecProposal.__dataclass_fields__
+    assert "schedule_scores_cpu" in DSparkSpecProposal.__dataclass_fields__
+
+
+def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
+    scatter_args = {}
+    monkeypatch.setattr(
+        mtp_utils,
+        "mtp_scatter_next_token_ids",
+        lambda **kwargs: scatter_args.update(kwargs),
+    )
+    req_to_next_token_ids = torch.empty((4, 2), dtype=torch.int64)
+    req_to_next_token_scores = torch.empty((4, 1), dtype=torch.float32)
+    backend = SimpleNamespace(
+        model=SimpleNamespace(
+            req_manager=SimpleNamespace(
+                req_sampling_params_manager=SimpleNamespace(
+                    req_to_next_token_ids=req_to_next_token_ids,
+                    req_to_next_token_scores=req_to_next_token_scores,
+                )
+            )
+        )
+    )
+    proposal = DFlashSpecProposal(
+        token_ids=torch.arange(6, dtype=torch.int64).view(3, 2),
+        extra_mem_indexes_cpu=None,
+        schedule_scores=torch.arange(3, dtype=torch.float32).view(3, 1),
+    )
+
+    mtp_utils.scatter_mtp_next_tokens(
+        backend=backend,
+        proposal=proposal,
+        b_req_mtp_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
+        mtp_accept_len=torch.ones(2, dtype=torch.int32),
+        valid_row_count=2,
+    )
+
+    assert scatter_args["req_to_next_token_ids"] is req_to_next_token_ids
+    assert scatter_args["req_to_next_token_scores"] is req_to_next_token_scores
+    assert torch.equal(scatter_args["all_next_token_ids"], proposal.token_ids[:2])
+    assert torch.equal(scatter_args["schedule_scores"], proposal.schedule_scores[:2])
 
 
 def test_dp_planner_returns_fixed_backend_draft_step():
@@ -306,6 +360,7 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
         draft_step=0,
     )
 
+    assert isinstance(proposal, EagleSpecProposal)
     assert proposal.token_ids.tolist() == [[10], [11]]
     assert proposal.schedule_scores.shape == (2, 0)
 
@@ -321,10 +376,13 @@ def test_dynamic_decode_frees_unselected_and_rejected_rows():
 
     mtp_utils.free_unused_mtp_decode_mem(
         backend=backend,
+        proposal=SpecProposal(
+            token_ids=torch.empty((0,), dtype=torch.int64),
+            extra_mem_indexes_cpu=torch.tensor([20]),
+        ),
         model_input=model_input,
         selected_row_mask_cpu=torch.tensor([1, 0, 1, 0], dtype=torch.bool),
         accepted_index_cpu=torch.tensor([1, 0], dtype=torch.int32),
-        extra_mem_indexes_cpu=torch.tensor([20]),
     )
 
     assert len(freed) == 1
@@ -695,7 +753,7 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
     planner.draft_infer_costs.update(batch_size=6, infer_cost_ms=0.5)
     confidence_probs = np.asarray([[0.9, 0.9, 0.9]] * 2, dtype=np.float64)
     plan = SpecDecodePlan(origin_batch_size=8, dynamic_batch_size=8, draft_step=3, pre_draft_step=3)
-    proposal = SpecProposal(
+    proposal = DSparkSpecProposal(
         token_ids=torch.empty((0,), dtype=torch.int64),
         extra_mem_indexes_cpu=None,
         schedule_scores_cpu=torch.from_numpy(confidence_probs),

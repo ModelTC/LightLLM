@@ -13,6 +13,7 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 class LightSpecPlanner(BaseMtpPlanner):
@@ -114,9 +115,9 @@ class LightSpecPlanner(BaseMtpPlanner):
     def update_statics(
         self,
         plan: SpecDecodePlan,
+        proposal: SpecProposal,
         req_num: int,
         accept_lengths,
-        schedule_scores=None,
     ) -> None:
         # The progress EMA records one complete-batch sample for a single
         # (N, B, d) configuration. all_reqs_have_proposals is false if any request is

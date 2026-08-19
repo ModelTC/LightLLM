@@ -10,6 +10,7 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     SpecDecodePlan,
     _InferCostMsTable,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkSpecProposal
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -52,13 +53,13 @@ class DSparkPlanner(BaseMtpPlanner):
     def update_statics(
         self,
         plan: SpecDecodePlan,
+        proposal: DSparkSpecProposal,
         req_num: int,
         accept_lengths,
-        schedule_scores=None,
     ) -> None:
-        if schedule_scores is not None:
+        if proposal.schedule_scores_cpu is not None:
             self._update_confidence_probs(
-                confidence_probs=schedule_scores,
+                confidence_probs=proposal.schedule_scores_cpu,
                 req_num=req_num,
             )
 

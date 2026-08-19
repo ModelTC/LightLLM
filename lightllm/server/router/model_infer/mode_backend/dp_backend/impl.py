@@ -649,10 +649,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num > 0:
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
-                all_next_token_ids=proposal.token_ids[:req_num],
+                proposal=proposal,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx[:req_num],
                 mtp_accept_len=mtp_accept_len,
+                valid_row_count=req_num,
             )
         return proposal.extra_mem_indexes_cpu
 
@@ -705,11 +706,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num > 0:
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
+                proposal=proposal,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
-                all_next_token_ids=proposal.token_ids[:req_num],
                 b_req_idx=model_input.b_req_idx[:req_num],
                 mtp_accept_len=mtp_accept_len,
-                schedule_scores=(proposal.schedule_scores[:req_num] if proposal.schedule_scores is not None else None),
+                valid_row_count=req_num,
             )
         return proposal.extra_mem_indexes_cpu
 
@@ -988,7 +989,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num0 + req_num1 > 0:
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
-                all_next_token_ids=proposal.token_ids,
+                proposal=proposal,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=b_req_idx,
                 mtp_accept_len=mtp_accept_len,
@@ -1061,10 +1062,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         if req_num0 + req_num1 > 0:
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
+                proposal=proposal,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
-                all_next_token_ids=proposal.token_ids,
                 b_req_idx=b_req_idx,
                 mtp_accept_len=mtp_accept_len,
-                schedule_scores=proposal.schedule_scores,
             )
         return proposal.extra_mem_indexes_cpu

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 from typing import Callable
 
 import torch
@@ -10,6 +11,13 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+
+
+@dataclass
+class EagleSpecProposal(SpecProposal):
+    """EAGLE proposal with optional selected-token probabilities."""
+
+    schedule_scores: torch.Tensor | None = None
 
 
 def build_eagle_draft_state_from_prefill(
@@ -75,7 +83,7 @@ def propose_next_eagle(
     draft_step: int,
     accept_len: torch.Tensor | None,
     map_draft_token_ids: Callable[[torch.Tensor], torch.Tensor],
-) -> SpecProposal:
+) -> EagleSpecProposal:
     """运行 EAGLE extend 后接单 token decode 的通用 proposal 流程。"""
 
     verify_row_count = int(next_token_ids.shape[0])
@@ -96,7 +104,7 @@ def propose_next_eagle(
         else None
     )
     if draft_step == 0:
-        return SpecProposal(
+        return EagleSpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=None,
             schedule_scores=schedule_scores,
@@ -130,7 +138,7 @@ def propose_next_eagle(
     draft_hidden = extend_output.mtp_collector.spec_hidden.index_select(0, accepted_tail_rows)
 
     if draft_step == 1:
-        return SpecProposal(
+        return EagleSpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=None,
             schedule_scores=schedule_scores,
@@ -180,7 +188,7 @@ def propose_next_eagle(
         draft_hidden = draft_output.mtp_collector.spec_hidden
         draft_seq_lens.add_(1)
 
-    return SpecProposal(
+    return EagleSpecProposal(
         token_ids=proposal_token_ids,
         extra_mem_indexes_cpu=extra_mem_indexes_cpu,
         schedule_scores=schedule_scores,

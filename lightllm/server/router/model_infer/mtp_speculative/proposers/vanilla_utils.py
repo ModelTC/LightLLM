@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+
+
+@dataclass
+class VanillaSpecProposal(SpecProposal):
+    """Vanilla proposal with optional selected-token probabilities."""
+
+    schedule_scores: torch.Tensor | None = None
 
 
 def build_chained_mtp_draft_state_from_prefill(
@@ -37,7 +46,7 @@ def propose_next_chained_mtp(
     main_model_output: ModelOutput,
     next_token_ids: torch.Tensor,
     draft_step: int,
-) -> SpecProposal:
+) -> VanillaSpecProposal:
     """依次运行 Vanilla chained MTP 模块并生成 proposal。"""
 
     verify_row_count = int(next_token_ids.shape[0])
@@ -68,7 +77,7 @@ def propose_next_chained_mtp(
             draft_token_ids = proposer.backend._gen_argmax_token_ids(draft_output)
         proposal_token_ids[:, step + 1] = draft_token_ids
 
-    return SpecProposal(
+    return VanillaSpecProposal(
         token_ids=proposal_token_ids,
         extra_mem_indexes_cpu=None,
         schedule_scores=schedule_scores,

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List
+from typing import TYPE_CHECKING, List
 
 from sortedcontainers import SortedDict
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 @dataclass(frozen=True)
@@ -62,19 +65,19 @@ class BaseMtpPlanner(ABC):
     def update_statics(
         self,
         plan: SpecDecodePlan,
+        proposal: SpecProposal,
         req_num: int,
         accept_lengths,
-        schedule_scores=None,
     ) -> None:
         """在本轮 verify 完成后更新规划器的运行时统计。
 
         Args:
             plan: 本轮 decode 实际采用的执行计划，用于确定被验证的配置。
+            proposal: proposer 生成的模式专属输出。需要额外调度信息的规划器
+                直接读取自己的 proposal 子类，其他规划器忽略该对象。
             req_num: 本轮逻辑请求数量。
             accept_lengths: 每个请求本轮提交的 token 数量，包含必然提交的
                 target token。
-            schedule_scores: proposer 可选提供的调度分数。LightSpec 主要使用
-                accept_lengths，DSpark 使用置信度分数，固定规划器忽略所有反馈。
         """
 
         raise NotImplementedError

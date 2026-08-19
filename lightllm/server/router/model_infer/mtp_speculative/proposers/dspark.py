@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
@@ -10,6 +12,14 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block
     build_parallel_block_draft_state_from_prefill,
     extend_parallel_block_draft_kv_cache,
 )
+
+
+@dataclass
+class DSparkSpecProposal(SpecProposal):
+    """DSpark proposal with GPU confidence scores and their CPU planner view."""
+
+    schedule_scores: torch.Tensor | None = None
+    schedule_scores_cpu: torch.Tensor | None = None
 
 
 class DSparkProposer(BaseSpecProposer):
@@ -42,7 +52,7 @@ class DSparkProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
-    ) -> SpecProposal:
+    ) -> DSparkSpecProposal:
         request_count = int(b_req_mtp_start_loc.shape[0])
         verify_row_count = int(next_token_ids.shape[0])
         draft_model = self.backend.draft_models[0]
@@ -106,7 +116,7 @@ class DSparkProposer(BaseSpecProposer):
                 gpu_tensor=schedule_scores,
             )
 
-        return SpecProposal(
+        return DSparkSpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=extra_mem_indexes_cpu,
             schedule_scores=schedule_scores,

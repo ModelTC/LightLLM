@@ -15,6 +15,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 def alloc_mem_indexes(token_count: int) -> torch.Tensor:
@@ -61,19 +62,32 @@ def verify_mtp_tokens(
 
 def scatter_mtp_next_tokens(
     backend: ModeBackend,
+    proposal: SpecProposal,
     b_req_mtp_start_loc: torch.Tensor,
-    all_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     mtp_accept_len: torch.Tensor,
-    schedule_scores: Optional[torch.Tensor] = None,
+    valid_row_count: Optional[int] = None,
 ) -> None:
     """Persist the next MTP proposal and optional scheduling scores by request."""
+
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashSpecProposal
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkSpecProposal
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import EagleSpecProposal
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
+
+    token_ids = proposal.token_ids
+    scored_proposal_types = (VanillaSpecProposal, EagleSpecProposal, DFlashSpecProposal, DSparkSpecProposal)
+    schedule_scores = proposal.schedule_scores if isinstance(proposal, scored_proposal_types) else None
+    if valid_row_count is not None:
+        token_ids = token_ids[:valid_row_count]
+        if schedule_scores is not None:
+            schedule_scores = schedule_scores[:valid_row_count]
 
     sampling_params_manager = backend.model.req_manager.req_sampling_params_manager
     mtp_scatter_next_token_ids(
         req_to_next_token_ids=sampling_params_manager.req_to_next_token_ids,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
-        all_next_token_ids=all_next_token_ids,
+        all_next_token_ids=token_ids,
         b_req_idx=b_req_idx,
         mtp_accept_len=mtp_accept_len,
         req_to_next_token_scores=(
@@ -107,10 +121,10 @@ def record_request_mtp_metrics(
 
 def free_unused_mtp_decode_mem(
     backend: ModeBackend,
+    proposal: SpecProposal,
     model_input: ModelInput,
     selected_row_mask_cpu: Optional[torch.Tensor],
     accepted_index_cpu: torch.Tensor,
-    extra_mem_indexes_cpu: Optional[torch.Tensor],
 ) -> None:
     """Free rejected target KV slots and draft-only temporary slots."""
 
@@ -123,8 +137,8 @@ def free_unused_mtp_decode_mem(
         free_mask[selected_mask] = accepted_index_cpu == 0
     need_free_mem_indexes = mem_indexes_cpu[free_mask]
 
-    if extra_mem_indexes_cpu is not None:
-        need_free_mem_indexes = torch.cat([need_free_mem_indexes, extra_mem_indexes_cpu], dim=0)
+    if proposal.extra_mem_indexes_cpu is not None:
+        need_free_mem_indexes = torch.cat([need_free_mem_indexes, proposal.extra_mem_indexes_cpu], dim=0)
     if len(need_free_mem_indexes) > 0:
         backend.model.req_manager.mem_manager.free(need_free_mem_indexes)
 

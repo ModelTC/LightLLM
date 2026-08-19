@@ -6,8 +6,8 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eag
     build_dp_eagle_draft_state_from_prefill_overlap,
     propose_next_dp_eagle_autoregressive_overlap,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
+    EagleSpecProposal,
     build_eagle_draft_state_from_prefill,
     propose_next_eagle,
 )
@@ -54,7 +54,7 @@ class DpOverlapEagle3Proposer(BaseDpOverlapProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
-    ) -> SpecProposal:
+    ) -> EagleSpecProposal:
         return propose_next_eagle(
             self,
             main_model_input,
@@ -79,7 +79,7 @@ class DpOverlapEagle3Proposer(BaseDpOverlapProposer):
         real_verify_rows1: int,
         accept_len1: torch.Tensor | None,
         draft_step: int,
-    ) -> SpecProposal:
+    ) -> EagleSpecProposal:
         return propose_next_dp_eagle_autoregressive_overlap(
             self,
             main_model_input0,

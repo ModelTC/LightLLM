@@ -6,7 +6,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
 
 
 def build_dp_chained_mtp_draft_state_from_prefill_overlap(
@@ -53,7 +53,7 @@ def propose_next_dp_chained_mtp_overlap(
     next_token_ids1: torch.Tensor,
     real_verify_rows1: int,
     draft_step: int,
-) -> SpecProposal:
+) -> VanillaSpecProposal:
     """为两个 DP microbatch 运行 Vanilla chained overlap decode。"""
 
     model_inputs = (main_model_input0, main_model_input1)
@@ -80,7 +80,8 @@ def propose_next_dp_chained_mtp_overlap(
         proposal_token_ids[:real_verify_rows0, step + 1] = draft_token_ids[0][:real_verify_rows0]
         proposal_token_ids[real_verify_rows0:, step + 1] = draft_token_ids[1][:real_verify_rows1]
 
-    return SpecProposal(
+    return VanillaSpecProposal(
         token_ids=proposal_token_ids,
         extra_mem_indexes_cpu=None,
+        schedule_scores=None,
     )
