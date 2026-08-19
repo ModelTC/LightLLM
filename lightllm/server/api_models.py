@@ -1,9 +1,10 @@
+from optparse import Option
 import time
 from typing_extensions import deprecated
 import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
+from typing import Any, Dict, List, Optional, Tuple, Union, Literal, ClassVar, TypeAlias
 from transformers import GenerationConfig
 
 
@@ -297,6 +298,8 @@ class ChatMessage(BaseModel):
     reasoning: Optional[str] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+    # OpenRouter-style: generated images alongside text; content may include "<image>" placeholders
+    images: Optional[List[MessageContent]] = None
 
     @model_validator(mode="after")
     def _sync_reasoning_aliases(self):
@@ -328,10 +331,11 @@ class ChatCompletionResponse(BaseModel):
 
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
-    content: Optional[str] = None
+    content: Optional[Union[str, List[MessageContent]]] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
     reasoning: Optional[str] = None
     reasoning_content: Optional[str] = None
+    images: Optional[List[MessageContent]] = None
 
     @model_validator(mode="after")
     def _sync_reasoning_aliases(self):
@@ -408,6 +412,135 @@ class CompletionStreamResponse(BaseModel):
         return str(v)
 
 
+# Supported values
+AspectRatio: TypeAlias = Literal[
+    "1:1",
+    "2:3",
+    "3:2",
+    "3:4",
+    "4:3",
+    "4:5",
+    "5:4",
+    "9:16",
+    "16:9",
+    "21:9",
+]
+
+ImageSize: TypeAlias = Literal["0.5K", "1K", "1.5K", "2K", "4K"]
+
+Modality: TypeAlias = Literal["text", "image", "audio"]
+
+ImageType: TypeAlias = Literal["png", "jpeg", "webp"]
+
+
+class ImageConfig(BaseModel):
+    aspect_ratio: AspectRatio = "1:1"
+    image_size: ImageSize = "1.5K"
+    image_type: ImageType = "jpeg"
+    height: Optional[int] = -1
+    width: Optional[int] = -1
+    # X2I / diffusion sampling (optional; server defaults apply when omitted)
+    steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
+    image_guidance_scale: Optional[float] = None
+    seed: Optional[int] = None
+    num_images: Optional[int] = None
+    cfg_norm: Optional[Literal["none", "cfg_zero_star", "global", "text_channel", "channel"]] = None
+    cfg_interval: Optional[Tuple[float, float]] = None
+    timestep_shift: Optional[float] = None
+    dynamic_resolution: Optional[bool] = True
+    _aspect_ratio_to_resolution: ClassVar[dict] = {
+        "1:1": {"1K": (1024, 1024), "1.5K": (1536, 1536), "2K": (2048, 2048), "4K": (4096, 4096)},
+        "16:9": {"1.5K": (2048, 1152), "2K": (2720, 1536), "4K": (4096, 2304)},
+        "9:16": {"1.5K": (1152, 2048), "2K": (1536, 2720), "4K": (2304, 4096)},
+        "3:2": {"1.5K": (1888, 1248), "2K": (2496, 1664), "4K": (4096, 2720)},
+        "2:3": {"1.5K": (1248, 1888), "2K": (1664, 2496), "4K": (2720, 4096)},
+        "4:3": {"1.5K": (1760, 1312), "2K": (2368, 1760), "4K": (4096, 3072)},
+        "3:4": {"1.5K": (1312, 1760), "2K": (1760, 2368), "4K": (3072, 4096)},
+        "1:2": {"1.5K": (1088, 2144), "2K": (1440, 2880), "4K": (2048, 4096)},
+        "2:1": {"1.5K": (2144, 1088), "2K": (2880, 1440), "4K": (4096, 2048)},
+        "1:3": {"1.5K": (864, 2592), "2K": (1152, 3456), "4K": (1376, 4096)},
+        "3:1": {"1.5K": (2592, 864), "2K": (3456, 1152), "4K": (4096, 1376)},
+    }
+    _size_set: ClassVar[set[str]] = {"1.5K", "2K", "4K"}
+
+    @field_validator("image_size", mode="before")
+    @classmethod
+    def normalize_image_size(cls, v):
+        if isinstance(v, str):
+            return v.strip().upper()
+        return v
+
+    @model_validator(mode="after")
+    def validate_resolution_config(self):
+        has_custom_height = self.height is not None and self.height > 0
+        has_custom_width = self.width is not None and self.width > 0
+        has_any_custom = (self.height is not None and self.height != -1) or (
+            self.width is not None and self.width != -1
+        )
+
+        # If custom resolution is provided, require both height/width and both must be positive.
+        if has_any_custom:
+            if not has_custom_height or not has_custom_width:
+                raise ValueError("height and width must both be provided as positive integers")
+            self.dynamic_resolution = False
+            return self
+
+        # Otherwise, validate ratio and logical image size.
+        if self.aspect_ratio not in self._aspect_ratio_to_resolution:
+            raise ValueError(f"Unsupported aspect ratio: {self.aspect_ratio}")
+        if self.image_size not in self._size_set:
+            raise ValueError(f"Unsupported image size: {self.image_size}")
+        return self
+
+    @field_validator("image_type")
+    @classmethod
+    def validate_image_type(cls, v):
+        if v not in ["jpeg", "png", "webp"]:
+            raise ValueError(f"unsupported image type: {v}")
+        return v
+
+    def get_resolution(self):
+        """Return scaled resolution (width, height)"""
+        from lightllm.models.neo_chat_moe.vision_process import smart_resize
+
+        print(f"self.height: {self.height}, self.width: {self.width}", flush=True)
+        if self.height > -1 and self.width > -1:
+            w, h = self.width, self.height
+        else:
+            base = self._aspect_ratio_to_resolution[self.aspect_ratio][self.image_size]
+            w, h = base
+
+        from lightllm.server.x2i_server.manager import get_min_max_pixels
+        min_pixels, max_pixels = get_min_max_pixels()
+        h, w = smart_resize(h, w, factor=32, min_pixels=min_pixels, max_pixels=max_pixels)
+        return w, h
+
+
+class ChatCompletionRequestV2(ChatCompletionRequest):
+    modalities: List[Modality] = ["text"]
+    image_config: Optional[ImageConfig] = None
+
+    @field_validator("modalities")
+    @classmethod
+    def validate_modalities(cls, v):
+        if "text" not in v and v != ["image"]:
+            raise ValueError("modalities must include 'text', or be ['image'] for image-only generation")
+        if len(v) != len(set(v)):
+            raise ValueError("modalities must be unique")
+        return v
+
+    @model_validator(mode="after")
+    def validate_image_config(self):
+        if "image" in self.modalities:
+            if self.image_config is None:
+                self.image_config = ImageConfig()
+        else:
+            if self.image_config is not None:
+                raise ValueError("image_config provided but 'image' not in modalities")
+        return self
+
+
 class ModelCard(BaseModel):
     id: str
     object: str = "model"
@@ -419,3 +552,90 @@ class ModelCard(BaseModel):
 class ModelListResponse(BaseModel):
     object: str = "list"
     data: List[ModelCard]
+
+
+class ImageGenerationRequest(BaseModel):
+    model: str = "default"
+    prompt: str
+    size: str = "1024x1024"
+    n: Literal[1] = 1
+    output_format: ImageType = "jpeg"
+    response_format: Literal["b64_json"] = "b64_json"
+    watermark: Optional[bool] = False
+
+    img_config: Optional[ImageConfig] = None
+
+    @model_validator(mode="after")
+    def parse_size(self):
+        width = -1
+        height = -1
+        try:
+            if "x" in self.size:
+                width, height = self.size.split("x")
+            else:
+                width, height = int(self.size), int(self.size)
+        except ValueError:
+            raise ValueError(f"Invalid size: {self.size}")
+
+        from lightllm.server.x2i_server.manager import get_default_image_config
+        conf = get_default_image_config()
+        conf.update({
+            "image_type": self.output_format,
+            "height": height,
+            "width": width,
+        })
+        self.img_config = ImageConfig(**conf)
+        return self
+
+
+class ImageInputTokensDetails(BaseModel):
+    image_tokens: int = 0
+    text_tokens: int = 0
+
+
+class ImageUsageInfo(BaseModel):
+    input_tokens: int = 0
+    input_tokens_details: ImageInputTokensDetails = ImageInputTokensDetails()
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ImageB64(BaseModel):
+    b64_json: str
+
+
+class ImageGenerationResponse(BaseModel):
+    created: int = Field(default_factory=lambda: int(time.time()))
+    data: List[ImageB64]
+    output_format: ImageType
+    size: str
+    usage: ImageUsageInfo
+
+
+class RawImageURL(BaseModel):
+    image_url: str
+
+    def to_image_url(self) -> Optional[dict]:
+        if self.image_url.startswith("http://") or self.image_url.startswith("https://"):
+            return {"type": "url", "data": self.image_url}
+        elif self.image_url.startswith("data:image"):
+            data_str = self.image_url.split(";", 1)[1]
+            if data_str.startswith("base64,"):
+                data = data_str[7:]
+                return {"type": "base64", "data": data}
+        return None
+
+
+class ImageEditRequest(ImageGenerationRequest):
+    images: List[RawImageURL]
+
+    @model_validator(mode="after")
+    def parse_size(self):
+        # auto resolution will update the height and width to the first ref image.
+        if self.size == "auto":
+            self.size = f"-1x-1"
+        return super().parse_size()
+
+
+class ImageEditResponse(ImageGenerationResponse):
+    pass

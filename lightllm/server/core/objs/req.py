@@ -6,7 +6,7 @@ import time
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
-from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLenList
+from .token_chunck_hash_list import TokenHashList, CpuCachePageList, PastKVCachePageList, TokenPageLenList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
@@ -125,6 +125,8 @@ class Req(ctypes.Structure):
         ("token_hash_page_len_list", TokenPageLenList),
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
+        # 用于图片生成场景，记录请求对应的kv cache页面信息，供生成过程使用。
+        ("past_kv_cache_page_indexes", PastKVCachePageList),
     ]
 
     def get_str(self):

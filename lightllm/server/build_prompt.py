@@ -1,7 +1,9 @@
 import os
 import json
+from typing import Union
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.api_models import ImageGenerationRequest, ImageEditRequest
 
 logger = init_logger(__name__)
 
@@ -125,3 +127,24 @@ async def build_prompt(request, tools) -> str:
         logger.error(f"Failed to build prompt: {e}")
         raise e
     return input_str
+
+
+async def build_prompt_from_image_request(request: Union[ImageGenerationRequest, ImageEditRequest]) -> str:
+    try:
+        user_content = []
+        if isinstance(request, ImageEditRequest):
+            [
+                user_content.append({"type": "image_url", "image_url": {"url": image.image_url[:100]}})
+                for image in request.images
+            ]
+        user_content.append({"type": "text", "text": request.prompt})
+        kwargs = {"conversation": [{"role": "user", "content": user_content}]}
+        # logger.info(f"kwargs: {kwargs}")
+
+        input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True)
+
+        return input_str
+
+    except BaseException as e:
+        logger.error(f"Failed to build prompt: {e}")
+        raise e
