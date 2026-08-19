@@ -566,7 +566,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             verify_event = torch.cuda.Event()
             verify_event.record()
 
-            eagle_mem_indexes_cpu = self._draft_decode_func(
+            extra_mem_indexes_cpu = self._draft_decode_func(
                 model_input=model_input,
                 model_output=model_output,
                 next_token_ids=next_token_ids,
@@ -601,8 +601,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
             need_free_mem_indexes = model_input.mem_indexes_cpu[0:req_num][accepted_index_cpu == 0]
-            if eagle_mem_indexes_cpu is not None:
-                need_free_mem_indexes = torch.cat([need_free_mem_indexes, eagle_mem_indexes_cpu], dim=0)
 
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
@@ -613,8 +611,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
-            if len(need_free_mem_indexes) > 0:
-                g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
+            mtp_utils.free_mem_indexes(
+                backend=self,
+                mem_indexes_cpu=need_free_mem_indexes,
+                extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+            )
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -884,7 +885,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             verify_event = torch.cuda.Event()
             verify_event.record()
 
-            eagle_mem_indexes_cpu = self._draft_decode_overlap_func(
+            extra_mem_indexes_cpu = self._draft_decode_overlap_func(
                 model_input0=model_input0,
                 model_input1=model_input1,
                 model_output0=model_output0,
@@ -924,8 +925,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 (model_input0.mem_indexes_cpu[0:req_num0], model_input1.mem_indexes_cpu[0:req_num1]), dim=0
             )
             need_free_mem_indexes = mem_indexes_cpu[accepted_index_cpu == 0]
-            if eagle_mem_indexes_cpu is not None:
-                need_free_mem_indexes = torch.cat((need_free_mem_indexes, eagle_mem_indexes_cpu), dim=0)
 
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
@@ -936,8 +935,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
-            if len(need_free_mem_indexes) > 0:
-                g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
+            mtp_utils.free_mem_indexes(
+                backend=self,
+                mem_indexes_cpu=need_free_mem_indexes,
+                extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+            )
             event_pack.notify_pre_post_handle()
         else:
             event_pack.notify_post_handle_and_wait_pre_post_handle()

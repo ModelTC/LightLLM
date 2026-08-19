@@ -9,6 +9,7 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
     EagleSpecProposal,
     generate_eagle_token_ids,
@@ -145,7 +146,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
     if draft_step == 1:
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=None,
+            extra_mem_indexes_cpu=[],
             schedule_scores=None,
         )
 
@@ -200,7 +201,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
 
     return EagleSpecProposal(
         token_ids=proposal_token_ids,
-        extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+        extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
         schedule_scores=None,
     )
 
@@ -286,6 +287,6 @@ def propose_next_dp_eagle_fixed_layout_overlap(
 
     return EagleSpecProposal(
         token_ids=proposal_token_ids,
-        extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+        extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
         schedule_scores=None,
     )

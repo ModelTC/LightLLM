@@ -10,7 +10,11 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
+    BaseSpecProposer,
+    MtpMemIndexesToFree,
+    SpecProposal,
+)
 
 
 @dataclass
@@ -106,7 +110,7 @@ def propose_next_eagle(
     if draft_step == 0:
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=None,
+            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )
 
@@ -140,7 +144,7 @@ def propose_next_eagle(
     if draft_step == 1:
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=None,
+            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )
 
@@ -190,6 +194,6 @@ def propose_next_eagle(
 
     return EagleSpecProposal(
         token_ids=proposal_token_ids,
-        extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+        extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
         schedule_scores=schedule_scores,
     )

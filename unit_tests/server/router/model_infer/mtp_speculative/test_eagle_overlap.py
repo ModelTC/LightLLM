@@ -109,7 +109,9 @@ def test_overlap_eagle_keeps_fixed_verify_layout(monkeypatch):
     expected_draft_tokens = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 5])
     assert torch.equal(proposal.token_ids[:, 1], expected_draft_tokens)
     assert torch.equal(proposal.token_ids[:, 2], expected_draft_tokens)
-    assert torch.equal(proposal.extra_mem_indexes_cpu, torch.arange(6, dtype=torch.int32))
+    assert len(proposal.extra_mem_indexes_cpu) == 1
+    assert torch.equal(proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu, torch.arange(6, dtype=torch.int32))
+    assert proposal.extra_mem_indexes_cpu[0].free_mask_cpu is None
     assert torch.equal(model_input0.mem_indexes, torch.tensor([2, 0, 1, 5, 99, 99], dtype=torch.int32))
     assert torch.equal(model_input1.mem_indexes, torch.tensor([2, 2, 4, 5, 3, 5], dtype=torch.int32))
 
@@ -161,7 +163,9 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     assert draft_model.extend_batch_sizes == (6, 6)
     assert draft_model.decode_batch_sizes == [(2, 2)]
     assert proposal.token_ids.shape == (9, 3)
-    assert torch.equal(proposal.extra_mem_indexes_cpu, torch.arange(3, dtype=torch.int32))
+    assert len(proposal.extra_mem_indexes_cpu) == 1
+    assert torch.equal(proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu, torch.arange(3, dtype=torch.int32))
+    assert proposal.extra_mem_indexes_cpu[0].free_mask_cpu is None
 
 
 def test_eagle3_maps_draft_token_ids_in_proposer():

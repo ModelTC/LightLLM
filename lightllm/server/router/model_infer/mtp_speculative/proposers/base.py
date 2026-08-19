@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
@@ -13,17 +13,36 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class MtpMemIndexesToFree:
+    """描述一组由 MTP proposal 持有、需要在 verify 后释放的临时 KV 索引。"""
+
+    # 位于 CPU 上的临时 KV cache 索引。
+    mem_indexes_cpu: torch.Tensor
+    # 与 mem_indexes_cpu 形状一致的 bool Tensor；True 表示释放对应索引。
+    # 为 None 时表示 mem_indexes_cpu 中的全部索引都需要释放。
+    free_mask_cpu: Optional[torch.Tensor] = None
+
+    def __post_init__(self) -> None:
+        if self.free_mask_cpu is None:
+            return
+        assert isinstance(self.free_mask_cpu, torch.Tensor)
+        assert self.free_mask_cpu.dtype == torch.bool
+        assert self.free_mask_cpu.shape == self.mem_indexes_cpu.shape
+
+
+@dataclass
 class SpecProposal:
     """Common candidate-token output produced by every MTP proposer.
 
     `token_ids` has shape `[verify_batch, draft_step + 1]`; column 0 contains
     target-model tokens and the remaining columns contain draft candidates.
-    `extra_mem_indexes_cpu` tracks temporary KV slots owned by the proposal.
+    `extra_mem_indexes_cpu` tracks temporary KV slots owned by the proposal;
+    each item describes one independently managed group of temporary indexes.
     Mode-specific scheduling metadata belongs to the corresponding subclass.
     """
 
     token_ids: torch.Tensor
-    extra_mem_indexes_cpu: Optional[torch.Tensor]
+    extra_mem_indexes_cpu: List[MtpMemIndexesToFree] = field(default_factory=list)
 
 
 class BaseSpecProposer(ABC):

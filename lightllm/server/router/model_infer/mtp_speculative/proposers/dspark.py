@@ -6,7 +6,11 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
+    BaseSpecProposer,
+    MtpMemIndexesToFree,
+    SpecProposal,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block_utils import (
     build_parallel_block_draft_input,
     build_parallel_block_draft_state_from_prefill,
@@ -118,7 +122,7 @@ class DSparkProposer(BaseSpecProposer):
 
         return DSparkSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
             schedule_scores=schedule_scores,
             schedule_scores_cpu=schedule_scores_cpu,
         )

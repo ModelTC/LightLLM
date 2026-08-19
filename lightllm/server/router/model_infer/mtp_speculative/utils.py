@@ -15,7 +15,10 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
+        MtpMemIndexesToFree,
+        SpecProposal,
+    )
 
 
 def alloc_mem_indexes(token_count: int) -> torch.Tensor:
@@ -119,6 +122,28 @@ def record_request_mtp_metrics(
             req.update_mtp_verify_step_num(verify_step_num=1)
 
 
+def free_mem_indexes(
+    backend: ModeBackend,
+    mem_indexes_cpu: torch.Tensor,
+    extra_mem_indexes_cpu: List[MtpMemIndexesToFree],
+) -> None:
+    """Free regular KV indexes plus proposal-owned indexes selected by masks."""
+
+    mem_indexes_to_free = []
+    if mem_indexes_cpu.numel() > 0:
+        mem_indexes_to_free.append(mem_indexes_cpu)
+
+    for extra_mem_to_free in extra_mem_indexes_cpu:
+        extra_indexes_cpu = extra_mem_to_free.mem_indexes_cpu
+        if extra_mem_to_free.free_mask_cpu is not None:
+            extra_indexes_cpu = extra_indexes_cpu[extra_mem_to_free.free_mask_cpu]
+        if extra_indexes_cpu.numel() > 0:
+            mem_indexes_to_free.append(extra_indexes_cpu)
+
+    if mem_indexes_to_free:
+        backend.model.req_manager.mem_manager.free(torch.cat(mem_indexes_to_free, dim=0))
+
+
 def free_unused_mtp_decode_mem(
     backend: ModeBackend,
     proposal: SpecProposal,
@@ -137,14 +162,16 @@ def free_unused_mtp_decode_mem(
         free_mask[selected_mask] = accepted_index_cpu == 0
     need_free_mem_indexes = mem_indexes_cpu[free_mask]
 
-    if proposal.extra_mem_indexes_cpu is not None:
-        need_free_mem_indexes = torch.cat([need_free_mem_indexes, proposal.extra_mem_indexes_cpu], dim=0)
-    if len(need_free_mem_indexes) > 0:
-        backend.model.req_manager.mem_manager.free(need_free_mem_indexes)
+    free_mem_indexes(
+        backend=backend,
+        mem_indexes_cpu=need_free_mem_indexes,
+        extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
+    )
 
 
 __all__ = [
     "alloc_mem_indexes",
+    "free_mem_indexes",
     "free_unused_mtp_decode_mem",
     "record_request_mtp_metrics",
     "scatter_mtp_next_tokens",

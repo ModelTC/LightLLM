@@ -82,6 +82,6 @@ def propose_next_dp_chained_mtp_overlap(
 
     return VanillaSpecProposal(
         token_ids=proposal_token_ids,
-        extra_mem_indexes_cpu=None,
+        extra_mem_indexes_cpu=[],
         schedule_scores=None,
     )

@@ -50,7 +50,11 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
 )
 from lightllm.server.router.model_infer.mtp_speculative.planner.base import _InferCostMsTable
 from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
+    BaseSpecProposer,
+    MtpMemIndexesToFree,
+    SpecProposal,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer, DFlashSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer, DSparkSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
@@ -174,7 +178,7 @@ def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
     )
     proposal = DFlashSpecProposal(
         token_ids=torch.arange(6, dtype=torch.int64).view(3, 2),
-        extra_mem_indexes_cpu=None,
+        extra_mem_indexes_cpu=[],
         schedule_scores=torch.arange(3, dtype=torch.float32).view(3, 1),
     )
 
@@ -378,7 +382,13 @@ def test_dynamic_decode_frees_unselected_and_rejected_rows():
         backend=backend,
         proposal=SpecProposal(
             token_ids=torch.empty((0,), dtype=torch.int64),
-            extra_mem_indexes_cpu=torch.tensor([20]),
+            extra_mem_indexes_cpu=[
+                MtpMemIndexesToFree(
+                    mem_indexes_cpu=torch.tensor([20, 21]),
+                    free_mask_cpu=torch.tensor([True, False]),
+                ),
+                MtpMemIndexesToFree(mem_indexes_cpu=torch.tensor([22])),
+            ],
         ),
         model_input=model_input,
         selected_row_mask_cpu=torch.tensor([1, 0, 1, 0], dtype=torch.bool),
@@ -386,7 +396,7 @@ def test_dynamic_decode_frees_unselected_and_rejected_rows():
     )
 
     assert len(freed) == 1
-    assert freed[0].tolist() == [11, 12, 13, 20]
+    assert freed[0].tolist() == [11, 12, 13, 20, 22]
 
 
 def test_records_request_mtp_metrics_in_one_pass():
@@ -737,7 +747,7 @@ def test_engine_skips_feedback_for_a_mixed_proposal_batch():
         plan=plan,
         proposal=SpecProposal(
             token_ids=torch.empty((0,), dtype=torch.int64),
-            extra_mem_indexes_cpu=None,
+            extra_mem_indexes_cpu=[],
         ),
         req_num=2,
         accept_lengths_cpu=torch.tensor([1, 2], dtype=torch.int32),
@@ -755,7 +765,7 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
     plan = SpecDecodePlan(origin_batch_size=8, dynamic_batch_size=8, draft_step=3, pre_draft_step=3)
     proposal = DSparkSpecProposal(
         token_ids=torch.empty((0,), dtype=torch.int64),
-        extra_mem_indexes_cpu=None,
+        extra_mem_indexes_cpu=[],
         schedule_scores_cpu=torch.from_numpy(confidence_probs),
     )
     engine = SpecEngine.__new__(SpecEngine)
