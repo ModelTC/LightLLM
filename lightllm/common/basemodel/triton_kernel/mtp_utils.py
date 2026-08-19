@@ -100,8 +100,9 @@ def mtp_verify(
 def _fwd_kernel_mtp_scatter_next_token_ids(
     req_to_next_token_ids,
     req_to_next_token_ids_stride,
-    all_next_token_ids,
-    all_next_token_ids_stride,
+    target_next_token_ids,
+    draft_token_ids,
+    draft_token_ids_stride,
     req_to_next_token_scores,
     req_to_next_token_scores_stride,
     schedule_scores,
@@ -109,7 +110,7 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     mtp_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
-    proposal_width,
+    draft_step,
     verify_width,
     HAS_NEXT_TOKEN_SCORES: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -122,52 +123,67 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     offset = tl.arange(0, BLOCK_SIZE)
     selected_row = req_start_loc + accept_len - 1
 
-    if HAS_NEXT_TOKEN_SCORES:
-        # schedule_scores omits the guaranteed target column. Insert its 1.0
-        # here and clear the unused tail of the fixed-width request buffer.
-        schedule_offset = tl.maximum(offset - 1, 0)
-        draft_scores = tl.load(
-            schedule_scores + selected_row * schedule_scores_stride + schedule_offset,
-            mask=(offset > 0) & (offset < proposal_width),
-            other=0.0,
-        )
-        next_token_scores = tl.where(offset == 0, 1.0, draft_scores)
-        tl.store(
-            req_to_next_token_scores + cur_req_idx * req_to_next_token_scores_stride + offset,
-            next_token_scores,
-            mask=offset < verify_width,
-        )
-    scatter_next_token_ids = tl.load(
-        all_next_token_ids + selected_row * all_next_token_ids_stride + offset,
-        mask=offset < proposal_width,
+    # 第 0 列写入当前请求最终接受位置对应的 target token。
+    target_token_id = tl.load(target_next_token_ids + selected_row)
+    tl.store(
+        req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride,
+        target_token_id,
+    )
+
+    # 从第 1 列开始写入 draft token；固定宽度 buffer 的未使用列填 1。
+    draft_token_id = tl.load(
+        draft_token_ids + cur_index * draft_token_ids_stride + offset,
+        mask=offset < draft_step,
         other=1,
     )
     tl.store(
-        req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + offset,
-        scatter_next_token_ids,
-        mask=offset < verify_width,
+        req_to_next_token_ids + cur_req_idx * req_to_next_token_ids_stride + offset + 1,
+        draft_token_id,
+        mask=offset + 1 < verify_width,
     )
+
+    if HAS_NEXT_TOKEN_SCORES:
+        # Target token 必然接受，因此第 0 列分数固定为 1.0。
+        tl.store(
+            req_to_next_token_scores + cur_req_idx * req_to_next_token_scores_stride,
+            1.0,
+        )
+
+        draft_scores = tl.load(
+            schedule_scores + cur_index * schedule_scores_stride + offset,
+            mask=offset < draft_step,
+            other=0.0,
+        )
+        tl.store(
+            req_to_next_token_scores + cur_req_idx * req_to_next_token_scores_stride + offset + 1,
+            draft_scores,
+            mask=offset + 1 < verify_width,
+        )
     return
 
 
 def mtp_scatter_next_token_ids(
-    req_to_next_token_ids: torch.Tensor,
-    b_req_mtp_start_loc: torch.Tensor,
-    all_next_token_ids: torch.Tensor,
-    b_req_idx: torch.Tensor,
-    mtp_accept_len: torch.Tensor,
-    req_to_next_token_scores: Optional[torch.Tensor] = None,
-    schedule_scores: Optional[torch.Tensor] = None,
+    req_to_next_token_ids: torch.Tensor,  # [max_req_num, verify_width]
+    b_req_mtp_start_loc: torch.Tensor,  # [req_num]
+    target_next_token_ids: torch.Tensor,  # [verify_batch_size]
+    draft_token_ids: torch.Tensor,  # [req_num, draft_step]
+    b_req_idx: torch.Tensor,  # [verify_batch_size]
+    mtp_accept_len: torch.Tensor,  # [req_num]
+    req_to_next_token_scores: Optional[torch.Tensor] = None,  # [max_req_num, verify_width]
+    schedule_scores: Optional[torch.Tensor] = None,  # [req_num, draft_step]
 ):
+    """将 target token 和 draft proposal 写入请求级 MTP buffer。"""
+
     verify_width = req_to_next_token_ids.shape[1]
     BLOCK_SIZE = 16
     assert verify_width <= BLOCK_SIZE, f"verify_width must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
-    proposal_width = all_next_token_ids.shape[1]
-    assert proposal_width <= verify_width
+    draft_step = draft_token_ids.shape[1]
+    assert draft_token_ids.shape[0] == num_reqs
+    assert draft_step < verify_width
     if req_to_next_token_scores is not None:
         assert schedule_scores is not None
-        assert schedule_scores.shape == (all_next_token_ids.shape[0], proposal_width - 1)
+        assert schedule_scores.shape == draft_token_ids.shape
 
     HAS_NEXT_TOKEN_SCORES = req_to_next_token_scores is not None
     # Triton launch arguments cannot be None; static verification uses an unused placeholder.
@@ -186,8 +202,9 @@ def mtp_scatter_next_token_ids(
     _fwd_kernel_mtp_scatter_next_token_ids[grid](
         req_to_next_token_ids=req_to_next_token_ids,
         req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
-        all_next_token_ids=all_next_token_ids,
-        all_next_token_ids_stride=all_next_token_ids.stride(0),
+        target_next_token_ids=target_next_token_ids,
+        draft_token_ids=draft_token_ids,
+        draft_token_ids_stride=draft_token_ids.stride(0),
         req_to_next_token_scores=req_to_next_token_scores_arg,
         req_to_next_token_scores_stride=req_to_next_token_scores_stride,
         schedule_scores=schedule_scores_arg,
@@ -195,7 +212,7 @@ def mtp_scatter_next_token_ids(
         mtp_accept_len=mtp_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
-        proposal_width=proposal_width,
+        draft_step=draft_step,
         verify_width=verify_width,
         HAS_NEXT_TOKEN_SCORES=HAS_NEXT_TOKEN_SCORES,
         BLOCK_SIZE=BLOCK_SIZE,
@@ -314,14 +331,17 @@ def test_mtp_verify():
     b_req_idx = torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32, device="cuda")
     b_req_mtp_start_loc = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
     new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int64, device="cuda")
-    all_next_token_ids = torch.tensor(
-        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int64, device="cuda"
-    )
+    draft_token_ids = torch.tensor([[2, 3], [8, 9]], dtype=torch.int64, device="cuda")
     mtp_accept_len, accepted_index = mtp_verify(
         req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx
     )
     mtp_scatter_next_token_ids(
-        req_to_next_token_ids, b_req_mtp_start_loc, all_next_token_ids, b_req_idx, mtp_accept_len
+        req_to_next_token_ids,
+        b_req_mtp_start_loc,
+        new_next_token_ids,
+        draft_token_ids,
+        b_req_idx,
+        mtp_accept_len,
     )
     print(mtp_accept_len)
     print(req_to_next_token_ids)

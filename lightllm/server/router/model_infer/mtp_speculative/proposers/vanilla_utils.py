@@ -45,18 +45,20 @@ def propose_next_chained_mtp(
     main_model_input: ModelInput,
     main_model_output: ModelOutput,
     next_token_ids: torch.Tensor,
+    b_req_mtp_start_loc: torch.Tensor,
     draft_step: int,
+    accept_len: torch.Tensor,
 ) -> VanillaSpecProposal:
     """依次运行 Vanilla chained MTP 模块并生成 proposal。"""
 
-    verify_row_count = int(next_token_ids.shape[0])
+    request_count = int(b_req_mtp_start_loc.shape[0])
+    accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
     draft_token_ids = next_token_ids
     draft_hidden = main_model_output.mtp_collector.spec_hidden
-    proposal_token_ids = next_token_ids.new_empty((verify_row_count, draft_step + 1))
-    proposal_token_ids[:, 0] = next_token_ids
+    proposal_token_ids = next_token_ids.new_empty((request_count, draft_step))
     schedule_scores = (
         torch.empty(
-            (verify_row_count, draft_step),
+            (request_count, draft_step),
             dtype=torch.float32,
             device=next_token_ids.device,
         )
@@ -72,10 +74,10 @@ def propose_next_chained_mtp(
         draft_hidden = draft_output.mtp_collector.spec_hidden
         if proposer.enable_dynmaic_mtp:
             draft_token_ids, draft_token_probs = proposer.backend._gen_argmax_token_ids_and_prob(draft_output)
-            schedule_scores[:, step] = draft_token_probs
+            schedule_scores[:, step] = draft_token_probs.index_select(0, accepted_tail_rows)
         else:
             draft_token_ids = proposer.backend._gen_argmax_token_ids(draft_output)
-        proposal_token_ids[:, step + 1] = draft_token_ids
+        proposal_token_ids[:, step] = draft_token_ids.index_select(0, accepted_tail_rows)
 
     return VanillaSpecProposal(
         token_ids=proposal_token_ids,

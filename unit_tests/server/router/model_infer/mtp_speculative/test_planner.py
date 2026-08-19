@@ -177,24 +177,26 @@ def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
         )
     )
     proposal = DFlashSpecProposal(
-        token_ids=torch.arange(6, dtype=torch.int64).view(3, 2),
+        token_ids=torch.arange(2, dtype=torch.int64).view(2, 1),
         extra_mem_indexes_cpu=[],
-        schedule_scores=torch.arange(3, dtype=torch.float32).view(3, 1),
+        schedule_scores=torch.arange(2, dtype=torch.float32).view(2, 1),
     )
+    next_token_ids = torch.tensor([10, 11], dtype=torch.int64)
 
     mtp_utils.scatter_mtp_next_tokens(
         backend=backend,
         proposal=proposal,
+        target_next_token_ids=next_token_ids,
         b_req_mtp_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
         mtp_accept_len=torch.ones(2, dtype=torch.int32),
-        valid_row_count=2,
     )
 
     assert scatter_args["req_to_next_token_ids"] is req_to_next_token_ids
     assert scatter_args["req_to_next_token_scores"] is req_to_next_token_scores
-    assert torch.equal(scatter_args["all_next_token_ids"], proposal.token_ids[:2])
-    assert torch.equal(scatter_args["schedule_scores"], proposal.schedule_scores[:2])
+    assert torch.equal(scatter_args["target_next_token_ids"], next_token_ids)
+    assert torch.equal(scatter_args["draft_token_ids"], proposal.token_ids)
+    assert torch.equal(scatter_args["schedule_scores"], proposal.schedule_scores)
 
 
 def test_dp_planner_returns_fixed_backend_draft_step():
@@ -365,7 +367,7 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
     )
 
     assert isinstance(proposal, EagleSpecProposal)
-    assert proposal.token_ids.tolist() == [[10], [11]]
+    assert proposal.token_ids.shape == (2, 0)
     assert proposal.schedule_scores.shape == (2, 0)
 
 

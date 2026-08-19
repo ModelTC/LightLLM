@@ -55,14 +55,8 @@ class DFlashProposer(BaseSpecProposer):
         accept_len: torch.Tensor | None = None,
     ) -> DFlashSpecProposal:
         request_count = int(b_req_mtp_start_loc.shape[0])
-        verify_row_count = int(next_token_ids.shape[0])
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        proposal_token_ids = next_token_ids.new_full(
-            (verify_row_count, draft_step + 1),
-            fill_value=1,
-        )
-        proposal_token_ids[:, 0] = next_token_ids
 
         # One accepted-tail anchor expands to a complete block-diffusion draft.
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
@@ -85,17 +79,12 @@ class DFlashProposer(BaseSpecProposer):
         else:
             flat_draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
         block_draft_token_ids = flat_draft_token_ids.reshape(request_count, block_size)
-        proposal_token_ids[accepted_tail_rows, 1:] = block_draft_token_ids[:, :draft_step]
+        proposal_token_ids = block_draft_token_ids[:, :draft_step].contiguous()
 
         schedule_scores = None
         if self.enable_dynmaic_mtp:
             block_draft_token_probs = flat_draft_token_probs.reshape(request_count, block_size)
-            schedule_scores = torch.zeros(
-                (verify_row_count, draft_step),
-                dtype=torch.float32,
-                device=next_token_ids.device,
-            )
-            schedule_scores[accepted_tail_rows] = block_draft_token_probs[:, :draft_step].float()
+            schedule_scores = block_draft_token_probs[:, :draft_step].float().contiguous()
         return DFlashSpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],

@@ -640,6 +640,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         req_num: int,
     ):
+        if b_req_mtp_start_loc is None:
+            b_req_mtp_start_loc = torch.empty((0,), dtype=torch.int32, device=model_input.b_req_idx.device)
+            mtp_accept_len = torch.empty_like(b_req_mtp_start_loc)
         padded_next_token_ids = self._build_padded_next_token_ids(
             token_ids=next_token_ids,
             batch_size=model_input.batch_size,
@@ -651,16 +654,17 @@ class DPChunkedPrefillBackend(ModeBackend):
             main_model_output=model_output,
             next_token_ids=padded_next_token_ids,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
+            accept_len=mtp_accept_len,
         )
 
         if req_num > 0:
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
                 proposal=proposal,
+                target_next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx[:req_num],
                 mtp_accept_len=mtp_accept_len,
-                valid_row_count=req_num,
             )
         return proposal.extra_mem_indexes_cpu
 
@@ -709,15 +713,18 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_req_mtp_start_loc=padded_start_locs,
             accept_len=padded_accept_len,
         )
+        proposal.token_ids = proposal.token_ids[:real_request_num]
+        if getattr(proposal, "schedule_scores", None) is not None:
+            proposal.schedule_scores = proposal.schedule_scores[:real_request_num]
 
         if req_num > 0:
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
                 proposal=proposal,
+                target_next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx[:req_num],
                 mtp_accept_len=mtp_accept_len,
-                valid_row_count=req_num,
             )
         return proposal.extra_mem_indexes_cpu
 
@@ -828,7 +835,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             _,
         ) = padded_overlap_prepare_decode_inputs(decode_reqs)
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
-        all_next_token_ids = []
         b_mtp_index_cpu0 = model_input0.b_mtp_index
         b_mtp_index_cpu1 = model_input1.b_mtp_index
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
@@ -886,8 +892,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                     key="mtp_accept_len",
                     gpu_tensor=mtp_accept_len,
                 )
-                all_next_token_ids.append(next_token_ids)
-
             verify_event = torch.cuda.Event()
             verify_event.record()
 
@@ -971,6 +975,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num0: int = 0,
         req_num1: int = 0,
     ):
+        if mtp_accept_len is None:
+            mtp_accept_len = torch.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
+        verify_width = self.max_draft_step + 1
+        real_request_num0 = req_num0 // verify_width
         padded_next_token_ids0 = self._build_padded_next_token_ids(
             token_ids=next_token_ids,
             batch_size=model_input0.batch_size,
@@ -991,18 +999,19 @@ class DPChunkedPrefillBackend(ModeBackend):
             main_model_output0=model_output0,
             next_token_ids0=padded_next_token_ids0,
             real_verify_rows0=req_num0,
-            accept_len0=None,
+            accept_len0=mtp_accept_len[:real_request_num0],
             main_model_input1=model_input1,
             main_model_output1=model_output1,
             next_token_ids1=padded_next_token_ids1,
             real_verify_rows1=req_num1,
-            accept_len1=None,
+            accept_len1=mtp_accept_len[real_request_num0:],
         )
 
         if req_num0 + req_num1 > 0:
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
                 proposal=proposal,
+                target_next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=b_req_idx,
                 mtp_accept_len=mtp_accept_len,
@@ -1076,6 +1085,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
                 proposal=proposal,
+                target_next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=b_req_idx,
                 mtp_accept_len=mtp_accept_len,

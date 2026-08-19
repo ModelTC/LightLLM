@@ -104,11 +104,10 @@ def test_overlap_eagle_keeps_fixed_verify_layout(monkeypatch):
 
     assert draft_model.extend_batch_sizes is None
     assert draft_model.decode_batch_sizes == [(6, 6), (6, 6)]
-    assert proposal.token_ids.shape == (9, 3)
-    assert torch.equal(proposal.token_ids[:, 0], torch.tensor([0, 1, 2, 10, 11, 12, 13, 14, 15]))
-    expected_draft_tokens = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 5])
+    assert proposal.token_ids.shape == (3, 2)
+    expected_draft_tokens = torch.tensor([1, 0, 5])
+    assert torch.equal(proposal.token_ids[:, 0], expected_draft_tokens)
     assert torch.equal(proposal.token_ids[:, 1], expected_draft_tokens)
-    assert torch.equal(proposal.token_ids[:, 2], expected_draft_tokens)
     assert len(proposal.extra_mem_indexes_cpu) == 1
     assert torch.equal(proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu, torch.arange(6, dtype=torch.int32))
     assert proposal.extra_mem_indexes_cpu[0].free_mask_cpu is None
@@ -162,7 +161,8 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     assert draft_model.decode_inputs[0][1] is model_input1
     assert draft_model.extend_batch_sizes == (6, 6)
     assert draft_model.decode_batch_sizes == [(2, 2)]
-    assert proposal.token_ids.shape == (9, 3)
+    assert proposal.token_ids.shape == (3, 2)
+    assert torch.equal(proposal.token_ids, torch.tensor([[1, 0], [0, 0], [5, 1]]))
     assert len(proposal.extra_mem_indexes_cpu) == 1
     assert torch.equal(proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu, torch.arange(3, dtype=torch.int32))
     assert proposal.extra_mem_indexes_cpu[0].free_mask_cpu is None

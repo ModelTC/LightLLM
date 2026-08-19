@@ -83,10 +83,12 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
             main_model_output0,
             next_token_ids0,
             real_verify_rows0,
+            accept_len0,
             main_model_input1,
             main_model_output1,
             next_token_ids1,
             real_verify_rows1,
+            accept_len1,
             draft_step,
             lambda token_ids: token_ids,
         )

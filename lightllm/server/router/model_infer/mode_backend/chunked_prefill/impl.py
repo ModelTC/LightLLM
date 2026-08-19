@@ -314,6 +314,7 @@ class ChunkedPrefillBackend(ModeBackend):
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,
                 proposal=proposal,
+                target_next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_req_idx=model_input.b_req_idx,
                 mtp_accept_len=mtp_accept_len,

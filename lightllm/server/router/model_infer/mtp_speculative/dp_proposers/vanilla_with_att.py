@@ -29,4 +29,12 @@ class DpVanillaWithAttProposer(BaseDpProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> VanillaSpecProposal:
-        return propose_next_chained_mtp(self, main_model_input, main_model_output, next_token_ids, draft_step)
+        return propose_next_chained_mtp(
+            self,
+            main_model_input,
+            main_model_output,
+            next_token_ids,
+            b_req_mtp_start_loc,
+            draft_step,
+            accept_len,
+        )

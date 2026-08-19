@@ -17,14 +17,14 @@ def test_mtp_verify_scatter_and_start_locations():
     b_mtp_index = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32, device="cuda")
     b_req_mtp_start_loc = mtp_utils.gen_b_req_mtp_start_loc(b_mtp_index, num_reqs=2)
     new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int64, device="cuda")
-    all_next_token_ids = torch.tensor(
-        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]],
+    draft_token_ids = torch.tensor(
+        [[2, 3], [8, 9]],
         dtype=torch.int64,
         device="cuda",
     )
     req_to_next_token_scores = torch.full((3, 5), -1.0, dtype=torch.float32, device="cuda")
     schedule_scores = torch.tensor(
-        [[0.9, 0.8], [0.8, 0.7], [0.7, 0.6], [0.6, 0.5], [0.5, 0.4]],
+        [[0.9, 0.8], [0.7, 0.6]],
         dtype=torch.float32,
         device="cuda",
     )
@@ -35,7 +35,8 @@ def test_mtp_verify_scatter_and_start_locations():
     mtp_utils.mtp_scatter_next_token_ids(
         req_to_next_token_ids=req_to_next_token_ids,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
-        all_next_token_ids=all_next_token_ids,
+        target_next_token_ids=new_next_token_ids,
+        draft_token_ids=draft_token_ids,
         b_req_idx=b_req_idx,
         mtp_accept_len=mtp_accept_len,
         req_to_next_token_scores=req_to_next_token_scores,
@@ -49,7 +50,7 @@ def test_mtp_verify_scatter_and_start_locations():
     assert torch.equal(
         req_to_next_token_ids.cpu(),
         torch.tensor(
-            [[1, 2, 3, 1, 1], [1, 2, 0, -1, -1], [7, 8, 9, 1, 1]],
+            [[1, 2, 3, 1, 1], [1, 2, 0, -1, -1], [2, 8, 9, 1, 1]],
             dtype=torch.int64,
         ),
     )
@@ -69,7 +70,8 @@ def test_mtp_scatter_handles_zero_draft_step():
     mtp_utils.mtp_scatter_next_token_ids(
         req_to_next_token_ids=req_to_next_token_ids,
         b_req_mtp_start_loc=torch.tensor([0], dtype=torch.int32, device="cuda"),
-        all_next_token_ids=torch.tensor([[42]], dtype=torch.int64, device="cuda"),
+        target_next_token_ids=torch.tensor([42], dtype=torch.int64, device="cuda"),
+        draft_token_ids=torch.empty((1, 0), dtype=torch.int64, device="cuda"),
         b_req_idx=torch.tensor([0], dtype=torch.int32, device="cuda"),
         mtp_accept_len=torch.tensor([1], dtype=torch.int32, device="cuda"),
         req_to_next_token_scores=req_to_next_token_scores,

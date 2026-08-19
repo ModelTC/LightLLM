@@ -39,5 +39,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
             main_model_input=main_model_input,
             main_model_output=main_model_output,
             next_token_ids=next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=draft_step,
+            accept_len=accept_len,
         )

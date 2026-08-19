@@ -90,17 +90,12 @@ def propose_next_eagle(
 ) -> EagleSpecProposal:
     """运行 EAGLE extend 后接单 token decode 的通用 proposal 流程。"""
 
-    verify_row_count = int(next_token_ids.shape[0])
     request_count = int(b_req_mtp_start_loc.shape[0])
-    proposal_token_ids = next_token_ids.new_full(
-        (verify_row_count, draft_step + 1),
-        fill_value=1,
-    )
-    proposal_token_ids[:, 0].copy_(next_token_ids)
+    proposal_token_ids = next_token_ids.new_empty((request_count, draft_step))
     collect_schedule_scores = proposer.enable_dynmaic_mtp
     schedule_scores = (
         torch.zeros(
-            (verify_row_count, draft_step),
+            (request_count, draft_step),
             dtype=torch.float32,
             device=next_token_ids.device,
         )
@@ -131,14 +126,14 @@ def propose_next_eagle(
             model_output=accepted_tail_output,
             map_draft_token_ids=map_draft_token_ids,
         )
-        schedule_scores[accepted_tail_rows, 0] = draft_token_probs.float()
+        schedule_scores[:, 0] = draft_token_probs.float()
     else:
         draft_token_ids = generate_eagle_token_ids(
             proposer=proposer,
             model_output=accepted_tail_output,
             map_draft_token_ids=map_draft_token_ids,
         )
-    proposal_token_ids[accepted_tail_rows, 1] = draft_token_ids
+    proposal_token_ids[:, 0] = draft_token_ids
     draft_hidden = extend_output.mtp_collector.spec_hidden.index_select(0, accepted_tail_rows)
 
     if draft_step == 1:
@@ -181,14 +176,14 @@ def propose_next_eagle(
                 model_output=draft_output,
                 map_draft_token_ids=map_draft_token_ids,
             )
-            schedule_scores[accepted_tail_rows, step] = draft_token_probs.float()
+            schedule_scores[:, step] = draft_token_probs.float()
         else:
             draft_token_ids = generate_eagle_token_ids(
                 proposer=proposer,
                 model_output=draft_output,
                 map_draft_token_ids=map_draft_token_ids,
             )
-        proposal_token_ids[accepted_tail_rows, step + 1] = draft_token_ids
+        proposal_token_ids[:, step] = draft_token_ids
         draft_hidden = draft_output.mtp_collector.spec_hidden
         draft_seq_lens.add_(1)
 

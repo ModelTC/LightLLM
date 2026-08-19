@@ -103,13 +103,8 @@ class DSparkPlanner(BaseMtpPlanner):
         if draft_confidence_probs.size == 0:
             return
 
-        # Confidence is scattered onto one accepted-tail row per request;
-        # unused verify rows remain zero.
-        valid_rows = np.any(draft_confidence_probs > 0.0, axis=1)
-        if not np.any(valid_rows):
-            return
-
-        conditional_probs = np.clip(draft_confidence_probs[valid_rows], 0.01, 0.99)
+        # Proposal scores are dense request rows and contain draft columns only.
+        conditional_probs = np.clip(draft_confidence_probs, 0.01, 0.99)
         survival_scores = np.cumprod(conditional_probs, axis=1)
         dynamic_batch_size = self._select_dynamic_batch_size_from_survival_scores(
             req_num=int(req_num),

@@ -113,13 +113,8 @@ def propose_next_dp_eagle_autoregressive_overlap(
             target_hidden=model_output.mtp_collector.spec_hidden,
         )
 
-    verify_row_count = real_verify_rows0 + real_verify_rows1
-    proposal_token_ids = next_token_ids0.new_full(
-        (verify_row_count, draft_step + 1),
-        fill_value=1,
-    )
-    proposal_token_ids[:real_verify_rows0, 0].copy_(next_token_ids0[:real_verify_rows0])
-    proposal_token_ids[real_verify_rows0:, 0].copy_(next_token_ids1[:real_verify_rows1])
+    total_real_request_count = sum(real_request_counts)
+    proposal_token_ids = next_token_ids0.new_empty((total_real_request_count, draft_step))
 
     draft_model = proposer.backend.draft_models[0]
     extend_outputs = draft_model.microbatch_overlap_prefill(*model_inputs)
@@ -128,8 +123,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
     draft_hiddens_by_batch = []
     draft_seq_lens_by_batch = []
     draft_req_indices_by_batch = []
-    proposal_rows_by_batch = []
-    proposal_row_offsets = (0, real_verify_rows0)
+    proposal_row_offsets = (0, real_request_counts[0])
     for batch_index, (model_input, extend_output, accepted_tail_rows, real_request_count) in enumerate(
         zip(model_inputs, extend_outputs, accepted_tail_rows_by_batch, real_request_counts)
     ):
@@ -139,9 +133,10 @@ def propose_next_dp_eagle_autoregressive_overlap(
         draft_hiddens_by_batch.append(extend_output.mtp_collector.spec_hidden.index_select(0, accepted_tail_rows))
         draft_seq_lens_by_batch.append(model_input.b_seq_len.index_select(0, accepted_tail_rows) + 1)
         draft_req_indices_by_batch.append(model_input.b_req_idx.index_select(0, accepted_tail_rows))
-        proposal_rows = accepted_tail_rows[:real_request_count] + proposal_row_offsets[batch_index]
-        proposal_rows_by_batch.append(proposal_rows)
-        proposal_token_ids[proposal_rows, 1] = draft_token_ids[:real_request_count]
+        proposal_row_start = proposal_row_offsets[batch_index]
+        proposal_token_ids[proposal_row_start : proposal_row_start + real_request_count, 0] = draft_token_ids[
+            :real_request_count
+        ]
 
     if draft_step == 1:
         return EagleSpecProposal(
@@ -167,7 +162,6 @@ def propose_next_dp_eagle_autoregressive_overlap(
             empty_multimodal_params = {"images": [], "audios": []}
             model_input.multimodal_params = [empty_multimodal_params] * model_input.batch_size
 
-    total_real_request_count = sum(real_request_counts)
     extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(total_real_request_count * (draft_step - 1))
     extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids0.device, non_blocking=True)
     hold_mem_index = proposer.backend.model.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX
@@ -197,7 +191,10 @@ def propose_next_dp_eagle_autoregressive_overlap(
             draft_hiddens_by_batch[batch_index] = draft_output.mtp_collector.spec_hidden
             draft_seq_lens_by_batch[batch_index].add_(1)
             real_request_count = real_request_counts[batch_index]
-            proposal_token_ids[proposal_rows_by_batch[batch_index], step + 1] = draft_token_ids[:real_request_count]
+            proposal_row_start = proposal_row_offsets[batch_index]
+            proposal_token_ids[proposal_row_start : proposal_row_start + real_request_count, step] = draft_token_ids[
+                :real_request_count
+            ]
 
     return EagleSpecProposal(
         token_ids=proposal_token_ids,
@@ -212,14 +209,16 @@ def propose_next_dp_eagle_fixed_layout_overlap(
     main_model_output0: ModelOutput,
     next_token_ids0: torch.Tensor,
     real_verify_rows0: int,
+    accept_len0: torch.Tensor,
     main_model_input1: ModelInput,
     main_model_output1: ModelOutput,
     next_token_ids1: torch.Tensor,
     real_verify_rows1: int,
+    accept_len1: torch.Tensor,
     draft_step: int,
     map_draft_token_ids: Callable[[torch.Tensor], torch.Tensor],
 ) -> EagleSpecProposal:
-    """保持 expanded verify-row layout 运行 DP EAGLE overlap decode。"""
+    """以 expanded verify-row layout 运行 decode，返回按真实请求压缩的 proposal。"""
 
     verify_width = proposer.backend.max_draft_step + 1
     model_inputs = (main_model_input0, main_model_input1)
@@ -228,9 +227,12 @@ def propose_next_dp_eagle_fixed_layout_overlap(
     request_capacities_by_batch = tuple(model_input.batch_size // verify_width for model_input in model_inputs)
     total_real_request_count = sum(real_request_counts)
 
-    proposal_token_ids = next_token_ids0.new_empty((sum(real_verify_row_counts), draft_step + 1))
-    proposal_token_ids[:real_verify_rows0, 0] = next_token_ids0[:real_verify_rows0]
-    proposal_token_ids[real_verify_rows0:, 0] = next_token_ids1[:real_verify_rows1]
+    proposal_token_ids = next_token_ids0.new_empty((total_real_request_count, draft_step))
+    proposal_row_offsets = (0, real_request_counts[0])
+    accepted_tail_rows_by_batch = (
+        torch.arange(0, main_model_input0.batch_size, verify_width, device=next_token_ids0.device) + accept_len0 - 1,
+        torch.arange(0, main_model_input1.batch_size, verify_width, device=next_token_ids1.device) + accept_len1 - 1,
+    )
 
     extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(total_real_request_count * draft_step)
     extra_mem_indexes = extra_mem_indexes_cpu.to(device=next_token_ids0.device, non_blocking=True)
@@ -282,8 +284,15 @@ def propose_next_dp_eagle_fixed_layout_overlap(
             )
             draft_hiddens_by_batch[batch_index] = draft_output.mtp_collector.spec_hidden
 
-        proposal_token_ids[:real_verify_rows0, step + 1] = draft_token_ids_by_batch[0][:real_verify_rows0]
-        proposal_token_ids[real_verify_rows0:, step + 1] = draft_token_ids_by_batch[1][:real_verify_rows1]
+        for batch_index, draft_token_ids in enumerate(draft_token_ids_by_batch):
+            real_request_count = real_request_counts[batch_index]
+            proposal_row_start = proposal_row_offsets[batch_index]
+            proposal_token_ids[
+                proposal_row_start : proposal_row_start + real_request_count, step
+            ] = draft_token_ids.index_select(
+                0,
+                accepted_tail_rows_by_batch[batch_index][:real_request_count].long(),
+            )
 
     return EagleSpecProposal(
         token_ids=proposal_token_ids,

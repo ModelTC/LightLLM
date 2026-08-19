@@ -26,40 +26,38 @@ class _DraftModel:
 def test_dp_vanilla_proposer_owns_overlap_decode():
     draft_models = [_DraftModel(), _DraftModel()]
     backend = SimpleNamespace(
+        max_draft_step=2,
         draft_models=draft_models,
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
     proposer = DpOverlapVanillaWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
-    model_input0 = SimpleNamespace(batch_size=4)
-    model_input1 = SimpleNamespace(batch_size=4)
+    model_input0 = SimpleNamespace(batch_size=6)
+    model_input1 = SimpleNamespace(batch_size=6)
 
     proposal = proposer.propose_next_overlap(
         main_model_input0=model_input0,
         main_model_output0=ModelOutput(
-            logits=torch.empty((4, 1)),
-            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((4, 2))),
+            logits=torch.empty((6, 1)),
+            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2))),
         ),
-        next_token_ids0=torch.tensor([10, 11, 0, 0], dtype=torch.int64),
-        real_verify_rows0=2,
-        accept_len0=None,
+        next_token_ids0=torch.tensor([10, 11, 0, 0, 0, 0], dtype=torch.int64),
+        real_verify_rows0=3,
+        accept_len0=torch.tensor([2], dtype=torch.int32),
         main_model_input1=model_input1,
         main_model_output1=ModelOutput(
-            logits=torch.empty((4, 1)),
-            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((4, 2))),
+            logits=torch.empty((6, 1)),
+            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2))),
         ),
-        next_token_ids1=torch.tensor([20, 21, 22, 0], dtype=torch.int64),
+        next_token_ids1=torch.tensor([20, 21, 22, 0, 0, 0], dtype=torch.int64),
         real_verify_rows1=3,
-        accept_len1=None,
+        accept_len1=torch.tensor([1], dtype=torch.int32),
         draft_step=2,
     )
 
     assert proposal.token_ids.tolist() == [
-        [10, 0, 0],
-        [11, 1, 1],
-        [20, 0, 0],
-        [21, 1, 1],
-        [22, 2, 2],
+        [1, 1],
+        [0, 0],
     ]
     assert proposal.extra_mem_indexes_cpu == []
-    assert draft_models[0].decode_batch_sizes == [(4, 4)]
-    assert draft_models[1].decode_batch_sizes == [(4, 4)]
+    assert draft_models[0].decode_batch_sizes == [(6, 6)]
+    assert draft_models[1].decode_batch_sizes == [(6, 6)]

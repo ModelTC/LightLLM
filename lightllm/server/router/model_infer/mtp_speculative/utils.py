@@ -64,11 +64,11 @@ def verify_mtp_tokens(
 
 def scatter_mtp_next_tokens(
     backend: ModeBackend,
-    proposal: SpecProposal,
-    b_req_mtp_start_loc: torch.Tensor,
-    b_req_idx: torch.Tensor,
-    mtp_accept_len: torch.Tensor,
-    valid_row_count: Optional[int] = None,
+    proposal: SpecProposal,  # proposal.token_ids: [req_num, draft_step]
+    target_next_token_ids: torch.Tensor,  # [verify_batch_size]
+    b_req_mtp_start_loc: torch.Tensor,  # [req_num]
+    b_req_idx: torch.Tensor,  # [verify_batch_size]
+    mtp_accept_len: torch.Tensor,  # [req_num]
 ) -> None:
     """Persist the next MTP proposal and optional scheduling scores by request."""
 
@@ -77,19 +77,15 @@ def scatter_mtp_next_tokens(
     from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import EagleSpecProposal
     from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
 
-    token_ids = proposal.token_ids
     scored_proposal_types = (VanillaSpecProposal, EagleSpecProposal, DFlashSpecProposal, DSparkSpecProposal)
     schedule_scores = proposal.schedule_scores if isinstance(proposal, scored_proposal_types) else None
-    if valid_row_count is not None:
-        token_ids = token_ids[:valid_row_count]
-        if schedule_scores is not None:
-            schedule_scores = schedule_scores[:valid_row_count]
 
     sampling_params_manager = backend.model.req_manager.req_sampling_params_manager
     mtp_scatter_next_token_ids(
         req_to_next_token_ids=sampling_params_manager.req_to_next_token_ids,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
-        all_next_token_ids=token_ids,
+        target_next_token_ids=target_next_token_ids,
+        draft_token_ids=proposal.token_ids,
         b_req_idx=b_req_idx,
         mtp_accept_len=mtp_accept_len,
         req_to_next_token_scores=(

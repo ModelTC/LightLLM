@@ -52,7 +52,15 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> VanillaSpecProposal:
-        return propose_next_chained_mtp(self, main_model_input, main_model_output, next_token_ids, draft_step)
+        return propose_next_chained_mtp(
+            self,
+            main_model_input,
+            main_model_output,
+            next_token_ids,
+            b_req_mtp_start_loc,
+            draft_step,
+            accept_len,
+        )
 
     def propose_next_overlap(
         self,
@@ -74,9 +82,11 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
             main_model_output0,
             next_token_ids0,
             real_verify_rows0,
+            accept_len0,
             main_model_input1,
             main_model_output1,
             next_token_ids1,
             real_verify_rows1,
+            accept_len1,
             draft_step,
         )

@@ -58,23 +58,9 @@ class DSparkProposer(BaseSpecProposer):
         accept_len: torch.Tensor | None = None,
     ) -> DSparkSpecProposal:
         request_count = int(b_req_mtp_start_loc.shape[0])
-        verify_row_count = int(next_token_ids.shape[0])
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        proposal_token_ids = next_token_ids.new_full(
-            (verify_row_count, draft_step + 1),
-            fill_value=1,
-        )
-        proposal_token_ids[:, 0] = next_token_ids
-        schedule_scores = (
-            torch.zeros(
-                (verify_row_count, draft_step),
-                dtype=torch.float32,
-                device=next_token_ids.device,
-            )
-            if self.enable_dynmaic_mtp
-            else None
-        )
+        schedule_scores = None
 
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
         draft_input, extra_mem_indexes_cpu = build_parallel_block_draft_input(
@@ -96,7 +82,7 @@ class DSparkProposer(BaseSpecProposer):
         else:
             flat_draft_token_ids = draft_output.mtp_collector.draft_token_ids
         block_draft_token_ids = flat_draft_token_ids.reshape(request_count, block_size)
-        proposal_token_ids[accepted_tail_rows, 1:] = block_draft_token_ids[:, :draft_step]
+        proposal_token_ids = block_draft_token_ids[:, :draft_step].contiguous()
 
         if self.enable_dynmaic_mtp:
             confidence_logits = draft_output.mtp_collector.confidence_logits
@@ -104,13 +90,14 @@ class DSparkProposer(BaseSpecProposer):
                 raise RuntimeError("DSpark dynamic verify requires confidence head logits")
             # Match the clamp used by the GPU dynamic row selector before it
             # converts conditional confidence to prefix survival probability.
-            schedule_scores[accepted_tail_rows] = (
+            schedule_scores = (
                 confidence_logits[:, :draft_step]
                 .sigmoid()
                 .clamp(
                     min=0.01,
                     max=0.99,
                 )
+                .contiguous()
             )
 
         schedule_scores_cpu = None

@@ -34,8 +34,9 @@ class MtpMemIndexesToFree:
 class SpecProposal:
     """Common candidate-token output produced by every MTP proposer.
 
-    `token_ids` has shape `[verify_batch, draft_step + 1]`; column 0 contains
-    target-model tokens and the remaining columns contain draft candidates.
+    `token_ids` has shape `[req_num, draft_step]` and contains only draft-model
+    candidates. The target model's latest token is kept separately and merged
+    into the request-level MTP buffer only when the proposal is persisted.
     `extra_mem_indexes_cpu` uniformly tracks every KV slot considered for
     release, including rejected target rows and proposal-owned temporary rows.
     Mode-specific scheduling metadata belongs to the corresponding subclass.
@@ -96,7 +97,8 @@ class BaseSpecProposer(ABC):
         by dynamic scheduling. `b_req_mtp_start_loc` identifies each logical
         request's first row.
 
-        Column 0 of the returned proposal must equal `next_token_ids`.
+        The returned proposal contains one dense row per logical request and
+        only the `draft_step` candidate tokens produced by the draft model.
         """
 
         raise NotImplementedError

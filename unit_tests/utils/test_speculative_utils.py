@@ -228,7 +228,6 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities(monkeypatch)
     block_size = 4
     max_draft_step = 3
     verify_row_count = 5
-    accepted_tail_rows = torch.tensor([0, 3])
     flat_draft_token_ids = torch.arange(2 * block_size)
     flat_draft_token_probs = torch.arange(2 * block_size, dtype=torch.float32) / 10
 
@@ -262,13 +261,12 @@ def test_dflash_dynamic_verify_uses_fixed_block_token_probabilities(monkeypatch)
 
     assert isinstance(proposal, DFlashSpecProposal)
     expected_blocks = flat_draft_token_ids.reshape(2, block_size)[:, :2]
-    torch.testing.assert_close(proposal.token_ids[accepted_tail_rows, 1:], expected_blocks)
-    assert proposal.schedule_scores.shape == (verify_row_count, 2)
-    for step in range(2):
-        scores = proposal.schedule_scores[:, step]
-        expected_scores = torch.zeros(verify_row_count)
-        expected_scores[accepted_tail_rows] = flat_draft_token_probs.reshape(2, block_size)[:, step]
-        torch.testing.assert_close(scores, expected_scores)
+    torch.testing.assert_close(proposal.token_ids, expected_blocks)
+    assert proposal.schedule_scores.shape == (2, 2)
+    torch.testing.assert_close(
+        proposal.schedule_scores,
+        flat_draft_token_probs.reshape(2, block_size)[:, :2],
+    )
 
 
 def test_dflash_reuses_decode_input_for_kv_commit():
