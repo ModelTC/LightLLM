@@ -3,12 +3,10 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_utils import (
-    fill_dp_chained_mtp_draft_model_kv_state_overlap,
     propose_next_dp_chained_mtp_overlap,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import (
     VanillaSpecProposal,
-    fill_chained_mtp_draft_model_kv_state,
     propose_next_chained_mtp,
 )
 
@@ -22,7 +20,7 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         target_model_output: ModelOutput,
         target_next_token_ids: torch.Tensor,
     ) -> None:
-        fill_chained_mtp_draft_model_kv_state(self, target_model_input, target_model_output, target_next_token_ids)
+        pass
 
     def fill_draft_model_kv_state_overlap(
         self,
@@ -33,15 +31,7 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         target_model_output1: ModelOutput,
         target_next_token_ids1: torch.Tensor,
     ) -> None:
-        fill_dp_chained_mtp_draft_model_kv_state_overlap(
-            self,
-            target_model_input0,
-            target_model_output0,
-            target_next_token_ids0,
-            target_model_input1,
-            target_model_output1,
-            target_next_token_ids1,
-        )
+        pass
 
     def propose_next(
         self,

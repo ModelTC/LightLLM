@@ -12,6 +12,7 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.bas
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
     EagleSpecProposal,
+    _prepare_eagle_prefill_inputs,
     generate_eagle_token_ids,
     prepare_eagle_verify_decode_input,
 )
@@ -28,14 +29,12 @@ def fill_dp_eagle_draft_model_kv_state_overlap(
 ) -> None:
     """使用两个 target prefill microbatch 初始化 EAGLE draft state。"""
 
-    from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
-
-    prepare_mtp_prefill_inputs(
+    _prepare_eagle_prefill_inputs(
         model_input=target_model_input0,
         b_next_token_ids=target_next_token_ids0,
         mtp_draft_input_hiddens=target_model_output0.mtp_collector.spec_hidden,
     )
-    prepare_mtp_prefill_inputs(
+    _prepare_eagle_prefill_inputs(
         model_input=target_model_input1,
         b_next_token_ids=target_next_token_ids1,
         mtp_draft_input_hiddens=target_model_output1.mtp_collector.spec_hidden,

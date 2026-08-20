@@ -17,29 +17,6 @@ class VanillaSpecProposal(SpecProposal):
     schedule_scores: torch.Tensor | None = None
 
 
-def fill_chained_mtp_draft_model_kv_state(
-    proposer: BaseSpecProposer,
-    target_model_input: ModelInput,
-    target_model_output: ModelOutput,
-    target_next_token_ids: torch.Tensor,
-) -> None:
-    """构建 Vanilla chained MTP 各级 draft model 的 prefill state。"""
-
-    from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
-
-    draft_hidden = target_model_output.mtp_collector.spec_hidden
-    draft_token_ids = target_next_token_ids
-    for draft_model in proposer.backend.draft_models:
-        prepare_mtp_prefill_inputs(
-            model_input=target_model_input,
-            b_next_token_ids=draft_token_ids,
-            mtp_draft_input_hiddens=draft_hidden,
-        )
-        draft_output = draft_model.forward(target_model_input)
-        draft_hidden = draft_output.mtp_collector.spec_hidden
-        draft_token_ids = proposer.backend._gen_argmax_token_ids(draft_output)
-
-
 def propose_next_chained_mtp(
     proposer: BaseSpecProposer,
     target_model_input: ModelInput,

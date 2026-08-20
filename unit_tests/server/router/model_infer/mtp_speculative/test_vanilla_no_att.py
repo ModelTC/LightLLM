@@ -4,6 +4,10 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_no_att import (
+    DpOverlapVanillaNoAttProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.vanilla_no_att import DpVanillaNoAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
 
 
@@ -155,3 +159,17 @@ def test_vanilla_no_att_skips_draft_forward_for_zero_steps():
 
     assert proposal.token_ids.shape == (2, 0)
     assert proposal.schedule_scores.shape == (2, 0)
+
+
+def test_all_vanilla_no_att_fill_hooks_are_noops():
+    backend = SimpleNamespace(draft_models=[])
+    proposers = [
+        VanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False),
+        DpVanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False),
+        DpOverlapVanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False),
+    ]
+
+    for proposer in proposers:
+        proposer.fill_draft_model_kv_state(None, None, None)
+
+    proposers[-1].fill_draft_model_kv_state_overlap(None, None, None, None, None, None)

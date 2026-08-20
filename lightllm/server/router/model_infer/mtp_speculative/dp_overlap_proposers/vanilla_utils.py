@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
@@ -20,18 +22,25 @@ def fill_dp_chained_mtp_draft_model_kv_state_overlap(
 ) -> None:
     """为两个 DP microbatch 依次构建 Vanilla chained draft state。"""
 
-    from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
+    target_model_inputs = (target_model_input0, target_model_input1)
+    target_next_token_ids = (target_next_token_ids0, target_next_token_ids1)
+    for model_input, next_token_ids in zip(target_model_inputs, target_next_token_ids):
+        assert model_input.is_prefill
+        assert model_input.b_position_delta is None
+        assert next_token_ids.shape == model_input.b_req_idx.shape
 
-    model_inputs = (target_model_input0, target_model_input1)
+    # 两个 microbatch 各自保留逐级左移后的 draft 输入，不修改
+    # target prefill ModelInput。
+    model_inputs = [copy.copy(model_input) for model_input in target_model_inputs]
     draft_hiddens = [
         target_model_output0.mtp_collector.spec_hidden,
         target_model_output1.mtp_collector.spec_hidden,
     ]
-    draft_token_ids = [target_next_token_ids0, target_next_token_ids1]
+    draft_token_ids = list(target_next_token_ids)
 
     for draft_model in proposer.backend.draft_models:
         for batch_index, model_input in enumerate(model_inputs):
-            prepare_mtp_prefill_inputs(
+            model_inputs[batch_index] = proposer._prepare_mtp_prefill_inputs(
                 model_input=model_input,
                 b_next_token_ids=draft_token_ids[batch_index],
                 mtp_draft_input_hiddens=draft_hiddens[batch_index],

@@ -9,12 +9,14 @@ from typing import Callable
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     BaseSpecProposer,
     MtpMemIndexesToFree,
     SpecProposal,
 )
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
 @dataclass
@@ -32,14 +34,33 @@ def fill_eagle_draft_model_kv_state(
 ) -> None:
     """使用 target prefill 输出初始化 EAGLE draft state。"""
 
-    from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import prepare_mtp_prefill_inputs
-
-    prepare_mtp_prefill_inputs(
+    _prepare_eagle_prefill_inputs(
         model_input=target_model_input,
         b_next_token_ids=target_next_token_ids,
         mtp_draft_input_hiddens=target_model_output.mtp_collector.spec_hidden,
     )
     proposer.backend.draft_models[0].forward(target_model_input)
+
+
+def _prepare_eagle_prefill_inputs(
+    model_input: ModelInput,
+    b_next_token_ids: torch.Tensor,
+    mtp_draft_input_hiddens: torch.Tensor,
+) -> ModelInput:
+    model_input.b_is_decode_req = g_pin_mem_manager.get_const_gpu_tensor(
+        key="eagle_mtp_prefill_b_is_decode_req",
+        shape=model_input.b_req_idx.shape,
+        fill_value=False,
+        dtype=torch.bool,
+    )
+    model_input.input_ids = gen_mtp_new_input_ids(
+        input_ids=model_input.input_ids,
+        b_next_token_ids=b_next_token_ids,
+        b_seq_len=model_input.b_seq_len,
+        b_ready_cache_len=model_input.b_ready_cache_len,
+    )
+    model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
+    return model_input
 
 
 def generate_eagle_token_ids(
