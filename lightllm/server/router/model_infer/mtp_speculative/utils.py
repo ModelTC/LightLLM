@@ -72,13 +72,9 @@ def scatter_mtp_next_tokens(
 ) -> None:
     """Persist the next MTP proposal and optional scheduling scores by request."""
 
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashSpecProposal
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkSpecProposal
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import EagleSpecProposal
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
-
-    scored_proposal_types = (VanillaSpecProposal, EagleSpecProposal, DFlashSpecProposal, DSparkSpecProposal)
-    schedule_scores = proposal.schedule_scores if isinstance(proposal, scored_proposal_types) else None
+    schedule_scores = getattr(proposal, "schedule_scores", None)
+    if schedule_scores is not None and 0 in schedule_scores.shape:
+        schedule_scores = None
 
     sampling_params_manager = backend.model.req_manager.req_sampling_params_manager
     mtp_scatter_next_token_ids(

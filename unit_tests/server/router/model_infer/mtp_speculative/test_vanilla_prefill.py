@@ -3,9 +3,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_utils import (
-    fill_dp_chained_mtp_draft_model_kv_state_overlap,
-)
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_with_att import (
     DpOverlapVanillaWithAttProposer,
 )
@@ -120,8 +117,7 @@ def test_overlap_chained_prefill_uses_local_microbatch_inputs(monkeypatch):
     proposer = DpOverlapVanillaWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
     monkeypatch.setattr(proposer, "_prepare_mtp_prefill_inputs", prepare)
 
-    fill_dp_chained_mtp_draft_model_kv_state_overlap(
-        proposer=proposer,
+    proposer.fill_draft_model_kv_state_overlap(
         target_model_input0=target_input0,
         target_model_output0=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden0)),
         target_next_token_ids0=torch.tensor([5, 6], dtype=torch.int64),

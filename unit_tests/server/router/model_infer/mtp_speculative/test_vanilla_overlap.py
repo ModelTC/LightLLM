@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
@@ -16,14 +17,25 @@ class _DraftModel:
         self.decode_batch_sizes.append((input0.batch_size, input1.batch_size))
         return tuple(
             ModelOutput(
-                logits=torch.arange(model_input.batch_size, dtype=torch.float32).view(-1, 1),
-                mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((model_input.batch_size, 2))),
+                logits=torch.arange(
+                    model_input.batch_size,
+                    dtype=torch.float32,
+                    device=model_input.input_ids.device,
+                ).view(-1, 1),
+                mtp_collector=ModelMtpOutputCollector(
+                    spec_hidden=torch.ones(
+                        (model_input.batch_size, 2),
+                        device=model_input.input_ids.device,
+                    )
+                ),
             )
             for model_input in (input0, input1)
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_dp_vanilla_proposer_owns_overlap_decode():
+    device = "cuda"
     draft_models = [_DraftModel(), _DraftModel()]
     backend = SimpleNamespace(
         max_draft_step=2,
@@ -37,20 +49,20 @@ def test_dp_vanilla_proposer_owns_overlap_decode():
     proposal = proposer.propose_next_overlap(
         target_model_input0=model_input0,
         target_model_output0=ModelOutput(
-            logits=torch.empty((6, 1)),
-            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2))),
+            logits=torch.empty((6, 1), device=device),
+            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2), device=device)),
         ),
-        target_next_token_ids0=torch.tensor([10, 11, 0, 0, 0, 0], dtype=torch.int64),
+        target_next_token_ids0=torch.tensor([10, 11, 0, 0, 0, 0], dtype=torch.int64, device=device),
         real_verify_rows0=3,
-        accept_len0=torch.tensor([2], dtype=torch.int32),
+        accept_len0=torch.tensor([2], dtype=torch.int32, device=device),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
-            logits=torch.empty((6, 1)),
-            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2))),
+            logits=torch.empty((6, 1), device=device),
+            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2), device=device)),
         ),
-        target_next_token_ids1=torch.tensor([20, 21, 22, 0, 0, 0], dtype=torch.int64),
+        target_next_token_ids1=torch.tensor([20, 21, 22, 0, 0, 0], dtype=torch.int64, device=device),
         real_verify_rows1=3,
-        accept_len1=torch.tensor([1], dtype=torch.int32),
+        accept_len1=torch.tensor([1], dtype=torch.int32, device=device),
         draft_step=2,
     )
 
