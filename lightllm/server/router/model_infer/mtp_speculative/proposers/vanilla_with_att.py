@@ -4,11 +4,9 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
+from lightllm.common.basemodel.triton_kernel.overlay_mtp_decode_input import overlay_chained_mtp_decode_input
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import (
-    VanillaSpecProposal,
-    propose_next_chained_mtp,
-)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
@@ -49,14 +47,75 @@ class VanillaWithAttProposer(BaseSpecProposer):
         draft_step: int,
         accept_len: torch.Tensor | None = None,
     ) -> VanillaSpecProposal:
-        return propose_next_chained_mtp(
-            proposer=self,
-            target_model_input=target_model_input,
-            target_model_output=target_model_output,
-            target_next_token_ids=target_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            draft_step=draft_step,
-            accept_len=accept_len,
+        """运行完整 Vanilla-With-Att 级联并生成下一轮 proposal。
+
+        每一级 draft model 都维护自己所在级联位置的 attention KV，因此
+        decode 时必须依次运行全部 draft model，不能动态缩短级联深度。
+        每一级在完整 target verify 布局上 forward，以补齐该级对应位置的
+        KV；最终只抽取每个请求最后接受位置的输出作为下一轮候选 token。
+        """
+
+        req_num = int(b_req_mtp_start_loc.shape[0])
+        proposal_token_ids_by_step = []
+        schedule_scores_by_step = []
+
+        assert not target_model_input.is_prefill
+        assert accept_len is not None
+        assert accept_len.shape == (req_num,)
+        assert target_next_token_ids.shape[0] == target_model_input.batch_size
+        assert target_model_output.mtp_collector.spec_hidden.shape[0] == target_model_input.batch_size
+        assert draft_step == self.backend.max_draft_step, (
+            "vanilla_with_att requires the full chained draft depth: "
+            f"draft_step={draft_step}, max_draft_step={self.backend.max_draft_step}"
+        )
+        assert len(self.backend.draft_models) == draft_step
+
+        # target verify 布局中，同一请求的行从 b_req_mtp_start_loc 开始，
+        # accept_len 包含必然接受的 target token。因此减 1 后得到本轮最后
+        # 接受 token 所在的物理行，后续每一级都从这些固定行收集 proposal。
+        accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
+
+        # draft forward 需要复用 target decode 的请求、位置和 KV slot 布局，
+        # 但 input_ids 与 hidden 会逐级更新。使用浅副本避免覆盖 target 输入
+        # 中这两个字段；布局 tensor 仍然共享，不引入额外拷贝。
+        draft_token_ids = target_next_token_ids
+        draft_hidden = target_model_output.mtp_collector.spec_hidden
+        draft_input = copy.copy(target_model_input)
+
+        for step in range(draft_step):
+            draft_input.input_ids = draft_token_ids
+            draft_input.mtp_draft_input_hiddens = draft_hidden
+            draft_output = self.backend.draft_models[step].forward(draft_input)
+            draft_hidden = draft_output.mtp_collector.spec_hidden
+
+            if self.enable_dynmaic_mtp:
+                # Vanilla With-Att 没有独立的 confidence head；动态调度使用
+                # 当前 draft model 选中 token 的采样概率。
+                draft_token_ids, draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
+                selected_token_probs = draft_token_probs.index_select(0, accepted_tail_rows)
+                schedule_scores_by_step.append(selected_token_probs.float().unsqueeze(1))
+            else:
+                draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
+            selected_token_ids = draft_token_ids.index_select(0, accepted_tail_rows)
+            proposal_token_ids_by_step.append(selected_token_ids.unsqueeze(1))
+
+            if step + 1 < draft_step:
+                # 下一层不能直接使用所有行的 draft 预测。已接受前缀继续使用
+                # main/上一层输入中的真实 token，仅在 tail 行接上本级新生成
+                # 的 draft token，从而形成逐级左移并覆盖尾部的级联输入。
+                draft_token_ids = overlay_chained_mtp_decode_input(
+                    input_ids=draft_input.input_ids,
+                    draft_token_ids=draft_token_ids,
+                    b_req_mtp_start_loc=b_req_mtp_start_loc,
+                    accept_len=accept_len,
+                )
+
+        proposal_token_ids = torch.cat(proposal_token_ids_by_step, dim=1)
+        schedule_scores = torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None
+        return VanillaSpecProposal(
+            token_ids=proposal_token_ids,
+            extra_mem_indexes_cpu=[],
+            schedule_scores=schedule_scores,
         )
 
     def _prepare_mtp_prefill_inputs(
