@@ -1,4 +1,5 @@
 from optparse import Option
+import random
 import time
 from typing_extensions import deprecated
 import uuid
@@ -581,6 +582,7 @@ class ImageGenerationRequest(BaseModel):
             "image_type": self.output_format,
             "height": height,
             "width": width,
+            "seed": 42 + random.randint(0, 2**31-43)
         })
         self.img_config = ImageConfig(**conf)
         return self
