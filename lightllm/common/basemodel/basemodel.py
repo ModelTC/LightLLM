@@ -481,12 +481,13 @@ class TpPartBaseModel:
         return new_model_input
 
     def _create_padded_prefill_model_input(self, model_input: ModelInput, new_handle_token_num: int):
-        if model_input.total_token_num - model_input.prefix_total_token_num == new_handle_token_num:
+        handle_token_num = model_input.input_ids.shape[0]
+        if handle_token_num == new_handle_token_num:
             return model_input
 
-        assert model_input.total_token_num - model_input.prefix_total_token_num < new_handle_token_num
+        assert handle_token_num < new_handle_token_num
 
-        padded_token_num = new_handle_token_num - (model_input.total_token_num - model_input.prefix_total_token_num)
+        padded_token_num = new_handle_token_num - handle_token_num
         assert padded_token_num > 0
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = model_input.batch_size + 1
@@ -570,7 +571,7 @@ class TpPartBaseModel:
                 b_prefill_start_loc=model_input.b_prefill_start_loc,
             )
 
-        origin_handle_token_num = model_input.total_token_num - model_input.prefix_total_token_num
+        origin_handle_token_num = model_input.input_ids.shape[0]
         origin_batch_size = model_input.batch_size
 
         if self.args.enable_tpsp_mix_mode:
@@ -801,8 +802,8 @@ class TpPartBaseModel:
         assert model_input1.mem_indexes.is_cuda
 
         assert self.args.enable_tpsp_mix_mode
-        origin_handle_token_num0 = model_input0.total_token_num - model_input0.prefix_total_token_num
-        origin_handle_token_num1 = model_input1.total_token_num - model_input1.prefix_total_token_num
+        origin_handle_token_num0 = model_input0.input_ids.shape[0]
+        origin_handle_token_num1 = model_input1.input_ids.shape[0]
         infer_handle_token_num0 = triton.cdiv(origin_handle_token_num0, self.tp_world_size_) * self.tp_world_size_
         infer_handle_token_num1 = triton.cdiv(origin_handle_token_num1, self.tp_world_size_) * self.tp_world_size_
         origin_batch_size0 = model_input0.batch_size

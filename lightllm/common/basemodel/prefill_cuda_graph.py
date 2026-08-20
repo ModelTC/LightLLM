@@ -77,7 +77,7 @@ class PrefillCudaGraph:
     def _capture_prefill(
         self, prefill_func, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
-        handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
+        handle_token_num = infer_state.input_ids.shape[0]
         infer_state.mem_pool = self.mempool
         infer_state.prefill_cuda_graph_create_graph_obj()
         infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
@@ -147,7 +147,7 @@ class PrefillCudaGraph:
             )
 
     def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo) -> List[torch.Tensor]:
-        handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
+        handle_token_num = infer_state.input_ids.shape[0]
         graph_infer_state, graph_input_tensors, graph_output_tensors, graph_hidden_collector = self.graph[
             handle_token_num
         ]

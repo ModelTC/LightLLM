@@ -10,6 +10,7 @@ from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 class _GraphInferState:
     def __init__(self, hidden_collector):
         self.hidden_collector = hidden_collector
+        self.input_ids = torch.empty(4, dtype=torch.int64)
         self.copied_from = None
         self.replayed_with = None
 
@@ -48,8 +49,7 @@ def test_replay_restores_captured_hidden_state_into_request_collector(monkeypatc
     request_collector = graph_collector.new_instance()
     graph_infer_state = _GraphInferState(hidden_collector=graph_collector)
     request_infer_state = SimpleNamespace(
-        total_token_num=4,
-        prefix_total_token_num=0,
+        input_ids=torch.empty(4, dtype=torch.int64),
         hidden_collector=request_collector,
     )
     graph_output = torch.randn(2, 3)
@@ -71,8 +71,6 @@ def test_first_replay_replaces_capture_collector_with_runtime_instance(monkeypat
     graph_collector = _create_layer_collector(monkeypatch)
     graph_collector.add(layer_index=0, hidden=torch.randn(2, 3))
     graph_infer_state = _GraphInferState(hidden_collector=graph_collector)
-    graph_infer_state.total_token_num = 4
-    graph_infer_state.prefix_total_token_num = 0
     graph_output = torch.randn(2, 3)
     prefill_graph = PrefillCudaGraph.__new__(PrefillCudaGraph)
     prefill_graph.graph = {4: (graph_infer_state, [], [graph_output], graph_collector)}
