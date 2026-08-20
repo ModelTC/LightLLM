@@ -80,11 +80,11 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     """
     # 创建转发队列
     forwarding_queue = AsyncQueue()
-    generation_tasks: Dict[int, asyncio.Task] = {}
 
     while True:
         forwarding_tokens_task = None
         heartbeat_task = None
+        generation_tasks: Dict[int, asyncio.Task] = {}
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
@@ -180,6 +180,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.exception(str(e))
         finally:
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
+            child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
