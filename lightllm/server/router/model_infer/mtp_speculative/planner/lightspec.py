@@ -139,7 +139,13 @@ class LightSpecPlanner(BaseMtpPlanner):
 
         if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
             return tuple(range(self.max_draft_step + 1))
-        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
+        # Vanilla with attention uses one draft model for each chained depth.
+        # Every model only owns the KV state at its fixed cascade position, so
+        # changing the depth between iterations would leave some levels with
+        # incomplete or position-misaligned KV. Always run the full chain.
+        if self.spec_mode == "vanilla_with_att":
+            return (self.max_draft_step,)
+        if self.spec_mode in ("eagle_with_att", "eagle3"):
             return tuple(range(1, self.max_draft_step + 1))
         if self.spec_mode == "dflash":
             return (self.max_draft_step,)

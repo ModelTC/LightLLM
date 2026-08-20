@@ -234,7 +234,7 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
     vanilla_planner = build_planner("vanilla_with_att")
     assert isinstance(vanilla_planner, LightSpecPlanner)
     assert isinstance(vanilla_planner, BaseMtpPlanner)
-    assert vanilla_planner.draft_steps == (1, 2, 3)
+    assert vanilla_planner.draft_steps == (3,)
 
     vanilla_no_att_planner = build_planner("vanilla_no_att")
     assert vanilla_no_att_planner.draft_steps == (0, 1, 2, 3)
@@ -478,6 +478,25 @@ def test_lightspec_selects_eagle_draft_depth_and_verify_capacity():
     assert plan.dynamic_batch_size == 4
     assert plan.pre_draft_step == 3
     assert plan.draft_step == 1
+
+
+def test_lightspec_keeps_vanilla_attention_chained_depth_fixed():
+    planner = build_lightspec_planner(spec_mode="vanilla_with_att")
+    for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 10.0)):
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
+    for batch_size, draft_cost in ((2, 0.1), (4, 0.1), (8, 0.2)):
+        planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=draft_cost)
+    planner._update_verified_batch(
+        accept_lengths=[4, 4],
+        req_num=2,
+        dynamic_batch_size=8,
+        verified_draft_step=3,
+    )
+
+    plan = planner.plan(decode_reqs=build_decode_reqs(2), origin_batch_size=8)
+
+    assert planner.draft_steps == (3,)
+    assert plan.draft_step == plan.pre_draft_step == 3
 
 
 def test_lightspec_compacts_block_verify_without_changing_draft_shape():
