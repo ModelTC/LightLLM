@@ -248,7 +248,7 @@ class HttpServerManagerForPDMaster:
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
-                    start_time,
+                    start_time if iter_index == 0 else time.time(),
                     block_prompt,
                     sampling_params,
                     multimodal_params,
