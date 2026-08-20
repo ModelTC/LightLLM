@@ -4,6 +4,8 @@ import triton
 import triton.language as tl
 from triton.language.standard import _log2, sum, zeros_like
 
+from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_replica_index
+
 
 @triton.jit
 def _compare_and_swap(x, x_1, ids, flip, i: tl.core.constexpr, n_dims: tl.core.constexpr):
@@ -299,7 +301,6 @@ def grouped_topk_eplb_kernel(
     selected_weights = tl.zeros((TOPK_BLOCK_SIZE,), tl.float32)
     selected_physical_ids = tl.zeros((TOPK_BLOCK_SIZE,), tl.int32)
     sum_scores = 0.0
-    hashed = token_index.to(tl.uint32) * 2654435769
     for topk_index in range(TOPK_NUM):
         selected_offset = tl.argmax(candidate_scores, axis=0)
         selected_group = selected_offset // EXPERT_GROUP_SIZE
@@ -322,7 +323,7 @@ def grouped_topk_eplb_kernel(
                 1,
             )
         replica_count = tl.load(logical_replica_count_ptr + selected_logical_id)
-        replica_index = hashed % replica_count.to(tl.uint32)
+        replica_index = eplb_replica_index(token_index, selected_logical_id, replica_count)
         physical_id = tl.load(logical_to_physical_ptr + selected_logical_id * MAP_SLOTS + replica_index)
         selected_physical_ids = tl.where(topk_lane, physical_id, selected_physical_ids)
         candidate_scores = tl.where(flat_offsets == selected_offset, -float("inf"), candidate_scores)

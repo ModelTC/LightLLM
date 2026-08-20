@@ -32,7 +32,9 @@ def build_logical_to_physical_map(
     """Build logical-to-physical maps for fixed primary and redundant slots.
 
     With a source rank, prefer copies on that source node.  If an expert has
-    no local copy, retain every global copy as the fallback.
+    no local copy, retain every global copy as the fallback.  Selected copies
+    are phase-rotated by source rank so source DP ranks do not synchronously
+    select the same replica while keeping their legal copy set unchanged.
     """
     assert redundant_expert_ids.ndim == 2
     num_ranks, redundant_experts_per_rank = redundant_expert_ids.shape
@@ -90,19 +92,30 @@ def build_logical_to_physical_map(
     if source_rank is None:
         return global_logical_to_physical, global_replica_count
 
-    logical_to_physical = torch.full_like(global_logical_to_physical, -1)
     source_node = source_rank // node_world_size
     replica_slots = torch.arange(max_replicas, dtype=torch.int32).unsqueeze(0)
     valid = replica_slots < global_replica_count.unsqueeze(1)
     replica_ranks = torch.div(global_logical_to_physical, physical_experts_per_rank, rounding_mode="floor")
     local = valid & (torch.div(replica_ranks, node_world_size, rounding_mode="floor") == source_node)
     selected = torch.where(local.any(dim=1, keepdim=True), local, valid)
+    selected_count = selected.sum(dim=1, dtype=torch.int32)
+
+    # Compact selected entries first in their historic physical-row order.
+    compact = torch.full_like(global_logical_to_physical, -1)
     selected_positions = selected.to(torch.int32).cumsum(dim=1) - 1
     rows = torch.arange(num_logical_experts, dtype=torch.int64).unsqueeze(1).expand_as(global_logical_to_physical)
-    logical_to_physical[rows[selected], selected_positions[selected].to(torch.int64)] = global_logical_to_physical[
-        selected
-    ]
-    return logical_to_physical, selected.sum(dim=1, dtype=torch.int32)
+    compact[rows[selected], selected_positions[selected].to(torch.int64)] = global_logical_to_physical[selected]
+
+    # Rotate only the selected prefix.  The same source rank keeps the old
+    # order at rank zero; all other source ranks see the identical copies and
+    # count with a distinct deterministic starting phase.
+    output_positions = torch.arange(max_replicas, dtype=torch.int64).unsqueeze(0)
+    rotation = (source_rank % selected_count.to(torch.int64)).unsqueeze(1)
+    source_positions = (output_positions + rotation) % selected_count.to(torch.int64).unsqueeze(1)
+    logical_to_physical = torch.full_like(global_logical_to_physical, -1)
+    output_valid = output_positions < selected_count.to(torch.int64).unsqueeze(1)
+    logical_to_physical[output_valid] = compact.gather(1, source_positions)[output_valid]
+    return logical_to_physical, selected_count
 
 
 def estimate_rank_load(
@@ -226,8 +239,20 @@ def plan_redundant_experts(
     redundant_experts_per_rank: int,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
+    current_placement: torch.Tensor | None = None,
+    stickiness: float = 0.0,
 ) -> torch.Tensor:
-    """Plan replicas using source-node-local copies, with global fallback."""
+    """Plan replicas using source-node-local copies, with global fallback.
+
+    With ``current_placement`` and a positive ``stickiness``, a candidate that
+    keeps an expert on its current rank receives a bonus of
+    ``stickiness * mean per-layer expert load``. This preserves rank
+    membership, not a particular redundant physical slot; target slots are
+    canonicalized against the current live rows before transfer and metadata
+    publication. A rank membership only changes when the move improves the
+    critical-load objective by more than that margin.
+    Without them the planning is bit-identical to the legacy behavior.
+    """
     assert expert_load.ndim in (2, 3, 4)
     if expert_alignment is not None:
         assert expert_alignment > 0
@@ -244,12 +269,20 @@ def plan_redundant_experts(
     load = source_load.to(dtype=torch.float64, device="cpu")
     placement = torch.full((num_layers, num_ranks, redundant_experts_per_rank), -1, dtype=torch.int64)
     owner_rank = torch.arange(num_logical_experts, dtype=torch.int64) // experts_per_rank
+    if current_placement is not None:
+        assert tuple(current_placement.shape) == (num_layers, num_ranks, redundant_experts_per_rank)
+        current_locations = _expert_locations(current_placement, num_logical_experts)
+        stickiness_scale = load.sum(dim=(0, 2, 3)) / num_logical_experts
+    else:
+        current_locations = None
+        stickiness_scale = None
 
     locations = _expert_locations(placement, num_logical_experts)
     expert_rank = _expert_rank_load_all(load, locations, num_nodes, node_world_size, expert_alignment)
     rank_load = expert_rank.sum(dim=2)
     remaining_slots = torch.full((num_layers, num_ranks), redundant_experts_per_rank, dtype=torch.int64)
     layer_indices = torch.arange(num_layers, dtype=torch.int64)
+    expert_ids = torch.arange(num_logical_experts, dtype=torch.int64)
     rank_nodes = (
         torch.arange(num_ranks, dtype=torch.int64) // legacy_node_world_size
         if legacy_node_world_size is not None and legacy_node_world_size < num_ranks
@@ -285,15 +318,20 @@ def plan_redundant_experts(
             raise RuntimeError("EPLB planner found no valid redundant expert placement")
 
         candidate_locations = locations.clone()
-        candidate_locations[
-            layer_indices[:, None], torch.arange(num_logical_experts)[None, :], target_ranks[:, None]
-        ] = True
+        candidate_locations[layer_indices[:, None], expert_ids[None, :], target_ranks[:, None]] = True
         candidate_expert_rank = _expert_rank_load_all(
             load, candidate_locations, num_nodes, node_world_size, expert_alignment
         )
         candidate_rank_load = rank_load[:, :, None, :] - expert_rank + candidate_expert_rank
         critical = candidate_rank_load.max(dim=3).values.sum(dim=0)
         critical.masked_fill_(~legal, torch.inf)
+        if current_locations is not None:
+            # An expert already held by the target rank is retained unless
+            # another candidate beats it by more than the stickiness margin.
+            # This is rank membership, not physical-slot stickiness. Masked
+            # (inf) candidates stay masked: inf - x == inf.
+            keep = current_locations[layer_indices[:, None], expert_ids[None, :], target_ranks[:, None]]
+            critical = critical - stickiness * stickiness_scale[:, None] * keep
         selected_experts = critical.argmin(dim=1)
         if torch.isinf(critical[layer_indices, selected_experts]).any():
             raise RuntimeError("EPLB planner found no valid redundant expert placement")

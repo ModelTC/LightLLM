@@ -15,10 +15,12 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
 )
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
+    align_target_placement,
     build_transfer_plan,
 )
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_node_world_size
 from lightllm.utils.envs_utils import (
+    get_eplb_placement_stickiness,
     get_eplb_rebalance_gain_threshold,
     get_prefill_eplb_step_interval,
 )
@@ -27,6 +29,8 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 EPLB_MIN_AVG_TOKENS_PER_EXPERT = 100
 EPLB_EXPERT_ALIGNMENT = 128
+EPLB_CONTROL_ERROR = -1
+EPLB_STEADY_SAMPLE_STEPS = 4
 
 
 def _imbalance_summary(rank_load: torch.Tensor) -> Dict[str, float]:
@@ -68,6 +72,7 @@ class EPLBManager:
         self._eplb_states = [weight.expert_parallel_state.eplb for weight in self.weights]
         self.step_interval = get_prefill_eplb_step_interval()
         self.rebalance_gain_threshold = get_eplb_rebalance_gain_threshold()
+        self.placement_stickiness = get_eplb_placement_stickiness()
         self.sampling_interval = self.step_interval
         self.prefill_steps = 0
         self.rebalanced = False
@@ -96,6 +101,7 @@ class EPLBManager:
         self._continuous_collection_start_step: Optional[int] = None
         self._continuous_collection_end_step: Optional[int] = self.step_interval
         self._sampling_pending = False
+        self._steady_collection_end_step: Optional[int] = None
         self._reset_recorded_samples()
         self._set_recording(True)
         # Keep background evaluation collectives separate from the main-thread
@@ -113,7 +119,8 @@ class EPLBManager:
                 f"layers={len(self.weights)} logical_experts={self.num_logical_experts} "
                 f"redundant_experts_per_rank={self.redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} "
-                f"rebalance_gain_threshold={self.rebalance_gain_threshold:.4f}"
+                f"rebalance_gain_threshold={self.rebalance_gain_threshold:.4f} "
+                f"placement_stickiness={self.placement_stickiness:.4f}"
             )
 
     def _set_recording(self, enabled: bool):
@@ -138,11 +145,25 @@ class EPLBManager:
         self._continuous_collection_start_step = None
         self._continuous_collection_end_step = None
 
+    def _clear_steady_collection(self):
+        self._sampling_pending = False
+        self._steady_collection_end_step = None
+
+    def _steady_sample_window_steps(self) -> int:
+        return min(EPLB_STEADY_SAMPLE_STEPS, getattr(self, "sampling_interval", self.step_interval))
+
+    def _arm_steady_collection(self, collection_end_step: int):
+        """Start the fixed sparse window without moving its evaluation boundary."""
+        self._reset_recorded_samples()
+        self._sampling_pending = True
+        self._steady_collection_end_step = collection_end_step
+        self._set_recording(True)
+
     def _begin_continuous_collection(self):
         minimum_end = self.prefill_steps + self.step_interval
         collection_end = -(-minimum_end // self.sampling_interval) * self.sampling_interval
         self._reset_recorded_samples()
-        self._sampling_pending = False
+        self._clear_steady_collection()
         self._continuous_collection_start_step = collection_end - self.step_interval
         self._continuous_collection_end_step = collection_end
         self._set_recording(self._continuous_collection_start_step == self.prefill_steps)
@@ -150,9 +171,18 @@ class EPLBManager:
     def _prepare_next_sampling_window(self):
         """Clear the current window and arm the next sparse sampling window."""
         self._clear_continuous_collection()
-        self._reset_recorded_samples()
-        self._sampling_pending = False
-        self._set_recording(self.sampling_interval == 1)
+        self._clear_steady_collection()
+        if self.sampling_interval == 1:
+            self._reset_recorded_samples()
+            self._set_recording(True)
+        elif self.sampling_interval <= EPLB_STEADY_SAMPLE_STEPS:
+            # There is no later pre-boundary manager step at which to arm a
+            # full clamped window, so arm immediately but keep the same next
+            # fixed boundary.
+            self._arm_steady_collection(getattr(self, "prefill_steps", 0) + self.sampling_interval)
+        else:
+            self._reset_recorded_samples()
+            self._set_recording(False)
 
     @staticmethod
     def _recent_ring_samples(counter: torch.Tensor, recorded_sample_count: int) -> torch.Tensor:
@@ -239,43 +269,65 @@ class EPLBManager:
     def _plan_and_broadcast(self, global_load: torch.Tensor):
         """Plan on rank zero and share the serializable result on the evaluation group."""
         result = None
+        local_error = None
         if self.global_rank == 0:
-            minimum = self.num_logical_experts * EPLB_MIN_AVG_TOKENS_PER_EXPERT
-            layer_samples = global_load.sum(dim=(0, 2, 3))
-            if torch.any(layer_samples < minimum):
-                result = {
-                    "kind": "insufficient",
-                    "minimum_layer_samples": int(layer_samples.min().item()),
-                    "minimum": minimum,
-                }
-            else:
-                candidate = plan_redundant_experts(
-                    global_load,
-                    self.world_size,
-                    self.redundant_experts_per_rank,
-                    expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                    node_world_size=self.node_world_size,
-                )
-                placement, improved, metrics, before_load, after_load = _select_improving_placements_with_loads(
-                    global_load,
-                    self.current_placement,
-                    candidate,
-                    expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                    node_world_size=self.node_world_size,
-                    rebalance_gain_threshold=self.rebalance_gain_threshold,
-                )
-                result = {
-                    "kind": "planned" if bool(torch.any(improved)) else "no_improvement",
-                    "placement": placement,
-                    "improved": improved,
-                    "before": _imbalance_summary(before_load),
-                    "after": _imbalance_summary(after_load),
-                    **metrics,
-                }
+            try:
+                minimum = self.num_logical_experts * EPLB_MIN_AVG_TOKENS_PER_EXPERT
+                layer_samples = global_load.sum(dim=(0, 2, 3))
+                if torch.any(layer_samples < minimum):
+                    result = {
+                        "kind": "insufficient",
+                        "minimum_layer_samples": int(layer_samples.min().item()),
+                        "minimum": minimum,
+                    }
+                else:
+                    candidate = plan_redundant_experts(
+                        global_load,
+                        self.world_size,
+                        self.redundant_experts_per_rank,
+                        expert_alignment=EPLB_EXPERT_ALIGNMENT,
+                        node_world_size=self.node_world_size,
+                        current_placement=self.current_placement,
+                        stickiness=self.placement_stickiness,
+                    )
+                    placement, improved, metrics, before_load, after_load = _select_improving_placements_with_loads(
+                        global_load,
+                        self.current_placement,
+                        candidate,
+                        expert_alignment=EPLB_EXPERT_ALIGNMENT,
+                        node_world_size=self.node_world_size,
+                        rebalance_gain_threshold=self.rebalance_gain_threshold,
+                    )
+                    if bool(torch.any(improved)):
+                        # A planner placement identifies experts by rank, not
+                        # by redundant slot. Canonicalize every selected row
+                        # before broadcasting so transfer, metadata, and the
+                        # next current_placement all describe the same live
+                        # physical expert rows.
+                        placement = placement.clone()
+                        for layer_index in torch.nonzero(improved, as_tuple=False).flatten().tolist():
+                            placement[layer_index] = align_target_placement(
+                                self.current_placement[layer_index], placement[layer_index]
+                            )
+                    result = {
+                        "kind": "planned" if bool(torch.any(improved)) else "no_improvement",
+                        "placement": placement,
+                        "improved": improved,
+                        "before": _imbalance_summary(before_load),
+                        "after": _imbalance_summary(after_load),
+                        **metrics,
+                    }
+            except BaseException as exc:
+                local_error = exc
+                result = {"kind": "error", "message": f"{type(exc).__name__}: {exc}"}
         if self.world_size > 1:
             result_list = [result]
             dist.broadcast_object_list(result_list, src=0, group=self.evaluation_group)
             result = result_list[0]
+        if result["kind"] == "error":
+            if local_error is not None:
+                raise RuntimeError("EPLB planner failed on rank zero") from local_error
+            raise RuntimeError(f"EPLB planner failed on rank zero: {result['message']}")
         return result
 
     def _evaluate_after_event(self, event: torch.cuda.Event):
@@ -284,6 +336,12 @@ class EPLBManager:
             torch.cuda.set_device(self._eplb_states[0].route_counter.device)
             event.synchronize()
             local_load = self._collect_local_samples()
+            recorded_sample_count = int(local_load.shape[0])
+            sample_window_steps = (
+                self.step_interval
+                if getattr(self, "_continuous_collection_end_step", None) is not None
+                else self._steady_sample_window_steps()
+            )
             num_nodes = self.world_size // self.node_world_size
             # Preserve source nodes until physical-replica loads are combined;
             # DeepEP applies expert alignment after traffic from all sources
@@ -292,6 +350,8 @@ class EPLBManager:
             global_load[:, :, self.global_rank // self.node_world_size] = local_load
             dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.evaluation_group)
             result = self._plan_and_broadcast(global_load)
+            result["recorded_sample_count"] = recorded_sample_count
+            result["sample_window_steps"] = sample_window_steps
             if result["kind"] == "planned":
                 metadata = [None] * len(self.weights)
                 layer_plans = []
@@ -365,21 +425,26 @@ class EPLBManager:
                 if from_continuous_window:
                     logger.info(
                         "eplb insufficient samples: prefill_steps=%s minimum_layer_samples=%s required=%s "
-                        "next_sampling_interval=%s",
+                        "next_sampling_interval=%s recorded_sample_count=%s sample_window_steps=%s",
                         self.prefill_steps,
                         result["minimum_layer_samples"],
                         result["minimum"],
                         self.sampling_interval,
+                        result.get("recorded_sample_count"),
+                        result.get("sample_window_steps"),
                     )
                 else:
                     logger.info(
                         "eplb insufficient samples: prefill_steps=%s minimum_layer_samples=%s required=%s "
-                        "scheduled_fresh_window_start=%s scheduled_fresh_window_end=%s",
+                        "scheduled_fresh_window_start=%s scheduled_fresh_window_end=%s "
+                        "recorded_sample_count=%s sample_window_steps=%s",
                         self.prefill_steps,
                         result["minimum_layer_samples"],
                         result["minimum"],
                         self._continuous_collection_start_step,
                         self._continuous_collection_end_step,
+                        result.get("recorded_sample_count"),
+                        result.get("sample_window_steps"),
                     )
             return False
         if result["kind"] == "no_improvement":
@@ -388,12 +453,15 @@ class EPLBManager:
                 logger.info(
                     "eplb skip rearrangement: no model improvement model_imbalance_ratio=%.4f "
                     "candidate_model_imbalance_ratio=%.4f candidate_rebalance_gain=%.4f "
-                    "candidate_changed_layer_count=%s actual_changed_layer_count=0 next_sampling_interval=%s",
+                    "candidate_changed_layer_count=%s actual_changed_layer_count=0 next_sampling_interval=%s "
+                    "recorded_sample_count=%s sample_window_steps=%s",
                     result["model_imbalance_ratio"],
                     result["candidate_model_imbalance_ratio"],
                     result["candidate_rebalance_gain"],
                     result["candidate_changed_layer_count"],
                     self.sampling_interval,
+                    result.get("recorded_sample_count"),
+                    result.get("sample_window_steps"),
                 )
             self._prepare_next_sampling_window()
             return False
@@ -432,11 +500,18 @@ class EPLBManager:
         self.in_flight_started_at = time.time()
         self.transfer.start(layer_plans)
         if self.global_rank == 0:
+            actual_changed_slot_count = sum(len(plan) for _, plan in layer_plans)
+            cross_node_transfer_count = sum(
+                step.src_rank // self.node_world_size != step.dst_rank // self.node_world_size
+                for _, plan in layer_plans
+                for step in plan
+            )
             logger.info(
                 "eplb started prefill_steps=%s max_before=%.4f max_after=%.4f p95_before=%.4f p95_after=%.4f "
                 "model_imbalance_ratio=%.4f candidate_model_imbalance_ratio=%.4f "
                 "candidate_rebalance_gain=%.4f candidate_changed_layer_count=%s "
-                "actual_changed_layer_count=%s",
+                "actual_changed_layer_count=%s actual_changed_slot_count=%s cross_node_transfer_count=%s "
+                "recorded_sample_count=%s sample_window_steps=%s",
                 self.prefill_steps,
                 result["before"]["max"],
                 result["after"]["max"],
@@ -447,6 +522,10 @@ class EPLBManager:
                 result["candidate_rebalance_gain"],
                 result["candidate_changed_layer_count"],
                 len(layer_plans),
+                actual_changed_slot_count,
+                cross_node_transfer_count,
+                result.get("recorded_sample_count"),
+                result.get("sample_window_steps"),
             )
 
     def poll(self):
@@ -472,13 +551,13 @@ class EPLBManager:
         sampling_interval = self.sampling_interval
         phase = self.prefill_steps % sampling_interval
         if self._sampling_pending:
-            self._sampling_pending = False
-            self._start_evaluation()
+            steady_collection_end_step = getattr(self, "_steady_collection_end_step", None)
+            if steady_collection_end_step is None or self.prefill_steps >= steady_collection_end_step:
+                self._clear_steady_collection()
+                self._start_evaluation()
             return
         if sampling_interval == 1:
             self._start_evaluation()
             return
-        if phase == sampling_interval - 1:
-            self._reset_recorded_samples()
-            self._sampling_pending = True
-            self._set_recording(True)
+        if phase == sampling_interval - self._steady_sample_window_steps():
+            self._arm_steady_collection(self.prefill_steps + self._steady_sample_window_steps())

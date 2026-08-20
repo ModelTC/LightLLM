@@ -43,6 +43,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
 )
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
+    align_target_placement,
     build_transfer_plan,
     commit_staging_rows,
     extract_expert_tensors,
@@ -249,14 +250,24 @@ def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
     assert manager_module._find_fused_moe_weights(model) == [alternate, aliased, first]
 
 
-def test_get_eplb_rebalance_gain_threshold_defaults_to_five_percent(monkeypatch):
+def test_get_eplb_rebalance_gain_threshold_defaults_to_ten_percent(monkeypatch):
     monkeypatch.delenv("LIGHTLLM_EPLB_REBALANCE_GAIN_THRESHOLD", raising=False)
     envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
 
     try:
-        assert envs_utils.get_eplb_rebalance_gain_threshold() == 0.05
+        assert envs_utils.get_eplb_rebalance_gain_threshold() == 0.1
     finally:
         envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
+
+
+def test_get_eplb_placement_stickiness_defaults_to_ten_percent(monkeypatch):
+    monkeypatch.delenv("LIGHTLLM_EPLB_PLACEMENT_STICKINESS", raising=False)
+    envs_utils.get_eplb_placement_stickiness.cache_clear()
+
+    try:
+        assert envs_utils.get_eplb_placement_stickiness() == 0.1
+    finally:
+        envs_utils.get_eplb_placement_stickiness.cache_clear()
 
 
 @pytest.mark.parametrize(("configured", "expected"), [("0", 0.0), (".04", 0.04), ("1", 1.0)])
@@ -576,6 +587,19 @@ def test_source_node_local_maps_fall_back_to_global_replicas():
     assert maps[2][0][0, 0].item() == maps[3][0][0, 0].item() == 8
 
 
+def test_source_rank_rotates_selected_replica_order_without_changing_copies():
+    # Expert 0 is primary on rank 0 and redundant on rank 1, so both ranks
+    # on node 0 have the same two local copies.  Their source-rank phases
+    # must differ while their selected set/count remain identical.
+    redundant = torch.tensor([[1], [0], [3], [2]], dtype=torch.int64)
+    rank0_map, rank0_count = build_logical_to_physical_map(redundant, 4, source_rank=0, node_world_size=2)
+    rank1_map, rank1_count = build_logical_to_physical_map(redundant, 4, source_rank=1, node_world_size=2)
+
+    assert rank0_count[0].item() == rank1_count[0].item() == 2
+    assert set(rank0_map[0, :2].tolist()) == set(rank1_map[0, :2].tolist()) == {0, 3}
+    assert torch.equal(rank1_map[0, :2], torch.tensor([3, 0], dtype=torch.int32))
+
+
 def test_plan_redundant_experts_prefers_first_replica_on_new_node():
     # One redundant slot per rank leaves legal alternatives on both nodes;
     # topology preference therefore puts every first replica away from its
@@ -669,7 +693,200 @@ def test_source_node_select_uses_the_same_runtime_critical_prediction():
     )
 
 
-def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twenty(
+def _count_moved_slots(current: torch.Tensor, target: torch.Tensor) -> int:
+    """Count rank rows gaining an expert: one migrated row per new expert id."""
+    moved = 0
+    for layer in range(current.shape[0]):
+        for rank in range(current.shape[1]):
+            moved += len(set(target[layer, rank].tolist()) - set(current[layer, rank].tolist()))
+    return moved
+
+
+def test_sticky_plan_reproduces_current_when_load_unchanged():
+    generator = torch.Generator().manual_seed(7)
+    load = torch.randint(1, 1000, (3, 16, 32), generator=generator)
+    placement = plan_redundant_experts(load, num_ranks=4, redundant_experts_per_rank=2)
+
+    replanned = plan_redundant_experts(
+        load,
+        num_ranks=4,
+        redundant_experts_per_rank=2,
+        current_placement=placement,
+        stickiness=0.1,
+    )
+
+    assert torch.equal(replanned, placement)
+    for layer in range(placement.shape[0]):
+        assert build_transfer_plan(placement[layer], replanned[layer], 32, 4, 4) == []
+
+
+def test_sticky_plan_bounded_moves_under_small_perturbation():
+    generator = torch.Generator().manual_seed(11)
+    load = torch.randint(100, 1000, (4, 16, 32), generator=generator)
+    placement = plan_redundant_experts(load, num_ranks=4, redundant_experts_per_rank=2)
+    noise = torch.rand((4, 16, 32), generator=generator) * 0.1 + 0.95
+    perturbed = (load.double() * noise).round().to(torch.int64)
+
+    sticky = plan_redundant_experts(perturbed, 4, 2, current_placement=placement, stickiness=0.1)
+    free = plan_redundant_experts(perturbed, 4, 2)
+
+    sticky_moves = _count_moved_slots(placement, sticky)
+    free_moves = _count_moved_slots(placement, free)
+    assert sticky_moves <= placement.numel() // 4
+    assert sticky_moves < free_moves
+
+    def critical(candidate):
+        return estimate_rank_load(perturbed, candidate).max(dim=2).values.sum()
+
+    assert critical(sticky) <= critical(free) * 1.1
+
+
+def test_sticky_plan_still_churns_under_phase_shift():
+    layers, experts = 8, 32
+    before = torch.full((layers, experts), 10, dtype=torch.int64)
+    after = torch.full((layers, experts), 10, dtype=torch.int64)
+    offsets = torch.arange(4)
+    for layer in range(layers):
+        before[layer, (4 * layer + offsets) % experts] = 5000
+        after[layer, (4 * layer + 16 + offsets) % experts] = 5000
+    placement = plan_redundant_experts(before, num_ranks=4, redundant_experts_per_rank=2)
+
+    replanned = plan_redundant_experts(
+        after,
+        num_ranks=4,
+        redundant_experts_per_rank=2,
+        current_placement=placement,
+        stickiness=0.1,
+    )
+
+    assert _count_moved_slots(placement, replanned) > placement.numel() // 2
+
+
+def test_transfer_plan_slot_permutation_is_free():
+    current = torch.tensor([[4, 5], [6, 7], [0, 1], [2, 3]])
+    target = torch.tensor([[5, 4], [7, 6], [1, 0], [3, 2]])
+
+    assert torch.equal(align_target_placement(current, target), current)
+    assert build_transfer_plan(current, target, num_logical_experts=8, world_size=4, node_world_size=2) == []
+
+
+def test_align_target_placement_keeps_retained_experts_in_live_slots():
+    current = torch.tensor([[4, 5], [6, 7], [0, 1], [2, 3]])
+    target = torch.tensor([[5, 6], [7, 0], [1, 0], [3, 2]])
+
+    canonical = align_target_placement(current, target)
+
+    assert torch.equal(canonical, torch.tensor([[6, 5], [0, 7], [0, 1], [2, 3]]))
+
+
+def test_canonical_placement_keeps_transfer_rows_and_published_map_consistent():
+    num_logical_experts = 8
+    world_size = 4
+    redundant_slots = 2
+    experts_per_rank = num_logical_experts // world_size
+    physical_experts_per_rank = experts_per_rank + redundant_slots
+    current = torch.tensor([[4, 5], [6, 7], [0, 1], [2, 3]])
+    target = torch.tensor([[5, 6], [7, 0], [1, 0], [3, 2]])
+    canonical = align_target_placement(current, target)
+    plan = build_transfer_plan(current, canonical, num_logical_experts, world_size, node_world_size=2)
+
+    # Label every current physical row by its resident logical expert, then
+    # apply the transfer plan from a frozen source snapshot just as staging
+    # copies do before the destination rows are published.
+    source_rows = [
+        list(range(rank * experts_per_rank, (rank + 1) * experts_per_rank)) + current[rank].tolist()
+        for rank in range(world_size)
+    ]
+    live_rows = [row.copy() for row in source_rows]
+    for step in plan:
+        live_rows[step.dst_rank][experts_per_rank + step.dst_slot] = source_rows[step.src_rank][step.src_local_row]
+
+    logical_to_physical, replica_count = build_logical_to_physical_map(canonical, num_logical_experts)
+    for logical_expert, count in enumerate(replica_count.tolist()):
+        for physical_id in logical_to_physical[logical_expert, :count].tolist():
+            rank, row = divmod(physical_id, physical_experts_per_rank)
+            assert live_rows[rank][row] == logical_expert
+
+
+def test_plan_and_broadcast_publishes_canonical_placement(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.global_rank = 0
+    manager.world_size = 4
+    manager.node_world_size = 2
+    manager.num_logical_experts = 8
+    manager.redundant_experts_per_rank = 2
+    manager.current_placement = torch.tensor([[[4, 5], [6, 7], [0, 1], [2, 3]]])
+    manager.placement_stickiness = 0.1
+    manager.rebalance_gain_threshold = 0.05
+    manager.evaluation_group = object()
+    candidate = torch.tensor([[[5, 4], [7, 6], [1, 0], [3, 2]]])
+    broadcasts = []
+
+    def fixed_selector(*_args, **_kwargs):
+        rank_load = torch.full((1, 4), 100.0)
+        return candidate.clone(), torch.tensor([True]), {}, rank_load, rank_load
+
+    def record_broadcast(result_list, **_kwargs):
+        broadcasts.append(result_list[0])
+
+    monkeypatch.setattr(manager_module, "plan_redundant_experts", lambda *_args, **_kwargs: candidate.clone())
+    monkeypatch.setattr(manager_module, "_select_improving_placements_with_loads", fixed_selector)
+    monkeypatch.setattr(manager_module.dist, "broadcast_object_list", record_broadcast)
+
+    result = manager._plan_and_broadcast(torch.full((1, 1, 2, 8), 100, dtype=torch.int64))
+
+    assert torch.equal(result["placement"], manager.current_placement)
+    assert broadcasts and torch.equal(broadcasts[0]["placement"], manager.current_placement)
+
+
+def test_stickiness_zero_matches_legacy():
+    generator = torch.Generator().manual_seed(17)
+    load = torch.randint(1, 1000, (2, 8, 16), generator=generator)
+    legacy = plan_redundant_experts(load, num_ranks=4, redundant_experts_per_rank=2)
+    unrelated = build_initial_redundant_expert_ids(16, 4, 2).unsqueeze(0).expand(8, -1, -1).clone()
+
+    replanned = plan_redundant_experts(
+        load,
+        num_ranks=4,
+        redundant_experts_per_rank=2,
+        current_placement=unrelated,
+        stickiness=0.0,
+    )
+
+    assert torch.equal(replanned, legacy)
+
+
+def test_plan_and_broadcast_propagates_rank_zero_error_after_existing_broadcast(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.global_rank = 0
+    manager.world_size = 2
+    manager.node_world_size = 2
+    manager.num_logical_experts = 8
+    manager.redundant_experts_per_rank = 2
+    manager.current_placement = torch.tensor([[[4, 5], [6, 7], [0, 1], [2, 3]]])
+    manager.placement_stickiness = 0.1
+    manager.rebalance_gain_threshold = 0.05
+    manager.evaluation_group = object()
+    broadcasted = []
+
+    def broken_planner(*_args, **_kwargs):
+        raise RuntimeError("planner boom")
+
+    def record_broadcast(result_list, **_kwargs):
+        broadcasted.append(result_list[0])
+
+    monkeypatch.setattr(manager_module, "plan_redundant_experts", broken_planner)
+    monkeypatch.setattr(manager_module.dist, "broadcast_object_list", record_broadcast)
+
+    with pytest.raises(RuntimeError, match="EPLB planner failed on rank zero") as exc_info:
+        manager._plan_and_broadcast(torch.full((1, 1, 1, 8), 100, dtype=torch.int64))
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "planner boom"
+    assert broadcasted == [{"kind": "error", "message": "RuntimeError: planner boom"}]
+
+
+def test_steady_state_sparse_sampling_records_steps_sixteen_to_nineteen_and_evaluates_step_twenty(
     monkeypatch,
 ):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
@@ -692,7 +909,7 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
     ]
     manager.rebalanced = True
     manager.in_flight = False
-    manager.prefill_steps = 18
+    manager.prefill_steps = 15
     manager.step_interval = 20
     manager.sampling_interval = manager.step_interval
     manager.evaluation_group = object()
@@ -700,6 +917,7 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
     manager.global_rank = 1
     manager.evaluation_in_flight = False
     manager._sampling_pending = False
+    manager._steady_collection_end_step = None
     manager._continuous_collection_start_step = None
     manager._continuous_collection_end_step = None
 
@@ -714,15 +932,51 @@ def test_steady_state_sparse_sampling_arms_step_nineteen_and_evaluates_step_twen
     )
 
     manager.step()
-    assert manager.prefill_steps == 19
+    assert manager.prefill_steps == 16
     assert recordings == [True]
     assert resets == [True]
     assert manager._sampling_pending
+    assert manager._steady_collection_end_step == 20
+
+    for _ in range(3):
+        manager.step()
+    assert manager.prefill_steps == 19
+    assert recordings == [True]
+    assert started == []
 
     manager.step()
     assert manager.prefill_steps == 20
     assert not manager._sampling_pending
     assert started == [True]
+
+
+def test_steady_sampling_window_clamps_to_short_interval_without_moving_boundary(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.in_flight = False
+    manager.evaluation_in_flight = False
+    manager.prefill_steps = 0
+    manager.step_interval = 20
+    manager.sampling_interval = 3
+    manager._sampling_pending = False
+    manager._steady_collection_end_step = None
+    manager._continuous_collection_start_step = None
+    manager._continuous_collection_end_step = None
+    recordings, resets, started = [], [], []
+    manager._set_recording = lambda enabled: recordings.append((manager.prefill_steps, enabled))
+    manager._reset_recorded_samples = lambda: resets.append(manager.prefill_steps)
+    monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(manager.prefill_steps))
+
+    manager._prepare_next_sampling_window()
+    assert resets == [0]
+    assert recordings == [(0, True)]
+    assert manager._steady_collection_end_step == 3
+    assert manager._sampling_pending
+
+    manager.step()
+    manager.step()
+    assert started == []
+    manager.step()
+    assert started == [3]
 
 
 def test_eplb_step_does_not_start_a_second_evaluation_while_one_is_pending(monkeypatch):
@@ -838,15 +1092,17 @@ def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(
 
     manager.poll()
 
-    assert recordings == [False]
-    assert not manager._sampling_pending
+    # The no-improvement backoff changes interval 1 to 4.  The clamped
+    # steady window arms immediately but still waits for boundary step 5.
+    assert recordings == [True]
+    assert manager._sampling_pending
+    assert manager._steady_collection_end_step == 5
     assert starts == []
     assert manager.prefill_steps == 1
 
-    manager.step()
+    for _ in range(3):
+        manager.step()
     assert starts == []
-    manager.step()
-    assert recordings == [False, True]
     manager.step()
     assert starts == [True]
 
@@ -1030,6 +1286,29 @@ def test_eplb_counter_capacity_covers_default_dense_interval(monkeypatch):
     assert weight.expert_parallel_state.eplb.route_counter.shape == (40, 4)
 
 
+def test_steady_sampling_resets_fixed_ring_without_retained_history():
+    counter = torch.ones((8, 4), dtype=torch.int64)
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    state = _test_parallel_state(
+        eplb=True,
+        route_counter=counter,
+        recording=False,
+        recorded_sample_count=99,
+        logical_experts=4,
+        world_size=1,
+    ).eplb
+    manager._eplb_states = [state]
+
+    manager._reset_recorded_samples()
+    manager._reset_recorded_samples()
+
+    assert state.route_counter.shape == (8, 4)
+    assert torch.count_nonzero(state.route_counter) == 0
+    assert state.recorded_sample_count == 0
+    assert not hasattr(manager, "_retained_local_samples")
+    assert not hasattr(manager, "_sample_history")
+
+
 def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
     args = type(
         "Args",
@@ -1110,6 +1389,8 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     assert torch.equal(seen["global_load"][:, :, 0], torch.full_like(expected_local, 100))
     assert torch.equal(seen["global_load"][:, :, 1], expected_local)
     assert manager._evaluation_error is None
+    assert manager._evaluation_result["recorded_sample_count"] == 1
+    assert manager._evaluation_result["sample_window_steps"] == 4
 
 
 def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeypatch):
@@ -1989,6 +2270,24 @@ def test_manager_sparse_insufficient_schedules_bounded_fresh_window(monkeypatch)
     assert "insufficient samples" in logs[0][0]
     assert "scheduled_fresh_window" in logs[0][0]
 
+    manager.in_flight = False
+    manager.evaluation_in_flight = False
+    starts = []
+    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(manager.prefill_steps))
+    manager.step()
+    manager.step()
+    assert manager.prefill_steps == 39
+    assert starts == []
+    manager.step()
+    assert manager.prefill_steps == 40
+    assert starts == []
+    for _ in range(19):
+        manager.step()
+    assert manager.prefill_steps == 59
+    assert starts == []
+    manager.step()
+    assert starts == [60]
+
 
 def test_manager_full_window_insufficient_clears_and_backs_off():
     class DoneThread:
@@ -2186,14 +2485,20 @@ def test_sparse_backoff_arms_and_evaluates_only_at_new_interval_boundary(monkeyp
     assert recordings == []
     assert starts == []
 
-    manager.prefill_steps = 78
+    for _ in range(55):
+        manager.step()
+    assert manager.prefill_steps == 75
+    assert recordings == []
+    assert starts == []
+
     manager.step()
-    assert manager.prefill_steps == 79
+    assert manager.prefill_steps == 76
     assert recordings == [True]
     assert resets == [True]
     assert manager._sampling_pending
 
-    manager.step()
+    for _ in range(4):
+        manager.step()
     assert manager.prefill_steps == 80
     assert starts == [True]
     assert not manager._sampling_pending
@@ -2231,7 +2536,7 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
     assert manager._continuous_collection_start_step is None
 
 
-def test_first_rebalance_completion_switches_to_sparse_step_nineteen_arm(monkeypatch):
+def test_first_rebalance_completion_switches_to_four_step_sparse_window(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.rebalanced = False
     manager.step_interval = 20
@@ -2251,9 +2556,11 @@ def test_first_rebalance_completion_switches_to_sparse_step_nineteen_arm(monkeyp
     manager.prefill_steps = 38
     manager.evaluation_in_flight = False
     monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(True))
+    manager.prefill_steps = 35
     manager.step()
     assert recordings == [False, True]
-    manager.step()
+    for _ in range(4):
+        manager.step()
     assert starts == [True]
 
 
@@ -2787,22 +3094,36 @@ def test_eplb_record_flag_controls_counter_without_changing_mapping():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-def test_eplb_map_uses_prebuilt_source_node_local_map():
+def test_eplb_map_decorrelates_replica_phase_between_topk_experts():
     from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
 
-    redundant = torch.tensor([[4], [5], [0], [1]], dtype=torch.int64)
-    rank2_map, rank2_count = build_logical_to_physical_map(
-        redundant, num_logical_experts=8, source_rank=2, node_world_size=2
-    )
-    topk_ids = torch.tensor([[0], [0]], dtype=torch.int64, device="cuda")
-    counter = torch.zeros((1, 8), dtype=torch.int64, device="cuda")
+    # For token 0, logical expert 0 hashes to replica phase 0 while logical
+    # expert 1 hashes to phase 1.  The two top-k assignments therefore no
+    # longer select the same replica phase merely because they share a token.
+    logical_to_physical = torch.tensor([[0, 4], [1, 5]], dtype=torch.int32, device="cuda")
+    replica_count = torch.tensor([2, 2], dtype=torch.int32, device="cuda")
+    topk_ids = torch.tensor([[0, 1], [0, 1]], dtype=torch.int64, device="cuda")
+    counter = torch.zeros((1, 2), dtype=torch.int64, device="cuda")
     eplb_map(
         topk_ids,
-        rank2_map.cuda(),
-        rank2_count.cuda(),
+        logical_to_physical,
+        replica_count,
         counter,
         torch.zeros((), dtype=torch.int32, device="cuda"),
         sample_index=0,
     )
     torch.cuda.synchronize()
-    assert torch.equal(topk_ids.cpu(), torch.tensor([[8], [8]], dtype=torch.int64))
+    assert torch.equal(topk_ids.cpu(), torch.tensor([[0, 5], [4, 1]]))
+
+    # Decode's single-token route retains the historic primary-copy choice.
+    topk_ids.copy_(torch.tensor([[0, 1], [0, 1]], dtype=torch.int64, device="cuda"))
+    eplb_map(
+        topk_ids[:1],
+        logical_to_physical,
+        replica_count,
+        counter,
+        torch.zeros((), dtype=torch.int32, device="cuda"),
+        sample_index=0,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(topk_ids[:1].cpu(), torch.tensor([[0, 1]]))

@@ -56,6 +56,34 @@ def commit_staging_rows(
             run_start = previous = dst_slot
 
 
+def align_target_placement(current: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Canonicalize a target row layout without moving retained experts.
+
+    EPLB placement is rank-based: redundant slots on one rank are
+    interchangeable. Retained experts therefore keep their live physical
+    slot, while new experts fill freed slots in the planner's target-row
+    order. The returned placement is the single canonical layout that must
+    be used both for transfers and for published routing metadata.
+    """
+    assert current.ndim == target.ndim == 2
+    assert tuple(current.shape) == tuple(target.shape)
+
+    current_rows = current.tolist()
+    target_rows = target.tolist()
+    aligned_target_rows = []
+    for current_row, target_row in zip(current_rows, target_rows):
+        current_slots = {expert: slot for slot, expert in enumerate(current_row)}
+        target_experts = set(target_row)
+        aligned_row = list(current_row)
+        freed_slots = [slot for slot, expert in enumerate(current_row) if expert not in target_experts]
+        new_experts = [expert for expert in target_row if expert not in current_slots]
+        assert len(freed_slots) == len(new_experts)
+        for slot, expert in zip(freed_slots, new_experts):
+            aligned_row[slot] = expert
+        aligned_target_rows.append(aligned_row)
+    return target.new_tensor(aligned_target_rows)
+
+
 def build_transfer_plan(
     current: torch.Tensor,
     target: torch.Tensor,
@@ -66,7 +94,7 @@ def build_transfer_plan(
     assert tuple(current.shape) == tuple(target.shape) == (world_size, current.shape[1])
     experts_per_rank = num_logical_experts // world_size
     current_rows = current.tolist()
-    target_rows = target.tolist()
+    aligned_target_rows = align_target_placement(current, target).tolist()
     # A logical expert has one primary row and at most one redundant row per
     # rank, so this source list is already unique.  Build it once instead of
     # allocating/sorting a set for every destination slot.
@@ -79,7 +107,7 @@ def build_transfer_plan(
     source_load = [0] * world_size
     plan = []
     for dst_rank in range(world_size):
-        for dst_slot, expert in enumerate(target_rows[dst_rank]):
+        for dst_slot, expert in enumerate(aligned_target_rows[dst_rank]):
             if expert == current_rows[dst_rank][dst_slot]:
                 continue
             src_rank, src_row = min(

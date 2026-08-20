@@ -4,6 +4,14 @@ import triton.language as tl
 
 
 @triton.jit
+def eplb_replica_index(token_index, logical_id, replica_count):
+    """Choose a replica with independent phases for a token's top-k experts."""
+    token_hash = token_index.to(tl.uint32) * 2654435769
+    expert_hash = logical_id.to(tl.uint32) * 2246822519
+    return (token_hash + expert_hash) % replica_count.to(tl.uint32)
+
+
+@triton.jit
 def _eplb_push_copy_kernel(
     src_ptrs_ptr,
     dst_ptrs_ptr,
@@ -82,9 +90,8 @@ def _eplb_map_kernel(
             mask=mask,
             other=1,
         )
-        token_index = (offsets // topk_num).to(tl.uint32)
-        hashed = token_index * 2654435769
-        replica_index = hashed % replica_count.to(tl.uint32)
+        token_index = offsets // topk_num
+        replica_index = eplb_replica_index(token_index, logical_id, replica_count)
     physical_id = tl.load(
         logical_to_physical_ptr + logical_id * map_slots + replica_index,
         mask=mask,
@@ -112,8 +119,8 @@ def _eplb_map_no_record_kernel(
         replica_index = 0
     else:
         replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
-        token_index = (offsets // topk_num).to(tl.uint32)
-        replica_index = (token_index * 2654435769) % replica_count.to(tl.uint32)
+        token_index = offsets // topk_num
+        replica_index = eplb_replica_index(token_index, logical_id, replica_count)
     physical_id = tl.load(
         logical_to_physical_ptr + logical_id * map_slots + replica_index,
         mask=mask,
@@ -150,8 +157,8 @@ def _eplb_map_record_kernel(
         replica_index = 0
     else:
         replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
-        token_index = (offsets // topk_num).to(tl.uint32)
-        replica_index = (token_index * 2654435769) % replica_count.to(tl.uint32)
+        token_index = offsets // topk_num
+        replica_index = eplb_replica_index(token_index, logical_id, replica_count)
     physical_id = tl.load(
         logical_to_physical_ptr + logical_id * map_slots + replica_index,
         mask=mask,
@@ -172,6 +179,7 @@ def _eplb_map_record_histogram_kernel(
     histogram_bins: tl.constexpr,
     topk_num: tl.constexpr,
     map_slots: tl.constexpr,
+    SINGLE_TOKEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -189,9 +197,12 @@ def _eplb_map_record_histogram_kernel(
         sem="relaxed",
     )
 
-    replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
-    token_index = (offsets // topk_num).to(tl.uint32)
-    replica_index = (token_index * 2654435769) % replica_count.to(tl.uint32)
+    if SINGLE_TOKEN:
+        replica_index = 0
+    else:
+        replica_count = tl.load(logical_replica_count_ptr + logical_id, mask=mask, other=1)
+        token_index = offsets // topk_num
+        replica_index = eplb_replica_index(token_index, logical_id, replica_count)
     physical_id = tl.load(
         logical_to_physical_ptr + logical_id * map_slots + replica_index,
         mask=mask,
@@ -281,6 +292,7 @@ def eplb_map_fast(
                 histogram_bins=triton.next_power_of_2(expert_counter.shape[1]),
                 topk_num=topk_ids.shape[1],
                 map_slots=logical_to_physical_map.shape[1],
+                SINGLE_TOKEN=topk_ids.shape[0] == 1,
                 BLOCK_SIZE=block_size,
                 num_warps=8 if block_size == 512 else 4,
             )
