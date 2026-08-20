@@ -58,7 +58,10 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer, DFlashSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer, DSparkSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import EagleNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import (
+    EagleNoAttProposer,
+    EagleSpecProposal as EagleNoAttSpecProposal,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import EagleSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import (
@@ -414,7 +417,7 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
         draft_step=0,
     )
 
-    assert isinstance(proposal, EagleSpecProposal)
+    assert isinstance(proposal, EagleNoAttSpecProposal)
     assert proposal.token_ids.shape == (2, 0)
     assert proposal.schedule_scores.shape == (2, 0)
 
