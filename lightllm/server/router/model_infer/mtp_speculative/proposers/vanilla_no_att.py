@@ -1,18 +1,11 @@
 import copy
-from dataclasses import dataclass
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
-
-
-@dataclass
-class VanillaSpecProposal(SpecProposal):
-    """Vanilla No-Att proposal with optional selected-token probabilities."""
-
-    schedule_scores: torch.Tensor | None = None
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal
 
 
 class VanillaNoAttProposer(BaseSpecProposer):

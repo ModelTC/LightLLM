@@ -7,10 +7,10 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eag
     propose_next_dp_eagle_fixed_layout_overlap,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
-    EagleSpecProposal,
     fill_eagle_draft_model_kv_state,
     propose_next_eagle,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 
 
 class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):

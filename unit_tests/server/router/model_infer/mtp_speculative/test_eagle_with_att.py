@@ -5,10 +5,56 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import (
-    EagleSpecProposal,
-    EagleWithAttProposer,
-)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
+
+
+def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
+    target_input_ids = torch.tensor([10, 20], dtype=torch.int64)
+    target_hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+
+    def forward(model_input):
+        assert model_input.input_ids is target_input_ids
+        assert model_input.mtp_draft_input_hiddens is target_hidden
+        return ModelOutput(
+            logits=torch.tensor([[1.0], [2.0]]),
+            mtp_collector=ModelMtpOutputCollector(spec_hidden=target_hidden + 10),
+        )
+
+    draft_model = SimpleNamespace(
+        forward=forward,
+        map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100,
+    )
+    proposer = Eagle3Proposer(
+        backend=SimpleNamespace(
+            draft_models=[draft_model],
+            _gen_argmax_token_ids=lambda output: output.logits[:, 0].long(),
+        ),
+        enable_dynmaic_mtp=False,
+    )
+    target_input = SimpleNamespace(
+        is_prefill=False,
+        batch_size=2,
+        input_ids=None,
+        b_position_delta=torch.zeros(2, dtype=torch.int32),
+        mtp_draft_input_hiddens=None,
+    )
+
+    proposal = proposer.propose_next(
+        target_model_input=target_input,
+        target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
+        target_next_token_ids=target_input_ids,
+        b_req_mtp_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        draft_step=1,
+        accept_len=torch.ones(2, dtype=torch.int32),
+    )
+
+    assert isinstance(proposal, EagleSpecProposal)
+    torch.testing.assert_close(proposal.token_ids, torch.tensor([[101], [102]]))
+    assert proposal.schedule_scores is None
+    assert target_input.input_ids is None
+    assert target_input.mtp_draft_input_hiddens is None
 
 
 def test_eagle_with_att_rejects_zero_draft_steps():

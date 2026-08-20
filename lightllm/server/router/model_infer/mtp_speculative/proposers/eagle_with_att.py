@@ -1,5 +1,4 @@
 import copy
-from dataclasses import dataclass
 
 import torch
 
@@ -10,16 +9,9 @@ from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_util
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     BaseSpecProposer,
     MtpMemIndexesToFree,
-    SpecProposal,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-
-
-@dataclass
-class EagleSpecProposal(SpecProposal):
-    """EAGLE With-Att proposal with optional selected-token probabilities."""
-
-    schedule_scores: torch.Tensor | None = None
 
 
 class EagleWithAttProposer(BaseSpecProposer):
@@ -67,7 +59,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         proposal_token_ids_by_step = []
         schedule_scores_by_step = []
 
-        assert draft_step > 0, "eagle_with_att requires draft_step to be greater than 0 to maintain draft KV state"
+        assert draft_step > 0, "EAGLE attention requires draft_step to be greater than 0 to maintain draft KV state"
         assert not target_model_input.is_prefill
         assert accept_len is not None
         assert accept_len.shape == (req_num,)
@@ -91,10 +83,10 @@ class EagleWithAttProposer(BaseSpecProposer):
         # vocabulary reduction。第一列 proposal 来自每个请求的 accepted tail。
         accepted_tail_output = ModelOutput(logits=extend_output.logits.index_select(0, accepted_tail_rows))
         if self.enable_dynmaic_mtp:
-            draft_token_ids, draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(accepted_tail_output)
+            draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(accepted_tail_output)
             schedule_scores_by_step.append(draft_token_probs.float().unsqueeze(1))
         else:
-            draft_token_ids = self.backend._gen_argmax_token_ids(accepted_tail_output)
+            draft_token_ids = self._gen_argmax_token_ids(accepted_tail_output)
         proposal_token_ids_by_step.append(draft_token_ids.unsqueeze(1))
 
         if draft_step == 1:
@@ -158,10 +150,10 @@ class EagleWithAttProposer(BaseSpecProposer):
             draft_hidden = draft_output.mtp_collector.spec_hidden
 
             if self.enable_dynmaic_mtp:
-                draft_token_ids, draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
+                draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(draft_output)
                 schedule_scores_by_step.append(draft_token_probs.float().unsqueeze(1))
             else:
-                draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
+                draft_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids_by_step.append(draft_token_ids.unsqueeze(1))
             draft_seq_lens.add_(1)
 
@@ -172,6 +164,16 @@ class EagleWithAttProposer(BaseSpecProposer):
             extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
             schedule_scores=schedule_scores,
         )
+
+    def _gen_argmax_token_ids(self, model_output: ModelOutput) -> torch.Tensor:
+        """生成 target vocabulary 下的候选 token；EAGLE3 会覆盖词表映射。"""
+
+        return self.backend._gen_argmax_token_ids(model_output)
+
+    def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        """生成候选 token 及其概率；EAGLE3 会覆盖 token 的词表映射。"""
+
+        return self.backend._gen_argmax_token_ids_and_prob(model_output)
 
     def _prepare_eagle_prefill_inputs(
         self,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
 from typing import Callable
 
 import torch
@@ -14,16 +13,9 @@ from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_util
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     BaseSpecProposer,
     MtpMemIndexesToFree,
-    SpecProposal,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-
-
-@dataclass
-class EagleSpecProposal(SpecProposal):
-    """EAGLE proposal with optional selected-token probabilities."""
-
-    schedule_scores: torch.Tensor | None = None
 
 
 def fill_eagle_draft_model_kv_state(

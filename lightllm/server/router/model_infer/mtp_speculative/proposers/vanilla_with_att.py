@@ -1,20 +1,13 @@
 import copy
-from dataclasses import dataclass
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.common.basemodel.triton_kernel.overlay_mtp_decode_input import overlay_chained_mtp_decode_input
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-
-
-@dataclass
-class VanillaSpecProposal(SpecProposal):
-    """Vanilla With-Att proposal with optional selected-token probabilities."""
-
-    schedule_scores: torch.Tensor | None = None
 
 
 class VanillaWithAttProposer(BaseSpecProposer):

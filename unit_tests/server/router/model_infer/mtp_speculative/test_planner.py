@@ -58,20 +58,14 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer, DFlashSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer, DSparkSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import (
-    EagleNoAttProposer,
-    EagleSpecProposal as EagleNoAttSpecProposal,
-)
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import EagleSpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import EagleNoAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import (
-    VanillaNoAttProposer,
-    VanillaSpecProposal as VanillaNoAttSpecProposal,
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
+    EagleSpecProposal,
+    VanillaSpecProposal,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import (
-    VanillaSpecProposal as VanillaWithAttSpecProposal,
-    VanillaWithAttProposer,
-)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import VanillaWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 
 
@@ -158,15 +152,13 @@ def test_mode_proposals_own_their_schedule_metadata():
     assert "schedule_scores_cpu" not in SpecProposal.__dataclass_fields__
 
     for proposal_type in (
-        VanillaNoAttSpecProposal,
-        VanillaWithAttSpecProposal,
+        VanillaSpecProposal,
         EagleSpecProposal,
         DFlashSpecProposal,
         DSparkSpecProposal,
     ):
         assert "schedule_scores" in proposal_type.__dataclass_fields__
-    assert "schedule_scores_cpu" not in VanillaNoAttSpecProposal.__dataclass_fields__
-    assert "schedule_scores_cpu" not in VanillaWithAttSpecProposal.__dataclass_fields__
+    assert "schedule_scores_cpu" not in VanillaSpecProposal.__dataclass_fields__
     assert "schedule_scores_cpu" not in EagleSpecProposal.__dataclass_fields__
     assert "schedule_scores_cpu" not in DFlashSpecProposal.__dataclass_fields__
     assert "schedule_scores_cpu" in DSparkSpecProposal.__dataclass_fields__
@@ -231,7 +223,7 @@ def test_scatter_mtp_next_tokens_ignores_empty_schedule_scores(monkeypatch):
             )
         )
     )
-    proposal = VanillaNoAttSpecProposal(
+    proposal = VanillaSpecProposal(
         token_ids=torch.empty((2, 0), dtype=torch.int64),
         extra_mem_indexes_cpu=[],
         schedule_scores=torch.empty((2, 0), dtype=torch.float32),
@@ -320,13 +312,12 @@ def test_dynamic_planner_registers_cuda_graph_costs_from_backend():
     assert planner.draft_infer_costs.estimate(4) == 0.3
 
 
-def test_each_mode_proposer_only_inherits_its_base_interface():
+def test_each_mode_proposer_inherits_its_expected_implementation_base():
     proposer_types = (
         VanillaWithAttProposer,
         VanillaNoAttProposer,
         EagleWithAttProposer,
         EagleNoAttProposer,
-        Eagle3Proposer,
         DFlashProposer,
         DSparkProposer,
     )
@@ -347,6 +338,7 @@ def test_each_mode_proposer_only_inherits_its_base_interface():
 
     for proposer_type in proposer_types:
         assert proposer_type.__bases__ == (BaseSpecProposer,)
+    assert Eagle3Proposer.__bases__ == (EagleWithAttProposer,)
     for proposer_type in dp_proposer_types:
         assert proposer_type.__bases__ == (BaseDpProposer,)
     for proposer_type in dp_overlap_proposer_types:
@@ -417,7 +409,7 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
         draft_step=0,
     )
 
-    assert isinstance(proposal, EagleNoAttSpecProposal)
+    assert isinstance(proposal, EagleSpecProposal)
     assert proposal.token_ids.shape == (2, 0)
     assert proposal.schedule_scores.shape == (2, 0)
 

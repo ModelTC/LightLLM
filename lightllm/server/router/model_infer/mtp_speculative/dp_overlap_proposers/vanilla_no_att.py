@@ -1,18 +1,10 @@
 import copy
-from dataclasses import dataclass
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
-
-
-@dataclass
-class VanillaSpecProposal(SpecProposal):
-    """DP-overlap Vanilla No-Att proposal with optional selected-token probabilities."""
-
-    schedule_scores: torch.Tensor | None = None
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal
 
 
 class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):

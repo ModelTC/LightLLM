@@ -11,11 +11,11 @@ from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_util
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
-    EagleSpecProposal,
     _prepare_eagle_prefill_inputs,
     generate_eagle_token_ids,
     prepare_eagle_verify_decode_input,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 
 
 def fill_dp_eagle_draft_model_kv_state_overlap(
