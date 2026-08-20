@@ -4,10 +4,8 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_utils import (
     fill_dp_eagle_draft_model_kv_state_overlap,
-    propose_next_dp_eagle_autoregressive_overlap,
-)
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
     fill_eagle_draft_model_kv_state,
+    propose_next_dp_eagle_autoregressive_overlap,
     propose_next_eagle,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal

@@ -1,4 +1,4 @@
-"""EAGLE proposer 共享辅助函数。"""
+"""普通 DP 与 DP-overlap EAGLE proposer 共用的辅助函数。"""
 
 from __future__ import annotations
 

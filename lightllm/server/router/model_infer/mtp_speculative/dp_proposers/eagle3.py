@@ -2,7 +2,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.base import BaseDpProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
+from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.eagle_utils import (
     fill_eagle_draft_model_kv_state,
     propose_next_eagle,
 )
