@@ -1,6 +1,9 @@
-import torch
+import copy
 from typing import List
 
+import torch
+
+from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.draft_registry import DraftModelRegistry
@@ -77,6 +80,32 @@ class Qwen3EagleModel(LlamaTpPartModel):
             len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models
         )
         super()._init_infer_layer(start_layer_index=total_pre_layers_num)
+
+    def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
+        """在进入模型主体和 CUDA Graph 前统一 EAGLE3 hidden 的宽度。
+
+        Target model 收集的多个辅助层 hidden 会沿最后一维拼接，宽度为
+        ``target_layer_num * hidden_size``；后续自回归 draft step 返回的 hidden
+        已经是 ``hidden_size``。Decode CUDA Graph 只按 batch size 缓存，因此
+        不能让这两种 shape 和对应的 FC 分支进入同一张图。
+
+        这里在创建 InferState 之前完成一次 target hidden 投影，使 prefill、
+        decode、Graph capture 和 replay 看到的输入始终为 ``[token_num, hidden_size]``。
+        使用浅副本避免覆盖调用方持有的 target ModelInput。
+        """
+
+        draft_hiddens = model_input.mtp_draft_input_hiddens
+        assert draft_hiddens is not None
+        assert draft_hiddens.ndim == 2
+        assert draft_hiddens.shape[0] == model_input.input_ids.shape[0]
+
+        hidden_size = int(self.config["hidden_size"])
+        if draft_hiddens.shape[-1] != hidden_size:
+            model_input = copy.copy(model_input)
+            model_input.mtp_draft_input_hiddens = self.pre_post_weight.fc_weight_.mm(draft_hiddens)
+
+        assert model_input.mtp_draft_input_hiddens.shape == (model_input.input_ids.shape[0], hidden_size)
+        return super()._create_inferstate(model_input=model_input, microbatch_index=microbatch_index)
 
     # d2t stores per-token offsets: target_id = draft_id + d2t[draft_id].
     @torch.no_grad()

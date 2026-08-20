@@ -4,7 +4,7 @@ from lightllm.models.qwen3_eagle.layer_weights.pre_and_post_layer_weight import 
 
 
 class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
-    """Eagle3 draft-token embedding plus target-hidden projection."""
+    """EAGLE3 draft-token embedding and fixed-width draft hidden preparation."""
 
     def __init__(self, network_config):
         super().__init__(network_config)
@@ -13,14 +13,11 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
     def prepare_spec_draft_hiddens(
         self,
         infer_state: InferStateInfo,
-        layer_weight: Qwen3EaglePreAndPostLayerWeight,
     ) -> None:
-        target_hiddens = infer_state.mtp_draft_input_hiddens
-        # Target verification provides concatenated auxiliary-layer hiddens (N * H).
-        # Autoregressive draft steps feed the previous draft output, which is already H.
-        if target_hiddens.shape[-1] != self.hidden_size_:
-            target_hiddens = layer_weight.fc_weight_.mm(target_hiddens)
-        infer_state.eagle_draft_hidden_states = target_hiddens
+        draft_hiddens = infer_state.mtp_draft_input_hiddens
+        assert draft_hiddens is not None
+        assert draft_hiddens.shape[-1] == self.hidden_size_
+        infer_state.eagle_draft_hidden_states = draft_hiddens
 
     def context_forward(
         self,
@@ -28,7 +25,7 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
         infer_state: InferStateInfo,
         layer_weight: Qwen3EaglePreAndPostLayerWeight,
     ):
-        self.prepare_spec_draft_hiddens(infer_state, layer_weight)
+        self.prepare_spec_draft_hiddens(infer_state)
         return super().context_forward(input_ids, infer_state, layer_weight)
 
     def token_forward(
@@ -37,5 +34,5 @@ class Qwen3EaglePreLayerInfer(LlamaPreLayerInfer):
         infer_state: InferStateInfo,
         layer_weight: Qwen3EaglePreAndPostLayerWeight,
     ):
-        self.prepare_spec_draft_hiddens(infer_state, layer_weight)
+        self.prepare_spec_draft_hiddens(infer_state)
         return super().token_forward(input_ids, infer_state, layer_weight)

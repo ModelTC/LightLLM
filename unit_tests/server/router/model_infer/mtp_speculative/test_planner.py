@@ -55,12 +55,14 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     MtpMemIndexesToFree,
     SpecProposal,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer, DFlashSpecProposal
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer, DSparkSpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import EagleNoAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
+    DFlashSpecProposal,
+    DSparkSpecProposal,
     EagleSpecProposal,
     VanillaSpecProposal,
 )

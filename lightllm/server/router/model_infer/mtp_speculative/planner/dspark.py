@@ -10,7 +10,7 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     SpecDecodePlan,
     _InferCostMsTable,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkSpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import DSparkSpecProposal
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
