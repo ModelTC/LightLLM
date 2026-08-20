@@ -4,11 +4,7 @@ from typing import List, Optional
 
 import torch
 
-from lightllm.utils.envs_utils import (
-    enable_diverse_mode_gqa_decode_fast_kernel,
-    enable_triton_mtp_kernel,
-    get_env_start_args,
-)
+from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -116,9 +112,6 @@ class ModelInput:
                 self.b_mark_shared_group = torch.ones_like(self.b_req_idx, dtype=torch.int32)
             if self.b_shared_seq_len is None:
                 self.b_shared_seq_len = torch.zeros_like(self.b_req_idx, dtype=torch.int32)
-        elif get_env_start_args().mtp_dynamic_verify or enable_triton_mtp_kernel():
-            if self.b_mark_shared_group is None:
-                self.b_mark_shared_group = torch.ones_like(self.b_req_idx, dtype=torch.int32)
 
 
 @dataclass

@@ -6,6 +6,7 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -128,10 +129,14 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         self._init_page_table(b_att_req_idx)
 
     def _init_dynamic_spec_verify_state(self, draft_step: int) -> torch.Tensor:
+        b_mark_mtp_shared_group = build_mtp_shared_group_markers(
+            self.infer_state.b_req_idx,
+            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+        )
         b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len = build_dynamic_spec_fa3_decode_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_seq_len=self.infer_state.b_seq_len,
-            b_mark_shared_group=self.infer_state.b_mark_shared_group,
+            b_mark_mtp_shared_group=b_mark_mtp_shared_group,
             att_batch_size=self.infer_state.batch_size,
             hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
         )

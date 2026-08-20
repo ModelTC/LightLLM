@@ -93,8 +93,6 @@ def build_parallel_block_draft_input(
         .contiguous()
     )
     draft_input.mem_indexes = extra_mem_indexes_cpu.to(device=target_next_token_ids.device, non_blocking=True)
-    draft_input.b_mark_shared_group = torch.zeros_like(draft_input.b_req_idx)
-    draft_input.b_mark_shared_group[block_size - 1 :: block_size] = block_size
     empty_multimodal_params = {"images": [], "audios": []}
     draft_input.multimodal_params = [empty_multimodal_params] * draft_input.batch_size
     return draft_input, extra_mem_indexes_cpu

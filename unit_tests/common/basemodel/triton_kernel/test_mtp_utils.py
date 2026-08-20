@@ -7,6 +7,24 @@ if not torch.cuda.is_available():
 from lightllm.common.basemodel.triton_kernel import mtp_utils
 
 
+@pytest.mark.parametrize(
+    "max_group_size,req_indexes,expected_markers",
+    [
+        (2, [7, 7, 7, 11, 11, 20], [0, 2, 1, 0, 2, 1]),
+        (8, [7, 7, 7, 11, 11, 11, 20, 20, 20], [0, 0, 3, 0, 0, 3, 0, 0, 3]),
+        (3, [7, 7, 7, 7, 7, 7], [0, 0, 3, 0, 0, 3]),
+        (3, [7, 7, -1, -1, 11, 11], [0, 2, 1, 1, 0, 2]),
+    ],
+)
+def test_build_mtp_shared_group_markers(monkeypatch, max_group_size, req_indexes, expected_markers):
+    monkeypatch.setattr(mtp_utils, "get_diverse_max_batch_shared_group_size", lambda: max_group_size)
+    b_req_idx = torch.tensor(req_indexes, dtype=torch.int32, device="cuda")
+
+    markers = mtp_utils.build_mtp_shared_group_markers(b_req_idx, hold_req_id=-1)
+
+    assert markers.cpu().tolist() == expected_markers
+
+
 def test_mtp_verify_scatter_and_start_locations():
     req_to_next_token_ids = torch.tensor(
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]],

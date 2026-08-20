@@ -156,7 +156,6 @@ def propose_next_dp_eagle_autoregressive_overlap(
             if position_deltas_by_batch[batch_index] is not None
             else None
         )
-        model_input.b_mark_shared_group = torch.ones_like(model_input.b_req_idx)
         model_input.b_shared_seq_len = None
         if len(model_input.multimodal_params) != model_input.batch_size:
             empty_multimodal_params = {"images": [], "audios": []}

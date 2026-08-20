@@ -6,6 +6,94 @@ import triton
 import triton.language as tl
 import torch
 
+from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
+
+
+@triton.jit
+def _fwd_kernel_build_mtp_shared_group_markers(
+    b_req_idx,
+    b_mark_mtp_shared_group,
+    batch_size,
+    hold_req_id,
+    MAX_GROUP_SIZE: tl.constexpr,
+    SCAN_BLOCK_SIZE: tl.constexpr,
+):
+    current_row = tl.program_id(axis=0)
+    current_req_idx = tl.load(b_req_idx + current_row)
+
+    # HOLD rows never participate in request grouping. Each one directly forms
+    # an independent one-row group, even when multiple HOLD rows are adjacent.
+    has_next_row = current_row + 1 < batch_size
+    next_req_idx = tl.load(
+        b_req_idx + current_row + 1,
+        mask=has_next_row,
+        other=-1,
+    )
+    is_hold_row = current_req_idx == hold_req_id
+    if is_hold_row:
+        tl.store(b_mark_mtp_shared_group + current_row, 1)
+        return
+
+    # A normal request only needs work on the final row of its consecutive run.
+    is_request_run_end = (~has_next_row) | (next_req_idx != current_req_idx)
+    if not is_request_run_end:
+        return
+
+    # ModelInput keeps all MTP rows of one real request together and emits each
+    # request only once. Count the rows matching the current request, then use
+    # that count to recover the request's first row.
+    backward_offsets = tl.arange(0, SCAN_BLOCK_SIZE)
+    scanned_rows = current_row - backward_offsets
+    valid_scanned_rows = scanned_rows >= 0
+    scanned_req_idx = tl.load(
+        b_req_idx + scanned_rows,
+        mask=valid_scanned_rows,
+        other=-1,
+    )
+    belongs_to_current_request = valid_scanned_rows & (scanned_req_idx == current_req_idx)
+    request_row_count = tl.sum(belongs_to_current_request, axis=0)
+    request_start_row = current_row - request_row_count + 1
+
+    # Split the request run from left to right into groups of MAX_GROUP_SIZE.
+    # Each loop iteration finds one group's final row and writes its size.
+    for group_start_offset in tl.range(0, request_row_count, MAX_GROUP_SIZE):
+        group_size = tl.minimum(MAX_GROUP_SIZE, request_row_count - group_start_offset)
+        group_end_row = request_start_row + group_start_offset + group_size - 1
+        tl.store(b_mark_mtp_shared_group + group_end_row, group_size)
+
+
+def build_mtp_shared_group_markers(b_req_idx: torch.Tensor, hold_req_id: int) -> torch.Tensor:
+    """Build MTP group markers from consecutive request indexes on GPU.
+
+    Only the final row of each group stores its size. Long request runs are
+    split by ``max_batch_shared_group_size``. Every ``hold_req_id`` row forms
+    an independent one-row group. For example, with limit 3 and ``H`` denoting
+    ``hold_req_id``::
+
+        b_req_idx:               [7, 7, 7, 7, 11, 11, H, H]
+        b_mark_mtp_shared_group: [0, 0, 3, 1,  0,  2,  1,  1]
+    """
+
+    assert b_req_idx.is_cuda
+    batch_size = b_req_idx.shape[0]
+    if batch_size == 0:
+        return torch.empty((0,), dtype=torch.int32, device=b_req_idx.device)
+
+    max_group_size = int(get_diverse_max_batch_shared_group_size())
+    assert max_group_size > 0
+    b_mark_mtp_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device=b_req_idx.device)
+    _fwd_kernel_build_mtp_shared_group_markers[(batch_size,)](
+        b_req_idx=b_req_idx,
+        b_mark_mtp_shared_group=b_mark_mtp_shared_group,
+        batch_size=batch_size,
+        hold_req_id=hold_req_id,
+        MAX_GROUP_SIZE=max_group_size,
+        SCAN_BLOCK_SIZE=triton.next_power_of_2(batch_size),
+        num_warps=8,
+        num_stages=1,
+    )
+    return b_mark_mtp_shared_group
+
 
 @triton.jit
 def _fwd_kernel_mtp_verify(

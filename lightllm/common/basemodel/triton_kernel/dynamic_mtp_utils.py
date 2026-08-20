@@ -8,7 +8,6 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.mtp_manager import MtpManager
-from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
 # 动态 verify 行选择。
@@ -139,37 +138,6 @@ def _fwd_kernel_compact_dynamic_mtp_model_input(
 
 
 @triton.jit
-def _fwd_kernel_rebuild_trimmed_mtp_b_mark_shared_group(
-    b_req_idx,
-    out_b_mark_shared_group,
-    batch_size,
-    max_batch_shared_group_size: tl.constexpr,
-    MAX_RUN_SCAN: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    offsets = tl.arange(0, BLOCK_SIZE)
-    mask = offsets < batch_size
-    cur_req_idx = tl.load(b_req_idx + offsets, mask=mask, other=-1)
-
-    prev_same_count = tl.full((BLOCK_SIZE,), 0, tl.int32)
-    for scan_offset in tl.static_range(1, MAX_RUN_SCAN + 1):
-        prev_offsets = offsets - scan_offset
-        prev_mask = mask & (prev_offsets >= 0)
-        prev_req_idx = tl.load(b_req_idx + prev_offsets, mask=prev_mask, other=-2)
-        prev_same_count += tl.where(prev_mask & (prev_req_idx == cur_req_idx), 1, 0)
-
-    next_offsets = offsets + 1
-    next_req_idx = tl.load(b_req_idx + next_offsets, mask=next_offsets < batch_size, other=-2)
-    group_pos = prev_same_count % max_batch_shared_group_size
-    is_group_end = mask & (
-        (next_offsets == batch_size) | (next_req_idx != cur_req_idx) | (group_pos == max_batch_shared_group_size - 1)
-    )
-    mark_value = tl.where(is_group_end, group_pos + 1, 0)
-    tl.store(out_b_mark_shared_group + offsets, mark_value, mask=mask)
-    return
-
-
-@triton.jit
 def _fwd_kernel_pack_selected_rows_2d(
     src,
     src_stride_0,
@@ -232,35 +200,10 @@ def _pack_selected_hidden(
     return dst
 
 
-def _rebuild_mtp_group_markers(b_req_idx: torch.Tensor, max_request_rows: int) -> torch.Tensor:
-    assert b_req_idx.is_cuda
-    batch_size = b_req_idx.shape[0]
-    max_batch_shared_group_size = int(get_diverse_max_batch_shared_group_size())
-    assert max_batch_shared_group_size > 0
-    assert max_request_rows > 0
-    if batch_size == 0:
-        return torch.empty((0,), dtype=torch.int32, device=b_req_idx.device)
-
-    b_mark_shared_group = torch.empty((batch_size,), dtype=torch.int32, device=b_req_idx.device)
-    BLOCK_SIZE = triton.next_power_of_2(batch_size)
-    _fwd_kernel_rebuild_trimmed_mtp_b_mark_shared_group[(1,)](
-        b_req_idx=b_req_idx,
-        out_b_mark_shared_group=b_mark_shared_group,
-        batch_size=batch_size,
-        max_batch_shared_group_size=max_batch_shared_group_size,
-        MAX_RUN_SCAN=max_request_rows - 1,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=8,
-        num_stages=1,
-    )
-    return b_mark_shared_group
-
-
 def _compact_decode_model_input(
     model_input: ModelInput,
     selected_row_mask: torch.Tensor,
     dynamic_batch_size: int,
-    max_draft_step: int,
 ) -> ModelInput:
     assert not model_input.is_prefill
     assert selected_row_mask.is_cuda
@@ -338,10 +281,7 @@ def _compact_decode_model_input(
     model_input.b_seq_len = out_b_seq_len
     model_input.b_position_delta = out_b_position_delta
     model_input.b_shared_seq_len = out_b_shared_seq_len
-    model_input.b_mark_shared_group = _rebuild_mtp_group_markers(
-        out_b_req_idx,
-        max_request_rows=max_draft_step + 1,
-    )
+    model_input.b_mark_shared_group = None
 
     if model_input.mtp_draft_input_hiddens is not None:
         assert model_input.mtp_draft_input_hiddens.is_cuda
@@ -391,7 +331,6 @@ def prepare_dynamic_mtp_model_input(
         model_input=model_input,
         selected_row_mask=selected_row_mask,
         dynamic_batch_size=dynamic_batch_size,
-        max_draft_step=max_draft_step,
     )
     # Decode and draft-cache commit use the compacted b_position_delta, so
     # placeholder multimodal metadata only needs to keep ModelInput shapes

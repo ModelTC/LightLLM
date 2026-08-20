@@ -1,28 +1,10 @@
 from types import SimpleNamespace
 
 import torch
-from lightllm.server.router.model_infer.mode_backend import generic_padded_pre_process, generic_pre_process
+from lightllm.server.router.model_infer.mode_backend import generic_padded_pre_process
 
 
-def test_mtp_shared_group_markers_split_requests_and_size_limit(monkeypatch):
-    monkeypatch.setattr(generic_pre_process, "get_diverse_max_batch_shared_group_size", lambda: 2)
-    b_req_idx = torch.tensor([7, 7, 7, 11, 11, 20], dtype=torch.int32)
-
-    markers = generic_pre_process.build_mtp_shared_group_markers(b_req_idx=b_req_idx)
-
-    assert markers.tolist() == [0, 2, 1, 0, 2, 1]
-
-
-def test_mtp_shared_group_markers_detect_request_boundaries(monkeypatch):
-    monkeypatch.setattr(generic_pre_process, "get_diverse_max_batch_shared_group_size", lambda: 8)
-    b_req_idx = torch.tensor([7, 7, 7, 11, 11, 11, 20, 20, 20], dtype=torch.int32)
-
-    markers = generic_pre_process.build_mtp_shared_group_markers(b_req_idx=b_req_idx)
-
-    assert markers.tolist() == [0, 0, 3, 0, 0, 3, 0, 0, 3]
-
-
-def test_padded_decode_builds_spec_metadata_for_real_and_fake_rows(monkeypatch):
+def test_padded_decode_leaves_mtp_attention_metadata_unset(monkeypatch):
     max_draft_step = 2
     mem_manager = SimpleNamespace(
         HOLD_TOKEN_MEMINDEX=-1,
@@ -40,8 +22,6 @@ def test_padded_decode_builds_spec_metadata_for_real_and_fake_rows(monkeypatch):
         lambda: SimpleNamespace(mtp_step=max_draft_step, mtp_dynamic_verify=True),
     )
     monkeypatch.setattr(generic_padded_pre_process, "enable_diverse_mode_gqa_decode_fast_kernel", lambda: False)
-    monkeypatch.setattr(generic_padded_pre_process, "enable_triton_mtp_kernel", lambda: False)
-    monkeypatch.setattr(generic_pre_process, "get_diverse_max_batch_shared_group_size", lambda: 8)
 
     req = SimpleNamespace(
         req_idx=7,
@@ -56,4 +36,4 @@ def test_padded_decode_builds_spec_metadata_for_real_and_fake_rows(monkeypatch):
 
     assert padded_req_num == 2
     assert model_input.b_mtp_index.tolist() == [0, 1, 2, 0, 1, 2, 0, 1, 2]
-    assert model_input.b_mark_shared_group.tolist() == [0, 0, 3, 0, 0, 0, 0, 0, 6]
+    assert model_input.b_mark_shared_group is None

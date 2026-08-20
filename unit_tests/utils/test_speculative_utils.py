@@ -10,6 +10,7 @@ import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
+from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.server.router.model_infer.mtp_speculative.proposers import dflash as dflash_module
@@ -157,6 +158,46 @@ def test_fa3_decode_state_owns_causality(state_class):
     state.init_state()
 
     assert state.causal is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_triton_mtp_decode_state_builds_group_markers():
+    model = SimpleNamespace(
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
+        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
+    )
+    state = TritonDecodeAttState(
+        backend=SimpleNamespace(model=model),
+        infer_state=SimpleNamespace(
+            b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
+        ),
+    )
+
+    state.init_state()
+
+    assert state.b_mark_mtp_shared_group.cpu().tolist() == [0, 2, 1, 1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
+def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
+    model = SimpleNamespace(req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1))
+    state = state_class(
+        backend=SimpleNamespace(model=model),
+        infer_state=SimpleNamespace(
+            b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
+            b_seq_len=torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda"),
+            batch_size=4,
+        ),
+    )
+
+    b_att_req_idx = state._init_dynamic_spec_verify_state(draft_step=2)
+    torch.cuda.synchronize()
+
+    assert b_att_req_idx.cpu().tolist() == [7, -1, -1, -1]
+    assert state.b_att_seq_len.cpu().tolist() == [4, 2, 2, 0]
+    assert state.cu_seqlens_q.cpu().tolist() == [0, 2, 3, 4, 4]
 
 
 @pytest.mark.parametrize(

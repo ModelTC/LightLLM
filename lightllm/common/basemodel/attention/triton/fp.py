@@ -2,6 +2,7 @@ import dataclasses
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
+from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
 
 class TritonAttBackend(BaseAttBackend):
@@ -93,8 +94,15 @@ class TritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class TritonDecodeAttState(BaseDecodeAttState):
+    b_mark_mtp_shared_group: torch.Tensor = None
+
     def init_state(self):
-        pass
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+        if draft_step > 0:
+            self.b_mark_mtp_shared_group = build_mtp_shared_group_markers(
+                self.infer_state.b_req_idx,
+                hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+            )
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -229,7 +237,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             Req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
             B_req_idx=self.infer_state.b_req_idx,
             b_seq_len=self.infer_state.b_seq_len,
-            b_mark_shared_group=self.infer_state.b_mark_shared_group,
+            b_mark_shared_group=self.b_mark_mtp_shared_group,
             alloc_tensor_func=alloc_func,
         )
 

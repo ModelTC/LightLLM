@@ -38,7 +38,6 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
     )
     monkeypatch.setenv("LIGHTLLM_MAX_BATCH_SHARED_GROUP_SIZE", "4")
     get_env_start_args.cache_clear()
-    dynamic_mtp_utils.get_diverse_max_batch_shared_group_size.cache_clear()
 
     model_input = ModelInput(
         batch_size=12,
@@ -97,9 +96,7 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
     assert torch.equal(
         compacted_input.b_shared_seq_len.cpu(), torch.tensor([0, 0, 0, 7, 9, 9, 9, 9], dtype=torch.int32)
     )
-    assert torch.equal(
-        compacted_input.b_mark_shared_group.cpu(), torch.tensor([0, 0, 3, 1, 0, 0, 0, 4], dtype=torch.int32)
-    )
+    assert compacted_input.b_mark_shared_group is None
     assert torch.equal(
         compacted_input.mem_indexes.cpu(), torch.tensor([100, 101, 102, 103, 104, 105, 106, 107], dtype=torch.int32)
     )
@@ -111,10 +108,7 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
     assert torch.equal(compacted_input.mtp_draft_input_hiddens.cpu(), expected_hiddens)
 
 
-def test_compaction_rebuilds_b_mark_shared_group_by_max_batch_shared_group_size(monkeypatch):
-    monkeypatch.setenv("LIGHTLLM_MAX_BATCH_SHARED_GROUP_SIZE", "3")
-    dynamic_mtp_utils.get_diverse_max_batch_shared_group_size.cache_clear()
-
+def test_compaction_clears_attention_group_metadata():
     model_input = ModelInput(
         batch_size=5,
         total_token_num=36,
@@ -137,13 +131,12 @@ def test_compaction_rebuilds_b_mark_shared_group_by_max_batch_shared_group_size(
         model_input=model_input,
         selected_row_mask=selected_row_mask,
         dynamic_batch_size=5,
-        max_draft_step=4,
     )
     torch.cuda.synchronize()
 
     assert torch.equal(compacted_input.b_req_idx.cpu(), torch.tensor([0, 0, 0, 0, 0], dtype=torch.int32))
     assert torch.equal(compacted_input.b_mtp_index.cpu(), torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32))
-    assert torch.equal(compacted_input.b_mark_shared_group.cpu(), torch.tensor([0, 0, 3, 0, 2], dtype=torch.int32))
+    assert compacted_input.b_mark_shared_group is None
 
 
 def _reference_cumprod_scores(req_to_next_token_scores, b_req_idx, max_draft_step: int) -> torch.Tensor:

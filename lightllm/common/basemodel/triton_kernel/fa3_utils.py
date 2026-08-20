@@ -66,7 +66,7 @@ def page_table_copy(
 def _build_dynamic_spec_fa3_decode_params_kernel(
     b_req_idx,
     b_seq_len,
-    b_mark_shared_group,
+    b_mark_mtp_shared_group,
     out_b_q_seq_len,
     out_b_kv_seq_len,
     out_b_att_req_idx,
@@ -78,7 +78,7 @@ def _build_dynamic_spec_fa3_decode_params_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < batch_size
 
-    mark = tl.load(b_mark_shared_group + offsets, mask=mask, other=0)
+    mark = tl.load(b_mark_mtp_shared_group + offsets, mask=mask, other=0)
     # A positive mark closes a query group and stores the number of rows in it.
     is_group_end = mask & (mark > 0)
     dst_pos = tl.cumsum(tl.where(is_group_end, 1, 0), axis=0) - 1
@@ -99,7 +99,7 @@ def _build_dynamic_spec_fa3_decode_params_kernel(
 
 @triton.jit
 def _count_dynamic_spec_fa3_decode_params_kernel(
-    b_mark_shared_group,
+    b_mark_mtp_shared_group,
     out_block_counts,
     batch_size,
     BLOCK_SIZE: tl.constexpr,
@@ -108,7 +108,7 @@ def _count_dynamic_spec_fa3_decode_params_kernel(
     offsets = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < batch_size
 
-    mark = tl.load(b_mark_shared_group + offsets, mask=mask, other=0)
+    mark = tl.load(b_mark_mtp_shared_group + offsets, mask=mask, other=0)
     block_count = tl.sum(tl.where(mask & (mark > 0), 1, 0), axis=0)
     tl.store(out_block_counts + block_id, block_count)
 
@@ -117,7 +117,7 @@ def _count_dynamic_spec_fa3_decode_params_kernel(
 def _compact_dynamic_spec_fa3_decode_params_kernel(
     b_req_idx,
     b_seq_len,
-    b_mark_shared_group,
+    b_mark_mtp_shared_group,
     block_counts,
     block_offsets,
     out_b_q_seq_len,
@@ -132,7 +132,7 @@ def _compact_dynamic_spec_fa3_decode_params_kernel(
     offsets = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < batch_size
 
-    mark = tl.load(b_mark_shared_group + offsets, mask=mask, other=0)
+    mark = tl.load(b_mark_mtp_shared_group + offsets, mask=mask, other=0)
     # A positive mark closes a query group and stores the number of rows in it.
     is_group_end = mask & (mark > 0)
     local_pos = tl.cumsum(tl.where(is_group_end, 1, 0), axis=0) - 1
@@ -154,35 +154,50 @@ def _compact_dynamic_spec_fa3_decode_params_kernel(
 def build_dynamic_spec_fa3_decode_params(
     b_req_idx: torch.Tensor,
     b_seq_len: torch.Tensor,
-    b_mark_shared_group: torch.Tensor,
+    b_mark_mtp_shared_group: torch.Tensor,
     att_batch_size: int,
     hold_req_id: int,
 ):
     """Convert dynamic speculative-verify rows to one metadata row per FA3 sequence.
 
     Query rows belonging to the same attention sequence are consecutive.
-    ``b_mark_shared_group`` is zero inside a group; its final row stores the
+    ``b_mark_mtp_shared_group`` is zero inside a group; its final row stores the
     number of query rows in that group.
 
     For example, let ``H`` denote ``hold_req_id`` and suppose::
 
         b_req_idx           = [ 7,  7,  7, 4,  9,  9, H, H]
-        b_seq_len           = [12, 13, 14, 8, 20, 21, 0, 0]
-        b_mark_shared_group = [ 0,  0,  3, 1,  0,  2, 0, 0]
+        b_seq_len           = [12, 13, 14, 8, 20, 21, 2, 2]
+        b_mark_mtp_shared_group = [ 0,  0,  3, 1,  0,  2, 1, 1]
 
-    The positive marks close three attention sequences::
+    The positive marks close five attention sequences. HOLD rows remain
+    independent one-row groups::
 
         request 7 -> query length 3, final KV length 14
         request 4 -> query length 1, final KV length 8
         request 9 -> query length 2, final KV length 21
+        HOLD row 6 -> query length 1
+        HOLD row 7 -> query length 1
 
     The operator retains each group's final row, compacts those rows to the
     front, and pads the unused tail to ``att_batch_size``::
 
-        b_q_seq_len   = [ 3, 1,  2, 0, 0, 0, 0, 0]
-        b_kv_seq_len  = [14, 8, 21, 0, 0, 0, 0, 0]
-        b_att_req_idx = [7, 4, 9, H, H, H, H, H]
-        b_att_seq_len = [14, 8, 21, 0, 0, 0, 0, 0]
+        #                              executable     metadata
+        #                              HOLD groups    padding
+        #                                 |  |        |  |  |
+        b_q_seq_len   = [ 3, 1,  2,       1, 1,       0, 0, 0]
+        b_kv_seq_len  = [14, 8, 21,       2, 2,       0, 0, 0]
+        b_att_req_idx = [ 7, 4,  9,       H, H,       H, H, H]
+        b_att_seq_len = [14, 8, 21,       2, 2,       0, 0, 0]
+
+    The first two ``H`` entries are input HOLD rows. Each remains an
+    executable one-query dummy sequence with a safe KV length, so FA3 consumes
+    every physical query row without merging adjacent HOLD requests. The final
+    three ``H`` entries only pad the metadata tensors to ``att_batch_size``;
+    their zero query and KV lengths prevent them from describing attention
+    work. Both kinds use ``hold_req_id`` because every ``b_att_req_idx`` value
+    must remain a valid page-table row. Their sequence lengths, rather than the
+    request id, distinguish executable HOLD groups from metadata padding.
 
     Thus ``b_att_req_idx`` changes from one request id per query row to one id
     per FA3 sequence; it selects that sequence's page-table row. A request may
@@ -190,8 +205,8 @@ def build_dynamic_spec_fa3_decode_params(
     multiple attention groups. Fixed output shapes let one CUDA Graph replay
     different speculative verify layouts.
     """
-    assert b_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_shared_group.is_cuda
-    assert b_req_idx.shape == b_seq_len.shape == b_mark_shared_group.shape
+    assert b_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_mtp_shared_group.is_cuda
+    assert b_req_idx.shape == b_seq_len.shape == b_mark_mtp_shared_group.shape
     assert b_req_idx.shape[0] == att_batch_size
     assert att_batch_size > 0
 
@@ -204,7 +219,7 @@ def build_dynamic_spec_fa3_decode_params(
         _build_dynamic_spec_fa3_decode_params_kernel[(1,)](
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
-            b_mark_shared_group=b_mark_shared_group,
+            b_mark_mtp_shared_group=b_mark_mtp_shared_group,
             out_b_q_seq_len=b_q_seq_len,
             out_b_kv_seq_len=b_kv_seq_len,
             out_b_att_req_idx=b_att_req_idx,
@@ -224,10 +239,10 @@ def build_dynamic_spec_fa3_decode_params(
 
     block_size = _DYNAMIC_SPEC_FA3_COMPACT_BLOCK_SIZE
     grid = (triton.cdiv(att_batch_size, block_size),)
-    block_counts = torch.empty((grid[0],), dtype=torch.int32, device=b_mark_shared_group.device)
+    block_counts = torch.empty((grid[0],), dtype=torch.int32, device=b_mark_mtp_shared_group.device)
 
     _count_dynamic_spec_fa3_decode_params_kernel[grid](
-        b_mark_shared_group=b_mark_shared_group,
+        b_mark_mtp_shared_group=b_mark_mtp_shared_group,
         out_block_counts=block_counts,
         batch_size=att_batch_size,
         BLOCK_SIZE=block_size,
@@ -239,7 +254,7 @@ def build_dynamic_spec_fa3_decode_params(
     _compact_dynamic_spec_fa3_decode_params_kernel[grid](
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
-        b_mark_shared_group=b_mark_shared_group,
+        b_mark_mtp_shared_group=b_mark_mtp_shared_group,
         block_counts=block_counts,
         block_offsets=block_offsets,
         out_b_q_seq_len=b_q_seq_len,

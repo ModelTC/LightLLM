@@ -8,14 +8,12 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context, Infe
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
-    enable_triton_mtp_kernel,
     get_env_start_args,
 )
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .generic_pre_process import (
     build_b_position_delta,
     build_diverse_shared_group_infos,
-    build_mtp_shared_group_markers,
 )
 
 
@@ -213,9 +211,6 @@ def padded_prepare_decode_inputs(
         if padded_row_count > 0:
             b_shared_seq_len = F.pad(b_shared_seq_len, (0, padded_row_count), value=0)
             b_mark_shared_group = F.pad(b_mark_shared_group, (0, padded_row_count), value=1)
-    elif get_env_start_args().mtp_dynamic_verify or enable_triton_mtp_kernel():
-        b_shared_seq_len = None
-        b_mark_shared_group = build_mtp_shared_group_markers(b_req_idx=b_req_idx)
     else:
         b_shared_seq_len = None
         b_mark_shared_group = None
