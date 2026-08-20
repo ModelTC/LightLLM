@@ -80,11 +80,11 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     """
     # 创建转发队列
     forwarding_queue = AsyncQueue()
+    generation_tasks: Dict[int, asyncio.Task] = {}
 
     while True:
         forwarding_tokens_task = None
         heartbeat_task = None
-        generation_tasks: Dict[int, asyncio.Task] = {}
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
@@ -146,11 +146,18 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
-                        group_req_id_to_event.pop(group_req_id, None)
                         generation_task = generation_tasks.get(group_req_id)
                         if generation_task is not None and not generation_task.done():
                             generation_task.cancel()
-                        await manager.abort(group_req_id)
+                        if not (await manager.abort(group_req_id)):
+
+                            async def delayed_abort_task(group_req_id, retry_count):
+                                for _ in range(retry_count):
+                                    await asyncio.sleep(5.0)
+                                    if await manager.abort(group_req_id):
+                                        break
+
+                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
 
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
@@ -173,10 +180,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.exception(str(e))
         finally:
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
-            child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
-                if not task.done():
-                    task.cancel()
+                task.cancel()
             if child_tasks:
                 await asyncio.gather(*child_tasks, return_exceptions=True)
 
@@ -241,8 +246,6 @@ async def _pd_process_generate(
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
-    except asyncio.CancelledError:
-        raise
     except BaseException as e:
         logger.error(str(e))
 
