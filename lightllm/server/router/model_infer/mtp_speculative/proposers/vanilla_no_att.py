@@ -3,6 +3,7 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_utils import VanillaSpecProposal
 
@@ -43,26 +44,35 @@ class VanillaNoAttProposer(BaseSpecProposer):
             )
 
         assert accept_len is not None
-        accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
-
         # Vanilla No-Att 不维护 KV cache。每一级 draft 只需要每个请求本轮
         # 最后接受位置的 token 和 hidden，因此先把 target verify 布局从
         # [verify_batch_size, ...] 压缩为 [req_num, ...]，后续所有 draft
         # model 都只对这 req_num 行进行推理。
-        draft_token_ids = target_next_token_ids.index_select(0, accepted_tail_rows)
-        draft_hidden = target_model_output.mtp_collector.spec_hidden.index_select(0, accepted_tail_rows)
+        selected_rows = select_accepted_tail_rows(
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            accept_len=accept_len,
+            input_ids=target_next_token_ids,
+            hidden=target_model_output.mtp_collector.spec_hidden,
+            b_req_idx=target_model_input.b_req_idx,
+            b_mtp_index=target_model_input.b_mtp_index,
+            b_seq_len=target_model_input.b_seq_len,
+            mem_indexes=target_model_input.mem_indexes,
+            b_shared_seq_len=target_model_input.b_shared_seq_len,
+            b_shared_radix_node_id=target_model_input.b_shared_radix_node_id,
+            b_position_delta=target_model_input.b_position_delta,
+        )
+        draft_token_ids = selected_rows.input_ids
+        draft_hidden = selected_rows.hidden
         draft_input = copy.copy(target_model_input)
         draft_input.batch_size = req_num
         draft_input.input_ids = draft_token_ids
-        draft_input.b_req_idx = target_model_input.b_req_idx.index_select(0, accepted_tail_rows)
-        draft_input.b_mtp_index = target_model_input.b_mtp_index.index_select(0, accepted_tail_rows)
-        draft_input.b_seq_len = target_model_input.b_seq_len.index_select(0, accepted_tail_rows)
-        draft_input.mem_indexes = target_model_input.mem_indexes.index_select(0, accepted_tail_rows)
-        draft_input.b_shared_seq_len = target_model_input.b_shared_seq_len.index_select(0, accepted_tail_rows)
-        draft_input.b_shared_radix_node_id = target_model_input.b_shared_radix_node_id.index_select(
-            0, accepted_tail_rows
-        )
-        draft_input.b_position_delta = target_model_input.b_position_delta.index_select(0, accepted_tail_rows)
+        draft_input.b_req_idx = selected_rows.b_req_idx
+        draft_input.b_mtp_index = selected_rows.b_mtp_index
+        draft_input.b_seq_len = selected_rows.b_seq_len
+        draft_input.mem_indexes = selected_rows.mem_indexes
+        draft_input.b_shared_seq_len = selected_rows.b_shared_seq_len
+        draft_input.b_shared_radix_node_id = selected_rows.b_shared_radix_node_id
+        draft_input.b_position_delta = selected_rows.b_position_delta
         draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(req_num)]
 
