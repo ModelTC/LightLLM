@@ -212,7 +212,7 @@ class StartArgs:
     multinode_httpmanager_port: int = field(default=12345)
 
     disable_shm_warning: bool = field(default=False)
-    dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer"]})
+    dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer", "cache_aware"]})
     enable_fused_shared_experts: bool = field(default=False)
     enable_mps: bool = field(default=False)
     multinode_router_gloo_port: int = field(default=20001)

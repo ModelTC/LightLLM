@@ -257,8 +257,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--dp_balancer",
         type=str,
         default="bs_balancer",
-        choices=["round_robin", "bs_balancer"],
-        help="the dp balancer type, default is bs_balancer",
+        choices=["round_robin", "bs_balancer", "cache_aware"],
+        help="the DP balancer type; cache_aware adds token-prefix affinity, default is bs_balancer",
     )
     parser.add_argument(
         "--max_req_total_len",
