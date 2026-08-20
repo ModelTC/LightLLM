@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput
 
 
@@ -14,10 +17,20 @@ def _create_model_input(*, is_prefill=False):
         b_req_idx=torch.arange(batch_size, dtype=torch.int32),
         b_mtp_index=torch.zeros(batch_size, dtype=torch.int32),
         b_seq_len=torch.ones(batch_size, dtype=torch.int32),
+        mem_indexes_cpu=torch.arange(batch_size, dtype=torch.int32),
         is_prefill=is_prefill,
         multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
-    if not is_prefill:
+    if is_prefill:
+        kwargs["max_cache_len"] = 0
+        kwargs["prefix_total_token_num"] = 0
+        kwargs["input_ids"] = torch.ones(batch_size, dtype=torch.int64)
+        kwargs["b_ready_cache_len"] = torch.zeros(batch_size, dtype=torch.int32)
+        kwargs["b_prefill_start_loc"] = torch.arange(batch_size, dtype=torch.int32)
+        kwargs["b_is_decode_req"] = torch.zeros(batch_size, dtype=torch.bool)
+        kwargs["b_prefill_has_output_cpu"] = [False] * batch_size
+    else:
+        kwargs["b_position_delta"] = torch.zeros(batch_size, dtype=torch.int32)
         kwargs["b_shared_seq_len"] = torch.tensor([4, 4], dtype=torch.int32)
         kwargs["b_shared_radix_node_id"] = torch.tensor([10, 10], dtype=torch.int64)
     return ModelInput(**kwargs)
@@ -33,6 +46,8 @@ def test_decode_requires_shared_radix_metadata():
             b_req_idx=torch.zeros(1, dtype=torch.int32),
             b_mtp_index=torch.zeros(1, dtype=torch.int32),
             b_seq_len=torch.ones(1, dtype=torch.int32),
+            b_position_delta=torch.zeros(1, dtype=torch.int32),
+            mem_indexes_cpu=torch.zeros(1, dtype=torch.int32),
             is_prefill=False,
             multimodal_params=[{"images": [], "audios": []}],
         )
@@ -50,3 +65,70 @@ def test_prefill_does_not_require_shared_radix_metadata():
 
     assert model_input.b_shared_seq_len is None
     assert model_input.b_shared_radix_node_id is None
+
+
+def test_decode_requires_position_delta():
+    model_input = _create_model_input()
+    model_input.b_position_delta = None
+
+    with pytest.raises(AssertionError):
+        model_input.check_input()
+
+
+def test_prefill_requires_prefill_metadata():
+    model_input = _create_model_input(is_prefill=True)
+    model_input.b_ready_cache_len = None
+
+    with pytest.raises(AssertionError):
+        model_input.check_input()
+
+
+def test_prefill_requires_decode_request_markers():
+    model_input = _create_model_input(is_prefill=True)
+    model_input.b_is_decode_req = None
+
+    with pytest.raises(AssertionError):
+        model_input.check_input()
+
+
+def test_prefill_rejects_position_delta():
+    model_input = _create_model_input(is_prefill=True)
+    model_input.b_position_delta = torch.zeros(model_input.batch_size, dtype=torch.int32)
+
+    with pytest.raises(AssertionError, match="prefill must not provide b_position_delta"):
+        model_input.check_input()
+
+
+def test_padded_prefill_adds_non_decode_request_marker():
+    model_input = ModelInput(
+        batch_size=1,
+        total_token_num=2,
+        max_q_seq_len=2,
+        max_kv_seq_len=2,
+        max_cache_len=0,
+        prefix_total_token_num=0,
+        input_ids=torch.ones(2, dtype=torch.int64),
+        b_req_idx=torch.zeros(1, dtype=torch.int32),
+        b_mtp_index=torch.zeros(1, dtype=torch.int32),
+        b_seq_len=torch.full((1,), 2, dtype=torch.int32),
+        b_is_decode_req=torch.ones(1, dtype=torch.bool),
+        b_ready_cache_len=torch.zeros(1, dtype=torch.int32),
+        b_prefill_start_loc=torch.zeros(1, dtype=torch.int32),
+        mem_indexes=torch.arange(2, dtype=torch.int32),
+        is_prefill=True,
+        b_prefill_has_output_cpu=[False],
+        multimodal_params=[{"images": [], "audios": []}],
+    )
+    model = SimpleNamespace(
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=-1),
+        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
+    )
+
+    padded_input = TpPartBaseModel._create_padded_prefill_model_input(
+        model,
+        model_input=model_input,
+        new_handle_token_num=4,
+    )
+
+    assert padded_input.b_is_decode_req.dtype == torch.bool
+    assert padded_input.b_is_decode_req.tolist() == [True, False]

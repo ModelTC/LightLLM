@@ -156,13 +156,12 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
         draft_step=2,
     )
 
-    assert draft_model.extend_inputs[0] is model_input0
-    assert draft_model.extend_inputs[1] is model_input1
-    assert len(draft_model.decode_inputs) == 1
+    assert draft_model.extend_inputs is None
+    assert len(draft_model.decode_inputs) == 2
     assert draft_model.decode_inputs[0][0] is model_input0
     assert draft_model.decode_inputs[0][1] is model_input1
-    assert draft_model.extend_batch_sizes == (6, 6)
-    assert draft_model.decode_batch_sizes == [(2, 2)]
+    assert draft_model.extend_batch_sizes is None
+    assert draft_model.decode_batch_sizes == [(6, 6), (2, 2)]
     assert proposal.token_ids.shape == (3, 2)
     assert torch.equal(proposal.token_ids, torch.tensor([[1, 0], [0, 0], [5, 1]]))
     assert len(proposal.extra_mem_indexes_cpu) == 1

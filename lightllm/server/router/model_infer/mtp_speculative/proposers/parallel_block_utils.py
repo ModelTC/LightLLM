@@ -33,17 +33,10 @@ def extend_parallel_block_draft_kv_cache(
     target_model_input: ModelInput,
     target_hidden: torch.Tensor,
 ) -> None:
-    """提交本轮 target verify hidden，扩展 parallel-block drafter KV。"""
+    """用 MTP decode 提交本轮 target verify hidden，扩展 drafter KV。"""
 
-    target_model_input.total_token_num = target_model_input.batch_size
-    target_model_input.prefix_total_token_num = 0
-    target_model_input.is_prefill = True
-    target_model_input.b_ready_cache_len = target_model_input.b_seq_len - 1
-    target_model_input.b_prefill_start_loc = torch.arange(
-        target_model_input.batch_size,
-        dtype=torch.int32,
-        device=target_hidden.device,
-    )
+    assert not target_model_input.is_prefill
+    assert target_model_input.b_position_delta is not None
     target_model_input.mtp_draft_input_hiddens = target_hidden
     proposer.backend.draft_models[0].forward(target_model_input)
 

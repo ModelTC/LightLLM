@@ -13,7 +13,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import Mt
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_utils import (
     EagleSpecProposal,
     generate_eagle_token_ids,
-    prepare_eagle_verify_extend_input,
+    prepare_eagle_verify_decode_input,
 )
 
 
@@ -107,7 +107,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
         request_capacities_by_batch.append(request_capacity)
         real_request_counts.append(real_request_count)
         accepted_tail_rows_by_batch.append(accepted_tail_rows)
-        prepare_eagle_verify_extend_input(
+        prepare_eagle_verify_decode_input(
             model_input=model_input,
             input_ids=token_ids,
             target_hidden=model_output.mtp_collector.spec_hidden,
@@ -117,7 +117,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
     proposal_token_ids = target_next_token_ids0.new_empty((total_real_request_count, draft_step))
 
     draft_model = proposer.backend.draft_models[0]
-    extend_outputs = draft_model.microbatch_overlap_prefill(*model_inputs)
+    extend_outputs = draft_model.microbatch_overlap_decode(*model_inputs)
 
     draft_token_ids_by_batch = []
     draft_hiddens_by_batch = []
@@ -157,10 +157,9 @@ def propose_next_dp_eagle_autoregressive_overlap(
         model_input.b_req_idx = draft_req_indices_by_batch[batch_index]
         model_input.b_mtp_index = torch.zeros_like(model_input.b_req_idx)
         model_input.b_seq_len = draft_seq_lens_by_batch[batch_index]
-        model_input.b_position_delta = (
-            position_deltas_by_batch[batch_index].index_select(0, accepted_tail_rows_by_batch[batch_index])
-            if position_deltas_by_batch[batch_index] is not None
-            else None
+        assert position_deltas_by_batch[batch_index] is not None
+        model_input.b_position_delta = position_deltas_by_batch[batch_index].index_select(
+            0, accepted_tail_rows_by_batch[batch_index]
         )
         model_input.b_shared_seq_len = draft_shared_seq_lens_by_batch[batch_index]
         model_input.b_shared_radix_node_id = draft_shared_radix_node_ids_by_batch[batch_index]

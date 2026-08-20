@@ -199,6 +199,7 @@ class PrefillCudaGraph:
             b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(total_token_num)
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
             b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
 
@@ -213,6 +214,7 @@ class PrefillCudaGraph:
                 b_req_idx=b_req_idx,
                 b_mtp_index=b_mtp_index,
                 b_seq_len=b_seq_len,
+                b_is_decode_req=b_is_decode_req,
                 b_ready_cache_len=b_ready_cache_len,
                 b_prefill_start_loc=b_prefill_start_loc,
                 is_prefill=True,
@@ -259,6 +261,7 @@ class PrefillCudaGraph:
                 b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(total_token_num)
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
                 b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
 
@@ -273,6 +276,7 @@ class PrefillCudaGraph:
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     b_seq_len=b_seq_len,
+                    b_is_decode_req=b_is_decode_req,
                     b_ready_cache_len=b_ready_cache_len,
                     b_prefill_start_loc=b_prefill_start_loc,
                     is_prefill=True,

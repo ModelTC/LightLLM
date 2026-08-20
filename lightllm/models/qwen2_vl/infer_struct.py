@@ -18,37 +18,17 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
         InferStateInfo.init_some_extra_state(self, model)
 
-        # Case 1: normal prompt prefill. There is no request-level position
-        # delta yet, so build the complete 3-axis MRoPE positions from the
-        # prompt's image/video layout.
-        if self.is_prefill and self.b_position_delta is None:
+        # Prefill builds complete 3-axis MRoPE positions from the prompt's
+        # image/video layout. Request-level position deltas are decode-only.
+        if self.is_prefill:
+            assert self.b_position_delta is None, "prefill must not provide b_position_delta"
             self.position_ids = self.get_mrope_position(self.multimodal_params)
 
-        # Case 2: normal decode. Base position_ids contains one scalar position
+        # Decode base position_ids contains one scalar position
         # per request; add the cached multimodal delta and broadcast the result
         # to MRoPE's temporal/height/width axes.
-        elif not self.is_prefill:
-            assert self.b_position_delta is not None, "decode requires b_position_delta"
-            self._apply_mrope_position_delta()
-
-        # Case 3: extend the draft-model KV cache after target verification.
-        # These rows originally came from target-model decode verification,
-        # potentially with multiple token rows belonging to the same request.
-        # The proposer reuses that row-aligned ModelInput and changes
-        # is_prefill to True so the draft model can replay all verified rows
-        # through its prefill kernel and write them into the draft KV cache in
-        # one forward. Therefore is_prefill describes the kernel/cache-write
-        # path here; it does not mean that this is the original prompt prefill.
-        #
-        # Every row is a post-prompt token and already carries the request-level
-        # b_position_delta derived from the original multimodal prompt. Its
-        # MRoPE position must consequently be calculated in the same way as a
-        # decode token: base position plus b_position_delta. Rebuilding MRoPE
-        # positions from multimodal_params would be incorrect because the
-        # original image/video token layout is no longer being prefetched and
-        # multimodal_params may contain only empty row-aligned placeholders.
         else:
-            assert self.b_position_delta is not None
+            assert self.b_position_delta is not None, "decode requires b_position_delta"
             self._apply_mrope_position_delta()
 
         self.position_ids = self.position_ids.contiguous()

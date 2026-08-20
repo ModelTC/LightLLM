@@ -507,6 +507,7 @@ class TpPartBaseModel:
         new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
         new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
+        new_model_input.b_is_decode_req = F.pad(new_model_input.b_is_decode_req, (0, 1), mode="constant", value=False)
         b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
@@ -559,7 +560,7 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ):
-        if self.args.enable_prefill_decode_mixed and model_input.b_is_decode_req is not None:
+        if self.args.enable_prefill_decode_mixed:
             gather_token_prefill_decode_mixed(
                 input_ids=model_input.input_ids,
                 req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -776,7 +777,7 @@ class TpPartBaseModel:
         model_input0.to_cuda()
         model_input1.to_cuda()
 
-        if self.args.enable_prefill_decode_mixed and model_input0.b_is_decode_req is not None:
+        if self.args.enable_prefill_decode_mixed:
             gather_token_prefill_decode_mixed(
                 input_ids=model_input0.input_ids,
                 req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -786,7 +787,7 @@ class TpPartBaseModel:
                 b_prefill_start_loc=model_input0.b_prefill_start_loc,
             )
 
-        if self.args.enable_prefill_decode_mixed and model_input1.b_is_decode_req is not None:
+        if self.args.enable_prefill_decode_mixed:
             gather_token_prefill_decode_mixed(
                 input_ids=model_input1.input_ids,
                 req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -1100,6 +1101,7 @@ class TpPartBaseModel:
             b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
             total_token_num = self.batch_max_tokens
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
             model_input = ModelInput(
                 batch_size=1,
                 total_token_num=total_token_num,
@@ -1112,6 +1114,7 @@ class TpPartBaseModel:
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
+                b_is_decode_req=b_is_decode_req,
                 is_prefill=True,
                 b_ready_cache_len=b_ready_cache_len,
                 b_prefill_start_loc=b_prefill_start_loc,
@@ -1177,6 +1180,7 @@ class TpPartBaseModel:
                 b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
                 total_token_num = input_len
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
                 model_input = ModelInput(
                     batch_size=1,
                     total_token_num=total_token_num,
@@ -1189,6 +1193,7 @@ class TpPartBaseModel:
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
                     b_mtp_index=b_mtp_index,
+                    b_is_decode_req=b_is_decode_req,
                     is_prefill=True,
                     b_ready_cache_len=b_ready_cache_len,
                     b_prefill_start_loc=b_prefill_start_loc,
@@ -1242,6 +1247,7 @@ class TpPartBaseModel:
         b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         total_token_num = prefill_input_len * batch_size
         b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+        b_is_decode_req = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
         model_input = ModelInput(
             batch_size=batch_size,
             total_token_num=total_token_num,
@@ -1254,6 +1260,7 @@ class TpPartBaseModel:
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,
             b_seq_len=b_seq_len,
+            b_is_decode_req=b_is_decode_req,
             b_ready_cache_len=b_ready_cache_len,
             b_prefill_start_loc=b_prefill_start_loc,
             b_prefill_has_output_cpu=[

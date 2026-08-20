@@ -59,23 +59,16 @@ def generate_eagle_token_ids_and_prob(
     return map_draft_token_ids(draft_token_ids), draft_token_probs
 
 
-def prepare_eagle_verify_extend_input(
+def prepare_eagle_verify_decode_input(
     model_input: ModelInput,
     input_ids: torch.Tensor,
     target_hidden: torch.Tensor,
 ) -> None:
-    model_input.is_prefill = True
-    model_input.total_token_num = model_input.batch_size
-    model_input.prefix_total_token_num = 0
-    model_input.max_cache_len = max(0, int(model_input.max_cache_len or 0))
+    """复用 target MTP decode 布局，为 drafter 的 verification KV commit 准备输入。"""
+
+    assert not model_input.is_prefill
     model_input.input_ids = input_ids
     model_input.mtp_draft_input_hiddens = target_hidden
-    model_input.b_ready_cache_len = model_input.b_seq_len - 1
-    model_input.b_prefill_start_loc = torch.arange(
-        model_input.batch_size,
-        dtype=torch.int32,
-        device=input_ids.device,
-    )
 
 
 def propose_next_eagle(
@@ -112,7 +105,8 @@ def propose_next_eagle(
     accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
     draft_model = proposer.backend.draft_models[0]
     position_delta = target_model_input.b_position_delta
-    prepare_eagle_verify_extend_input(
+    assert position_delta is not None
+    prepare_eagle_verify_decode_input(
         model_input=target_model_input,
         input_ids=target_next_token_ids,
         target_hidden=target_model_output.mtp_collector.spec_hidden,
@@ -153,13 +147,9 @@ def propose_next_eagle(
     draft_input.b_req_idx = target_model_input.b_req_idx.index_select(0, accepted_tail_rows)
     draft_input.b_mtp_index = torch.zeros_like(draft_input.b_req_idx)
     draft_input.b_seq_len = draft_seq_lens
-    draft_input.b_position_delta = (
-        position_delta.index_select(0, accepted_tail_rows) if position_delta is not None else None
-    )
+    draft_input.b_position_delta = position_delta.index_select(0, accepted_tail_rows)
     draft_input.b_shared_seq_len = target_model_input.b_shared_seq_len.index_select(0, accepted_tail_rows)
-    draft_input.b_shared_radix_node_id = target_model_input.b_shared_radix_node_id.index_select(
-        0, accepted_tail_rows
-    )
+    draft_input.b_shared_radix_node_id = target_model_input.b_shared_radix_node_id.index_select(0, accepted_tail_rows)
     if len(draft_input.multimodal_params) != request_count:
         empty_multimodal_params = {"images": [], "audios": []}
         draft_input.multimodal_params = [empty_multimodal_params] * request_count

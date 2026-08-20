@@ -24,7 +24,7 @@ class ModelInput:
     # 在 prefill 阶段，用于在 enable_prefill_decode_mixed 开启下，
     # 用于标识请求是否为 decode 请求混合在 prefill 请求中。
     # 其对应的 input_ids 需要特殊处理, 从 req_to_next_token_ids 中获取。
-
+    # 该字段是 prefill 必填参数；普通 prefill 和 draft prompt prefill 填全 False。
     b_is_decode_req: torch.Tensor = None
 
     # Decode 逐行携带的 radix cache 共享长度。普通 attention backend 不使用该
@@ -36,9 +36,9 @@ class ModelInput:
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
-    # Request/row-aligned MRoPE position offset. Normal prompt prefill leaves
-    # it unset; decode and one-token-per-row MTP draft KV commits carry it.
-    # Row-aligned input transforms must preserve the tensor unchanged.
+    # Request/row-aligned MRoPE position offset. It is decode-only; prefill
+    # builds positions directly from the complete prompt layout.
+    # Row-aligned decode input transforms must preserve the tensor unchanged.
     b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
@@ -57,48 +57,75 @@ class ModelInput:
 
     def to_cuda(self):
         self.check_input()
-        if self.input_ids is not None:
-            self.input_ids = self.input_ids.cuda(non_blocking=True)
+
+        # Prefill 和 decode 都必须提供的公共张量。
         if self.mem_indexes is None:
             self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
-
-        if self.b_is_decode_req is not None:
-            self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
-            assert self.is_prefill
-
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
-        if self.b_ready_cache_len is not None:
-            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
-        if self.b_position_delta is not None:
-            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
-        else:
-            # Decode always needs the request-level MRoPE delta. Prefill may
-            # omit it for a normal prompt, while MTP draft KV commit prefill
-            # deliberately carries it because its rows use decode positions.
-            assert self.is_prefill is True, "decode ModelInput should provide b_position_delta."
 
-        if self.b_prefill_start_loc is not None:
+        if self.is_prefill:
+            # Prefill 必须提供的张量。
+            self.input_ids = self.input_ids.cuda(non_blocking=True)
+            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-        if not self.is_prefill:
+            self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
+        else:
+            # Decode 必须提供的张量。
+            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
             self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
             self.b_shared_radix_node_id = self.b_shared_radix_node_id.cuda(non_blocking=True)
+
+            # Decode 可以显式提供 input_ids；未提供时会在模型内部按请求索引收集。
+            if self.input_ids is not None:
+                self.input_ids = self.input_ids.cuda(non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
 
     def check_input(self):
-        assert len(self.multimodal_params) == self.batch_size
         if self.input_ids is not None:
             assert (
                 self.input_ids.dtype == torch.int64
             ), f"model input_ids must use torch.int64, got {self.input_ids.dtype}"
-        if not self.is_prefill:
+
+        assert self.b_req_idx is not None
+        assert self.b_mtp_index is not None
+        assert self.b_seq_len is not None
+        assert self.multimodal_params is not None
+        assert self.mem_indexes is not None or self.mem_indexes_cpu is not None
+
+        assert self.b_req_idx.shape == (self.batch_size,)
+        assert self.b_mtp_index.shape == self.b_req_idx.shape
+        assert self.b_seq_len.shape == self.b_req_idx.shape
+        assert len(self.multimodal_params) == self.batch_size
+
+        if self.is_prefill:
+            assert self.input_ids is not None
+            assert self.max_cache_len is not None
+            assert self.prefix_total_token_num is not None
+            assert self.b_ready_cache_len is not None
+            assert self.b_prefill_start_loc is not None
+            assert self.b_is_decode_req is not None
+            assert self.b_ready_cache_len.shape == self.b_req_idx.shape
+            assert self.b_prefill_start_loc.shape == self.b_req_idx.shape
+            assert self.b_is_decode_req.shape == self.b_req_idx.shape
+            assert self.b_is_decode_req.dtype == torch.bool
+            assert self.b_position_delta is None, "prefill must not provide b_position_delta"
+            if self.b_prefill_has_output_cpu is not None:
+                assert len(self.b_prefill_has_output_cpu) == self.batch_size
+        else:
+            assert self.max_q_seq_len == 1
+            assert self.b_position_delta is not None
             assert self.b_shared_seq_len is not None
             assert self.b_shared_radix_node_id is not None
+            assert self.b_position_delta.shape == self.b_req_idx.shape
             assert self.b_shared_seq_len.shape == self.b_req_idx.shape
             assert self.b_shared_radix_node_id.shape == self.b_req_idx.shape
+
+        mem_indexes = self.mem_indexes if self.mem_indexes is not None else self.mem_indexes_cpu
+        assert mem_indexes.ndim == 1
 
 
 @dataclass
@@ -136,9 +163,7 @@ class ModelMtpOutputCollector:
         if self.confidence_logits is not None:
             self.confidence_logits = tensor_to_no_ref_tensor(self.confidence_logits)
 
-    def unpad_decode(
-        self, padded_batch_size: int, origin_batch_size: int
-    ) -> "ModelMtpOutputCollector":
+    def unpad_decode(self, padded_batch_size: int, origin_batch_size: int) -> "ModelMtpOutputCollector":
         collector = copy.copy(self)
         if collector.spec_hidden is not None:
             collector.spec_hidden = collector.spec_hidden[:origin_batch_size]
@@ -146,15 +171,10 @@ class ModelMtpOutputCollector:
             collector.draft_token_ids = collector.draft_token_ids[:origin_batch_size]
         if collector.confidence_logits is not None:
             confidence_row_count = collector.confidence_logits.shape[0]
-            assert (
-                confidence_row_count > 0
-                and padded_batch_size % confidence_row_count == 0
-            )
+            assert confidence_row_count > 0 and padded_batch_size % confidence_row_count == 0
             rows_per_confidence = padded_batch_size // confidence_row_count
             assert origin_batch_size % rows_per_confidence == 0
-            collector.confidence_logits = collector.confidence_logits[
-                : origin_batch_size // rows_per_confidence
-            ]
+            collector.confidence_logits = collector.confidence_logits[: origin_batch_size // rows_per_confidence]
         return collector
 
     def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutputCollector":

@@ -123,6 +123,7 @@ def test_compaction_preserves_shared_radix_metadata():
         b_req_idx=torch.tensor([0, 0, 0, 0, 0], dtype=torch.int32, device="cuda"),
         b_mtp_index=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32, device="cuda"),
         b_seq_len=torch.tensor([3, 4, 5, 6, 7], dtype=torch.int32, device="cuda"),
+        b_position_delta=torch.zeros(5, dtype=torch.int32, device="cuda"),
         b_shared_seq_len=torch.full((5,), 7, dtype=torch.int32, device="cuda"),
         b_shared_radix_node_id=torch.full((5,), 10, dtype=torch.int64, device="cuda"),
         mem_indexes=torch.arange(5, dtype=torch.int32, device="cuda"),

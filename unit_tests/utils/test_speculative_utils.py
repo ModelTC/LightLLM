@@ -17,6 +17,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers import dflash 
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer, DFlashSpecProposal
 from lightllm.server.router.model_infer.mtp_speculative.proposers.parallel_block_utils import (
     build_parallel_block_draft_input,
+    extend_parallel_block_draft_kv_cache,
 )
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.utils import envs_utils
@@ -332,17 +333,19 @@ def test_dflash_reuses_decode_input_for_kv_commit():
     )
     target_hidden = torch.empty(4, 16)
 
-    proposer.extend_draft_kv_cache(model_input, target_hidden)
+    extend_parallel_block_draft_kv_cache(
+        proposer=proposer,
+        target_model_input=model_input,
+        target_hidden=target_hidden,
+    )
 
     assert len(forwarded_inputs) == 1
     assert forwarded_inputs[0] is model_input
     assert model_input.input_ids is input_ids
     assert model_input.multimodal_params is multimodal_params
-    assert model_input.total_token_num == model_input.batch_size
-    assert model_input.prefix_total_token_num == 0
-    assert model_input.is_prefill
-    torch.testing.assert_close(model_input.b_ready_cache_len, model_input.b_seq_len - 1)
-    torch.testing.assert_close(model_input.b_prefill_start_loc, torch.arange(4, dtype=torch.int32))
+    assert model_input.total_token_num == 20
+    assert model_input.prefix_total_token_num is None
+    assert not model_input.is_prefill
     assert model_input.b_position_delta is position_delta
     assert model_input.mtp_draft_input_hiddens is target_hidden
 
