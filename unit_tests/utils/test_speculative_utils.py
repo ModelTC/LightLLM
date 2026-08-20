@@ -364,6 +364,8 @@ def test_dflash_expands_position_delta_with_request_block_rows(monkeypatch):
         b_req_idx=torch.tensor([10, 10, 11, 12, 12], dtype=torch.int32),
         b_seq_len=torch.tensor([4, 5, 7, 8, 9], dtype=torch.int32),
         b_position_delta=torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32),
+        b_shared_seq_len=torch.tensor([3, 3, 0, 6, 6], dtype=torch.int32),
+        b_shared_radix_node_id=torch.tensor([1, 1, 2, 3, 3], dtype=torch.int64),
         max_kv_seq_len=9,
     )
 

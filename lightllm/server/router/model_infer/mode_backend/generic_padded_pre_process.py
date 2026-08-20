@@ -6,14 +6,11 @@ import triton
 from typing import List, Optional, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.utils.infer_utils import calculate_time
-from lightllm.utils.envs_utils import (
-    enable_diverse_mode_gqa_decode_fast_kernel,
-    get_env_start_args,
-)
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .generic_pre_process import (
+    INT64_MAX,
     build_b_position_delta,
-    build_diverse_shared_group_infos,
 )
 
 
@@ -206,14 +203,22 @@ def padded_prepare_decode_inputs(
     b_position_delta = build_b_position_delta(batch_multimodal_params)
 
     padded_row_count = padded_req_num * (args_mtp_step + 1)
-    if enable_diverse_mode_gqa_decode_fast_kernel():
-        b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
-        if padded_row_count > 0:
-            b_shared_seq_len = F.pad(b_shared_seq_len, (0, padded_row_count), value=0)
-            b_mark_shared_group = F.pad(b_mark_shared_group, (0, padded_row_count), value=1)
-    else:
-        b_shared_seq_len = None
-        b_mark_shared_group = None
+    b_shared_seq_len = torch.tensor(
+        [req.get_radix_cache_shared_len() for req in run_reqs], dtype=torch.int32, device="cpu"
+    )
+    b_shared_radix_node_id = torch.tensor(
+        [
+            -1
+            if req.shared_kv_node is None
+            else req.shared_kv_node.time_id % INT64_MAX
+            for req in run_reqs
+        ],
+        dtype=torch.int64,
+        device="cpu",
+    )
+    if padded_row_count > 0:
+        b_shared_seq_len = F.pad(b_shared_seq_len, (0, padded_row_count), value=0)
+        b_shared_radix_node_id = F.pad(b_shared_radix_node_id, (0, padded_row_count), value=-1)
 
     # dynamic prompt cache 准备 token
     if g_infer_context.radix_cache is not None:
@@ -240,7 +245,7 @@ def padded_prepare_decode_inputs(
         b_seq_len=b_seq_len,
         b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
-        b_mark_shared_group=b_mark_shared_group,
+        b_shared_radix_node_id=b_shared_radix_node_id,
         is_prefill=False,
         multimodal_params=batch_multimodal_params,
     )

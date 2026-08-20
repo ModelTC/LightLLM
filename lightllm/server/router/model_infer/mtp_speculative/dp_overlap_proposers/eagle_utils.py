@@ -123,6 +123,8 @@ def propose_next_dp_eagle_autoregressive_overlap(
     draft_hiddens_by_batch = []
     draft_seq_lens_by_batch = []
     draft_req_indices_by_batch = []
+    draft_shared_seq_lens_by_batch = []
+    draft_shared_radix_node_ids_by_batch = []
     proposal_row_offsets = (0, real_request_counts[0])
     for batch_index, (model_input, extend_output, accepted_tail_rows, real_request_count) in enumerate(
         zip(model_inputs, extend_outputs, accepted_tail_rows_by_batch, real_request_counts)
@@ -133,6 +135,10 @@ def propose_next_dp_eagle_autoregressive_overlap(
         draft_hiddens_by_batch.append(extend_output.mtp_collector.spec_hidden.index_select(0, accepted_tail_rows))
         draft_seq_lens_by_batch.append(model_input.b_seq_len.index_select(0, accepted_tail_rows) + 1)
         draft_req_indices_by_batch.append(model_input.b_req_idx.index_select(0, accepted_tail_rows))
+        draft_shared_seq_lens_by_batch.append(model_input.b_shared_seq_len.index_select(0, accepted_tail_rows))
+        draft_shared_radix_node_ids_by_batch.append(
+            model_input.b_shared_radix_node_id.index_select(0, accepted_tail_rows)
+        )
         proposal_row_start = proposal_row_offsets[batch_index]
         proposal_token_ids[proposal_row_start : proposal_row_start + real_request_count, 0] = draft_token_ids[
             :real_request_count
@@ -156,7 +162,8 @@ def propose_next_dp_eagle_autoregressive_overlap(
             if position_deltas_by_batch[batch_index] is not None
             else None
         )
-        model_input.b_shared_seq_len = None
+        model_input.b_shared_seq_len = draft_shared_seq_lens_by_batch[batch_index]
+        model_input.b_shared_radix_node_id = draft_shared_radix_node_ids_by_batch[batch_index]
         if len(model_input.multimodal_params) != model_input.batch_size:
             empty_multimodal_params = {"images": [], "audios": []}
             model_input.multimodal_params = [empty_multimodal_params] * model_input.batch_size

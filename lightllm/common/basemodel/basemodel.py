@@ -35,7 +35,6 @@ from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import (
     set_model_init_status,
-    enable_diverse_mode_gqa_decode_fast_kernel,
     enable_full_att_decode_tune,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
@@ -400,9 +399,9 @@ class TpPartBaseModel:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
             else:
                 infer_state.b_ready_cache_len = torch.zeros_like(input=infer_state.b_seq_len)
-        elif enable_diverse_mode_gqa_decode_fast_kernel():
+        else:
             infer_state.b_shared_seq_len = model_input.b_shared_seq_len
-            infer_state.b_mark_shared_group = model_input.b_mark_shared_group
+            infer_state.b_shared_radix_node_id = model_input.b_shared_radix_node_id
 
         infer_state.multimodal_params = model_input.multimodal_params
 
@@ -464,15 +463,12 @@ class TpPartBaseModel:
             {"images": [], "audios": []} for _ in range(padded_batch_size)
         ]
 
-        if enable_diverse_mode_gqa_decode_fast_kernel():
-            if new_model_input.b_shared_seq_len is not None:
-                new_model_input.b_shared_seq_len = F.pad(
-                    new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
-                )
-            if new_model_input.b_mark_shared_group is not None:
-                new_model_input.b_mark_shared_group = F.pad(
-                    new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
-                )
+        new_model_input.b_shared_seq_len = F.pad(
+            new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
+        )
+        new_model_input.b_shared_radix_node_id = F.pad(
+            new_model_input.b_shared_radix_node_id, (0, padded_batch_size), mode="constant", value=-1
+        )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.mtp_draft_input_hiddens is not None:

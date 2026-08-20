@@ -98,12 +98,13 @@ def _fwd_kernel_compact_dynamic_mtp_model_input(
     out_b_position_delta,
     b_shared_seq_len,
     out_b_shared_seq_len,
+    b_shared_radix_node_id,
+    out_b_shared_radix_node_id,
     selected_mask,
     selected_dst_pos,
     batch_size,
     HAS_INPUT_IDS: tl.constexpr,
     HAS_B_POSITION_DELTA: tl.constexpr,
-    HAS_B_SHARED_SEQ_LEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK_SIZE)
@@ -130,9 +131,10 @@ def _fwd_kernel_compact_dynamic_mtp_model_input(
         position_delta = tl.load(b_position_delta + offsets, mask=mask, other=0)
         tl.store(out_b_position_delta + dst_pos, position_delta, mask=write_mask)
 
-    if HAS_B_SHARED_SEQ_LEN:
-        shared_seq_len = tl.load(b_shared_seq_len + offsets, mask=mask, other=0)
-        tl.store(out_b_shared_seq_len + dst_pos, shared_seq_len, mask=write_mask)
+    shared_seq_len = tl.load(b_shared_seq_len + offsets, mask=mask, other=0)
+    shared_radix_node_id = tl.load(b_shared_radix_node_id + offsets, mask=mask, other=-1)
+    tl.store(out_b_shared_seq_len + dst_pos, shared_seq_len, mask=write_mask)
+    tl.store(out_b_shared_radix_node_id + dst_pos, shared_radix_node_id, mask=write_mask)
 
     return
 
@@ -210,6 +212,8 @@ def _compact_decode_model_input(
     assert model_input.b_req_idx.is_cuda
     assert model_input.b_mtp_index.is_cuda
     assert model_input.b_seq_len.is_cuda
+    assert model_input.b_shared_seq_len.is_cuda
+    assert model_input.b_shared_radix_node_id.is_cuda
 
     # Dynamic scheduling guarantees exactly dynamic_batch_size selected rows.
     selected_row_mask = selected_row_mask.to(torch.int32)
@@ -223,12 +227,14 @@ def _compact_decode_model_input(
             (dynamic_batch_size,), dtype=model_input.input_ids.dtype, device=model_input.input_ids.device
         )
 
-    out_b_shared_seq_len = None
-    if model_input.b_shared_seq_len is not None:
-        assert model_input.b_shared_seq_len.is_cuda
-        out_b_shared_seq_len = torch.empty(
-            (dynamic_batch_size,), dtype=model_input.b_shared_seq_len.dtype, device=model_input.b_shared_seq_len.device
-        )
+    out_b_shared_seq_len = torch.empty(
+        (dynamic_batch_size,), dtype=model_input.b_shared_seq_len.dtype, device=model_input.b_shared_seq_len.device
+    )
+    out_b_shared_radix_node_id = torch.empty(
+        (dynamic_batch_size,),
+        dtype=model_input.b_shared_radix_node_id.dtype,
+        device=model_input.b_shared_radix_node_id.device,
+    )
 
     out_b_req_idx = torch.empty(
         (dynamic_batch_size,), dtype=model_input.b_req_idx.dtype, device=model_input.b_req_idx.device
@@ -262,14 +268,15 @@ def _compact_decode_model_input(
         out_b_seq_len=out_b_seq_len,
         b_position_delta=model_input.b_position_delta if model_input.b_position_delta is not None else dummy_1d,
         out_b_position_delta=out_b_position_delta if out_b_position_delta is not None else dummy_1d,
-        b_shared_seq_len=model_input.b_shared_seq_len if model_input.b_shared_seq_len is not None else dummy_1d,
-        out_b_shared_seq_len=out_b_shared_seq_len if out_b_shared_seq_len is not None else dummy_1d,
+        b_shared_seq_len=model_input.b_shared_seq_len,
+        out_b_shared_seq_len=out_b_shared_seq_len,
+        b_shared_radix_node_id=model_input.b_shared_radix_node_id,
+        out_b_shared_radix_node_id=out_b_shared_radix_node_id,
         selected_mask=selected_row_mask,
         selected_dst_pos=selected_dst_pos,
         batch_size=old_batch_size,
         HAS_INPUT_IDS=model_input.input_ids is not None,
         HAS_B_POSITION_DELTA=model_input.b_position_delta is not None,
-        HAS_B_SHARED_SEQ_LEN=model_input.b_shared_seq_len is not None,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,
         num_stages=1,
@@ -281,7 +288,7 @@ def _compact_decode_model_input(
     model_input.b_seq_len = out_b_seq_len
     model_input.b_position_delta = out_b_position_delta
     model_input.b_shared_seq_len = out_b_shared_seq_len
-    model_input.b_mark_shared_group = None
+    model_input.b_shared_radix_node_id = out_b_shared_radix_node_id
 
     if model_input.mtp_draft_input_hiddens is not None:
         assert model_input.mtp_draft_input_hiddens.is_cuda

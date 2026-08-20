@@ -4,7 +4,6 @@ from typing import List, Optional
 
 import torch
 
-from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -28,15 +27,12 @@ class ModelInput:
 
     b_is_decode_req: torch.Tensor = None
 
-    # 只会在 diverse_mode 下的 decode 阶段真正被使用的参数, 用于记录共享的radix cache中的长度
+    # Decode 逐行携带的 radix cache 共享长度。普通 attention backend 不使用该
+    # 信息，diverse attention backend 会结合 b_shared_radix_node_id 构建共享组。
     b_shared_seq_len: torch.Tensor = None
-    # 只会在 diverse_mode 下的 decode 阶段真正被使用的参数, 用于记录请求间的共享关系。
-    # 举列说明:
-    # b_shared_seq_len : [10, 10, 10, 11, 11, 11, 11]
-    # b_mark_shared_group: [0, 0, 3, 0, 0, 0, 4]
-    # b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
-    # 同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。
-    b_mark_shared_group: torch.Tensor = None
+    # Decode 逐行携带的 radix node 标识。相同 id 表示请求引用同一个共享
+    # radix node；该 id 只用于重建 diverse attention 的 b_mark_shared_group。
+    b_shared_radix_node_id: torch.Tensor = None
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
@@ -85,11 +81,9 @@ class ModelInput:
 
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-        self._ensure_decode_group_metadata()
-        if self.b_mark_shared_group is not None:
-            self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
-        if self.b_shared_seq_len is not None:
+        if not self.is_prefill:
             self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+            self.b_shared_radix_node_id = self.b_shared_radix_node_id.cuda(non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
@@ -100,18 +94,11 @@ class ModelInput:
             assert (
                 self.input_ids.dtype == torch.int64
             ), f"model input_ids must use torch.int64, got {self.input_ids.dtype}"
-
-    def _ensure_decode_group_metadata(self):
-        """按 decode 模式补齐能够安全降级的 attention 分组信息。"""
-        if self.is_prefill:
-            return
-
-        if enable_diverse_mode_gqa_decode_fast_kernel():
-            # 缺少共享信息时退化为互不共享前缀的单行组，不改变 attention 结果。
-            if self.b_mark_shared_group is None:
-                self.b_mark_shared_group = torch.ones_like(self.b_req_idx, dtype=torch.int32)
-            if self.b_shared_seq_len is None:
-                self.b_shared_seq_len = torch.zeros_like(self.b_req_idx, dtype=torch.int32)
+        if not self.is_prefill:
+            assert self.b_shared_seq_len is not None
+            assert self.b_shared_radix_node_id is not None
+            assert self.b_shared_seq_len.shape == self.b_req_idx.shape
+            assert self.b_shared_radix_node_id.shape == self.b_req_idx.shape
 
 
 @dataclass

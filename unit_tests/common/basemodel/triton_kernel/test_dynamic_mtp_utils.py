@@ -50,7 +50,9 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
         b_seq_len=torch.tensor([3, 4, 5, 6, 3, 4, 5, 6, 3, 4, 5, 6], dtype=torch.int32, device="cuda"),
         b_position_delta=torch.arange(12, dtype=torch.int32, device="cuda") + 200,
         b_shared_seq_len=torch.tensor([0, 0, 0, 0, 7, 7, 7, 7, 9, 9, 9, 9], dtype=torch.int32, device="cuda"),
-        b_mark_shared_group=torch.tensor([0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 4], dtype=torch.int32, device="cuda"),
+        b_shared_radix_node_id=torch.tensor(
+            [10, 10, 10, 10, 11, 11, 11, 11, 12, 12, 12, 12], dtype=torch.int64, device="cuda"
+        ),
         mem_indexes=torch.arange(8, dtype=torch.int32, device="cuda") + 100,
         mem_indexes_cpu=torch.arange(8, dtype=torch.int32, device="cpu") + 100,
         is_prefill=False,
@@ -96,7 +98,10 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
     assert torch.equal(
         compacted_input.b_shared_seq_len.cpu(), torch.tensor([0, 0, 0, 7, 9, 9, 9, 9], dtype=torch.int32)
     )
-    assert compacted_input.b_mark_shared_group is None
+    assert torch.equal(
+        compacted_input.b_shared_radix_node_id.cpu(),
+        torch.tensor([10, 10, 10, 11, 12, 12, 12, 12], dtype=torch.int64),
+    )
     assert torch.equal(
         compacted_input.mem_indexes.cpu(), torch.tensor([100, 101, 102, 103, 104, 105, 106, 107], dtype=torch.int32)
     )
@@ -108,7 +113,7 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
     assert torch.equal(compacted_input.mtp_draft_input_hiddens.cpu(), expected_hiddens)
 
 
-def test_compaction_clears_attention_group_metadata():
+def test_compaction_preserves_shared_radix_metadata():
     model_input = ModelInput(
         batch_size=5,
         total_token_num=36,
@@ -118,8 +123,8 @@ def test_compaction_clears_attention_group_metadata():
         b_req_idx=torch.tensor([0, 0, 0, 0, 0], dtype=torch.int32, device="cuda"),
         b_mtp_index=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32, device="cuda"),
         b_seq_len=torch.tensor([3, 4, 5, 6, 7], dtype=torch.int32, device="cuda"),
-        b_shared_seq_len=None,
-        b_mark_shared_group=torch.tensor([0, 0, 0, 0, 5], dtype=torch.int32, device="cuda"),
+        b_shared_seq_len=torch.full((5,), 7, dtype=torch.int32, device="cuda"),
+        b_shared_radix_node_id=torch.full((5,), 10, dtype=torch.int64, device="cuda"),
         mem_indexes=torch.arange(5, dtype=torch.int32, device="cuda"),
         mem_indexes_cpu=torch.arange(5, dtype=torch.int32, device="cpu"),
         is_prefill=False,
@@ -136,7 +141,8 @@ def test_compaction_clears_attention_group_metadata():
 
     assert torch.equal(compacted_input.b_req_idx.cpu(), torch.tensor([0, 0, 0, 0, 0], dtype=torch.int32))
     assert torch.equal(compacted_input.b_mtp_index.cpu(), torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32))
-    assert compacted_input.b_mark_shared_group is None
+    assert torch.equal(compacted_input.b_shared_seq_len.cpu(), torch.full((5,), 7, dtype=torch.int32))
+    assert torch.equal(compacted_input.b_shared_radix_node_id.cpu(), torch.full((5,), 10, dtype=torch.int64))
 
 
 def _reference_cumprod_scores(req_to_next_token_scores, b_req_idx, max_draft_step: int) -> torch.Tensor:

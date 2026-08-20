@@ -34,8 +34,8 @@ class InferStateInfo:
         self.b_req_idx: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
 
-        self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
-        self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
+        self.b_shared_seq_len: torch.Tensor = None  # raw decode radix-cache shared lengths.
+        self.b_shared_radix_node_id: torch.Tensor = None  # raw decode radix-node ids.
 
         self.b_mtp_index: torch.Tensor = None
         # MRoPE position offset propagated from ModelInput.

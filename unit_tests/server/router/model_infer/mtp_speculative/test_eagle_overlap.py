@@ -54,6 +54,8 @@ def _target_input(batch_size):
         b_req_idx=torch.arange(batch_size, dtype=torch.int32),
         b_mtp_index=torch.zeros(batch_size, dtype=torch.int32),
         b_position_delta=torch.zeros(batch_size, dtype=torch.int32),
+        b_shared_seq_len=torch.zeros(batch_size, dtype=torch.int32),
+        b_shared_radix_node_id=torch.arange(batch_size, dtype=torch.int64),
         mem_indexes=torch.arange(batch_size, dtype=torch.int32),
         mem_indexes_cpu=torch.arange(batch_size, dtype=torch.int32),
         max_kv_seq_len=16,

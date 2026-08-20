@@ -1,12 +1,12 @@
+import pytest
 import torch
 
-import lightllm.common.basemodel.batch_objs as batch_objs_module
 from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 def _create_model_input(*, is_prefill=False):
     batch_size = 2
-    return ModelInput(
+    kwargs = dict(
         batch_size=batch_size,
         total_token_num=batch_size,
         max_q_seq_len=1,
@@ -17,41 +17,36 @@ def _create_model_input(*, is_prefill=False):
         is_prefill=is_prefill,
         multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
+    if not is_prefill:
+        kwargs["b_shared_seq_len"] = torch.tensor([4, 4], dtype=torch.int32)
+        kwargs["b_shared_radix_node_id"] = torch.tensor([10, 10], dtype=torch.int64)
+    return ModelInput(**kwargs)
 
 
-def _mock_diverse_mode(monkeypatch, *, enabled=False):
-    monkeypatch.setattr(
-        batch_objs_module,
-        "enable_diverse_mode_gqa_decode_fast_kernel",
-        lambda: enabled,
-    )
+def test_decode_requires_shared_radix_metadata():
+    with pytest.raises(AssertionError):
+        ModelInput(
+            batch_size=1,
+            total_token_num=1,
+            max_q_seq_len=1,
+            max_kv_seq_len=1,
+            b_req_idx=torch.zeros(1, dtype=torch.int32),
+            b_mtp_index=torch.zeros(1, dtype=torch.int32),
+            b_seq_len=torch.ones(1, dtype=torch.int32),
+            is_prefill=False,
+            multimodal_params=[{"images": [], "audios": []}],
+        )
 
 
-def test_diverse_decode_defaults_to_independent_groups(monkeypatch):
-    _mock_diverse_mode(monkeypatch, enabled=True)
+def test_decode_carries_raw_shared_radix_metadata():
     model_input = _create_model_input()
 
-    model_input._ensure_decode_group_metadata()
-
-    assert torch.equal(model_input.b_mark_shared_group, torch.ones(2, dtype=torch.int32))
-    assert torch.equal(model_input.b_shared_seq_len, torch.zeros(2, dtype=torch.int32))
+    assert torch.equal(model_input.b_shared_seq_len, torch.tensor([4, 4], dtype=torch.int32))
+    assert torch.equal(model_input.b_shared_radix_node_id, torch.tensor([10, 10], dtype=torch.int64))
 
 
-def test_normal_decode_does_not_create_group_metadata(monkeypatch):
-    _mock_diverse_mode(monkeypatch)
-    model_input = _create_model_input()
-
-    model_input._ensure_decode_group_metadata()
-
-    assert model_input.b_mark_shared_group is None
-    assert model_input.b_shared_seq_len is None
-
-
-def test_prefill_does_not_create_decode_group_metadata(monkeypatch):
-    _mock_diverse_mode(monkeypatch, enabled=True)
+def test_prefill_does_not_require_shared_radix_metadata():
     model_input = _create_model_input(is_prefill=True)
 
-    model_input._ensure_decode_group_metadata()
-
-    assert model_input.b_mark_shared_group is None
     assert model_input.b_shared_seq_len is None
+    assert model_input.b_shared_radix_node_id is None

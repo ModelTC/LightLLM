@@ -92,6 +92,16 @@ def build_parallel_block_draft_input(
         .repeat_interleave(block_size)
         .contiguous()
     )
+    draft_input.b_shared_seq_len = (
+        target_model_input.b_shared_seq_len.index_select(0, accepted_tail_rows)
+        .repeat_interleave(block_size)
+        .contiguous()
+    )
+    draft_input.b_shared_radix_node_id = (
+        target_model_input.b_shared_radix_node_id.index_select(0, accepted_tail_rows)
+        .repeat_interleave(block_size)
+        .contiguous()
+    )
     draft_input.mem_indexes = extra_mem_indexes_cpu.to(device=target_next_token_ids.device, non_blocking=True)
     empty_multimodal_params = {"images": [], "audios": []}
     draft_input.multimodal_params = [empty_multimodal_params] * draft_input.batch_size

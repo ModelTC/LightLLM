@@ -156,7 +156,10 @@ def propose_next_eagle(
     draft_input.b_position_delta = (
         position_delta.index_select(0, accepted_tail_rows) if position_delta is not None else None
     )
-    draft_input.b_shared_seq_len = None
+    draft_input.b_shared_seq_len = target_model_input.b_shared_seq_len.index_select(0, accepted_tail_rows)
+    draft_input.b_shared_radix_node_id = target_model_input.b_shared_radix_node_id.index_select(
+        0, accepted_tail_rows
+    )
     if len(draft_input.multimodal_params) != request_count:
         empty_multimodal_params = {"images": [], "audios": []}
         draft_input.multimodal_params = [empty_multimodal_params] * request_count

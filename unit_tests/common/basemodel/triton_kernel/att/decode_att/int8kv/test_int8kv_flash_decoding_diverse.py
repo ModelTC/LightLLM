@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 import torch
 
@@ -25,16 +26,12 @@ class MockInferState:
         req_to_tokens,
         b_req_idx,
         b_seq_len,
-        b_shared_seq_len=None,
-        b_mark_shared_group=None,
     ):
         self.batch_size = batch_size
         self.max_kv_seq_len = max_kv_seq_len
         self.req_manager = MockReqManager(req_to_tokens)
         self.b_req_idx = b_req_idx
         self.b_seq_len = b_seq_len
-        self.b_shared_seq_len = b_shared_seq_len
-        self.b_mark_shared_group = b_mark_shared_group
 
 
 # @pytest.mark.parametrize("shared_seq_len", [512])
@@ -104,6 +101,8 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
         req_to_tokens=req_to_tokens,
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
+    )
+    diverse_infer_state.decode_att_state = SimpleNamespace(
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
     )
