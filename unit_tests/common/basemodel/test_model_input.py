@@ -158,6 +158,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
         is_prefill=True,
         b_prefill_has_output_cpu=[],
         multimodal_params=[],
+        mtp_draft_input_hiddens=torch.empty((0, 4), dtype=torch.float32),
     )
     model = SimpleNamespace(
         mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99),
@@ -177,6 +178,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
     assert padded_input.b_req_idx.tolist() == [88]
     assert padded_input.b_seq_len.tolist() == [1]
     assert padded_input.b_prefill_has_output_cpu == [False]
+    assert torch.equal(padded_input.mtp_draft_input_hiddens, torch.zeros((1, 4)))
 
 
 def test_padded_decode_builds_internal_request_from_empty_token_tensor():
