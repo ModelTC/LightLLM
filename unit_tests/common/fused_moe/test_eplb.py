@@ -2071,8 +2071,80 @@ def test_manager_inflight_ready_gate_commits_ordered_prefix_and_propagates_worke
             raise RuntimeError("boom")
 
     manager.transfer = BrokenTransfer()
-    with pytest.raises(RuntimeError, match="boom"):
+    encoded_statuses = []
+
+    def retain_local_error(tensor, **_kwargs):
+        encoded_statuses.append(int(tensor.item()))
+
+    monkeypatch.setattr(manager_module.dist, "all_reduce", retain_local_error)
+    with pytest.raises(RuntimeError, match="EPLB transfer worker failed on this rank") as exc_info:
         manager._poll_in_flight()
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "boom"
+    assert encoded_statuses == [manager_module.EPLB_CONTROL_ERROR]
+
+
+def test_manager_inflight_remote_worker_error_does_not_commit(monkeypatch):
+    class Transfer:
+        def __init__(self):
+            self.commits = []
+
+        def pending_layers(self):
+            return [(0, 0)]
+
+        def commit(self, *args):
+            self.commits.append(args)
+
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.transfer = Transfer()
+    manager.control_group = object()
+    manager.in_flight_layers = [0]
+    manager._commit_layer_metadata = lambda _layer: None
+    manager._finish_rebalance = lambda: None
+    statuses = []
+
+    def remote_error(tensor, **_kwargs):
+        statuses.append(int(tensor.item()))
+        tensor.fill_(manager_module.EPLB_CONTROL_ERROR)
+
+    monkeypatch.setattr(manager_module.dist, "all_reduce", remote_error)
+
+    with pytest.raises(RuntimeError, match="EPLB transfer worker failed on another rank"):
+        manager._poll_in_flight()
+    assert statuses == [1]
+    assert manager.transfer.commits == []
+
+
+def test_evaluation_ready_gate_propagates_local_and_remote_errors(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager._evaluation_lock = threading.Lock()
+    manager.control_group = object()
+    manager._evaluation_error = RuntimeError("evaluation boom")
+    manager._evaluation_result = None
+    statuses = []
+
+    def retain_local_error(tensor, **_kwargs):
+        statuses.append(int(tensor.item()))
+
+    monkeypatch.setattr(manager_module.dist, "all_reduce", retain_local_error)
+    with pytest.raises(RuntimeError, match="EPLB evaluation failed on this rank") as exc_info:
+        manager._evaluation_ready_on_all_ranks()
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "evaluation boom"
+    assert statuses == [manager_module.EPLB_CONTROL_ERROR]
+
+    manager._evaluation_error = None
+    manager._evaluation_result = {"kind": "no_improvement"}
+    statuses.clear()
+
+    def remote_error(tensor, **_kwargs):
+        statuses.append(int(tensor.item()))
+        tensor.fill_(manager_module.EPLB_CONTROL_ERROR)
+
+    monkeypatch.setattr(manager_module.dist, "all_reduce", remote_error)
+    with pytest.raises(RuntimeError, match="EPLB evaluation failed on another rank"):
+        manager._evaluation_ready_on_all_ranks()
+    assert statuses == [1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -2207,6 +2279,50 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
     transfer.commit(1, 1)
     transfer.commit(2, 0)
     transfer.finish()
+
+
+def test_transfer_finalization_failure_stays_in_worker_and_success_finalizes_once(monkeypatch):
+    def make_transfer(finalize):
+        transfer = object.__new__(transfer_module._EPLBTransferBase)
+        transfer.backend = "test"
+        transfer.device = torch.device("cuda", 0)
+        transfer.global_rank = 0
+        transfer.staging_depth = 1
+        transfer.staging = [[]]
+        transfer._release = [threading.Event()]
+        transfer._release[0].set()
+        transfer._consumed_events = [object()]
+        transfer._consumed_recorded = [False]
+        transfer._changed_dst_slots = [()]
+        transfer._pending = deque()
+        transfer._pending_lock = threading.Lock()
+        transfer._error = None
+        transfer._thread = None
+        transfer._needs_staging_reuse_barrier = False
+        transfer._copy_batch = lambda _batch: None
+        transfer._finish_transfer_generation = finalize
+        return transfer
+
+    monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
+
+    finalized_before_publish = []
+    success = make_transfer(lambda: finalized_before_publish.append(len(success._pending)))
+    success.start([(0, [])])
+    success.finish()
+    assert finalized_before_publish == [0]
+    assert success.pending_layers() == [(0, 0)]
+
+    failed = make_transfer(lambda: (_ for _ in ()).throw(RuntimeError("cache boom")))
+    failed.start([(0, [])])
+    failed._thread.join()
+    assert list(failed._pending) == []
+    with pytest.raises(RuntimeError, match="EPLB migration worker failed") as exc_info:
+        failed.pending_layers()
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "cache boom"
+    with pytest.raises(RuntimeError, match="EPLB migration worker failed"):
+        failed.finish()
+    assert failed._thread is None
 
 
 def test_manager_rearms_after_rebalance_for_interval_one():

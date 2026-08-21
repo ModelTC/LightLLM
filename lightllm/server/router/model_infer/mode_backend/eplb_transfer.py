@@ -193,6 +193,8 @@ class _EPLBTransferBase:
         def worker() -> None:
             try:
                 torch.cuda.set_device(self.device)
+                if not layer_plans:
+                    self._finish_transfer_generation()
                 for batch_start in range(0, len(layer_plans), self.staging_depth):
                     batch = []
                     for plan_index in range(batch_start, min(batch_start + self.staging_depth, len(layer_plans))):
@@ -213,6 +215,8 @@ class _EPLBTransferBase:
                         # before a source can reuse the peer buffer for this batch.
                         dist.barrier(group=self.transfer_group)
                     self._copy_batch(batch)
+                    if batch_start + self.staging_depth >= len(layer_plans):
+                        self._finish_transfer_generation()
                     with self._pending_lock:
                         self._pending.extend((layer_index, buffer_index) for layer_index, _, buffer_index, _ in batch)
             except BaseException as exc:
@@ -248,7 +252,6 @@ class _EPLBTransferBase:
             return
         thread.join()
         self._thread = None
-        self._finish_transfer_generation()
         if self._error is not None:
             raise RuntimeError("EPLB migration worker failed") from self._error
 

@@ -242,10 +242,19 @@ class EPLBManager:
             logger.info(f"eplb completed wall_time={time.time() - self.in_flight_started_at:.2f}s")
 
     def _poll_in_flight(self):
-        pending = self.transfer.pending_layers()  # Propagates worker errors on the main thread.
-        ready_count = self._control_count(len(pending))
+        local_error = None
+        try:
+            pending = self.transfer.pending_layers()
+        except BaseException as exc:
+            pending = []
+            local_error = exc
+        ready_count = self._control_count(EPLB_CONTROL_ERROR if local_error is not None else len(pending))
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=self.control_group)
         ready_count = int(ready_count.item())
+        if ready_count < 0:
+            if local_error is not None:
+                raise RuntimeError("EPLB transfer worker failed on this rank") from local_error
+            raise RuntimeError("EPLB transfer worker failed on another rank")
         if ready_count == 0:
             return
         if ready_count > len(pending) or ready_count > len(self.in_flight_layers):
@@ -470,10 +479,17 @@ class EPLBManager:
 
     def _evaluation_ready_on_all_ranks(self) -> bool:
         with self._evaluation_lock:
-            local_ready = self._evaluation_error is not None or self._evaluation_result is not None
-        ready_count = self._control_count(int(local_ready))
+            local_error = self._evaluation_error
+            local_result = self._evaluation_result
+        local_status = EPLB_CONTROL_ERROR if local_error is not None else int(local_result is not None)
+        ready_count = self._control_count(local_status)
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=self.control_group)
-        return bool(ready_count.item())
+        ready_count = int(ready_count.item())
+        if ready_count < 0:
+            if local_error is not None:
+                raise RuntimeError("EPLB evaluation failed on this rank") from local_error
+            raise RuntimeError("EPLB evaluation failed on another rank")
+        return bool(ready_count)
 
     def _start_rebalance(self, result):
         placement, improved = result["placement"], result["improved"]
