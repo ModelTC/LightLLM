@@ -229,7 +229,11 @@ def test_gather_token():
     req_ids = torch.arange(20, 20 + batch_size, dtype=torch.int32).cuda()
     mtp_index = torch.zeros((batch_size,), dtype=torch.int32).cuda()
     scatter_token(token_info, req_to_token_info, req_ids, mtp_index)
-    output = gather_token(req_to_token_info, req_ids, mtp_index)
+    output = gather_token(
+        req_to_next_token_ids=req_to_token_info,
+        b_req_idx=req_ids,
+        b_mtp_index=mtp_index,
+    )
     diff = (token_info - output).abs().max()
     assert diff < 1e-6
     print("test_gather_token passed")

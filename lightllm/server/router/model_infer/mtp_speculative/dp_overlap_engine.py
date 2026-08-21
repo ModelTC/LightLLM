@@ -48,14 +48,14 @@ class DPOverlapSpecEngine:
 
     def propose_next_overlap(
         self,
-        target_model_input0: ModelInput,  # batch_size = padded_verify_batch_size0
-        target_model_output0: ModelOutput,  # logits: [padded_verify_batch_size0, vocab_size]
-        target_next_token_ids0: torch.Tensor,  # [padded_verify_batch_size0]
+        target_model_input0: ModelInput,  # batch_size = verify_batch_size0
+        target_model_output0: ModelOutput,  # logits: [verify_batch_size0, vocab_size]
+        target_next_token_ids0: torch.Tensor,  # [verify_batch_size0]
         real_verify_rows0: int,
         accept_len0: Optional[torch.Tensor],  # [req_num0]
-        target_model_input1: ModelInput,  # batch_size = padded_verify_batch_size1
-        target_model_output1: ModelOutput,  # logits: [padded_verify_batch_size1, vocab_size]
-        target_next_token_ids1: torch.Tensor,  # [padded_verify_batch_size1]
+        target_model_input1: ModelInput,  # batch_size = verify_batch_size1
+        target_model_output1: ModelOutput,  # logits: [verify_batch_size1, vocab_size]
+        target_next_token_ids1: torch.Tensor,  # [verify_batch_size1]
         real_verify_rows1: int,
         accept_len1: Optional[torch.Tensor],  # [req_num1]
     ) -> SpecProposal:

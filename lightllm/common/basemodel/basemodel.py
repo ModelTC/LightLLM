@@ -619,9 +619,9 @@ class TpPartBaseModel:
         if model_input.input_ids is None:
             if model_input.batch_size > 0:
                 model_input.input_ids = gather_token(
-                    self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                    model_input.b_req_idx,
-                    model_input.b_mtp_index,
+                    req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
+                    b_req_idx=model_input.b_req_idx,
+                    b_mtp_index=model_input.b_mtp_index,
                 )
             else:
                 # 空 DP rank 不启动 gather kernel，但仍将 input_ids 规范化为
@@ -776,37 +776,36 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
-        model_input0.to_cuda()
-        model_input1.to_cuda()
+        """执行由调用方提前构建好的两个 prefill microbatch。"""
 
-        if self.args.enable_prefill_decode_mixed:
-            gather_token_prefill_decode_mixed(
-                input_ids=model_input0.input_ids,
-                req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                b_req_idx=model_input0.b_req_idx,
-                b_mtp_index=model_input0.b_mtp_index,
-                b_is_decode_req=model_input0.b_is_decode_req,
-                b_prefill_start_loc=model_input0.b_prefill_start_loc,
-            )
+        for model_input in (model_input0, model_input1):
+            model_input.to_cuda()
+            if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
+                gather_token_prefill_decode_mixed(
+                    input_ids=model_input.input_ids,
+                    req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
+                    b_req_idx=model_input.b_req_idx,
+                    b_mtp_index=model_input.b_mtp_index,
+                    b_is_decode_req=model_input.b_is_decode_req,
+                    b_prefill_start_loc=model_input.b_prefill_start_loc,
+                )
+        return self._microbatch_overlap_prefill_cuda(model_input0, model_input1)
 
-        if self.args.enable_prefill_decode_mixed:
-            gather_token_prefill_decode_mixed(
-                input_ids=model_input1.input_ids,
-                req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                b_req_idx=model_input1.b_req_idx,
-                b_mtp_index=model_input1.b_mtp_index,
-                b_is_decode_req=model_input1.b_is_decode_req,
-                b_prefill_start_loc=model_input1.b_prefill_start_loc,
-            )
-
+    def _microbatch_overlap_prefill_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
 
         assert self.args.enable_tpsp_mix_mode
         origin_handle_token_num0 = model_input0.input_ids.shape[0]
         origin_handle_token_num1 = model_input1.input_ids.shape[0]
-        infer_handle_token_num0 = triton.cdiv(origin_handle_token_num0, self.tp_world_size_) * self.tp_world_size_
-        infer_handle_token_num1 = triton.cdiv(origin_handle_token_num1, self.tp_world_size_) * self.tp_world_size_
+        infer_handle_token_num0 = max(
+            self.tp_world_size_,
+            triton.cdiv(origin_handle_token_num0, self.tp_world_size_) * self.tp_world_size_,
+        )
+        infer_handle_token_num1 = max(
+            self.tp_world_size_,
+            triton.cdiv(origin_handle_token_num1, self.tp_world_size_) * self.tp_world_size_,
+        )
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
 
@@ -867,36 +866,39 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
-        model_input0.to_cuda()
-        model_input1.to_cuda()
-        assert self.args.enable_tpsp_mix_mode
+        """执行由调用方提前构建好的两个 decode microbatch。"""
 
-        if model_input0.input_ids is None:
-            model_input0.input_ids = gather_token(
-                self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                model_input0.b_req_idx,
-                model_input0.b_mtp_index,
-            )
-        if model_input1.input_ids is None:
-            model_input1.input_ids = gather_token(
-                self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                model_input1.b_req_idx,
-                model_input1.b_mtp_index,
-            )
-        # TODO 动态 mtp fix
-        assert model_input0.batch_size == model_input1.batch_size
+        for model_input in (model_input0, model_input1):
+            model_input.to_cuda()
+            if model_input.input_ids is None:
+                if model_input.batch_size > 0:
+                    model_input.input_ids = gather_token(
+                        req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
+                        b_req_idx=model_input.b_req_idx,
+                        b_mtp_index=model_input.b_mtp_index,
+                    )
+                else:
+                    model_input.input_ids = torch.empty(
+                        (0,),
+                        dtype=torch.int64,
+                        device=model_input.b_req_idx.device,
+                    )
+        return self._microbatch_overlap_decode_cuda(model_input0, model_input1)
+
+    def _microbatch_overlap_decode_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
+        assert self.args.enable_tpsp_mix_mode
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
 
-        origin_batch_size = model_input0.batch_size
-        max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
-        infer_batch_size = triton.cdiv(origin_batch_size, self.tp_world_size_) * self.tp_world_size_
+        origin_batch_size0 = model_input0.batch_size
+        origin_batch_size1 = model_input1.batch_size
+        max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
+        infer_batch_size = max(1, origin_batch_size0, origin_batch_size1)
+        infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
             need_capture = self.graph.need_capture(infer_batch_size)
-            # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
-            # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
@@ -933,9 +935,8 @@ class TpPartBaseModel:
                     infer_state1=infer_state1,
                 )
 
-            # TODO 动态 mtp fix
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
+            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
+            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
         else:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
@@ -960,8 +961,8 @@ class TpPartBaseModel:
             infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
+            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
+            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
 
         return model_output0, model_output1
 

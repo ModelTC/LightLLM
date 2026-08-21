@@ -100,7 +100,7 @@ def test_overlap_chained_prefill_uses_local_microbatch_inputs(monkeypatch):
         def __init__(self, token_offset):
             self.token_offset = token_offset
 
-        def microbatch_overlap_prefill(self, input0, input1):
+        def _microbatch_overlap_prefill_cuda(self, input0, input1):
             forwarded.append((input0, input1, input0.input_ids.clone(), input1.input_ids.clone()))
             return tuple(
                 SimpleNamespace(

@@ -164,6 +164,54 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     return model_input, run_reqs
 
 
+def overlap_prepare_decode_inputs(req_objs: List[InferReq]):
+    """按请求把 decode batch 拆成两个允许为空的 microbatch。"""
+
+    split_req_bound = (len(req_objs) + 1) // 2
+    model_input0, run_reqs0 = prepare_decode_inputs(
+        req_objs=req_objs[:split_req_bound],
+    )
+    model_input1, run_reqs1 = prepare_decode_inputs(
+        req_objs=req_objs[split_req_bound:],
+    )
+    return model_input0, run_reqs0, model_input1, run_reqs1
+
+
+def overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
+    """按当前 prefill token 负载把完整请求分配到两个 microbatch。
+
+    请求不能跨 microbatch 拆分，否则同一个 ``InferReq`` 会在后处理阶段被
+    重复更新。所有请求统一按照两侧已分配 token 数进行贪心均衡。这里不
+    创建 HOLD 请求，空侧保留完整的 0-shape ``ModelInput``，执行阶段需要
+    的 padding 由 BaseModel 统一处理。
+    """
+
+    req_input_token_nums = [len(req.get_chuncked_input_token_ids()) - req.cur_kv_len for req in req_objs]
+    assert all(token_num > 0 for token_num in req_input_token_nums)
+
+    left_token_num = 0
+    right_token_num = 0
+    left_reqs = []
+    right_reqs = []
+    for req, token_num in zip(req_objs, req_input_token_nums):
+        if left_token_num <= right_token_num:
+            left_reqs.append(req)
+            left_token_num += token_num
+        else:
+            right_reqs.append(req)
+            right_token_num += token_num
+
+    model_input0, run_reqs0 = prepare_prefill_inputs(
+        req_objs=left_reqs,
+        is_chuncked_mode=True,
+    )
+    model_input1, run_reqs1 = prepare_prefill_inputs(
+        req_objs=right_reqs,
+        is_chuncked_mode=True,
+    )
+    return model_input0, run_reqs0, model_input1, run_reqs1
+
+
 def build_b_position_delta(multimodal_params: List[dict]) -> torch.Tensor:
     b_position_delta = []
     for params in multimodal_params:

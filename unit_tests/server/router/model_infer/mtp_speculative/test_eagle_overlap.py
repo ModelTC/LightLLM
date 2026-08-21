@@ -18,7 +18,7 @@ class _DraftModel:
         self.decode_batch_sizes = []
         self.decode_inputs = []
 
-    def microbatch_overlap_prefill(self, input0, input1):
+    def _microbatch_overlap_prefill_cuda(self, input0, input1):
         self.extend_batch_sizes = (input0.batch_size, input1.batch_size)
         self.extend_inputs = (input0, input1)
         return tuple(
@@ -29,7 +29,7 @@ class _DraftModel:
             for model_input in (input0, input1)
         )
 
-    def microbatch_overlap_decode(self, input0, input1):
+    def _microbatch_overlap_decode_cuda(self, input0, input1):
         self.decode_batch_sizes.append((input0.batch_size, input1.batch_size))
         self.decode_inputs.append((input0, input1))
         return tuple(

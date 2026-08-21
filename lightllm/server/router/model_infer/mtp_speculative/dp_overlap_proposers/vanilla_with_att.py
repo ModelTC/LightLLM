@@ -66,7 +66,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
                     b_next_token_ids=draft_token_ids[batch_index],
                     mtp_draft_input_hiddens=draft_hiddens[batch_index],
                 )
-            draft_outputs = draft_model.microbatch_overlap_prefill(*model_inputs)
+            draft_outputs = draft_model._microbatch_overlap_prefill_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
                 draft_hiddens[batch_index] = draft_output.mtp_collector.spec_hidden
                 draft_token_ids[batch_index] = self.backend._gen_argmax_token_ids(draft_output)
@@ -171,7 +171,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
                 model_input.input_ids = draft_token_ids[batch_index]
                 model_input.mtp_draft_input_hiddens = draft_hiddens[batch_index]
 
-            draft_outputs = self.backend.draft_models[step].microbatch_overlap_decode(*model_inputs)
+            draft_outputs = self.backend.draft_models[step]._microbatch_overlap_decode_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
                 draft_hiddens[batch_index] = draft_output.mtp_collector.spec_hidden
                 draft_token_ids[batch_index] = self.backend._gen_argmax_token_ids(draft_output)

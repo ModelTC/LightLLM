@@ -41,7 +41,7 @@ def fill_dp_eagle_draft_model_kv_state_overlap(
         b_next_token_ids=target_next_token_ids1,
         mtp_draft_input_hiddens=target_model_output1.mtp_collector.spec_hidden,
     )
-    proposer.backend.draft_models[0].microbatch_overlap_prefill(target_model_input0, target_model_input1)
+    proposer.backend.draft_models[0]._microbatch_overlap_prefill_cuda(target_model_input0, target_model_input1)
 
 
 def pad_dp_step_mem_indexes(
@@ -118,7 +118,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
     proposal_token_ids = target_next_token_ids0.new_empty((total_real_request_count, draft_step))
 
     draft_model = proposer.backend.draft_models[0]
-    extend_outputs = draft_model.microbatch_overlap_decode(*model_inputs)
+    extend_outputs = draft_model._microbatch_overlap_decode_cuda(*model_inputs)
 
     draft_token_ids_by_batch = []
     draft_hiddens_by_batch = []
@@ -190,7 +190,7 @@ def propose_next_dp_eagle_autoregressive_overlap(
             model_input.max_kv_seq_len = max_kv_seq_lens_by_batch[batch_index] + step
             model_input.total_token_num = model_input.batch_size * model_input.max_kv_seq_len
 
-        draft_outputs = draft_model.microbatch_overlap_decode(*model_inputs)
+        draft_outputs = draft_model._microbatch_overlap_decode_cuda(*model_inputs)
         for batch_index, draft_output in enumerate(draft_outputs):
             draft_token_ids = generate_eagle_token_ids(proposer, draft_output, map_draft_token_ids)
             draft_token_ids_by_batch[batch_index] = draft_token_ids
@@ -265,7 +265,7 @@ def propose_next_dp_eagle_fixed_layout_overlap(
             model_input.input_ids = draft_token_ids_by_batch[batch_index]
             model_input.mtp_draft_input_hiddens = draft_hiddens_by_batch[batch_index]
 
-        draft_outputs = draft_model.microbatch_overlap_decode(*model_inputs)
+        draft_outputs = draft_model._microbatch_overlap_decode_cuda(*model_inputs)
 
         for batch_index, (model_input, draft_output) in enumerate(zip(model_inputs, draft_outputs)):
             model_input.b_seq_len += 1
