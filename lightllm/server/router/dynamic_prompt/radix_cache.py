@@ -174,6 +174,15 @@ class RadixCache:
             return 0
         return int(valid.sum().item()) * self._swa_pages_per_prompt_page
 
+    def _node_direct_ref_num(self, node: TreeNode) -> int:
+        # 子树引用同时计入父子节点，差值就是直接命中本节点的请求数。
+        return node.ref_counter - sum(child.ref_counter for child in node.children.values())
+
+    def _node_last_valid_swa_pages_num(self, node: TreeNode) -> int:
+        if node.token_extra_value is None:
+            return 0
+        return self._swa_pages_per_prompt_page if node.token_extra_value.swa_last_valid_page >= 0 else 0
+
     def _align_len(self, length: int) -> int:
         if self.page_size <= 1:
             return int(length)
@@ -352,6 +361,8 @@ class RadixCache:
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         if tree_node != self.root_node:
+            if update_refs and self._swa_pages_per_prompt_page > 0 and self._node_direct_ref_num(tree_node) == 1:
+                self.swa_refed_pages_num += self._node_last_valid_swa_pages_num(tree_node)
             if len(ans_value_list) != 0:
                 value = torch.concat(ans_value_list)
             else:
@@ -427,7 +438,6 @@ class RadixCache:
             # from 0 to 1 need update refs token num
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
-                self.swa_refed_pages_num += self._node_swa_pages_num(node)
 
         if len(key) == 0:
             return node
@@ -457,7 +467,6 @@ class RadixCache:
                     # from 0 to 1 need update refs token num
                     if split_parent_node.ref_counter == 1:
                         self.refed_tokens_num.arr[0] += len(split_parent_node.token_mem_index_value)
-                        self.swa_refed_pages_num += self._node_swa_pages_num(split_parent_node)
 
                 if child.is_leaf():
                     self.evict_tree_set.add(child)
@@ -581,13 +590,18 @@ class RadixCache:
             return
         # 如果减引用的是叶节点，需要先从 evict_tree_set 中移除
         old_node = node
+        if (
+            self._swa_pages_per_prompt_page > 0
+            and old_node is not self.root_node
+            and self._node_direct_ref_num(old_node) == 1
+        ):
+            self.swa_refed_pages_num -= self._node_last_valid_swa_pages_num(old_node)
         if old_node.is_leaf():
             self.evict_tree_set.discard(old_node)
 
         while node is not None:
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
-                self.swa_refed_pages_num -= self._node_swa_pages_num(node)
             node.ref_counter -= 1
             node = node.parent
 
@@ -601,13 +615,18 @@ class RadixCache:
             return
         # 如果减引用的是叶节点，需要先从 evict_tree_set 中移除
         old_node = node
+        if (
+            self._swa_pages_per_prompt_page > 0
+            and old_node is not self.root_node
+            and self._node_direct_ref_num(old_node) == 0
+        ):
+            self.swa_refed_pages_num += self._node_last_valid_swa_pages_num(old_node)
         if old_node.is_leaf():
             self.evict_tree_set.discard(old_node)
 
         while node is not None:
             if node.ref_counter == 0:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
-                self.swa_refed_pages_num += self._node_swa_pages_num(node)
             node.ref_counter += 1
             node = node.parent
 
@@ -665,7 +684,7 @@ class RadixCache:
         return
 
     def free_unreferenced_swa_pages(self, need_pages: int) -> None:
-        """DeepSeek-V4 swa free hook: 页 allocator 触底时，回收 ref_count==0 节点的 swa 页。"""
+        """DeepSeek-V4 swa free hook: 页 allocator 触底时回收未被命中终点保护的 swa 页。"""
         if self.mem_manager is None or self.extra_value_ops is None:
             return
         allocator = self.mem_manager.swa_page_allocator
@@ -679,12 +698,14 @@ class RadixCache:
                 if allocator.can_use_mem_size + evict_swa_pages >= target:
                     break
                 node = leaf
-                while node is not None and node is not self.root_node and node.ref_counter == 0:
+                while node is not None and node is not self.root_node:
                     node_id = id(node)
                     if node_id in visited:
                         node = node.parent
                         continue
                     visited.add(node_id)
+
+                    has_direct_ref = self._node_direct_ref_num(node) > 0
 
                     payload = node.token_extra_value
                     if (
@@ -695,6 +716,10 @@ class RadixCache:
                         last_page = int(payload.swa_last_valid_page)
                         if last_page >= 0:
                             if free_last:
+                                if has_direct_ref:
+                                    # 活跃请求恰好命中该节点时，最后一页仍需保留。
+                                    node = node.parent
+                                    continue
                                 page_slice = slice(last_page, last_page + 1)
                             else:
                                 page_slice = slice(0, last_page)
