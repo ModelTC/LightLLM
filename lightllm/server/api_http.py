@@ -420,6 +420,13 @@ async def anthropic_messages(raw_request: Request) -> Response:
         return Response(status_code=499)
 
 
+@app.post("/v1/messages/count_tokens")
+async def anthropic_count_tokens(raw_request: Request) -> Response:
+    from .api_anthropic import anthropic_count_tokens_impl
+
+    return await anthropic_count_tokens_impl(raw_request)
+
+
 @app.post("/v1/responses")
 async def openai_responses(raw_request: Request) -> Response:
     if get_env_start_args().run_mode in ["prefill", "decode"]:

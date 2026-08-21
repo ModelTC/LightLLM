@@ -217,20 +217,8 @@ def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
     return [arguments]
 
 
-async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    from .api_http import g_objs
-
-    if request.logit_bias is not None:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The logit_bias parameter is not currently supported",
-        )
-
-    if request.function_call != "none":
-        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
-
-    created_time = int(time.time())
-
+def _build_multimodal_params(request: ChatCompletionRequest) -> MultimodalParams:
+    """Build LightLLM multimodal inputs from chat content parts."""
     multimodal_params_dict = {"images": [], "audios": []}
     for message in request.messages:
         if isinstance(message.content, list):
@@ -275,6 +263,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     else:
                         raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
 
+    return MultimodalParams(**multimodal_params_dict)
+
+
+def _select_chat_template_tools(request: ChatCompletionRequest) -> Optional[List[dict]]:
+    """Select the tool schemas exposed to the model's chat template."""
     tools = None
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False
@@ -293,6 +286,24 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         else:
             tools = [item.function.model_dump(exclude_none=True) for item in request.tools]
 
+    return tools
+
+
+async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
+    from .api_http import g_objs
+
+    if request.logit_bias is not None:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logit_bias parameter is not currently supported",
+        )
+
+    if request.function_call != "none":
+        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
+
+    created_time = int(time.time())
+    multimodal_params = _build_multimodal_params(request)
+    tools = _select_chat_template_tools(request)
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
         "do_sample": request.do_sample,
@@ -340,8 +351,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
     sampling_params.verify()
-    multimodal_params = MultimodalParams(**multimodal_params_dict)
-
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
