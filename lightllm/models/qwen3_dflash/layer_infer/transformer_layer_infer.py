@@ -18,6 +18,7 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
+        self.partial_rotary_factor = network_config.get("partial_rotary_factor", 1.0)
 
     def context_forward(
         self,
@@ -38,6 +39,7 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
             None,
             infer_state.position_cos,
             infer_state.position_sin,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         return input_embdings
@@ -62,5 +64,6 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
             cache_kv[:, : self.tp_k_head_num_, :],
             infer_state.position_cos,
             infer_state.position_sin,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         return q, cache_kv

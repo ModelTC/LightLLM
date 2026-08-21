@@ -6,6 +6,8 @@ import torch
 from lightllm.common.basemodel import batch_objs
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
 from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
+from lightllm.models.qwen3_dflash.layer_infer import transformer_layer_infer as qwen3_dflash_layer_infer
+from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dspark.layer_weights import pre_and_post_layer_weight as dspark_pre_post_weight
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
@@ -167,9 +169,32 @@ def test_qwen35_dspark_adapter_uses_current_checkpoint_rope_layout(monkeypatch):
             "dflash_config": {"mask_token_id": 1},
             "rope_parameters": {
                 "rope_theta": 1_000_000,
-                "partial_rotary_factor": 0.25,
+                "factor": 32.0,
+                "original_max_position_embeddings": 8192,
+                "rope_type": "yarn",
+            },
+        }
+
+    monkeypatch.setattr(Qwen3DSparkModel, "_init_config", init_dspark_config)
+    model = Qwen3_5DSparkModel.__new__(Qwen3_5DSparkModel)
+
+    model._init_config()
+
+    assert model.config["rope_scaling"] == model.config["rope_parameters"]
+    assert model.config["rope_theta"] == 1_000_000
+    assert model.config["partial_rotary_factor"] == 1.0
+    assert model.config["mask_token_id"] == 1
+
+
+def test_qwen35_dspark_adapter_preserves_custom_partial_rotary_layout(monkeypatch):
+    def init_dspark_config(self):
+        self.config = {
+            "dflash_config": {"mask_token_id": 1},
+            "rope_parameters": {
                 "mrope_interleaved": True,
                 "mrope_section": [11, 11, 10],
+                "partial_rotary_factor": 0.25,
+                "rope_theta": 10_000_000,
                 "rope_type": "default",
             },
         }
@@ -179,10 +204,52 @@ def test_qwen35_dspark_adapter_uses_current_checkpoint_rope_layout(monkeypatch):
 
     model._init_config()
 
-    assert model.config["rope_scaling"] is None
-    assert model.config["rope_theta"] == 1_000_000
-    assert model.config["partial_rotary_factor"] == 1.0
-    assert model.config["mask_token_id"] == 1
+    assert model.config["partial_rotary_factor"] == 0.25
+    assert model.config["rope_scaling"] == model.config["rope_parameters"]
+
+
+def test_qwen3_parallel_block_draft_applies_partial_rotary_factor(monkeypatch):
+    rotary_factors = []
+    monkeypatch.setattr(qwen3_dflash_layer_infer, "qk_rmsnorm_forward", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        qwen3_dflash_layer_infer,
+        "rotary_emb_fwd",
+        lambda *args, **kwargs: rotary_factors.append(kwargs["partial_rotary_factor"]),
+    )
+
+    class Projection:
+        def __init__(self, width):
+            self.width = width
+
+        def mm(self, input, **kwargs):
+            return input.new_zeros((input.shape[0], self.width))
+
+    class QKNorm:
+        k_weight = object()
+
+        def __call__(self, *args, **kwargs):
+            return None
+
+    layer = Qwen3DFlashTransformerLayerInfer.__new__(Qwen3DFlashTransformerLayerInfer)
+    layer.tp_q_head_num_ = 1
+    layer.tp_k_head_num_ = 1
+    layer.tp_v_head_num_ = 1
+    layer.head_dim_ = 8
+    layer.eps_ = 1e-6
+    layer.partial_rotary_factor = 0.25
+    layer._post_cache_kv = lambda *args, **kwargs: None
+    infer_state = SimpleNamespace(position_cos=object(), position_sin=object())
+    layer_weight = SimpleNamespace(
+        q_proj=Projection(8),
+        kv_proj=Projection(16),
+        qk_norm_weight_=QKNorm(),
+    )
+    inputs = torch.zeros((2, 4))
+
+    layer.context_forward(inputs, infer_state, layer_weight)
+    layer._get_qkv(inputs, infer_state, layer_weight)
+
+    assert rotary_factors == [0.25, 0.25]
 
 
 def test_vanilla_markov_local_sampling_matches_full_logits():

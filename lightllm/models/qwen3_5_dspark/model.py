@@ -15,9 +15,11 @@ class Qwen3_5DSparkModel(Qwen3DSparkModel):
         if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
             self.config["rope_theta"] = rope_parameters["rope_theta"]
 
-        # Match the draft checkpoint's 1D full-head RoPE layout.
-        self.config["rope_scaling"] = None
-        self.config["partial_rotary_factor"] = 1.0
+        # The draft is Qwen3-style and owns a 1D rotary cache. Released
+        # checkpoints rotate the full head, while target-shaped custom
+        # checkpoints can retain Qwen3.5's partial rotary layout.
+        self.config["rope_scaling"] = rope_parameters
+        self.config["partial_rotary_factor"] = rope_parameters.get("partial_rotary_factor", 1.0)
 
     def _init_custom(self):
         # Draft and target use different rotary shapes, so the draft owns its rotary cache.
