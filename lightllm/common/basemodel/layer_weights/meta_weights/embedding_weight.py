@@ -8,8 +8,16 @@ from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 
 
 class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
-    def __init__(self, dim: int, vocab_size: int, weight_name: str, data_type: torch.dtype):
-        super().__init__()
+    def __init__(
+        self,
+        dim: int,
+        vocab_size: int,
+        weight_name: str,
+        data_type: torch.dtype,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ):
+        super().__init__(tp_rank=tp_rank, tp_world_size=tp_world_size)
         self.dim = dim
         self.vocab_size = vocab_size
         # 计算 split_indexes
@@ -92,9 +100,18 @@ class LMHeadWeight(EmbeddingWeight):
         weight_name: str,
         data_type: torch.dtype,
         embedding_weight: Optional[EmbeddingWeight] = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
     ):
         self._embedding_weight = embedding_weight
-        super().__init__(dim=dim, vocab_size=vocab_size, weight_name=weight_name, data_type=data_type)
+        super().__init__(
+            dim=dim,
+            vocab_size=vocab_size,
+            weight_name=weight_name,
+            data_type=data_type,
+            tp_rank=tp_rank,
+            tp_world_size=tp_world_size,
+        )
 
     def _create_weight(self):
         if self._embedding_weight is not None:
