@@ -2,7 +2,7 @@ import enum
 import time
 import copy
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
@@ -41,6 +41,90 @@ class ObjType(enum.Enum):
     PD_UPLOAD_PREFILL_PROMPT_IDS = 4  # prefill 节点上报生成的 prompt ids 信息。
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
+    TOKEN_PACKS_COMPACT = 7  # 不含 logprobs 等可选字段的紧凑 token 包。
+
+
+PD_COMPACT_TOKEN_INFO_LEN = 9
+PDCompactTokenInfo = Tuple[
+    int,  # sub request id
+    str,  # decoded text
+    int,  # count_output_tokens
+    int,  # prompt_tokens
+    int,  # prompt_cache_len
+    int,  # mtp_accepted_token_num
+    int,  # finish status
+    Optional[str],  # node_mode, first token only
+    Optional[Tuple[int, int, int]],  # input text/audio/image tokens, first token only
+]
+_PD_COMPACT_METADATA_KEYS = frozenset(
+    {
+        "count_output_tokens",
+        "prompt_tokens",
+        "prompt_cache_len",
+        "mtp_accepted_token_num",
+        "node_mode",
+        "input_usage",
+    }
+)
+_PD_INPUT_USAGE_KEYS = frozenset({"input_text_tokens", "input_audio_tokens", "input_image_tokens"})
+
+
+def build_pd_compact_token_info(sub_req_id, text, metadata, finish_status) -> Optional[PDCompactTokenInfo]:
+    """Build the lossless compact form, or return None for optional metadata."""
+    if not metadata.keys() <= _PD_COMPACT_METADATA_KEYS:
+        return None
+
+    input_usage = metadata.get("input_usage")
+    compact_input_usage = None
+    if input_usage is not None:
+        if input_usage.keys() != _PD_INPUT_USAGE_KEYS:
+            return None
+        compact_input_usage = (
+            input_usage["input_text_tokens"],
+            input_usage["input_audio_tokens"],
+            input_usage["input_image_tokens"],
+        )
+
+    return (
+        sub_req_id,
+        text,
+        metadata["count_output_tokens"],
+        metadata["prompt_tokens"],
+        metadata["prompt_cache_len"],
+        metadata["mtp_accepted_token_num"],
+        finish_status.status,
+        metadata.get("node_mode"),
+        compact_input_usage,
+    )
+
+
+def unpack_pd_compact_token_info(token_info: PDCompactTokenInfo):
+    (
+        sub_req_id,
+        text,
+        count_output_tokens,
+        prompt_tokens,
+        prompt_cache_len,
+        mtp_accepted_token_num,
+        finish_status,
+        node_mode,
+        input_usage,
+    ) = token_info
+    metadata = {
+        "count_output_tokens": count_output_tokens,
+        "prompt_tokens": prompt_tokens,
+        "prompt_cache_len": prompt_cache_len,
+        "mtp_accepted_token_num": mtp_accepted_token_num,
+    }
+    if node_mode is not None:
+        metadata["node_mode"] = node_mode
+    if input_usage is not None:
+        metadata["input_usage"] = {
+            "input_text_tokens": input_usage[0],
+            "input_audio_tokens": input_usage[1],
+            "input_image_tokens": input_usage[2],
+        }
+    return sub_req_id, text, metadata, finish_status
 
 
 @dataclass
@@ -132,7 +216,7 @@ class PDAgentMetadata:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: Optional[bytes] = None
-    page_xfer_handles: Optional[int] = None
+    page_xfer_handles: Optional[Dict[int, object]] = None
 
 
 @dataclass
@@ -140,6 +224,7 @@ class PDChunckedTransTask:
     request_id: int
     start_kv_index: int
     end_kv_index: int
+    request_kv_len: int
     time_out_secs: int
 
     pd_master_node_id: int
@@ -168,6 +253,7 @@ class PDChunckedTransTask:
     # transfer params
     src_page_index: Optional[int] = None
     dst_page_index: Optional[int] = None
+    transfer_nbytes: Optional[int] = None
 
     # xfer_handle
     xfer_handle: Optional[int] = None

@@ -49,6 +49,8 @@ torch.backends.cudnn.enabled = True
 
 
 class TpPartBaseModel:
+    is_mtp_draft_model = False
+
     # weight class
     pre_and_post_weight_class = None
     transformer_weight_class = None
@@ -63,6 +65,7 @@ class TpPartBaseModel:
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
+        self.ep_balance_monitor = None
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
@@ -138,6 +141,7 @@ class TpPartBaseModel:
 
         self._autotune_warmup()
         self._full_att_decode_autotune()
+        self._kernel_warmup()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
@@ -274,7 +278,7 @@ class TpPartBaseModel:
     def _init_cudagraph(self):
         self.graph = (
             None
-            if self.disable_cudagraph
+            if self.args.run_mode == "prefill" or self.disable_cudagraph
             else CudaGraph(
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
@@ -315,7 +319,7 @@ class TpPartBaseModel:
         Candidate batch sizes follow the same schedule as CUDA Graph capture.
         Actual benchmarking is delegated to ``fa3_decode_autotune`` in ``sgl_utils``.
         """
-        if self.disable_cudagraph:
+        if self.args.run_mode == "prefill" or self.disable_cudagraph:
             return
         # Only tune on the main model; MTP draft models skip this path.
         if getattr(self, "is_mtp_draft_model", False):
@@ -348,15 +352,24 @@ class TpPartBaseModel:
     def _init_custom(self):
         pass
 
+    def _kernel_warmup(self):
+        """Warm model-specific kernels before CUDA graph capture."""
+        return
+
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
         model_input.to_cuda()
         assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
-            return self._prefill(model_input)
-        else:
-            return self._decode(model_input)
+            model_output = self._prefill(model_input)
+            self._record_prefill_ep_balance()
+            return model_output
+        return self._decode(model_input)
+
+    def _record_prefill_ep_balance(self):
+        if self.ep_balance_monitor is not None:
+            self.ep_balance_monitor.record_prefill_round()
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
@@ -618,8 +631,10 @@ class TpPartBaseModel:
         else:
             infer_batch_size = model_input.batch_size
 
-        if self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
+        if (
+            self.graph is not None
+            and not self.is_mtp_draft_model
+            and self.graph.can_run(batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len)
         ):
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
             model_input = self._create_padded_decode_model_input(
@@ -665,6 +680,7 @@ class TpPartBaseModel:
     def _context_forward(self, infer_state: InferStateInfo):
 
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
+        infer_state.mtp_draft_input_hiddens = None
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
             infer_state.prepare_prefill_dp_balance()
@@ -710,14 +726,20 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
+        mtp_main_output_hiddens = None
+        if isinstance(predict_logits, tuple):
+            predict_logits, mtp_main_output_hiddens = predict_logits
         model_output = ModelOutput(logits=predict_logits, prompt_logics=infer_state.prompt_logics)
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            if infer_state.need_dp_prefill_balance:
-                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            if mtp_main_output_hiddens is not None:
+                model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
+            else:
+                input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+                if infer_state.need_dp_prefill_balance:
+                    input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
+                model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -729,6 +751,7 @@ class TpPartBaseModel:
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+        infer_state.mtp_draft_input_hiddens = None
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
         for i in range(self.layers_num):
@@ -736,16 +759,22 @@ class TpPartBaseModel:
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        predict_logits: torch.Tensor = self.post_infer.token_forward(
+        predict_logits = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
+        mtp_main_output_hiddens = None
+        if isinstance(predict_logits, tuple):
+            predict_logits, mtp_main_output_hiddens = predict_logits
 
         model_output = ModelOutput(logits=predict_logits.contiguous())
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            if mtp_main_output_hiddens is not None:
+                model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
+            else:
+                input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+                model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -842,6 +871,7 @@ class TpPartBaseModel:
         dist_group_manager.clear_deepep_buffer()
         model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
+        self._record_prefill_ep_balance()
         return model_output0, model_output1
 
     @torch.no_grad()
@@ -982,18 +1012,31 @@ class TpPartBaseModel:
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
         g_cache_manager.cache_env_out()
+        mtp_main_output_hiddens = None
+        mtp_main_output_hiddens1 = None
+        if isinstance(predict_logits, tuple):
+            predict_logits, mtp_main_output_hiddens = predict_logits
+        if isinstance(predict_logits1, tuple):
+            predict_logits1, mtp_main_output_hiddens1 = predict_logits1
 
         model_output = ModelOutput(logits=predict_logits.contiguous(), prompt_logics=infer_state.prompt_logics)
         model_output1 = ModelOutput(logits=predict_logits1.contiguous(), prompt_logics=infer_state1.prompt_logics)
 
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            if infer_state.need_dp_prefill_balance:
-                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-                input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+            if mtp_main_output_hiddens is not None:
+                model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
+            else:
+                input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+                if infer_state.need_dp_prefill_balance:
+                    input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
+                model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            if mtp_main_output_hiddens1 is not None:
+                model_output1.mtp_main_output_hiddens = mtp_main_output_hiddens1.contiguous()
+            else:
+                input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+                if infer_state.need_dp_prefill_balance:
+                    input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
+                model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
         return model_output, model_output1
 
@@ -1020,15 +1063,27 @@ class TpPartBaseModel:
         predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
+        mtp_main_output_hiddens = None
+        mtp_main_output_hiddens1 = None
+        if isinstance(predict_logits, tuple):
+            predict_logits, mtp_main_output_hiddens = predict_logits
+        if isinstance(predict_logits1, tuple):
+            predict_logits1, mtp_main_output_hiddens1 = predict_logits1
 
         model_output = ModelOutput(logits=predict_logits.contiguous())
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+            if mtp_main_output_hiddens is not None:
+                model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
+            else:
+                input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+                model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            if mtp_main_output_hiddens1 is not None:
+                model_output1.mtp_main_output_hiddens = mtp_main_output_hiddens1.contiguous()
+            else:
+                input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+                model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()

@@ -4,7 +4,8 @@ import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
-from transformers import GenerationConfig
+
+from lightllm.utils.config_utils import get_generation_config_diff_dict
 
 MAX_SEED = (1 << 63) - 1
 
@@ -162,7 +163,7 @@ class CompletionRequest(BaseModel):
     def load_generation_cfg(cls, weight_dir: str):
         """Load default values from model generation config."""
         try:
-            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            generation_cfg = get_generation_config_diff_dict(weight_dir)
             cls._loaded_defaults = {
                 "do_sample": generation_cfg.get("do_sample", True),
                 "presence_penalty": generation_cfg.get("presence_penalty", 0.0),
@@ -223,7 +224,7 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
-    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    reasoning_effort: Optional[Literal["none", "low", "medium", "high", "max"]] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
@@ -244,7 +245,7 @@ class ChatCompletionRequest(BaseModel):
     def load_generation_cfg(cls, weight_dir: str):
         """Load default values from model generation config."""
         try:
-            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            generation_cfg = get_generation_config_diff_dict(weight_dir)
             cls._loaded_defaults = {
                 "do_sample": generation_cfg.get("do_sample", True),
                 "presence_penalty": generation_cfg.get("presence_penalty", 0.0),
