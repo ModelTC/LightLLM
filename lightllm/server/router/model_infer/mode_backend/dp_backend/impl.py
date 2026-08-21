@@ -6,6 +6,8 @@ from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.pre import (
+    prepare_prefill_inputs,
+    prepare_decode_inputs,
     padded_prepare_prefill_inputs,
     padded_prepare_decode_inputs,
     padded_overlap_prepare_prefill_inputs,
@@ -198,7 +200,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         event_pack: OverlapEventPack,
         prefill_reqs: List[InferReq],
     ):
-        model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
+        model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
@@ -210,16 +212,16 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=model_output.logits[:run_reqs_num],
-                    b_req_idx=model_input.b_req_idx[:run_reqs_num],
-                    b_mtp_index=model_input.b_mtp_index[:run_reqs_num],
+                    logits=model_output.logits,
+                    b_req_idx=model_input.b_req_idx,
+                    b_mtp_index=model_input.b_mtp_index,
                     run_reqs=run_reqs,
                     is_prefill=True,
-                    b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu[:run_reqs_num],
+                    b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                     mask_func=None,
                 )
                 g_infer_context.copy_linear_att_state_to_cache_buffer(
-                    b_req_idx=model_input.b_req_idx[:run_reqs_num],
+                    b_req_idx=model_input.b_req_idx,
                     reqs=run_reqs,
                 )
                 sync_event = torch.cuda.Event()
@@ -251,7 +253,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def decode_normal(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
-        model_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(req_objs=decode_reqs)
+        model_input, run_reqs = prepare_decode_inputs(req_objs=decode_reqs)
         model_input: ModelInput = model_input
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
@@ -263,9 +265,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=model_output.logits[:run_reqs_num],
-                    b_req_idx=model_input.b_req_idx[:run_reqs_num],
-                    b_mtp_index=model_input.b_mtp_index[:run_reqs_num],
+                    logits=model_output.logits,
+                    b_req_idx=model_input.b_req_idx,
+                    b_mtp_index=model_input.b_mtp_index,
                     run_reqs=run_reqs,
                     is_prefill=False,
                     mask_func=None,

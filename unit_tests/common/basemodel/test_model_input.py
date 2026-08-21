@@ -83,6 +83,14 @@ def test_prefill_requires_prefill_metadata():
         model_input.check_input()
 
 
+def test_prefill_requires_prefill_output_markers():
+    model_input = _create_model_input(is_prefill=True)
+    model_input.b_prefill_has_output_cpu = None
+
+    with pytest.raises(AssertionError, match="prefill must provide b_prefill_has_output_cpu"):
+        model_input.check_input()
+
+
 def test_prefill_requires_decode_request_markers():
     model_input = _create_model_input(is_prefill=True)
     model_input.b_is_decode_req = None
@@ -132,3 +140,81 @@ def test_padded_prefill_adds_non_decode_request_marker():
 
     assert padded_input.b_is_decode_req.dtype == torch.bool
     assert padded_input.b_is_decode_req.tolist() == [True, False]
+
+
+def test_padded_prefill_builds_internal_request_for_empty_input():
+    model_input = ModelInput(
+        batch_size=0,
+        total_token_num=0,
+        max_q_seq_len=0,
+        max_kv_seq_len=0,
+        max_cache_len=0,
+        prefix_total_token_num=0,
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        b_mtp_index=torch.empty((0,), dtype=torch.int32),
+        b_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_is_decode_req=torch.empty((0,), dtype=torch.bool),
+        b_ready_cache_len=torch.empty((0,), dtype=torch.int32),
+        b_prefill_start_loc=torch.empty((0,), dtype=torch.int32),
+        mem_indexes=torch.empty((0,), dtype=torch.int32),
+        is_prefill=True,
+        b_prefill_has_output_cpu=[],
+        multimodal_params=[],
+    )
+    model = SimpleNamespace(
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99),
+        req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
+    )
+
+    padded_input = TpPartBaseModel._create_padded_prefill_model_input(
+        model,
+        model_input=model_input,
+        new_handle_token_num=1,
+    )
+
+    assert model_input.batch_size == 0
+    assert padded_input.batch_size == 1
+    assert padded_input.input_ids.tolist() == [1]
+    assert padded_input.mem_indexes.tolist() == [99]
+    assert padded_input.b_req_idx.tolist() == [88]
+    assert padded_input.b_seq_len.tolist() == [1]
+    assert padded_input.b_prefill_has_output_cpu == [False]
+
+
+def test_padded_decode_builds_internal_request_from_empty_token_tensor():
+    model_input = ModelInput(
+        batch_size=0,
+        total_token_num=0,
+        max_q_seq_len=1,
+        max_kv_seq_len=0,
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        b_mtp_index=torch.empty((0,), dtype=torch.int32),
+        b_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_position_delta=torch.empty((0,), dtype=torch.int32),
+        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
+        mem_indexes=torch.empty((0,), dtype=torch.int32),
+        is_prefill=False,
+        multimodal_params=[],
+    )
+    model = SimpleNamespace(
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99),
+        req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
+    )
+
+    padded_input = TpPartBaseModel._create_padded_decode_model_input(
+        model,
+        model_input=model_input,
+        new_batch_size=1,
+    )
+
+    assert model_input.batch_size == 0
+    assert padded_input.batch_size == 1
+    assert padded_input.input_ids.tolist() == [1]
+    assert padded_input.mem_indexes.tolist() == [99]
+    assert padded_input.b_req_idx.tolist() == [88]
+    assert padded_input.b_seq_len.tolist() == [2]
+    assert padded_input.b_shared_seq_len.tolist() == [0]
+    assert padded_input.b_shared_radix_node_id.tolist() == [-1]

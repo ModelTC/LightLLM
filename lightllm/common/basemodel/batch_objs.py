@@ -46,7 +46,8 @@ class ModelInput:
     mem_indexes_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
-    b_prefill_has_output_cpu: List[bool] = None  # 标记进行prefill的请求是否具有输出
+    # 标记 prefill 请求是否会在本轮产生输出。Prefill 必填（空 batch 使用空 list），decode 不使用。
+    b_prefill_has_output_cpu: List[bool] = None
 
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输入变量。只在特殊的模型模式下才会具体使用和生效。
@@ -113,8 +114,8 @@ class ModelInput:
             assert self.b_is_decode_req.shape == self.b_req_idx.shape
             assert self.b_is_decode_req.dtype == torch.bool
             assert self.b_position_delta is None, "prefill must not provide b_position_delta"
-            if self.b_prefill_has_output_cpu is not None:
-                assert len(self.b_prefill_has_output_cpu) == self.batch_size
+            assert self.b_prefill_has_output_cpu is not None, "prefill must provide b_prefill_has_output_cpu"
+            assert len(self.b_prefill_has_output_cpu) == self.batch_size
         else:
             assert self.max_q_seq_len == 1
             assert self.b_position_delta is not None

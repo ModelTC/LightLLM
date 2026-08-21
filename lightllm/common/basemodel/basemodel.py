@@ -561,7 +561,7 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ):
-        if self.args.enable_prefill_decode_mixed:
+        if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
             gather_token_prefill_decode_mixed(
                 input_ids=model_input.input_ids,
                 req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -574,10 +574,11 @@ class TpPartBaseModel:
         origin_handle_token_num = model_input.input_ids.shape[0]
         origin_batch_size = model_input.batch_size
 
+        # 即使当前 DP rank 没有实际 token，也需要补出一个 dummy token 执行模型；
+        # TPSP 模式再将这个实际推理数量向上对齐到 TP world size 的整数倍。
+        infer_handle_token_num = max(1, origin_handle_token_num)
         if self.args.enable_tpsp_mix_mode:
-            infer_handle_token_num = triton.cdiv(origin_handle_token_num, self.tp_world_size_) * self.tp_world_size_
-        else:
-            infer_handle_token_num = origin_handle_token_num
+            infer_handle_token_num = triton.cdiv(infer_handle_token_num, self.tp_world_size_) * self.tp_world_size_
 
         if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=infer_handle_token_num):
             infer_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
@@ -617,62 +618,64 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ) -> ModelOutput:
-        # for overlap mode
         if model_input.input_ids is None:
-            model_input.input_ids = gather_token(
-                self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                model_input.b_req_idx,
-                model_input.b_mtp_index,
-            )
+            if model_input.batch_size > 0:
+                model_input.input_ids = gather_token(
+                    self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                    model_input.b_req_idx,
+                    model_input.b_mtp_index,
+                )
+            else:
+                # 空 DP rank 不启动 gather kernel，但仍将 input_ids 规范化为
+                # CUDA 空 tensor；后续内部 padding 会为 dummy request 填入 token id 1。
+                model_input.input_ids = torch.empty(
+                    (0,),
+                    dtype=torch.int64,
+                    device=model_input.b_req_idx.device,
+                )
 
         origin_batch_size = model_input.batch_size
+        # 空 DP rank 先补出一个 dummy request；TPSP 模式下继续将 batch size
+        # 向上对齐到 TP world size 的整数倍，保证后续切分得到合法 shape。
+        infer_batch_size = max(1, origin_batch_size)
         if self.args.enable_tpsp_mix_mode:
-            infer_batch_size = triton.cdiv(model_input.batch_size, self.tp_world_size_) * self.tp_world_size_
-        else:
-            infer_batch_size = model_input.batch_size
+            infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
 
-        if self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
-        ):
+        # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
+        # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
+        infer_max_kv_seq_len = max(2, model_input.max_kv_seq_len)
+        use_cuda_graph = self.graph is not None and self.graph.can_run(
+            batch_size=infer_batch_size,
+            max_len_in_batch=infer_max_kv_seq_len,
+        )
+        need_capture = False
+        if use_cuda_graph:
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
-            model_input = self._create_padded_decode_model_input(
-                model_input=model_input, new_batch_size=infer_batch_size
-            )
-            infer_state = self._create_inferstate(model_input)
             need_capture = self.graph.need_capture(infer_batch_size)
-            infer_state.is_cuda_graph = need_capture
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_seq_len,
-                infer_state.mem_index,
-            )
-            infer_state.init_some_extra_state(self)
-            infer_state.init_att_state()
 
+        model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
+        infer_state = self._create_inferstate(model_input)
+        # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
+        # 因此必须在 init_att_state 之前完成赋值。
+        infer_state.is_cuda_graph = need_capture
+        copy_kv_index_to_req(
+            self.req_manager.req_to_token_indexs,
+            infer_state.b_req_idx,
+            infer_state.b_seq_len,
+            infer_state.mem_index,
+        )
+        infer_state.init_some_extra_state(self)
+        infer_state.init_att_state()
+
+        if use_cuda_graph:
             if need_capture:
                 model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
             else:
                 model_output: ModelOutput = self.graph.replay(infer_state)
-
-            model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
         else:
-            model_input = self._create_padded_decode_model_input(
-                model_input=model_input, new_batch_size=infer_batch_size
-            )
-            infer_state = self._create_inferstate(model_input)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_seq_len,
-                infer_state.mem_index,
-            )
-            infer_state.init_some_extra_state(self)
-            infer_state.init_att_state()
             model_output = self._token_forward(infer_state)
-            model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
 
-        return model_output
+        return self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
@@ -1119,6 +1122,7 @@ class TpPartBaseModel:
                 is_prefill=True,
                 b_ready_cache_len=b_ready_cache_len,
                 b_prefill_start_loc=b_prefill_start_loc,
+                b_prefill_has_output_cpu=[False],
                 multimodal_params=[{"images": [], "audios": []}],
             )
             model_output = self.forward(

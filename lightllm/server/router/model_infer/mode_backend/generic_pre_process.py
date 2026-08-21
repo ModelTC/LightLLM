@@ -51,11 +51,13 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         else:
             b_is_decode_req.append(False)
 
-    max_kv_seq_len = max(b_seq_len)
-    max_cache_len = max(b_ready_cache_len)
-    max_q_seq_len = max(b_q_seq_len)
+    # DP 模式下某个 rank 可能没有本地请求。这里保留真实的 0 shape，
+    # 推理所需的 dummy request 统一由 BaseModel 在执行前补齐。
+    max_kv_seq_len = max(b_seq_len, default=0)
+    max_cache_len = max(b_ready_cache_len, default=0)
+    max_q_seq_len = max(b_q_seq_len, default=0)
 
-    input_ids = np.concatenate(input_ids, dtype=np.int64)
+    input_ids = np.concatenate(input_ids, dtype=np.int64) if input_ids else np.empty((0,), dtype=np.int64)
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
@@ -122,8 +124,10 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             multimodal_params.append(req.multimodal_params)
             b_q_seq_len.append(1)
 
-    max_kv_seq_len = max(b_seq_len)
-    max_q_seq_len = max(b_q_seq_len)
+    # 空 DP rank 同样构建完整的 decode ModelInput；BaseModel 会在 token
+    # gather 和 attention 初始化之前补入内部 dummy request。
+    max_kv_seq_len = max(b_seq_len, default=0)
+    max_q_seq_len = max(b_q_seq_len, default=1)
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
@@ -134,12 +138,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         [req.get_radix_cache_shared_len() for req in run_reqs], dtype=torch.int32, device="cpu"
     )
     b_shared_radix_node_id = torch.tensor(
-        [
-            -1
-            if req.shared_kv_node is None
-            else req.shared_kv_node.time_id % INT64_MAX
-            for req in run_reqs
-        ],
+        [-1 if req.shared_kv_node is None else req.shared_kv_node.time_id % INT64_MAX for req in run_reqs],
         dtype=torch.int64,
         device="cpu",
     )
