@@ -1326,31 +1326,27 @@ async def anthropic_count_tokens_impl(raw_request: Request) -> Response:
     from .build_prompt import build_prompt
     from .core.objs.sampling_params import SamplingParams
 
-    try:
-        raw_body = await raw_request.json()
-        # LiteLLM validates the body as a Messages creation request, where
-        # max_tokens is required. Anthropic's count_tokens request omits it;
-        # the value has no effect on prompt rendering, so provide a sentinel.
-        raw_body.setdefault("max_tokens", 1)
-        chat_dict, _ = await asyncio.to_thread(_anthropic_to_chat_request, raw_body)
-        chat_request = ChatCompletionRequest(**chat_dict)
+    raw_body = await raw_request.json()
+    # LiteLLM validates the body as a Messages creation request, where
+    # max_tokens is required. Anthropic's count_tokens request omits it;
+    # the value has no effect on prompt rendering, so provide a sentinel.
+    raw_body.setdefault("max_tokens", 1)
+    chat_dict, _ = await asyncio.to_thread(_anthropic_to_chat_request, raw_body)
+    chat_request = ChatCompletionRequest(**chat_dict)
 
-        prompt = await build_prompt(chat_request, _select_chat_template_tools(chat_request))
-        multimodal_params = _build_multimodal_params(chat_request)
-        await multimodal_params.verify_and_preload(raw_request)
+    prompt = await build_prompt(chat_request, _select_chat_template_tools(chat_request))
+    multimodal_params = _build_multimodal_params(chat_request)
+    await multimodal_params.verify_and_preload(raw_request)
 
-        sampling_params = SamplingParams()
-        sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, add_special_tokens=False)
-        sampling_params.verify()
-        input_tokens = g_objs.httpserver_manager.tokens(
-            prompt,
-            multimodal_params,
-            sampling_params,
-            {"add_special_tokens": False},
-        )
-    except Exception as exc:
-        logger.exception("Failed to count Anthropic message tokens")
-        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, f"Token counting failed: {exc}")
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, add_special_tokens=False)
+    sampling_params.verify()
+    input_tokens = g_objs.httpserver_manager.tokens(
+        prompt,
+        multimodal_params,
+        sampling_params,
+        {"add_special_tokens": False},
+    )
 
     return JSONResponse(
         {
