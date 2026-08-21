@@ -19,7 +19,6 @@ class Deepseek3_2TransformerLayerWeight(Deepseek2TransformerLayerWeight):
         self._init_indexer_weight()
 
     def _init_indexer_weight(self):
-
         prefix = f"model.layers.{self.layer_num_}.self_attn.indexer"
 
         assert self.index_n_heads % self.tp_world_size_ == 0
@@ -28,7 +27,7 @@ class Deepseek3_2TransformerLayerWeight(Deepseek2TransformerLayerWeight):
             out_dims=[self.index_n_heads * self.index_head_dim],
             weight_names=f"{prefix}.wq_b.weight",
             data_type=self.data_type_,
-            quant_method=None,
+            quant_method=self.get_quant_method("indexer_wq_b"),
             tp_rank=self.tp_rank_,
             tp_world_size=self.tp_world_size_,
         )
@@ -37,7 +36,7 @@ class Deepseek3_2TransformerLayerWeight(Deepseek2TransformerLayerWeight):
             out_dims=[self.index_head_dim],
             weight_names=f"{prefix}.wk.weight",
             data_type=self.data_type_,
-            quant_method=None,
+            quant_method=self.get_quant_method("indexer_wk"),
             tp_rank=0,
             tp_world_size=1,
         )

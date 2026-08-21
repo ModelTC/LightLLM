@@ -16,6 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
 from typing import List, Tuple, Union
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -37,6 +39,41 @@ from ..models import deepseek3_2  # noqa: F401  # registers the deepseek_v32 con
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
+
+
+def _load_tokenizers_backend_tokenizer(
+    tokenizer_name: str,
+    error: ValueError,
+    *args,
+    **kwargs,
+) -> Union[PreTrainedTokenizerFast, None]:
+    if "Tokenizer class TokenizersBackend does not exist or is not currently imported" not in str(error):
+        return None
+    if not os.path.isdir(tokenizer_name):
+        return None
+
+    tokenizer_file = os.path.join(tokenizer_name, "tokenizer.json")
+    tokenizer_config_file = os.path.join(tokenizer_name, "tokenizer_config.json")
+    if not os.path.exists(tokenizer_file) or not os.path.exists(tokenizer_config_file):
+        return None
+
+    with open(tokenizer_config_file, "r", encoding="utf-8") as fp:
+        tokenizer_config = json.load(fp)
+    if tokenizer_config.get("tokenizer_class") != "TokenizersBackend":
+        return None
+
+    special_token_kwargs = {
+        name: tokenizer_config[name]
+        for name in ("bos_token", "eos_token", "unk_token", "sep_token", "pad_token", "cls_token", "mask_token")
+        if tokenizer_config.get(name) is not None
+    }
+    if tokenizer_config.get("extra_special_tokens"):
+        special_token_kwargs["additional_special_tokens"] = tokenizer_config["extra_special_tokens"]
+    if tokenizer_config.get("model_max_length") is not None:
+        special_token_kwargs["model_max_length"] = tokenizer_config["model_max_length"]
+
+    logger.info("Loading TokenizersBackend tokenizer through tokenizer.json fast-tokenizer fallback.")
+    return PreTrainedTokenizerFast(tokenizer_file=tokenizer_file, *args, **special_token_kwargs, **kwargs)
 
 
 def get_tokenizer(
@@ -71,6 +108,10 @@ def get_tokenizer(
         logger.warning(f"load fast tokenizer fail: {str(e)}")
         kwargs["use_fast"] = False
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
+    except ValueError as e:
+        tokenizer = _load_tokenizers_backend_tokenizer(tokenizer_name, e, *args, **kwargs)
+        if tokenizer is None:
+            raise
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         logger.info(

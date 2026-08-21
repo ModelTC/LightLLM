@@ -31,7 +31,7 @@ def trans_topk_index_to_mem_index(topk_index: torch.Tensor, ragged_mem_index: to
 
     grid = (topk_index.shape[0],)
 
-    topk_mem_index = torch.empty_like(topk_index)
+    topk_mem_index = torch.empty(topk_index.shape, dtype=torch.int32, device=topk_index.device)
 
     _trans_topk_index_to_mem_index[grid](
         topk_index=topk_index,

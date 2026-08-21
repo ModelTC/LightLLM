@@ -1,0 +1,4 @@
+interface:
+  display_name: "GLM-5.2 Static Matrix Benchmark"
+  short_description: "运行四节点 GLM-5.2 prefill/decode 矩阵压测"
+  default_prompt: "Use $glm52-static-matrix-benchmark to run the requested four-node prefill and constrained-decode matrix and produce Markdown tables."
