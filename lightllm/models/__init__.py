@@ -21,6 +21,7 @@ from lightllm.models.phi3.model import Phi3TpPartModel
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
+from lightllm.models.glm5_2.model import Glm5_2TpPartModel
 from lightllm.models.internvl.model import (
     InternVLLlamaTpPartModel,
     InternVLPhi3TpPartModel,
@@ -45,6 +46,7 @@ from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
 from lightllm.models.qwen3_5_moe.model import Qwen3_5MOETpPartModel
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
+from lightllm.models.glm5_2_mtp.model import Glm5_2MTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
 from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel

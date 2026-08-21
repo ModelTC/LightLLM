@@ -1,141 +1,114 @@
+import torch
 import triton
 import triton.language as tl
-import torch
 
 
 @triton.jit
 def _fp8_paged_mqa_logits_kernel(
     Q_ptr,
-    KV_ptr,
-    KVScale_ptr,
-    Weights_ptr,
-    MemIndex_ptr,
-    CuSeqlenKs_ptr,
-    CuSeqlenKe_ptr,
-    Output_ptr,
-    seq_len,
-    seq_len_kv,
-    num_heads,
-    head_dim,
     stride_q_seq,
     stride_q_head,
-    stride_q_dim,
-    stride_kv_pool,
-    stride_kv_dim,
+    K_ptr,
+    stride_k_pool,
+    KScale_ptr,
+    stride_kscale_pool,
+    Weights_ptr,
     stride_w_seq,
-    stride_w_head,
+    RaggedMemIndex_ptr,
+    CuSeqlenKs_ptr,
+    CuSeqlenKe_ptr,
+    Out_ptr,
     stride_o_seq,
-    stride_o_kv,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_D: tl.constexpr,
+    HEAD_NUM: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
+    cur_q_index = tl.program_id(0)
+    block_n_index = tl.program_id(1)
 
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    ks = tl.load(CuSeqlenKs_ptr + cur_q_index)
+    ke = tl.load(CuSeqlenKe_ptr + cur_q_index)
+    kv_len = ke - ks
+    start_n = block_n_index * BLOCK_N
+    if start_n >= kv_len:
+        return
 
-    start_m = pid_m * BLOCK_SIZE_M
-    start_n = pid_n * BLOCK_SIZE_N
+    offs_n = start_n + tl.arange(0, BLOCK_N)
+    mask_n = offs_n < kv_len
+    offs_h = tl.arange(0, HEAD_NUM)
+    offs_d = tl.arange(0, HEAD_DIM)
 
-    offs_m = start_m + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = start_n + tl.arange(0, BLOCK_SIZE_N)
+    mem_index = tl.load(RaggedMemIndex_ptr + ks + offs_n, mask=mask_n, other=0)
 
-    logits = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    # q: [HEAD_NUM, HEAD_DIM] fp8, k: [BLOCK_N, HEAD_DIM] fp8 gathered from the kv pool.
+    q = tl.load(Q_ptr + cur_q_index * stride_q_seq + offs_h[:, None] * stride_q_head + offs_d[None, :])
+    k = tl.load(K_ptr + mem_index[:, None] * stride_k_pool + offs_d[None, :], mask=mask_n[:, None], other=0.0)
 
-    mask_m = offs_m < seq_len
-    mask_n = offs_n < seq_len_kv
+    # relu commutes with the (positive) fp8 scales: q_scale is folded into weights by the
+    # caller, k_scale is applied on the reduced column below.
+    logits = tl.dot(q, tl.trans(k))  # [HEAD_NUM, BLOCK_N] fp32
+    logits = tl.maximum(logits, 0.0)
 
-    mem_indices = tl.load(MemIndex_ptr + offs_n, mask=mask_n, other=0)
+    weights = tl.load(Weights_ptr + cur_q_index * stride_w_seq + offs_h)  # [HEAD_NUM]
+    k_scale = tl.load(KScale_ptr + mem_index * stride_kscale_pool, mask=mask_n, other=0.0)  # [BLOCK_N]
+    out = tl.sum(logits * weights[:, None], axis=0) * k_scale
 
-    scales = tl.load(KVScale_ptr + mem_indices, mask=mask_n, other=1.0)
-
-    for h in range(num_heads):
-        weights = tl.load(Weights_ptr + offs_m * stride_w_seq + h * stride_w_head, mask=mask_m, other=0.0)
-        score = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-        for d_block in range(tl.cdiv(head_dim, BLOCK_SIZE_D)):
-            d_start = d_block * BLOCK_SIZE_D
-            offs_d = d_start + tl.arange(0, BLOCK_SIZE_D)
-            mask_d = offs_d < head_dim
-
-            q_ptrs = Q_ptr + offs_m[:, None] * stride_q_seq + h * stride_q_head + offs_d[None, :] * stride_q_dim
-            mask_q = (offs_m[:, None] < seq_len) & mask_d[None, :]
-            q = tl.load(q_ptrs, mask=mask_q, other=0.0).to(tl.float32)
-
-            k_ptrs = KV_ptr + mem_indices[:, None] * stride_kv_pool + offs_d[None, :] * stride_kv_dim
-            mask_k = mask_n[:, None] & mask_d[None, :]
-            k = tl.load(k_ptrs, mask=mask_k, other=0.0).to(tl.float32)
-
-            k = k * scales[:, None]
-
-            score += tl.dot(q, tl.trans(k))
-        score = tl.maximum(score, 0.0)
-        logits += score * weights[:, None]
-
-    mask_ks = tl.load(CuSeqlenKs_ptr + offs_m, mask=mask_m, other=0)
-    mask_ke = tl.load(CuSeqlenKe_ptr + offs_m, mask=mask_m, other=seq_len_kv)
-
-    mask_lo = offs_n[None, :] >= mask_ks[:, None]
-    mask_hi = offs_n[None, :] < mask_ke[:, None]
-    mask_valid = mask_lo & mask_hi & mask_m[:, None] & mask_n[None, :]
-
-    logits = tl.where(mask_valid, logits, float("-inf"))
-
-    # Store output
-    out_ptrs = Output_ptr + offs_m[:, None] * stride_o_seq + offs_n[None, :] * stride_o_kv
-    mask_out = (offs_m[:, None] < seq_len) & (offs_n[None, :] < seq_len_kv)
-    tl.store(out_ptrs, logits, mask=mask_out)
+    # row-compacted layout (matches deep_gemm.fp8_mqa_logits): row m's keys land at columns [0, ke-ks)
+    tl.store(Out_ptr + cur_q_index * stride_o_seq + offs_n, out, mask=mask_n)
 
 
+@torch.no_grad()
 def fp8_paged_mqa_logits(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    kv_scale: torch.Tensor,
+    q_fp8: torch.Tensor,
+    indexer_k_buffer: torch.Tensor,
     weights: torch.Tensor,
-    mem_index: torch.Tensor,
+    ragged_mem_index: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
-    out: torch.Tensor = None,
+    max_kv_seq_len: int,
 ) -> torch.Tensor:
-    seq_len, num_heads, head_dim = q.shape
-    seq_len_kv = mem_index.shape[0]
+    """Indexer logits over the paged (token-granular) indexer-K pool.
 
-    if out is None:
-        output = torch.empty((seq_len, seq_len_kv), device=q.device, dtype=torch.float32)
-    else:
-        output = out
+    Row m holds k_scale_j * sum_h(weights[m, h] * relu(q[m, h] @ k_j)) for the ragged keys
+    j in [cu_seqlen_ks[m], cu_seqlen_ke[m]), row-compacted at columns [0, ke-ks) — the same
+    output contract as deep_gemm.fp8_mqa_logits(clean_logits=False) on the densely extracted
+    K, but reading K directly from the kv pool through ragged_mem_index.
 
-    BLOCK_SIZE_M = 16
-    BLOCK_SIZE_N = 64
-    BLOCK_SIZE_D = 128
+    q_fp8:            [q_token_num, head_num, 128] float8_e4m3fn
+    indexer_k_buffer: [pool_size, 1, 132] uint8 (128B fp8 K + 4B fp32 scale per token)
+    weights:          [q_token_num, head_num] float32 (q_scale folded in)
+    ragged_mem_index / cu_seqlen_ks / cu_seqlen_ke: from gen_nsa_ks_ke
+    """
+    q_token_num, head_num, head_dim = q_fp8.shape
+    assert head_dim == 128 and head_num in (16, 32, 64, 128)
+    assert indexer_k_buffer.dtype == torch.uint8 and indexer_k_buffer.shape[2] == 132
 
-    grid = (triton.cdiv(seq_len, BLOCK_SIZE_M), triton.cdiv(seq_len_kv, BLOCK_SIZE_N))
+    k_fp8 = indexer_k_buffer[:, 0, 0:128].view(dtype=torch.float8_e4m3fn)
+    k_scale = indexer_k_buffer[:, 0, 128:132].view(dtype=torch.float32)
 
+    logits = torch.empty((q_token_num, max_kv_seq_len), dtype=torch.float32, device=q_fp8.device)
+
+    BLOCK_N = 128
+    grid = (q_token_num, triton.cdiv(max_kv_seq_len, BLOCK_N))
     _fp8_paged_mqa_logits_kernel[grid](
-        q,
-        kv,
-        kv_scale,
-        weights,
-        mem_index,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        output,
-        seq_len,
-        seq_len_kv,
-        num_heads,
-        head_dim,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        kv.stride(0),
-        kv.stride(1),
-        weights.stride(0),
-        weights.stride(1),
-        output.stride(0),
-        output.stride(1),
-        BLOCK_SIZE_M=BLOCK_SIZE_M,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-        BLOCK_SIZE_D=BLOCK_SIZE_D,
+        q_fp8,
+        stride_q_seq=q_fp8.stride(0),
+        stride_q_head=q_fp8.stride(1),
+        K_ptr=k_fp8,
+        stride_k_pool=k_fp8.stride(0),
+        KScale_ptr=k_scale,
+        stride_kscale_pool=k_scale.stride(0),
+        Weights_ptr=weights,
+        stride_w_seq=weights.stride(0),
+        RaggedMemIndex_ptr=ragged_mem_index,
+        CuSeqlenKs_ptr=cu_seqlen_ks,
+        CuSeqlenKe_ptr=cu_seqlen_ke,
+        Out_ptr=logits,
+        stride_o_seq=logits.stride(0),
+        HEAD_NUM=head_num,
+        HEAD_DIM=head_dim,
+        BLOCK_N=BLOCK_N,
+        num_warps=4,
+        num_stages=3,
     )
-
-    return output
+    return logits

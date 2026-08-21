@@ -10,6 +10,13 @@ logger = init_logger(__name__)
 tokenizer = None
 
 
+def _set_chat_template(chat_template_str: str) -> None:
+    if hasattr(tokenizer, "tokenizer"):
+        tokenizer.tokenizer.chat_template = chat_template_str
+    else:
+        tokenizer.chat_template = chat_template_str
+
+
 def init_tokenizer(args):
     global tokenizer
 
@@ -17,30 +24,29 @@ def init_tokenizer(args):
     chat_path = args.chat_template
     if chat_path is not None:
         with open(chat_path, "r", encoding="utf-8") as f:
-            chat_template_str = f.read()
-        if hasattr(tokenizer, "tokenizer"):
-            tokenizer.tokenizer.chat_template = chat_template_str
-        else:
-            tokenizer.chat_template = chat_template_str
+            _set_chat_template(f.read())
         return
+
+    default_jinja_chat_template_path = os.path.join(args.model_dir, "chat_template.jinja")
+    if os.path.exists(default_jinja_chat_template_path):
+        try:
+            with open(default_jinja_chat_template_path, "r", encoding="utf-8") as f:
+                _set_chat_template(f.read())
+            logger.info(f"Loaded chat_template.jinja from {default_jinja_chat_template_path}")
+            return
+        except Exception as e:
+            logger.warning(f"Failed to load chat_template.jinja from {default_jinja_chat_template_path}: {e}")
 
     # 如果 tokenizer 目录下存在chat_template.json， 同时不存在 chat_template.jinja,
     # 则加载其并赋值给tokenizer 的 chat_template 对象。
-    if not os.path.exists(os.path.join(args.model_dir, "chat_template.jinja")) and os.path.exists(
-        os.path.join(args.model_dir, "chat_template.json")
-    ):
+    if os.path.exists(os.path.join(args.model_dir, "chat_template.json")):
         default_chat_template_path = os.path.join(args.model_dir, "chat_template.json")
         try:
             with open(default_chat_template_path, "r", encoding="utf-8") as f:
                 template_data = json.load(f)
                 if "chat_template" in template_data:
                     # Set it directly on the tokenizer object so apply_chat_template can use it
-                    if hasattr(tokenizer, "tokenizer"):
-                        # 多模态 tokenizer
-                        tokenizer.tokenizer.chat_template = template_data["chat_template"]
-                    else:
-                        tokenizer.chat_template = template_data["chat_template"]
-
+                    _set_chat_template(template_data["chat_template"])
                     logger.info(f"Loaded chat_template.json from {default_chat_template_path}")
         except Exception as e:
             logger.warning(f"Failed to load chat_template.json from {default_chat_template_path}: {e}")
