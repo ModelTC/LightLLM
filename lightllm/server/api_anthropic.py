@@ -1331,9 +1331,8 @@ async def anthropic_count_tokens_impl(raw_request: Request) -> Response:
         # LiteLLM validates the body as a Messages creation request, where
         # max_tokens is required. Anthropic's count_tokens request omits it;
         # the value has no effect on prompt rendering, so provide a sentinel.
-        translation_body = dict(raw_body)
-        translation_body.setdefault("max_tokens", 1)
-        chat_dict, _ = await asyncio.to_thread(_anthropic_to_chat_request, translation_body)
+        raw_body.setdefault("max_tokens", 1)
+        chat_dict, _ = await asyncio.to_thread(_anthropic_to_chat_request, raw_body)
         chat_request = ChatCompletionRequest(**chat_dict)
 
         prompt = await build_prompt(chat_request, _select_chat_template_tools(chat_request))
