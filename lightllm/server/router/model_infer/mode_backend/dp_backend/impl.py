@@ -73,15 +73,13 @@ class DPChunkedPrefillBackend(ModeBackend):
             spec_mode=self.args.mtp_mode,
             enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
         )
-        # 非 overlap DP 与普通后端复用同一个 SpecEngine。固定 draft 深度
-        # 保证所有 DP rank 执行相同数量的 draft forward；空 rank 则由
-        # allow_empty_batch 进入完整的 dummy forward 流程。
+        # 非 overlap DP 与普通后端复用同一个 SpecEngine。
         self.spec_engine = SpecEngine(
             backend=self,
             spec_mode=self.args.mtp_mode,
-            enable_dynmaic_mtp=False,
-            allow_empty_batch=True,
+            enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
         )
+
         self.dp_overlap_spec_engine = DPOverlapSpecEngine(**engine_kwargs)
         self.prefill_draft_engine = (
             self.dp_overlap_spec_engine if self.enable_prefill_microbatch_overlap else self.spec_engine

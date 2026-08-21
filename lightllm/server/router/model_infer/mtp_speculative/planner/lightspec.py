@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
+import torch.distributed as dist
 
 from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     BaseMtpPlanner,
@@ -10,6 +12,7 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     _EMAValue,
     _InferCostMsTable,
 )
+from lightllm.utils.dist_utils import get_global_world_size
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -65,9 +68,31 @@ class LightSpecPlanner(BaseMtpPlanner):
         # The current verify width is bounded by the proposal built last time.
         self.pre_draft_step = self.max_draft_step
 
+        # 只有非 overlap DP 下的变长 LightSpec 需要跨 rank 对齐 draft 深度。
+        self._draft_step_group = None
+        self._draft_step_tensor = None
+        self._draft_step_stream = None
+        if backend.args.dp > 1 and not backend.enable_decode_microbatch_overlap and len(self.draft_steps) > 1:
+            self._draft_step_group = dist.new_group(
+                ranks=list(range(get_global_world_size())),
+                backend="nccl",
+            )
+            self._draft_step_tensor = torch.zeros((1,), dtype=torch.int32, device="cuda")
+            self._draft_step_stream = torch.cuda.Stream()
+
     def plan(self, decode_reqs: List, origin_batch_size: int) -> SpecDecodePlan:
         req_num = len(decode_reqs)
         pre_draft_step = self.pre_draft_step
+
+        if req_num == 0:
+            return self._sync_draft_step(
+                SpecDecodePlan(
+                    origin_batch_size=origin_batch_size,
+                    dynamic_batch_size=origin_batch_size,
+                    draft_step=self.draft_steps[0],
+                    pre_draft_step=pre_draft_step,
+                )
+            )
 
         # A request entering its first decode has only the guaranteed target
         # row. Existing requests additionally expose pre_draft_step candidates.
@@ -81,13 +106,14 @@ class LightSpecPlanner(BaseMtpPlanner):
             # Costs come from CUDA Graph capture, while progress requires one
             # real verification batch. Keep the available proposal intact until
             # J(N, B, d) has a progress observation.
-            self.pre_draft_step = self.max_draft_step
-            return SpecDecodePlan(
-                origin_batch_size=origin_batch_size,
-                dynamic_batch_size=max_batch_size,
-                draft_step=self.max_draft_step,
-                pre_draft_step=pre_draft_step,
-                all_reqs_have_proposals=all_reqs_have_proposals,
+            return self._sync_draft_step(
+                SpecDecodePlan(
+                    origin_batch_size=origin_batch_size,
+                    dynamic_batch_size=max_batch_size,
+                    draft_step=self.max_draft_step,
+                    pre_draft_step=pre_draft_step,
+                    all_reqs_have_proposals=all_reqs_have_proposals,
+                )
             )
 
         min_batch_size = req_num
@@ -103,13 +129,40 @@ class LightSpecPlanner(BaseMtpPlanner):
         dynamic_batch_size = batch_sizes[np.argmin(costs)]
         draft_step = self._select_draft_step(req_num=req_num)
 
+        return self._sync_draft_step(
+            SpecDecodePlan(
+                origin_batch_size=origin_batch_size,
+                dynamic_batch_size=dynamic_batch_size,
+                draft_step=draft_step,
+                pre_draft_step=pre_draft_step,
+                all_reqs_have_proposals=all_reqs_have_proposals,
+            )
+        )
+
+    def _sync_draft_step(self, plan: SpecDecodePlan) -> SpecDecodePlan:
+        """在 LightSpec 的全局 NCCL 组内对齐下一轮 draft 深度。"""
+
+        draft_step = int(plan.draft_step)
+        if self._draft_step_group is not None:
+            assert self._draft_step_stream is not None
+            with torch.cuda.stream(self._draft_step_stream):
+                self._draft_step_tensor.fill_(draft_step)
+                dist.all_reduce(
+                    self._draft_step_tensor,
+                    op=dist.ReduceOp.MAX,
+                    group=self._draft_step_group,
+                    async_op=False,
+                )
+                draft_step = int(self._draft_step_tensor.item())
+
+        assert draft_step in self.draft_steps
         self.pre_draft_step = draft_step
         return SpecDecodePlan(
-            origin_batch_size=origin_batch_size,
-            dynamic_batch_size=dynamic_batch_size,
+            origin_batch_size=plan.origin_batch_size,
+            dynamic_batch_size=plan.dynamic_batch_size,
             draft_step=draft_step,
-            pre_draft_step=pre_draft_step,
-            all_reqs_have_proposals=all_reqs_have_proposals,
+            pre_draft_step=plan.pre_draft_step,
+            all_reqs_have_proposals=plan.all_reqs_have_proposals,
         )
 
     def update_statics(

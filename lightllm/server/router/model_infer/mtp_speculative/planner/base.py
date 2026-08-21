@@ -49,10 +49,9 @@ class BaseMtpPlanner(ABC):
         """为当前 decode 迭代生成执行计划。
 
         Args:
-            decode_reqs: 当前参与 decode 的非空逻辑请求列表。规划器可以读取
+            decode_reqs: 当前参与 decode 的逻辑请求列表。规划器可以读取
                 请求的输出进度，判断请求是否已经持有上一轮生成的
-                draft proposal。DP 空 batch 由 SpecEngine 在进入 planner 前
-                直接构造固定深度计划。
+                draft proposal；DP 空 rank 对应空列表。
             origin_batch_size: 进入动态压缩前的物理 verify 行数。
 
         Returns:

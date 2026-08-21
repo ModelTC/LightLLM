@@ -63,6 +63,8 @@ def build_lightspec_planner(
     block_size: int = 3,
 ):
     backend = SimpleNamespace(
+        args=SimpleNamespace(dp=1),
+        enable_decode_microbatch_overlap=False,
         max_draft_step=max_draft_step,
         model=SimpleNamespace(graph=None),
         draft_models=[SimpleNamespace(block_size=block_size, graph=None)],
@@ -93,6 +95,8 @@ def build_decode_reqs(req_num: int, req_num_with_proposals: int | None = None):
 def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
     engine = SpecEngine.__new__(SpecEngine)
     engine.backend = SimpleNamespace(
+        args=SimpleNamespace(dp=1),
+        enable_decode_microbatch_overlap=False,
         max_draft_step=3,
         model=SimpleNamespace(graph=None),
         draft_models=[SimpleNamespace(block_size=3, graph=None)],
@@ -114,17 +118,9 @@ def test_fixed_planner_returns_static_plan():
     assert not plan.skip_verify_sync
 
 
-def test_non_dp_engine_rejects_empty_decode_batch():
+def test_common_engine_accepts_empty_fixed_decode_batch():
     engine = SpecEngine.__new__(SpecEngine)
-
-    with pytest.raises(AssertionError, match="requires at least one request"):
-        engine.plan_decode(model_input=SimpleNamespace(batch_size=0), decode_reqs=[])
-
-
-def test_common_engine_builds_fixed_plan_for_allowed_empty_batch():
-    engine = SpecEngine.__new__(SpecEngine)
-    engine.allow_empty_batch = True
-    engine.backend = SimpleNamespace(max_draft_step=3)
+    engine.planner = FixedSpecPlanner(max_draft_step=3)
 
     plan = engine.plan_decode(model_input=SimpleNamespace(batch_size=0), decode_reqs=[])
 
@@ -133,6 +129,23 @@ def test_common_engine_builds_fixed_plan_for_allowed_empty_batch():
         dynamic_batch_size=0,
         draft_step=3,
         pre_draft_step=3,
+    )
+
+
+def test_common_engine_delegates_empty_dp_batch_to_lightspec_planner():
+    engine = SpecEngine.__new__(SpecEngine)
+    engine.backend = SimpleNamespace(max_draft_step=3, dp_size=2)
+    engine.planner = build_lightspec_planner(spec_mode="eagle3")
+    engine.planner.backend.args.dp = 2
+    engine.planner.pre_draft_step = 2
+
+    plan = engine.plan_decode(model_input=SimpleNamespace(batch_size=0), decode_reqs=[])
+
+    assert plan == SpecDecodePlan(
+        origin_batch_size=0,
+        dynamic_batch_size=0,
+        draft_step=1,
+        pre_draft_step=2,
     )
 
 
@@ -288,9 +301,14 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
     assert isinstance(eagle_planner, LightSpecPlanner)
     assert eagle_planner.draft_steps == (1, 2, 3)
 
+    eagle_with_att_planner = build_planner("eagle_with_att")
+    assert eagle_with_att_planner.draft_steps == (1, 2, 3)
+
 
 def test_dynamic_planner_registers_cuda_graph_costs_from_backend():
     backend = SimpleNamespace(
+        args=SimpleNamespace(dp=1),
+        enable_decode_microbatch_overlap=False,
         max_draft_step=3,
         model=SimpleNamespace(graph=SimpleNamespace(infer_cost_ms_by_batch_size={4: 1.2})),
         draft_models=[
