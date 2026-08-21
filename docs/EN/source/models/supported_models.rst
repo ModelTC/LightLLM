@@ -56,6 +56,8 @@ Large Language Models
     - 
   * - `DeepSeek-V3.2 `_
     - 
+  * - `GLM-5.2 <https://huggingface.co/zai-org/GLM-5.2>`_
+    - Supports BF16/FP8 and MTP.
 
 Multimodal Models
 ^^^^^^^^^^^^^^^^^
@@ -94,4 +96,3 @@ Reward Models
     -  :code:`--use_reward_model`
   * - `Qwen2-Reward <https://huggingface.co/Qwen/Qwen2-Reward>`_
     -  :code:`--use_reward_model`
-

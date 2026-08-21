@@ -3,6 +3,7 @@
 
 import dataclasses
 import torch
+import torch.nn.functional as F
 from typing import Tuple, TYPE_CHECKING
 
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
@@ -86,6 +87,12 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         if topk_mem_indices.ndim == 2:
             topk_mem_indices = topk_mem_indices.unsqueeze(1)
 
+        real_head_num = q.shape[1]
+        head_block_size = 64
+        pad_head_num = (-real_head_num) % head_block_size
+        if pad_head_num:
+            q = F.pad(q, (0, 0, 0, pad_head_num))
+
         mla_out, _, _ = flash_mla_sparse_fwd(
             q=q,
             kv=kv,
@@ -93,7 +100,7 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
             sm_scale=softmax_scale,
             d_v=kv_lora_rank,
         )
-        return mla_out
+        return mla_out[:, :real_head_num, :]
 
 
 @dataclasses.dataclass
