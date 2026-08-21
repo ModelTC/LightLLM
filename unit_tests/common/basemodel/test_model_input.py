@@ -23,7 +23,6 @@ def _create_model_input(*, is_prefill=False):
     )
     if is_prefill:
         kwargs["max_cache_len"] = 0
-        kwargs["prefix_total_token_num"] = 0
         kwargs["input_ids"] = torch.ones(batch_size, dtype=torch.int64)
         kwargs["b_ready_cache_len"] = torch.zeros(batch_size, dtype=torch.int32)
         kwargs["b_prefill_start_loc"] = torch.arange(batch_size, dtype=torch.int32)
@@ -114,7 +113,6 @@ def test_padded_prefill_adds_non_decode_request_marker():
         max_q_seq_len=2,
         max_kv_seq_len=2,
         max_cache_len=0,
-        prefix_total_token_num=0,
         input_ids=torch.ones(2, dtype=torch.int64),
         b_req_idx=torch.zeros(1, dtype=torch.int32),
         b_mtp_index=torch.zeros(1, dtype=torch.int32),
@@ -149,7 +147,6 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
         max_q_seq_len=0,
         max_kv_seq_len=0,
         max_cache_len=0,
-        prefix_total_token_num=0,
         input_ids=torch.empty((0,), dtype=torch.int64),
         b_req_idx=torch.empty((0,), dtype=torch.int32),
         b_mtp_index=torch.empty((0,), dtype=torch.int32),

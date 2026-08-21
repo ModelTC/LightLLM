@@ -10,7 +10,6 @@ INT64_MAX = torch.iinfo(torch.int64).max
 def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs = []
     total_token_num = 0
-    prefix_total_token_num = 0
     input_ids = []
     b_req_idx = []
     b_seq_len = []
@@ -42,7 +41,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_q_seq_len.append(input_token_len)
         input_ids.append(input_id)
         total_token_num += seq_len
-        prefix_total_token_num += req.cur_kv_len
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
         if hasattr(req, "is_decode_req_mixed_in_prefill"):
@@ -88,7 +86,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
-        prefix_total_token_num=prefix_total_token_num,
         multimodal_params=batch_multimodal_params,
     )
 

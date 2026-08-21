@@ -48,7 +48,6 @@ def _target_input(batch_size):
     return SimpleNamespace(
         batch_size=batch_size,
         total_token_num=batch_size,
-        prefix_total_token_num=None,
         input_ids=torch.arange(batch_size, dtype=torch.int64),
         b_seq_len=torch.arange(batch_size, dtype=torch.int32) + 4,
         b_req_idx=torch.arange(batch_size, dtype=torch.int32),

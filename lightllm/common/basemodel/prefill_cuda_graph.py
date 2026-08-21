@@ -219,7 +219,6 @@ class PrefillCudaGraph:
                 b_prefill_start_loc=b_prefill_start_loc,
                 is_prefill=True,
                 b_prefill_has_output_cpu=[False],
-                prefix_total_token_num=0,
                 multimodal_params=[{"images": [], "audios": []}],
                 **model._gen_special_model_input(token_num=total_token_num),
             )
@@ -281,7 +280,6 @@ class PrefillCudaGraph:
                     b_prefill_start_loc=b_prefill_start_loc,
                     is_prefill=True,
                     b_prefill_has_output_cpu=[False],
-                    prefix_total_token_num=0,
                     multimodal_params=[{"images": [], "audios": []}],
                     **model._gen_special_model_input(token_num=total_token_num),
                 )

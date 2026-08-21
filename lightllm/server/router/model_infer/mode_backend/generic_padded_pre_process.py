@@ -29,7 +29,6 @@ def padded_prepare_prefill_inputs(
 
     run_reqs = []
     total_token_num = 0
-    prefix_total_token_num = 0
     padded_req_num = dest_batch_size - len(req_objs)
     input_ids = []
     b_req_idx = []
@@ -57,7 +56,6 @@ def padded_prepare_prefill_inputs(
         b_q_seq_len.append(input_token_len)
         input_ids.append(input_id)
         total_token_num += seq_len
-        prefix_total_token_num += req.cur_kv_len
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
 
@@ -79,7 +77,6 @@ def padded_prepare_prefill_inputs(
         b_prefill_has_output.append(False)
         b_ready_cache_len.append(0)
         total_token_num += 1
-        prefix_total_token_num += 0
         batch_multimodal_params.append({"images": [], "audios": []})
         b_is_decode_req.append(False)
 
@@ -116,7 +113,6 @@ def padded_prepare_prefill_inputs(
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         max_cache_len=max_cache_len,
-        prefix_total_token_num=prefix_total_token_num,
         input_ids=input_ids,
         mem_indexes_cpu=mem_indexes,
         b_req_idx=b_req_idx,
@@ -207,12 +203,7 @@ def padded_prepare_decode_inputs(
         [req.get_radix_cache_shared_len() for req in run_reqs], dtype=torch.int32, device="cpu"
     )
     b_shared_radix_node_id = torch.tensor(
-        [
-            -1
-            if req.shared_kv_node is None
-            else req.shared_kv_node.time_id % INT64_MAX
-            for req in run_reqs
-        ],
+        [-1 if req.shared_kv_node is None else req.shared_kv_node.time_id % INT64_MAX for req in run_reqs],
         dtype=torch.int64,
         device="cpu",
     )

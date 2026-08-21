@@ -16,7 +16,6 @@ class ModelInput:
     max_q_seq_len: int
     max_kv_seq_len: int
     max_cache_len: int = None
-    prefix_total_token_num: int = None
     input_ids: torch.Tensor = None
     b_req_idx: torch.Tensor = None
     b_mtp_index: torch.Tensor = None
@@ -105,7 +104,6 @@ class ModelInput:
         if self.is_prefill:
             assert self.input_ids is not None
             assert self.max_cache_len is not None
-            assert self.prefix_total_token_num is not None
             assert self.b_ready_cache_len is not None
             assert self.b_prefill_start_loc is not None
             assert self.b_is_decode_req is not None

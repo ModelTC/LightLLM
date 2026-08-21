@@ -388,7 +388,6 @@ class TpPartBaseModel:
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
         infer_state.max_cache_len = model_input.max_cache_len
-        infer_state.prefix_total_token_num = model_input.prefix_total_token_num
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
@@ -513,7 +512,6 @@ class TpPartBaseModel:
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
         new_model_input.b_prefill_has_output_cpu = [e for e in new_model_input.b_prefill_has_output_cpu] + [False]
-        new_model_input.prefix_total_token_num = model_input.prefix_total_token_num
 
         new_model_input.multimodal_params = [e for e in new_model_input.multimodal_params] + [
             {"images": [], "audios": []}
@@ -1112,7 +1110,6 @@ class TpPartBaseModel:
                 max_q_seq_len=self.batch_max_tokens,
                 max_kv_seq_len=self.batch_max_tokens,
                 max_cache_len=0,
-                prefix_total_token_num=0,
                 input_ids=dummy_input_ids,
                 mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
@@ -1192,7 +1189,6 @@ class TpPartBaseModel:
                     max_q_seq_len=input_len,
                     max_kv_seq_len=input_len,
                     max_cache_len=0,
-                    prefix_total_token_num=0,
                     input_ids=dummy_input_ids,
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
@@ -1259,7 +1255,6 @@ class TpPartBaseModel:
             max_q_seq_len=prefill_input_len,
             max_kv_seq_len=prefill_input_len,
             max_cache_len=0,
-            prefix_total_token_num=0,
             input_ids=dummy_input_ids,
             mem_indexes=mem_indexes,
             b_req_idx=b_req_idx,
