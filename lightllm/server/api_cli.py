@@ -480,7 +480,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_image_pixels",
         type=int,
-        default=3686400,  # 8294400 is 4k, 3686400 is 2k
+        default=8294400,
         help="maximum allowed pixel count for one image before resize preprocessing",
     )
     parser.add_argument(

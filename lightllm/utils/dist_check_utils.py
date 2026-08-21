@@ -157,6 +157,15 @@ def auto_configure_allreduce_flags_from_args(args: "StartArgs") -> None:
 
     会就地修改 ``args.disable_flashinfer_allreduce`` / ``args.disable_symm_mem_allreduce``。
     """
+    if args.enable_rl:
+        # Match the established RL rollout policy on every replica.  Skipping
+        # capability probes also avoids per-replica divergence when concurrent
+        # local probes race for the same TCP port.
+        logger.info("RL mode: disable FlashInfer all-reduce and keep SymmMem all-reduce enabled.")
+        args.disable_flashinfer_allreduce = True
+        args.disable_symm_mem_allreduce = False
+        return
+
     if not _should_run_allreduce_capability_check(args):
         return
 

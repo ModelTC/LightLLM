@@ -19,12 +19,19 @@ def _sigmoid_mul_kernel(
     offs = tl.arange(0, BLOCK_N)
     mask = offs < N
     x_ptrs = x + row * stride_x_m + offs * stride_x_n
-    x_vals = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
+    x_vals = tl.load(x_ptrs, mask=mask, other=0.0)
     if GATE_N == 1:
         gate_vals = tl.load(gate + row * stride_g_m).to(tl.float32)
     else:
         gate_vals = tl.load(gate + row * stride_g_m + offs * stride_g_n, mask=mask, other=0.0).to(tl.float32)
-    gate_vals = tl.sigmoid(gate_vals)
+    # Match LightLLM's pre-fusion sigmoid_() then mul_() behavior: sigmoid is
+    # materialized in the gate dtype before the multiplication.
+    gate_vals = tl.sigmoid(gate_vals).to(gate.dtype.element_ty)
+    # Qwen3.5 uses BF16, so keep both rounded operands in BF16 for the direct
+    # multiply. Preserve the widened multiply for the generic FP16 path.
+    if x.dtype.element_ty == tl.float16:
+        x_vals = x_vals.to(tl.float32)
+        gate_vals = gate_vals.to(tl.float32)
     tl.store(x_ptrs, (x_vals * gate_vals).to(x.dtype.element_ty), mask=mask)
 
 
