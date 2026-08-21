@@ -553,8 +553,10 @@ def chunked_expanded_moe_forward(
 
     if max_chunk_rows == 0:
         raise RuntimeError(
-            f"DeepEP workspace with {workspace.numel()} bytes cannot hold the dense output and "
-            f"one {alignment}-row temporary chunk"
+            "RDMA workspace sizing invariant violated: "
+            f"workspace_bytes={workspace.numel()}, gather_rows={gather_rows}, "
+            f"hidden_size={hidden_size}, intermediate_size={intermediate_size}, "
+            f"chunk_rows={alignment}"
         )
     max_chunk_rows = min(all_tokens, max_chunk_rows)
 
