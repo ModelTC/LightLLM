@@ -25,7 +25,12 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
+from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_llm_data_type,
+    get_added_mtp_kv_layer_num,
+)
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.hidden_collector import (
@@ -112,7 +117,9 @@ class TpPartBaseModel:
         self._init_quant()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
-        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
+        with profile_mtp_weight_memory(self), self.torch_memory_saver.region(
+            tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup
+        ):
             self._init_weights()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
