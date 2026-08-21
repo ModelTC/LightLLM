@@ -7,17 +7,54 @@ from typing import Callable
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
-from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.eagle_utils import (
-    _prepare_eagle_prefill_inputs,
-    fill_eagle_draft_model_kv_state,
-    generate_eagle_token_ids,
-    prepare_eagle_verify_decode_input,
-    propose_next_eagle,
-)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+
+
+def _prepare_eagle_prefill_inputs(
+    model_input: ModelInput,
+    b_next_token_ids: torch.Tensor,
+    mtp_draft_input_hiddens: torch.Tensor,
+) -> None:
+    """构造 DP-overlap EAGLE draft model 的 prefill 输入。"""
+
+    model_input.b_is_decode_req = g_pin_mem_manager.get_const_gpu_tensor(
+        key="dp_overlap_eagle_prefill_b_is_decode_req",
+        shape=model_input.b_req_idx.shape,
+        fill_value=False,
+        dtype=torch.bool,
+    )
+    model_input.input_ids = gen_mtp_new_input_ids(
+        input_ids=model_input.input_ids,
+        b_next_token_ids=b_next_token_ids,
+        b_seq_len=model_input.b_seq_len,
+        b_ready_cache_len=model_input.b_ready_cache_len,
+    )
+    model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
+
+
+def generate_eagle_token_ids(
+    proposer: BaseDpOverlapProposer,
+    model_output: ModelOutput,
+    map_draft_token_ids: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    return map_draft_token_ids(proposer.backend._gen_argmax_token_ids(model_output))
+
+
+def prepare_eagle_verify_decode_input(
+    model_input: ModelInput,
+    input_ids: torch.Tensor,
+    target_hidden: torch.Tensor,
+) -> None:
+    """复用 target verify 布局构造 DP-overlap drafter 输入。"""
+
+    assert not model_input.is_prefill
+    model_input.input_ids = input_ids
+    model_input.mtp_draft_input_hiddens = target_hidden
 
 
 def fill_dp_eagle_draft_model_kv_state_overlap(

@@ -111,7 +111,6 @@ def select_accepted_tail_rows(
     """Select one accepted-tail row per request in a single CUDA kernel."""
 
     req_num = b_req_mtp_start_loc.shape[0]
-    assert req_num > 0
     assert input_ids.is_cuda
     assert hidden.ndim == 2 and hidden.shape[0] == input_ids.shape[0]
     assert hidden.shape[1] > 0
@@ -140,6 +139,9 @@ def select_accepted_tail_rows(
         b_shared_radix_node_id=b_shared_radix_node_id.new_empty((req_num,)),
         b_position_delta=b_position_delta.new_empty((req_num,)),
     )
+    if req_num == 0:
+        return selected
+
     block_hidden = 1024
     pipeline_stages = 3
     grid = (req_num,)

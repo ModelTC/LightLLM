@@ -4,9 +4,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_utils import (
     fill_dp_eagle_draft_model_kv_state_overlap,
-    fill_eagle_draft_model_kv_state,
     propose_next_dp_eagle_autoregressive_overlap,
-    propose_next_eagle,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 
@@ -16,14 +14,6 @@ class DpOverlapEagle3Proposer(BaseDpOverlapProposer):
 
     def _map_draft_token_ids(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
         return self.backend.draft_models[0].map_draft_vocab_to_main_vocab(draft_token_ids)
-
-    def fill_draft_model_kv_state(
-        self,
-        target_model_input: ModelInput,
-        target_model_output: ModelOutput,
-        target_next_token_ids: torch.Tensor,
-    ) -> None:
-        fill_eagle_draft_model_kv_state(self, target_model_input, target_model_output, target_next_token_ids)
 
     def fill_draft_model_kv_state_overlap(
         self,
@@ -42,26 +32,6 @@ class DpOverlapEagle3Proposer(BaseDpOverlapProposer):
             target_model_input1,
             target_model_output1,
             target_next_token_ids1,
-        )
-
-    def propose_next(
-        self,
-        target_model_input: ModelInput,
-        target_model_output: ModelOutput,
-        target_next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-        draft_step: int,
-        accept_len: torch.Tensor | None = None,
-    ) -> EagleSpecProposal:
-        return propose_next_eagle(
-            self,
-            target_model_input,
-            target_model_output,
-            target_next_token_ids,
-            b_req_mtp_start_loc,
-            draft_step,
-            accept_len,
-            self._map_draft_token_ids,
         )
 
     def propose_next_overlap(

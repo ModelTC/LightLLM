@@ -21,14 +21,23 @@ if TYPE_CHECKING:
 
 
 class SpecEngine:
-    """Owns non-DP MTP planning and draft proposal generation.
+    """Owns MTP planning and draft proposal generation.
 
     Target verification, request metrics, stream synchronization, and resource
-    cleanup are stateless operations exposed by ``mtp_speculative.utils``.
+    cleanup are stateless operations exposed by ``mtp_speculative.utils``. DP
+    backends can enable ``allow_empty_batch`` so an idle rank still executes the
+    same fixed-depth draft-forward sequence as ranks that own real requests.
     """
 
-    def __init__(self, backend: ModeBackend, spec_mode: str, enable_dynmaic_mtp: bool) -> None:
+    def __init__(
+        self,
+        backend: ModeBackend,
+        spec_mode: str,
+        enable_dynmaic_mtp: bool,
+        allow_empty_batch: bool = False,
+    ) -> None:
         self.backend = backend
+        self.allow_empty_batch = bool(allow_empty_batch)
         self.proposer: BaseSpecProposer = build_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,
@@ -58,7 +67,14 @@ class SpecEngine:
     def plan_decode(self, model_input: ModelInput, decode_reqs: List) -> SpecDecodePlan:
         """Return the fixed or dynamic speculative plan for one decode iteration."""
 
-        assert decode_reqs, "non-DP speculative decode requires at least one request"
+        if not decode_reqs:
+            assert getattr(self, "allow_empty_batch", False), "speculative decode requires at least one request"
+            return SpecDecodePlan(
+                origin_batch_size=model_input.batch_size,
+                dynamic_batch_size=model_input.batch_size,
+                draft_step=self.backend.max_draft_step,
+                pre_draft_step=self.backend.max_draft_step,
+            )
         return self.planner.plan(
             decode_reqs=decode_reqs,
             origin_batch_size=model_input.batch_size,

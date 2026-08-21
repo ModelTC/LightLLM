@@ -1,13 +1,21 @@
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
-class BaseDpOverlapProposer(BaseSpecProposer, ABC):
-    """DP proposer 的完整接口，扩展双 microbatch overlap 操作。"""
+class BaseDpOverlapProposer(ABC):
+    """双 microbatch DP-overlap proposer 的独立接口。"""
+
+    def __init__(self, *, backend: "ModeBackend", enable_dynmaic_mtp: bool) -> None:
+        self.backend = backend
+        self.enable_dynmaic_mtp = bool(enable_dynmaic_mtp)
 
     @abstractmethod
     def fill_draft_model_kv_state_overlap(

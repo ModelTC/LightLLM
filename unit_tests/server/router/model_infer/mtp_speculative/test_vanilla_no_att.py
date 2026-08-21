@@ -7,7 +7,6 @@ from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accep
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.vanilla_no_att import (
     DpOverlapVanillaNoAttProposer,
 )
-from lightllm.server.router.model_infer.mtp_speculative.dp_proposers.vanilla_no_att import DpVanillaNoAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
 
 
@@ -56,6 +55,57 @@ def test_select_accepted_tail_rows_triton_matches_index_select():
         b_shared_radix_node_id.index_select(0, expected_rows),
     )
     torch.testing.assert_close(selected.b_position_delta, b_position_delta.index_select(0, expected_rows))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_vanilla_no_att_runs_all_draft_steps_for_empty_dp_batch():
+    device = "cuda"
+    draft_batch_sizes = []
+
+    def draft_forward(model_input):
+        draft_batch_sizes.append(model_input.batch_size)
+        return SimpleNamespace(
+            token_ids=torch.empty((0,), dtype=torch.int64, device=device),
+            mtp_collector=SimpleNamespace(
+                spec_hidden=torch.empty((0, 2), dtype=torch.float32, device=device),
+            ),
+        )
+
+    backend = SimpleNamespace(
+        draft_models=[SimpleNamespace(forward=draft_forward) for _ in range(2)],
+        _gen_argmax_token_ids=lambda output: output.token_ids,
+    )
+    proposer = VanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False)
+    empty_i32 = torch.empty((0,), dtype=torch.int32, device=device)
+    target_model_input = SimpleNamespace(
+        batch_size=0,
+        b_req_idx=empty_i32,
+        b_mtp_index=empty_i32,
+        b_seq_len=empty_i32,
+        mem_indexes=empty_i32,
+        mem_indexes_cpu=torch.empty((0,), dtype=torch.int32),
+        b_position_delta=empty_i32,
+        b_shared_seq_len=empty_i32,
+        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64, device=device),
+        multimodal_params=[],
+    )
+    target_model_output = SimpleNamespace(
+        mtp_collector=SimpleNamespace(
+            spec_hidden=torch.empty((0, 2), dtype=torch.float32, device=device),
+        )
+    )
+
+    proposal = proposer.propose_next(
+        target_model_input=target_model_input,
+        target_model_output=target_model_output,
+        target_next_token_ids=torch.empty((0,), dtype=torch.int64, device=device),
+        b_req_mtp_start_loc=empty_i32,
+        draft_step=2,
+        accept_len=empty_i32,
+    )
+
+    assert draft_batch_sizes == [0, 0]
+    assert proposal.token_ids.shape == (0, 2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -161,15 +211,10 @@ def test_vanilla_no_att_skips_draft_forward_for_zero_steps():
     assert proposal.schedule_scores.shape == (2, 0)
 
 
-def test_all_vanilla_no_att_fill_hooks_are_noops():
+def test_vanilla_no_att_fill_hooks_are_noops():
     backend = SimpleNamespace(draft_models=[])
-    proposers = [
-        VanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False),
-        DpVanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False),
-        DpOverlapVanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False),
-    ]
+    proposer = VanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False)
+    overlap_proposer = DpOverlapVanillaNoAttProposer(backend=backend, enable_dynmaic_mtp=False)
 
-    for proposer in proposers:
-        proposer.fill_draft_model_kv_state(None, None, None)
-
-    proposers[-1].fill_draft_model_kv_state_overlap(None, None, None, None, None, None)
+    proposer.fill_draft_model_kv_state(None, None, None)
+    overlap_proposer.fill_draft_model_kv_state_overlap(None, None, None, None, None, None)

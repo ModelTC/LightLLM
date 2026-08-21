@@ -1,14 +1,15 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from lightllm.server.router.model_infer.mode_backend.dp_backend import impl as dp_backend_impl
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
-from lightllm.server.router.model_infer.mtp_speculative.dp_engine import DPSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
+from lightllm.server.router.model_infer.mtp_speculative.planner import FixedSpecPlanner, SpecDecodePlan
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     MtpMemIndexesToFree,
     SpecProposal,
@@ -52,7 +53,7 @@ def _assert_all_mem_indexes_are_freed(extra_mem_indexes_cpu, expected):
     assert extra_mem_indexes_cpu[0].free_mask_cpu is None
 
 
-def test_backends_initialize_their_own_spec_engine():
+def test_dp_backend_reuses_common_engine_outside_overlap():
     args = SimpleNamespace(mtp_mode="eagle3", mtp_dynamic_verify=False)
     backend = ChunkedPrefillBackend.__new__(ChunkedPrefillBackend)
     backend.args = args
@@ -67,11 +68,13 @@ def test_backends_initialize_their_own_spec_engine():
 
     assert "spec_engine_class" not in ModeBackend.__dict__
     assert type(backend.spec_engine) is SpecEngine
-    assert type(dp_backend.spec_engine) is DPSpecEngine
+    assert type(dp_backend.spec_engine) is SpecEngine
+    assert dp_backend.spec_engine.allow_empty_batch
+    assert not dp_backend.spec_engine.proposer.enable_dynmaic_mtp
+    assert type(dp_backend.spec_engine.planner) is FixedSpecPlanner
     assert type(dp_backend.dp_overlap_spec_engine) is DPOverlapSpecEngine
     assert dp_backend.prefill_draft_engine is dp_backend.spec_engine
     assert dp_backend.decode_draft_engine is dp_backend.dp_overlap_spec_engine
-    assert not issubclass(DPSpecEngine, SpecEngine)
     assert not issubclass(DPOverlapSpecEngine, SpecEngine)
 
 
@@ -104,67 +107,62 @@ def test_padded_token_ids_support_empty_dp_rank():
     assert torch.equal(padded_token_ids, torch.zeros(4, dtype=torch.int64))
 
 
-def test_dp_eagle_uses_common_extend_then_unit_decode_proposer(monkeypatch):
-    scatter_args = _capture_scatter_args(monkeypatch)
-    backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
-    backend.max_draft_step = 7
-    backend.spec_engine = _RecordingSpecEngine()
-    backend.decode_draft_engine = backend.spec_engine
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
+    device = "cuda"
+    empty_i32 = torch.empty((0,), dtype=torch.int32, device=device)
     model_input = SimpleNamespace(
-        batch_size=16,
-        b_req_idx=torch.arange(16, dtype=torch.int32),
+        batch_size=0,
+        b_req_idx=empty_i32,
+        b_mtp_index=empty_i32,
+        mem_indexes_cpu=torch.empty((0,), dtype=torch.int32),
     )
-    model_output = SimpleNamespace(spec_hidden=torch.randn(16, 4))
-    next_token_ids = torch.arange(8, dtype=torch.int64)
-    real_start_locs = torch.tensor([0], dtype=torch.int32)
-    real_accept_len = torch.tensor([2], dtype=torch.int32)
+    model_output = SimpleNamespace(logits=torch.empty((0, 8), device=device))
+    calls = []
 
-    extra_mem = backend._draft_decode_eagle(
-        model_input=model_input,
-        model_output=model_output,
-        next_token_ids=next_token_ids,
-        b_req_mtp_start_loc=real_start_locs,
-        mtp_accept_len=real_accept_len,
-        req_num=8,
-    )
+    class _CommonEngine:
+        def plan_decode(self, **kwargs):
+            calls.append("plan")
+            return SpecDecodePlan(0, 0, 2, 2)
 
-    propose_args = backend.spec_engine.propose_args
-    assert propose_args["target_next_token_ids"].shape == (16,)
-    assert torch.equal(propose_args["target_next_token_ids"][:8], next_token_ids)
-    assert torch.equal(propose_args["b_req_mtp_start_loc"], torch.tensor([0, 8], dtype=torch.int32))
-    assert torch.equal(propose_args["accept_len"], torch.tensor([2, 1], dtype=torch.int32))
-    assert scatter_args["proposal"].token_ids.shape == (1, 7)
-    assert torch.equal(scatter_args["target_next_token_ids"], next_token_ids)
-    _assert_all_mem_indexes_are_freed(extra_mem, torch.tensor([123], dtype=torch.int32))
+        def prepare_decode_model_input(self, **kwargs):
+            calls.append("prepare")
+            return kwargs["model_input"], None
 
+        def propose_next(self, **kwargs):
+            calls.append("propose")
+            assert kwargs["target_next_token_ids"].shape == (0,)
+            assert kwargs["b_req_mtp_start_loc"].shape == (0,)
+            assert kwargs["accept_len"].shape == (0,)
+            return SpecProposal(token_ids=torch.empty((0, 2), dtype=torch.int64, device=device))
 
-def test_dp_vanilla_uses_dp_engine_proposer(monkeypatch):
-    scatter_args = _capture_scatter_args(monkeypatch)
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
-    backend.max_draft_step = 7
-    backend.spec_engine = _RecordingSpecEngine()
-    backend.decode_draft_engine = backend.spec_engine
-    model_input = SimpleNamespace(
-        batch_size=16,
-        b_req_idx=torch.arange(16, dtype=torch.int32),
+    backend.spec_engine = _CommonEngine()
+    backend.model = SimpleNamespace(forward=lambda _: model_output)
+    event_pack = SimpleNamespace(
+        notify_post_handle_and_wait_pre_post_handle=lambda: calls.append("post_wait"),
+        notify_forward_and_wait_post_handle=lambda: calls.append("forward_wait"),
+        notify_pre_post_handle=lambda: calls.append("pre_post"),
     )
-    next_token_ids = torch.arange(8, dtype=torch.int64)
-
-    extra_mem = backend._draft_decode_vanilla(
-        model_input=model_input,
-        model_output=SimpleNamespace(),
-        next_token_ids=next_token_ids,
-        b_req_mtp_start_loc=torch.arange(8, dtype=torch.int32),
-        mtp_accept_len=torch.ones(8, dtype=torch.int32),
-        req_num=8,
+    monkeypatch.setattr(
+        dp_backend_impl,
+        "prepare_decode_inputs",
+        lambda req_objs: (model_input, []),
+    )
+    monkeypatch.setattr(
+        dp_backend_impl,
+        "g_infer_context",
+        SimpleNamespace(get_overlap_stream=lambda: torch.cuda.current_stream()),
+    )
+    monkeypatch.setattr(
+        dp_backend_impl.mtp_utils,
+        "free_mem_indexes",
+        lambda **kwargs: calls.append("free"),
     )
 
-    propose_args = backend.spec_engine.propose_args
-    assert propose_args["target_next_token_ids"].shape == (16,)
-    assert torch.equal(propose_args["target_next_token_ids"][:8], next_token_ids)
-    assert scatter_args["proposal"].token_ids.shape == (8, 7)
-    assert torch.equal(scatter_args["target_next_token_ids"], next_token_ids)
-    _assert_all_mem_indexes_are_freed(extra_mem, torch.tensor([123], dtype=torch.int32))
+    backend.decode_mtp(event_pack=event_pack, decode_reqs=[])
+
+    assert calls == ["plan", "prepare", "propose", "post_wait", "forward_wait", "free", "pre_post"]
 
 
 def test_dp_overlap_eagle_passes_both_fixed_verify_layouts_to_proposer(monkeypatch):
