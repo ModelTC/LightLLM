@@ -3,6 +3,7 @@ from typing import Optional, Dict
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.fused_add_rmsnorm import fused_add_rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
 from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
@@ -70,6 +71,21 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+
+    def fused_add_forward(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        """Fused residual-add + RMSNorm: ``residual <- residual + x`` (in place) and return
+        ``rmsnorm(residual) * weight``. Bit-identical to a plain ``residual.add_(x)`` followed
+        by ``__call__`` but in a single Triton launch. CUDA/MUSA (Triton) only."""
+        if out is None:
+            out = alloc_func(residual.shape, dtype=residual.dtype, device=residual.device)
+        return fused_add_rmsnorm_forward(residual=residual, x=x, weight=self.weight, eps=eps, out=out)
 
 
 class GatedRMSNormWeight(RMSNormWeight):

@@ -142,6 +142,7 @@ def parse_args():
     parser.add_argument("--num-questions", type=int, default=1000)
     parser.add_argument("--result-file", type=str, default="result.jsonl")
     parser.add_argument("--data-path", type=str, default="test.jsonl")
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
     return parser.parse_args()
 
 
@@ -151,7 +152,7 @@ def main(args):
 
     # Read data
     url_data = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
-    filename = download_and_cache_file(url_data)
+    filename = args.data_path if os.path.exists(args.data_path) else download_and_cache_file(url_data)
     lines = list(read_jsonl(filename))
 
     # Construct prompts
@@ -183,7 +184,7 @@ def main(args):
         answer = call_generate_lightllm(
             prompt=few_shot_examples + questions[i],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=args.max_new_tokens,
             stop=["Question", "Assistant:", "<|separator|>", "Human:", "\n\nQuestion"],
             url=url,
         )
@@ -231,6 +232,7 @@ def main(args):
             "other": {
                 "num_questions": args.num_questions,
                 "parallel": args.parallel,
+                "max_new_tokens": args.max_new_tokens,
             },
         }
         fout.write(json.dumps(value) + "\n")
