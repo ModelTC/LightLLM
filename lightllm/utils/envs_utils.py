@@ -274,6 +274,20 @@ def get_added_mtp_kv_layer_num() -> int:
     raise ValueError(f"unsupported mtp_mode: {mtp_mode}")
 
 
+@lru_cache(maxsize=None)
+def get_mtp_weight_layer_num() -> int:
+    args = get_env_start_args()
+    mtp_mode = args.mtp_mode
+
+    if mtp_mode is None:
+        return 0
+    if mtp_mode == "vanilla_no_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_no_att":
+        return 1
+    return get_added_mtp_kv_layer_num()
+
+
 def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
