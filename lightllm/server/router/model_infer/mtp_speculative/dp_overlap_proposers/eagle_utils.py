@@ -96,22 +96,89 @@ def pad_dp_step_mem_indexes(
     return padded
 
 
+def prepare_dp_eagle_overlap_decode_inputs(
+    proposer: BaseDpOverlapProposer,
+    target_model_input0: ModelInput,
+    target_model_input1: ModelInput,
+    target_next_token_ids: torch.Tensor,
+    real_verify_rows0: int,
+    real_verify_rows1: int,
+    accept_len: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """拆分真实 verify 结果，并补齐为两个 EAGLE overlap microbatch 的固定布局。"""
+
+    verify_width = proposer.backend.max_draft_step + 1
+    real_request_num0 = real_verify_rows0 // verify_width
+    real_request_num1 = real_verify_rows1 // verify_width
+    request_capacity0 = target_model_input0.batch_size // verify_width
+    request_capacity1 = target_model_input1.batch_size // verify_width
+
+    assert accept_len.shape == (real_request_num0 + real_request_num1,)
+
+    target_next_token_ids0 = proposer._build_padded_next_token_ids(
+        target_next_token_ids=target_next_token_ids,
+        batch_size=target_model_input0.batch_size,
+        real_verify_rows=real_verify_rows0,
+        device=target_model_input0.b_req_idx.device,
+        source_start=0,
+    )
+    target_next_token_ids1 = proposer._build_padded_next_token_ids(
+        target_next_token_ids=target_next_token_ids,
+        batch_size=target_model_input1.batch_size,
+        real_verify_rows=real_verify_rows1,
+        device=target_model_input1.b_req_idx.device,
+        source_start=real_verify_rows0,
+    )
+
+    padded_accept_len0 = torch.ones(
+        (request_capacity0,),
+        dtype=torch.int32,
+        device=target_model_input0.b_req_idx.device,
+    )
+    padded_accept_len1 = torch.ones(
+        (request_capacity1,),
+        dtype=torch.int32,
+        device=target_model_input1.b_req_idx.device,
+    )
+    if real_request_num0 > 0:
+        padded_accept_len0[:real_request_num0].copy_(accept_len[:real_request_num0])
+    if real_request_num1 > 0:
+        padded_accept_len1[:real_request_num1].copy_(
+            accept_len[real_request_num0 : real_request_num0 + real_request_num1]
+        )
+
+    return target_next_token_ids0, target_next_token_ids1, padded_accept_len0, padded_accept_len1
+
+
 def propose_next_dp_eagle_autoregressive_overlap(
     proposer: BaseDpOverlapProposer,
     target_model_input0: ModelInput,
     target_model_output0: ModelOutput,
-    target_next_token_ids0: torch.Tensor,
-    real_verify_rows0: int,
-    accept_len0: torch.Tensor | None,
     target_model_input1: ModelInput,
     target_model_output1: ModelOutput,
-    target_next_token_ids1: torch.Tensor,
+    target_next_token_ids: torch.Tensor,
+    real_verify_rows0: int,
     real_verify_rows1: int,
-    accept_len1: torch.Tensor | None,
+    accept_len: torch.Tensor,
     draft_step: int,
     map_draft_token_ids: Callable[[torch.Tensor], torch.Tensor],
 ) -> EagleSpecProposal:
     """运行 DP EAGLE extend 后接单 token overlap decode 的 proposal 流程。"""
+
+    (
+        target_next_token_ids0,
+        target_next_token_ids1,
+        accept_len0,
+        accept_len1,
+    ) = prepare_dp_eagle_overlap_decode_inputs(
+        proposer=proposer,
+        target_model_input0=target_model_input0,
+        target_model_input1=target_model_input1,
+        target_next_token_ids=target_next_token_ids,
+        real_verify_rows0=real_verify_rows0,
+        real_verify_rows1=real_verify_rows1,
+        accept_len=accept_len,
+    )
 
     verify_width = proposer.backend.max_draft_step + 1
     model_inputs = (target_model_input0, target_model_input1)
@@ -250,18 +317,31 @@ def propose_next_dp_eagle_fixed_layout_overlap(
     proposer: BaseDpOverlapProposer,
     target_model_input0: ModelInput,
     target_model_output0: ModelOutput,
-    target_next_token_ids0: torch.Tensor,
-    real_verify_rows0: int,
-    accept_len0: torch.Tensor,
     target_model_input1: ModelInput,
     target_model_output1: ModelOutput,
-    target_next_token_ids1: torch.Tensor,
+    target_next_token_ids: torch.Tensor,
+    real_verify_rows0: int,
     real_verify_rows1: int,
-    accept_len1: torch.Tensor,
+    accept_len: torch.Tensor,
     draft_step: int,
     map_draft_token_ids: Callable[[torch.Tensor], torch.Tensor],
 ) -> EagleSpecProposal:
     """以 expanded verify-row layout 运行 decode，返回按真实请求压缩的 proposal。"""
+
+    (
+        target_next_token_ids0,
+        target_next_token_ids1,
+        accept_len0,
+        accept_len1,
+    ) = prepare_dp_eagle_overlap_decode_inputs(
+        proposer=proposer,
+        target_model_input0=target_model_input0,
+        target_model_input1=target_model_input1,
+        target_next_token_ids=target_next_token_ids,
+        real_verify_rows0=real_verify_rows0,
+        real_verify_rows1=real_verify_rows1,
+        accept_len=accept_len,
+    )
 
     verify_width = proposer.backend.max_draft_step + 1
     model_inputs = (target_model_input0, target_model_input1)

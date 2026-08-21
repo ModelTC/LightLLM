@@ -25,29 +25,40 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
-        target_next_token_ids0: torch.Tensor,
-        real_verify_rows0: int,
-        accept_len0: torch.Tensor | None,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
-        target_next_token_ids1: torch.Tensor,
+        target_next_token_ids: torch.Tensor,
+        real_verify_rows0: int,
         real_verify_rows1: int,
-        accept_len1: torch.Tensor | None,
+        accept_len: torch.Tensor,
         draft_step: int,
     ) -> VanillaSpecProposal:
-        assert accept_len0 is not None
-        assert accept_len1 is not None
-
         verify_width = self.backend.max_draft_step + 1
         real_verify_rows = (int(real_verify_rows0), int(real_verify_rows1))
         req_num_by_batch = tuple(row_count // verify_width for row_count in real_verify_rows)
+        assert accept_len.shape == (sum(req_num_by_batch),)
+
+        target_next_token_ids0 = self._build_padded_next_token_ids(
+            target_next_token_ids=target_next_token_ids,
+            batch_size=target_model_input0.batch_size,
+            real_verify_rows=real_verify_rows0,
+            device=target_model_input0.b_req_idx.device,
+            source_start=0,
+        )
+        target_next_token_ids1 = self._build_padded_next_token_ids(
+            target_next_token_ids=target_next_token_ids,
+            batch_size=target_model_input1.batch_size,
+            real_verify_rows=real_verify_rows1,
+            device=target_model_input1.b_req_idx.device,
+            source_start=real_verify_rows0,
+        )
         req_start_rows = (
             torch.arange(0, real_verify_rows0, verify_width, device=target_next_token_ids0.device),
             torch.arange(0, real_verify_rows1, verify_width, device=target_next_token_ids1.device),
         )
         accepted_tail_rows = (
-            req_start_rows[0] + accept_len0[: req_num_by_batch[0]] - 1,
-            req_start_rows[1] + accept_len1[: req_num_by_batch[1]] - 1,
+            req_start_rows[0] + accept_len[: req_num_by_batch[0]] - 1,
+            req_start_rows[1] + accept_len[req_num_by_batch[0] : sum(req_num_by_batch)] - 1,
         )
         model_inputs = [copy.copy(target_model_input0), copy.copy(target_model_input1)]
         draft_token_ids = [target_next_token_ids0, target_next_token_ids1]

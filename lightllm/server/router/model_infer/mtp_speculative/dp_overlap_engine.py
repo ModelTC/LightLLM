@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -50,26 +50,25 @@ class DPOverlapSpecEngine:
         self,
         target_model_input0: ModelInput,  # batch_size = verify_batch_size0
         target_model_output0: ModelOutput,  # logits: [verify_batch_size0, vocab_size]
-        target_next_token_ids0: torch.Tensor,  # [verify_batch_size0]
-        real_verify_rows0: int,
-        accept_len0: Optional[torch.Tensor],  # [req_num0]
         target_model_input1: ModelInput,  # batch_size = verify_batch_size1
         target_model_output1: ModelOutput,  # logits: [verify_batch_size1, vocab_size]
-        target_next_token_ids1: torch.Tensor,  # [verify_batch_size1]
+        target_next_token_ids: torch.Tensor,  # [real_verify_rows0 + real_verify_rows1]
+        real_verify_rows0: int,
         real_verify_rows1: int,
-        accept_len1: Optional[torch.Tensor],  # [req_num1]
+        accept_len: torch.Tensor,  # [real_req_num0 + real_req_num1]
     ) -> SpecProposal:
+        real_verify_rows = real_verify_rows0 + real_verify_rows1
+        assert target_next_token_ids.shape == (real_verify_rows,)
+
         return self.proposer.propose_next_overlap(
             target_model_input0=target_model_input0,
             target_model_output0=target_model_output0,
-            target_next_token_ids0=target_next_token_ids0,
-            real_verify_rows0=real_verify_rows0,
-            accept_len0=accept_len0,
             target_model_input1=target_model_input1,
             target_model_output1=target_model_output1,
-            target_next_token_ids1=target_next_token_ids1,
+            target_next_token_ids=target_next_token_ids,
+            real_verify_rows0=real_verify_rows0,
             real_verify_rows1=real_verify_rows1,
-            accept_len1=accept_len1,
+            accept_len=accept_len,
             draft_step=self.planner.get_draft_step(),
         )
 

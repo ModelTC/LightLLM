@@ -90,16 +90,17 @@ def test_overlap_eagle_keeps_fixed_verify_layout(monkeypatch):
         target_model_output0=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        target_next_token_ids0=torch.arange(6, dtype=torch.int64),
-        real_verify_rows0=3,
-        accept_len0=torch.tensor([2, 1], dtype=torch.int32),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
+        target_next_token_ids=torch.cat(
+            (torch.arange(3, dtype=torch.int64), torch.arange(10, 16, dtype=torch.int64)),
+            dim=0,
+        ),
+        real_verify_rows0=3,
         real_verify_rows1=6,
-        accept_len1=torch.tensor([1, 3], dtype=torch.int32),
+        accept_len=torch.tensor([2, 1, 3], dtype=torch.int32),
         draft_step=2,
     )
 
@@ -114,6 +115,45 @@ def test_overlap_eagle_keeps_fixed_verify_layout(monkeypatch):
     assert proposal.extra_mem_indexes_cpu[0].free_mask_cpu is None
     assert torch.equal(model_input0.mem_indexes, torch.tensor([2, 0, 1, 5, 99, 99], dtype=torch.int32))
     assert torch.equal(model_input1.mem_indexes, torch.tensor([2, 2, 4, 5, 3, 5], dtype=torch.int32))
+
+
+def test_overlap_eagle_builds_padded_inputs_for_empty_verify_rows(monkeypatch):
+    draft_model = _DraftModel()
+    backend = SimpleNamespace(
+        max_draft_step=2,
+        draft_models=[draft_model],
+        model=SimpleNamespace(
+            req_manager=SimpleNamespace(
+                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99),
+            )
+        ),
+        _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
+    )
+    proposer = DpOverlapEagleWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
+    monkeypatch.setattr(
+        mtp_utils,
+        "alloc_mem_indexes",
+        lambda token_count: torch.arange(token_count, dtype=torch.int32),
+    )
+
+    proposal = proposer.propose_next_overlap(
+        target_model_input0=_target_input(batch_size=6),
+        target_model_output0=ModelOutput(
+            logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
+        ),
+        target_model_input1=_target_input(batch_size=6),
+        target_model_output1=ModelOutput(
+            logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
+        ),
+        target_next_token_ids=torch.empty((0,), dtype=torch.int64),
+        real_verify_rows0=0,
+        real_verify_rows1=0,
+        accept_len=torch.empty((0,), dtype=torch.int32),
+        draft_step=2,
+    )
+
+    assert proposal.token_ids.shape == (0, 2)
+    assert draft_model.decode_batch_sizes == [(6, 6), (6, 6)]
 
 
 def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
@@ -142,16 +182,17 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
         target_model_output0=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        target_next_token_ids0=torch.arange(6, dtype=torch.int64),
-        real_verify_rows0=3,
-        accept_len0=torch.tensor([2, 1], dtype=torch.int32),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)), mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2)))
         ),
-        target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
+        target_next_token_ids=torch.cat(
+            (torch.arange(3, dtype=torch.int64), torch.arange(10, 16, dtype=torch.int64)),
+            dim=0,
+        ),
+        real_verify_rows0=3,
         real_verify_rows1=6,
-        accept_len1=torch.tensor([1, 3], dtype=torch.int32),
+        accept_len=torch.tensor([2, 1, 3], dtype=torch.int32),
         draft_step=2,
     )
 
