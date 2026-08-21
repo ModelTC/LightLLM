@@ -89,6 +89,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     while True:
         forwarding_tokens_task = None
         heartbeat_task = None
+        generation_tasks: Dict[int, asyncio.Task] = {}
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
@@ -130,7 +131,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
                         manager.begin_pd_request_registration(group_req_id)
-                        asyncio.create_task(
+                        generation_task = asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
                                 prompt=prompt,
@@ -141,9 +142,21 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 pd_event=pd_event,
                             )
                         )
+                        generation_tasks[group_req_id] = generation_task
+
+                        def remove_generation_task(task: asyncio.Task, request_id: int = group_req_id):
+                            if generation_tasks.get(request_id) is task:
+                                generation_tasks.pop(request_id, None)
+                                # task 可能在首次运行前被取消，此时协程内的 finally 不会执行。
+                                manager.cancel_pd_request_registration(request_id)
+
+                        generation_task.add_done_callback(remove_generation_task)
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
+                        generation_task = generation_tasks.get(group_req_id)
+                        if generation_task is not None and not generation_task.done():
+                            generation_task.cancel()
                         await manager.abort(group_req_id)
 
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
@@ -167,6 +180,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.exception(str(e))
         finally:
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
+            child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:

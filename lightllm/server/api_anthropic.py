@@ -1316,3 +1316,41 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         logger.error("Failed to translate response to Anthropic format: %s", exc)
         return _anthropic_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
     return JSONResponse(anthropic_dict)
+
+
+async def anthropic_count_tokens_impl(raw_request: Request) -> Response:
+    """Count the fully rendered input for Anthropic's Messages API."""
+    from .api_http import g_objs
+    from .api_models import ChatCompletionRequest
+    from .api_openai import _build_multimodal_params, _select_chat_template_tools
+    from .build_prompt import build_prompt
+    from .core.objs.sampling_params import SamplingParams
+
+    raw_body = await raw_request.json()
+    # LiteLLM validates the body as a Messages creation request, where
+    # max_tokens is required. Anthropic's count_tokens request omits it;
+    # the value has no effect on prompt rendering, so provide a sentinel.
+    raw_body.setdefault("max_tokens", 1)
+    chat_dict, _ = await asyncio.to_thread(_anthropic_to_chat_request, raw_body)
+    chat_request = ChatCompletionRequest(**chat_dict)
+
+    prompt = await build_prompt(chat_request, _select_chat_template_tools(chat_request))
+    multimodal_params = _build_multimodal_params(chat_request)
+    await multimodal_params.verify_and_preload(raw_request)
+
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, add_special_tokens=False)
+    sampling_params.verify()
+    input_tokens = g_objs.httpserver_manager.tokens(
+        prompt,
+        multimodal_params,
+        sampling_params,
+        {"add_special_tokens": False},
+    )
+
+    return JSONResponse(
+        {
+            "input_tokens": input_tokens,
+            "context_management": {"original_input_tokens": input_tokens},
+        }
+    )
