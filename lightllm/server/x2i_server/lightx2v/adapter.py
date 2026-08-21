@@ -8,6 +8,9 @@ import setproctitle
 import asyncio
 import os
 import time
+from PIL import Image
+import io
+import base64
 
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_logger
@@ -19,6 +22,49 @@ from ..past_kv_cache_client import PastKVCacheClient
 from ..rng_state_cache import RngStateCache
 
 logger = init_logger(__name__)
+
+
+def process_images_after_vae_decoder(self):
+    r_height, r_width = -1, -1
+    if hasattr(self, "target_shape") and self.target_shape is not None:
+        r_height, r_width = self.target_shape
+
+    image = self._denorm(self.scheduler.image_prediction.float())
+    image = (image.clamp(0, 1) * 255.0).round().to(torch.uint8).cpu()
+    # CHW -> HWC
+    image = image[0].permute(1, 2, 0).contiguous().numpy()
+    pil_image = Image.fromarray(image)
+
+     # Resize if requested
+    if r_height > 0 and r_width > 0:
+        if (
+            pil_image.height != r_height
+            or pil_image.width != r_width
+        ):
+            logger.info(f"resize image to user request size ({r_width}x{r_height}) from "
+                        f"x2i server generated image size ({pil_image.width}x{pil_image.height})")
+            pil_image = pil_image.resize(
+                (r_width, r_height),
+                Image.Resampling.LANCZOS,
+            )
+
+    buffer = io.BytesIO()
+
+    output_format = self.output_format.lower() or "jpeg"
+    if output_format in ("jpg", "jpeg"):
+        pil_image.save(buffer, format="JPEG", quality=90)
+    elif output_format == "png":
+        pil_image.save(buffer, format="PNG", compress_level=1)
+    elif output_format == "webp":
+        pil_image.save(buffer, format="WEBP", quality=90, method=0)
+    else:
+        raise ValueError(f"Unsupported output format: {output_format}")
+
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def set_resolution(self, r_width, r_height):
+    self.target_shape = (r_height, r_width)
 
 
 class LightX2VServer:
@@ -62,6 +108,10 @@ class LightX2VServer:
         os.environ["WORLD_SIZE"] = str(self.world_size)
 
         from lightx2v import LightX2VPipeline
+        from lightx2v.models.runners.neopp.neopp_runner import NeoppRunner
+        # monkey patch
+        NeoppRunner.process_images_after_vae_decoder = process_images_after_vae_decoder
+        NeoppRunner.set_resolution = set_resolution
 
         self.pipe = LightX2VPipeline(
             model_path=self.args.model_dir,
@@ -170,6 +220,7 @@ class LightX2VServer:
                     f"fallback to current global rng"
                 )
         logger.info(f"seed: {seed} param.seed: {param.seed} first_image: {param.first_image} session_id: {session_id}")
+        self.pipe.runner.set_resolution(param.r_width, param.r_height)
         image = self.pipe.generate(
             seed=seed,
             save_result_path="",

@@ -62,6 +62,8 @@ class X2IParams(ctypes.Structure):
     _fields_ = [
         ("width", ctypes.c_int),
         ("height", ctypes.c_int),
+        ("r_width", ctypes.c_int),
+        ("r_height", ctypes.c_int),
         ("steps", ctypes.c_int),
         ("guidance_scale", ctypes.c_float),
         ("image_guidance_scale", ctypes.c_float),
@@ -103,6 +105,8 @@ class X2IParams(ctypes.Structure):
 
         self.width = _get("width", X2IParams._width)
         self.height = _get("height", X2IParams._height)
+        self.r_width = _get("r_width", -1)
+        self.r_height = _get("r_height", -1)
         self.steps = _get("steps", X2IParams._steps)
         self.guidance_scale = _get("guidance_scale", X2IParams._guidance_scale)
         self.image_guidance_scale = _get("image_guidance_scale", X2IParams._image_guidance_scale)
@@ -133,6 +137,8 @@ class X2IParams(ctypes.Structure):
         kwargs: Dict[str, Any] = {
             "width": w,
             "height": h,
+            "r_width": image_config.width,
+            "r_height": image_config.height,
             "output_format": OutputFormatType.from_str(image_config.image_type),
         }
         if image_config.steps is not None:
