@@ -129,6 +129,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
+                        manager.begin_pd_request_registration(group_req_id)
                         asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
@@ -143,15 +144,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
-                        if not (await manager.abort(group_req_id)):
-
-                            async def delayed_abort_task(group_req_id, retry_count):
-                                for _ in range(retry_count):
-                                    await asyncio.sleep(5.0)
-                                    if await manager.abort(group_req_id):
-                                        break
-
-                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
+                        await manager.abort(group_req_id)
 
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
@@ -253,6 +246,8 @@ async def _pd_process_generate(
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
     except BaseException as e:
         logger.error(str(e))
+    finally:
+        manager.cancel_pd_request_registration(sampling_params.group_request_id)
 
 
 # 转发token的task
