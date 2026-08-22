@@ -5,16 +5,15 @@ import pytest
 import torch
 
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_planner import (
-    BaseDpOverlapPlanner,
-    FixedDpOverlapPlanner,
-    build_dp_overlap_planner,
-)
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers import (
     build_dp_overlap_spec_proposer,
 )
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle3 import DpOverlapEagle3Proposer
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
+    BaseDpOverlapProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle3 import (
+    DpOverlapEagle3Proposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_no_att import (
     DpOverlapEagleNoAttProposer,
 )
@@ -34,26 +33,44 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
     LightSpecPlanner,
     SpecDecodePlan,
 )
-from lightllm.server.router.model_infer.mtp_speculative.planner.base import _InferCostMsTable
-from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
+from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
+    _InferCostMsTable,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers import (
+    build_spec_proposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     BaseSpecProposer,
     MtpMemIndexesToFree,
     SpecProposal,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import EagleNoAttProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import (
+    DFlashProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import (
+    DSparkProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import (
+    Eagle3Proposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_no_att import (
+    EagleNoAttProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import (
+    EagleWithAttProposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
     DFlashSpecProposal,
     DSparkSpecProposal,
     EagleSpecProposal,
     VanillaSpecProposal,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import VanillaNoAttProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import VanillaWithAttProposer
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_no_att import (
+    VanillaNoAttProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.vanilla_with_att import (
+    VanillaWithAttProposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 
 
@@ -61,10 +78,11 @@ def build_lightspec_planner(
     max_draft_step: int = 3,
     spec_mode: str = "vanilla_with_att",
     block_size: int = 3,
+    enable_decode_microbatch_overlap: bool = False,
 ):
     backend = SimpleNamespace(
         args=SimpleNamespace(dp=1),
-        enable_decode_microbatch_overlap=False,
+        enable_decode_microbatch_overlap=enable_decode_microbatch_overlap,
         max_draft_step=max_draft_step,
         model=SimpleNamespace(graph=None),
         draft_models=[SimpleNamespace(block_size=block_size, graph=None)],
@@ -258,14 +276,6 @@ def test_scatter_mtp_next_tokens_ignores_empty_schedule_scores(monkeypatch):
     assert scatter_args["schedule_scores"] is None
 
 
-def test_dp_overlap_planner_returns_fixed_backend_draft_step():
-    planner = build_dp_overlap_planner(backend=SimpleNamespace(max_draft_step=5))
-
-    assert type(planner) is FixedDpOverlapPlanner
-    assert isinstance(planner, BaseDpOverlapPlanner)
-    assert planner.get_draft_step() == 5
-
-
 def test_infer_cost_candidates_include_feasible_boundaries():
     costs = _InferCostMsTable()
     costs.update(batch_size=4, infer_cost_ms=1.0)
@@ -323,6 +333,28 @@ def test_dynamic_planner_registers_cuda_graph_costs_from_backend():
 
     assert planner.target_infer_costs.estimate(4) == 1.2
     assert planner.draft_infer_costs.estimate(4) == 0.3
+
+
+def test_overlap_lightspec_consumes_combined_cuda_graph_batch_size():
+    backend = SimpleNamespace(
+        args=SimpleNamespace(dp=1),
+        enable_decode_microbatch_overlap=True,
+        max_draft_step=3,
+        model=SimpleNamespace(graph=SimpleNamespace(infer_cost_ms_by_batch_size={8: 1.2})),
+        draft_models=[
+            SimpleNamespace(
+                block_size=3,
+                graph=SimpleNamespace(infer_cost_ms_by_batch_size={8: 0.3}),
+            )
+        ],
+    )
+
+    planner = LightSpecPlanner(spec_mode="vanilla_with_att", backend=backend)
+
+    assert planner.target_infer_costs.estimate(7) == 1.2
+    assert planner.target_infer_costs.estimate(8) == 1.2
+    assert planner.draft_infer_costs.estimate(7) == 0.3
+    assert planner.draft_infer_costs.estimate(8) == 0.3
 
 
 def test_each_mode_proposer_inherits_its_expected_implementation_base():
@@ -511,6 +543,44 @@ def test_lightspec_selects_eagle_draft_depth_and_verify_capacity():
     assert plan.draft_step == 1
 
 
+def test_lightspec_overlap_prices_combined_batch_size():
+    planner = build_lightspec_planner(
+        spec_mode="eagle_with_att",
+        enable_decode_microbatch_overlap=True,
+    )
+    planner.target_infer_costs.update(batch_size=4, infer_cost_ms=1.0)
+    planner.target_infer_costs.update(batch_size=8, infer_cost_ms=3.0)
+    planner.draft_infer_costs.update(batch_size=4, infer_cost_ms=0.25)
+    planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=1.0)
+
+    assert planner.target_infer_costs.estimate(7) == 3.0
+    assert planner.target_infer_costs.get_batch_size_keys_between(4, 8) == [4, 8]
+    assert planner._get_cost_ms(req_num=4, dynamic_batch_size=8, draft_step=1) == 0.5
+
+
+def test_lightspec_overlap_selects_dynamic_draft_step():
+    planner = build_lightspec_planner(
+        spec_mode="eagle_with_att",
+        enable_decode_microbatch_overlap=True,
+    )
+    for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 10.0)):
+        planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
+    for batch_size, draft_cost in ((2, 0.1), (4, 0.1), (8, 0.2)):
+        planner.draft_infer_costs.update(batch_size=batch_size, infer_cost_ms=draft_cost)
+    planner._update_verified_batch(
+        accept_lengths=[4, 4],
+        req_num=2,
+        dynamic_batch_size=8,
+        verified_draft_step=3,
+    )
+
+    plan = planner.plan(decode_reqs=build_decode_reqs(2), origin_batch_size=8)
+
+    assert plan.dynamic_batch_size == 4
+    assert plan.pre_draft_step == 3
+    assert plan.draft_step == 1
+
+
 def test_lightspec_keeps_vanilla_attention_chained_depth_fixed():
     planner = build_lightspec_planner(spec_mode="vanilla_with_att")
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 10.0)):
@@ -575,11 +645,17 @@ def test_engine_lets_planner_count_requests_with_a_previous_proposal():
 
     mixed_plan = engine.plan_decode(
         model_input=model_input,
-        decode_reqs=[SimpleNamespace(cur_output_len=1), SimpleNamespace(cur_output_len=2)],
+        decode_reqs=[
+            SimpleNamespace(cur_output_len=1),
+            SimpleNamespace(cur_output_len=2),
+        ],
     )
     ready_plan = engine.plan_decode(
         model_input=model_input,
-        decode_reqs=[SimpleNamespace(cur_output_len=2), SimpleNamespace(cur_output_len=2)],
+        decode_reqs=[
+            SimpleNamespace(cur_output_len=2),
+            SimpleNamespace(cur_output_len=2),
+        ],
     )
 
     assert mixed_plan.dynamic_batch_size == 5
@@ -591,7 +667,9 @@ def test_engine_lets_planner_count_requests_with_a_previous_proposal():
 def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypatch):
     from lightllm.common.basemodel.triton_kernel import dynamic_mtp_utils
     from lightllm.server.router.model_infer import infer_batch as infer_batch_module
-    from lightllm.server.router.model_infer.mtp_speculative import engine as engine_module
+    from lightllm.server.router.model_infer.mtp_speculative import (
+        engine as engine_module,
+    )
 
     freed = []
     monkeypatch.setattr(

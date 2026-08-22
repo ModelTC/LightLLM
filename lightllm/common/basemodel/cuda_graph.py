@@ -189,6 +189,9 @@ class CudaGraph:
             device="cuda",
         )
         dist.all_reduce(infer_cost_ms_tensor, op=dist.ReduceOp.MIN, group=dist.group.WORLD)
+        if self.enable_decode_microbatch_overlap:
+            # overlap graph 每次 replay 同时处理两个等容量 microbatch。
+            batch_size *= 2
         self.infer_cost_ms_by_batch_size[batch_size] = float(infer_cost_ms_tensor.item())
 
     def capture_decode(

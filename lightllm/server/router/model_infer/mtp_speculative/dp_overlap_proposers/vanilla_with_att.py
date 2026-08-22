@@ -3,10 +3,21 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
-from lightllm.common.basemodel.triton_kernel.overlay_mtp_decode_input import overlay_chained_mtp_decode_input
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import BaseDpOverlapProposer
-from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal
+from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import (
+    gen_mtp_new_input_ids,
+)
+from lightllm.common.basemodel.triton_kernel.overlay_mtp_decode_input import (
+    overlay_chained_mtp_decode_input,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
+    BaseDpOverlapProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_utils import (
+    get_dp_overlap_req_start_rows,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
+    VanillaSpecProposal,
+)
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
@@ -52,39 +63,32 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         self,
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
+        target_next_token_ids0: torch.Tensor,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
-        target_next_token_ids: torch.Tensor,
-        real_verify_rows0: int,
-        real_verify_rows1: int,
+        target_next_token_ids1: torch.Tensor,
+        real_request_num0: int,
+        real_request_num1: int,
         accept_len: torch.Tensor,
         draft_step: int,
     ) -> VanillaSpecProposal:
         assert draft_step == self.backend.max_draft_step
         assert len(self.backend.draft_models) == draft_step
 
-        verify_width = self.backend.max_draft_step + 1
-        real_verify_rows = (int(real_verify_rows0), int(real_verify_rows1))
-        req_num_by_batch = tuple(row_count // verify_width for row_count in real_verify_rows)
+        req_num_by_batch = (int(real_request_num0), int(real_request_num1))
         assert accept_len.shape == (sum(req_num_by_batch),)
 
-        target_next_token_ids0 = self._build_padded_next_token_ids(
-            target_next_token_ids=target_next_token_ids,
-            batch_size=target_model_input0.batch_size,
-            real_verify_rows=real_verify_rows0,
-            device=target_model_input0.b_req_idx.device,
-            source_start=0,
-        )
-        target_next_token_ids1 = self._build_padded_next_token_ids(
-            target_next_token_ids=target_next_token_ids,
-            batch_size=target_model_input1.batch_size,
-            real_verify_rows=real_verify_rows1,
-            device=target_model_input1.b_req_idx.device,
-            source_start=real_verify_rows0,
-        )
+        assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
+        assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
         req_start_rows = (
-            torch.arange(0, real_verify_rows0, verify_width, device=target_next_token_ids0.device),
-            torch.arange(0, real_verify_rows1, verify_width, device=target_next_token_ids1.device),
+            get_dp_overlap_req_start_rows(
+                b_mtp_index=target_model_input0.b_mtp_index,
+                request_num=real_request_num0,
+            ),
+            get_dp_overlap_req_start_rows(
+                b_mtp_index=target_model_input1.b_mtp_index,
+                request_num=real_request_num1,
+            ),
         )
         accept_len_by_batch = (
             accept_len[: req_num_by_batch[0]],
@@ -98,6 +102,15 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
             target_model_output1.mtp_collector.spec_hidden,
         ]
         proposal_token_ids = target_next_token_ids0.new_empty((sum(req_num_by_batch), draft_step))
+        proposal_schedule_scores = (
+            torch.empty(
+                (sum(req_num_by_batch), draft_step),
+                dtype=torch.float32,
+                device=target_next_token_ids0.device,
+            )
+            if self.enable_dynmaic_mtp
+            else None
+        )
         req_offset = req_num_by_batch[0]
 
         for step in range(draft_step):
@@ -108,7 +121,21 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
             draft_outputs = self.backend.draft_models[step]._microbatch_overlap_decode_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
                 draft_hiddens[batch_index] = draft_output.mtp_collector.spec_hidden
-                draft_token_ids[batch_index] = self.backend._gen_argmax_token_ids(draft_output)
+                if self.enable_dynmaic_mtp:
+                    draft_token_ids[batch_index], draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(
+                        draft_output
+                    )
+                    selected_token_probs = draft_token_probs.index_select(
+                        0,
+                        accepted_tail_rows[batch_index].long(),
+                    )
+                    proposal_row_start = 0 if batch_index == 0 else req_offset
+                    proposal_schedule_scores[
+                        proposal_row_start : proposal_row_start + req_num_by_batch[batch_index],
+                        step,
+                    ] = selected_token_probs
+                else:
+                    draft_token_ids[batch_index] = self.backend._gen_argmax_token_ids(draft_output)
 
             proposal_token_ids[:req_offset, step] = draft_token_ids[0].index_select(0, accepted_tail_rows[0].long())
             proposal_token_ids[req_offset:, step] = draft_token_ids[1].index_select(0, accepted_tail_rows[1].long())
@@ -125,7 +152,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         return VanillaSpecProposal(
             token_ids=proposal_token_ids,
             extra_mem_indexes_cpu=[],
-            schedule_scores=None,
+            schedule_scores=proposal_schedule_scores,
         )
 
     def _prepare_mtp_prefill_inputs(

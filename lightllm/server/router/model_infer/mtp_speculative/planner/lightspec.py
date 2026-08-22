@@ -68,11 +68,13 @@ class LightSpecPlanner(BaseMtpPlanner):
         # The current verify width is bounded by the proposal built last time.
         self.pre_draft_step = self.max_draft_step
 
-        # 只有非 overlap DP 下的变长 LightSpec 需要跨 rank 对齐 draft 深度。
+        # DP 下的变长 LightSpec 需要跨 rank 对齐 draft 深度。
+        # overlap engine 与普通 engine 共享这一 planner，因此全局只会
+        # 创建一组通信资源。
         self._draft_step_group = None
         self._draft_step_tensor = None
         self._draft_step_stream = None
-        if backend.args.dp > 1 and not backend.enable_decode_microbatch_overlap and len(self.draft_steps) > 1:
+        if backend.args.dp > 1 and len(self.draft_steps) > 1:
             self._draft_step_group = dist.new_group(
                 ranks=list(range(get_global_world_size())),
                 backend="nccl",

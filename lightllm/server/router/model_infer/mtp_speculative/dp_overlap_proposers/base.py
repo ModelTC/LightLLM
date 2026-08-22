@@ -4,7 +4,9 @@ from typing import TYPE_CHECKING
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
+    SpecProposal,
+)
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -36,33 +38,15 @@ class BaseDpOverlapProposer(ABC):
         self,
         target_model_input0: ModelInput,  # batch_size = padded_verify_batch_size0
         target_model_output0: ModelOutput,  # logits: [padded_verify_batch_size0, vocab_size]
+        target_next_token_ids0: torch.Tensor,  # [padded_verify_batch_size0]
         target_model_input1: ModelInput,  # batch_size = padded_verify_batch_size1
         target_model_output1: ModelOutput,  # logits: [padded_verify_batch_size1, vocab_size]
-        target_next_token_ids: torch.Tensor,  # [real_verify_rows0 + real_verify_rows1]
-        real_verify_rows0: int,
-        real_verify_rows1: int,
+        target_next_token_ids1: torch.Tensor,  # [padded_verify_batch_size1]
+        real_request_num0: int,
+        real_request_num1: int,
         accept_len: torch.Tensor,  # [real_req_num0 + real_req_num1]
         draft_step: int,
     ) -> SpecProposal:
         """Generate one proposal from two DP-overlapped decode microbatches."""
 
         raise NotImplementedError
-
-    @staticmethod
-    def _build_padded_next_token_ids(
-        target_next_token_ids: torch.Tensor,
-        batch_size: int,
-        real_verify_rows: int,
-        device: torch.device,
-        source_start: int,
-    ) -> torch.Tensor:
-        """将合并后的真实 target token 拆分并补齐到一个 microbatch 的 verify shape。"""
-
-        assert 0 <= real_verify_rows <= batch_size
-        padded_token_ids = torch.zeros((batch_size,), dtype=torch.int64, device=device)
-        if real_verify_rows > 0:
-            padded_token_ids[:real_verify_rows].copy_(
-                target_next_token_ids[source_start : source_start + real_verify_rows],
-                non_blocking=True,
-            )
-        return padded_token_ids
