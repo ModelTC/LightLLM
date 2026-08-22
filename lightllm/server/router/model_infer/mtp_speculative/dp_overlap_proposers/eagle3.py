@@ -1,67 +1,21 @@
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
-    BaseDpOverlapProposer,
-)
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_utils import (
-    fill_dp_eagle_draft_model_kv_state_overlap,
-    propose_next_dp_eagle_autoregressive_overlap,
-)
-from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
-    EagleSpecProposal,
+from lightllm.common.basemodel.batch_objs import ModelOutput
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_with_att import (
+    DpOverlapEagleWithAttProposer,
 )
 
 
-class DpOverlapEagle3Proposer(BaseDpOverlapProposer):
-    """DP ``eagle3`` proposer。"""
+class DpOverlapEagle3Proposer(DpOverlapEagleWithAttProposer):
+    """复用 DP EAGLE With-Att KV 流程并执行 draft-to-target 词表映射。"""
 
     def _map_draft_token_ids(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
         return self.backend.draft_models[0].map_draft_vocab_to_main_vocab(draft_token_ids)
 
-    def fill_draft_model_kv_state_overlap(
-        self,
-        target_model_input0: ModelInput,
-        target_model_output0: ModelOutput,
-        target_next_token_ids0: torch.Tensor,
-        target_model_input1: ModelInput,
-        target_model_output1: ModelOutput,
-        target_next_token_ids1: torch.Tensor,
-    ) -> None:
-        fill_dp_eagle_draft_model_kv_state_overlap(
-            self,
-            target_model_input0,
-            target_model_output0,
-            target_next_token_ids0,
-            target_model_input1,
-            target_model_output1,
-            target_next_token_ids1,
-        )
+    def _gen_argmax_token_ids(self, model_output: ModelOutput) -> torch.Tensor:
+        draft_token_ids = super()._gen_argmax_token_ids(model_output)
+        return self._map_draft_token_ids(draft_token_ids)
 
-    def propose_next_overlap(
-        self,
-        target_model_input0: ModelInput,
-        target_model_output0: ModelOutput,
-        target_next_token_ids0: torch.Tensor,
-        target_model_input1: ModelInput,
-        target_model_output1: ModelOutput,
-        target_next_token_ids1: torch.Tensor,
-        real_request_num0: int,
-        real_request_num1: int,
-        accept_len: torch.Tensor,
-        draft_step: int,
-    ) -> EagleSpecProposal:
-        return propose_next_dp_eagle_autoregressive_overlap(
-            proposer=self,
-            target_model_input0=target_model_input0,
-            target_model_output0=target_model_output0,
-            target_next_token_ids0=target_next_token_ids0,
-            target_model_input1=target_model_input1,
-            target_model_output1=target_model_output1,
-            target_next_token_ids1=target_next_token_ids1,
-            real_request_num0=real_request_num0,
-            real_request_num1=real_request_num1,
-            accept_len=accept_len,
-            draft_step=draft_step,
-            map_draft_token_ids=self._map_draft_token_ids,
-        )
+    def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        draft_token_ids, draft_token_probs = super()._gen_argmax_token_ids_and_prob(model_output)
+        return self._map_draft_token_ids(draft_token_ids), draft_token_probs

@@ -371,7 +371,6 @@ def test_each_mode_proposer_inherits_its_expected_implementation_base():
         DpOverlapVanillaNoAttProposer,
         DpOverlapEagleWithAttProposer,
         DpOverlapEagleNoAttProposer,
-        DpOverlapEagle3Proposer,
     )
 
     for proposer_type in proposer_types:
@@ -379,6 +378,7 @@ def test_each_mode_proposer_inherits_its_expected_implementation_base():
     assert Eagle3Proposer.__bases__ == (EagleWithAttProposer,)
     for proposer_type in dp_overlap_proposer_types:
         assert proposer_type.__bases__ == (BaseDpOverlapProposer,)
+    assert DpOverlapEagle3Proposer.__bases__ == (DpOverlapEagleWithAttProposer,)
 
 
 def test_each_mtp_mode_builds_its_own_proposer():

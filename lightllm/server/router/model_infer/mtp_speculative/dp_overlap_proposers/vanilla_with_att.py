@@ -12,7 +12,7 @@ from lightllm.common.basemodel.triton_kernel.overlay_mtp_decode_input import (
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
     BaseDpOverlapProposer,
 )
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_utils import (
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.utils import (
     get_dp_overlap_req_start_rows,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
@@ -80,21 +80,27 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
 
         assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
         assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
-        req_start_rows = (
+        b_req_mtp_start_loc = (
             get_dp_overlap_req_start_rows(
                 b_mtp_index=target_model_input0.b_mtp_index,
-                request_num=real_request_num0,
+                req_num=real_request_num0,
             ),
             get_dp_overlap_req_start_rows(
                 b_mtp_index=target_model_input1.b_mtp_index,
-                request_num=real_request_num1,
+                req_num=real_request_num1,
             ),
         )
         accept_len_by_batch = (
             accept_len[: req_num_by_batch[0]],
             accept_len[req_num_by_batch[0] : sum(req_num_by_batch)],
         )
-        accepted_tail_rows = tuple(starts + lengths - 1 for starts, lengths in zip(req_start_rows, accept_len_by_batch))
+        accepted_tail_rows = tuple(
+            req_mtp_start_loc + batch_accept_len - 1
+            for req_mtp_start_loc, batch_accept_len in zip(
+                b_req_mtp_start_loc,
+                accept_len_by_batch,
+            )
+        )
         model_inputs = [copy.copy(target_model_input0), copy.copy(target_model_input1)]
         draft_token_ids = [target_next_token_ids0, target_next_token_ids1]
         draft_hiddens = [
@@ -145,7 +151,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
                     draft_token_ids[batch_index] = overlay_chained_mtp_decode_input(
                         input_ids=model_input.input_ids,
                         draft_token_ids=draft_token_ids[batch_index],
-                        b_req_mtp_start_loc=req_start_rows[batch_index],
+                        b_req_mtp_start_loc=b_req_mtp_start_loc[batch_index],
                         accept_len=accept_len_by_batch[batch_index],
                     )
 

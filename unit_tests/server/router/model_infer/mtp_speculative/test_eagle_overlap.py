@@ -5,6 +5,10 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers import eagle_with_att
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.utils import (
+    get_dp_overlap_req_start_rows,
+)
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle3 import (
     DpOverlapEagle3Proposer,
 )
@@ -83,7 +87,25 @@ def _target_input(batch_size, b_mtp_index=None, device="cpu"):
     )
 
 
+def _patch_cpu_req_start_rows(monkeypatch):
+    def get_cpu_req_start_rows(b_mtp_index, req_num):
+        req_start_rows = torch.nonzero(b_mtp_index == 0, as_tuple=False).flatten().to(dtype=torch.int32)
+        assert req_start_rows.shape == (req_num,)
+        return req_start_rows
+
+    monkeypatch.setattr(eagle_with_att, "get_dp_overlap_req_start_rows", get_cpu_req_start_rows)
+
+
+def test_dp_overlap_req_start_rows_rejects_nonempty_cpu_input():
+    with pytest.raises(AssertionError, match="must be a CUDA tensor"):
+        get_dp_overlap_req_start_rows(
+            b_mtp_index=torch.tensor([0, 1], dtype=torch.int32),
+            req_num=1,
+        )
+
+
 def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
+    _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
         max_draft_step=2,
@@ -180,6 +202,7 @@ def test_overlap_eagle_supports_empty_verify_rows(monkeypatch):
 
 
 def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
+    _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
         max_draft_step=2,
@@ -288,6 +311,7 @@ def test_overlap_eagle_no_att_supports_dynamic_draft_step():
 
 
 def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
+    _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
         max_draft_step=2,
@@ -345,6 +369,25 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
 
 def test_eagle3_maps_draft_token_ids_in_proposer():
     proposer = Eagle3Proposer.__new__(Eagle3Proposer)
+    proposer.backend = SimpleNamespace(
+        draft_models=[SimpleNamespace(map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100)],
+        _gen_argmax_token_ids=lambda _: torch.tensor([1, 2]),
+        _gen_argmax_token_ids_and_prob=lambda _: (
+            torch.tensor([3, 4]),
+            torch.tensor([0.8, 0.7]),
+        ),
+    )
+
+    token_ids = proposer._gen_argmax_token_ids(ModelOutput(logits=torch.empty(0)))
+    token_ids_with_prob, probs = proposer._gen_argmax_token_ids_and_prob(ModelOutput(logits=torch.empty(0)))
+
+    assert torch.equal(token_ids, torch.tensor([101, 102]))
+    assert torch.equal(token_ids_with_prob, torch.tensor([103, 104]))
+    assert torch.equal(probs, torch.tensor([0.8, 0.7]))
+
+
+def test_dp_overlap_eagle3_maps_draft_token_ids_in_proposer():
+    proposer = DpOverlapEagle3Proposer.__new__(DpOverlapEagle3Proposer)
     proposer.backend = SimpleNamespace(
         draft_models=[SimpleNamespace(map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100)],
         _gen_argmax_token_ids=lambda _: torch.tensor([1, 2]),
