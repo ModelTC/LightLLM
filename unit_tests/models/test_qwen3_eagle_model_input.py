@@ -3,9 +3,28 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_eagle.layer_infer.pre_layer_infer import Qwen3EaglePreLayerInfer
+from lightllm.models.qwen3_eagle.layer_infer.transformer_layer_infer import Qwen3EagleTransformerLayerInfer
 from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
+
+
+def test_qwen3_eagle_uses_configured_attention_head_dim(monkeypatch):
+    def init_llama_layer(self, layer_num, network_config):
+        self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
+
+    monkeypatch.setattr(LlamaTransformerLayerInfer, "__init__", init_llama_layer)
+    layer = Qwen3EagleTransformerLayerInfer(
+        layer_num=0,
+        network_config={
+            "hidden_size": 2560,
+            "num_attention_heads": 32,
+            "head_dim": 128,
+        },
+    )
+
+    assert layer.head_dim_ == 128
 
 
 def test_qwen3_eagle_projects_concatenated_target_hiddens_before_inferstate(monkeypatch):

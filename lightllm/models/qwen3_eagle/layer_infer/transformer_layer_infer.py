@@ -1,12 +1,12 @@
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 
 
-class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
+class Qwen3EagleTransformerLayerInfer(Qwen3TransformerLayerInfer):
     def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight: Qwen3EagleTransformerLayerWeight):
         input_part = self._att_norm(input, infer_state, layer_weight)
         target_part = layer_weight.hidden_norm_weight_(
