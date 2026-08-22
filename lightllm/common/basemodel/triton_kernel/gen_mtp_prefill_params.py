@@ -32,6 +32,10 @@ def gen_mtp_new_input_ids(
 ):
     assert len(b_seq_len.shape) == 1
     batch_size = b_seq_len.shape[0]
+    if batch_size == 0:
+        # Overlap prefill 允许一侧保持真实的 0-shape ModelInput。空侧没有
+        # token 需要移动，直接返回空输出，避免启动 0-grid Triton kernel。
+        return torch.empty_like(input_ids)
     if b_ready_cache_len is None:
         b_q_seq_len = b_seq_len
     else:

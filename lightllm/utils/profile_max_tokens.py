@@ -2,10 +2,12 @@ import os
 import gc
 import json
 import torch
+from contextlib import contextmanager
 from transformers import AutoModelForCausalLM
 import argparse
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.envs_utils import get_mtp_weight_layer_num
 
 data_type_dict = {"float32": 4, "float16": 2, "bfloat16": 2, "fp32": 4, "fp16": 2, "bf16": 2, "int8": 1, "int4": 0.5}
 
@@ -29,6 +31,40 @@ def get_total_gpu_memory():
     """
     total_memory = torch.cuda.get_device_properties(0).total_memory
     return total_memory / (1024 ** 3)  # Convert to GB
+
+
+def get_mtp_adjusted_mem_fraction(
+    mem_fraction: float,
+    target_weight_bytes: int,
+    target_layer_num: int,
+    mtp_layer_num: int,
+) -> float:
+    mtp_weight_bytes = target_weight_bytes * mtp_layer_num / target_layer_num
+    total_gpu_bytes = torch.cuda.get_device_properties(get_current_device_id()).total_memory
+    adjusted_mem_fraction = mem_fraction - mtp_weight_bytes / total_gpu_bytes
+    assert adjusted_mem_fraction > 0, "MTP weight reservation leaves no memory for the target model KV cache"
+    return adjusted_mem_fraction
+
+
+@contextmanager
+def profile_mtp_weight_memory(model):
+    """Reserve auto-profiled KV budget for MTP weights allocated after the target model."""
+    should_adjust = (
+        model.max_total_token_num is None and not model.is_mtp_draft_model and model.args.mtp_mode is not None
+    )
+    if not should_adjust:
+        yield
+        return
+
+    weight_memory_before = torch.cuda.memory_allocated()
+    yield
+    target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
+    model.mem_fraction = get_mtp_adjusted_mem_fraction(
+        mem_fraction=model.mem_fraction,
+        target_weight_bytes=target_weight_bytes,
+        target_layer_num=model.config["n_layer"],
+        mtp_layer_num=get_mtp_weight_layer_num(),
+    )
 
 
 def load_config(weight_dir_):

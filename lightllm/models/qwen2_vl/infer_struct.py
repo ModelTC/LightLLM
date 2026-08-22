@@ -17,17 +17,33 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         rope_scaling = model.config.get("rope_scaling", {})
         self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
         InferStateInfo.init_some_extra_state(self, model)
+
+        # Prefill builds complete 3-axis MRoPE positions from the prompt's
+        # image/video layout. Request-level position deltas are decode-only.
         if self.is_prefill:
+            assert self.b_position_delta is None, "prefill must not provide b_position_delta"
             self.position_ids = self.get_mrope_position(self.multimodal_params)
+
+        # Decode base position_ids contains one scalar position
+        # per request; add the cached multimodal delta and broadcast the result
+        # to MRoPE's temporal/height/width axes.
         else:
-            b_position_delta = self.b_position_delta.to(dtype=self.position_ids.dtype)
-            position_ids = self.position_ids + b_position_delta
-            self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
+            assert self.b_position_delta is not None, "decode requires b_position_delta"
+            self._apply_mrope_position_delta()
 
         self.position_ids = self.position_ids.contiguous()
         self.position_cos = model._cos_cached[self.position_ids]
         self.position_sin = model._sin_cached[self.position_ids]
         return
+
+    def _apply_mrope_position_delta(self):
+        b_position_delta = self.b_position_delta.to(dtype=self.position_ids.dtype)
+        assert b_position_delta.shape == self.position_ids.shape, (
+            "b_position_delta must align with position_ids, "
+            f"got delta_shape={b_position_delta.shape}, position_shape={self.position_ids.shape}"
+        )
+        position_ids = self.position_ids + b_position_delta
+        self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
 
     def get_mrope_position(self, multimodal_params: List[dict]) -> torch.Tensor:
         if len(multimodal_params) == 0:

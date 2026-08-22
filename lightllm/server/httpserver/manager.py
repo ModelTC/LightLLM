@@ -711,6 +711,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
+        sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
+        sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -744,6 +746,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
                     metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+                    cur_mtp_verify_token_num = metadata.get("mtp_verify_token_num", 0)
+                    sub_req_id_to_mtp_verify_token_num[sub_req_id] = cur_mtp_verify_token_num
+                    cur_mtp_verify_step_num = metadata.get("mtp_verify_step_num", 0)
+                    sub_req_id_to_mtp_verify_step_num[sub_req_id] = cur_mtp_verify_step_num
 
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
@@ -773,9 +779,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
-                        mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
-                        )
+                        mtp_accepted_token_num = sum(sub_req_id_to_mtp_accepted_token_num.values())
+                        mtp_verify_token_num = sum(sub_req_id_to_mtp_verify_token_num.values())
+                        mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
+                        if mtp_total_verify_steps <= 0:
+                            mtp_total_verify_steps = out_token_counter - mtp_accepted_token_num
+                        mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
+                        mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
+                        mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
                             f"X-Request-Id:{x_request_id} "
@@ -793,7 +804,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                             f"disk cache hit: {disk_prompt_cache_len > 0} "
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
+                            f"mtp_accepted_token_num:{mtp_accepted_token_num} "
+                            f"mtp_total_verify_steps:{mtp_total_verify_steps} "
+                            f"mtp_total_verify_tokens:{mtp_verify_token_num} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
+                            f"mtp_avg_accepted_tokens_per_step:{mtp_avg_accepted_tokens_per_step} "
+                            f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
                         )
 
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
@@ -938,6 +954,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
                                     "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                                    "mtp_verify_token_num": req.mtp_verify_token_num,
+                                    "mtp_verify_step_num": req.mtp_verify_step_num,
                                 }
                                 metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
                                 if self.args.use_reward_model:

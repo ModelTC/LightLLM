@@ -737,31 +737,36 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
+            "eagle3",
+            "dspark",
+            "dflash",
             None,
         ],
         default=None,
-        help="""Supported MTP modes.
-        None: Disables MTP.
-        *_with_att: Uses the MTP model with an attention mechanism to predict the next draft token.
-        *_no_att: Uses the MTP model without an attention module to predict the next draft token.""",
+        help="""Speculative decoding mode.
+        *_with_att and *_no_att select attention or non-attention draft models;
+        eagle3 uses autoregressive EAGLE-3 drafting; dflash uses block-diffusion drafting;
+        dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(
         "--mtp_draft_model_dir",
         type=str,
         nargs="+",
         default=None,
-        help="""Path to the draft model for the MTP multi-prediction feature,
-        used for loading the MTP multi-output token model.""",
+        help="""Path to the speculative draft model. The legacy option name is
+        retained for command-line compatibility.""",
     )
     parser.add_argument(
         "--mtp_step",
         type=int,
         default=0,
-        help="""Specifies the number of additional tokens to predict using the draft model.
-        Currently, this feature supports only the DeepSeekV3 model.
-        Increasing this value allows for more predictions,
-        but ensure that the model is compatible with the specified step count.
-        currently, deepseekv3 model only support 1 step""",
+        help="""Number of additional draft tokens per request.
+        For DSpark and DFlash this value is derived from the draft checkpoint block_size.""",
+    )
+    parser.add_argument(
+        "--mtp_dynamic_verify",
+        action="store_true",
+        help="""Enable dynamic speculative scheduling.""",
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",

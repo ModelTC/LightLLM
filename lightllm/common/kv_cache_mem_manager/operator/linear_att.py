@@ -191,7 +191,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         # Qwen3Next 需要调整 layer_index
-        layer_index = layer_index // self.linear_config.full_attention_interval
+        layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager

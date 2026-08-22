@@ -46,7 +46,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             b_q_seq_len=self.infer_state.b_q_seq_len,
             b_req_idx=self.infer_state.b_req_idx,
             req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
-            q_token_num=self.infer_state.total_token_num - self.infer_state.prefix_total_token_num,
+            q_token_num=self.infer_state.input_ids.shape[0],
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
@@ -79,7 +79,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         topk_mem_indices = nsa_dict["topk_mem_indices"]
         prefill_cache_kv = nsa_dict["prefill_cache_kv"]
 
-        if self.infer_state.prefix_total_token_num > 0:
+        if self.infer_state.max_cache_len > 0:
             # 当前推理生成的token kv部分从 prefill_cache_kv 中获取，历史
             # 部分kv 从 packed_kv 中获取, 并进行反量化，这样可以避免 prefill_cache_kv
             # 部分的数据进行重复的反量化操作，提升整体的性能。

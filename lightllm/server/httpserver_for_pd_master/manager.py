@@ -517,6 +517,7 @@ class HttpServerManagerForPDMaster:
         unfinished_count = sampling_params.best_of
         is_first_token = True
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
+        sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
         async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
             p_node, d_node, prompt, sampling_params, multimodal_params, request
@@ -530,6 +531,7 @@ class HttpServerManagerForPDMaster:
             out_token_counter += 1
             prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))
             sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+            sub_req_id_to_mtp_verify_step_num[sub_req_id] = metadata.get("mtp_verify_step_num", 0)
             if is_first_token:
                 first_token_cost_ms = (time.time() - start_time) * 1000
                 is_first_token = False
@@ -548,9 +550,10 @@ class HttpServerManagerForPDMaster:
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
         prompt_cache_ratio = prompt_cache_len / prompt_tokens
-        mtp_avg_token_per_step = out_token_counter / max(
-            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
-        )
+        mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
+        if mtp_total_verify_steps <= 0:
+            mtp_total_verify_steps = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+        mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             f"X-Request-Id:{x_request_id} "

@@ -7,7 +7,7 @@ import pickle
 
 from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Callable, Any, Union
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
@@ -24,6 +24,9 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 logger = init_logger(__name__)
 
@@ -44,15 +47,13 @@ class InferenceContext:
 
     def register(
         self,
-        backend,
+        backend: "ModeBackend",
         req_manager: Union[ReqManager, ReqManagerForMamba],
         radix_cache: Union[LinearAttPagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
     ):
         self.args = get_env_start_args()
-        from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-
         self.backend: ModeBackend = backend
         self.req_manager = req_manager
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager
@@ -858,6 +859,12 @@ class InferReq:
     def update_mtp_accepted_token_num(self, accept_token_num: int):
         # 用于统计 mtp 的接受率
         self.shm_req.mtp_accepted_token_num += accept_token_num
+
+    def update_mtp_verify_token_num(self, verify_token_num: int):
+        self.shm_req.mtp_verify_token_num += verify_token_num
+
+    def update_mtp_verify_step_num(self, verify_step_num: int):
+        self.shm_req.mtp_verify_step_num += verify_step_num
 
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]

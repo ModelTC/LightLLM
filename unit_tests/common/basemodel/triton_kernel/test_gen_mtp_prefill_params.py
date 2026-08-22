@@ -5,6 +5,22 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 
 
+def test_gen_mtp_new_input_ids_empty_batch():
+    input_ids = torch.empty((0,), dtype=torch.int64, device="cuda")
+    b_next_token_ids = torch.empty((0,), dtype=torch.int64, device="cuda")
+    b_seq_len = torch.empty((0,), dtype=torch.int32, device="cuda")
+
+    new_input_ids = gen_mtp_new_input_ids(
+        input_ids=input_ids,
+        b_next_token_ids=b_next_token_ids,
+        b_seq_len=b_seq_len,
+    )
+
+    assert new_input_ids.is_cuda
+    assert new_input_ids.dtype == torch.int64
+    assert new_input_ids.shape == (0,)
+
+
 def test_gen_mtp_new_input_ids_0():
     input_ids = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9]).long().cuda()
     b_next_token_ids = torch.tensor([10, 11, 12]).long().cuda()
