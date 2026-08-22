@@ -1,3 +1,5 @@
+import os
+import statistics
 import threading
 import time
 from collections import deque
@@ -1442,7 +1444,7 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
     monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), topk_ids))
     monkeypatch.setattr(
         deepgemm_module,
-        "eplb_map_fast",
+        "eplb_map_to_physical_long_fast",
         lambda *_args, **_kwargs: pytest.fail("decode must not map"),
     )
 
@@ -1477,7 +1479,7 @@ def test_select_experts_and_quant_input_keeps_prefill_ids_logical(monkeypatch):
     )
     monkeypatch.setattr(
         deepgemm_module,
-        "eplb_map_fast",
+        "eplb_map_to_physical_long_fast",
         lambda *_args, **_kwargs: pytest.fail("selection must not map"),
     )
     monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
@@ -1507,7 +1509,7 @@ def test_prepare_prefill_topk_ids_returns_identity_without_eplb(monkeypatch):
     logical_ids = torch.tensor([[1, 2]], dtype=torch.int64)
     monkeypatch.setattr(
         deepgemm_module,
-        "eplb_map_fast",
+        "eplb_map_to_physical_long_fast",
         lambda *_args, **_kwargs: pytest.fail("must not map"),
     )
 
@@ -1589,14 +1591,14 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
     mapped = []
     calls = []
 
-    def map_in_place(topk_ids, *_args, **_kwargs):
+    def map_to_physical_long(topk_ids, *_args, **_kwargs):
         mapped.append(topk_ids)
-        assert topk_ids.dtype is torch.int32
+        assert topk_ids.dtype is torch.int64
         assert topk_ids.is_contiguous()
         order.append("map")
-        topk_ids.add_(10)
+        return topk_ids + 10
 
-    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", map_in_place)
+    monkeypatch.setattr(deepgemm_module, "eplb_map_to_physical_long_fast", map_to_physical_long)
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
     monkeypatch.setattr(
         deepgemm_module,
@@ -1612,17 +1614,8 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
     def fake_routing_stream(_stream):
         yield
 
-    original_to = torch.Tensor.to
-
-    def observe_long_conversion(tensor, *args, **kwargs):
-        dtype = kwargs.get("dtype", args[0] if args else None)
-        if dtype is torch.long:
-            order.append("long")
-        return original_to(tensor, *args, **kwargs)
-
     monkeypatch.setattr(deepgemm_module, "_get_prefill_routing_stream", lambda _device: object())
     monkeypatch.setattr(torch.cuda, "stream", fake_routing_stream)
-    monkeypatch.setattr(torch.Tensor, "to", observe_long_conversion)
     monkeypatch.setattr(
         deepgemm_module.ElasticBuffer,
         "capture",
@@ -1633,9 +1626,10 @@ def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
     result = impl.dispatch("qinput", logical_ids, torch.ones((1, 2)), source_event)
 
     assert len(mapped) == 1
-    assert order == ["source_wait", "map", "long", "capture"]
+    assert order == ["source_wait", "map", "capture"]
     assert calls[0]["topk_idx"].dtype is torch.long
     assert calls[0]["topk_idx"].tolist() == [[11, 12]]
+    assert logical_ids.tolist() == [[1, 2]]
     assert calls[0]["previous_event"] is dispatch_event
     assert calls[0]["num_experts"] == 130
     assert result[3] == [4]
@@ -1647,7 +1641,7 @@ def test_deepgemm_constructor_configures_eplb():
     assert impl.expert_parallel_state is state
 
 
-def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
+def test_prefill_eplb_keeps_logical_ids_without_capture_clone(monkeypatch):
     from lightllm.common.basemodel.triton_kernel.fused_moe import topk_select
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
@@ -1664,11 +1658,11 @@ def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
     def select(**_kwargs):
         return torch.ones((1, 2)), torch.tensor([[3, 4]], dtype=torch.int32)
 
-    def map_in_place(topk_ids, *_args, **_kwargs):
-        topk_ids.add_(10)
+    def map_to_physical_long(topk_ids, *_args, **_kwargs):
+        return topk_ids.to(torch.long) + 10
 
     monkeypatch.setattr(topk_select, "select_experts", select)
-    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", map_in_place)
+    monkeypatch.setattr(deepgemm_module, "eplb_map_to_physical_long_fast", map_to_physical_long)
     clone_calls = []
     original_clone = torch.Tensor.clone
 
@@ -1677,6 +1671,26 @@ def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
         return original_clone(tensor, *args, **kwargs)
 
     monkeypatch.setattr(torch.Tensor, "clone", clone_spy)
+    _, physical_ids, origin_ids = impl._select_experts(
+        torch.empty((1, 4)),
+        torch.empty((1, 128)),
+        None,
+        2,
+        False,
+        False,
+        0,
+        0,
+        "softmax",
+        is_prefill=True,
+        preserve_logical_ids=True,
+    )
+    assert physical_ids.dtype is torch.long
+    assert physical_ids.tolist() == [[13, 14]]
+    assert origin_ids.dtype is torch.int32
+    assert origin_ids.tolist() == [[3, 4]]
+    assert physical_ids.data_ptr() != origin_ids.data_ptr()
+    assert clone_calls == []
+
     result = impl(
         torch.empty((1, 4)),
         torch.empty((1, 128)),
@@ -1712,10 +1726,10 @@ def test_prefill_eplb_clones_logical_ids_only_for_metadata_capture(monkeypatch):
     )
     assert result.tolist() == [[13, 14]]
     assert captured[0].tolist() == [[3, 4]]
-    assert len(clone_calls) == 2  # EPLB preserves logical IDs, then the test captures a stable copy.
+    assert len(clone_calls) == 1
 
 
-def test_fused_experts_with_topk_prefill_eplb_maps_and_records_in_place(monkeypatch):
+def test_fused_experts_with_topk_prefill_eplb_maps_and_records_without_mutating_logical_ids(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     _set_expert_parallel_state(
         impl,
@@ -1730,11 +1744,11 @@ def test_fused_experts_with_topk_prefill_eplb_maps_and_records_in_place(monkeypa
     )
     calls, fused_calls = [], []
 
-    def map_in_place(topk_ids, logical_map, replica_count, counter, sample_index, *, record_load):
+    def map_to_physical_long(topk_ids, logical_map, replica_count, counter, sample_index, *, record_load):
         calls.append((topk_ids, logical_map, replica_count, counter, sample_index, record_load))
-        topk_ids.add_(10)
+        return topk_ids.to(torch.long) + 10
 
-    monkeypatch.setattr(deepgemm_module, "eplb_map_fast", map_in_place)
+    monkeypatch.setattr(deepgemm_module, "eplb_map_to_physical_long_fast", map_to_physical_long)
     impl._fused_experts = lambda **kwargs: fused_calls.append(kwargs) or "out"
     input_tensor, w13, w2 = object(), object(), object()
     topk_weights = torch.ones((1, 2))
@@ -1752,17 +1766,16 @@ def test_fused_experts_with_topk_prefill_eplb_maps_and_records_in_place(monkeypa
         )
     ]
     assert impl.eplb_state.recorded_sample_count == 5
-    assert topk_ids.tolist() == [[11, 12]]
-    assert fused_calls == [
-        {
-            "input_tensor": input_tensor,
-            "w13": w13,
-            "w2": w2,
-            "topk_weights": topk_weights,
-            "topk_ids": topk_ids,
-            "is_prefill": True,
-        }
-    ]
+    assert topk_ids.tolist() == [[1, 2]]
+    assert len(fused_calls) == 1
+    assert fused_calls[0]["input_tensor"] is input_tensor
+    assert fused_calls[0]["w13"] is w13
+    assert fused_calls[0]["w2"] is w2
+    assert fused_calls[0]["topk_weights"] is topk_weights
+    assert torch.equal(fused_calls[0]["topk_ids"], torch.tensor([[11, 12]], dtype=torch.long))
+    assert fused_calls[0]["is_prefill"] is True
+    assert fused_calls[0]["clamp_limit"] is None
+    assert fused_calls[0]["alloc_tensor_func"] is torch.empty
 
 
 def test_fused_experts_with_topk_prefill_eplb_maps_without_recording(monkeypatch):
@@ -1780,20 +1793,19 @@ def test_fused_experts_with_topk_prefill_eplb_maps_without_recording(monkeypatch
     calls = []
     monkeypatch.setattr(
         deepgemm_module,
-        "eplb_map_fast",
-        lambda *args, **kwargs: calls.append((args, kwargs)) or args[0].add_(10),
+        "eplb_map_to_physical_long_fast",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or args[0].to(torch.long).add_(10),
     )
     impl._fused_experts = lambda **kwargs: kwargs["topk_ids"]
     topk_ids = torch.tensor([[1, 2]], dtype=torch.int32)
 
-    assert (
-        impl.fused_experts_with_topk(object(), object(), object(), torch.ones((1, 2)), topk_ids, is_prefill=True)
-        is topk_ids
-    )
+    result = impl.fused_experts_with_topk(object(), object(), object(), torch.ones((1, 2)), topk_ids, is_prefill=True)
+    assert result.dtype is torch.long
+    assert result.tolist() == [[11, 12]]
     assert calls[0][0][4] == 0
     assert calls[0][1] == {"record_load": False}
     assert impl.eplb_state.recorded_sample_count == 4
-    assert topk_ids.tolist() == [[11, 12]]
+    assert topk_ids.tolist() == [[1, 2]]
 
 
 def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(
@@ -3243,3 +3255,173 @@ def test_eplb_map_decorrelates_replica_phase_between_topk_experts():
     )
     torch.cuda.synchronize()
     assert torch.equal(topk_ids[:1].cpu(), torch.tensor([[0, 1]]))
+
+
+def _cuda_eplb_map_inputs(tokens: int, topk: int, experts: int, dtype: torch.dtype):
+    logical_ids = (torch.arange(tokens * topk, device="cuda") % experts).reshape(tokens, topk).to(dtype)
+    logical_to_physical = torch.stack(
+        (
+            torch.arange(experts, dtype=torch.int32, device="cuda"),
+            torch.arange(experts, dtype=torch.int32, device="cuda") + experts,
+        ),
+        dim=1,
+    )
+    replica_count = torch.where(
+        torch.arange(experts, device="cuda") % 3 == 0,
+        torch.full((experts,), 2, dtype=torch.int32, device="cuda"),
+        torch.ones(experts, dtype=torch.int32, device="cuda"),
+    )
+    return logical_ids, logical_to_physical, replica_count
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+@pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    ("record_load", "tokens"),
+    [
+        (False, 32),
+        (True, 2),
+        (True, 2048),
+    ],
+)
+def test_eplb_map_to_physical_long_fast_matches_legacy_pipeline(input_dtype, record_load, tokens):
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
+        eplb_map_fast,
+        eplb_map_to_physical_long_fast,
+    )
+
+    topk = 8
+    experts = 256
+    logical_ids, logical_to_physical, replica_count = _cuda_eplb_map_inputs(tokens, topk, experts, input_dtype)
+    logical_before = logical_ids.clone()
+    legacy_counter = torch.zeros((2, experts), dtype=torch.int64, device="cuda")
+    fused_counter = torch.zeros_like(legacy_counter)
+
+    legacy_ids = logical_ids.clone().to(dtype=torch.int32).contiguous()
+    eplb_map_fast(
+        legacy_ids,
+        logical_to_physical,
+        replica_count,
+        legacy_counter,
+        sample_index=1,
+        record_load=record_load,
+    )
+    legacy_physical_ids = legacy_ids.to(torch.long)
+    fused_physical_ids = eplb_map_to_physical_long_fast(
+        logical_ids,
+        logical_to_physical,
+        replica_count,
+        fused_counter,
+        sample_index=1,
+        record_load=record_load,
+    )
+    torch.cuda.synchronize()
+
+    assert fused_physical_ids.dtype is torch.long
+    assert torch.equal(fused_physical_ids, legacy_physical_ids)
+    assert torch.equal(fused_counter, legacy_counter)
+    assert torch.equal(logical_ids, logical_before)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+def test_eplb_map_to_physical_long_fast_empty_tensor_preserves_shape_and_dtype():
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_to_physical_long_fast
+
+    logical_ids, logical_to_physical, replica_count = _cuda_eplb_map_inputs(1, 8, 256, torch.int32)
+    empty_ids = logical_ids[:0]
+    counter = torch.zeros((2, 256), dtype=torch.int64, device="cuda")
+
+    physical_ids = eplb_map_to_physical_long_fast(
+        empty_ids,
+        logical_to_physical,
+        replica_count,
+        counter,
+        sample_index=0,
+        record_load=False,
+    )
+
+    assert physical_ids.shape == empty_ids.shape
+    assert physical_ids.dtype is torch.long
+    assert physical_ids.is_cuda
+    assert torch.equal(counter, torch.zeros_like(counter))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+@pytest.mark.skipif(
+    os.getenv("LIGHTLLM_RUN_EPLB_PERF") != "1",
+    reason="set LIGHTLLM_RUN_EPLB_PERF=1 to run the opt-in EPLB CUDA microbenchmark",
+)
+def test_eplb_map_to_physical_long_fast_reduces_external_prefill_pipeline_latency():
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
+        eplb_map_fast,
+        eplb_map_to_physical_long_fast,
+    )
+
+    tokens = 8192
+    topk = 8
+    experts = 256
+    logical_ids, logical_to_physical, replica_count = _cuda_eplb_map_inputs(tokens, topk, experts, torch.int64)
+    counter = torch.zeros((1, experts), dtype=torch.int64, device="cuda")
+
+    def legacy_pipeline():
+        physical_ids = logical_ids.to(dtype=torch.int32).contiguous()
+        eplb_map_fast(
+            physical_ids,
+            logical_to_physical,
+            replica_count,
+            counter,
+            sample_index=0,
+            record_load=False,
+        )
+        return physical_ids.to(torch.long)
+
+    def fused_pipeline():
+        return eplb_map_to_physical_long_fast(
+            logical_ids,
+            logical_to_physical,
+            replica_count,
+            counter,
+            sample_index=0,
+            record_load=False,
+        )
+
+    legacy_output = legacy_pipeline()
+    fused_output = fused_pipeline()
+    torch.cuda.synchronize()
+    assert legacy_output.dtype is torch.long
+    assert fused_output.dtype is torch.long
+    assert torch.equal(legacy_output, fused_output)
+
+    def measure_us(fn, rounds=200):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(rounds):
+            output = fn()
+        end.record()
+        end.synchronize()
+        assert output.dtype is torch.long
+        return start.elapsed_time(end) * 1000 / rounds
+
+    for _ in range(50):
+        legacy_pipeline()
+        fused_pipeline()
+    torch.cuda.synchronize()
+    legacy_rounds = []
+    fused_rounds = []
+    for round_index in range(7):
+        if round_index % 2 == 0:
+            legacy_rounds.append(measure_us(legacy_pipeline))
+            fused_rounds.append(measure_us(fused_pipeline))
+        else:
+            fused_rounds.append(measure_us(fused_pipeline))
+            legacy_rounds.append(measure_us(legacy_pipeline))
+    legacy_median = statistics.median(legacy_rounds)
+    fused_median = statistics.median(fused_rounds)
+    speedup = legacy_median / fused_median
+    print(
+        "EPLB external prefill map microbenchmark "
+        f"old_us={legacy_rounds} new_us={fused_rounds} "
+        f"old_median_us={legacy_median:.2f} new_median_us={fused_median:.2f} speedup={speedup:.2f}x"
+    )
+    assert speedup >= 1.5

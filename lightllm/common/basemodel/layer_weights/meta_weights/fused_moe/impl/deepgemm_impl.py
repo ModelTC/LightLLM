@@ -20,7 +20,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_fast
+from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_to_physical_long_fast
 
 
 # Dispatch policy mapping is launched after the caller has captured its
@@ -137,10 +137,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         origin_topk_ids = topk_ids
         if route_prefill and is_prefill is True and eplb_active and not fused_eplb_grouped_topk:
-            if preserve_logical_ids:
-                origin_topk_ids = topk_ids.clone()
             sample_index = self._next_eplb_sample_index()
-            eplb_map_fast(
+            topk_ids = eplb_map_to_physical_long_fast(
                 topk_ids,
                 eplb.logical_to_physical_map,
                 eplb.logical_replica_count,
@@ -204,10 +202,10 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         eplb = self.eplb_state
         if eplb is None:
             return topk_ids
-        if topk_ids.dtype != torch.int32 or not topk_ids.is_contiguous():
-            topk_ids = topk_ids.to(dtype=torch.int32).contiguous()
+        if not topk_ids.is_contiguous():
+            topk_ids = topk_ids.contiguous()
         sample_index = self._next_eplb_sample_index()
-        eplb_map_fast(
+        return eplb_map_to_physical_long_fast(
             topk_ids,
             eplb.logical_to_physical_map,
             eplb.logical_replica_count,
@@ -215,7 +213,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             sample_index,
             record_load=eplb.recording,
         )
-        return topk_ids
 
     def _prepare_prefill_dispatch_topk_ids(
         self,
@@ -226,9 +223,9 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
 
         Policy-free dispatch deliberately retains the original path: it only
         performs the existing long conversion and forwards the caller event.
-        A policy needs an in-place CUDA map, however.  Run that map and the
-        final conversion on a shared routing stream after the caller's input
-        event, then hand DeepEP an event captured after both operations.
+        A policy maps logical IDs directly to a freshly allocated int64
+        physical-ID tensor on a shared routing stream after the caller's input
+        event, then hands DeepEP an event captured after that map.
         """
         if self.eplb_state is None:
             return topk_ids.to(torch.long), overlap_event
@@ -240,7 +237,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         with torch.cuda.stream(routing_stream):
             source_event.current_stream_wait()
             topk_ids = self._prepare_prefill_topk_ids(topk_ids)
-            topk_ids = topk_ids.to(torch.long)
             dispatch_event = ElasticBuffer.capture()
         return topk_ids, dispatch_event
 

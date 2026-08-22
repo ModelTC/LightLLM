@@ -102,7 +102,8 @@ def _eplb_map_kernel(
 
 @triton.jit
 def _eplb_map_no_record_kernel(
-    topk_ids_ptr,
+    logical_topk_ids_ptr,
+    physical_topk_ids_ptr,
     logical_to_physical_ptr,
     logical_replica_count_ptr,
     total_assignment_num,
@@ -114,7 +115,7 @@ def _eplb_map_no_record_kernel(
     """Map logical ids without carrying any sampling state in the ABI."""
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < total_assignment_num
-    logical_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
+    logical_id = tl.load(logical_topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
     if SINGLE_TOKEN:
         replica_index = 0
     else:
@@ -126,12 +127,13 @@ def _eplb_map_no_record_kernel(
         mask=mask,
         other=-1,
     )
-    tl.store(topk_ids_ptr + offsets, physical_id, mask=mask)
+    tl.store(physical_topk_ids_ptr + offsets, physical_id, mask=mask)
 
 
 @triton.jit
 def _eplb_map_record_kernel(
-    topk_ids_ptr,
+    logical_topk_ids_ptr,
+    physical_topk_ids_ptr,
     logical_to_physical_ptr,
     logical_replica_count_ptr,
     expert_counter_ptr,
@@ -146,7 +148,7 @@ def _eplb_map_record_kernel(
     """Map logical ids and unconditionally record the sampled load."""
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < total_assignment_num
-    logical_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
+    logical_id = tl.load(logical_topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
     tl.atomic_add(
         expert_counter_ptr + sample_index * counter_num_experts + logical_id,
         1,
@@ -164,12 +166,13 @@ def _eplb_map_record_kernel(
         mask=mask,
         other=-1,
     )
-    tl.store(topk_ids_ptr + offsets, physical_id, mask=mask)
+    tl.store(physical_topk_ids_ptr + offsets, physical_id, mask=mask)
 
 
 @triton.jit
 def _eplb_map_record_histogram_kernel(
-    topk_ids_ptr,
+    logical_topk_ids_ptr,
+    physical_topk_ids_ptr,
     logical_to_physical_ptr,
     logical_replica_count_ptr,
     expert_counter_ptr,
@@ -184,7 +187,7 @@ def _eplb_map_record_histogram_kernel(
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < total_assignment_num
-    logical_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
+    logical_id = tl.load(logical_topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
 
     histogram = tl.histogram(logical_id, histogram_bins)
     bins = tl.arange(0, histogram_bins)
@@ -208,7 +211,7 @@ def _eplb_map_record_histogram_kernel(
         mask=mask,
         other=-1,
     )
-    tl.store(topk_ids_ptr + offsets, physical_id, mask=mask)
+    tl.store(physical_topk_ids_ptr + offsets, physical_id, mask=mask)
 
 
 def _map_launch_config(total_assignment_num: int):
@@ -264,6 +267,72 @@ def eplb_map(
     )
 
 
+def _launch_eplb_map_fast(
+    logical_topk_ids: torch.Tensor,
+    physical_topk_ids: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+    expert_counter: torch.Tensor,
+    sample_index: int,
+    *,
+    record_load: bool,
+) -> None:
+    """Launch the host-selected fast EPLB map from logical to physical IDs."""
+    total_assignment_num = logical_topk_ids.numel()
+    if total_assignment_num == 0:
+        return
+    if record_load:
+        block_size = _record_histogram_block_size(total_assignment_num, expert_counter.shape[1])
+        if block_size:
+            _eplb_map_record_histogram_kernel[(triton.cdiv(total_assignment_num, block_size),)](
+                logical_topk_ids,
+                physical_topk_ids,
+                logical_to_physical_map,
+                logical_replica_count,
+                expert_counter,
+                sample_index,
+                total_assignment_num,
+                counter_num_experts=expert_counter.shape[1],
+                histogram_bins=triton.next_power_of_2(expert_counter.shape[1]),
+                topk_num=logical_topk_ids.shape[1],
+                map_slots=logical_to_physical_map.shape[1],
+                SINGLE_TOKEN=logical_topk_ids.shape[0] == 1,
+                BLOCK_SIZE=block_size,
+                num_warps=8 if block_size == 512 else 4,
+            )
+        else:
+            block_size, num_warps = _map_launch_config(total_assignment_num)
+            _eplb_map_record_kernel[(triton.cdiv(total_assignment_num, block_size),)](
+                logical_topk_ids,
+                physical_topk_ids,
+                logical_to_physical_map,
+                logical_replica_count,
+                expert_counter,
+                sample_index,
+                total_assignment_num,
+                counter_num_experts=expert_counter.shape[1],
+                topk_num=logical_topk_ids.shape[1],
+                map_slots=logical_to_physical_map.shape[1],
+                SINGLE_TOKEN=logical_topk_ids.shape[0] == 1,
+                BLOCK_SIZE=block_size,
+                num_warps=num_warps,
+            )
+    else:
+        block_size, num_warps = _map_launch_config(total_assignment_num)
+        _eplb_map_no_record_kernel[(triton.cdiv(total_assignment_num, block_size),)](
+            logical_topk_ids,
+            physical_topk_ids,
+            logical_to_physical_map,
+            logical_replica_count,
+            total_assignment_num,
+            topk_num=logical_topk_ids.shape[1],
+            map_slots=logical_to_physical_map.shape[1],
+            SINGLE_TOKEN=logical_topk_ids.shape[0] == 1,
+            BLOCK_SIZE=block_size,
+            num_warps=num_warps,
+        )
+
+
 @torch.no_grad()
 def eplb_map_fast(
     topk_ids: torch.Tensor,
@@ -274,54 +343,49 @@ def eplb_map_fast(
     *,
     record_load: bool,
 ) -> None:
-    """Service fast path selected by a host recording state."""
-    total_assignment_num = topk_ids.numel()
-    if total_assignment_num == 0:
-        return
-    if record_load:
-        block_size = _record_histogram_block_size(total_assignment_num, expert_counter.shape[1])
-        if block_size:
-            _eplb_map_record_histogram_kernel[(triton.cdiv(total_assignment_num, block_size),)](
-                topk_ids,
-                logical_to_physical_map,
-                logical_replica_count,
-                expert_counter,
-                sample_index,
-                total_assignment_num,
-                counter_num_experts=expert_counter.shape[1],
-                histogram_bins=triton.next_power_of_2(expert_counter.shape[1]),
-                topk_num=topk_ids.shape[1],
-                map_slots=logical_to_physical_map.shape[1],
-                SINGLE_TOKEN=topk_ids.shape[0] == 1,
-                BLOCK_SIZE=block_size,
-                num_warps=8 if block_size == 512 else 4,
-            )
-        else:
-            block_size, num_warps = _map_launch_config(total_assignment_num)
-            _eplb_map_record_kernel[(triton.cdiv(total_assignment_num, block_size),)](
-                topk_ids,
-                logical_to_physical_map,
-                logical_replica_count,
-                expert_counter,
-                sample_index,
-                total_assignment_num,
-                counter_num_experts=expert_counter.shape[1],
-                topk_num=topk_ids.shape[1],
-                map_slots=logical_to_physical_map.shape[1],
-                SINGLE_TOKEN=topk_ids.shape[0] == 1,
-                BLOCK_SIZE=block_size,
-                num_warps=num_warps,
-            )
-    else:
-        block_size, num_warps = _map_launch_config(total_assignment_num)
-        _eplb_map_no_record_kernel[(triton.cdiv(total_assignment_num, block_size),)](
-            topk_ids,
-            logical_to_physical_map,
-            logical_replica_count,
-            total_assignment_num,
-            topk_num=topk_ids.shape[1],
-            map_slots=logical_to_physical_map.shape[1],
-            SINGLE_TOKEN=topk_ids.shape[0] == 1,
-            BLOCK_SIZE=block_size,
-            num_warps=num_warps,
-        )
+    """Service fast path selected by a host recording state.
+
+    This remains intentionally in-place for CUDA graph and existing call-site
+    compatibility. New callers which must preserve logical IDs should use the
+    out-of-place int64 helper instead.
+    """
+    _launch_eplb_map_fast(
+        topk_ids,
+        topk_ids,
+        logical_to_physical_map,
+        logical_replica_count,
+        expert_counter,
+        sample_index,
+        record_load=record_load,
+    )
+
+
+@torch.no_grad()
+def eplb_map_to_physical_long_fast(
+    logical_topk_ids: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+    expert_counter: torch.Tensor,
+    sample_index: int,
+    *,
+    record_load: bool,
+) -> torch.Tensor:
+    """Map logical IDs to newly allocated int64 physical IDs in one kernel.
+
+    DeepEP 2.1.0 consumes int64 expert IDs. Keeping logical input untouched
+    avoids the old int64 -> int32 -> in-place map -> int64 sequence while
+    retaining exactly the same replica and sampling semantics.
+    """
+    assert logical_topk_ids.is_cuda and logical_topk_ids.is_contiguous() and logical_topk_ids.ndim == 2
+    assert logical_topk_ids.dtype in (torch.int32, torch.int64)
+    physical_topk_ids = torch.empty_like(logical_topk_ids, dtype=torch.long)
+    _launch_eplb_map_fast(
+        logical_topk_ids,
+        physical_topk_ids,
+        logical_to_physical_map,
+        logical_replica_count,
+        expert_counter,
+        sample_index,
+        record_load=record_load,
+    )
+    return physical_topk_ids
