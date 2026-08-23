@@ -462,7 +462,7 @@ def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch
     monkeypatch.setattr(
         dp_backend_impl,
         "overlap_prepare_decode_inputs",
-        lambda req_objs: (model_input0, [], model_input1, []),
+        lambda req_objs: (model_input0, [], [], model_input1, [], []),
     )
     monkeypatch.setattr(
         dp_backend_impl,

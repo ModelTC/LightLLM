@@ -349,7 +349,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         return
 
     def decode_overlap(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
-        model_input0, run_reqs0, model_input1, run_reqs1 = overlap_prepare_decode_inputs(req_objs=decode_reqs)
+        model_input0, run_reqs0, _, model_input1, run_reqs1, _ = overlap_prepare_decode_inputs(req_objs=decode_reqs)
         run_reqs = run_reqs0 + run_reqs1
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
 
@@ -728,12 +728,13 @@ class DPChunkedPrefillBackend(ModeBackend):
         (
             model_input0,
             run_reqs0,
+            decode_reqs0,
             model_input1,
             run_reqs1,
+            decode_reqs1,
         ) = overlap_prepare_decode_inputs(req_objs=decode_reqs)
-        request_split = (len(decode_reqs) + 1) // 2
-        real_request_num0 = request_split
-        real_request_num1 = len(decode_reqs) - request_split
+        real_request_num0 = len(decode_reqs0)
+        real_request_num1 = len(decode_reqs1)
         req_num = real_request_num0 + real_request_num1
         spec_engine = self.decode_draft_engine
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):

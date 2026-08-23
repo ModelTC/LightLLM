@@ -130,8 +130,17 @@ def test_overlap_decode_builds_two_unpadded_inputs(monkeypatch):
     _patch_overlap_input_context(monkeypatch)
     reqs = [_make_decode_req(req_idx=index) for index in range(3)]
 
-    model_input0, run_reqs0, model_input1, run_reqs1 = generic_pre_process.overlap_prepare_decode_inputs(reqs)
+    (
+        model_input0,
+        run_reqs0,
+        decode_reqs0,
+        model_input1,
+        run_reqs1,
+        decode_reqs1,
+    ) = generic_pre_process.overlap_prepare_decode_inputs(reqs)
 
+    assert decode_reqs0 == reqs[:2]
+    assert decode_reqs1 == reqs[2:]
     assert run_reqs0 == reqs[:2]
     assert run_reqs1 == reqs[2:]
     assert model_input0.batch_size == 2
@@ -144,8 +153,17 @@ def test_overlap_decode_preserves_empty_microbatch(monkeypatch):
     _patch_overlap_input_context(monkeypatch)
     req = _make_decode_req(req_idx=7)
 
-    model_input0, run_reqs0, model_input1, run_reqs1 = generic_pre_process.overlap_prepare_decode_inputs([req])
+    (
+        model_input0,
+        run_reqs0,
+        decode_reqs0,
+        model_input1,
+        run_reqs1,
+        decode_reqs1,
+    ) = generic_pre_process.overlap_prepare_decode_inputs([req])
 
+    assert decode_reqs0 == [req]
+    assert decode_reqs1 == []
     assert run_reqs0 == [req]
     assert model_input0.batch_size == 1
     assert run_reqs1 == []

@@ -168,13 +168,15 @@ def overlap_prepare_decode_inputs(req_objs: List[InferReq]):
     """按请求把 decode batch 拆成两个允许为空的 microbatch。"""
 
     split_req_bound = (len(req_objs) + 1) // 2
+    decode_reqs0 = req_objs[:split_req_bound]
+    decode_reqs1 = req_objs[split_req_bound:]
     model_input0, run_reqs0 = prepare_decode_inputs(
-        req_objs=req_objs[:split_req_bound],
+        req_objs=decode_reqs0,
     )
     model_input1, run_reqs1 = prepare_decode_inputs(
-        req_objs=req_objs[split_req_bound:],
+        req_objs=decode_reqs1,
     )
-    return model_input0, run_reqs0, model_input1, run_reqs1
+    return model_input0, run_reqs0, decode_reqs0, model_input1, run_reqs1, decode_reqs1
 
 
 def overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
