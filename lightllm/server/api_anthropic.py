@@ -129,11 +129,18 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     # This also makes the native Anthropic spelling behave the same as the
     # existing ``extra_body.chat_template_kwargs`` escape hatch.
     anthropic_body = dict(anthropic_body)
-    thinking = anthropic_body.pop("thinking", None)
+    native_thinking = anthropic_body.pop("thinking", None)
+    thinking = native_thinking
     if isinstance(thinking, dict) and thinking.get("type") in {"enabled", "disabled"}:
         extra_body = dict(anthropic_body.get("extra_body") or {})
         chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
-        chat_template_kwargs["enable_thinking"] = thinking["type"] == "enabled"
+        native_enable = thinking["type"] == "enabled"
+        prior_enable = chat_template_kwargs.get("enable_thinking")
+        if prior_enable is not None and prior_enable != native_enable:
+            raise ValueError(
+                "thinking.type and chat_template_kwargs.enable_thinking must agree"
+            )
+        chat_template_kwargs["enable_thinking"] = native_enable
         extra_body["chat_template_kwargs"] = chat_template_kwargs
         # Anthropic has a separate thinking content block, so make sure the
         # downstream response keeps reasoning separate from normal text.
@@ -187,17 +194,22 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     if explicit_enable is not None and not isinstance(explicit_enable, bool):
         raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
 
-    thinking = anthropic_body.get("thinking")
+    thinking = native_thinking
     if thinking is not None and not isinstance(thinking, dict):
         raise ValueError("thinking must be an object when provided")
-    if explicit_enable is None and thinking is not None:
+    if thinking is not None:
         thinking_type = thinking.get("type")
         if thinking_type in {"adaptive", "enabled"}:
-            explicit_enable = True
+            native_enable = True
         elif thinking_type == "disabled":
-            explicit_enable = False
+            native_enable = False
         else:
             raise ValueError(f"Unsupported thinking.type: {thinking_type!r}")
+        if explicit_enable is not None and explicit_enable != native_enable:
+            raise ValueError(
+                "thinking.type and chat_template_kwargs.enable_thinking must agree"
+            )
+        explicit_enable = native_enable
         template_kwargs["enable_thinking"] = explicit_enable
 
     output_config = anthropic_body.get("output_config")
@@ -210,6 +222,25 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
         openai_dict["reasoning_effort"] = effort
     if template_kwargs:
         openai_dict["chat_template_kwargs"] = template_kwargs
+
+    if "seed" in anthropic_body:
+        seed = anthropic_body["seed"]
+        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 9_999_998:
+            raise ValueError("seed must be an integer between 0 and 9999998")
+        openai_dict["seed"] = seed
+
+    native_tool_choice = anthropic_body.get("tool_choice")
+    if isinstance(native_tool_choice, dict) and "disable_parallel_tool_use" in native_tool_choice:
+        disable_parallel = native_tool_choice["disable_parallel_tool_use"]
+        if not isinstance(disable_parallel, bool):
+            raise ValueError("tool_choice.disable_parallel_tool_use must be a boolean")
+        translated_parallel = openai_dict.get("parallel_tool_calls")
+        expected_parallel = not disable_parallel
+        if translated_parallel is not None and translated_parallel != expected_parallel:
+            raise ValueError(
+                "tool_choice.disable_parallel_tool_use conflicts with parallel_tool_calls"
+            )
+        openai_dict["parallel_tool_calls"] = expected_parallel
 
     _UNKNOWN_FIELDS = {"extra_body", "metadata", "anthropic_version", "cache_control"}
     dropped = [k for k in anthropic_body if k in _UNKNOWN_FIELDS]

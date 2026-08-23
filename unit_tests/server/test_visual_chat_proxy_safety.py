@@ -15,7 +15,15 @@ from lightllm.server.api_models import (
     UsageInfo,
 )
 from lightllm.server.api_stream_obj import CustomStreamingResponse
-from lightllm.server.api_anthropic import _openai_sse_to_anthropic_events
+from lightllm.server.api_anthropic import (
+    _anthropic_to_chat_request,
+    _openai_sse_to_anthropic_events,
+)
+
+VALID_PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _tool_call(name: str, arguments: dict, call_id: str) -> ToolCall:
@@ -81,6 +89,24 @@ def test_model_content_with_fabricated_tool_response_is_quarantined():
         visual_chat_proxy._sanitize_model_message(message)
 
 
+def test_private_execution_state_phrases_are_narrowly_blocked():
+    for value in (
+        "There are no tools with results.",
+        "Tool result unavailable.",
+        "No tool results are available.",
+        "Use the internal image reader.",
+        "I inspected <image_1/>.",
+    ):
+        assert visual_chat_proxy.text_exposes_private_multimodal_mechanism(value)
+
+    assert not visual_chat_proxy.text_exposes_private_multimodal_mechanism(
+        "The tool result shows that revenue increased."
+    )
+    assert not visual_chat_proxy.text_exposes_private_multimodal_mechanism(
+        "This table compares several developer tools."
+    )
+
+
 def test_anthropic_mixed_builtin_and_external_calls_are_rejected_before_visual_execution(
     monkeypatch,
 ):
@@ -97,7 +123,7 @@ def test_anthropic_mixed_builtin_and_external_calls_are_rejected_before_visual_e
                         },
                         {
                             "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                            "image_url": {"url": VALID_PNG_DATA_URL},
                         },
                     ],
                 }
@@ -180,6 +206,107 @@ def test_anthropic_mixed_builtin_and_external_calls_are_rejected_before_visual_e
     assert not visual_called
 
 
+def test_anthropic_exposes_private_reader_then_caller_tools_in_separate_phases(
+    monkeypatch,
+):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Read the image, then check weather."},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                    ],
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    raw_request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/messages", "headers": []}
+    )
+    calls = 0
+
+    async def fake_visual_remote(**_kwargs):
+        return "The image shows Shanghai."
+
+    async def fake_main_handler(main_request, _raw_request):
+        nonlocal calls
+        calls += 1
+        tool_names = [tool.function.name for tool in main_request.tools or []]
+        if calls == 1:
+            assert tool_names == ["vision_reader"]
+            message = ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        "vision_reader",
+                        {"image": "<image_1/>", "task": "identify the city"},
+                        "builtin_1",
+                    )
+                ],
+            )
+        else:
+            assert tool_names == ["get_weather"]
+            message = ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    _tool_call("get_weather", {"city": "Shanghai"}, "external_1")
+                ],
+            )
+        return ChatCompletionResponse(
+            model="agent",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=message,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_visual_remote)
+    runtime = visual_chat_proxy.VisualProxyRuntime(
+        visual_chat_proxy.VisualProxySettings(
+            remote_url="http://127.0.0.1:18180/generate"
+        )
+    )
+
+    async def run_test():
+        try:
+            return await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=fake_main_handler,
+            )
+        finally:
+            await runtime.close()
+
+    response = asyncio.run(run_test())
+
+    assert calls == 2
+    assert response.choices[0].finish_reason == "tool_calls"
+    assert response.choices[0].message.tool_calls[0].function.name == "get_weather"
+
+
 def test_visual_trace_format_defaults_to_natural():
     settings = visual_chat_proxy.VisualProxySettings(
         remote_url="http://127.0.0.1:18180/generate"
@@ -207,7 +334,7 @@ def test_visual_request_matches_nova_formal_profile():
 
     image = visual_chat_proxy.RegisteredImage(
         tag="<image_1/>",
-        source="data:image/png;base64,AAAA",
+        source=VALID_PNG_DATA_URL,
         origin="user",
     )
 
@@ -231,7 +358,7 @@ def test_visual_request_matches_nova_formal_profile():
                     {"type": "text", "text": "read the title"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                        "image_url": {"url": VALID_PNG_DATA_URL},
                     },
                 ],
             }
@@ -279,7 +406,7 @@ def test_visual_stream_assembles_same_result_and_requests_streaming():
 
     image = visual_chat_proxy.RegisteredImage(
         tag="<image_1/>",
-        source="data:image/png;base64,AAAA",
+        source=VALID_PNG_DATA_URL,
         origin="user",
     )
     result = asyncio.run(
@@ -324,7 +451,7 @@ def test_visual_stream_buffers_reasoning_fallback_until_content_priority_is_know
             model="agent-model",
             image=visual_chat_proxy.RegisteredImage(
                 tag="<image_1/>",
-                source="data:image/png;base64,AAAA",
+                source=VALID_PNG_DATA_URL,
                 origin="user",
             ),
             task="inspect",
@@ -401,7 +528,7 @@ def test_openai_enabled_effort_levels_turn_thinking_on(effort):
     assert resolved.reasoning_effort == effort
 
 
-def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypatch):
+def test_visual_proxy_buffers_private_turns_and_projects_only_verified_results(monkeypatch):
     first_turn_gate = asyncio.Event()
     second_turn_gate = asyncio.Event()
     main_requests = []
@@ -522,6 +649,7 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
 
     async def fake_main(request, _raw_request):
         main_requests.append(request)
+        assert request.stream_options.include_usage is True
         iterator = first_turn() if len(main_requests) == 1 else second_turn()
         return CustomStreamingResponse(iterator, media_type="text/event-stream")
 
@@ -544,7 +672,7 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
                         {"type": "text", "text": "Read the title."},
                         {
                             "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                            "image_url": {"url": VALID_PNG_DATA_URL},
                         },
                     ],
                 }
@@ -580,14 +708,18 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
         )
         iterator = response.body_iterator.__aiter__()
         chunks = [await iterator.__anext__()]
-        while not any('"reasoning"' in str(chunk) for chunk in chunks):
-            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
+        assert chunks == [": nova-stream-open\n\n"]
+        chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
+        assert not any('"reasoning"' in str(chunk) for chunk in chunks)
         assert not first_turn_gate.is_set()
         assert len(main_requests) == 1
         assert main_requests[0].stream is True
         first_turn_gate.set()
-        while not any("The title is LightLLM." in str(chunk) for chunk in chunks):
-            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
+        for _ in range(100):
+            if len(main_requests) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(main_requests) == 2
         assert not second_turn_gate.is_set()
         second_turn_gate.set()
         async for chunk in iterator:
@@ -600,6 +732,8 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
 
     assert "I am inspecting the image now." in body
     assert "The visual evidence is sufficient." in body
+    assert "我先查看了图片 <image_1/>，The title is LightLLM." in body
+    assert "read the title" not in body
     assert '"content": "The title is LightLLM."' in body
     assert '"name": "vision_reader"' not in body
     assert body.endswith("data: [DONE]\n\n")
@@ -631,8 +765,8 @@ def test_visual_proxy_streams_reasoning_before_main_model_turn_finishes(monkeypa
     expected_reasoning = "\n".join(
         [
             visual_chat_proxy.sanitize_reasoning("I am inspecting the image now. " * 4),
-            visual_chat_proxy._format_natural_builtin_trace(
-                "<image_1/>", "read the title", "The title is LightLLM.", "我先"
+            visual_chat_proxy._format_public_builtin_projection(
+                "<image_1/>", "The title is LightLLM.", 0
             ),
             visual_chat_proxy.sanitize_reasoning(
                 "The visual evidence is sufficient. " * 3
@@ -717,7 +851,7 @@ def test_empty_output_retry_does_not_replay_rejected_assistant_turn(monkeypatch)
                         {"type": "text", "text": "Do not inspect this image."},
                         {
                             "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                            "image_url": {"url": VALID_PNG_DATA_URL},
                         },
                     ],
                 }
@@ -817,7 +951,7 @@ def test_visual_guardrail_does_not_replay_rejected_assistant_turn(monkeypatch):
                         {"type": "text", "text": "What color is this image?"},
                         {
                             "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                            "image_url": {"url": VALID_PNG_DATA_URL},
                         },
                     ],
                 }
@@ -876,14 +1010,15 @@ def test_anthropic_stream_maps_proxy_reasoning_to_thinking_deltas():
 
 
 def test_closing_visual_stream_cancels_generation_and_releases_request_slot():
-    generation_cancelled = asyncio.Event()
+    cancellation_count = 0
 
     async def endless_stream():
+        nonlocal cancellation_count
         try:
             yield 'data: {"choices":[{"delta":{"reasoning":"working"},"finish_reason":null}]}\n\n'
             await asyncio.Event().wait()
         finally:
-            generation_cancelled.set()
+            cancellation_count += 1
 
     async def fake_main(_request, _raw_request):
         return CustomStreamingResponse(endless_stream(), media_type="text/event-stream")
@@ -899,7 +1034,7 @@ def test_closing_visual_stream_cancels_generation_and_releases_request_slot():
                         {"type": "text", "text": "Inspect this."},
                         {
                             "type": "image_url",
-                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                            "image_url": {"url": VALID_PNG_DATA_URL},
                         },
                     ],
                 }
@@ -922,18 +1057,569 @@ def test_closing_visual_stream_cancels_generation_and_releases_request_slot():
     )
 
     async def run_test():
-        response = await visual_chat_proxy.visual_chat_completions_impl(
-            request=request,
-            raw_request=raw_request,
-            runtime=runtime,
-            main_chat_handler=fake_main,
-        )
-        iterator = response.body_iterator.__aiter__()
-        await iterator.__anext__()
-        await iterator.aclose()
-        await asyncio.sleep(0)
+        for _ in range(25):
+            response = await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=fake_main,
+            )
+            iterator = response.body_iterator.__aiter__()
+            await iterator.__anext__()
+            await iterator.aclose()
+            await asyncio.sleep(0)
+            assert runtime._request_semaphore._value == runtime.settings.max_inflight_requests
 
     asyncio.run(run_test())
 
-    assert generation_cancelled.is_set()
+    assert cancellation_count == 25
     assert runtime._request_semaphore._value == runtime.settings.max_inflight_requests
+
+
+def test_conflicting_thinking_controls_fail_closed():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [{"role": "user", "content": "inspect"}],
+            "reasoning_effort": "high",
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    )
+    with pytest.raises(ValueError, match="Conflicting thinking controls"):
+        visual_chat_proxy.apply_visual_thinking_policy(
+            request,
+            visual_chat_proxy.VisualProxySettings(
+                remote_url="http://127.0.0.1:18180/generate"
+            ),
+        )
+
+
+@pytest.mark.parametrize("seed", [True, False, 1.5, "1"])
+def test_seed_rejects_non_integer_values_before_coercion(seed):
+    with pytest.raises(ValueError, match="seed must be an integer"):
+        ChatCompletionRequest.model_validate(
+            {
+                "model": "agent",
+                "messages": [{"role": "user", "content": "inspect"}],
+                "seed": seed,
+            }
+        )
+
+
+@pytest.mark.parametrize("parallel_tool_calls", [0, 1, "false", "true"])
+def test_parallel_tool_calls_requires_a_real_boolean(parallel_tool_calls):
+    with pytest.raises(ValueError, match="parallel_tool_calls must be a boolean"):
+        ChatCompletionRequest.model_validate(
+            {
+                "model": "agent",
+                "messages": [{"role": "user", "content": "inspect"}],
+                "parallel_tool_calls": parallel_tool_calls,
+            }
+        )
+
+
+def test_request_thinking_policy_defaults_on_and_force_off_hides_public_reasoning():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [{"role": "user", "content": "inspect"}],
+        }
+    )
+    request_settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate",
+        thinking_policy="request",
+    )
+    normalized = visual_chat_proxy.apply_visual_thinking_policy(request, request_settings)
+    assert normalized.chat_template_kwargs["enable_thinking"] is True
+    assert visual_chat_proxy.resolve_public_reasoning_enabled(None, request_settings) is True
+
+    force_off_settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate",
+        thinking_policy="force_off",
+    )
+    assert visual_chat_proxy.resolve_public_reasoning_enabled(True, force_off_settings) is False
+
+
+def test_anthropic_maps_seed_parallel_control_and_rejects_conflicting_thinking():
+    converted, _ = _anthropic_to_chat_request(
+        {
+            "model": "agent",
+            "max_tokens": 64,
+            "seed": 42,
+            "messages": [{"role": "user", "content": "inspect"}],
+            "tools": [
+                {
+                    "name": "lookup",
+                    "description": "Look something up.",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+        }
+    )
+    assert converted["seed"] == 42
+    assert converted["parallel_tool_calls"] is False
+
+    with pytest.raises(ValueError, match="disable_parallel_tool_use must be a boolean"):
+        _anthropic_to_chat_request(
+            {
+                "model": "agent",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "inspect"}],
+                "tool_choice": {"type": "auto", "disable_parallel_tool_use": "true"},
+            }
+        )
+
+    with pytest.raises(ValueError, match="must agree"):
+        _anthropic_to_chat_request(
+            {
+                "model": "agent",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "inspect"}],
+                "thinking": {"type": "disabled"},
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+            }
+        )
+
+
+def test_parallel_tool_violation_on_last_step_keeps_specific_failure(monkeypatch):
+    monkeypatch.setattr(visual_chat_proxy, "MAX_AGENT_STEPS", 1)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Inspect and call one tool."},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                    ],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": name,
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+                for name in ("alpha", "beta")
+            ],
+        }
+    )
+
+    async def fake_main(_request, _raw_request):
+        return ChatCompletionResponse(
+            model="agent",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    finish_reason="tool_calls",
+                    message=ChatMessage(
+                        role="assistant",
+                        content="",
+                        tool_calls=[
+                            _tool_call("alpha", {}, "external_1"),
+                            _tool_call("beta", {}, "external_2"),
+                        ],
+                    ),
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    runtime = visual_chat_proxy.VisualProxyRuntime(
+        visual_chat_proxy.VisualProxySettings(
+            remote_url="http://127.0.0.1:18180/generate",
+            empty_output_retries=1,
+        )
+    )
+    raw_request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    )
+
+    async def run_test():
+        try:
+            with pytest.raises(
+                visual_chat_proxy.VisualChatProxyError,
+                match="parallel_tool_calls_violation",
+            ):
+                await visual_chat_proxy.visual_chat_completions_impl(
+                    request=request,
+                    raw_request=raw_request,
+                    runtime=runtime,
+                    main_chat_handler=fake_main,
+                )
+        finally:
+            await runtime.close()
+
+    asyncio.run(run_test())
+
+
+def test_explicit_thinking_off_hides_public_visual_reasoning(monkeypatch):
+    calls = 0
+
+    async def fake_main(request, _raw_request):
+        nonlocal calls
+        calls += 1
+        assert request.chat_template_kwargs["enable_thinking"] is False
+        if calls == 1:
+            message = ChatMessage(
+                role="assistant",
+                content="",
+                reasoning="private planning",
+                tool_calls=[
+                    _tool_call(
+                        "vision_reader",
+                        {"image": "<image_1/>", "task": "read title"},
+                        "builtin_1",
+                    )
+                ],
+            )
+            finish_reason = "tool_calls"
+        else:
+            message = ChatMessage(
+                role="assistant",
+                content="The title is LightLLM.",
+                reasoning="private final reasoning",
+            )
+            finish_reason = "stop"
+        return ChatCompletionResponse(
+            model="agent",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    finish_reason=finish_reason,
+                    message=message,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def fake_visual_remote(**_kwargs):
+        return "The title is LightLLM."
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_visual_remote)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Read the title."},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                    ],
+                }
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(
+        visual_chat_proxy.VisualProxySettings(
+            remote_url="http://127.0.0.1:18180/generate"
+        ),
+        client=object(),
+    )
+    raw_request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    )
+
+    async def run_test():
+        try:
+            return await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=fake_main,
+            )
+        finally:
+            await runtime.close()
+
+    response = asyncio.run(run_test())
+    message = response.choices[0].message
+    assert message.content == "The title is LightLLM."
+    assert message.reasoning is None
+    assert message.reasoning_content is None
+
+
+def test_all_current_turn_images_require_independent_evidence(monkeypatch):
+    main_requests = []
+    visual_results = iter(["first result", "second result"])
+
+    async def fake_main(request, _raw_request):
+        main_requests.append(request)
+        step = len(main_requests)
+        if step == 1:
+            message = ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    _tool_call("vision_reader", {"image": "<image_1/>", "task": "first"}, "v1")
+                ],
+            )
+            finish_reason = "tool_calls"
+        elif step == 2:
+            message = ChatMessage(role="assistant", content="Both images are handled.", reasoning="discard me")
+            finish_reason = "stop"
+        elif step == 3:
+            assert "<image_2/>" in str(request.messages[-1].content)
+            assert "<image_1/>" not in str(request.messages[-1].content).split("Available image tags:", 1)[-1]
+            message = ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    _tool_call("vision_reader", {"image": "<image_2/>", "task": "second"}, "v2")
+                ],
+            )
+            finish_reason = "tool_calls"
+        else:
+            message = ChatMessage(role="assistant", content="Both images are handled.")
+            finish_reason = "stop"
+        return ChatCompletionResponse(
+            model="agent",
+            choices=[ChatCompletionResponseChoice(index=0, finish_reason=finish_reason, message=message)],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def fake_visual_remote(**_kwargs):
+        return next(visual_results)
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_visual_remote)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Compare both images."},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                    ],
+                }
+            ],
+        }
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(
+        visual_chat_proxy.VisualProxySettings(remote_url="http://127.0.0.1:18180/generate"),
+        client=object(),
+    )
+    raw_request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    )
+
+    async def run_test():
+        try:
+            return await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=fake_main,
+            )
+        finally:
+            await runtime.close()
+
+    response = asyncio.run(run_test())
+    reasoning = response.choices[0].message.reasoning or ""
+    assert "我先查看了图片 <image_1/>，first result" in reasoning
+    assert "我接着查看了图片 <image_2/>，second result" in reasoning
+    assert "discard me" not in reasoning
+    assert "vision_reader" not in reasoning
+    assert "first" not in reasoning.replace("first result", "")
+
+
+def test_latest_failed_reread_does_not_fall_back_in_public_projection(monkeypatch):
+    main_calls = 0
+    visual_calls = 0
+
+    async def fake_main(_request, _raw_request):
+        nonlocal main_calls
+        main_calls += 1
+        if main_calls <= 3:
+            image = "<image_1/>" if main_calls in {1, 3} else "<image_2/>"
+            message = ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        "vision_reader",
+                        {"image": image, "task": f"task-{main_calls}"},
+                        f"v{main_calls}",
+                    )
+                ],
+            )
+            finish_reason = "tool_calls"
+        else:
+            message = ChatMessage(role="assistant", content="Final answer.")
+            finish_reason = "stop"
+        return ChatCompletionResponse(
+            model="agent",
+            choices=[ChatCompletionResponseChoice(index=0, finish_reason=finish_reason, message=message)],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    async def fake_visual_remote(**_kwargs):
+        nonlocal visual_calls
+        visual_calls += 1
+        if visual_calls == 1:
+            return "old image-one result"
+        if visual_calls == 2:
+            return "image-two result"
+        return visual_chat_proxy.VisualRemoteResult(
+            "truncated image-one result",
+            finish_reason="length",
+        )
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_visual_remote)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Compare both images."},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                    ],
+                }
+            ],
+        }
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(
+        visual_chat_proxy.VisualProxySettings(remote_url="http://127.0.0.1:18180/generate"),
+        client=object(),
+    )
+    raw_request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    )
+
+    async def run_test():
+        try:
+            return await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=fake_main,
+            )
+        finally:
+            await runtime.close()
+
+    response = asyncio.run(run_test())
+    reasoning = response.choices[0].message.reasoning or ""
+    assert "image-two result" in reasoning
+    assert "old image-one result" not in reasoning
+    assert "truncated image-one result" not in reasoning
+
+
+def test_remote_image_target_rejects_mixed_private_dns_and_pins_public_ip(monkeypatch):
+    settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate",
+        allow_remote_image_urls=True,
+        remote_image_hosts=("images.example.com",),
+    )
+    monkeypatch.setattr(
+        visual_chat_proxy.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (2, 1, 6, "", ("8.8.8.8", 443)),
+            (2, 1, 6, "", ("127.0.0.1", 443)),
+        ],
+    )
+    with pytest.raises(ValueError, match="private or non-global"):
+        visual_chat_proxy._pinned_remote_image_request(
+            "https://images.example.com/a.png",
+            settings,
+        )
+
+
+def test_remote_image_download_falls_back_across_validated_addresses(monkeypatch):
+    settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate",
+        allow_remote_image_urls=True,
+        remote_image_hosts=("images.example.com",),
+    )
+    monkeypatch.setattr(
+        visual_chat_proxy.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (2, 1, 6, "", ("8.8.8.8", 443)),
+            (2, 1, 6, "", ("8.8.4.4", 443)),
+        ],
+    )
+    attempts = []
+    png_bytes = visual_chat_proxy.base64.b64decode(VALID_PNG_DATA_URL.split(",", 1)[1])
+
+    class FakeImageClient:
+        def build_request(self, method, url, **kwargs):
+            return visual_chat_proxy.httpx.Request(method, url, **kwargs)
+
+        async def send(self, request, stream):
+            assert stream is True
+            attempts.append(str(request.url))
+            if request.url.host == "8.8.4.4":
+                raise visual_chat_proxy.httpx.ConnectError("unreachable", request=request)
+            return visual_chat_proxy.httpx.Response(
+                200,
+                headers={"Content-Type": "image/png"},
+                content=png_bytes,
+                request=request,
+            )
+
+        async def aclose(self):
+            return None
+
+    runtime = visual_chat_proxy.VisualProxyRuntime(settings, client=object())
+
+    async def run_test():
+        await runtime.image_client.aclose()
+        runtime.image_client = FakeImageClient()
+        try:
+            return await runtime.freeze_remote_image(
+                "https://images.example.com/a.png",
+                request=None,
+                trace_id="fallback",
+            )
+        finally:
+            await runtime.close()
+
+    frozen = asyncio.run(run_test())
+    assert frozen == VALID_PNG_DATA_URL
+    assert attempts == [
+        "https://8.8.4.4/a.png",
+        "https://8.8.8.8/a.png",
+    ]
+
+    monkeypatch.setattr(
+        visual_chat_proxy.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (2, 1, 6, "", ("8.8.8.8", 443)),
+            (2, 1, 6, "", ("8.8.4.4", 443)),
+        ],
+    )
+    pinned_urls, host_header, sni = visual_chat_proxy._pinned_remote_image_request(
+        "https://images.example.com/a.png?x=1",
+        settings,
+    )
+    assert pinned_urls == (
+        "https://8.8.4.4:443/a.png?x=1",
+        "https://8.8.8.8:443/a.png?x=1",
+    )
+    assert host_header == "images.example.com"
+    assert sni == "images.example.com"
+
+    monkeypatch.setattr(
+        visual_chat_proxy.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("224.0.0.1", 443))],
+    )
+    with pytest.raises(ValueError, match="private or non-global"):
+        visual_chat_proxy._pinned_remote_image_request(
+            "https://images.example.com/a.png",
+            settings,
+        )
