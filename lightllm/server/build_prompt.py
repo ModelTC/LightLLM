@@ -59,6 +59,13 @@ def tokenizer_supports_force_thinking() -> bool:
 
     assert tokenizer is not None
 
+    # Tokenizers that encode prompts in Python (e.g. DeepSeek-V4) have no Jinja
+    # chat_template string to inspect, so advertise thinking support via an
+    # explicit attribute instead.
+    if getattr(tokenizer, "supports_thinking", False):
+        logger.info("tokenizer_supports_force_thinking : True (explicit attribute)")
+        return True
+
     try:
         ans = "thinking" in tokenizer.chat_template or "enable_thinking" in tokenizer.chat_template
         logger.debug(f"chat_template: {tokenizer.chat_template}")
@@ -150,6 +157,8 @@ async def build_prompt(request, tools) -> str:
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
 
+    if request.reasoning_effort is not None and "reasoning_effort" not in kwargs:
+        kwargs["reasoning_effort"] = request.reasoning_effort
     # 修复一些parser类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
     # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
     from .api_openai import _is_force_thinking_mode
@@ -166,5 +175,11 @@ async def build_prompt(request, tools) -> str:
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except Exception as e:
-        raise ValueError(f"Failed to build prompt: {e}") from None
+        logger.exception(
+            "Failed to build prompt. request=%s tools=%s template_kwargs=%s",
+            json.dumps(request.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False, default=str),
+            json.dumps(tools, ensure_ascii=False, default=str),
+            json.dumps(kwargs, ensure_ascii=False, default=str),
+        )
+        raise ValueError(f"Failed to build prompt: {e}") from e
     return input_str

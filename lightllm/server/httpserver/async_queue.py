@@ -5,7 +5,6 @@ class AsyncQueue:
     def __init__(self):
         self.datas = []
         self.event = asyncio.Event()
-        self.lock = asyncio.Lock()
 
     async def wait_to_ready(self):
         try:
@@ -14,15 +13,15 @@ class AsyncQueue:
             pass
 
     async def get_all_data(self):
-        async with self.lock:
-            self.event.clear()
-            ans = self.datas
-            self.datas = []
-            return ans
+        self.event.clear()
+        ans = self.datas
+        self.datas = []
+        return ans
 
     async def put(self, obj):
-        async with self.lock:
-            self.datas.append(obj)
+        was_empty = not self.datas
+        self.datas.append(obj)
+        if was_empty:
             self.event.set()
         return
 

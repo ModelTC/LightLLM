@@ -105,15 +105,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_kv_page_num",
         type=int,
-        default=16,
-        help="pd mode, kv move page_num",
+        default=None,
+        help="pd mode, kv move page_num; defaults to 8 for DeepSeek-V4 and 16 otherwise.",
     )
 
     parser.add_argument(
         "--pd_kv_page_size",
         type=int,
-        default=1024,
-        help="pd mode, kv page size.",
+        default=None,
+        help="pd mode, kv page size; defaults to 2048 for DeepSeek-V4 and 1024 otherwise.",
     )
 
     parser.add_argument(
@@ -183,6 +183,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "qwen",
             "deepseekv31",
             "deepseekv32",
+            "deepseekv4",
             "glm47",
             "kimi_k2",
             "qwen3_coder",
@@ -196,6 +197,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         choices=[
             "deepseek-r1",
             "deepseek-v3",
+            "deepseek-v4",
             "glm45",
             "gpt-oss",
             "kimi",
@@ -255,8 +257,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--dp_balancer",
         type=str,
         default="bs_balancer",
-        choices=["round_robin", "bs_balancer"],
-        help="the dp balancer type, default is bs_balancer",
+        choices=["round_robin", "bs_balancer", "cache_aware"],
+        help="the DP balancer type; cache_aware adds token-prefix affinity, default is bs_balancer",
     )
     parser.add_argument(
         "--max_req_total_len",
@@ -665,8 +667,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default=None,
         choices=["fp8", "fp4"],
-        help="""Expert quantization dtype for EP MoE. Supported values are
-            fp8 and fp4. Note that fp4 is only supported on SM100 GPUs.""",
+        help="""Requested dtype for MoE expert weights, fp8 or fp4. Resolves the fused_moe
+            quant method: fp8 -> fp8w8a8-b128-deepgemm; fp4 -> fp4fp8-b32-deepgemm (online
+            quantization) on SM100 GPUs, or mxfp4w4a16-b32-marlin (Marlin W4A16, TP only) on other GPUs.
+            Defaults to `expert_dtype` in config.json if present. Per-layer override:
+            --quant_cfg mix_bits with name `fused_moe`.""",
     )
     parser.add_argument(
         "--vit_quant_type",
@@ -813,8 +818,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu_cache_token_page_size",
         type=int,
-        default=256,
-        help="""The token page size of cpu cache""",
+        default=None,
+        help="""The token page size of cpu cache. Defaults to 2048 for DeepSeek-V4 and 256 otherwise.""",
     )
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(

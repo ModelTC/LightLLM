@@ -6,7 +6,10 @@ import bisect
 from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
-from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+from lightllm.server.multi_level_kv_cache.cpu_cache_client import (
+    CpuKvCacheClient,
+    CpuPageAllocState,
+)
 from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
@@ -240,10 +243,11 @@ class MultiLevelKvCacheModule(object):
 
                 try:
                     self.cpu_cache_client.lock.acquire_sleep1ms()
-                    page_list, ready_list = self.cpu_cache_client.allocate_pages(
+                    page_list, alloc_states = self.cpu_cache_client.allocate_pages(
                         token_hash_list[:move_block_size],
                         disk_offload_enable=self.args.enable_disk_cache,
                     )
+                    ready_list = [state is CpuPageAllocState.READY_EXISTING for state in alloc_states]
                 finally:
                     self.cpu_cache_client.lock.release()
 

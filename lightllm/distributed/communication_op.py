@@ -18,9 +18,11 @@
 # limitations under the License.
 
 
+import math
 import os
 import torch
 import torch.distributed as dist
+from dataclasses import dataclass
 from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Set, Union
 from lightllm.utils.log_utils import init_logger
@@ -40,6 +42,96 @@ from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 logger = init_logger(__name__)
+
+
+_TENSOR_BUFFER_ALIGNMENT_BYTES = 256
+_DEEPEP_PREFILL_CHUNK_ROWS = 128
+_DEEPEP_GATHER_ROWS_CACHE_ALIGNMENT = 1024
+
+
+@dataclass(frozen=True)
+class _LegacyLowLatencyRdmaSizing:
+    """Capacity required to reuse each legacy DeepEP RDMA slice in prefill."""
+
+    num_rdma_bytes: int
+    per_workspace_bytes: int
+    prefill_required_total_bytes: int
+    max_dense_rows: int
+    microbatch_count: int
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _calculate_legacy_low_latency_rdma_sizing(
+    decode_size_hint: int,
+    global_world_size: int,
+    prefill_tokens_per_rank: int,
+    hidden_size: int,
+    moe_intermediate_size: Optional[int],
+    hidden_dtype: torch.dtype,
+    microbatch_count: int,
+) -> _LegacyLowLatencyRdmaSizing:
+    """Return RDMA storage large enough for one prefill chunk in every slice.
+
+    The grouped FP8 expanded-MoE path keeps the dense gather output alive,
+    then executes a 128-row chunk through W1, quantization, and W2. The byte
+    accounting mirrors TensorBufferManager's 256-byte first-fit allocation and
+    the actual tensor lifetimes in ``chunked_expanded_moe_forward``.
+    """
+    if moe_intermediate_size is None:
+        raise ValueError("Legacy DeepEP low-latency buffer requires moe_intermediate_size")
+    if global_world_size <= 0 or prefill_tokens_per_rank <= 0 or hidden_size <= 0:
+        raise ValueError("DeepEP workspace dimensions must be positive")
+    if moe_intermediate_size <= 0 or moe_intermediate_size % _DEEPEP_PREFILL_CHUNK_ROWS:
+        raise ValueError("moe_intermediate_size must be a positive multiple of 128 for legacy DeepEP FP8 MoE")
+    if microbatch_count <= 0:
+        raise ValueError("DeepEP microbatch_count must be positive")
+
+    def tensor_bytes(*shape: int, itemsize: int) -> int:
+        return _align_up(math.prod(shape) * itemsize, _TENSOR_BUFFER_ALIGNMENT_BYTES)
+
+    chunk_rows = _DEEPEP_PREFILL_CHUNK_ROWS
+    hidden_itemsize = hidden_dtype.itemsize
+    block_size_k = 128
+    scale_cols = moe_intermediate_size // block_size_k
+    silu_bytes = tensor_bytes(chunk_rows, moe_intermediate_size, itemsize=hidden_itemsize)
+    gemm_out_a_bytes = tensor_bytes(chunk_rows, 2 * moe_intermediate_size, itemsize=hidden_itemsize)
+    # Legacy expanded MoE quantizes activations to FP8, i.e. one byte per value.
+    quant_bytes = tensor_bytes(chunk_rows, moe_intermediate_size, itemsize=1)
+    # HAS_SGL_KERNEL uses [scale_cols, chunk_rows], the fallback [chunk_rows,
+    # scale_cols]; their element counts are identical.
+    scale_bytes = tensor_bytes(chunk_rows, scale_cols, itemsize=torch.float32.itemsize)
+    gemm_out_b_bytes = tensor_bytes(chunk_rows, hidden_size, itemsize=hidden_itemsize)
+
+    w1_peak_bytes = silu_bytes + gemm_out_a_bytes
+    quant_peak_bytes = silu_bytes + quant_bytes + scale_bytes
+    # A is freed before Q/L. S is freed before B; first-fit can reuse S only
+    # when B fits there, otherwise B must fit as a contiguous tail allocation.
+    if silu_bytes >= gemm_out_b_bytes:
+        temp_bytes = max(w1_peak_bytes, quant_peak_bytes)
+    else:
+        temp_bytes = max(w1_peak_bytes, quant_peak_bytes + gemm_out_b_bytes)
+
+    max_dense_rows = _align_up(
+        global_world_size * prefill_tokens_per_rank,
+        _DEEPEP_GATHER_ROWS_CACHE_ALIGNMENT,
+    )
+    gather_bytes = tensor_bytes(max_dense_rows, hidden_size, itemsize=hidden_itemsize)
+    per_workspace_bytes = gather_bytes + temp_bytes
+    prefill_required_total_bytes = per_workspace_bytes * microbatch_count
+    num_rdma_bytes = _align_up(
+        max(decode_size_hint, prefill_required_total_bytes),
+        microbatch_count * _TENSOR_BUFFER_ALIGNMENT_BYTES,
+    )
+    return _LegacyLowLatencyRdmaSizing(
+        num_rdma_bytes=num_rdma_bytes,
+        per_workspace_bytes=per_workspace_bytes,
+        prefill_required_total_bytes=prefill_required_total_bytes,
+        max_dense_rows=max_dense_rows,
+        microbatch_count=microbatch_count,
+    )
 
 
 try:
@@ -117,6 +209,7 @@ class DistributeGroupManager:
         self.ep_balance_monitor_group = None
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
+        self.ep_prefill_moe_workspace = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
 
@@ -164,6 +257,8 @@ class DistributeGroupManager:
         for layer_weight in layer_weights:
             # dense 层没有 experts；这里只关心真正参与 MoE 计算的层。
             experts = getattr(layer_weight, "experts", None)
+            if experts is None:
+                experts = getattr(layer_weight, "experts_", None)
             quant_method = getattr(experts, "quant_method", None)
             method_name = getattr(quant_method, "method_name", None)
             if method_name is not None:
@@ -185,12 +280,16 @@ class DistributeGroupManager:
         DeepEP legacy low-latency 路径。这里只为实际存在的执行路径分配 buffer，
         避免为未使用的路径长期占用显存。
         """
-        enable_ep_moe = get_env_start_args().enable_ep_moe
+        args = get_env_start_args()
+        enable_ep_moe = args.enable_ep_moe
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
-        decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+        decode_num_max_dispatch_tokens_per_rank = (
+            None if args.run_mode == "prefill" else get_deepep_num_max_dispatch_tokens_per_rank_decode()
+        )
         if not enable_ep_moe:
             self.ep_buffer = None
             self.ep_low_latency_buffer = None
+            self.ep_prefill_moe_workspace = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
             return
@@ -227,6 +326,7 @@ class DistributeGroupManager:
         )
         self.ep_mega_moe_buffer = None
         self.ep_low_latency_buffer = None
+        self.ep_prefill_moe_workspace = None
 
         if not expert_quant_method_names:
             raise ValueError("No valid MoE quant method was found while initializing DeepEP buffers")
@@ -247,22 +347,51 @@ class DistributeGroupManager:
                 method_name != mega_moe_quant_method for method_name in expert_quant_method_names
             )
             enable_mega_moe_buffer = has_mega_moe_layer
-            enable_low_latency_buffer = has_legacy_moe_layer
         else:
             enable_mega_moe_buffer = False
-            enable_low_latency_buffer = True
+            has_legacy_moe_layer = True
+
+        # The legacy buffer is also the only prefill workspace. Pure prefill
+        # does not use its low-latency protocol, but still needs its RDMA
+        # storage for the bounded grouped-MoE compute path.
+        enable_low_latency_buffer = has_legacy_moe_layer
 
         if enable_low_latency_buffer:
-            # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
-            # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
-            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_decode_num_experts
+            if self.ll_decode_num_tokens is None:
+                decode_size_hint = 0
+            else:
+                decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                    self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_decode_num_experts
+                )
+            rdma_sizing = _calculate_legacy_low_latency_rdma_sizing(
+                decode_size_hint=decode_size_hint,
+                global_world_size=global_world_size,
+                prefill_tokens_per_rank=prefill_num_max_dispatch_tokens_per_rank,
+                hidden_size=hidden_size,
+                moe_intermediate_size=moe_intermediate_size,
+                hidden_dtype=get_torch_dtype(args.data_type),
+                microbatch_count=len(self.groups),
+            )
+            num_rdma_bytes = rdma_sizing.num_rdma_bytes
+            logger.info(
+                "Initialize DeepEP legacy RDMA workspace: decode_size_hint=%s, "
+                "prefill_required_total_bytes=%s, num_rdma_bytes=%s, "
+                "per_workspace_bytes=%s, max_dense_rows=%s, microbatch_count=%s",
+                decode_size_hint,
+                rdma_sizing.prefill_required_total_bytes,
+                num_rdma_bytes,
+                rdma_sizing.per_workspace_bytes,
+                rdma_sizing.max_dense_rows,
+                rdma_sizing.microbatch_count,
             )
             self.ep_low_latency_buffer = deep_ep.Buffer(
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
                 low_latency_mode=True,
                 num_qps_per_rank=(self.ll_decode_num_experts // global_world_size),
+            )
+            self.ep_prefill_moe_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
+                torch.uint8, use_rdma_buffer=True
             )
 
         if enable_mega_moe_buffer:
@@ -282,9 +411,10 @@ class DistributeGroupManager:
                 moe_intermediate_size,
             )
         logger.info(
-            "Initialize DeepEP MoE buffers: low_latency=%s, mega_moe=%s, "
-            "ll_prefill_num_experts=%s, ll_decode_num_experts=%s, expert_quant_method_names=%s",
+            "Initialize DeepEP MoE buffers: low_latency=%s, prefill_workspace_bytes=%s, "
+            "mega_moe=%s, ll_prefill_num_experts=%s, ll_decode_num_experts=%s, expert_quant_method_names=%s",
             enable_low_latency_buffer,
+            self.ep_prefill_moe_workspace.numel() if self.ep_prefill_moe_workspace is not None else 0,
             enable_mega_moe_buffer,
             self.ll_prefill_num_experts,
             self.ll_decode_num_experts,
@@ -314,15 +444,14 @@ class DistributeGroupManager:
             logger.warning(f"set num sms for deep_gemm failed: {e}")
 
     def get_deep_ep_prefill_moe_workspace(self, microbatch_index: int = 0) -> torch.Tensor:
-        """Return a slice of the workspace reused by DeepEP prefill MoE kernels.
+        """Return a slice of the workspace used by DeepEP Prefill MoE kernels.
 
-        DeepEP's low-latency RDMA buffer is idle during prefill, so its local
-        storage is reused as temporary workspace for the expanded MoE compute
-        path to reduce peak GPU memory. With one communication group, the
-        default ``microbatch_index=0`` receives the whole workspace. With
-        multiple groups, the workspace is split into ``len(self.groups)``
-        equal slices and each in-flight microbatch uses the slice matching its
-        group index.
+        All legacy FP8 MoE modes, including pure prefill, use local DeepEP
+        low-latency RDMA storage. Pure prefill only treats it as workspace;
+        decode-capable modes reuse the same storage after decode has released
+        its low-latency layout. With one communication group, the default
+        ``microbatch_index=0`` receives the whole workspace. With multiple
+        groups, the workspace is split into ``len(self.groups)`` equal slices.
 
         Args:
             microbatch_index: Zero-based microbatch and communication-group
@@ -336,8 +465,8 @@ class DistributeGroupManager:
         initialized. The same returned slice must not be used concurrently by
         overlapping calls.
         """
-        assert self.ep_low_latency_buffer is not None, "DeepEP low-latency buffer is not initialized"
-        workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(torch.uint8, use_rdma_buffer=True)
+        assert self.ep_prefill_moe_workspace is not None, "DeepEP Prefill MoE workspace is not initialized"
+        workspace = self.ep_prefill_moe_workspace
         microbatch_count = len(self.groups)
         assert 0 <= microbatch_index < microbatch_count
         workspace_size = workspace.numel() // microbatch_count
@@ -345,10 +474,12 @@ class DistributeGroupManager:
 
     def clear_deepep_buffer(self):
         """
-        Prefill MoE compute reuses the low-latency RDMA buffer as workspace.
-        Clean it before the buffer is used by low-latency decode kernels.
+        Decode-capable modes reuse the low-latency RDMA buffer during Prefill,
+        so clean it before the next low-latency Decode. Pure Prefill uses the
+        same RDMA storage only as workspace and has no low-latency layout to
+        clean.
         """
-        if self.ep_low_latency_buffer is not None:
+        if self.ep_low_latency_buffer is not None and self.ll_decode_num_tokens is not None:
             self.ep_low_latency_buffer.clean_low_latency_buffer(
                 self.ll_decode_num_tokens, self.ll_hidden, self.ll_decode_num_experts
             )

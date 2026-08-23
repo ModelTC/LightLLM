@@ -157,6 +157,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         if is_prefill is False:
             w13 = self._primary_weight_pack(w13)
@@ -174,6 +176,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
+            clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
             ep_balance_counters=self.ep_balance_counters,
         )
         return output
@@ -186,6 +190,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         is_prefill: Optional[bool] = None,
+        clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         if is_prefill is True:
             topk_ids = self._prepare_prefill_topk_ids(topk_ids)
@@ -196,6 +202,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             is_prefill=is_prefill,
+            clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
         )
 
     def _prepare_prefill_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
@@ -292,6 +300,18 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             is_prefill=False,
         )
 
+        return self.low_latency_dispatch_with_topk(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+    def low_latency_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
@@ -307,6 +327,9 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             return_recv_hook=True,
         )
         return recv_x, masked_m, topk_idx, topk_weights, handle, hook
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
+        return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
 
     def select_experts_and_quant_input(
         self,
@@ -392,6 +415,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         masked_m: torch.Tensor,
         dtype: torch.dtype,
         expected_m: int,
+        clamp_limit: Optional[float] = None,
     ):
         w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
         w13_weight, w13_scale = w13.weight, w13.weight_scale
@@ -405,6 +429,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             w2_weight,
             w2_scale,
             expected_m=expected_m,
+            clamp_limit=clamp_limit,
         )
 
     def prefilled_group_gemm(
@@ -419,6 +444,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
         microbatch_index: int = 0,
+        clamp_limit: Optional[float] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -438,6 +464,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 block_size_k=self.quant_method.block_size,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
+                clamp_limit=clamp_limit,
             )
         else:
             gather_out = torch.empty(
@@ -453,7 +480,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 N = w13_weight.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=recv_x[0].device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, limit=clamp_limit)
                 _gemm_out_a, _silu_out = None, None
         del recv_x
         return gather_out

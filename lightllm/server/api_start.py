@@ -21,11 +21,13 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
+    get_model_type,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 from lightllm.utils.device_utils import is_sm100_gpu
+from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -40,6 +42,13 @@ def _launch_subprocesses(args: StartArgs):
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
+    model_type = get_model_type(args.model_dir)
+    if args.pd_kv_page_num is None:
+        args.pd_kv_page_num = 8 if model_type == "deepseek_v4" else 16
+    if args.pd_kv_page_size is None:
+        args.pd_kv_page_size = 2048 if model_type == "deepseek_v4" else 1024
+    if args.enable_cpu_cache and model_type == "deepseek_v4" and args.llm_kv_type in (None, "None"):
+        args.llm_kv_type = "fp8kv_dsa"
 
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
@@ -48,6 +57,10 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
+
+    if args.run_mode in ("prefill", "decode") and model_type == "deepseek_v4":
+        if args.tp != args.dp:
+            raise ValueError("DeepSeek-V4 PD requires one TP rank per DP replica (--tp must equal --dp)")
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -74,6 +87,7 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
+        register_sysv_shm_for_cleanup(args.cpu_kv_cache_shm_id)
 
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
@@ -101,6 +115,17 @@ def _launch_subprocesses(args: StartArgs):
             f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
             f"graph_max_batch_size to 32"
         )
+
+    dp_size_in_node = max(1, args.dp // args.nnodes)
+    args.per_dp_running_max_req_size = args.running_max_req_size // dp_size_in_node
+    args.graph_max_batch_size = min(args.graph_max_batch_size, args.per_dp_running_max_req_size)
+    logger.info(
+        "set per-DP running request limit: global=%d, local_dp=%d, per_dp=%d, graph_max_batch_size=%d",
+        args.running_max_req_size,
+        dp_size_in_node,
+        args.per_dp_running_max_req_size,
+        args.graph_max_batch_size,
+    )
 
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
@@ -277,6 +302,8 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+    elif args.enable_cpu_cache and args.cpu_cache_token_page_size is None:
+        args.cpu_cache_token_page_size = 2048 if get_model_type(args.model_dir) == "deepseek_v4" else 256
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -296,7 +323,14 @@ def _launch_subprocesses(args: StartArgs):
         from lightllm.utils.config_utils import get_dtype
 
         args.data_type = get_dtype(args.model_dir)
-        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+        assert args.data_type in [
+            "fp16",
+            "float16",
+            "bf16",
+            "bfloat16",
+            "fp32",
+            "float32",
+        ]
 
     set_unique_server_name(args)
 
@@ -458,6 +492,9 @@ def pd_master_start(args: StartArgs):
     if args.run_mode != "pd_master":
         return
 
+    if args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4":
+        raise ValueError("DeepSeek-V4 CPU cache does not support pd_master")
+
     auto_set_max_req_total_len(args)
     auto_set_response_parsers(args)
 
@@ -529,7 +566,14 @@ def visual_only_start(args):
         from lightllm.utils.config_utils import get_dtype
 
         args.data_type = get_dtype(args.model_dir)
-        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+        assert args.data_type in [
+            "fp16",
+            "float16",
+            "bf16",
+            "bfloat16",
+            "fp32",
+            "float32",
+        ]
 
     args.visual_node_id = uuid.uuid4().int
 

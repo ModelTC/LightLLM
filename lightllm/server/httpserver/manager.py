@@ -10,6 +10,7 @@ import copy
 import hashlib
 import datetime
 import pickle
+from array import array
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -109,6 +110,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
+        # key 存在表示 PD 请求正在登记，value 表示登记期间是否已收到 ABORT。
+        self._pd_registration_abort_flags: Dict[int, bool] = {}
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
         self.max_req_total_len = args.max_req_total_len
@@ -311,6 +314,21 @@ class HttpServerManager(HttpRlManagerHelper, object):
             assert False, "dead code path"
         return group_request_id
 
+    def begin_pd_request_registration(self, group_req_id: int) -> None:
+        self._pd_registration_abort_flags[group_req_id] = False
+
+    def cancel_pd_request_registration(self, group_req_id: int) -> None:
+        """PD 请求在正式登记前结束时，清理对应的待处理 ABORT。"""
+        self._pd_registration_abort_flags.pop(group_req_id, None)
+
+    def _register_req_status(self, group_req_id: int, req_status: "ReqStatus") -> None:
+        """发布 PD 请求，并立即消费登记期间收到的 ABORT。"""
+        self.req_id_to_out_inf[group_req_id] = req_status
+        if self._pd_registration_abort_flags.pop(group_req_id, False):
+            for req in req_status.group_req_objs.shm_req_objs:
+                req.is_aborted = True
+            logger.warning(f"applied pending abort for group_request_id {group_req_id}")
+
     async def generate(
         self,
         prompt: Union[str, List[int]],
@@ -397,7 +415,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await pd_upload_websocket.send(
-                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, prompt_ids))
+                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("i", prompt_ids)))
                 )
                 try:
                     await asyncio.wait_for(pd_event.wait(), timeout=180)
@@ -449,7 +467,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
-            self.req_id_to_out_inf[group_request_id] = req_status
+            self._register_req_status(group_request_id, req_status)
             # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
             # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
             if self.rl_controller is not None:
@@ -824,6 +842,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def abort(self, group_req_id: int) -> bool:
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
         if req_status is None:
+            if group_req_id in self._pd_registration_abort_flags:
+                self._pd_registration_abort_flags[group_req_id] = True
+                logger.warning(f"deferred abort for registering group_request_id {group_req_id}")
+                return True
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
             return False
 

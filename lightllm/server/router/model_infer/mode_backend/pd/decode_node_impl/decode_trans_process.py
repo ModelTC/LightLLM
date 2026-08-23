@@ -165,17 +165,21 @@ class _DecodeTransModule:
         return
 
     def _warmup(self):
-        for dp_index in range(self.args.dp // self.args.nnodes):
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.mem_managers[self.device_id]
+        cur_mem = self.mem_managers[self.device_id]
+        with torch.cuda.stream(stream=self.copy_cuda_stream):
+            cur_mem.kv_move_buffer[0].zero_()
+            for dp_index in range(self.args.dp // self.args.nnodes):
                 cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=[0],
+                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEX],
                     page_index=0,
                     dp_index=dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
+                    start_kv_index=0,
+                    request_kv_len=1,
+                    req_idx=cur_mem.req_to_token_indexs.shape[0] - 1,
                 )
-                torch.cuda.current_stream().synchronize()
+            torch.cuda.current_stream().synchronize()
         return
 
     @log_exception
@@ -291,8 +295,10 @@ class _DecodeTransModule:
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
+                                local_trans_task.transfer_nbytes = remote_trans_task.transfer_nbytes
                                 self.request_page_task_queue.put(local_trans_task)
-                                logger.info(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
+                                if self.args.detail_log:
+                                    logger.info(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # This does not necessarily mean the WRITE protocol state is corrupted.
                                 # A common benign case is: decode has already received an abort for this
@@ -319,7 +325,8 @@ class _DecodeTransModule:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
-                                logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                                if self.args.detail_log:
+                                    logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -392,6 +399,8 @@ class _DecodeTransModule:
                     dp_index=trans_task.decode_dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
+                    start_kv_index=trans_task.start_kv_index,
+                    request_kv_len=trans_task.request_kv_len,
                     page_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
                 )
@@ -420,13 +429,14 @@ class _DecodeTransModule:
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
 
-            if trans_task.start_trans_time is not None:
-                logger.info(
-                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                )
-            else:
-                logger.info(f"trans task ret success:{ret}")
+            if self.args.detail_log:
+                if trans_task.start_trans_time is not None:
+                    logger.info(
+                        f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
+                        f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
+                    )
+                else:
+                    logger.info(f"trans task ret success:{ret}")
 
     @log_exception
     def fail_loop(self):
