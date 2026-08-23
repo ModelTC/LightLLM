@@ -4,6 +4,7 @@ import json
 import pytest
 from fastapi import Request
 
+from lightllm.server import api_openai
 from lightllm.server import visual_chat_proxy
 from lightllm.server.api_models import (
     ChatCompletionRequest,
@@ -324,6 +325,15 @@ def test_visual_request_matches_nova_formal_profile():
             remote_model="vision-model",
         )
 
+        def ensure_remote_available(self):
+            return None
+
+        def record_remote_success(self):
+            return None
+
+        def record_remote_failure(self, _trace_id):
+            return None
+
         async def post_json(self, payload, raw_request, trace_id):
             captured.update(payload)
             return {
@@ -394,6 +404,15 @@ def test_visual_stream_assembles_same_result_and_requests_streaming():
             remote_model="vision-model",
         )
 
+        def ensure_remote_available(self):
+            return None
+
+        def record_remote_success(self):
+            return None
+
+        def record_remote_failure(self, _trace_id):
+            return None
+
         async def stream_json(self, payload, raw_request, trace_id):
             captured.update(payload)
             yield {"choices": [{"delta": {"content": "  The title "}}]}
@@ -436,6 +455,15 @@ def test_visual_stream_buffers_reasoning_fallback_until_content_priority_is_know
         settings = visual_chat_proxy.VisualProxySettings(
             remote_url="http://127.0.0.1:18180/v1/chat/completions"
         )
+
+        def ensure_remote_available(self):
+            return None
+
+        def record_remote_success(self):
+            return None
+
+        def record_remote_failure(self, _trace_id):
+            return None
 
         async def stream_json(self, payload, raw_request, trace_id):
             yield {"choices": [{"delta": {"reasoning_content": "fallback "}}]}
@@ -1011,17 +1039,26 @@ def test_anthropic_stream_maps_proxy_reasoning_to_thinking_deltas():
 
 def test_closing_visual_stream_cancels_generation_and_releases_request_slot():
     cancellation_count = 0
+    next_request_id = 10_000
+    active_request_ids = set()
+    aborted_request_ids = []
 
-    async def endless_stream():
+    async def endless_stream(request_id):
         nonlocal cancellation_count
+        active_request_ids.add(request_id)
         try:
             yield 'data: {"choices":[{"delta":{"reasoning":"working"},"finish_reason":null}]}\n\n'
             await asyncio.Event().wait()
         finally:
             cancellation_count += 1
+            active_request_ids.discard(request_id)
+            aborted_request_ids.append(request_id)
 
     async def fake_main(_request, _raw_request):
-        return CustomStreamingResponse(endless_stream(), media_type="text/event-stream")
+        nonlocal next_request_id
+        request_id = next_request_id
+        next_request_id += 1
+        return CustomStreamingResponse(endless_stream(request_id), media_type="text/event-stream")
 
     request = ChatCompletionRequest.model_validate(
         {
@@ -1068,12 +1105,173 @@ def test_closing_visual_stream_cancels_generation_and_releases_request_slot():
             await iterator.__anext__()
             await iterator.aclose()
             await asyncio.sleep(0)
+            assert active_request_ids == set()
             assert runtime._request_semaphore._value == runtime.settings.max_inflight_requests
 
     asyncio.run(run_test())
 
     assert cancellation_count == 25
+    assert aborted_request_ids == list(range(10_000, 10_025))
+    assert active_request_ids == set()
     assert runtime._request_semaphore._value == runtime.settings.max_inflight_requests
+
+
+def test_proxy_cancellation_closes_nested_dsv4_alloc_request_iterator():
+    active_request_ids = set()
+    aborted_request_ids = []
+
+    async def run_test():
+        started = asyncio.Event()
+
+        async def allocated_dsv4_stream():
+            request_id = 20_001
+            active_request_ids.add(request_id)
+            started.set()
+            try:
+                yield 'data: {"choices":[{"delta":{"reasoning":"working"},"finish_reason":null}]}\n\n'
+                await asyncio.Event().wait()
+            finally:
+                active_request_ids.discard(request_id)
+                aborted_request_ids.append(request_id)
+
+        response = CustomStreamingResponse(
+            api_openai._safe_stream_wrapper(allocated_dsv4_stream()),
+            media_type="text/event-stream",
+        )
+
+        async def callback(_kind, _value, _separate):
+            return None
+
+        consume_task = asyncio.create_task(
+            visual_chat_proxy._consume_main_model_stream(
+                response,
+                model="agent",
+                callback=callback,
+                separate_from_prior_reasoning=False,
+                stream_content=False,
+            )
+        )
+        await started.wait()
+        assert active_request_ids == {20_001}
+        consume_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consume_task
+        await asyncio.sleep(0)
+
+    asyncio.run(run_test())
+
+    assert active_request_ids == set()
+    assert aborted_request_ids == [20_001]
+
+
+def test_invalid_remote_200_opens_circuit_before_another_dsv4_allocation():
+    class InvalidRemoteClient:
+        async def post(self, _url, json):
+            return visual_chat_proxy.httpx.Response(200, json={"choices": []})
+
+    settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate",
+        remote_max_retries=0,
+        circuit_failure_threshold=2,
+        circuit_recovery_seconds=60.0,
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(settings, client=InvalidRemoteClient())
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Inspect."},
+                        {"type": "image_url", "image_url": {"url": VALID_PNG_DATA_URL}},
+                    ],
+                }
+            ],
+        }
+    )
+    raw_request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
+    dsv4_allocations = 0
+    active_request_ids = set()
+
+    async def allocate_then_request_vision(_request, _raw_request):
+        nonlocal dsv4_allocations
+        dsv4_allocations += 1
+        request_id = 30_000 + dsv4_allocations
+        active_request_ids.add(request_id)
+        try:
+            return ChatCompletionResponse(
+                model="agent",
+                choices=[
+                    ChatCompletionResponseChoice(
+                        index=0,
+                        finish_reason="tool_calls",
+                        message=ChatMessage(
+                            role="assistant",
+                            content="",
+                            tool_calls=[
+                                _tool_call(
+                                    "vision_reader",
+                                    {"image": "<image_1/>", "task": "inspect"},
+                                    f"vision-{request_id}",
+                                )
+                            ],
+                        ),
+                    )
+                ],
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        finally:
+            active_request_ids.discard(request_id)
+
+    async def run_test():
+        for call_index in range(2):
+            with pytest.raises(
+                visual_chat_proxy.VisualProxyUpstreamError,
+                match=r"choices\[0\]",
+            ):
+                await visual_chat_proxy.visual_chat_completions_impl(
+                    request=request,
+                    raw_request=raw_request,
+                    runtime=runtime,
+                    main_chat_handler=allocate_then_request_vision,
+                )
+            assert dsv4_allocations == call_index + 1
+            assert active_request_ids == set()
+            assert runtime._request_semaphore._value == settings.max_inflight_requests
+            assert runtime._semaphore._value == settings.remote_max_concurrency
+
+        with pytest.raises(
+            visual_chat_proxy.VisualProxyUpstreamError,
+            match="circuit breaker is open",
+        ):
+            await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=allocate_then_request_vision,
+            )
+        assert dsv4_allocations == 2
+        assert active_request_ids == set()
+        assert runtime._request_semaphore._value == settings.max_inflight_requests
+        assert runtime._semaphore._value == settings.remote_max_concurrency
+        await runtime.close()
+
+    asyncio.run(run_test())
+
+
+def test_visual_proxy_never_intercepts_text_only_dsv4_requests():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "agent",
+            "messages": [{"role": "user", "content": "Keep this on the native DSV4 path."}],
+        }
+    )
+
+    assert not visual_chat_proxy.should_use_visual_proxy(
+        "http://127.0.0.1:18180/generate",
+        request,
+    )
 
 
 def test_conflicting_thinking_controls_fail_closed():
