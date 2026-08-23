@@ -802,7 +802,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    b_mtp_index=b_mtp_index if self.is_linear_att_mixed_model else None,
+                    b_mtp_index=b_mtp_index,
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",

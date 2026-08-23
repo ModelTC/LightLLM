@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
@@ -39,7 +39,7 @@ def verify_mtp_tokens(
     next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
-    b_mtp_index: Optional[torch.Tensor] = None,
+    b_mtp_index: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Verify target tokens and update recurrent MTP state when required."""
 
@@ -50,7 +50,6 @@ def verify_mtp_tokens(
         b_req_idx=b_req_idx,
     )
     if backend.is_linear_att_mixed_model:
-        assert b_mtp_index is not None
         linear_att_mtp_state_index_update(
             req_to_mtp_state_index=backend.model.req_manager.req_to_mtp_state_index,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
