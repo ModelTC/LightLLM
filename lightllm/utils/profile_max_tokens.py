@@ -42,6 +42,21 @@ def get_mtp_adjusted_mem_fraction(
     mtp_weight_bytes = target_weight_bytes * mtp_layer_num / target_layer_num
     total_gpu_bytes = torch.cuda.get_device_properties(get_current_device_id()).total_memory
     adjusted_mem_fraction = mem_fraction - mtp_weight_bytes / total_gpu_bytes
+
+    # 不同 rank 的权重分片大小和 GPU 总显存可能不同。取全局最小值，保证所有
+    # rank 使用相同且能够安全预留 MTP 权重显存的 KV cache 比例。
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        adjusted_mem_fraction_tensor = torch.tensor(
+            adjusted_mem_fraction,
+            dtype=torch.float32,
+            device=f"cuda:{get_current_device_id()}",
+        )
+        torch.distributed.all_reduce(
+            adjusted_mem_fraction_tensor,
+            op=torch.distributed.ReduceOp.MIN,
+        )
+        adjusted_mem_fraction = adjusted_mem_fraction_tensor.item()
+
     assert adjusted_mem_fraction > 0, "MTP weight reservation leaves no memory for the target model KV cache"
     return adjusted_mem_fraction
 
