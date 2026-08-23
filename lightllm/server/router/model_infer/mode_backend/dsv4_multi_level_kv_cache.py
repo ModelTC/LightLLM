@@ -15,6 +15,26 @@ from lightllm.utils.envs_utils import get_dsv4_cpu_cache_max_pages_per_task
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 
 
+def _split_dsv4_loaded_cache_lengths(
+    original_gpu_kv_len: int,
+    loaded_end: int,
+    requested_end: int,
+    disk_prompt_cache_len: int,
+) -> tuple[int, int]:
+    """Split an actual CPU-cache load into CPU and disk matched token counts."""
+    load_start = max(0, int(original_gpu_kv_len))
+    load_end = max(load_start, int(loaded_end))
+    actual_loaded_len = load_end - load_start
+
+    matched_end = max(0, int(requested_end))
+    matched_disk_len = min(max(0, int(disk_prompt_cache_len)), matched_end)
+    disk_start = matched_end - matched_disk_len
+    actual_disk_len = max(0, min(load_end, matched_end) - max(load_start, disk_start))
+    actual_disk_len = min(actual_disk_len, actual_loaded_len)
+    actual_cpu_len = actual_loaded_len - actual_disk_len
+    return actual_cpu_len, actual_disk_len
+
+
 class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
     def __init__(self, backend):
         super().__init__(backend)
@@ -32,9 +52,23 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
         if session.leased_pages:
             self.cpu_cache_client.lock.acquire_sleep1ms()
             try:
-                # Cumulative hashes make the root page the most valuable entry.
-                # Releasing tail-to-root makes the tail oldest in the LRU.
-                self.cpu_cache_client.deref_pages(list(reversed(session.leased_pages)))
+                if self.args.enable_disk_cache:
+                    # A disk-cache group must contain one complete request prefix in
+                    # root-to-tail order.  Incremental store batches may complete in
+                    # a different order, so do not publish or release any page until
+                    # every page leased by this session is ready.
+                    if not self.cpu_cache_client.check_allpages_ready(session.leased_pages):
+                        return
+                    self.cpu_cache_client.update_pages_status_to_ready(
+                        page_list=session.leased_pages,
+                        deref=True,
+                        disk_offload_enable=True,
+                        token_num_in_page_list=(len(session.leased_pages) * self.args.cpu_cache_token_page_size),
+                    )
+                else:
+                    # Cumulative hashes make the root page the most valuable entry.
+                    # Releasing tail-to-root makes the tail oldest in the LRU.
+                    self.cpu_cache_client.deref_pages(list(reversed(session.leased_pages)))
             finally:
                 self.cpu_cache_client.lock.release()
         del self._dsv4_store_sessions[session.request_id]
@@ -218,6 +252,8 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
             assert len(page_list) <= len(page_len_list)
 
             gpu_kv_len = int(req.cur_kv_len)
+            requested_end = gpu_kv_len
+            matched_disk_len = int(req.shm_req.disk_prompt_cache_len)
             if is_master_in_dp:
                 session = Dsv4CpuStoreSession(
                     request_id=req.req_id,
@@ -291,7 +327,14 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                             idle_token_num -= token_num
 
             if is_master_in_dp:
-                req.shm_req.cpu_prompt_cache_len = loaded_end - gpu_kv_len
+                cpu_prompt_cache_len, disk_prompt_cache_len = _split_dsv4_loaded_cache_lengths(
+                    original_gpu_kv_len=gpu_kv_len,
+                    loaded_end=loaded_end,
+                    requested_end=requested_end,
+                    disk_prompt_cache_len=matched_disk_len,
+                )
+                req.shm_req.cpu_prompt_cache_len = cpu_prompt_cache_len
+                req.shm_req.disk_prompt_cache_len = disk_prompt_cache_len
                 req.shm_req.shm_cur_kv_len = loaded_end
                 session.load_submitted = True
                 if loaded_end > gpu_kv_len:
