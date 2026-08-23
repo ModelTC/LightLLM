@@ -2,7 +2,6 @@ import dataclasses
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING, Tuple
-from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
@@ -28,13 +27,14 @@ class MlaFa3AttBackend(BaseAttBackend):
                 max_att_batch_size //= model.mtp_manager.get_decode_batch_multiplier(model.is_mtp_draft_model)
 
             buffer_count = 2 if model.args.enable_decode_microbatch_overlap else 1
+            workspace_size = max_att_batch_size * model.graph_max_len_in_batch
             self._shared_page_table_buffer = [
-                torch.empty(
-                    max_att_batch_size * model.graph_max_len_in_batch,
+                self.get_gpu_workspace_buffer(
+                    key_name=f"fa3_mla_page_table_{buffer_index}",
+                    workspace_size=workspace_size,
                     dtype=torch.int32,
-                    device=get_current_device_id(),
                 )
-                for _ in range(buffer_count)
+                for buffer_index in range(buffer_count)
             ]
         return self._shared_page_table_buffer
 
