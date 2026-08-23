@@ -62,6 +62,14 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
+async def _aclose_if_possible(iterator) -> None:
+    """Deterministically close nested generation iterators on proxy cancellation."""
+
+    close = getattr(iterator, "aclose", None)
+    if close is not None:
+        await close()
+
+
 async def _safe_stream_wrapper(stream_generator):
     """Convert generation errors to SSE events after the response has started."""
     first_chunk_sent = False
@@ -85,6 +93,8 @@ async def _safe_stream_wrapper(stream_generator):
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
         return
+    finally:
+        await _aclose_if_possible(stream_generator)
 
 
 def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
@@ -405,28 +415,31 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         prompt_cache_len_dict = {}
         completion_tokens = 0
         reasoning_parser_dict: Dict[int, ReasoningParser] = {}
-        async for sub_req_id, request_output, metadata, finish_status in results_generator:
-            from .req_id_generator import convert_sub_id_to_group_id
+        try:
+            async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                from .req_id_generator import convert_sub_id_to_group_id
 
-            group_request_id = convert_sub_id_to_group_id(sub_req_id)
-            count_output_tokens_dict[sub_req_id] += 1
-            final_output_dict[sub_req_id].append(request_output)
-            if reasoning_parser:
-                parser = reasoning_parser_dict.get(sub_req_id)
-                if parser is None:
-                    parser = ReasoningParser(
-                        reasoning_parser,
-                        stream_reasoning=False,
-                        force_reasoning=request_enable_reasoning,
-                    )
-                    reasoning_parser_dict[sub_req_id] = parser
-                token_id = metadata.get("id")
-                if token_id is not None:
-                    parser.update_reasoning_token_count(int(token_id))
-            if finish_status.is_finished():
-                finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
-                prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
-                prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
+                group_request_id = convert_sub_id_to_group_id(sub_req_id)
+                count_output_tokens_dict[sub_req_id] += 1
+                final_output_dict[sub_req_id].append(request_output)
+                if reasoning_parser:
+                    parser = reasoning_parser_dict.get(sub_req_id)
+                    if parser is None:
+                        parser = ReasoningParser(
+                            reasoning_parser,
+                            stream_reasoning=False,
+                            force_reasoning=request_enable_reasoning,
+                        )
+                        reasoning_parser_dict[sub_req_id] = parser
+                    token_id = metadata.get("id")
+                    if token_id is not None:
+                        parser.update_reasoning_token_count(int(token_id))
+                if finish_status.is_finished():
+                    finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
+                    prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
+                    prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
+        finally:
+            await _aclose_if_possible(results_generator)
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
         prompt_tokens = prompt_tokens_dict[sub_ids[0]]
@@ -564,7 +577,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         return chunk
 
     # Streaming case
-    async def stream_results_inner() -> AsyncGenerator[bytes, None]:
+    async def stream_results_body() -> AsyncGenerator[bytes, None]:
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
         has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
@@ -815,8 +828,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         yield "data: [DONE]\n\n".encode("utf-8")
 
     async def stream_results() -> AsyncGenerator[bytes, None]:
+        body_iterator = stream_results_body()
         try:
-            async for chunk in stream_results_inner():
+            async for chunk in body_iterator:
                 yield chunk
         except ClientDisconnected:
             raise
@@ -824,6 +838,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             while pending_sse_chunks:
                 yield pop_sse_chunk()
             raise
+        finally:
+            await _aclose_if_possible(body_iterator)
+            await _aclose_if_possible(results_generator)
 
     background_tasks = BackgroundTasks()
     return CustomStreamingResponse(

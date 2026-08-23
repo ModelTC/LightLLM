@@ -476,6 +476,31 @@ class VisualProxyRuntime:
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
 
+    def ensure_remote_available(self) -> None:
+        """Fail before entering DSV4 while the isolated Vision circuit is open."""
+
+        if asyncio.get_running_loop().time() < self._circuit_open_until:
+            raise VisualProxyUpstreamError("Visual upstream circuit breaker is open")
+
+    def record_remote_success(self) -> None:
+        """Close the circuit only after the complete provider contract is valid."""
+
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+
+    def record_remote_failure(self, trace_id: str) -> None:
+        """Count one logical provider invocation failure, including invalid HTTP 200 bodies."""
+
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.settings.circuit_failure_threshold:
+            self._circuit_open_until = asyncio.get_running_loop().time() + self.settings.circuit_recovery_seconds
+            logger.error(
+                "[visual-chat-proxy][circuit_open] trace_id=%s failures=%d recovery_seconds=%.1f",
+                trace_id,
+                self._consecutive_failures,
+                self.settings.circuit_recovery_seconds,
+            )
+
     async def close(self) -> None:
         if self._owns_client:
             await self.client.aclose()
@@ -727,9 +752,7 @@ class VisualProxyRuntime:
                     await open_task
 
     async def post_json(self, payload: dict[str, Any], request: Optional[Request], trace_id: str) -> dict[str, Any]:
-        now = asyncio.get_running_loop().time()
-        if now < self._circuit_open_until:
-            raise VisualProxyUpstreamError("Visual upstream circuit breaker is open")
+        self.ensure_remote_available()
         try:
             await asyncio.wait_for(self._semaphore.acquire(), timeout=self.settings.remote_queue_timeout)
         except asyncio.TimeoutError as exc:
@@ -775,8 +798,6 @@ class VisualProxyRuntime:
                         raise VisualProxyUpstreamError("Visual upstream returned invalid JSON") from exc
                     if not isinstance(data, dict):
                         raise VisualProxyUpstreamError("Visual upstream returned a non-object response")
-                    self._consecutive_failures = 0
-                    self._circuit_open_until = 0.0
                     return data
 
                 if attempt >= self.settings.remote_max_retries:
@@ -797,19 +818,6 @@ class VisualProxyRuntime:
                     delay,
                 )
                 await asyncio.sleep(min(delay, max(0.0, deadline - asyncio.get_running_loop().time())))
-        except VisualProxyUpstreamRejectedError:
-            raise
-        except (VisualProxyUpstreamError, VisualProxyTimeoutError):
-            self._consecutive_failures += 1
-            if self._consecutive_failures >= self.settings.circuit_failure_threshold:
-                self._circuit_open_until = asyncio.get_running_loop().time() + self.settings.circuit_recovery_seconds
-                logger.error(
-                    "[visual-chat-proxy][circuit_open] trace_id=%s failures=%d recovery_seconds=%.1f",
-                    trace_id,
-                    self._consecutive_failures,
-                    self.settings.circuit_recovery_seconds,
-                )
-            raise
         finally:
             self._semaphore.release()
 
@@ -821,9 +829,7 @@ class VisualProxyRuntime:
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream OpenAI-compatible SSE JSON while retaining bounded retries and cancellation."""
 
-        now = asyncio.get_running_loop().time()
-        if now < self._circuit_open_until:
-            raise VisualProxyUpstreamError("Visual upstream circuit breaker is open")
+        self.ensure_remote_available()
         try:
             await asyncio.wait_for(self._semaphore.acquire(), timeout=self.settings.remote_queue_timeout)
         except asyncio.TimeoutError as exc:
@@ -882,8 +888,6 @@ class VisualProxyRuntime:
 
             if response is None:
                 raise VisualProxyUpstreamError("Visual upstream did not return a streaming response")
-            self._consecutive_failures = 0
-            self._circuit_open_until = 0.0
 
             async def bounded_body() -> AsyncIterator[bytes]:
                 total_bytes = 0
@@ -913,13 +917,6 @@ class VisualProxyRuntime:
 
             async for item in _iter_openai_sse_payloads(bounded_body()):
                 yield item
-        except VisualProxyUpstreamRejectedError:
-            raise
-        except (VisualProxyUpstreamError, VisualProxyTimeoutError):
-            self._consecutive_failures += 1
-            if self._consecutive_failures >= self.settings.circuit_failure_threshold:
-                self._circuit_open_until = asyncio.get_running_loop().time() + self.settings.circuit_recovery_seconds
-            raise
         finally:
             if response is not None:
                 await response.aclose()
@@ -2165,13 +2162,13 @@ def _remote_image_url(source: str, settings: VisualProxySettings) -> str:
 
 def _remote_content(data: Any) -> str:
     if not isinstance(data, dict):
-        raise VisualChatProxyError("Visual remote returned a non-object response")
+        raise VisualProxyUpstreamError("Visual remote returned a non-object response")
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise VisualChatProxyError("Visual remote response has no choices[0]")
+        raise VisualProxyUpstreamError("Visual remote response has no choices[0]")
     message = choices[0].get("message")
     if not isinstance(message, dict):
-        raise VisualChatProxyError("Visual remote response has no choices[0].message")
+        raise VisualProxyUpstreamError("Visual remote response has no choices[0].message")
     content = message.get("content")
     visible_text = ""
     if isinstance(content, str):
@@ -2191,7 +2188,7 @@ def _remote_content(data: Any) -> str:
             reasoning_text = strip_backend_special_tokens(reasoning)
             if reasoning_text:
                 return reasoning_text
-    raise VisualChatProxyError("Visual remote returned an empty assistant message")
+    raise VisualProxyUpstreamError("Visual remote returned an empty assistant message")
 
 
 class VisualRemoteResult(str):
@@ -2242,6 +2239,7 @@ async def call_visual_remote(
     image_digest_sha256 = ""
     if image_payload:
         image_digest_sha256 = hashlib.sha256(base64.b64decode(image_payload, validate=True)).hexdigest()
+    runtime.ensure_remote_available()
     payload = {
         "model": settings.remote_model or model,
         "messages": [
@@ -2348,13 +2346,17 @@ async def call_visual_remote(
                 content = reasoning_text
                 content_source = "message.reasoning"
             else:
-                raise VisualChatProxyError("Visual remote returned an empty assistant message")
+                raise VisualProxyUpstreamError("Visual remote returned an empty assistant message")
             trace_response = {
                 "stream": True,
                 "content": content,
                 "content_source": content_source,
             }
     except BaseException as exc:
+        if isinstance(exc, (VisualProxyUpstreamError, VisualProxyTimeoutError)) and not isinstance(
+            exc, VisualProxyUpstreamRejectedError
+        ):
+            runtime.record_remote_failure(trace_id)
         if trace_recorder is not None and trace_recorder.enabled:
             trace_recorder.event(
                 "visual_model_error",
@@ -2369,7 +2371,9 @@ async def call_visual_remote(
             response=trace_response,
         )
     if len(content.encode("utf-8")) > settings.max_remote_response_bytes:
+        runtime.record_remote_failure(trace_id)
         raise VisualProxyUpstreamError("Visual upstream response exceeds the configured size limit")
+    runtime.record_remote_success()
     return VisualRemoteResult(
         content,
         finish_reason=finish_reason,
@@ -2668,66 +2672,72 @@ async def _consume_main_model_stream(
         )
         emitted_reasoning = True
 
-    async for payload in _iter_openai_sse_payloads(response.body_iterator):
-        if "error" in payload and not payload.get("choices"):
-            error = payload.get("error") or {}
-            message = error.get("message") if isinstance(error, dict) else str(error)
-            raise VisualChatProxyError(f"Main model stream failed: {message or 'unknown error'}")
-        if payload.get("id") is not None:
-            response_id = str(payload["id"])
-        if isinstance(payload.get("created"), int):
-            created = payload["created"]
-        raw_usage = payload.get("usage")
-        if isinstance(raw_usage, dict):
-            usage = UsageInfo.model_validate(raw_usage)
-        choices = payload.get("choices") or []
-        if not choices:
-            continue
-        if not emitted_ready:
-            await callback("ready", "1", False)
-            emitted_ready = True
-        choice = choices[0]
-        if not isinstance(choice, dict):
-            continue
-        delta = choice.get("delta") or {}
-        if not isinstance(delta, dict):
-            continue
-        raw_reasoning = delta.get("reasoning")
-        if not isinstance(raw_reasoning, str):
-            raw_reasoning = delta.get("reasoning_content")
-        if isinstance(raw_reasoning, str) and raw_reasoning:
-            reasoning_parts.append(raw_reasoning)
-            await emit_reasoning(sanitizer.feed(raw_reasoning))
-        content = delta.get("content")
-        if isinstance(content, str):
-            content_parts.append(content)
-            if stream_content:
-                clean_content = content_sanitizer.feed(content)
-                if clean_content:
-                    await callback("content", clean_content, False)
-        for raw_call in delta.get("tool_calls") or []:
-            if not isinstance(raw_call, dict):
+    body_iterator = response.body_iterator
+    try:
+        async for payload in _iter_openai_sse_payloads(body_iterator):
+            if "error" in payload and not payload.get("choices"):
+                error = payload.get("error") or {}
+                message = error.get("message") if isinstance(error, dict) else str(error)
+                raise VisualChatProxyError(f"Main model stream failed: {message or 'unknown error'}")
+            if payload.get("id") is not None:
+                response_id = str(payload["id"])
+            if isinstance(payload.get("created"), int):
+                created = payload["created"]
+            raw_usage = payload.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = UsageInfo.model_validate(raw_usage)
+            choices = payload.get("choices") or []
+            if not choices:
                 continue
-            index = raw_call.get("index")
-            if not isinstance(index, int):
-                index = len(tool_states)
-            state = tool_states.setdefault(
-                index,
-                {"id": None, "type": "function", "name": None, "arguments": []},
-            )
-            if raw_call.get("id"):
-                state["id"] = str(raw_call["id"])
-            if raw_call.get("type"):
-                state["type"] = raw_call["type"]
-            function = raw_call.get("function") or {}
-            if isinstance(function, dict):
-                if function.get("name"):
-                    state["name"] = str(function["name"])
-                arguments = function.get("arguments")
-                if isinstance(arguments, str):
-                    state["arguments"].append(arguments)
-        if choice.get("finish_reason") is not None:
-            finish_reason = choice["finish_reason"]
+            if not emitted_ready:
+                await callback("ready", "1", False)
+                emitted_ready = True
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") or {}
+            if not isinstance(delta, dict):
+                continue
+            raw_reasoning = delta.get("reasoning")
+            if not isinstance(raw_reasoning, str):
+                raw_reasoning = delta.get("reasoning_content")
+            if isinstance(raw_reasoning, str) and raw_reasoning:
+                reasoning_parts.append(raw_reasoning)
+                await emit_reasoning(sanitizer.feed(raw_reasoning))
+            content = delta.get("content")
+            if isinstance(content, str):
+                content_parts.append(content)
+                if stream_content:
+                    clean_content = content_sanitizer.feed(content)
+                    if clean_content:
+                        await callback("content", clean_content, False)
+            for raw_call in delta.get("tool_calls") or []:
+                if not isinstance(raw_call, dict):
+                    continue
+                index = raw_call.get("index")
+                if not isinstance(index, int):
+                    index = len(tool_states)
+                state = tool_states.setdefault(
+                    index,
+                    {"id": None, "type": "function", "name": None, "arguments": []},
+                )
+                if raw_call.get("id"):
+                    state["id"] = str(raw_call["id"])
+                if raw_call.get("type"):
+                    state["type"] = raw_call["type"]
+                function = raw_call.get("function") or {}
+                if isinstance(function, dict):
+                    if function.get("name"):
+                        state["name"] = str(function["name"])
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        state["arguments"].append(arguments)
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice["finish_reason"]
+    finally:
+        close = getattr(body_iterator, "aclose", None)
+        if close is not None:
+            await close()
 
     await emit_reasoning(sanitizer.finish())
     if stream_content:
@@ -3826,6 +3836,7 @@ async def visual_chat_completions_impl(
 
     if runtime is None:
         raise VisualChatProxyError("Visual proxy runtime is not initialized")
+    runtime.ensure_remote_available()
     trace_id = f"visual-{uuid.uuid4().hex[:16]}"
     trace_request: dict[str, Any] = {}
     if runtime.settings.trace_dump_dir is not None:
