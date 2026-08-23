@@ -4,7 +4,9 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
-from lightllm.common.basemodel.triton_kernel.overlay_mtp_decode_input import overlay_chained_mtp_decode_input
+from lightllm.common.basemodel.triton_kernel.build_chained_mtp_decode_input import (
+    build_chained_mtp_decode_input_inplace,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
@@ -103,7 +105,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
                 # 下一层不能直接使用所有行的 draft 预测。已接受前缀继续使用
                 # main/上一层输入中的真实 token，仅在 tail 行接上本级新生成
                 # 的 draft token，从而形成逐级左移并覆盖尾部的级联输入。
-                draft_token_ids = overlay_chained_mtp_decode_input(
+                draft_token_ids = build_chained_mtp_decode_input_inplace(
                     input_ids=draft_input.input_ids,
                     draft_token_ids=draft_token_ids,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,

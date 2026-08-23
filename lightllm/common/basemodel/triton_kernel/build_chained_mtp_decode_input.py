@@ -4,7 +4,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _overlay_chained_mtp_decode_input_kernel(
+def _build_chained_mtp_decode_input_kernel(
     input_ids,
     draft_token_ids,
     b_req_mtp_start_loc,
@@ -24,7 +24,7 @@ def _overlay_chained_mtp_decode_input_kernel(
 
 
 @torch.no_grad()
-def overlay_chained_mtp_decode_input(
+def build_chained_mtp_decode_input_inplace(
     input_ids: torch.Tensor,
     draft_token_ids: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
@@ -62,7 +62,7 @@ def overlay_chained_mtp_decode_input(
     if req_num == 0:
         return draft_token_ids
 
-    _overlay_chained_mtp_decode_input_kernel[(req_num,)](
+    _build_chained_mtp_decode_input_kernel[(req_num,)](
         input_ids=input_ids,
         draft_token_ids=draft_token_ids,
         b_req_mtp_start_loc=b_req_mtp_start_loc,

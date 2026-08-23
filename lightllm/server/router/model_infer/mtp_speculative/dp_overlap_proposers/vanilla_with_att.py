@@ -6,8 +6,8 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import (
     gen_mtp_new_input_ids,
 )
-from lightllm.common.basemodel.triton_kernel.overlay_mtp_decode_input import (
-    overlay_chained_mtp_decode_input,
+from lightllm.common.basemodel.triton_kernel.build_chained_mtp_decode_input import (
+    build_chained_mtp_decode_input_inplace,
 )
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
     BaseDpOverlapProposer,
@@ -148,7 +148,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
 
             if step + 1 < draft_step:
                 for batch_index, model_input in enumerate(model_inputs):
-                    draft_token_ids[batch_index] = overlay_chained_mtp_decode_input(
+                    draft_token_ids[batch_index] = build_chained_mtp_decode_input_inplace(
                         input_ids=model_input.input_ids,
                         draft_token_ids=draft_token_ids[batch_index],
                         b_req_mtp_start_loc=b_req_mtp_start_loc[batch_index],
