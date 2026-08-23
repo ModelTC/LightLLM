@@ -82,26 +82,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         )
         return
 
-    @staticmethod
-    def _build_padded_next_token_ids(
-        token_ids: torch.Tensor | None,
-        batch_size: int,
-        copy_len: int,
-        device: torch.device,
-        source_start: int = 0,
-    ) -> torch.Tensor:
-        """Pad DP-local draft tokens to the collective batch shape."""
-
-        copy_len = int(copy_len)
-        source_start = int(source_start)
-        padded_token_ids = torch.zeros((int(batch_size),), dtype=torch.int64, device=device)
-        if copy_len > 0:
-            padded_token_ids[:copy_len].copy_(
-                token_ids[source_start : source_start + copy_len],
-                non_blocking=True,
-            )
-        return padded_token_ids
-
     def _init_reqs(self, reqs: List[Tuple]):
         if not self.args.enable_dp_prompt_cache_fetch:
             return super()._init_reqs(reqs)
@@ -719,20 +699,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             else:
                 next_token_ids = torch.empty((0,), dtype=torch.int64, device=logits.device)
 
-            target_next_token_ids_gpu0 = self._build_padded_next_token_ids(
-                token_ids=next_token_ids,
-                batch_size=model_input0.batch_size,
-                copy_len=req_num0,
-                device=model_input0.b_req_idx.device,
-                source_start=0,
-            )
-            target_next_token_ids_gpu1 = self._build_padded_next_token_ids(
-                token_ids=next_token_ids,
-                batch_size=model_input1.batch_size,
-                copy_len=req_num1,
-                device=model_input1.b_req_idx.device,
-                source_start=req_num0,
-            )
+            target_next_token_ids_gpu0 = next_token_ids[:req_num0]
+            target_next_token_ids_gpu1 = next_token_ids[req_num0:]
 
             self.prefill_draft_engine.fill_draft_model_kv_state_overlap(
                 target_model_input0=model_input0,

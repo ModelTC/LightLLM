@@ -230,17 +230,6 @@ def test_dp_prefill_and_decode_select_overlap_engine_independently():
             assert backend.decode_draft_engine is expected_decode_engine
 
 
-def test_padded_token_ids_support_empty_dp_rank():
-    padded_token_ids = DPChunkedPrefillBackend._build_padded_next_token_ids(
-        token_ids=None,
-        batch_size=4,
-        copy_len=0,
-        device=torch.device("cpu"),
-    )
-
-    assert torch.equal(padded_token_ids, torch.zeros(4, dtype=torch.int64))
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
     device = "cuda"
