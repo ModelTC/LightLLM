@@ -25,8 +25,6 @@ class DiversehBackend(ChunkedPrefillBackend):
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
             assert spec_mode in [
-                "vanilla_with_att",
-                "eagle_with_att",
                 "vanilla_no_att",
                 "eagle_no_att",
             ]
