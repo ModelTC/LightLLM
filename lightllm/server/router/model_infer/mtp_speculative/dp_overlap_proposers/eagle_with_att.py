@@ -57,12 +57,11 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
         target_next_token_ids0: torch.Tensor,
+        accept_len0: torch.Tensor,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
         target_next_token_ids1: torch.Tensor,
-        real_request_num0: int,
-        real_request_num1: int,
-        accept_len: torch.Tensor,
+        accept_len1: torch.Tensor,
         draft_step: int,
     ) -> EagleSpecProposal:
         """提交两个 target verify microbatch 的 draft KV，并生成下一轮 proposal。"""
@@ -72,9 +71,9 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         assert not target_model_input1.is_prefill
         assert len(self.backend.draft_models) == 1
 
-        req_num_by_batch = (int(real_request_num0), int(real_request_num1))
+        accept_len_by_batch = (accept_len0, accept_len1)
+        req_num_by_batch = (accept_len0.shape[0], accept_len1.shape[0])
         req_num = sum(req_num_by_batch)
-        assert accept_len.shape == (req_num,)
         assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
         assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
         assert target_model_output0.mtp_collector.spec_hidden.shape[0] == target_model_input0.batch_size
@@ -82,10 +81,6 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         assert target_model_input0.b_position_delta is not None
         assert target_model_input1.b_position_delta is not None
 
-        accept_len_by_batch = (
-            accept_len[: req_num_by_batch[0]],
-            accept_len[req_num_by_batch[0] :],
-        )
         b_req_mtp_start_loc = (
             get_dp_overlap_req_start_rows(
                 b_mtp_index=target_model_input0.b_mtp_index,

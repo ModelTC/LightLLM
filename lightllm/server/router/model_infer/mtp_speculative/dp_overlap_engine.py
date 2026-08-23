@@ -144,28 +144,27 @@ class DPOverlapSpecEngine:
         target_model_input0: ModelInput,  # batch_size = verify_batch_size0
         target_model_output0: ModelOutput,  # logits: [verify_batch_size0, vocab_size]
         target_next_token_ids0: torch.Tensor,  # [verify_batch_size0]
+        accept_len0: torch.Tensor,  # [real_req_num0]
         target_model_input1: ModelInput,  # batch_size = verify_batch_size1
         target_model_output1: ModelOutput,  # logits: [verify_batch_size1, vocab_size]
         target_next_token_ids1: torch.Tensor,  # [verify_batch_size1]
-        real_request_num0: int,
-        real_request_num1: int,
-        accept_len: torch.Tensor,  # [real_req_num0 + real_req_num1]
+        accept_len1: torch.Tensor,  # [real_req_num1]
         draft_step: int,
     ) -> SpecProposal:
         assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
         assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
-        assert accept_len.shape == (real_request_num0 + real_request_num1,)
+        assert accept_len0.ndim == 1
+        assert accept_len1.ndim == 1
 
         return self.proposer.propose_next_overlap(
             target_model_input0=target_model_input0,
             target_model_output0=target_model_output0,
             target_next_token_ids0=target_next_token_ids0,
+            accept_len0=accept_len0,
             target_model_input1=target_model_input1,
             target_model_output1=target_model_output1,
             target_next_token_ids1=target_next_token_ids1,
-            real_request_num0=real_request_num0,
-            real_request_num1=real_request_num1,
-            accept_len=accept_len,
+            accept_len1=accept_len1,
             draft_step=draft_step,
         )
 

@@ -48,12 +48,11 @@ def test_dp_vanilla_no_att_supports_zero_dynamic_draft_step():
         target_model_input0=None,
         target_model_output0=None,
         target_next_token_ids0=target_next_token_ids0,
+        accept_len0=torch.ones((1,), dtype=torch.int32),
         target_model_input1=None,
         target_model_output1=None,
         target_next_token_ids1=target_next_token_ids1,
-        real_request_num0=1,
-        real_request_num1=1,
-        accept_len=torch.ones((2,), dtype=torch.int32),
+        accept_len1=torch.ones((1,), dtype=torch.int32),
         draft_step=0,
     )
 
@@ -90,15 +89,14 @@ def test_dp_vanilla_proposer_owns_overlap_decode():
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2), device=device)),
         ),
         target_next_token_ids0=torch.tensor([10, 11, 0], dtype=torch.int64, device=device),
+        accept_len0=torch.tensor([2], dtype=torch.int32, device=device),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1), device=device),
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2), device=device)),
         ),
         target_next_token_ids1=torch.tensor([20, 21, 22], dtype=torch.int64, device=device),
-        real_request_num0=1,
-        real_request_num1=1,
-        accept_len=torch.tensor([2, 1], dtype=torch.int32, device=device),
+        accept_len1=torch.tensor([1], dtype=torch.int32, device=device),
         draft_step=2,
     )
 
@@ -137,12 +135,11 @@ def test_dp_vanilla_proposer_builds_padded_inputs_for_empty_verify_rows():
         target_model_input0=model_input0,
         target_model_output0=model_output0,
         target_next_token_ids0=torch.empty((0,), dtype=torch.int64, device=device),
+        accept_len0=torch.empty((0,), dtype=torch.int32, device=device),
         target_model_input1=model_input1,
         target_model_output1=model_output1,
         target_next_token_ids1=torch.empty((0,), dtype=torch.int64, device=device),
-        real_request_num0=0,
-        real_request_num1=0,
-        accept_len=torch.empty((0,), dtype=torch.int32, device=device),
+        accept_len1=torch.empty((0,), dtype=torch.int32, device=device),
         draft_step=2,
     )
 

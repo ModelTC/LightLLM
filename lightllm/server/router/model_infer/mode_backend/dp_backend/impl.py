@@ -805,6 +805,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=b_mtp_index,
                 )
+                mtp_accept_len0 = mtp_accept_len[:real_request_num0]
+                mtp_accept_len1 = mtp_accept_len[real_request_num0:]
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
                     gpu_tensor=accepted_index,
@@ -813,9 +815,15 @@ class DPChunkedPrefillBackend(ModeBackend):
                     key="mtp_accept_len",
                     gpu_tensor=mtp_accept_len,
                 )
+                accepted_index_cpu0 = accepted_index_cpu[:verify_row_num0]
+                accepted_index_cpu1 = accepted_index_cpu[verify_row_num0:]
+                mtp_accept_len_cpu0 = mtp_accept_len_cpu[:real_request_num0]
+                mtp_accept_len_cpu1 = mtp_accept_len_cpu[real_request_num0:]
             else:
                 b_req_idx = torch.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
                 mtp_accept_len = torch.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
+                mtp_accept_len0 = mtp_accept_len
+                mtp_accept_len1 = mtp_accept_len
                 b_req_mtp_start_loc = torch.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
                 next_token_ids = torch.empty((0,), dtype=torch.int64, device=model_input0.b_req_idx.device)
             verify_event = torch.cuda.Event()
@@ -827,12 +835,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                 target_model_input0=model_input0,
                 target_model_output0=model_output0,
                 target_next_token_ids0=target_next_token_ids0,
+                accept_len0=mtp_accept_len0,
                 target_model_input1=model_input1,
                 target_model_output1=model_output1,
                 target_next_token_ids1=target_next_token_ids1,
-                real_request_num0=real_request_num0,
-                real_request_num1=real_request_num1,
-                accept_len=mtp_accept_len,
+                accept_len1=mtp_accept_len1,
                 draft_step=spec_plan.draft_step,
             )
             if req_num > 0:
@@ -859,11 +866,19 @@ class DPChunkedPrefillBackend(ModeBackend):
             verify_event.synchronize()
             mtp_utils.record_request_mtp_metrics(
                 backend=self,
-                decode_reqs=decode_reqs,
-                accept_lengths_cpu=mtp_accept_len_cpu,
-                verify_run_reqs=run_reqs,
+                decode_reqs=decode_reqs0,
+                accept_lengths_cpu=mtp_accept_len_cpu0,
+                verify_run_reqs=run_reqs0,
             )
-            verify_ok_reqs = [req for req, accepted in zip(run_reqs, accepted_index_cpu.tolist()) if accepted]
+            mtp_utils.record_request_mtp_metrics(
+                backend=self,
+                decode_reqs=decode_reqs1,
+                accept_lengths_cpu=mtp_accept_len_cpu1,
+                verify_run_reqs=run_reqs1,
+            )
+            verify_ok_reqs0 = [req for req, accepted in zip(run_reqs0, accepted_index_cpu0.tolist()) if accepted]
+            verify_ok_reqs1 = [req for req, accepted in zip(run_reqs1, accepted_index_cpu1.tolist()) if accepted]
+            verify_ok_reqs = verify_ok_reqs0 + verify_ok_reqs1
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
             event_pack.notify_forward_and_wait_post_handle()
@@ -874,12 +889,17 @@ class DPChunkedPrefillBackend(ModeBackend):
                 req_num=req_num,
                 accept_lengths_cpu=mtp_accept_len_cpu,
             )
-            mem_indexes_cpu = torch.cat((model_input0.mem_indexes_cpu, model_input1.mem_indexes_cpu), dim=0)
-            proposal.extra_mem_indexes_cpu.append(
-                MtpMemIndexesToFree(
-                    mem_indexes_cpu=mem_indexes_cpu,
-                    free_mask_cpu=accepted_index_cpu == 0,
-                ),
+            proposal.extra_mem_indexes_cpu.extend(
+                (
+                    MtpMemIndexesToFree(
+                        mem_indexes_cpu=model_input0.mem_indexes_cpu,
+                        free_mask_cpu=accepted_index_cpu0 == 0,
+                    ),
+                    MtpMemIndexesToFree(
+                        mem_indexes_cpu=model_input1.mem_indexes_cpu,
+                        free_mask_cpu=accepted_index_cpu1 == 0,
+                    ),
+                )
             )
 
             select_mask = accepted_index_cpu.to(dtype=torch.bool)

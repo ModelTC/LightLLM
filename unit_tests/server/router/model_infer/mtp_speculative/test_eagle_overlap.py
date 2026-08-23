@@ -133,15 +133,14 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((3, 2))),
         ),
         target_next_token_ids0=torch.arange(3, dtype=torch.int64),
+        accept_len0=torch.tensor([2], dtype=torch.int32),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)),
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2))),
         ),
         target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
-        real_request_num0=1,
-        real_request_num1=2,
-        accept_len=torch.tensor([2, 1, 3], dtype=torch.int32),
+        accept_len1=torch.tensor([1, 3], dtype=torch.int32),
         draft_step=2,
     )
 
@@ -185,15 +184,14 @@ def test_overlap_eagle_supports_empty_verify_rows(monkeypatch):
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((0, 2))),
         ),
         target_next_token_ids0=torch.empty((0,), dtype=torch.int64),
+        accept_len0=torch.empty((0,), dtype=torch.int32),
         target_model_input1=_target_input(batch_size=0),
         target_model_output1=ModelOutput(
             logits=torch.empty((0, 1)),
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((0, 2))),
         ),
         target_next_token_ids1=torch.empty((0,), dtype=torch.int64),
-        real_request_num0=0,
-        real_request_num1=0,
-        accept_len=torch.empty((0,), dtype=torch.int32),
+        accept_len1=torch.empty((0,), dtype=torch.int32),
         draft_step=2,
     )
 
@@ -234,6 +232,7 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((2, 2))),
         ),
         target_next_token_ids0=torch.arange(2, dtype=torch.int64),
+        accept_len0=torch.tensor([2], dtype=torch.int32),
         target_model_input1=_target_input(
             batch_size=3,
             b_mtp_index=torch.tensor([0, 1, 0], dtype=torch.int32),
@@ -243,9 +242,7 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((3, 2))),
         ),
         target_next_token_ids1=torch.arange(2, 5, dtype=torch.int64),
-        real_request_num0=1,
-        real_request_num1=2,
-        accept_len=torch.tensor([2, 1, 1], dtype=torch.int32),
+        accept_len1=torch.tensor([1, 1], dtype=torch.int32),
         draft_step=2,
     )
 
@@ -287,15 +284,14 @@ def test_overlap_eagle_no_att_supports_dynamic_draft_step():
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((2, 2), device=device)),
         ),
         target_next_token_ids0=torch.arange(2, dtype=torch.int64, device=device),
+        accept_len0=torch.tensor([2], dtype=torch.int32, device=device),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((3, 1), device=device),
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((3, 2), device=device)),
         ),
         target_next_token_ids1=torch.arange(2, 5, dtype=torch.int64, device=device),
-        real_request_num0=1,
-        real_request_num1=2,
-        accept_len=torch.tensor([2, 1, 1], dtype=torch.int32, device=device),
+        accept_len1=torch.tensor([1, 1], dtype=torch.int32, device=device),
         draft_step=2,
     )
 
@@ -339,15 +335,14 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((3, 2))),
         ),
         target_next_token_ids0=torch.arange(3, dtype=torch.int64),
+        accept_len0=torch.tensor([2], dtype=torch.int32),
         target_model_input1=model_input1,
         target_model_output1=ModelOutput(
             logits=torch.empty((6, 1)),
             mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((6, 2))),
         ),
         target_next_token_ids1=torch.arange(10, 16, dtype=torch.int64),
-        real_request_num0=1,
-        real_request_num1=2,
-        accept_len=torch.tensor([2, 1, 3], dtype=torch.int32),
+        accept_len1=torch.tensor([1, 3], dtype=torch.int32),
         draft_step=2,
     )
 

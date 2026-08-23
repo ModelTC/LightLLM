@@ -64,35 +64,30 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
         target_next_token_ids0: torch.Tensor,
+        accept_len0: torch.Tensor,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
         target_next_token_ids1: torch.Tensor,
-        real_request_num0: int,
-        real_request_num1: int,
-        accept_len: torch.Tensor,
+        accept_len1: torch.Tensor,
         draft_step: int,
     ) -> VanillaSpecProposal:
         assert draft_step == self.backend.max_draft_step
         assert len(self.backend.draft_models) == draft_step
 
-        req_num_by_batch = (int(real_request_num0), int(real_request_num1))
-        assert accept_len.shape == (sum(req_num_by_batch),)
+        accept_len_by_batch = (accept_len0, accept_len1)
+        req_num_by_batch = (accept_len0.shape[0], accept_len1.shape[0])
 
         assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
         assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
         b_req_mtp_start_loc = (
             get_dp_overlap_req_start_rows(
                 b_mtp_index=target_model_input0.b_mtp_index,
-                req_num=real_request_num0,
+                req_num=req_num_by_batch[0],
             ),
             get_dp_overlap_req_start_rows(
                 b_mtp_index=target_model_input1.b_mtp_index,
-                req_num=real_request_num1,
+                req_num=req_num_by_batch[1],
             ),
-        )
-        accept_len_by_batch = (
-            accept_len[: req_num_by_batch[0]],
-            accept_len[req_num_by_batch[0] : sum(req_num_by_batch)],
         )
         accepted_tail_rows = tuple(
             req_mtp_start_loc + batch_accept_len - 1

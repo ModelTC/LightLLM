@@ -312,18 +312,18 @@ def test_dp_overlap_engine_delegates_raw_verify_layout_to_proposer():
     model_output1 = SimpleNamespace()
     target_next_token_ids0 = torch.arange(8, dtype=torch.int64)
     target_next_token_ids1 = torch.arange(8, 24, dtype=torch.int64)
-    accept_len = torch.tensor([2, 3, 4], dtype=torch.int32)
+    accept_len0 = torch.tensor([2], dtype=torch.int32)
+    accept_len1 = torch.tensor([3, 4], dtype=torch.int32)
 
     proposal = engine.propose_next_overlap(
         target_model_input0=model_input0,
         target_model_output0=model_output0,
         target_next_token_ids0=target_next_token_ids0,
+        accept_len0=accept_len0,
         target_model_input1=model_input1,
         target_model_output1=model_output1,
         target_next_token_ids1=target_next_token_ids1,
-        real_request_num0=1,
-        real_request_num1=2,
-        accept_len=accept_len,
+        accept_len1=accept_len1,
         draft_step=7,
     )
 
@@ -333,9 +333,8 @@ def test_dp_overlap_engine_delegates_raw_verify_layout_to_proposer():
     assert calls["target_model_output1"] is model_output1
     assert calls["target_next_token_ids0"] is target_next_token_ids0
     assert calls["target_next_token_ids1"] is target_next_token_ids1
-    assert calls["real_request_num0"] == 1
-    assert calls["real_request_num1"] == 2
-    assert calls["accept_len"] is accept_len
+    assert calls["accept_len0"] is accept_len0
+    assert calls["accept_len1"] is accept_len1
     assert calls["draft_step"] == 7
     assert proposal.token_ids.shape == (3, 7)
 
@@ -442,10 +441,10 @@ def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch
             assert kwargs["target_next_token_ids0"].dtype == torch.int64
             assert kwargs["target_next_token_ids1"].shape == (0,)
             assert kwargs["target_next_token_ids1"].dtype == torch.int64
-            assert kwargs["real_request_num0"] == 0
-            assert kwargs["real_request_num1"] == 0
-            assert kwargs["accept_len"].shape == (0,)
-            assert kwargs["accept_len"].dtype == torch.int32
+            assert kwargs["accept_len0"].shape == (0,)
+            assert kwargs["accept_len0"].dtype == torch.int32
+            assert kwargs["accept_len1"].shape == (0,)
+            assert kwargs["accept_len1"].dtype == torch.int32
             assert kwargs["draft_step"] == 2
             return SpecProposal(token_ids=torch.empty((0, 2), dtype=torch.int64, device=device))
 

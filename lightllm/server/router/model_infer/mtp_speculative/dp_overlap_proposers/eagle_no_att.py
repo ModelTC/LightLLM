@@ -34,17 +34,16 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
         target_model_input0: ModelInput,
         target_model_output0: ModelOutput,
         target_next_token_ids0: torch.Tensor,
+        accept_len0: torch.Tensor,
         target_model_input1: ModelInput,
         target_model_output1: ModelOutput,
         target_next_token_ids1: torch.Tensor,
-        real_request_num0: int,
-        real_request_num1: int,
-        accept_len: torch.Tensor,
+        accept_len1: torch.Tensor,
         draft_step: int,
     ) -> EagleSpecProposal:
-        req_num_by_batch = (int(real_request_num0), int(real_request_num1))
+        accept_len_by_batch = (accept_len0, accept_len1)
+        req_num_by_batch = (accept_len0.shape[0], accept_len1.shape[0])
         req_num = sum(req_num_by_batch)
-        assert accept_len.shape == (req_num,)
 
         proposal_token_ids = target_next_token_ids0.new_empty((req_num, draft_step))
         schedule_scores = (
@@ -66,10 +65,6 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
 
         assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
         assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
-        accept_len_by_batch = (
-            accept_len[: req_num_by_batch[0]],
-            accept_len[req_num_by_batch[0] :],
-        )
         b_req_mtp_start_loc = (
             get_dp_overlap_req_start_rows(
                 b_mtp_index=target_model_input0.b_mtp_index,
