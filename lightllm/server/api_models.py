@@ -243,6 +243,20 @@ class ChatCompletionRequest(BaseModel):
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
 
+    @field_validator("seed", mode="before")
+    @classmethod
+    def validate_seed_type(cls, value: Any):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("seed must be an integer")
+        return value
+
+    @field_validator("parallel_tool_calls", mode="before")
+    @classmethod
+    def validate_parallel_tool_calls_type(cls, value: Any):
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("parallel_tool_calls must be a boolean")
+        return value
+
     @classmethod
     def load_generation_cfg(cls, weight_dir: str):
         """Load default values from model generation config."""

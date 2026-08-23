@@ -17,22 +17,25 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
 import ipaddress
 import json
 import mimetypes
 import os
 import random
 import re
+import socket
 import stat
 import time
 import traceback
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 from fastapi import Request
@@ -59,9 +62,23 @@ from .visual_trace import (
 
 logger = init_logger(__name__)
 
+
+async def _request_is_disconnected(request: Optional[Request]) -> bool:
+    if request is None:
+        return False
+    try:
+        return await request.is_disconnected()
+    except RuntimeError as exc:
+        # In-process tests and adapters may not attach an ASGI receive
+        # channel. Disconnect polling is unavailable in that case.
+        if "Receive channel has not been made available" in str(exc):
+            return False
+        raise
+
 VISION_READER_NAME = "vision_reader"
 MAX_AGENT_STEPS = 12
 MAX_REASONING_CONTEXT_BYTES = 256 * 1024
+REMOTE_IMAGE_MAX_REDIRECTS = 4
 BUILTIN_TRACE_FORMATS = {"xml", "natural"}
 THINKING_POLICIES = {"request", "force_on", "force_off"}
 ANTHROPIC_SEQUENTIAL_TOOL_PROMPT = (
@@ -150,12 +167,43 @@ _INVALID_BUILTIN_VISION_RESULT_MARKERS = (
     "Builtin vision_reader rejected the call",
 )
 _ALLOWED_IMAGE_MEDIA_TYPES = {
-    "image/bmp",
     "image/gif",
     "image/jpeg",
     "image/png",
     "image/webp",
 }
+_TRUNCATED_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
+_PRIVATE_MULTIMODAL_MARKERS = (
+    "vision_reader",
+    "让内建读图能力完成这个任务",
+    "读图结果：",
+    "builtin vision",
+    "built-in vision",
+    "builtin tool",
+    "built-in tool",
+    "multimodal harness",
+    "multimodal_harness",
+    "内建读图",
+    "内置读图",
+    "内建工具",
+    "内置工具",
+    "读图工具",
+)
+_PRIVATE_MULTIMODAL_MECHANISM_RE = re.compile(
+    r"(?:\bvision[\s_-]*reader\b|"
+    r"\b(?:internal|private|built[\s-]?in)\s+(?:(?:image|vision)\s+)?(?:reader|tool)\b|"
+    r"(?:内部|内建|内置)(?:(?:读图|视觉|图片)(?:工具|读取器|阅读器|模型)?|工具)|"
+    r"图片(?:读取器|阅读器|工具))",
+    re.IGNORECASE,
+)
+_PRIVATE_IMAGE_LABEL_RE = re.compile(r"(?:</?image_\d+\s*/?>|\bimage_\d+\b)", re.IGNORECASE)
+_PRIVATE_EXECUTION_STATE_RE = re.compile(
+    r"(?:\bthere\s+(?:are|is)\s+no\s+tools?\s+with\s+results?\b|"
+    r"\bno\s+tool\s+results?\s+(?:are\s+)?available\b|"
+    r"\btool\s+results?\s+(?:(?:is|are)\s+)?(?:unavailable|missing|not\s+available)\b|"
+    r"(?:没有|无)(?:任何|可用的?)?(?:工具结果|工具返回)(?:可用)?)",
+    re.IGNORECASE,
+)
 
 
 BUILTIN_VISION_READER_TOOL = {
@@ -236,6 +284,7 @@ class VisualProxySettings:
     local_file_roots: tuple[Path, ...] = ()
     allow_remote_image_urls: bool = False
     allow_http_image_urls: bool = False
+    allow_private_remote_image_urls: bool = False
     remote_image_hosts: tuple[str, ...] = ()
 
     @classmethod
@@ -320,6 +369,9 @@ class VisualProxySettings:
             local_file_roots=local_file_roots,
             allow_remote_image_urls=bool(getattr(args, "visual_allow_remote_image_urls", False)),
             allow_http_image_urls=bool(getattr(args, "visual_allow_http_image_urls", False)),
+            allow_private_remote_image_urls=bool(
+                getattr(args, "visual_allow_private_remote_image_urls", False)
+            ),
             remote_image_hosts=tuple(
                 str(host).lower().rstrip(".") for host in (getattr(args, "visual_remote_image_host", None) or ())
             ),
@@ -361,6 +413,8 @@ class VisualProxySettings:
             raise ValueError("--visual_remote_max_retries must be between 0 and 10")
         if self.allow_http_image_urls and not self.allow_remote_image_urls:
             raise ValueError("--visual_allow_http_image_urls requires --visual_allow_remote_image_urls")
+        if self.allow_private_remote_image_urls and not self.allow_remote_image_urls:
+            raise ValueError("--visual_allow_private_remote_image_urls requires --visual_allow_remote_image_urls")
         if self.allow_remote_image_urls and not self.remote_image_hosts:
             raise ValueError("--visual_allow_remote_image_urls requires at least one --visual_remote_image_host")
         if not self.allow_remote_image_urls and self.remote_image_hosts:
@@ -405,6 +459,17 @@ class VisualProxyRuntime:
             ),
             trust_env=False,
         )
+        # Remote images are fetched by the proxy itself. Keep this client
+        # separate so visual-provider credentials can never reach image hosts.
+        self.image_client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=settings.remote_max_concurrency,
+                max_keepalive_connections=settings.remote_max_concurrency,
+            ),
+            follow_redirects=False,
+            trust_env=False,
+        )
         self._owns_client = client is None
         self._semaphore = asyncio.Semaphore(settings.remote_max_concurrency)
         self._request_semaphore = asyncio.Semaphore(settings.max_inflight_requests)
@@ -414,6 +479,7 @@ class VisualProxyRuntime:
     async def close(self) -> None:
         if self._owns_client:
             await self.client.aclose()
+        await self.image_client.aclose()
 
     @asynccontextmanager
     async def request_slot(self):
@@ -429,9 +495,127 @@ class VisualProxyRuntime:
         finally:
             self._request_semaphore.release()
 
+    async def freeze_remote_image(
+        self,
+        source: str,
+        request: Optional[Request],
+        trace_id: str,
+    ) -> str:
+        """Download one URL image with DNS validation, IP pinning, and bounded redirects."""
+
+        deadline = asyncio.get_running_loop().time() + self.settings.remote_timeout
+        current_url = source
+        for redirect_index in range(REMOTE_IMAGE_MAX_REDIRECTS + 1):
+            pinned_urls, host_header, sni_hostname = await asyncio.to_thread(
+                _pinned_remote_image_request,
+                current_url,
+                self.settings,
+            )
+            response: Optional[httpx.Response] = None
+            try:
+                for candidate_index, pinned_url in enumerate(pinned_urls):
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise VisualProxyTimeoutError("Remote image download timed out")
+                    extensions = {"sni_hostname": sni_hostname} if sni_hostname else None
+                    upstream_request = self.image_client.build_request(
+                        "GET",
+                        pinned_url,
+                        headers={
+                            "Host": host_header,
+                            "Accept": "image/png,image/jpeg,image/gif,image/webp",
+                        },
+                        extensions=extensions,
+                    )
+                    try:
+                        response = await asyncio.wait_for(
+                            self.image_client.send(upstream_request, stream=True),
+                            timeout=remaining,
+                        )
+                        break
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        if candidate_index + 1 == len(pinned_urls):
+                            raise
+                        logger.warning(
+                            "Remote image connection failed for one validated address; trying the next"
+                        )
+                if response is None:
+                    raise VisualProxyUpstreamError(
+                        "Remote image host has no reachable validated address"
+                    )
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("Remote image redirect has no Location header")
+                    if redirect_index >= REMOTE_IMAGE_MAX_REDIRECTS:
+                        raise ValueError("Remote image URL exceeded the redirect limit")
+                    current_url = urljoin(current_url, location)
+                    continue
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise VisualProxyUpstreamRejectedError(
+                        f"Remote image download failed with HTTP {response.status_code}"
+                    )
+
+                declared_length = response.headers.get("Content-Length")
+                if declared_length is not None:
+                    try:
+                        if int(declared_length) > self.settings.max_image_bytes:
+                            raise ValueError(
+                                f"Remote image exceeds the {self.settings.max_image_bytes}-byte limit"
+                            )
+                    except ValueError as exc:
+                        if "exceeds" in str(exc):
+                            raise
+
+                body = bytearray()
+                iterator = response.aiter_bytes().__aiter__()
+                while True:
+                    if await _request_is_disconnected(request):
+                        raise ClientDisconnected(reason="client disconnected during remote image download")
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise VisualProxyTimeoutError("Remote image download timed out")
+                    try:
+                        chunk = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError as exc:
+                        raise VisualProxyTimeoutError("Remote image download timed out") from exc
+                    body.extend(chunk)
+                    if len(body) > self.settings.max_image_bytes:
+                        raise ValueError(
+                            f"Remote image exceeds the {self.settings.max_image_bytes}-byte limit"
+                        )
+
+                media_type = _sniff_supported_image_media_type(bytes(body))
+                if media_type is None:
+                    raise ValueError("Remote image body is not a supported PNG/JPEG/GIF/WebP image")
+                declared_type = _normalized_image_content_type(response.headers.get("Content-Type", ""))
+                if declared_type != media_type:
+                    raise ValueError("Remote image Content-Type does not match its magic bytes")
+                logger.info(
+                    "[visual-chat-proxy][remote_image_frozen] trace_id=%s bytes=%d media_type=%s",
+                    trace_id,
+                    len(body),
+                    media_type,
+                )
+                encoded = base64.b64encode(body).decode("ascii")
+                return f"data:{media_type};base64,{encoded}"
+            except asyncio.TimeoutError as exc:
+                raise VisualProxyTimeoutError("Remote image download timed out") from exc
+            except httpx.TimeoutException as exc:
+                raise VisualProxyTimeoutError("Remote image download timed out") from exc
+            except httpx.TransportError as exc:
+                raise VisualProxyUpstreamError("Remote image download failed") from exc
+            finally:
+                if response is not None:
+                    await response.aclose()
+
+        raise ValueError("Remote image URL exceeded the redirect limit")
+
     async def _wait_for_disconnect(self, request: Request) -> None:
         while True:
-            if await request.is_disconnected():
+            if await _request_is_disconnected(request):
                 return
             await asyncio.sleep(0.25)
 
@@ -708,7 +892,7 @@ class VisualProxyRuntime:
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         raise VisualProxyTimeoutError("Visual upstream request timed out")
-                    if request is not None and await request.is_disconnected():
+                    if await _request_is_disconnected(request):
                         raise ClientDisconnected(reason="client disconnected during visual upstream request")
                     try:
                         chunk = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
@@ -747,6 +931,7 @@ class RegisteredImage:
     tag: str
     source: str
     origin: str
+    current_user_turn: bool = False
 
 
 class ImageRegistry:
@@ -757,14 +942,38 @@ class ImageRegistry:
         self._max_images = max_images
         self._max_total_image_bytes = max_total_image_bytes
         self._total_image_bytes = 0
+        self._current_user_turn_tags: list[str] = []
+        self._digest_by_tag: dict[str, str] = {}
 
-    def add(self, source: str, origin: str, byte_size: int = 0) -> str:
+    def add(
+        self,
+        source: str,
+        origin: str,
+        byte_size: int = 0,
+        *,
+        current_user_turn: bool = False,
+    ) -> str:
         if len(self._images) >= self._max_images:
             raise ValueError(f"Visual proxy accepts at most {self._max_images} images per request")
         if self._total_image_bytes + byte_size > self._max_total_image_bytes:
             raise ValueError(f"Visual proxy image payloads exceed the {self._max_total_image_bytes}-byte request limit")
         tag = f"<image_{len(self._images) + 1}/>"
-        self._images.append(RegisteredImage(tag=tag, source=source, origin=origin))
+        self._images.append(
+            RegisteredImage(
+                tag=tag,
+                source=source,
+                origin=origin,
+                current_user_turn=current_user_turn,
+            )
+        )
+        if current_user_turn:
+            self._current_user_turn_tags.append(tag)
+        if source.startswith("data:"):
+            with suppress(ValueError, TypeError):
+                payload = source.split(",", 1)[1]
+                self._digest_by_tag[tag] = hashlib.sha256(
+                    base64.b64decode(payload, validate=True)
+                ).hexdigest()
         self._total_image_bytes += byte_size
         return tag
 
@@ -788,8 +997,95 @@ class ImageRegistry:
     def tags(self) -> list[str]:
         return [image.tag for image in self._images]
 
+    def current_user_turn_tags(self) -> list[str]:
+        return list(self._current_user_turn_tags)
+
+    def bind_digest(self, tag: str, digest_sha256: str) -> None:
+        if digest_sha256:
+            self.resolve(tag)
+            self._digest_by_tag[tag] = digest_sha256
+
+    def digest_for_tag(self, tag: str) -> str:
+        return self._digest_by_tag.get(self.resolve(tag).tag, "")
+
     def __len__(self) -> int:
         return len(self._images)
+
+
+class EvidenceLedger:
+    """Bind accepted visual evidence to exact current-turn image tags."""
+
+    def __init__(self, registry: ImageRegistry) -> None:
+        self.registry = registry
+        current_turn_tags = registry.current_user_turn_tags()
+        # LightLLM does not persist Nova's private continuation cache. When a
+        # follow-up refers to historical images, re-read them rather than
+        # trusting caller-replayed public reasoning as evidence.
+        self.target_tags = current_turn_tags or registry.tags()
+        self.records: list[dict[str, Any]] = []
+
+    def record(
+        self,
+        *,
+        image_tag: str,
+        result: str,
+        step: int,
+        call_index: int,
+        tool_call_id: str,
+        task: str,
+        finish_reason: str = "",
+        image_digest_sha256: str = "",
+        terminal_failed: str = "",
+    ) -> bool:
+        if image_digest_sha256:
+            self.registry.bind_digest(image_tag, image_digest_sha256)
+        accepted = (
+            _valid_builtin_vision_result(result)
+            and finish_reason not in _TRUNCATED_FINISH_REASONS
+            and not terminal_failed
+            and bool(self.registry.digest_for_tag(image_tag))
+        )
+        self.records.append(
+            {
+                "agent_step_index": step,
+                "vision_call_index": call_index,
+                "image_tag": image_tag,
+                "content_digest_sha256": self.registry.digest_for_tag(image_tag),
+                "content_digest_verified": bool(self.registry.digest_for_tag(image_tag)),
+                "tool_call_id": tool_call_id,
+                "task_digest_sha256": hashlib.sha256(task.encode("utf-8")).hexdigest(),
+                "provider_finish_reason": finish_reason,
+                "terminal_failed": terminal_failed,
+                "accepted_as_evidence": accepted,
+            }
+        )
+        return accepted
+
+    def covered_tags(self) -> list[str]:
+        covered = {
+            record["image_tag"]
+            for record in self.records
+            if record.get("accepted_as_evidence") is True
+        }
+        return [tag for tag in self.registry.tags() if tag in covered]
+
+    def missing_tags(self, *, visual_answer_required: bool) -> list[str]:
+        if not visual_answer_required:
+            return []
+        covered = set(self.covered_tags())
+        return [tag for tag in self.target_tags if tag not in covered]
+
+    def snapshot(self, *, visual_answer_required: bool) -> dict[str, Any]:
+        missing = self.missing_tags(visual_answer_required=visual_answer_required)
+        return {
+            "schema_version": "lightllm.visual_proxy.image_evidence.v1",
+            "policy": "all_current_turn_images_for_visual_answer",
+            "current_user_turn_image_tags": list(self.target_tags),
+            "vision_results": copy.deepcopy(self.records),
+            "covered_image_tags": self.covered_tags(),
+            "missing_image_tags": missing,
+            "coverage_complete": not missing,
+        }
 
 
 MainChatHandler = Callable[[ChatCompletionRequest, Request], Awaitable[Union[ChatCompletionResponse, Response]]]
@@ -821,31 +1117,41 @@ def should_use_visual_proxy(visual_remote_url: Optional[str], request: ChatCompl
     return bool(visual_remote_url and visual_remote_url.strip()) and request_has_images(request)
 
 
+def requested_enable_thinking(request: ChatCompletionRequest) -> Optional[bool]:
+    template_kwargs = request.chat_template_kwargs or {}
+    controls: list[tuple[str, bool]] = []
+    for name in ("enable_thinking", "thinking"):
+        value = template_kwargs.get(name)
+        if value is not None:
+            if not isinstance(value, bool):
+                raise ValueError(f"chat_template_kwargs.{name} must be a boolean")
+            controls.append((f"chat_template_kwargs.{name}", value))
+    if request.reasoning_effort is not None:
+        controls.append(
+            (
+                "reasoning_effort",
+                request.reasoning_effort not in {"none", "off", "disabled"},
+            )
+        )
+    if controls and any(value != controls[0][1] for _, value in controls[1:]):
+        names = ", ".join(name for name, _ in controls)
+        raise ValueError(f"Conflicting thinking controls: {names} must express the same boolean value")
+    return controls[0][1] if controls else None
+
+
 def apply_visual_thinking_policy(
     request: ChatCompletionRequest, settings: VisualProxySettings
 ) -> ChatCompletionRequest:
     """Apply the proxy thinking policy without mutating the caller's request."""
     template_kwargs = copy.deepcopy(request.chat_template_kwargs or {})
-    enable_requested = template_kwargs.get("enable_thinking")
-    thinking_requested = template_kwargs.get("thinking")
-    for name, value in (
-        ("enable_thinking", enable_requested),
-        ("thinking", thinking_requested),
-    ):
-        if value is not None and not isinstance(value, bool):
-            raise ValueError(f"chat_template_kwargs.{name} must be a boolean")
-    if enable_requested is not None and thinking_requested is not None and enable_requested != thinking_requested:
-        raise ValueError("chat_template_kwargs.enable_thinking and chat_template_kwargs.thinking must agree")
-    requested = enable_requested if enable_requested is not None else thinking_requested
-    if requested is None and request.reasoning_effort is not None:
-        requested = request.reasoning_effort not in {"none", "off", "disabled"}
+    requested = requested_enable_thinking(request)
 
     if settings.thinking_policy == "force_on":
         enable_thinking = True
     elif settings.thinking_policy == "force_off":
         enable_thinking = False
     elif settings.thinking_policy == "request":
-        enable_thinking = requested if requested is not None else False
+        enable_thinking = requested if requested is not None else True
     else:  # Settings validation normally catches this; keep request-time behavior safe.
         raise ValueError(f"Unsupported visual thinking policy: {settings.thinking_policy!r}")
 
@@ -862,6 +1168,16 @@ def apply_visual_thinking_policy(
             "reasoning_effort": reasoning_effort,
         }
     )
+
+
+def resolve_public_reasoning_enabled(
+    requested: Optional[bool], settings: VisualProxySettings
+) -> bool:
+    """Apply the public-output gate without overriding an explicit opt-out."""
+
+    if requested is False:
+        return False
+    return settings.thinking_policy != "force_off"
 
 
 def _image_source(part: dict[str, Any]) -> Optional[str]:
@@ -884,8 +1200,20 @@ def replace_images_with_tags(
 ) -> list[dict[str, Any]]:
     """Copy messages while replacing every real image part with a text tag."""
 
+    last_completed_assistant_index = -1
+    for message_index, message in enumerate(messages):
+        if _assistant_message_closes_logical_user_turn(message):
+            last_completed_assistant_index = message_index
+    current_user_index = next(
+        (
+            index
+            for index in range(last_completed_assistant_index + 1, len(messages))
+            if messages[index].get("role") == "user"
+        ),
+        None,
+    )
     transformed: list[dict[str, Any]] = []
-    for message in messages:
+    for message_index, message in enumerate(messages):
         item = copy.deepcopy(message)
         content = item.get("content")
         if not isinstance(content, list):
@@ -906,7 +1234,16 @@ def replace_images_with_tags(
             if source.startswith("data:"):
                 byte_size = (len(source.split(",", 1)[1]) * 3) // 4
             origin = "tool_response" if item.get("role") == "tool" else "user"
-            tag = registry.add(source=source, origin=origin, byte_size=byte_size)
+            tag = registry.add(
+                source=source,
+                origin=origin,
+                byte_size=byte_size,
+                current_user_turn=(
+                    current_user_index is not None
+                    and message_index >= current_user_index
+                    and item.get("role") in {"user", "tool"}
+                ),
+            )
             new_content.append({"type": "text", "text": tag})
         item["content"] = new_content
         transformed.append(item)
@@ -1047,6 +1384,33 @@ def sanitize_reasoning(text: Any) -> str:
     clean = "\n".join(line for line in clean.splitlines() if not _RAW_FC_LINE_RE.search(line))
     clean = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", clean)
     return clean.strip()
+
+
+def text_exposes_private_multimodal_mechanism(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    lowered = value.lower()
+    return (
+        any(marker.lower() in lowered for marker in _PRIVATE_MULTIMODAL_MARKERS)
+        or _PRIVATE_MULTIMODAL_MECHANISM_RE.search(value) is not None
+        or _PRIVATE_IMAGE_LABEL_RE.search(value) is not None
+        or _PRIVATE_EXECUTION_STATE_RE.search(value) is not None
+    )
+
+
+def _safe_public_reasoning_fragment(value: Any) -> str:
+    clean = sanitize_reasoning(value)
+    if reasoning_contains_raw_fc_serialization(clean) or text_exposes_private_multimodal_mechanism(clean):
+        return ""
+    return clean
+
+
+def _format_public_builtin_projection(image: str, result: str, offset: int) -> str:
+    prefix = "我先" if offset == 0 else "我接着"
+    public_result = _one_line_trace_text(result)
+    if not public_result:
+        raise VisualChatProxyError("Cannot expose an empty builtin visual result")
+    return f"{prefix}查看了图片 {_canonical_image_reference(image)}，{public_result}"
 
 
 def reasoning_contains_raw_fc_serialization(text: Any) -> bool:
@@ -1395,6 +1759,55 @@ def expand_builtin_traces(
     return expanded
 
 
+def strip_untrusted_builtin_traces(
+    messages: list[dict[str, Any]],
+    trace_format: str,
+) -> list[dict[str, Any]]:
+    """Remove caller-replayed private reader calls/results before model execution."""
+
+    parser = _parse_natural_builtin_trace if trace_format == "natural" else _parse_xml_builtin_trace
+    stripped: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") == "tool" and message.get("name") == VISION_READER_NAME:
+            continue
+        item = copy.deepcopy(message)
+        if item.get("role") != "assistant":
+            stripped.append(item)
+            continue
+        tool_calls = item.get("tool_calls")
+        if isinstance(tool_calls, list):
+            item["tool_calls"] = [
+                call
+                for call in tool_calls
+                if not (
+                    isinstance(call, dict)
+                    and isinstance(call.get("function"), dict)
+                    and call["function"].get("name") == VISION_READER_NAME
+                )
+            ]
+            if not item["tool_calls"]:
+                item.pop("tool_calls", None)
+        reasoning = _merge_reasoning_text(item.pop("reasoning", None), item.pop("reasoning_content", None))
+        if reasoning:
+            try:
+                segments, trailing = parser(reasoning)
+                retained = [segment.get("reasoning", "") for segment in segments]
+                retained.append(trailing)
+                clean_reasoning = sanitize_reasoning("\n".join(part for part in retained if part))
+            except ValueError:
+                clean_reasoning = sanitize_reasoning(reasoning)
+            clean_reasoning = "\n".join(
+                line
+                for line in clean_reasoning.splitlines()
+                if not any(marker.lower() in line.lower() for marker in _PRIVATE_MULTIMODAL_MARKERS)
+            ).strip()
+            if clean_reasoning:
+                item["reasoning"] = clean_reasoning
+        if item.get("content") or item.get("reasoning") or item.get("tool_calls"):
+            stripped.append(item)
+    return stripped
+
+
 def _has_visual_content_claim(content: str) -> bool:
     text = content.strip()
     if not text:
@@ -1426,22 +1839,48 @@ def _content_has_image(content: Any) -> bool:
     )
 
 
+def _assistant_message_closes_logical_user_turn(message: dict[str, Any]) -> bool:
+    if message.get("role") != "assistant":
+        return False
+    if message.get("tool_calls"):
+        return False
+    provider_blocks = message.get("anthropic_content_blocks")
+    if isinstance(provider_blocks, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_use"
+        for block in provider_blocks
+    ):
+        return False
+    return True
+
+
 def latest_user_message_depends_on_visual_content(
     messages: list[dict[str, Any]],
 ) -> bool:
-    for message in reversed(messages):
+    turn_start = 0
+    for index, message in enumerate(messages):
+        if _assistant_message_closes_logical_user_turn(message):
+            turn_start = index + 1
+
+    turn_messages = messages[turn_start:]
+    has_current_turn_image = any(
+        message.get("role") in {"user", "tool"}
+        and _content_has_image(message.get("content", ""))
+        for message in turn_messages
+    )
+    user_texts: list[str] = []
+    for message in turn_messages:
         if message.get("role") != "user":
             continue
-        content = message.get("content", "")
-        text = _content_text_only(content).strip()
+        text = _content_text_only(message.get("content", "")).strip()
         if text.startswith("<tool_response>") and text.endswith("</tool_response>"):
             continue
-        if _VISUAL_REQUEST_EXEMPT_RE.search(text):
-            return False
-        if _VISUAL_REQUEST_RE.search(text):
-            return True
-        return _content_has_image(content)
-    return False
+        if text:
+            user_texts.append(text)
+
+    latest_instruction = user_texts[-1] if user_texts else ""
+    if has_current_turn_image:
+        return _VISUAL_REQUEST_EXEMPT_RE.search(latest_instruction) is None
+    return any(_VISUAL_REQUEST_RE.search(text) for text in reversed(user_texts))
 
 
 def _valid_builtin_vision_result(value: str) -> bool:
@@ -1498,6 +1937,30 @@ def _build_empty_output_retry_feedback() -> dict[str, Any]:
     }
 
 
+def _build_parallel_tool_calls_feedback(tool_calls: list[Any]) -> dict[str, Any]:
+    names = [str(call.function.name) for call in tool_calls]
+    return {
+        "role": "user",
+        "content": (
+            "The caller disabled parallel tool calls, but the previous turn requested multiple external tools "
+            f"at once ({', '.join(names)}). Emit at most one external tool call in the next turn."
+        ),
+    }
+
+
+def _build_tool_choice_feedback(mode: str, selected_name: Optional[str] = None) -> dict[str, Any]:
+    if mode == "none":
+        instruction = "Do not emit any caller-owned external tool call."
+    elif mode == "named":
+        instruction = f"Emit only the caller-selected external tool {selected_name!r}."
+    else:
+        instruction = "Emit one caller-owned external tool call before giving a final answer."
+    return {
+        "role": "user",
+        "content": f"The previous turn violated tool_choice. {instruction}",
+    }
+
+
 def _is_loopback_host(host: str) -> bool:
     normalized = host.lower().rstrip(".")
     if normalized == "localhost":
@@ -1506,6 +1969,82 @@ def _is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
         return False
+
+
+def _normalized_image_content_type(value: str) -> str:
+    media_type = value.split(";", 1)[0].strip().lower()
+    return "image/jpeg" if media_type == "image/jpg" else media_type
+
+
+def _sniff_supported_image_media_type(content: bytes) -> Optional[str]:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _pinned_remote_image_request(
+    source: str,
+    settings: VisualProxySettings,
+) -> tuple[tuple[str, ...], str, Optional[str]]:
+    """Validate every DNS answer and return an IP-pinned request target."""
+
+    parsed = urlsplit(source)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Image URL must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("Image URL must not contain embedded credentials")
+    try:
+        host = parsed.hostname.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError as exc:
+        raise ValueError("Image URL contains an invalid hostname") from exc
+    if host not in settings.remote_image_hosts:
+        raise ValueError("Image URL host is not in the configured visual remote-image allowlist")
+    if parsed.scheme == "http" and not settings.allow_http_image_urls:
+        raise ValueError("Plain HTTP image URLs are disabled; use HTTPS or a data URL")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise ValueError("Remote image host could not be resolved") from exc
+    if not addresses:
+        raise ValueError("Remote image host resolved to no addresses")
+    parsed_addresses = []
+    for raw_address in addresses:
+        address = ipaddress.ip_address(raw_address)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        parsed_addresses.append(address)
+    if not settings.allow_private_remote_image_urls and any(
+        not address.is_global or address.is_multicast for address in parsed_addresses
+    ):
+        raise ValueError("Remote image host resolved to a private or non-global address")
+
+    parsed_addresses = sorted(set(parsed_addresses), key=lambda item: (item.version, item.packed))
+    pinned_urls = []
+    for pinned_address in parsed_addresses:
+        pinned_host = (
+            f"[{pinned_address.compressed}]"
+            if pinned_address.version == 6
+            else pinned_address.compressed
+        )
+        pinned_urls.append(
+            urlunsplit(
+                (parsed.scheme, f"{pinned_host}:{port}", parsed.path or "/", parsed.query, "")
+            )
+        )
+    explicit_port = parsed.port is not None
+    default_port = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
+    host_header = host if default_port and not explicit_port else f"{host}:{port}"
+    return tuple(pinned_urls), host_header, host if parsed.scheme == "https" else None
 
 
 def normalize_visual_remote_url(
@@ -1553,6 +2092,11 @@ def _validate_data_image(source: str, max_image_bytes: int) -> str:
         raise ValueError("Image data URL contains invalid base64") from exc
     if len(decoded) > max_image_bytes:
         raise ValueError(f"Image exceeds the {max_image_bytes}-byte limit")
+    sniffed_media_type = _sniff_supported_image_media_type(decoded)
+    if sniffed_media_type is None:
+        raise ValueError("Image data URL is not a supported PNG/JPEG/GIF/WebP image")
+    if sniffed_media_type != media_type:
+        raise ValueError("Image data URL media type does not match its magic bytes")
     return f"data:{media_type};base64,{base64.b64encode(decoded).decode('ascii')}"
 
 
@@ -1594,7 +2138,7 @@ def _remote_image_url(source: str, settings: VisualProxySettings) -> str:
             raise ValueError("Image file is outside the configured local file roots")
         if not path.is_file():
             raise ValueError(f"Image file does not exist: {path}")
-        mime_type = mimetypes.guess_type(path.name)[0] or ""
+        mime_type = _normalized_image_content_type(mimetypes.guess_type(path.name)[0] or "")
         if mime_type not in _ALLOWED_IMAGE_MEDIA_TYPES:
             raise ValueError("Local visual inputs must use a supported raster image media type")
         open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1611,6 +2155,9 @@ def _remote_image_url(source: str, settings: VisualProxySettings) -> str:
             image_bytes = image_file.read(settings.max_image_bytes + 1)
         if len(image_bytes) > settings.max_image_bytes:
             raise ValueError(f"Image exceeds the {settings.max_image_bytes}-byte limit")
+        sniffed_media_type = _sniff_supported_image_media_type(image_bytes)
+        if sniffed_media_type is None or sniffed_media_type != mime_type:
+            raise ValueError("Local image type does not match its magic bytes")
         encoded = base64.b64encode(image_bytes).decode("ascii")
         return f"data:{mime_type};base64,{encoded}"
     raise ValueError("Unrecognized image input. Use an image data URL or an explicitly enabled image source.")
@@ -1647,6 +2194,33 @@ def _remote_content(data: Any) -> str:
     raise VisualChatProxyError("Visual remote returned an empty assistant message")
 
 
+class VisualRemoteResult(str):
+    """String-compatible visual result with auditable provider metadata."""
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        finish_reason: str = "",
+        usage: Optional[dict[str, Any]] = None,
+        image_digest_sha256: str = "",
+    ):
+        instance = str.__new__(cls, value)
+        instance.finish_reason = finish_reason
+        instance.usage = dict(usage or {})
+        instance.image_digest_sha256 = image_digest_sha256
+        return instance
+
+
+def _visual_response_finish_reason(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+    return str(choices[0].get("finish_reason") or "")
+
+
 async def call_visual_remote(
     runtime: VisualProxyRuntime,
     model: str,
@@ -1660,6 +2234,14 @@ async def call_visual_remote(
     if len(task) > 16384:
         raise ValueError("vision_reader task exceeds the 16384-character limit")
     settings = runtime.settings
+    visual_source = image.source
+    if visual_source.startswith(("http://", "https://")):
+        visual_source = await runtime.freeze_remote_image(visual_source, raw_request, trace_id)
+    visual_source = _remote_image_url(visual_source, settings)
+    image_payload = visual_source.split(",", 1)[1] if visual_source.startswith("data:") else ""
+    image_digest_sha256 = ""
+    if image_payload:
+        image_digest_sha256 = hashlib.sha256(base64.b64decode(image_payload, validate=True)).hexdigest()
     payload = {
         "model": settings.remote_model or model,
         "messages": [
@@ -1669,7 +2251,7 @@ async def call_visual_remote(
                     {"type": "text", "text": task},
                     {
                         "type": "image_url",
-                        "image_url": {"url": _remote_image_url(image.source, settings)},
+                        "image_url": {"url": visual_source},
                     },
                 ],
             },
@@ -1702,11 +2284,16 @@ async def call_visual_remote(
             data = await runtime.post_json(payload, raw_request, trace_id)
             content = _remote_content(data)
             trace_response: Any = data
+            finish_reason = _visual_response_finish_reason(data)
+            raw_usage = data.get("usage") if isinstance(data, dict) else None
+            visual_usage = raw_usage if isinstance(raw_usage, dict) else {}
         else:
             visible_parts: list[str] = []
             reasoning_parts: list[str] = []
             visible_cleaner = _IncrementalVisualTextCleaner()
             emitted_result_bytes = 0
+            finish_reason = ""
+            visual_usage: dict[str, Any] = {}
 
             async def emit_result(value: str) -> None:
                 nonlocal emitted_result_bytes
@@ -1723,8 +2310,13 @@ async def call_visual_remote(
                         f"Visual upstream stream failed: {message or 'unknown error'}"
                     )
                 choices = stream_payload.get("choices") or []
+                raw_usage = stream_payload.get("usage")
+                if isinstance(raw_usage, dict):
+                    visual_usage = raw_usage
                 if not choices or not isinstance(choices[0], dict):
                     continue
+                if choices[0].get("finish_reason") is not None:
+                    finish_reason = str(choices[0]["finish_reason"])
                 delta = choices[0].get("delta") or {}
                 if not isinstance(delta, dict):
                     continue
@@ -1778,7 +2370,12 @@ async def call_visual_remote(
         )
     if len(content.encode("utf-8")) > settings.max_remote_response_bytes:
         raise VisualProxyUpstreamError("Visual upstream response exceeds the configured size limit")
-    return content
+    return VisualRemoteResult(
+        content,
+        finish_reason=finish_reason,
+        usage=visual_usage,
+        image_digest_sha256=image_digest_sha256,
+    )
 
 
 def _tool_arguments(tool_call: Any) -> dict[str, Any]:
@@ -1806,6 +2403,27 @@ def _usage_add(total: UsageInfo, current: UsageInfo) -> None:
     if total.prompt_tokens_details is None:
         total.prompt_tokens_details = PromptTokensDetails()
     total.prompt_tokens_details.cached_tokens += current_cached
+
+
+def _usage_add_mapping(total: UsageInfo, current: Any) -> None:
+    if not isinstance(current, dict):
+        return
+    prompt_tokens = current.get("prompt_tokens", current.get("input_tokens", 0))
+    completion_tokens = current.get("completion_tokens", current.get("output_tokens", 0))
+    try:
+        prompt_tokens = int(prompt_tokens or 0)
+        completion_tokens = int(completion_tokens or 0)
+    except (TypeError, ValueError):
+        return
+    _usage_add(
+        total,
+        UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(),
+        ),
+    )
 
 
 def _message_reasoning(message: ChatMessage) -> str:
@@ -1883,6 +2501,32 @@ def _has_external_vision_reader(tools: list[dict[str, Any]]) -> bool:
         if isinstance(function, dict) and function.get("name") == VISION_READER_NAME:
             return True
     return False
+
+
+def _external_tool_choice(
+    tool_choice: Any,
+    external_tools: list[dict[str, Any]],
+) -> tuple[str, Optional[str], list[dict[str, Any]]]:
+    if tool_choice is None or tool_choice == "auto":
+        return "auto", None, external_tools
+    if tool_choice == "none":
+        return "none", None, []
+    if tool_choice == "required":
+        if not external_tools:
+            raise ValueError("tool_choice='required' requires at least one caller-owned tool")
+        return "required", None, external_tools
+    if isinstance(tool_choice, dict):
+        selected_name = str((tool_choice.get("function") or {}).get("name") or "")
+        selected = [
+            tool
+            for tool in external_tools
+            if isinstance(tool.get("function"), dict)
+            and tool["function"].get("name") == selected_name
+        ]
+        if not selected_name or not selected:
+            raise ValueError("Named tool_choice must reference a caller-owned tool")
+        return "named", selected_name, selected
+    raise ValueError(f"Unsupported tool_choice: {tool_choice!r}")
 
 
 class _IncrementalReasoningSanitizer:
@@ -2132,7 +2776,7 @@ async def _consume_main_model_stream(
     )
 
 
-async def _run_agent_choice(
+async def _run_agent_choice_legacy(
     *,
     request_payload: dict[str, Any],
     registry: ImageRegistry,
@@ -2476,6 +3120,422 @@ async def _run_agent_choice(
     raise VisualChatProxyError(f"Visual agent loop exceeded max steps ({MAX_AGENT_STEPS})")
 
 
+async def _run_agent_choice(
+    *,
+    request_payload: dict[str, Any],
+    registry: ImageRegistry,
+    raw_request: Request,
+    runtime: VisualProxyRuntime,
+    main_chat_handler: MainChatHandler,
+    trace_id: str,
+    trace_recorder: VisualTraceRecorder,
+    user_question_depends_on_visual_content: bool,
+    public_reasoning_enabled: bool = True,
+    stream_callback: Optional[StreamEventCallback] = None,
+) -> Union[tuple[ChatCompletionResponseChoice, UsageInfo], Response]:
+    """Run one evidence-bound agent choice using Nova's public/private split."""
+
+    payload = copy.deepcopy(request_payload)
+    is_anthropic_request = raw_request.url.path.rstrip("/") == "/v1/messages"
+    public_separate_reasoning = payload.get("separate_reasoning")
+    payload["separate_reasoning"] = True
+    payload["stream"] = stream_callback is not None
+    if stream_callback is not None:
+        # Internal usage accounting must not depend on whether the caller asks
+        # for the final public usage chunk.
+        payload["stream_options"] = {"include_usage": True}
+    payload["n"] = 1
+
+    external_tools = copy.deepcopy(payload.get("tools") or [])
+    if _has_external_vision_reader(external_tools):
+        raise ValueError(f"{VISION_READER_NAME!r} is reserved for the server-owned visual reader")
+    original_tool_choice = payload.get("tool_choice", "auto")
+    choice_mode, _selected_name, selected_external_tools = _external_tool_choice(
+        original_tool_choice,
+        external_tools,
+    )
+    if is_anthropic_request:
+        payload["messages"] = _add_anthropic_sequential_tool_instruction(payload["messages"])
+
+    ledger = EvidenceLedger(registry)
+    aggregate_usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
+    public_reasoning_parts: list[str] = []
+    pending_vision_by_image: OrderedDict[str, Optional[str]] = OrderedDict()
+    public_trace_index = 0
+    empty_output_retry_count = 0
+    parallel_retry_count = 0
+
+    async def emit_public_reasoning(value: str) -> None:
+        if not public_reasoning_enabled or not value:
+            return
+        if len("\n".join((*public_reasoning_parts, value)).encode("utf-8")) > MAX_REASONING_CONTEXT_BYTES:
+            raise VisualChatProxyError("Visual reasoning context exceeds the configured size limit")
+        separate = bool(public_reasoning_parts)
+        public_reasoning_parts.append(value)
+        if stream_callback is not None:
+            await stream_callback("reasoning", value, separate)
+
+    async def flush_pending_vision_results() -> None:
+        nonlocal public_trace_index
+        for image_tag, result in list(pending_vision_by_image.items()):
+            if result is None:
+                continue
+            public_result = result
+            if text_exposes_private_multimodal_mechanism(public_result):
+                public_result = "相关结果未在此处展开"
+            projection = _format_public_builtin_projection(
+                image_tag,
+                public_result,
+                public_trace_index,
+            )
+            public_trace_index += 1
+            await emit_public_reasoning(projection)
+        pending_vision_by_image.clear()
+
+    def public_message_from_model(message: ChatMessage) -> ChatMessage:
+        data = message.model_dump(exclude_none=True)
+        data.pop("reasoning", None)
+        data.pop("reasoning_content", None)
+        base = ChatMessage.model_validate(data)
+        result = _message_with_reasoning(
+            base,
+            public_reasoning_parts if public_reasoning_enabled else [],
+        )
+        return _apply_separate_reasoning_contract(result, public_separate_reasoning)
+
+    def configure_tools_for_step() -> None:
+        missing = ledger.missing_tags(
+            visual_answer_required=user_question_depends_on_visual_content
+        )
+        private_reader_phase = bool(missing) and (
+            choice_mode in {"required", "named"}
+            or (is_anthropic_request and bool(external_tools))
+        )
+        if choice_mode == "none":
+            payload["tools"] = [copy.deepcopy(BUILTIN_VISION_READER_TOOL)]
+            payload["tool_choice"] = "auto"
+        elif private_reader_phase:
+            payload["tools"] = [copy.deepcopy(BUILTIN_VISION_READER_TOOL)]
+            payload["tool_choice"] = "auto"
+        elif choice_mode in {"required", "named"}:
+            payload["tools"] = copy.deepcopy(selected_external_tools)
+            payload["tool_choice"] = original_tool_choice
+        elif is_anthropic_request and external_tools and not missing:
+            # Anthropic signed assistant turns must never mix the private
+            # reader with caller-owned tools. Expose caller tools only after
+            # image evidence is complete.
+            payload["tools"] = copy.deepcopy(external_tools)
+            payload["tool_choice"] = original_tool_choice
+        else:
+            payload["tools"] = copy.deepcopy(external_tools)
+            payload["tools"].append(copy.deepcopy(BUILTIN_VISION_READER_TOOL))
+            payload["tool_choice"] = "auto"
+
+    for step in range(1, MAX_AGENT_STEPS + 1):
+        if await _request_is_disconnected(raw_request):
+            raise ClientDisconnected(reason="client disconnected during visual agent loop")
+        configure_tools_for_step()
+        main_request = ChatCompletionRequest.model_validate(payload)
+        if request_has_images(main_request):
+            raise VisualChatProxyError("Internal invariant failed: real image payload reached the main model request")
+        logger.info(
+            "[visual-chat-proxy][main_model_request] trace_id=%s step=%d registered_images=%d image_payload_count=0",
+            trace_id,
+            step,
+            len(registry),
+        )
+        if trace_recorder.enabled:
+            trace_recorder.event(
+                "main_model_request",
+                choice_trace_id=trace_id,
+                step=step,
+                request=main_request.model_dump(mode="json", by_alias=True, exclude_none=True),
+            )
+        try:
+            with bind_main_model_trace(trace_recorder, trace_id, step):
+                response = await main_chat_handler(main_request, raw_request)
+            if stream_callback is not None and isinstance(response, CustomStreamingResponse):
+                async def buffered_callback(kind: str, value: str, separate: bool) -> None:
+                    if kind == "ready":
+                        await stream_callback(kind, value, separate)
+
+                response = await _consume_main_model_stream(
+                    response,
+                    model=str(payload.get("model") or "default"),
+                    callback=buffered_callback,
+                    separate_from_prior_reasoning=False,
+                    stream_content=False,
+                )
+            elif stream_callback is not None and isinstance(response, ChatCompletionResponse):
+                await stream_callback("ready", "1", False)
+        except BaseException as exc:
+            if trace_recorder.enabled:
+                trace_recorder.event(
+                    "main_model_error",
+                    choice_trace_id=trace_id,
+                    step=step,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
+            raise
+
+        if trace_recorder.enabled:
+            trace_recorder.event(
+                "main_model_response",
+                choice_trace_id=trace_id,
+                step=step,
+                response=_response_for_trace(response),
+            )
+        if not isinstance(response, ChatCompletionResponse):
+            return response
+        _usage_add(aggregate_usage, response.usage)
+        if not response.choices:
+            raise VisualChatProxyError("Main model returned no choices")
+
+        choice = response.choices[0]
+        message = _sanitize_model_message(choice.message)
+        builtin_calls: list[Any] = []
+        external_calls: list[Any] = []
+        for tool_call in message.tool_calls or []:
+            if tool_call.function.name == VISION_READER_NAME:
+                builtin_calls.append(tool_call)
+            else:
+                external_calls.append(tool_call)
+
+        if payload.get("parallel_tool_calls") is False and len(external_calls) > 1:
+            if (
+                parallel_retry_count < runtime.settings.empty_output_retries
+                and step < MAX_AGENT_STEPS
+            ):
+                parallel_retry_count += 1
+                payload["messages"].append(_build_parallel_tool_calls_feedback(external_calls))
+                continue
+            raise VisualChatProxyError("parallel_tool_calls_violation")
+        if choice_mode == "none" and external_calls:
+            payload["messages"].append(_build_tool_choice_feedback("none"))
+            continue
+        if choice_mode == "named" and any(
+            call.function.name != _selected_name for call in external_calls
+        ):
+            payload["messages"].append(_build_tool_choice_feedback("named", _selected_name))
+            continue
+
+        if is_anthropic_request and builtin_calls and external_calls:
+            raise VisualChatProxyError(
+                "Anthropic response mixed builtin and external tool calls; response quarantined before tool execution."
+            )
+
+        if not builtin_calls:
+            await flush_pending_vision_results()
+        step_reasoning = _safe_public_reasoning_fragment(_message_reasoning(message))
+
+        builtin_results: list[dict[str, Any]] = []
+        for call_index, tool_call in enumerate(builtin_calls):
+            image_label = ""
+            task = ""
+            call_id = tool_call.id or f"call_{uuid.uuid4().hex[:24]}"
+            accepted = False
+            try:
+                arguments = _tool_arguments(tool_call)
+                image_label = str(arguments.get("image") or "")
+                task = str(arguments.get("task") or "").strip()
+                if not image_label or not task:
+                    raise ValueError(
+                        "Builtin vision_reader requires both arguments: image and task. "
+                        f"Available tags: {registry.available_tags()}."
+                    )
+                try:
+                    image = registry.resolve(image_label)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Builtin vision_reader cannot read image={image_label!r}. "
+                        f"Available tags: {registry.available_tags()}."
+                    ) from exc
+                image_label = image.tag
+                visual_result = await call_visual_remote(
+                    runtime=runtime,
+                    model=str(payload.get("model") or "default"),
+                    image=image,
+                    task=task,
+                    trace_id=f"{trace_id}-s{step}-c{call_index}",
+                    raw_request=raw_request,
+                    trace_recorder=trace_recorder,
+                    # Public projection is emitted only after the complete
+                    # provider result and finish reason are validated.
+                    result_callback=None,
+                )
+                raw_result = str(visual_result)
+                finish_reason = str(getattr(visual_result, "finish_reason", "") or "")
+                image_digest = str(getattr(visual_result, "image_digest_sha256", "") or "")
+                _usage_add_mapping(aggregate_usage, getattr(visual_result, "usage", {}))
+                accepted = ledger.record(
+                    image_tag=image_label,
+                    result=raw_result,
+                    step=step,
+                    call_index=call_index,
+                    tool_call_id=call_id,
+                    task=task,
+                    finish_reason=finish_reason,
+                    image_digest_sha256=image_digest,
+                )
+                if accepted:
+                    result = raw_result
+                elif finish_reason in _TRUNCATED_FINISH_REASONS:
+                    result = (
+                        "Builtin vision_reader result was truncated and cannot be used as evidence; "
+                        "retry the same image with a narrower task."
+                    )
+                else:
+                    result = "Builtin vision_reader returned no acceptable visual evidence; retry the image."
+            except ValueError as exc:
+                result = str(exc)
+                if not result.startswith("Builtin vision_reader"):
+                    result = f"Builtin vision_reader rejected the call: {result}"
+                if image_label:
+                    with suppress(ValueError):
+                        image_label = registry.resolve(image_label).tag
+                        ledger.record(
+                            image_tag=image_label,
+                            result=result,
+                            step=step,
+                            call_index=call_index,
+                            tool_call_id=call_id,
+                            task=task,
+                            terminal_failed="invalid_arguments",
+                        )
+            builtin_results.append(
+                {
+                    "call": tool_call,
+                    "call_id": call_id,
+                    "image_tag": image_label,
+                    "task": task,
+                    "result": result,
+                    "accepted": accepted,
+                }
+            )
+
+        if builtin_results:
+            if step_reasoning:
+                await emit_public_reasoning(step_reasoning)
+            for item in builtin_results:
+                image_tag = item["image_tag"]
+                if image_tag:
+                    pending_vision_by_image[image_tag] = item["result"] if item["accepted"] else None
+
+            if external_calls:
+                await flush_pending_vision_results()
+                missing = ledger.missing_tags(
+                    visual_answer_required=user_question_depends_on_visual_content
+                )
+                if missing:
+                    payload["messages"].append(
+                        _build_output_guardrail_feedback(missing, "external tool call before visual evidence")
+                    )
+                    continue
+
+            internal_message = message.model_dump(exclude_none=True)
+            internal_message["tool_calls"] = []
+            for item in builtin_results:
+                call_data = item["call"].model_dump(exclude_none=True)
+                call_data["id"] = item["call_id"]
+                internal_message["tool_calls"].append(call_data)
+            payload["messages"].append(internal_message)
+            for item in builtin_results:
+                payload["messages"].append(
+                    {
+                        "role": "tool",
+                        "name": VISION_READER_NAME,
+                        "tool_call_id": item["call_id"],
+                        "content": item["result"],
+                    }
+                )
+            if external_calls:
+                # OpenAI can surface a caller tool after the private reader in
+                # the same turn only when coverage is already complete.
+                message_data = message.model_dump(exclude_none=True)
+                message_data["tool_calls"] = [call.model_dump(exclude_none=True) for call in external_calls]
+                message_data.pop("reasoning", None)
+                message_data.pop("reasoning_content", None)
+                public_message = public_message_from_model(ChatMessage.model_validate(message_data))
+                return ChatCompletionResponseChoice(
+                    index=0,
+                    message=public_message,
+                    finish_reason="tool_calls",
+                ), aggregate_usage
+            continue
+
+        if external_calls:
+            missing = ledger.missing_tags(
+                visual_answer_required=user_question_depends_on_visual_content
+            )
+            if missing:
+                payload["messages"].append(
+                    _build_output_guardrail_feedback(missing, "external tool call before visual evidence")
+                )
+                continue
+            for call in external_calls:
+                if text_exposes_private_multimodal_mechanism(str(call.function.arguments)):
+                    raise VisualChatProxyError("External tool arguments exposed private visual mechanics")
+            if step_reasoning:
+                await emit_public_reasoning(step_reasoning)
+            message_data = message.model_dump(exclude_none=True)
+            message_data["tool_calls"] = [call.model_dump(exclude_none=True) for call in external_calls]
+            message_data.pop("reasoning", None)
+            message_data.pop("reasoning_content", None)
+            public_message = public_message_from_model(ChatMessage.model_validate(message_data))
+            return ChatCompletionResponseChoice(
+                index=0,
+                message=public_message,
+                finish_reason="tool_calls",
+            ), aggregate_usage
+
+        answer = message.content or ""
+        if text_exposes_private_multimodal_mechanism(answer):
+            raise VisualChatProxyError("Main model answer exposed private visual mechanics")
+        if not answer.strip():
+            if empty_output_retry_count < runtime.settings.empty_output_retries:
+                empty_output_retry_count += 1
+                payload["messages"].append(_build_empty_output_retry_feedback())
+                continue
+            raise VisualChatProxyError(
+                "Main model returned no visible answer and no tool call after "
+                f"{empty_output_retry_count} empty-output retries"
+            )
+        if choice_mode in {"required", "named"}:
+            payload["messages"].append(_build_tool_choice_feedback(choice_mode, _selected_name))
+            continue
+        visual_answer_required = user_question_depends_on_visual_content or _has_visual_content_claim(answer)
+        missing = ledger.missing_tags(visual_answer_required=visual_answer_required)
+        if missing:
+            payload["messages"].append(_build_output_guardrail_feedback(missing, answer))
+            logger.warning(
+                "[visual-chat-proxy][output_guardrail] trace_id=%s step=%d missing_tags=%s",
+                trace_id,
+                step,
+                missing,
+            )
+            continue
+
+        if step_reasoning:
+            await emit_public_reasoning(step_reasoning)
+        public_message = public_message_from_model(message)
+        finish_reason = choice.finish_reason
+        if finish_reason == "tool_calls" and not public_message.tool_calls:
+            finish_reason = "stop"
+        if trace_recorder.enabled:
+            trace_recorder.event(
+                "image_evidence_ledger",
+                choice_trace_id=trace_id,
+                evidence=ledger.snapshot(visual_answer_required=visual_answer_required),
+            )
+        return ChatCompletionResponseChoice(
+            index=0,
+            message=public_message,
+            finish_reason=finish_reason,
+        ), aggregate_usage
+
+    raise VisualChatProxyError(f"Visual agent loop exceeded max steps ({MAX_AGENT_STEPS})")
+
+
 def _true_stream_response(
     *,
     request_payload: dict[str, Any],
@@ -2487,13 +3547,17 @@ def _true_stream_response(
     trace_recorder: VisualTraceRecorder,
     user_question_depends_on_visual_content: bool,
     requested_n: int,
+    public_reasoning_enabled: bool,
+    deadline: float,
 ) -> CustomStreamingResponse:
-    """Run the agent loop lazily and emit each safe reasoning delta immediately."""
+    """Run lazily with buffered safe output, open-comment, and heartbeat SSE."""
 
     response_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     model = str(request_payload.get("model") or "default")
     separate_reasoning = request_payload.get("separate_reasoning") is not False
+    stream_options = request_payload.get("stream_options") or {}
+    include_usage = isinstance(stream_options, dict) and stream_options.get("include_usage") is True
 
     def encode_choice(index: int, delta: dict[str, Any], finish_reason: Optional[str] = None) -> str:
         return "data: " + json.dumps(
@@ -2523,6 +3587,9 @@ def _true_stream_response(
                     await queue.put((kind, value, separate))
 
             async def run_choice_with_timeout():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise VisualProxyTimeoutError("Visual agent loop timed out")
                 try:
                     return await asyncio.wait_for(
                         _run_agent_choice(
@@ -2534,24 +3601,30 @@ def _true_stream_response(
                             trace_id=f"{trace_id}-{index}",
                             trace_recorder=trace_recorder,
                             user_question_depends_on_visual_content=user_question_depends_on_visual_content,
+                            public_reasoning_enabled=public_reasoning_enabled,
                             stream_callback=callback,
                         ),
-                        timeout=runtime.settings.agent_timeout,
+                        timeout=remaining,
                     )
                 except asyncio.TimeoutError as exc:
                     raise VisualProxyTimeoutError("Visual agent loop timed out") from exc
 
-            task = asyncio.create_task(
-                run_choice_with_timeout()
-            )
+            task = asyncio.create_task(run_choice_with_timeout())
             try:
+                if index == 0:
+                    yield ": nova-stream-open\n\n"
                 role_emitted = False
                 reasoning_started = False
                 streamed_content = ""
+                last_heartbeat = asyncio.get_running_loop().time()
                 while not task.done() or not queue.empty():
                     try:
-                        kind, value, separate = await asyncio.wait_for(queue.get(), timeout=0.05)
+                        kind, value, separate = await asyncio.wait_for(queue.get(), timeout=0.25)
                     except asyncio.TimeoutError:
+                        now = asyncio.get_running_loop().time()
+                        if now - last_heartbeat >= 5.0:
+                            yield ": heartbeat\n\n"
+                            last_heartbeat = now
                         continue
                     if not role_emitted:
                         yield encode_choice(index, {"role": "assistant", "content": ""})
@@ -2595,17 +3668,18 @@ def _true_stream_response(
                 yield encode_choice(index, {"tool_calls": [call_data]})
             yield encode_choice(index, {}, choice.finish_reason or "stop")
 
-        yield "data: " + json.dumps(
-            {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [],
-                "usage": aggregate_usage.model_dump(exclude_none=True),
-            },
-            ensure_ascii=False,
-        ) + "\n\n"
+        if include_usage:
+            yield "data: " + json.dumps(
+                {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [],
+                    "usage": aggregate_usage.model_dump(exclude_none=True),
+                },
+                ensure_ascii=False,
+            ) + "\n\n"
         yield "data: [DONE]\n\n"
 
     return CustomStreamingResponse(chunks(), media_type="text/event-stream")
@@ -2639,15 +3713,22 @@ async def _visual_chat_completions_impl(
     trace_id: str,
     trace_recorder: VisualTraceRecorder,
 ) -> Union[ChatCompletionResponse, Response]:
+    requested_thinking = requested_enable_thinking(request)
+    public_reasoning_enabled = resolve_public_reasoning_enabled(
+        requested_thinking, runtime.settings
+    )
+    if request.seed is not None and not 0 <= request.seed <= 9_999_998:
+        raise ValueError("seed must be an integer between 0 and 9999998")
     request = apply_visual_thinking_policy(request, runtime.settings)
     request_payload = _request_dict(request)
+    deadline = asyncio.get_running_loop().time() + runtime.settings.agent_timeout
     user_question_depends_on_visual_content = latest_user_message_depends_on_visual_content(request_payload["messages"])
     registry = ImageRegistry(
         max_images=runtime.settings.max_images,
         max_total_image_bytes=runtime.settings.max_total_image_bytes,
     )
     request_payload["messages"] = replace_images_with_tags(request_payload["messages"], registry, runtime.settings)
-    request_payload["messages"] = expand_builtin_traces(
+    request_payload["messages"] = strip_untrusted_builtin_traces(
         request_payload["messages"],
         runtime.settings.builtin_trace_format,
     )
@@ -2679,22 +3760,34 @@ async def _visual_chat_completions_impl(
             trace_recorder=trace_recorder,
             user_question_depends_on_visual_content=user_question_depends_on_visual_content,
             requested_n=requested_n,
+            public_reasoning_enabled=public_reasoning_enabled,
+            deadline=deadline,
         )
 
     async def run_choices() -> Union[tuple[list[ChatCompletionResponseChoice], UsageInfo], Response]:
         choices: list[ChatCompletionResponseChoice] = []
         aggregate_usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
         for index in range(requested_n):
-            result = await _run_agent_choice(
-                request_payload=request_payload,
-                registry=registry,
-                raw_request=raw_request,
-                runtime=runtime,
-                main_chat_handler=main_chat_handler,
-                trace_id=f"{trace_id}-{index}",
-                trace_recorder=trace_recorder,
-                user_question_depends_on_visual_content=(user_question_depends_on_visual_content),
-            )
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise VisualProxyTimeoutError("Visual agent loop timed out")
+            try:
+                result = await asyncio.wait_for(
+                    _run_agent_choice(
+                        request_payload=request_payload,
+                        registry=registry,
+                        raw_request=raw_request,
+                        runtime=runtime,
+                        main_chat_handler=main_chat_handler,
+                        trace_id=f"{trace_id}-{index}",
+                        trace_recorder=trace_recorder,
+                        user_question_depends_on_visual_content=user_question_depends_on_visual_content,
+                        public_reasoning_enabled=public_reasoning_enabled,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError as exc:
+                raise VisualProxyTimeoutError("Visual agent loop timed out") from exc
             if isinstance(result, Response):
                 return result
             choice, usage = result
@@ -2702,10 +3795,7 @@ async def _visual_chat_completions_impl(
             _usage_add(aggregate_usage, usage)
         return choices, aggregate_usage
 
-    try:
-        choices_result = await asyncio.wait_for(run_choices(), timeout=runtime.settings.agent_timeout)
-    except asyncio.TimeoutError as exc:
-        raise VisualProxyTimeoutError("Visual agent loop timed out") from exc
+    choices_result = await run_choices()
     if isinstance(choices_result, Response):
         return choices_result
     choices, aggregate_usage = choices_result
