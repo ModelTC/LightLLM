@@ -60,6 +60,7 @@ class StartArgs:
     visual_local_file_root: List[str] = field(default_factory=list)
     visual_allow_remote_image_urls: bool = field(default=False)
     visual_allow_http_image_urls: bool = field(default=False)
+    visual_allow_private_remote_image_urls: bool = field(default=False)
     visual_remote_image_host: List[str] = field(default_factory=list)
     model_dir: Optional[str] = field(default=None)
     tokenizer_mode: str = field(default="fast")

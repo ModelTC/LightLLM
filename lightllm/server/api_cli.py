@@ -234,6 +234,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Also allow plain HTTP image URLs; requires --visual_allow_remote_image_urls.",
     )
     parser.add_argument(
+        "--visual_allow_private_remote_image_urls",
+        action="store_true",
+        help=(
+            "Allow configured remote-image hosts to resolve to private/non-global addresses. "
+            "Disabled by default; intended only for isolated trusted development networks."
+        ),
+    )
+    parser.add_argument(
         "--visual_remote_image_host",
         action="append",
         default=[],
