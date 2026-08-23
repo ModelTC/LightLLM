@@ -292,15 +292,13 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
             logits = torch.empty((req_num0 + req_num1, logits0.shape[1]), dtype=logits0.dtype, device=logits0.device)
-            logits[0:req_num0, :].copy_(logits0[0:req_num0, :], non_blocking=True)
-            logits[req_num0 : req_num0 + req_num1, :].copy_(logits1[0:req_num1, :], non_blocking=True)
+            logits[0:req_num0, :].copy_(logits0, non_blocking=True)
+            logits[req_num0 : req_num0 + req_num1, :].copy_(logits1, non_blocking=True)
 
             run_reqs = run_reqs0 + run_reqs1
-            b_has_out_cpu = (
-                model_input0.b_prefill_has_output_cpu[0:req_num0] + model_input1.b_prefill_has_output_cpu[0:req_num1]
-            )
-            b_mtp_index = torch.cat((model_input0.b_mtp_index[0:req_num0], model_input1.b_mtp_index[0:req_num1]), dim=0)
-            b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
+            b_has_out_cpu = model_input0.b_prefill_has_output_cpu + model_input1.b_prefill_has_output_cpu
+            b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
+            b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
 
             if req_num0 + req_num1 > 0:
                 (
@@ -411,10 +409,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output: ModelOutput = self.model.forward(model_input)
-            b_has_out_cpu = model_input.b_prefill_has_output_cpu[0:req_num]
+            b_has_out_cpu = model_input.b_prefill_has_output_cpu
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
-            b_req_idx = model_input.b_req_idx[0:req_num]
-            b_mtp_index = model_input.b_mtp_index[0:req_num]
+            b_req_idx = model_input.b_req_idx
+            b_mtp_index = model_input.b_mtp_index
 
             if req_num > 0:
                 (
@@ -423,7 +421,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=model_output.logits[0:req_num, :],
+                    logits=model_output.logits,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
@@ -660,27 +658,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                 dtype=logits0.dtype,
                 device=logits0.device,
             )
-            logits[0:req_num0, :].copy_(logits0[0:req_num0, :], non_blocking=True)
-            logits[req_num0 : (req_num0 + req_num1), :].copy_(logits1[0:req_num1, :], non_blocking=True)
+            logits[0:req_num0, :].copy_(logits0, non_blocking=True)
+            logits[req_num0 : (req_num0 + req_num1), :].copy_(logits1, non_blocking=True)
 
             run_reqs = run_reqs0 + run_reqs1
-            b_has_out_cpu = (
-                model_input0.b_prefill_has_output_cpu[0:req_num0] + model_input1.b_prefill_has_output_cpu[0:req_num1]
-            )
-            b_mtp_index = torch.cat(
-                (
-                    model_input0.b_mtp_index[0:req_num0],
-                    model_input1.b_mtp_index[0:req_num1],
-                ),
-                dim=0,
-            )
-            b_req_idx = torch.cat(
-                (
-                    model_input0.b_req_idx[0:req_num0],
-                    model_input1.b_req_idx[0:req_num1],
-                ),
-                dim=0,
-            )
+            b_has_out_cpu = model_input0.b_prefill_has_output_cpu + model_input1.b_prefill_has_output_cpu
+            b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
+            b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
 
             if req_num > 0:
                 (
@@ -712,8 +696,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
 
             if req_num > 0 and g_infer_context.is_linear_att_mixed_model:
-                _b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
-                g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=_b_req_idx, reqs=run_reqs)
+                g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
