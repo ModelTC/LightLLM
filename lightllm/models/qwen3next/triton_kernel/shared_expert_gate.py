@@ -24,8 +24,8 @@ def _sigmoid_mul_kernel(
         gate_vals = tl.load(gate + row * stride_g_m).to(tl.float32)
     else:
         gate_vals = tl.load(gate + row * stride_g_m + offs * stride_g_n, mask=mask, other=0.0).to(tl.float32)
-    # Match LightLLM's pre-fusion sigmoid_() then mul_() behavior: sigmoid is
-    # materialized in the gate dtype before the multiplication.
+    # Match the official Qwen3.5 implementation, ``output * torch.sigmoid(gate)``:
+    # materialize the sigmoid result in the gate dtype before multiplication.
     gate_vals = tl.sigmoid(gate_vals).to(gate.dtype.element_ty)
     # Qwen3.5 uses BF16, so keep both rounded operands in BF16 for the direct
     # multiply.
