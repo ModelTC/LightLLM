@@ -5,6 +5,7 @@ import torch
 
 from lightllm.common.basemodel import batch_objs
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
+from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
 from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
 from lightllm.models.qwen3_dflash.layer_infer import transformer_layer_infer as qwen3_dflash_layer_infer
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
@@ -12,6 +13,59 @@ from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dspark.layer_weights import pre_and_post_layer_weight as dspark_pre_post_weight
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
+
+
+@pytest.mark.parametrize(
+    "model_class",
+    [Qwen3DFlashModel, Qwen3_5DFlashModel, Qwen3DSparkModel, Qwen3_5DSparkModel],
+)
+def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
+    model = model_class.__new__(model_class)
+    model._cos_cached = torch.arange(24).view(6, 4)
+    model._sin_cached = model._cos_cached + 100
+    model.mem_manager = object()
+    model.pre_post_weight = object()
+
+    target_hiddens = torch.arange(6, dtype=torch.float32).view(2, 3)
+    mem_indexes = torch.tensor([7, 11])
+    observed_states = []
+
+    class PreInfer:
+        def context_forward(self, input_ids, infer_state, layer_weight):
+            assert input_ids is None
+            assert layer_weight is model.pre_post_weight
+            assert infer_state.mtp_draft_input_hiddens is target_hiddens
+            observed_states.append(infer_state)
+            return target_hiddens + 1
+
+    class TransformerLayer:
+        def __init__(self, increment):
+            self.increment = increment
+
+        def context_forward(self, hidden, infer_state, layer_weight):
+            assert infer_state is observed_states[0]
+            assert layer_weight == self.increment
+            return hidden + self.increment
+
+    model.pre_infer = PreInfer()
+    model.layers_infer = [TransformerLayer(2), TransformerLayer(3)]
+    model.trans_layers_weight = [2, 3]
+    model_input = SimpleNamespace(
+        batch_size=2,
+        b_seq_len=torch.tensor([3, 5]),
+        mem_indexes=mem_indexes,
+        mtp_draft_input_hiddens=target_hiddens,
+    )
+
+    output = model._decode(model_input)
+
+    assert isinstance(output, ModelOutput)
+    assert output.logits.shape == (2, 1)
+    infer_state = observed_states[0]
+    assert infer_state.mem_manager is model.mem_manager
+    assert infer_state.mem_index is mem_indexes
+    assert torch.equal(infer_state.position_cos, model._cos_cached[[2, 4]])
+    assert torch.equal(infer_state.position_sin, model._sin_cached[[2, 4]])
 
 
 @pytest.mark.parametrize("model_class", [Qwen3DSparkModel, Qwen3_5DSparkModel])

@@ -1,8 +1,11 @@
+import torch
+
 from lightllm.common.basemodel.attention import (
     Fa3AttBackend,
     Fp8Fa3AttBackend,
 )
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
@@ -80,6 +83,30 @@ class Qwen3DFlashModel(LlamaTpPartModel):
             )
             for i in range(self.config["n_layer"])
         ]
+
+    def _decode(self, model_input: ModelInput) -> ModelOutput:
+        if model_input.mtp_draft_input_hiddens is None:
+            return super()._decode(model_input)
+
+        assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
+
+        # Target verification already computed the hidden rows that need to be
+        # committed to the draft cache. Project those rows and write their KV
+        # directly: no token embedding, attention state, or draft logits are
+        # needed for this half of the parallel-block proposal.
+        position_ids = model_input.b_seq_len - 1
+        infer_state = self.infer_state_class()
+        infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
+        infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
+        infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
+        infer_state.mem_manager = self.mem_manager
+        infer_state.mem_index = model_input.mem_indexes
+
+        hidden = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
+        for layer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
+            hidden = layer.context_forward(hidden, infer_state, layer_weight)
+
+        return ModelOutput(logits=hidden.new_empty((model_input.batch_size, 1)))
 
     def _gen_special_model_input(self, token_num: int):
         return {"mtp_draft_input_hiddens": None}
