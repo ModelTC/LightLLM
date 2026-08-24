@@ -10,6 +10,7 @@ import copy
 import hashlib
 import datetime
 import pickle
+from array import array
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -397,7 +398,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await pd_upload_websocket.send(
-                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, prompt_ids))
+                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("i", prompt_ids)))
                 )
                 try:
                     await asyncio.wait_for(pd_event.wait(), timeout=180)
@@ -737,9 +738,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 for sub_req_id, out_str, metadata, finish_status in req_status.out_token_info_list:
                     # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                     metadata["prompt_tokens"] = prompt_tokens
-                    # p 节点返回 prompt_ids 信息，防止 d 节点重新 encode
-                    if self.pd_mode.is_P() and is_first_token:
-                        metadata["prompt_ids"] = prompt_ids
 
                     gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
