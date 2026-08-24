@@ -11,7 +11,12 @@ import signal
 import sys
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
-from lightllm.server.pd_io_struct import NodeRole, ObjType
+from lightllm.server.pd_io_struct import (
+    NodeRole,
+    ObjType,
+    PD_COMPACT_TOKEN_INFO_LEN,
+    build_pd_compact_token_info,
+)
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
@@ -244,10 +249,15 @@ async def _pd_process_generate(
             pd_upload_websocket=pd_upload_websocket,
             pd_event=pd_event,
         ):
-            metadata["node_mode"] = manager.args.run_mode
+            if metadata.get("count_output_tokens") == 1:
+                metadata["node_mode"] = manager.args.run_mode
             if not return_output_logprobs:
                 for key in ("id", "logprob", "cumlogprob", "special", "logprobs"):
                     metadata.pop(key, None)
+                compact_token_info = build_pd_compact_token_info(sub_req_id, request_output, metadata, finish_status)
+                if compact_token_info is not None:
+                    await forwarding_queue.put(compact_token_info)
+                    continue
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
@@ -262,7 +272,16 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: Clien
 
         if handle_list:
             load_info: dict = _get_load_info()
-            await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
+            group_start = 0
+            group_is_compact = len(handle_list[0]) == PD_COMPACT_TOKEN_INFO_LEN
+            for index in range(1, len(handle_list) + 1):
+                item_is_compact = index < len(handle_list) and len(handle_list[index]) == PD_COMPACT_TOKEN_INFO_LEN
+                if index == len(handle_list) or item_is_compact != group_is_compact:
+                    token_list = handle_list[group_start:index]
+                    obj_type = ObjType.TOKEN_PACKS_COMPACT if group_is_compact else ObjType.TOKEN_PACKS
+                    await websocket.send(pickle.dumps((obj_type, token_list, load_info)))
+                    group_start = index
+                    group_is_compact = item_is_compact
 
 
 async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
