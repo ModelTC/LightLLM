@@ -12,6 +12,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     QKGEMMANormWeight,
     FusedMoeWeight,
 )
+from lightllm.models.qwen3next.layer_weights.qkv_gated_rowmm_weight import QKVGatedROWNMMWeight
 
 
 class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
@@ -23,25 +24,17 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def _init_qkv(self):
         in_dim = self.n_embed
-        q_out_dim = self.q_head_num_ * self.head_dim
-        self.qkv_proj = QKVROWNMMWeight(
+        self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
+        qkv_quant = self.get_quant_method("qkv_proj")
+        self.qkvo_gate_proj = QKVGatedROWNMMWeight(
             in_dim=in_dim,
             q_head_num=self.q_head_num_,
             kv_head_num=self.k_head_num_,
             head_dim=self.head_dim,
-            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
+            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name, self._o_gate_weight_name],
             data_type=self.data_type_,
-            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
-            quant_method=self.get_quant_method("qkv_proj"),
-        )
-        self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
-        self._o_gate_proj = ROWMMWeight(
-            in_dim=in_dim,
-            out_dims=[q_out_dim],
-            weight_names=[self._o_gate_weight_name],
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=self.get_quant_method("o_gate_proj"),
+            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name, None],
+            quant_method=qkv_quant,
         )
 
     def _init_weight(self):
