@@ -57,7 +57,7 @@ async def register_and_keep_alive(websocket: WebSocket):
         logger.exception(str(e))
     finally:
         logger.error(f"client {regist_json} removed")
-        await g_objs.httpserver_manager.remove_pd(regist_json)
+        await g_objs.httpserver_manager.remove_pd(regist_json, websocket)
     return
 
 
