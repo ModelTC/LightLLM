@@ -52,7 +52,8 @@ def set_env_start_args(args):
         else:
             decode_capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         min_qp_depth = 2 * (decode_capacity + 1)
-        derived_qp_depth = 1 << (min_qp_depth - 1).bit_length()
+        # NVSHMEM IBGDA rejects QP depths below NVSHMEMI_IBGDA_MIN_QP_DEPTH.
+        derived_qp_depth = max(128, 1 << (min_qp_depth - 1).bit_length())
         configured_qp_depth = int(os.getenv("NVSHMEM_QP_DEPTH", derived_qp_depth))
         if configured_qp_depth < derived_qp_depth:
             logger.warning(
