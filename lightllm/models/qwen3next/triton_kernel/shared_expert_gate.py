@@ -28,10 +28,7 @@ def _sigmoid_mul_kernel(
     # materialized in the gate dtype before the multiplication.
     gate_vals = tl.sigmoid(gate_vals).to(gate.dtype.element_ty)
     # Qwen3.5 uses BF16, so keep both rounded operands in BF16 for the direct
-    # multiply. Preserve the widened multiply for the generic FP16 path.
-    if x.dtype.element_ty == tl.float16:
-        x_vals = x_vals.to(tl.float32)
-        gate_vals = gate_vals.to(tl.float32)
+    # multiply.
     tl.store(x_ptrs, (x_vals * gate_vals).to(x.dtype.element_ty), mask=mask)
 
 
