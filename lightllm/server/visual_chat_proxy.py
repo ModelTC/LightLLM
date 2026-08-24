@@ -265,15 +265,15 @@ class VisualProxySettings:
     remote_api_key: Optional[str] = None
     remote_headers: tuple[tuple[str, str], ...] = ()
     allow_insecure_remote_url: bool = False
-    remote_timeout: float = 90.0
-    remote_connect_timeout: float = 5.0
+    remote_timeout: float = 180.0
+    remote_connect_timeout: float = 10.0
     remote_max_retries: int = 2
-    remote_max_concurrency: int = 32
-    remote_queue_timeout: float = 2.0
-    max_inflight_requests: int = 16
+    remote_max_concurrency: int = 64
+    remote_queue_timeout: float = 10.0
+    max_inflight_requests: int = 64
     circuit_failure_threshold: int = 5
     circuit_recovery_seconds: float = 30.0
-    agent_timeout: float = 180.0
+    agent_timeout: float = 600.0
     max_images: int = 8
     max_image_bytes: int = 20 * 1024 * 1024
     max_total_image_bytes: int = 40 * 1024 * 1024
@@ -350,15 +350,15 @@ class VisualProxySettings:
             remote_api_key=remote_api_key,
             remote_headers=remote_headers,
             allow_insecure_remote_url=allow_insecure_remote_url,
-            remote_timeout=float(getattr(args, "visual_remote_timeout", 90.0)),
-            remote_connect_timeout=float(getattr(args, "visual_remote_connect_timeout", 5.0)),
+            remote_timeout=float(getattr(args, "visual_remote_timeout", 180.0)),
+            remote_connect_timeout=float(getattr(args, "visual_remote_connect_timeout", 10.0)),
             remote_max_retries=int(getattr(args, "visual_remote_max_retries", 2)),
-            remote_max_concurrency=int(getattr(args, "visual_remote_max_concurrency", 32)),
-            remote_queue_timeout=float(getattr(args, "visual_remote_queue_timeout", 2.0)),
-            max_inflight_requests=int(getattr(args, "visual_max_inflight_requests", 16)),
+            remote_max_concurrency=int(getattr(args, "visual_remote_max_concurrency", 64)),
+            remote_queue_timeout=float(getattr(args, "visual_remote_queue_timeout", 10.0)),
+            max_inflight_requests=int(getattr(args, "visual_max_inflight_requests", 64)),
             circuit_failure_threshold=int(getattr(args, "visual_circuit_failure_threshold", 5)),
             circuit_recovery_seconds=float(getattr(args, "visual_circuit_recovery_seconds", 30.0)),
-            agent_timeout=float(getattr(args, "visual_agent_timeout", 180.0)),
+            agent_timeout=float(getattr(args, "visual_agent_timeout", 600.0)),
             max_images=int(getattr(args, "visual_max_images", 8)),
             max_image_bytes=int(getattr(args, "visual_max_image_bytes", 20 * 1024 * 1024)),
             max_total_image_bytes=int(getattr(args, "visual_max_total_image_bytes", 40 * 1024 * 1024)),
@@ -506,15 +506,43 @@ class VisualProxyRuntime:
             await self.client.aclose()
         await self.image_client.aclose()
 
-    @asynccontextmanager
-    async def request_slot(self):
+    async def _acquire_with_disconnect(
+        self,
+        semaphore: asyncio.Semaphore,
+        request: Optional[Request],
+        saturated_message: str,
+    ) -> None:
+        """Acquire queued capacity without retaining a slot after client cancellation."""
+
+        deadline = asyncio.get_running_loop().time() + self.settings.remote_queue_timeout
+        acquired = False
         try:
-            await asyncio.wait_for(
-                self._request_semaphore.acquire(),
-                timeout=self.settings.remote_queue_timeout,
-            )
-        except asyncio.TimeoutError as exc:
-            raise VisualProxyCapacityError("Visual proxy request limit is saturated") from exc
+            while True:
+                if await _request_is_disconnected(request):
+                    raise ClientDisconnected(reason="client disconnected while waiting for visual capacity")
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise VisualProxyCapacityError(saturated_message)
+                try:
+                    await asyncio.wait_for(semaphore.acquire(), timeout=min(0.25, remaining))
+                    acquired = True
+                    break
+                except asyncio.TimeoutError:
+                    continue
+            if await _request_is_disconnected(request):
+                raise ClientDisconnected(reason="client disconnected while waiting for visual capacity")
+        except BaseException:
+            if acquired:
+                semaphore.release()
+            raise
+
+    @asynccontextmanager
+    async def request_slot(self, request: Optional[Request]):
+        await self._acquire_with_disconnect(
+            self._request_semaphore,
+            request,
+            "Visual proxy request limit is saturated",
+        )
         try:
             yield
         finally:
@@ -753,10 +781,11 @@ class VisualProxyRuntime:
 
     async def post_json(self, payload: dict[str, Any], request: Optional[Request], trace_id: str) -> dict[str, Any]:
         self.ensure_remote_available()
-        try:
-            await asyncio.wait_for(self._semaphore.acquire(), timeout=self.settings.remote_queue_timeout)
-        except asyncio.TimeoutError as exc:
-            raise VisualProxyCapacityError("Visual upstream concurrency limit is saturated") from exc
+        await self._acquire_with_disconnect(
+            self._semaphore,
+            request,
+            "Visual upstream concurrency limit is saturated",
+        )
 
         deadline = asyncio.get_running_loop().time() + self.settings.remote_timeout
         try:
@@ -830,10 +859,11 @@ class VisualProxyRuntime:
         """Stream OpenAI-compatible SSE JSON while retaining bounded retries and cancellation."""
 
         self.ensure_remote_available()
-        try:
-            await asyncio.wait_for(self._semaphore.acquire(), timeout=self.settings.remote_queue_timeout)
-        except asyncio.TimeoutError as exc:
-            raise VisualProxyCapacityError("Visual upstream concurrency limit is saturated") from exc
+        await self._acquire_with_disconnect(
+            self._semaphore,
+            request,
+            "Visual upstream concurrency limit is saturated",
+        )
 
         deadline = asyncio.get_running_loop().time() + self.settings.remote_timeout
         response: Optional[httpx.Response] = None
@@ -3855,7 +3885,7 @@ async def visual_chat_completions_impl(
         runtime.settings.trace_dump_dir,
         trace_request,
     )
-    request_slot = runtime.request_slot()
+    request_slot = runtime.request_slot(raw_request)
     await request_slot.__aenter__()
     deferred_stream = False
     try:
