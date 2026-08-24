@@ -30,7 +30,7 @@ P_COMMON_ARGS=(
   --model_name qwen35_27b
   --graph_max_batch_size 8
   --running_max_req_size 8
-  --mem_fraction 0.80
+  --mem_fraction 0.75
   --max_image_token_count 4096
   --max_image_pixels 3686400
   --batch_max_tokens 8192
@@ -40,13 +40,12 @@ P_COMMON_ARGS=(
   --quant_type fp8w8a8-pt-sgl
   --mtp_mode dspark
   --mtp_draft_model_dir "${DSPARK_MODEL_DIR}"
-  --mtp_step 1
+  --mtp_step 5
   "${CHAT_TEMPLATE_ARGS[@]}"
   --pd_trans_mode nccl
   --pd_kv_page_size 4096
   --pd_master_ip 127.0.0.1
   --pd_master_port "${PORT}"
-  --enable_prefill_cudagraph
 )
 
 D_COMMON_ARGS=(
