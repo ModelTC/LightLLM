@@ -1,6 +1,8 @@
 import os
 import pytest
 import time
+from unittest.mock import MagicMock
+
 from easydict import EasyDict
 from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
@@ -67,8 +69,16 @@ def test_get_req_obj_by_index(shm_req_manager):
 def test_put_back_req_obj(shm_req_manager):
     index = shm_req_manager.alloc_req_index()
     req_obj = shm_req_manager.get_req_obj_by_index(index)
+    prompt_ids = req_obj.shm_prompt_ids = MagicMock()
+    logprobs = req_obj.shm_logprobs = MagicMock()
+
     shm_req_manager.put_back_req_obj(req_obj)
+
     assert req_obj.ref_count == 0
+    prompt_ids.detach_shm.assert_called_once_with()
+    logprobs.detach_shm.assert_called_once_with()
+    assert not hasattr(req_obj, "shm_prompt_ids")
+    assert not hasattr(req_obj, "shm_logprobs")
     shm_req_manager.release_req_index(index)
 
 

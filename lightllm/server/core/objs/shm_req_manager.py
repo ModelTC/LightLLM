@@ -136,6 +136,8 @@ class ShmReqManager:
         req_index_in_mem = req.index_in_shm_mem
         assert req_index_in_mem < self.max_req_num
         assert self.proc_private_get_state[req_index_in_mem] == 1
+        req.detach_shm_arrays()
+
         with self.get_req_lock_by_index(req_index_in_mem):
             req.ref_count = req.ref_count - 1
         self.proc_private_get_state[req_index_in_mem] = 0

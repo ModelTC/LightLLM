@@ -37,6 +37,18 @@ def test_create_prompt_ids_shm_array(req):
     assert hasattr(req, "shm_prompt_ids")
 
 
+def test_detach_shm_arrays(req):
+    prompt_ids = req.shm_prompt_ids
+    logprobs = req.shm_logprobs
+
+    req.detach_shm_arrays()
+
+    assert prompt_ids.shm is None
+    assert logprobs.shm is None
+    assert not hasattr(req, "shm_prompt_ids")
+    assert not hasattr(req, "shm_logprobs")
+
+
 def test_get_used_tokens(req):
     req.shm_cur_kv_len = 5
     assert req.get_used_tokens() == 5

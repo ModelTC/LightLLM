@@ -312,6 +312,14 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         return
 
+    def detach_shm_arrays(self):
+        """Detach process-local request-scoped SHM handles before slot reuse."""
+        for attr_name in ("shm_prompt_ids", "shm_logprobs"):
+            shm_array = getattr(self, attr_name, None)
+            if shm_array is not None:
+                shm_array.detach_shm()
+                delattr(self, attr_name)
+
     async def merge_final_token_metadata(
         self,
         metadata: Dict[str, Any],
