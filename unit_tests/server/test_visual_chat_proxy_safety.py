@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 
@@ -5,6 +6,7 @@ import pytest
 from fastapi import Request
 
 from lightllm.server import api_openai
+from lightllm.server import api_cli
 from lightllm.server import visual_chat_proxy
 from lightllm.server.api_models import (
     ChatCompletionRequest,
@@ -314,6 +316,28 @@ def test_visual_trace_format_defaults_to_natural():
     )
 
     assert settings.builtin_trace_format == "natural"
+
+
+def test_visual_capacity_and_timeout_defaults_are_production_sized():
+    parser = argparse.ArgumentParser()
+    api_cli.add_cli_args(parser)
+    args = parser.parse_args([])
+    settings = visual_chat_proxy.VisualProxySettings(remote_url="http://127.0.0.1:18180/generate")
+
+    assert (args.visual_remote_max_concurrency, args.visual_max_inflight_requests) == (64, 64)
+    assert (settings.remote_max_concurrency, settings.max_inflight_requests) == (64, 64)
+    assert (
+        args.visual_remote_timeout,
+        args.visual_remote_connect_timeout,
+        args.visual_remote_queue_timeout,
+        args.visual_agent_timeout,
+    ) == (180.0, 10.0, 10.0, 600.0)
+    assert (
+        settings.remote_timeout,
+        settings.remote_connect_timeout,
+        settings.remote_queue_timeout,
+        settings.agent_timeout,
+    ) == (180.0, 10.0, 10.0, 600.0)
 
 
 def test_visual_request_matches_nova_formal_profile():
@@ -1162,6 +1186,73 @@ def test_proxy_cancellation_closes_nested_dsv4_alloc_request_iterator():
 
     assert active_request_ids == set()
     assert aborted_request_ids == [20_001]
+
+
+def test_client_disconnect_stops_waiting_for_visual_request_capacity():
+    settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate",
+        max_inflight_requests=1,
+        remote_queue_timeout=5.0,
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(settings, client=object())
+
+    class DisconnectableRequest:
+        disconnected = False
+
+        async def is_disconnected(self):
+            return self.disconnected
+
+    request = DisconnectableRequest()
+
+    async def run_test():
+        await runtime._request_semaphore.acquire()
+
+        async def wait_for_slot():
+            async with runtime.request_slot(request):
+                raise AssertionError("disconnected request unexpectedly acquired visual capacity")
+
+        task = asyncio.create_task(wait_for_slot())
+        await asyncio.sleep(0.05)
+        request.disconnected = True
+        with pytest.raises(visual_chat_proxy.ClientDisconnected):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert runtime._request_semaphore._value == 0
+        runtime._request_semaphore.release()
+        assert runtime._request_semaphore._value == 1
+        await runtime.close()
+
+    asyncio.run(run_test())
+
+
+def test_client_disconnect_stops_waiting_for_visual_upstream_capacity():
+    settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate",
+        remote_max_concurrency=1,
+        remote_queue_timeout=5.0,
+    )
+    runtime = visual_chat_proxy.VisualProxyRuntime(settings, client=object())
+
+    class DisconnectableRequest:
+        disconnected = False
+
+        async def is_disconnected(self):
+            return self.disconnected
+
+    request = DisconnectableRequest()
+
+    async def run_test():
+        await runtime._semaphore.acquire()
+        task = asyncio.create_task(runtime.post_json({}, request, "queued-disconnect"))
+        await asyncio.sleep(0.05)
+        request.disconnected = True
+        with pytest.raises(visual_chat_proxy.ClientDisconnected):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert runtime._semaphore._value == 0
+        runtime._semaphore.release()
+        assert runtime._semaphore._value == 1
+        await runtime.close()
+
+    asyncio.run(run_test())
 
 
 def test_invalid_remote_200_opens_circuit_before_another_dsv4_allocation():
