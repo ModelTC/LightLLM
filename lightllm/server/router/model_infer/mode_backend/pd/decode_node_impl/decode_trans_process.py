@@ -1,8 +1,9 @@
-import torch
+import os
 import time
 import inspect
 import threading
 import setproctitle
+import torch
 import torch.multiprocessing as mp
 import queue
 import pickle
@@ -24,6 +25,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.process_check import start_parent_check_thread
 
 logger = init_logger(__name__)
+PD_KV_POLL_INTERVAL_S = float(os.getenv("LIGHTLLM_PD_KV_POLL_INTERVAL_S", "0.001"))
 
 
 def start_decode_trans_process(
@@ -337,7 +339,7 @@ class _DecodeTransModule:
 
             self._check_tasks_time_out()
             if not notifies_dict:
-                time.sleep(0.001)
+                time.sleep(PD_KV_POLL_INTERVAL_S)
 
     def _check_tasks_time_out(self):
         with self.waiting_dict_lock:

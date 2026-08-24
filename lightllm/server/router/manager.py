@@ -1,3 +1,4 @@
+import os
 import time
 import uvloop
 import asyncio
@@ -52,6 +53,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.node_rank = args.node_rank
         self.dp_size = args.dp
         self.schedule_time_interval = args.schedule_time_interval  # 默认30ms 的调度周期
+        self.metric_gauge_step_interval = max(1, int(os.getenv("LIGHTLLM_ROUTER_GAUGE_STEP_INTERVAL", "1")))
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
         self.dp_world_size = self.world_size // self.dp_size
@@ -248,16 +250,17 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                     self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
-                self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
-                self.metric_client.gauge_set("lightllm_num_running_reqs", len(self.running_batch.reqs))
-                self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
-                self.metric_client.gauge_set(
-                    "lightllm_batch_current_max_tokens",
-                    int(
-                        sum(self.shared_token_load.get_dynamic_max_load(d_i) for d_i in range(self.dp_size_in_node))
-                        * self.max_total_token_num
-                    ),
-                )
+                if counter_count % self.metric_gauge_step_interval == 0:
+                    self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
+                    self.metric_client.gauge_set("lightllm_num_running_reqs", len(self.running_batch.reqs))
+                    self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
+                    self.metric_client.gauge_set(
+                        "lightllm_batch_current_max_tokens",
+                        int(
+                            sum(self.shared_token_load.get_dynamic_max_load(d_i) for d_i in range(self.dp_size_in_node))
+                            * self.max_total_token_num
+                        ),
+                    )
             else:
                 self.req_queue.update_token_load(self.running_batch, force_update=True)
                 if counter_count % 300 == 0:
@@ -272,7 +275,14 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                             estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(dp_i)
                             logger.debug(f"dp_i {dp_i} estimated_peak_token_count: {estimated_peak_token_count} \n")
 
-            await asyncio.sleep(self._get_schedule_time_interval())
+            schedule_time_interval = self._get_schedule_time_interval()
+            if schedule_time_interval < 0.001:
+                # uvloop 会将亚毫秒级 sleep 向下取整为忙等待。
+                # 此处使用短暂的阻塞式 sleep 更准确，也能避免
+                # router/metrics 循环退化为占满 CPU 的轮询循环。
+                time.sleep(schedule_time_interval)
+            else:
+                await asyncio.sleep(schedule_time_interval)
 
     async def _step(self):
         """

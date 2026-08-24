@@ -1,3 +1,4 @@
+import os
 import uvloop
 import asyncio
 import setproctitle
@@ -20,6 +21,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
+DETOKENIZATION_POLL_INTERVAL_S = float(os.getenv("LIGHTLLM_DETOKENIZATION_POLL_INTERVAL_S", "0.002"))
 
 
 class DeTokenizationManager:
@@ -93,7 +95,7 @@ class DeTokenizationManager:
                     logger.info(f"detokenize batch cost time {cost_time} ms")
 
                 if not exist_need_detoken:
-                    time.sleep(0.002)
+                    time.sleep(DETOKENIZATION_POLL_INTERVAL_S)
 
         except Exception as e:
             logger.exception(f"detoken process has exception {str(e)}")

@@ -13,6 +13,7 @@ from .trans_process_obj import KVTransProcess
 from lightllm.utils.error_utils import log_exception
 
 logger = init_logger(__name__)
+PD_KV_RETURN_POLL_INTERVAL_S = float(os.getenv("LIGHTLLM_PD_KV_RETURN_POLL_INTERVAL_S", "0.01"))
 
 
 class BaseKVMoveManager:
@@ -77,7 +78,7 @@ class BaseKVMoveManager:
                     self.shm_pd_trans_io_buffer.set_ready()
                     break
                 else:
-                    time.sleep(0.01)
+                    time.sleep(PD_KV_RETURN_POLL_INTERVAL_S)
                     ret_objs.extend(self._collect_return_objects())
 
     def _collect_return_objects(self):

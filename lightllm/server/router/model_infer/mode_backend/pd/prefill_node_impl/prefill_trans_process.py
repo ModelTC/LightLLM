@@ -1,8 +1,9 @@
-import torch
+import os
 import time
 import inspect
 import threading
 import setproctitle
+import torch
 import torch.multiprocessing as mp
 import queue
 import pickle
@@ -19,6 +20,7 @@ from lightllm.utils.process_check import start_parent_check_thread
 
 
 logger = init_logger(__name__)
+PD_KV_POLL_INTERVAL_S = float(os.getenv("LIGHTLLM_PD_KV_POLL_INTERVAL_S", "0.001"))
 
 
 def start_prefill_trans_process(
@@ -283,7 +285,7 @@ class _PrefillTransModule:
             self._check_tasks_time_out()
 
             if not notifies_dict:
-                time.sleep(0.001)
+                time.sleep(PD_KV_POLL_INTERVAL_S)
         return
 
     def _check_tasks_time_out(self):
@@ -328,7 +330,7 @@ class _PrefillTransModule:
     ):
         while True:
             if len(self.waiting_dict) == 0:
-                time.sleep(0.001)
+                time.sleep(PD_KV_POLL_INTERVAL_S)
                 continue
 
             with self.waiting_dict_lock:
@@ -372,7 +374,7 @@ class _PrefillTransModule:
                         trans_task.error_info = "time out in update_task_status_loop"
                         self.failed_queue.put(trans_task)
 
-            time.sleep(0.001)
+            time.sleep(PD_KV_POLL_INTERVAL_S)
 
     @log_exception
     def success_loop(self):
