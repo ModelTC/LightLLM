@@ -1,10 +1,13 @@
 import torch
-from vllm._tilelang_ops import compute_num_split
+
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 
 try:
-    import vllm.model_executor.layers.mhc  # noqa: F401
+    from vllm.model_executor.layers import mhc as vllm_mhc
 except Exception as e:
     raise RuntimeError("DeepSeek-V4 requires vLLM mHC custom ops; failed to import vllm MHC kernels") from e
+
+compute_num_split = vllm_mhc.compute_num_split
 
 
 # vllm DeepseekV4DecoderLayer.hc_post_alpha
@@ -26,8 +29,8 @@ def mhc_warmup_token_sizes(max_tokens, hidden_size, hc_mult):
 
 def hc_pre(residual, hc_fn, hc_scale, hc_base, rms_eps, hc_eps, sinkhorn_iters, norm_weight, norm_eps):
     """Standalone hc_pre for the first layer. residual:[T, hc, dim] ->
-    (x[T,dim], residual, post_mix[T,hc,1], res_mix[T,hc,hc]); the sub-layer RMSNorm is fused via norm_weight."""
-    post_mix, res_mix, x = torch.ops.vllm.mhc_pre_tilelang(
+    (x[T,dim], residual, post_mix[T,hc,1], res_mix[T,hc,hc])."""
+    post_mix, res_mix, x = torch.ops.vllm.mhc_pre(
         residual=residual,
         fn=hc_fn,
         hc_scale=hc_scale,
@@ -37,18 +40,17 @@ def hc_pre(residual, hc_fn, hc_scale, hc_base, rms_eps, hc_eps, sinkhorn_iters, 
         hc_sinkhorn_eps=hc_eps,
         hc_post_mult_value=HC_POST_ALPHA,
         sinkhorn_repeat=sinkhorn_iters,
-        norm_weight=norm_weight,
-        norm_eps=norm_eps,
     )
+    x = rmsnorm_forward(x, norm_weight, norm_eps)
     return x, residual, post_mix, res_mix
 
 
 def hc_fused_post_pre(
     x, residual, post_mix, res_mix, hc_fn, hc_scale, hc_base, rms_eps, hc_eps, sinkhorn_iters, norm_weight, norm_eps
 ):
-    """hc_post of the previous sub-layer fused with hc_pre of the next one (norm fused too).
+    """hc_post of the previous sub-layer fused with hc_pre of the next one.
     Returns (x[T,dim], residual[T,hc,dim], post_mix, res_mix)."""
-    residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre_tilelang(
+    residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
         x=x,
         residual=residual,
         post_layer_mix=post_mix,
@@ -61,22 +63,21 @@ def hc_fused_post_pre(
         hc_sinkhorn_eps=hc_eps,
         hc_post_mult_value=HC_POST_ALPHA,
         sinkhorn_repeat=sinkhorn_iters,
-        norm_weight=norm_weight,
-        norm_eps=norm_eps,
     )
+    x = rmsnorm_forward(x, norm_weight, norm_eps)
     return x, residual, post_mix, res_mix
 
 
 def hc_post(x, residual, post_mix, res_mix):
     """Complete the hc_post left pending by the last layer. -> streams [T, hc, dim]."""
-    return torch.ops.vllm.mhc_post_tilelang(x, residual, post_mix, res_mix)
+    return torch.ops.vllm.mhc_post(x, residual, post_mix, res_mix)
 
 
 def hc_head(streams, hc_fn, hc_scale, hc_base, hc_mult, dim, rms_eps, hc_eps, alloc_func):
     """Final stream collapse before the lm_head. streams:[N, hc*dim] -> [N, dim]."""
     out = alloc_func((streams.shape[0], dim), dtype=streams.dtype, device=streams.device)
-    torch.ops.vllm.hc_head_fused_kernel_tilelang(
-        streams.view(-1, hc_mult, dim),
+    torch.ops.vllm.hc_head_fused_kernel(
+        streams.view(-1, hc_mult, dim).contiguous(),
         hc_fn,
         hc_scale,
         hc_base,

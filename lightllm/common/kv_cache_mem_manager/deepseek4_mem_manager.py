@@ -417,6 +417,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         indexer_head_dim: int = 128,
         cpu_cache_token_page_size: int = DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
         swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
+        min_swa_tokens: int = 0,
         always_copy=False,
         mem_fraction=0.9,
     ):
@@ -438,6 +439,9 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.c4_state_ring = DSV4_C4_STATE_RING + mtp_step
         self.c128_state_ring = _ceil_div(DSV4_C128_STATE_RING + mtp_step, 4) * 4
         self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
+        self.min_swa_tokens = int(min_swa_tokens)
+        if self.min_swa_tokens < 0:
+            raise ValueError(f"min_swa_tokens must be non-negative, got {self.min_swa_tokens}")
         self.cpu_cache_layout = DeepseekV4CpuCacheLayout.from_compress_rates(
             self.compress_rates,
             token_page_size=cpu_cache_token_page_size,
@@ -461,7 +465,8 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     # ------------------------------------------------------------------ sizing
     def _planned_swa_size(self, full_size: int) -> int:
-        return _ceil_div(int(full_size * self.swa_full_tokens_ratio), DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
+        planned_tokens = max(int(full_size * self.swa_full_tokens_ratio), self.min_swa_tokens)
+        return _ceil_div(planned_tokens, DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
 
     @staticmethod
     def _paged_state_rows(num_swa_pages: int, ring: int, ratio: int) -> int:

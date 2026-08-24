@@ -36,8 +36,11 @@ class KvCacheAllocator:
 
     def alloc(self, need_size) -> torch.Tensor:
         if need_size > self.mark_end - self.mark_start:
-            logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
-            assert False, "error alloc state"
+            raise RuntimeError(
+                "KV cache allocator capacity exceeded: "
+                f"requested={need_size}, contiguous_available={self.mark_end - self.mark_start}, "
+                f"total_available={self.can_use_mem_size}, capacity={self.size}"
+            )
 
         start = self.mark_start
         end = self.mark_start + need_size

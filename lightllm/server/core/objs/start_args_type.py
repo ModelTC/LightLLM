@@ -65,6 +65,9 @@ class StartArgs:
     model_dir: Optional[str] = field(default=None)
     tokenizer_mode: str = field(default="fast")
     load_way: str = field(default="HF")
+    distributed_weight_load: str = field(
+        default="disabled", metadata={"choices": ["disabled", "node", "global"]}
+    )
     max_total_token_num: Optional[int] = field(default=None)
     mem_fraction: float = field(default=0.8)
     batch_max_tokens: Optional[int] = field(default=None)

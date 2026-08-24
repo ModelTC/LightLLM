@@ -270,6 +270,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
           DS(Deepspeed)""",
     )
     parser.add_argument(
+        "--distributed_weight_load",
+        type=str,
+        choices=["disabled", "node", "global"],
+        default="disabled",
+        help=(
+            "Keep EP expert tensors sharded across readers, while loading replicated tensors once "
+            "and broadcasting them with NCCL. 'node' uses one rotating reader per node and NVLink "
+            "inside the node; 'global' uses one rotating reader globally and may transfer over IB."
+        ),
+    )
+    parser.add_argument(
         "--max_total_token_num",
         type=int,
         default=None,

@@ -1341,7 +1341,27 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         for case in cases:
             if args.warmup_iters > 0:
                 executor.run_case(case, warmup=True)
-            result = executor.run_case(case, warmup=False)
+            profile_case = args.profile_case
+            should_profile = (
+                rank_id == 0
+                and args.profile_dir is not None
+                and (profile_case is None or profile_case == case.name or profile_case == case.stage)
+            )
+            if should_profile:
+                profile_dir = Path(args.profile_dir)
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                    record_shapes=False,
+                    profile_memory=False,
+                    with_stack=False,
+                ) as profiler:
+                    result = executor.run_case(case, warmup=False)
+                profiler.export_chrome_trace(str(profile_dir / f"{case.name}.rank0.json"))
+                profile_table = profiler.key_averages().table(sort_by="self_cuda_time_total", row_limit=100)
+                (profile_dir / f"{case.name}.rank0.txt").write_text(profile_table)
+            else:
+                result = executor.run_case(case, warmup=False)
             results.append(asdict(result))
             dist.barrier()
 
@@ -1657,6 +1677,13 @@ def add_static_benchmark_args(parser: argparse.ArgumentParser):
     parser.add_argument("--bench_iters", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--dump_file", type=str, default=None, help="write aggregated benchmark results as JSON")
+    parser.add_argument("--profile_dir", type=str, default=None, help="export a rank-0 torch profiler trace")
+    parser.add_argument(
+        "--profile_case",
+        type=str,
+        default=None,
+        help="profile only an exact case name or a stage ('prefill'/'decode')",
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None):

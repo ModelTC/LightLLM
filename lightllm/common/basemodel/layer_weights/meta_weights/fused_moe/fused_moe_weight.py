@@ -13,9 +13,6 @@ from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_cal
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class FusedMoeWeight(BaseWeightTpl):
@@ -104,10 +101,6 @@ class FusedMoeWeight(BaseWeightTpl):
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
-            logger.debug(
-                f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
-                f"redundancy_expertids: {self.redundancy_expert_ids}"
-            )
             self.local_n_routed_experts = self.n_routed_experts // self.global_world_size + self.redundancy_expert_num
             n_experts_per_rank = self.n_routed_experts // self.global_world_size
             start_expert_id = self.global_rank_ * n_experts_per_rank
