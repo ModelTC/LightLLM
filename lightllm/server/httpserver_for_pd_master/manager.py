@@ -160,7 +160,9 @@ class HttpServerManagerForPDMaster:
             self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
         )
 
+        return_output_logprobs = getattr(sampling_params, "return_output_logprobs", True)
         origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
+        origin_sampling_params.return_output_logprobs = return_output_logprobs
         origin_group_request_id = self.id_gen.generate_id()
 
         # Record one user request even when it is expanded into multiple independent
@@ -174,6 +176,7 @@ class HttpServerManagerForPDMaster:
         generators = []
         for choice_index in range(choice_count):
             choice_sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
+            choice_sampling_params.return_output_logprobs = return_output_logprobs
             choice_sampling_params.n = 1
             choice_sampling_params.best_of = 1
             generators.append(
@@ -224,6 +227,7 @@ class HttpServerManagerForPDMaster:
 
             for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
+                sampling_params.return_output_logprobs = getattr(origin_sampling_params, "return_output_logprobs", True)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")

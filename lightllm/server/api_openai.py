@@ -349,6 +349,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+    # The chat API does not expose output-token logprobs. PD nodes use this
+    # transport-only marker to avoid forwarding unused per-token metadata.
+    sampling_params.return_output_logprobs = False
 
     sampling_params.verify()
     results_generator = g_objs.httpserver_manager.generate(
@@ -843,6 +846,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+    sampling_params.return_output_logprobs = request.logprobs is not None
     sampling_params.verify()
 
     # v1/completions does not support multimodal inputs, so we use an empty MultimodalParams
@@ -880,6 +884,7 @@ async def _process_prompts_completion(
         if len(prompts) > 1:
             individual_sampling_params = SamplingParams()
             individual_sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+            individual_sampling_params.return_output_logprobs = request.logprobs is not None
             individual_sampling_params.verify()
         else:
             individual_sampling_params = sampling_params
