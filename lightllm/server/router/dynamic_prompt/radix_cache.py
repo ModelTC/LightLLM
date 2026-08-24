@@ -689,61 +689,80 @@ class RadixCache:
             return
         allocator = self.mem_manager.swa_page_allocator
         target = allocator.can_use_mem_size + int(need_pages)
-        evict_slots = []
-        invalidate_payloads = []
-        evict_swa_pages = 0
-        for free_last in (False, True):
-            visited = set()
-            for leaf in self.evict_tree_set:
+        planned_reclaim_pages = 0
+        actual_reclaim_pages = 0
+        while allocator.can_use_mem_size < target:
+            evict_slots = []
+            invalidate_payloads = []
+            evict_swa_pages = 0
+            for free_last in (False, True):
+                visited = set()
+                for leaf in self.evict_tree_set:
+                    if allocator.can_use_mem_size + evict_swa_pages >= target:
+                        break
+                    node = leaf
+                    while node is not None and node is not self.root_node:
+                        node_id = id(node)
+                        if node_id in visited:
+                            node = node.parent
+                            continue
+                        visited.add(node_id)
+
+                        has_direct_ref = self._node_direct_ref_num(node) > 0
+
+                        payload = node.token_extra_value
+                        if (
+                            len(node.token_mem_index_value) > 0
+                            and payload is not None
+                            and payload.swa_page_valid is not None
+                        ):
+                            last_page = int(payload.swa_last_valid_page)
+                            if last_page >= 0:
+                                if free_last:
+                                    if has_direct_ref:
+                                        # 活跃请求恰好命中该节点时，最后一页仍需保留。
+                                        node = node.parent
+                                        continue
+                                    page_slice = slice(last_page, last_page + 1)
+                                else:
+                                    page_slice = slice(0, last_page)
+                                valid_pages = int(payload.swa_page_valid[page_slice].sum().item())
+                                if valid_pages > 0:
+                                    start = page_slice.start * self.page_size
+                                    end = min(page_slice.stop * self.page_size, len(node.token_mem_index_value))
+                                    if end > start:
+                                        evict_slots.append(node.token_mem_index_value[start:end])
+                                        invalidate_payloads.append((payload, page_slice, free_last))
+                                        evict_swa_pages += valid_pages * self._swa_pages_per_prompt_page
+                                        if allocator.can_use_mem_size + evict_swa_pages >= target:
+                                            break
+                        node = node.parent
                 if allocator.can_use_mem_size + evict_swa_pages >= target:
                     break
-                node = leaf
-                while node is not None and node is not self.root_node:
-                    node_id = id(node)
-                    if node_id in visited:
-                        node = node.parent
-                        continue
-                    visited.add(node_id)
-
-                    has_direct_ref = self._node_direct_ref_num(node) > 0
-
-                    payload = node.token_extra_value
-                    if (
-                        len(node.token_mem_index_value) > 0
-                        and payload is not None
-                        and payload.swa_page_valid is not None
-                    ):
-                        last_page = int(payload.swa_last_valid_page)
-                        if last_page >= 0:
-                            if free_last:
-                                if has_direct_ref:
-                                    # 活跃请求恰好命中该节点时，最后一页仍需保留。
-                                    node = node.parent
-                                    continue
-                                page_slice = slice(last_page, last_page + 1)
-                            else:
-                                page_slice = slice(0, last_page)
-                            valid_pages = int(payload.swa_page_valid[page_slice].sum().item())
-                            if valid_pages > 0:
-                                start = page_slice.start * self.page_size
-                                end = min(page_slice.stop * self.page_size, len(node.token_mem_index_value))
-                                if end > start:
-                                    evict_slots.append(node.token_mem_index_value[start:end])
-                                    invalidate_payloads.append((payload, page_slice, free_last))
-                                    evict_swa_pages += valid_pages * self._swa_pages_per_prompt_page
-                                    if allocator.can_use_mem_size + evict_swa_pages >= target:
-                                        break
-                    node = node.parent
-            if allocator.can_use_mem_size + evict_swa_pages >= target:
+            if len(evict_slots) == 0:
                 break
-        if len(evict_slots) == 0:
-            return
-        self.mem_manager.evict_swa(torch.cat(evict_slots))
-        for payload, page_slice, free_last in invalidate_payloads:
-            payload.swa_page_valid[page_slice] = False
-            if free_last:
-                payload.swa_last_valid_page = -1
-        self.swa_tree_total_pages_num -= evict_swa_pages
+            free_pages_before = allocator.can_use_mem_size
+            self.mem_manager.evict_swa(torch.cat(evict_slots))
+            for payload, page_slice, free_last in invalidate_payloads:
+                payload.swa_page_valid[page_slice] = False
+                if free_last:
+                    payload.swa_last_valid_page = -1
+            self.swa_tree_total_pages_num -= evict_swa_pages
+            planned_reclaim_pages += evict_swa_pages
+            actual_reclaim_pages += allocator.can_use_mem_size - free_pages_before
+
+        # bitmap 是候选页账本，最终能否继续分配必须以物理 allocator 的真实水位为准。
+        if allocator.can_use_mem_size < target or actual_reclaim_pages < planned_reclaim_pages:
+            logger.warning(
+                "DSV4 SWA reclaim mismatch: target_free_pages=%d actual_free_pages=%d "
+                "planned_reclaim_pages=%d actual_reclaim_pages=%d tree_pages=%d protected_pages=%d",
+                target,
+                allocator.can_use_mem_size,
+                planned_reclaim_pages,
+                actual_reclaim_pages,
+                self.swa_tree_total_pages_num,
+                self.swa_refed_pages_num,
+            )
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):

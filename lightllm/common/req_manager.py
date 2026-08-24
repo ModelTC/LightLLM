@@ -593,8 +593,9 @@ class DeepseekV4ReqManager(ReqManager):
                     continue
                 mark = self._swa_evict_marks[req_idx]
                 if mark < 0:
-                    # 未经过 prefill prep 的保守路径: 不回收旧位置，仅推进水位线。
-                    self._swa_evict_marks[req_idx] = self._align_swa_evict_frontier(seq_len - retain)
+                    # direct-decode 中 [0, seq_len-1) 是已有 KV；exact hit 时这段前缀归 radix 所有，
+                    # 水位必须从前缀末端开始，不能由请求回收。
+                    self._swa_evict_marks[req_idx] = self._align_swa_evict_frontier(seq_len - 1)
                     continue
                 evict_end = self._align_swa_evict_frontier(seq_len - retain)
                 if evict_end > mark:
