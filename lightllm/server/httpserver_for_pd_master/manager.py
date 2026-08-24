@@ -12,7 +12,13 @@ from contextlib import aclosing
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInfo
+from ..pd_io_struct import (
+    PD_Client_Obj,
+    PDUpKVStatus,
+    ObjType,
+    PDDecodeNodeInfo,
+    unpack_pd_compact_token_info,
+)
 from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
@@ -635,12 +641,19 @@ class HttpServerManagerForPDMaster:
 
             try:
                 for obj in objs:
-                    if obj[0] == ObjType.TOKEN_PACKS:
+                    if obj[0] in (ObjType.TOKEN_PACKS, ObjType.TOKEN_PACKS_COMPACT):
                         token_list, node_load_info = obj[1], obj[2]
                         self.pd_manager.update_node_load_info(node_load_info)
 
-                        for sub_req_id, text, metadata, finish_status in token_list:
-                            finish_status: FinishStatus = finish_status
+                        compact_pack = obj[0] == ObjType.TOKEN_PACKS_COMPACT
+                        for token_info in token_list:
+                            if compact_pack:
+                                sub_req_id, text, metadata, finish_status_value = unpack_pd_compact_token_info(
+                                    token_info
+                                )
+                                finish_status = FinishStatus(finish_status_value)
+                            else:
+                                sub_req_id, text, metadata, finish_status = token_info
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             try:
                                 req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
