@@ -185,15 +185,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "credentials would cross the network without transport encryption."
         ),
     )
-    parser.add_argument("--visual_remote_timeout", type=float, default=90.0)
-    parser.add_argument("--visual_remote_connect_timeout", type=float, default=5.0)
+    parser.add_argument("--visual_remote_timeout", type=float, default=180.0)
+    parser.add_argument("--visual_remote_connect_timeout", type=float, default=10.0)
     parser.add_argument("--visual_remote_max_retries", type=int, default=2)
-    parser.add_argument("--visual_remote_max_concurrency", type=int, default=32)
-    parser.add_argument("--visual_remote_queue_timeout", type=float, default=2.0)
-    parser.add_argument("--visual_max_inflight_requests", type=int, default=16)
+    parser.add_argument("--visual_remote_max_concurrency", type=int, default=64)
+    parser.add_argument("--visual_remote_queue_timeout", type=float, default=10.0)
+    parser.add_argument("--visual_max_inflight_requests", type=int, default=64)
     parser.add_argument("--visual_circuit_failure_threshold", type=int, default=5)
     parser.add_argument("--visual_circuit_recovery_seconds", type=float, default=30.0)
-    parser.add_argument("--visual_agent_timeout", type=float, default=180.0)
+    parser.add_argument("--visual_agent_timeout", type=float, default=600.0)
     parser.add_argument(
         "--visual_builtin_trace_format",
         "--builtin-trace-format",
