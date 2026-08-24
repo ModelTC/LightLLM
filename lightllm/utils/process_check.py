@@ -8,6 +8,21 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def install_fatal_thread_excepthook():
+    """Terminate the process when an unexpected daemon-thread exception escapes."""
+
+    def exit_process(args):
+        try:
+            logger.error(
+                f"fatal background thread failure in {getattr(args.thread, 'name', 'unknown')}",
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+        finally:
+            os._exit(1)
+
+    threading.excepthook = exit_process
+
+
 def is_process_active(pid):
     try:
         process = psutil.Process(pid)
