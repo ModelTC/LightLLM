@@ -23,9 +23,15 @@ class Fa3AttBackend(BaseAttBackend):
 
         args = model.args
         # Dynamic verification may keep the target row and all MTP draft rows for
-        # every running request. max_seq_length is max_req_total_len plus the MTP
-        # headroom reserved when the model is initialized.
-        self.page_table_max_batch_size = args.running_max_req_size * (args.mtp_step + 1)
+        # every running request. TPSP and CUDA Graph may pad that physical batch
+        # further, so the fixed buffer must cover both execution paths.
+        running_max_batch_size = args.running_max_req_size * (args.mtp_step + 1)
+        if args.enable_tpsp_mix_mode:
+            tp_size = model.tp_world_size_
+            running_max_batch_size = (running_max_batch_size + tp_size - 1) // tp_size * tp_size
+        self.page_table_max_batch_size = max(running_max_batch_size, model.graph_max_batch_size)
+        # max_seq_length is max_req_total_len plus the MTP headroom reserved when
+        # the model is initialized.
         self.page_table_max_seq_len = model.max_seq_length
         buffer_count = 2 if args.enable_decode_microbatch_overlap else 1
         workspace_size = self.page_table_max_batch_size * self.page_table_max_seq_len
@@ -40,6 +46,11 @@ class Fa3AttBackend(BaseAttBackend):
 
     def get_page_table_view(self, att_batch_size, microbatch_index):
         """Return a fixed-stride page-table view without allocating on the decode path."""
+        if att_batch_size > self.page_table_max_batch_size:
+            raise RuntimeError(
+                f"FA3 attention batch size {att_batch_size} exceeds page-table capacity "
+                f"{self.page_table_max_batch_size}"
+            )
         max_seq_len = self.page_table_max_seq_len
         return self.page_table_buffers[microbatch_index][: att_batch_size * max_seq_len].reshape(
             att_batch_size, max_seq_len
@@ -108,7 +119,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
 
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
-        sm_scale = 1.0 / (Lq ** 0.5)
+        sm_scale = 1.0 / (Lq**0.5)
         o = flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
@@ -204,6 +215,11 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     def _init_page_table(self, b_att_req_idx: torch.Tensor):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
+        if self.infer_state.max_kv_seq_len > self.backend.page_table_max_seq_len:
+            raise RuntimeError(
+                f"FA3 max KV sequence length {self.infer_state.max_kv_seq_len} exceeds page-table capacity "
+                f"{self.backend.page_table_max_seq_len}"
+            )
         self.page_table = self.backend.get_page_table_view(
             att_batch_size=att_batch_size,
             microbatch_index=self.infer_state.microbatch_index,
@@ -255,7 +271,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
 
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
-        sm_scale = 1.0 / (Lq ** 0.5)
+        sm_scale = 1.0 / (Lq**0.5)
         o = flash_attn_with_kvcache_autotune(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),

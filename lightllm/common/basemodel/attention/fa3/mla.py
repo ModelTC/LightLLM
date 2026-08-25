@@ -152,6 +152,11 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def _init_page_table(self, b_att_req_idx: torch.Tensor):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
+        if self.infer_state.max_kv_seq_len > self.backend.page_table_max_seq_len:
+            raise RuntimeError(
+                f"FA3 max KV sequence length {self.infer_state.max_kv_seq_len} exceeds page-table capacity "
+                f"{self.backend.page_table_max_seq_len}"
+            )
         self.page_table = self.backend.get_page_table_view(
             att_batch_size=att_batch_size,
             microbatch_index=self.infer_state.microbatch_index,
