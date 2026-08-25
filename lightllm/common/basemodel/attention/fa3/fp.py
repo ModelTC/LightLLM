@@ -14,9 +14,11 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_g
 class Fa3AttBackend(BaseAttBackend):
     """Common fixed page-table storage for FA3 attention backends."""
 
+    page_table_buffers = None
+
     def __init__(self, model):
         super().__init__(model=model)
-        if getattr(self, "page_table_buffers", None) is not None:
+        if self.page_table_buffers is not None:
             return
 
         args = model.args
