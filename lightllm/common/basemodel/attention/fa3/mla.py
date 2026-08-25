@@ -1,43 +1,16 @@
 import dataclasses
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
-from lightllm.utils.envs_utils import get_env_start_args
+from .fp import Fa3AttBackend
 
 
-class MlaFa3AttBackend(BaseAttBackend):
-    def __init__(self, model):
-        super().__init__(model=model)
-        self.get_page_table_buffer()  # init
-
-    def get_page_table_buffer(self):
-        """
-        用于减少 decode graph 捕获的时候, 造成显存二次方增长的情况.
-        """
-        model = self.model
-        if not hasattr(self, "_shared_page_table_buffer"):
-            max_att_batch_size = model.graph_max_batch_size
-            if not get_env_start_args().mtp_dynamic_verify:
-                # FA3 merges each fixed speculative block into one attention sequence.
-                max_att_batch_size //= model.mtp_manager.get_decode_batch_multiplier(model.is_mtp_draft_model)
-
-            buffer_count = 2 if model.args.enable_decode_microbatch_overlap else 1
-            workspace_size = max_att_batch_size * model.graph_max_len_in_batch
-            self._shared_page_table_buffer = [
-                self.get_gpu_workspace_buffer(
-                    key_name=f"fa3_mla_page_table_{buffer_index}",
-                    workspace_size=workspace_size,
-                    dtype=torch.int32,
-                )
-                for buffer_index in range(buffer_count)
-            ]
-        return self._shared_page_table_buffer
-
+class MlaFa3AttBackend(Fa3AttBackend):
     def create_att_prefill_state(self, infer_state) -> "MlaFa3PrefillAttState":
         return MlaFa3PrefillAttState(backend=self, infer_state=infer_state)
 
@@ -179,21 +152,10 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def _init_page_table(self, b_att_req_idx: torch.Tensor):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
-        # 可以使用 cuda graph的时候从 buffer中申请
-        if (
-            self.infer_state.batch_size <= model.graph_max_batch_size
-            and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
-        ):
-            page_buffer = self.backend.get_page_table_buffer()
-            self.page_table = page_buffer[self.infer_state.microbatch_index][
-                : att_batch_size * model.graph_max_len_in_batch
-            ].reshape(att_batch_size, model.graph_max_len_in_batch)
-        else:
-            self.page_table = torch.empty(
-                (att_batch_size, self.infer_state.max_kv_seq_len),
-                dtype=torch.int32,
-                device=self.infer_state.input_ids.device,
-            )
+        self.page_table = self.backend.get_page_table_view(
+            att_batch_size=att_batch_size,
+            microbatch_index=self.infer_state.microbatch_index,
+        )
 
         page_table_copy(
             page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
