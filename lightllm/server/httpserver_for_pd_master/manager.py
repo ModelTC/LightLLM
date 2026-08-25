@@ -54,6 +54,7 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
+        self.next_request_queue_metric_time = 0.0
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -62,7 +63,7 @@ class HttpServerManagerForPDMaster:
         return
 
     def get_real_supported_max_req_total_len(self):
-        # HttpServerManager.generate 会借用 _check_and_repair_length(self, ...)，其中会调用本方法。
+        # HttpServerManager.generate 会借用长度校验逻辑，其中会调用本方法。
         # PD master 无本地 token 池 shm 计数；上限与启动参数及子节点对齐的 max_req_total_len 一致。
         return self.max_req_total_len
 
@@ -159,12 +160,9 @@ class HttpServerManagerForPDMaster:
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
         input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
-        fake_prompt_ids = [0 for _ in range(input_token_num)]
         from lightllm.server.httpserver.manager import HttpServerManager
 
-        await HttpServerManager._check_and_repair_length(
-            self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
-        )
+        HttpServerManager._check_and_repair_length(self, prompt_tokens=input_token_num, sampling_params=sampling_params)
 
         return_output_logprobs = getattr(sampling_params, "return_output_logprobs", True)
         origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
@@ -458,7 +456,14 @@ class HttpServerManagerForPDMaster:
                         group_request_id=group_request_id,
                         reason="fetch_pd_stream decode period check network disconnected",
                     )
+            request_queue_duration = req_status.oldest_age()
             token_list = req_status.pop_all_tokens()
+            if token_list and now >= self.next_request_queue_metric_time:
+                self.metric_client.histogram_observe(
+                    "lightllm_pd_master_request_queue_duration", request_queue_duration
+                )
+                self.next_request_queue_metric_time = now + 1.0
+            ready_token_list = []
             for sub_req_id, request_output, metadata, finish_status in token_list:
                 output_index = metadata.get("count_output_tokens")
                 # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
@@ -470,12 +475,16 @@ class HttpServerManagerForPDMaster:
                             if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                 finish_status = FinishStatus(FinishStatus.NO_FINISH)
                         metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                        yield sub_req_id, request_output, metadata, finish_status
+                        ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
                     else:
                         continue
                 else:
                     metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                    yield sub_req_id, request_output, metadata, finish_status
+                    ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
+
+            for index, token_info in enumerate(ready_token_list):
+                token_info[2]["_pd_stream_batch_end"] = index == len(ready_token_list) - 1
+                yield token_info
 
         return
 
@@ -624,6 +633,8 @@ class HttpServerManagerForPDMaster:
     async def handle_loop(self):
         self.infos_queues = AsyncQueue()
         asyncio.create_task(self.timer_log())
+        event_loop = asyncio.get_running_loop()
+        next_ingress_queue_metric_time = 0.0
 
         use_config_server = self.args.config_server_host and self.args.config_server_port
 
@@ -633,7 +644,15 @@ class HttpServerManagerForPDMaster:
             asyncio.create_task(register_loop(self))
 
         while True:
-            objs = await self.infos_queues.wait_to_get_all_data()
+            await self.infos_queues.wait_to_ready()
+            ingress_queue_duration = self.infos_queues.oldest_age()
+            objs = await self.infos_queues.get_all_data()
+            now = event_loop.time()
+            if objs and now >= next_ingress_queue_metric_time:
+                self.metric_client.histogram_observe(
+                    "lightllm_pd_master_ingress_queue_duration", ingress_queue_duration
+                )
+                next_ingress_queue_metric_time = now + 1.0
 
             try:
                 for obj in objs:
@@ -686,6 +705,7 @@ class ReqStatus:
         self.up_status_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
+        self.oldest_token_time = None
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
 
@@ -701,19 +721,29 @@ class ReqStatus:
         was_empty = not self.out_token_info_list
         self.out_token_info_list.append(token_info)
         if was_empty:
+            self.oldest_token_time = time.monotonic()
             self.event.set()
+
+    def oldest_age(self):
+        if self.oldest_token_time is None:
+            return 0.0
+        return time.monotonic() - self.oldest_token_time
 
     def pop_all_tokens(self):
         self.event.clear()
         ans = self.out_token_info_list
         self.out_token_info_list = []
+        self.oldest_token_time = None
         return ans
 
     def put_tokens_to_front(self, token_list: List[Tuple[int, str, dict, FinishStatus]]):
         if not token_list:
             return
 
+        was_empty = not self.out_token_info_list
         self.out_token_info_list = token_list + self.out_token_info_list
+        if was_empty:
+            self.oldest_token_time = time.monotonic()
         self.event.set()
 
 

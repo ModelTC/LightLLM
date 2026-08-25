@@ -1572,6 +1572,10 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Streaming incremental parsing for DSML format tool calls."""
+        overlap = max(len(self.invoke_end_token), len(self.param_end_token)) - 1
+        new_input_window = self._buffer[-overlap:] + new_text
+        has_new_invoke_end = self.invoke_end_token in new_input_window
+        has_new_param_end = self.param_end_token in new_input_window
         self._buffer += new_text
         normal_text_parts = []
         calls: List[ToolCallItem] = []
@@ -1621,7 +1625,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
                 if self.eot_token.startswith(current_text):
                     return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
 
-                complete_invoke_match = self.invoke_regex.match(current_text)
+                complete_invoke_match = self.invoke_regex.match(current_text) if has_new_invoke_end else None
                 if complete_invoke_match:
                     func_name = complete_invoke_match.group(1)
                     invoke_body = complete_invoke_match.group(2)
@@ -1681,6 +1685,9 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     self.streamed_args_for_tool.append("")
                     continue
 
+                if self.current_tool_name_sent and not has_new_param_end:
+                    return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
+
                 partial_match = self.partial_invoke_regex.match(current_text)
                 if not partial_match:
                     return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
@@ -1712,7 +1719,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
                         "name": func_name,
                         "arguments": {},
                     }
-                else:
+                if has_new_param_end:
                     # Stream arguments as complete parameters are parsed
                     param_matches = self.param_regex.findall(partial_body)
                     if param_matches and len(param_matches) > len(self._accumulated_params):

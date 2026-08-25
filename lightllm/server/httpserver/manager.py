@@ -396,7 +396,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             prompt_tokens = len(prompt_ids)
-            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+            self._check_and_repair_length(prompt_tokens, sampling_params)
             # 监控
             self.metric_client.counter_inc("lightllm_request_count")
             self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
@@ -626,10 +626,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 得到系统真正能支持的最大长度，同时收到启动参数中模型支持长度的限制，也收到token容量的限制。
         return min(self.shm_max_total_token_num.get_value() - 36, self.max_req_total_len)
 
-    async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
-        if not prompt_ids:
-            raise ValueError("prompt_ids is empty")
-        prompt_tokens = len(prompt_ids)
+    def _check_and_repair_length(self, prompt_tokens: int, sampling_params: SamplingParams) -> None:
+        if prompt_tokens <= 0:
+            raise ValueError("prompt_tokens must be greater than 0")
         # 这里 -36 是保留一些不可预知的边界余量，防止系统出错
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
@@ -651,13 +650,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 )
 
         # last repaired
-        req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
+        req_total_len = prompt_tokens + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
             raise ValueError(
                 f"the req total len (input len + output len) is too long > max_req_total_len:{self.max_req_total_len}"
             )
-
-        return prompt_ids
 
     async def transfer_to_next_module_or_node(
         self,
