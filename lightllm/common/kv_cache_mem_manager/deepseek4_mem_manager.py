@@ -1,3 +1,5 @@
+import os
+
 import torch
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Union
@@ -38,7 +40,7 @@ DSV4_C4_STATE_RING = 8  # 8 rows/page before MTP padding
 DSV4_C128_STATE_RING = 128  # 128 rows/request before MTP padding
 # swa 池占 full token 空间的比例(sglang DSV4 默认 swa_full_tokens_ratio=0.1 同值)。
 # 瞬时借页/驱逐走 swa 压力阀;池子大小仅按 ratio 切分,不再叠加结构性余量。
-DSV4_SWA_FULL_TOKENS_RATIO = 0.1  # 0.1
+DSV4_SWA_FULL_TOKENS_RATIO = float(os.getenv("DSV4_SWA_FULL_TOKENS_RATIO", "0.1"))
 
 
 def _ceil_div(a: int, b: int) -> int:
