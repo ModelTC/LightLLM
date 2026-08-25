@@ -41,6 +41,9 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         super()._verify_params()
         assert not self.enable_tpsp_mix_mode, "Qwen3 DFlash draft model does not support TP-SP"
 
+        assert self.args.mtp_step <= self.config["block_size"]
+        self.config["block_size"] = self.args.mtp_step
+
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached

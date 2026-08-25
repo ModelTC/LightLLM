@@ -13,6 +13,31 @@ from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dspark.layer_weights import pre_and_post_layer_weight as dspark_pre_post_weight
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
+from lightllm.models.llama.model import LlamaTpPartModel
+
+
+@pytest.mark.parametrize("mtp_step", [1, 5, 7])
+def test_parallel_block_runtime_width_follows_mtp_step(monkeypatch, mtp_step):
+    monkeypatch.setattr(LlamaTpPartModel, "_verify_params", lambda self: None)
+    model = Qwen3DFlashModel.__new__(Qwen3DFlashModel)
+    model.args = SimpleNamespace(mtp_mode="dspark", mtp_step=mtp_step)
+    model.config = {"block_size": 7}
+    model.enable_tpsp_mix_mode = False
+
+    model._verify_params()
+
+    assert model.config["block_size"] == mtp_step
+
+
+def test_parallel_block_rejects_mtp_step_above_checkpoint_capacity(monkeypatch):
+    monkeypatch.setattr(LlamaTpPartModel, "_verify_params", lambda self: None)
+    model = Qwen3DFlashModel.__new__(Qwen3DFlashModel)
+    model.args = SimpleNamespace(mtp_mode="dflash", mtp_step=8)
+    model.config = {"block_size": 7}
+    model.enable_tpsp_mix_mode = False
+
+    with pytest.raises(AssertionError):
+        model._verify_params()
 
 
 @pytest.mark.parametrize(
