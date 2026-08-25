@@ -267,11 +267,23 @@ async def _pd_process_generate(
 # 转发token的task
 async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
     max_message_size = get_lightllm_websocket_max_message_size()
+    event_loop = asyncio.get_running_loop()
+    next_queue_metric_time = 0.0
 
     while True:
-        handle_list = await forwarding_queue.wait_to_get_all_data()
+        await forwarding_queue.wait_to_ready()
+        queue_duration = forwarding_queue.oldest_age()
+        handle_list = await forwarding_queue.get_all_data()
 
         if handle_list:
+            now = event_loop.time()
+            if now >= next_queue_metric_time:
+                from lightllm.server.api_http import g_objs
+
+                g_objs.httpserver_manager.metric_client.histogram_observe(
+                    "lightllm_pd_forward_queue_duration", queue_duration
+                )
+                next_queue_metric_time = now + 1.0
             load_info: dict = _get_load_info()
             pending_handle_lists = []
             group_start = 0
