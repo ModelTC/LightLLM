@@ -37,7 +37,9 @@ def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
     if args.mtp_mode is not None:
-        assert not args.disable_cudagraph, "--disable_cudagraph is not supported when --mtp_mode is enabled"
+        assert (
+            not args.disable_cudagraph or args.run_mode == "prefill"
+        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -173,7 +175,9 @@ def _launch_subprocesses(args: StartArgs):
                 "dflash",
             ), f"--mtp_draft_model_dir is required for {args.mtp_mode} mode"
             args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
-        assert args.mtp_step > 0
+        assert args.mtp_step > 0 or (
+            args.mtp_step == 0 and args.run_mode == "prefill" and args.mtp_mode in ("dspark", "dflash")
+        )
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0

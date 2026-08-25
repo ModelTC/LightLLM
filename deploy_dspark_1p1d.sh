@@ -10,7 +10,8 @@ CPU_CACHE_SIZE="${CPU_CACHE_SIZE:-600}"
 CHAT_TEMPLATE="${CHAT_TEMPLATE:-${MODEL_DIR}/chat_template.jinja}"
 PD_MASTER_IP="${PD_MASTER_IP:-127.0.0.1}"
 
-# DSpark checkpoint block_size. Prefill and decode must use the same value.
+# Decode speculative width. Prefill only builds/transfers draft KV and does not
+# need this decode-only setting.
 MTP_STEP="${MTP_STEP:-5}"
 
 # DSpark expands each logical decode request into speculative verification rows.
@@ -54,7 +55,6 @@ P_COMMON_ARGS=(
   --quant_type fp8w8a8-pt-sgl
   --mtp_mode dspark
   --mtp_draft_model_dir "${DRAFT_MODEL_DIR}"
-  --mtp_step "${MTP_STEP}"
   --chat_template "${CHAT_TEMPLATE}"
   --pd_trans_mode nixl
   --pd_kv_page_size 4096
@@ -109,6 +109,7 @@ start_prefill() {
     python -m lightllm.server.api_server \
       "${P_COMMON_ARGS[@]}" \
       --run_mode prefill \
+      --disable_cudagraph \
       --enable_cpu_cache \
       --cpu_cache_storage_size "${CPU_CACHE_SIZE}" \
       --tp 4 \
