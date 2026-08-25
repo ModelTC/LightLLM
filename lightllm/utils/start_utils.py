@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 class SubmoduleManager:
     def __init__(self):
         self.processes = []
+        self.process_names = {}
 
     def start_submodule_processes(self, start_funcs=[], start_args=[]):
         assert len(start_funcs) == len(start_args)
@@ -42,8 +43,16 @@ class SubmoduleManager:
                 logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
 
         assert all([proc.is_alive() for proc in processes])
+        processes = [psutil.Process(proc.pid) for proc in processes]
         self.processes.extend(processes)
-        return
+        self.process_names.update((process, process.name()) for process in processes)
+        return processes
+
+    def register_process_tree(self, root_process):
+        """Add all current descendants of a managed process to supervision."""
+        descendants = root_process.children(recursive=True)
+        self.processes.extend(descendants)
+        self.process_names.update((process, process.name()) for process in descendants)
 
     def terminate_all_processes(self):
         from lightllm.utils.envs_utils import get_env_start_args
@@ -61,9 +70,9 @@ class SubmoduleManager:
                 logger.warning(f"Process {proc.pid} does not exist.")
 
         for proc in self.processes:
-            if proc.is_alive():
+            if proc.is_running():
                 kill_recursive(proc)
-                proc.join()
+                proc.wait()
 
         # recover the gpu compute mode
         is_enable_mps = get_env_start_args().enable_mps
@@ -129,15 +138,19 @@ class SubmoduleManager:
                     raise RuntimeError(message)
 
             dead_processes = [
-                process for process in self.processes if not process.is_alive() or not is_process_active(process.pid)
+                process for process in self.processes if not process.is_running() or not is_process_active(process.pid)
             ]
             if dead_processes:
-                dead_process_descriptions = ", ".join(
-                    f"name={getattr(process, 'name', type(process).__name__)} "
-                    f"pid={getattr(process, 'pid', None)} "
-                    f"exitcode={getattr(process, 'exitcode', None)}"
-                    for process in dead_processes
-                )
+                dead_process_descriptions = []
+                for process in dead_processes:
+                    try:
+                        exitcode = process.wait(timeout=0)
+                    except psutil.TimeoutExpired:
+                        exitcode = None
+                    dead_process_descriptions.append(
+                        f"name={self.process_names[process]} pid={process.pid} exitcode={exitcode}"
+                    )
+                dead_process_descriptions = ", ".join(dead_process_descriptions)
                 message = f"Critical LightLLM submodule exited unexpectedly: {dead_process_descriptions}"
                 logger.error(message)
                 self._cleanup_after_process_failure(http_server_process)

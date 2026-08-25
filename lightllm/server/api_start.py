@@ -396,13 +396,14 @@ def _launch_subprocesses(args: StartArgs):
         start_args=[(args,)],
     )
 
-    process_manager.start_submodule_processes(
+    router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
             (args,),
             (args,),
         ],
     )
+    process_manager.register_process_tree(router_process)
 
     return process_manager
 

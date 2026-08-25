@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 
 from lightllm.utils import start_utils
@@ -21,6 +19,89 @@ class FakeHttpServerProcess:
     def wait(self, timeout=None):
         self.wait_timeouts.append(timeout)
         return self.return_code
+
+
+class FakeProcess:
+    def __init__(self, pid, running=True, children=None, name="process", exitcode=None, wait_timeout=False):
+        self.pid = pid
+        self.running = running
+        self._children = children or []
+        self._name = name
+        self.exitcode = exitcode
+        self.wait_timeout = wait_timeout
+
+    def is_running(self):
+        return self.running
+
+    def children(self, recursive=False):
+        return self._children
+
+    def name(self):
+        return self._name
+
+    def wait(self, timeout=None):
+        if self.wait_timeout:
+            raise start_utils.psutil.TimeoutExpired(timeout, pid=self.pid, name=self._name)
+        return self.exitcode
+
+
+def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypatch):
+    class FakePipeReader:
+        def recv(self):
+            return "init ok"
+
+    class FakeMpProcess:
+        next_pid = 1000
+
+        def __init__(self, target, args):
+            self.pid = self.next_pid
+            FakeMpProcess.next_pid += 1
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(start_utils.mp, "Pipe", lambda duplex: (FakePipeReader(), object()))
+    monkeypatch.setattr(start_utils.mp, "Process", FakeMpProcess)
+    monkeypatch.setattr(
+        start_utils.psutil,
+        "Process",
+        lambda pid: FakeProcess(pid=pid, name=f"process-{pid}"),
+    )
+    process_manager = start_utils.SubmoduleManager()
+
+    processes = process_manager.start_submodule_processes(
+        start_funcs=[lambda pipe_writer: None, lambda pipe_writer: None],
+        start_args=[(), ()],
+    )
+
+    assert processes == process_manager.processes
+    assert [process.pid for process in processes] == [1000, 1001]
+    assert process_manager.process_names == {
+        processes[0]: "process-1000",
+        processes[1]: "process-1001",
+    }
+
+
+def test_register_process_tree_adds_recursive_descendants():
+    descendants = [
+        FakeProcess(pid=1001, name="model_infer"),
+        FakeProcess(pid=1002, name="pd_manager"),
+        FakeProcess(pid=1003, name="pd_worker"),
+    ]
+    router_process = FakeProcess(pid=1000, children=descendants)
+    process_manager = start_utils.SubmoduleManager()
+
+    process_manager.register_process_tree(router_process)
+
+    assert process_manager.processes == descendants
+    assert process_manager.process_names == {
+        descendants[0]: "model_infer",
+        descendants[1]: "pd_manager",
+        descendants[2]: "pd_worker",
+    }
 
 
 def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
@@ -68,12 +149,14 @@ def test_supervisor_fails_when_http_server_exits(monkeypatch):
 
 def test_supervisor_fails_and_cleans_up_when_submodule_exits(monkeypatch):
     http_server_process = FakeHttpServerProcess()
-    dead_process = SimpleNamespace(name="router", pid=1234, exitcode=-9, is_alive=lambda: False)
+    dead_process = FakeProcess(pid=1234, running=False, name="router", exitcode=-9)
     process_manager = start_utils.SubmoduleManager()
     process_manager.processes = [dead_process]
+    process_manager.process_names = {dead_process: dead_process.name()}
     terminate_calls = []
     kill_calls = []
     monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
     monkeypatch.setattr(start_utils, "kill_recursive", lambda process: kill_calls.append(process))
 
     with pytest.raises(
@@ -88,9 +171,10 @@ def test_supervisor_fails_and_cleans_up_when_submodule_exits(monkeypatch):
 
 def test_supervisor_treats_zombie_submodule_as_dead(monkeypatch):
     http_server_process = FakeHttpServerProcess()
-    zombie_process = SimpleNamespace(name="router", pid=1234, exitcode=None, is_alive=lambda: True)
+    zombie_process = FakeProcess(pid=1234, name="router", exitcode=-9)
     process_manager = start_utils.SubmoduleManager()
     process_manager.processes = [zombie_process]
+    process_manager.process_names = {zombie_process: zombie_process.name()}
     terminate_calls = []
     kill_calls = []
     monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
@@ -99,7 +183,7 @@ def test_supervisor_treats_zombie_submodule_as_dead(monkeypatch):
 
     with pytest.raises(
         RuntimeError,
-        match="Critical LightLLM submodule exited unexpectedly: name=router pid=1234 exitcode=None",
+        match="Critical LightLLM submodule exited unexpectedly: name=router pid=1234 exitcode=-9",
     ):
         process_manager.supervise_processes(http_server_process)
 
@@ -109,9 +193,10 @@ def test_supervisor_treats_zombie_submodule_as_dead(monkeypatch):
 
 def test_supervisor_keeps_polling_while_all_processes_are_alive(monkeypatch):
     http_server_process = FakeHttpServerProcess()
-    child_process = SimpleNamespace(name="router", pid=1234, exitcode=None, is_alive=lambda: True)
+    child_process = FakeProcess(pid=1234)
     process_manager = start_utils.SubmoduleManager()
     process_manager.processes = [child_process]
+    process_manager.process_names = {child_process: child_process.name()}
     terminate_calls = []
     sleep_calls = []
     monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
@@ -131,17 +216,19 @@ def test_supervisor_keeps_polling_while_all_processes_are_alive(monkeypatch):
 
 
 def test_supervisor_supports_submodule_only_processes(monkeypatch):
-    dead_process = SimpleNamespace(name="visual", pid=1234, exitcode=1, is_alive=lambda: False)
+    dead_process = FakeProcess(pid=1234, running=False, name="model_infer", wait_timeout=True)
     process_manager = start_utils.SubmoduleManager()
     process_manager.processes = [dead_process]
+    process_manager.process_names = {dead_process: dead_process.name()}
     terminate_calls = []
     kill_calls = []
     monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: False)
     monkeypatch.setattr(start_utils, "kill_recursive", lambda process: kill_calls.append(process))
 
     with pytest.raises(
         RuntimeError,
-        match="Critical LightLLM submodule exited unexpectedly: name=visual pid=1234 exitcode=1",
+        match="Critical LightLLM submodule exited unexpectedly: name=model_infer pid=1234 exitcode=None",
     ):
         process_manager.supervise_processes()
 
