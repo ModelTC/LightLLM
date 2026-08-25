@@ -49,6 +49,7 @@ class ChunkedPrefillBackend(ModeBackend):
         )
         return
 
+    @torch.inference_mode(mode=True)
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
         try:
