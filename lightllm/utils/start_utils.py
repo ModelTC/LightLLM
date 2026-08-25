@@ -49,10 +49,24 @@ class SubmoduleManager:
         return processes
 
     def register_process_tree(self, root_process):
-        """Add all current descendants of a managed process to supervision."""
-        descendants = root_process.children(recursive=True)
-        self.processes.extend(descendants)
-        self.process_names.update((process, process.name()) for process in descendants)
+        """Add persistent LightLLM descendants to supervision.
+
+        A managed process may create short-lived helper processes while loading
+        models or compiling kernels. Those helpers retain a generic process name,
+        while persistent LightLLM services set a ``lightllm::`` process title.
+        """
+        for process in root_process.children(recursive=True):
+            try:
+                process_name = process.name()
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                # A short-lived child may exit while the process tree is scanned.
+                continue
+
+            if not process_name.startswith("lightllm::"):
+                continue
+
+            self.processes.append(process)
+            self.process_names[process] = process_name
 
     def terminate_all_processes(self):
         from lightllm.utils.envs_utils import get_env_start_args

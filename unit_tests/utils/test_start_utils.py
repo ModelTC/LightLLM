@@ -87,9 +87,9 @@ def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypa
 
 def test_register_process_tree_adds_recursive_descendants():
     descendants = [
-        FakeProcess(pid=1001, name="model_infer"),
-        FakeProcess(pid=1002, name="pd_manager"),
-        FakeProcess(pid=1003, name="pd_worker"),
+        FakeProcess(pid=1001, name="lightllm::model_infer"),
+        FakeProcess(pid=1002, name="lightllm::pd_manager"),
+        FakeProcess(pid=1003, name="lightllm::pd_worker"),
     ]
     router_process = FakeProcess(pid=1000, children=descendants)
     process_manager = start_utils.SubmoduleManager()
@@ -98,10 +98,41 @@ def test_register_process_tree_adds_recursive_descendants():
 
     assert process_manager.processes == descendants
     assert process_manager.process_names == {
-        descendants[0]: "model_infer",
-        descendants[1]: "pd_manager",
-        descendants[2]: "pd_worker",
+        descendants[0]: "lightllm::model_infer",
+        descendants[1]: "lightllm::pd_manager",
+        descendants[2]: "lightllm::pd_worker",
     }
+
+
+def test_register_process_tree_filters_short_lived_helper_processes():
+    model_process = FakeProcess(pid=1001, name="lightllm::model_infer")
+    compile_worker = FakeProcess(pid=1002, name="python")
+    pd_process = FakeProcess(pid=1003, name="lightllm::decode_trans")
+    router_process = FakeProcess(pid=1000, children=[model_process, compile_worker, pd_process])
+    process_manager = start_utils.SubmoduleManager()
+
+    process_manager.register_process_tree(router_process)
+
+    assert process_manager.processes == [model_process, pd_process]
+    assert process_manager.process_names == {
+        model_process: "lightllm::model_infer",
+        pd_process: "lightllm::decode_trans",
+    }
+
+
+def test_register_process_tree_ignores_processes_that_exit_during_scan():
+    class ExitedProcess(FakeProcess):
+        def name(self):
+            raise start_utils.psutil.NoSuchProcess(self.pid)
+
+    exited_process = ExitedProcess(pid=1001)
+    router_process = FakeProcess(pid=1000, children=[exited_process])
+    process_manager = start_utils.SubmoduleManager()
+
+    process_manager.register_process_tree(router_process)
+
+    assert process_manager.processes == []
+    assert process_manager.process_names == {}
 
 
 def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
