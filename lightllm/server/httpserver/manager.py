@@ -354,11 +354,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
             image_count=image_count,
         )
 
-        async with self._run_reqs_count_lock:
-            prev = self.run_reqs_count_mark.get_value()
-            self.run_reqs_count_mark.set_value(prev + 1)
-            if prev == 0:
-                self.latest_success_infer_time_mark.set_value(int(time.time()))
+        running_request_registered = False
+        if not self.pd_mode.is_P():
+            await self._register_running_request()
+            running_request_registered = True
 
         try:
             # RL：进入 generation admission。若当前处于 pause_generation / abort，
@@ -426,6 +425,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
                     # 直接 raise PDPrefillNodeStopGenToken
                     raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
+
+            if self.pd_mode.is_P():
+                # 等待 decode 分配期间尚未进入本地推理，不应触发 prefill 推理健康超时。
+                await self._register_running_request()
+                running_request_registered = True
 
             # 申请资源并存储
             alloced_req_indexes = []
@@ -526,8 +530,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # 防止 pending 请求泄漏导致 pause 无法正确结束。
             if self.rl_controller is not None:
                 await self.rl_controller.unregister_generation_admission(group_request_id)
-            async with self._run_reqs_count_lock:
-                self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
+            if running_request_registered:
+                await self._unregister_running_request()
         return
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
@@ -999,6 +1003,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             self.recycle_event.set()
         return
+
+    async def _register_running_request(self):
+        async with self._run_reqs_count_lock:
+            prev = self.run_reqs_count_mark.get_value()
+            self.run_reqs_count_mark.set_value(prev + 1)
+            if prev == 0:
+                self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+    async def _unregister_running_request(self):
+        async with self._run_reqs_count_lock:
+            self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
 
 
 class ReqStatus:

@@ -258,8 +258,18 @@ async def _pd_process_generate(
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
+    except asyncio.CancelledError:
+        # PD master 主动 abort 或连接断开时不需要反向上报生成错误。
+        pass
     except BaseException as e:
-        logger.error(str(e))
+        group_request_id = sampling_params.group_request_id
+        logger.exception(f"pd node generate request {group_request_id} failed: {str(e)}")
+        try:
+            await pd_upload_websocket.send(
+                pickle.dumps((ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, f"{type(e).__name__}: {str(e)}"))
+            )
+        except Exception:
+            logger.exception(f"report pd node generate error failed, group_request_id: {group_request_id}")
     finally:
         manager.cancel_pd_request_registration(sampling_params.group_request_id)
 
