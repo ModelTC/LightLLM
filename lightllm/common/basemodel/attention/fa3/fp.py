@@ -18,9 +18,14 @@ class Fa3AttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
+
+    # 延迟到首次获取 page table 时再初始化，避免 PD 分离模式下的 prefill 节点
+    # 分配仅供 decode 使用的 buffer，减少显存浪费。
+    def _init_page_table_buffers(self):
         if self.page_table_buffers is not None:
             return
 
+        model = self.model
         args = model.args
         # Dynamic verification may keep the target row and all MTP draft rows for
         # every running request. TPSP and CUDA Graph may pad that physical batch
@@ -45,7 +50,8 @@ class Fa3AttBackend(BaseAttBackend):
         ]
 
     def get_page_table_view(self, att_batch_size, max_kv_len, microbatch_index):
-        """Return a contiguous page-table view without allocating on the decode path."""
+        """Lazily initialize storage and return a contiguous page-table view."""
+        self._init_page_table_buffers()
         if att_batch_size > self.page_table_max_batch_size:
             raise RuntimeError(
                 f"FA3 attention batch size {att_batch_size} exceeds page-table capacity "
