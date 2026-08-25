@@ -417,11 +417,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await pd_upload_websocket.send(
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("i", prompt_ids)))
                 )
-                try:
-                    await asyncio.wait_for(pd_event.wait(), timeout=180)
-                except asyncio.TimeoutError:
-                    logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
-                    raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
+                await pd_event.wait()
 
                 decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
                 sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))

@@ -468,12 +468,18 @@ class HttpServerManagerForPDMaster:
                 output_index = metadata.get("count_output_tokens")
                 # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
                 if output_index == 1:
+                    node_run_mode = metadata.pop("node_mode", None)
                     if first_token_gen is False:
                         first_token_gen = True
-                        node_run_mode = metadata.pop("node_mode", None)
                         if node_run_mode == "prefill":
                             if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                 finish_status = FinishStatus(FinishStatus.NO_FINISH)
+                        metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
+                        ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
+                    elif finish_status.status in (
+                        FinishStatus.FINISHED_ABORTED,
+                        FinishStatus.FINISHED_ERROR,
+                    ):
                         metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                         ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
                     else:
@@ -519,6 +525,9 @@ class HttpServerManagerForPDMaster:
                     prompt_cache_len = metadata.get("prompt_cache_len", 0)
                     req_status.put_tokens_to_front(new_tokens)
                     return prompt_cache_len
+                if token[3].is_finished():
+                    req_status.put_tokens_to_front(new_tokens)
+                    return ready_kv_len
 
     async def _wait_to_token_package(
         self,
