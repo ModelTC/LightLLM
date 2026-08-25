@@ -65,6 +65,9 @@ class SubmoduleManager:
             if not process_name.startswith("lightllm::"):
                 continue
 
+            if not process.is_running() or not is_process_active(process.pid):
+                continue
+
             self.processes.append(process)
             self.process_names[process] = process_name
 
