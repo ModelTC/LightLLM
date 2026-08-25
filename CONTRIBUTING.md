@@ -2,9 +2,7 @@
 
 ### Coding Style Guide
 
-In general, we adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html), and we recommend to use `yapf` to format your code.
-
-In this project, we adopted `pre-commit` to automatic check the code style.
+This project uses [`black`](https://github.com/psf/black) (line length 120) and `flake8` for code style. Both are run automatically via `pre-commit` (see `.pre-commit-config.yaml` for the exact configuration).
 
 To begin with, you should follow the step below to install `pre-commit`.
 
