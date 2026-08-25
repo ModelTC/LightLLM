@@ -247,8 +247,20 @@ async def _pd_process_generate(
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
+    except asyncio.CancelledError:
+        # PD master 主动 abort 或连接断开清理任务时会走取消路径，不需要反向重复上报。
+        pass
     except BaseException as e:
-        logger.error(str(e))
+        group_request_id = sampling_params.group_request_id
+        logger.exception(f"pd node generate request {group_request_id} failed: {str(e)}")
+        try:
+            # 本地生成在任意阶段失败后，及时通知 PD master 终止对应请求，避免 master
+            # 只能依赖 prefill/decode 阶段的超时才能发现异常。
+            await pd_upload_websocket.send(
+                pickle.dumps((ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, f"{type(e).__name__}: {str(e)}"))
+            )
+        except Exception:
+            logger.exception(f"report pd node generate error failed, group_request_id: {group_request_id}")
 
 
 # 转发token的task

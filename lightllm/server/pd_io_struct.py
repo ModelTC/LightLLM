@@ -41,6 +41,7 @@ class ObjType(enum.Enum):
     PD_UPLOAD_PREFILL_PROMPT_IDS = 4  # prefill 节点上报生成的 prompt ids 信息。
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
+    PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
 
 
 @dataclass

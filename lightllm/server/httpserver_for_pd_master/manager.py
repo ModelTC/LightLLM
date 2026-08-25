@@ -398,6 +398,7 @@ class HttpServerManagerForPDMaster:
         except ServerBusyError:
             logger.warning(f"group_request_id: {group_request_id} wait prefill prompt ids time out")
             raise
+        req_status.raise_if_error()
 
         prompt_ids = prefill_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
@@ -418,6 +419,7 @@ class HttpServerManagerForPDMaster:
         except ServerBusyError:
             logger.warning(f"group_request_id: {group_request_id} wait decode stage time out err, server is busy now.")
             raise
+        req_status.raise_if_error()
 
         # 将 decode 节点上报的当前请求使用的decode节点的信息下发给 p 节点，这样 p 节点才知道将 kv 传输给那个 d 节点。
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
@@ -439,6 +441,7 @@ class HttpServerManagerForPDMaster:
 
         while True:
             await req_status.wait_to_ready()
+            req_status.raise_if_error()
             if await request.is_disconnected():
                 raise ClientDisconnected(
                     group_request_id=group_request_id,
@@ -480,6 +483,7 @@ class HttpServerManagerForPDMaster:
         new_tokens = []
         while True:
             await req_status.wait_to_ready()
+            req_status.raise_if_error()
             if await request.is_disconnected():
                 raise ClientDisconnected(
                     group_request_id=group_request_id,
@@ -656,6 +660,18 @@ class HttpServerManagerForPDMaster:
                             logger.error(
                                 f"PD_UPLOAD_PREFILL_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
                             )
+                    elif obj[0] == ObjType.PD_UPLOAD_GENERATE_ERROR:
+                        _, group_req_id, error_info = obj
+                        logger.error(
+                            f"received PD node generate error, group_req_id: {group_req_id}, error: {error_info}"
+                        )
+                        req_status = self.req_id_to_out_inf.get(group_req_id)
+                        if req_status is None:
+                            logger.error(
+                                f"PD_UPLOAD_GENERATE_ERROR fail find req status for group_req_id: {group_req_id}"
+                            )
+                        else:
+                            await req_status.set_error(error_info)
                     else:
                         logger.error(f"recevie error obj {obj}")
             except BaseException as e:
@@ -681,12 +697,30 @@ class ReqStatus:
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
+        self.error_info: Optional[str] = None
 
     async def wait_to_ready(self):
         try:
             await asyncio.wait_for(self.event.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
+
+    async def set_error(self, error_info: str):
+        async with self.lock:
+            self.error_info = error_info
+            # 请求可能正在等待 Prefill prompt ids、Decode KV 资源或输出 token，
+            # 设置全部事件，让请求自己的执行循环立即醒来并抛出异常。
+            self.event.set()
+            self.up_status_event.set()
+            self.prefill_prompt_ids_event.set()
+
+    def raise_if_error(self):
+        if self.error_info is not None:
+            logger.error(
+                f"group_request_id: {self.req_id} detected PD node generate error, "
+                f"raise exception to end the request flow early: {self.error_info}"
+            )
+            raise RuntimeError(f"PD node generate failed: {self.error_info}")
 
     async def can_read(self, req_id_to_out_inf):
         async with self.lock:

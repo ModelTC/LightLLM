@@ -337,11 +337,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
             image_count=image_count,
         )
 
-        async with self._run_reqs_count_lock:
-            prev = self.run_reqs_count_mark.get_value()
-            self.run_reqs_count_mark.set_value(prev + 1)
-            if prev == 0:
-                self.latest_success_infer_time_mark.set_value(int(time.time()))
+        running_request_registered = False
+        if not self.pd_mode.is_P():
+            await self._register_running_request()
+            running_request_registered = True
 
         try:
             # RL：进入 generation admission。若当前处于 pause_generation / abort，
@@ -413,6 +412,19 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
                     # 直接 raise PDPrefillNodeStopGenToken
                     raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
+
+            if self.pd_mode.is_P():
+                # PD Prefill 节点上报 prompt ids 后，需要等待 PD master 从 Decode 节点取得
+                # decode_node_info 和 KV 资源信息。Decode 节点容量已满时，这个等待可能持续较长时间，
+                # 此时 Prefill 节点尚未进入本地推理。如果提前增加运行请求计数，期间又没有 token
+                # 刷新 latest_success_infer_time_mark，/health 会把正常的 Decode 资源等待误判成 Prefill
+                # 推理卡死。因此这里只在 Decode 资源分配完成、且确认确实需要执行 prefill 后登记。
+                #
+                # 这样会缩小 Prefill 节点自身健康检查的覆盖范围：prompt encode、资源上报及 Decode
+                # 资源等待阶段不再计入本地推理健康状态。资源分配异常应由 PD master 侧的运行请求计数、
+                # Decode 节点健康检查和等待资源的超时逻辑负责监控，不能依赖 Prefill 推理计数判断。
+                await self._register_running_request()
+                running_request_registered = True
 
             # 申请资源并存储
             alloced_req_indexes = []
@@ -513,8 +525,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # 防止 pending 请求泄漏导致 pause 无法正确结束。
             if self.rl_controller is not None:
                 await self.rl_controller.unregister_generation_admission(group_request_id)
-            async with self._run_reqs_count_lock:
-                self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
+            if running_request_registered:
+                await self._unregister_running_request()
         return
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
@@ -1000,6 +1012,23 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             self.recycle_event.set()
         return
+
+    async def _register_running_request(self):
+        """登记一个开始运行的请求，必须与 ``_unregister_running_request`` 配对调用。
+
+        当运行请求数从 0 变为 1 时，同时刷新健康检查时间，避免服务长时间空闲后
+        刚开始处理新请求就被误判为推理超时。
+        """
+        async with self._run_reqs_count_lock:
+            prev = self.run_reqs_count_mark.get_value()
+            self.run_reqs_count_mark.set_value(prev + 1)
+            if prev == 0:
+                self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+    async def _unregister_running_request(self):
+        """注销一个结束运行的请求，必须在 finally 中与登记操作配对调用。"""
+        async with self._run_reqs_count_lock:
+            self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
 
 
 class ReqStatus:
