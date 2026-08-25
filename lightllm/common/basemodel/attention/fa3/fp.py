@@ -218,14 +218,25 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     def _init_page_table(self, b_att_req_idx: torch.Tensor):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
+        actual_max_kv_len = self.infer_state.max_kv_seq_len
+        page_table_width = actual_max_kv_len
+        if model.graph is not None and model.graph.can_run(
+            batch_size=self.infer_state.batch_size,
+            max_len_in_batch=actual_max_kv_len,
+        ):
+            # CUDA Graph replay uses the shape and strides captured with the
+            # graph-wide maximum KV length. Keep that fixed row stride while
+            # writing only the valid portion of each runtime row below.
+            page_table_width = model.graph.graph_max_len_in_batch
+
         self.page_table = self.backend.get_page_table_view(
             att_batch_size=att_batch_size,
-            max_kv_len=self.infer_state.max_kv_seq_len,
+            max_kv_len=page_table_width,
             microbatch_index=self.infer_state.microbatch_index,
         )
 
         page_table_copy(
-            page_table=self.page_table,
+            page_table=self.page_table[:, :actual_max_kv_len],
             req_to_token_indexs=model.req_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
         )
