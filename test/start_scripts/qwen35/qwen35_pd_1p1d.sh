@@ -40,6 +40,7 @@ P_COMMON_ARGS=(
   --quant_type fp8w8a8-pt-sgl
   --mtp_mode dspark
   --mtp_draft_model_dir "${DSPARK_MODEL_DIR}"
+  --mtp_step 5
   "${CHAT_TEMPLATE_ARGS[@]}"
   --pd_trans_mode nccl
   --pd_kv_page_size 4096
