@@ -148,7 +148,11 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "max_req_num": self.args.running_max_req_size,
+            "max_req_num": (
+                self.args.running_max_req_size
+                if self.args.run_mode in ["prefill", "normal"] and self.args.enable_dp_prompt_cache_fetch
+                else self.args.per_dp_running_max_req_size
+            ),
             "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
             "nccl_host": self.args.nccl_host,
             "nccl_port": get_shm_port_args().nccl_port,
