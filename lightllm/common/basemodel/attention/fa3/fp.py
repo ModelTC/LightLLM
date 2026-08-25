@@ -44,16 +44,19 @@ class Fa3AttBackend(BaseAttBackend):
             for buffer_index in range(buffer_count)
         ]
 
-    def get_page_table_view(self, att_batch_size, microbatch_index):
-        """Return a fixed-stride page-table view without allocating on the decode path."""
+    def get_page_table_view(self, att_batch_size, max_kv_len, microbatch_index):
+        """Return a contiguous page-table view without allocating on the decode path."""
         if att_batch_size > self.page_table_max_batch_size:
             raise RuntimeError(
                 f"FA3 attention batch size {att_batch_size} exceeds page-table capacity "
                 f"{self.page_table_max_batch_size}"
             )
-        max_seq_len = self.page_table_max_seq_len
-        return self.page_table_buffers[microbatch_index][: att_batch_size * max_seq_len].reshape(
-            att_batch_size, max_seq_len
+        if max_kv_len > self.page_table_max_seq_len:
+            raise RuntimeError(
+                f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity " f"{self.page_table_max_seq_len}"
+            )
+        return self.page_table_buffers[microbatch_index][: att_batch_size * max_kv_len].reshape(
+            att_batch_size, max_kv_len
         )
 
     def create_att_prefill_state(self, infer_state) -> "Fa3PrefillAttState":
@@ -215,18 +218,14 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     def _init_page_table(self, b_att_req_idx: torch.Tensor):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
-        if self.infer_state.max_kv_seq_len > self.backend.page_table_max_seq_len:
-            raise RuntimeError(
-                f"FA3 max KV sequence length {self.infer_state.max_kv_seq_len} exceeds page-table capacity "
-                f"{self.backend.page_table_max_seq_len}"
-            )
         self.page_table = self.backend.get_page_table_view(
             att_batch_size=att_batch_size,
+            max_kv_len=self.infer_state.max_kv_seq_len,
             microbatch_index=self.infer_state.microbatch_index,
         )
 
         page_table_copy(
-            page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
+            page_table=self.page_table,
             req_to_token_indexs=model.req_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
         )
