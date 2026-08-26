@@ -610,38 +610,27 @@ class ModeBackend:
 
     def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
         """
-        保持第一个可运行长请求之前的原始顺序，将后续长请求移到队尾。
-
-        这样排在后面的短请求可以轻量插队；如果本轮仍有 token 额度，队尾的长请求也可以运行。
-        paused、aborted、finished 和 slave 请求仍交给主循环处理，并且不占用首个长请求位置。
+        保留第一个长请求的调度位置，其余请求优先调度剩余 prefill token 更少的请求。
         """
         short_token_threshold = self.args.short_prefill_token_threshold
         if short_token_threshold is None:
             return ready_reqs
 
-        reordered_reqs = []
-        deferred_long_reqs = []
-        has_kept_long_req = False
-        for req in ready_reqs:
-            # cur_kv_len 已包含 prefix match 和之前完成的 chunk，只需计算剩余 prompt token。
-            remaining_prefill_tokens = max(0, req.shm_req.input_len - req.cur_kv_len)
-            is_runnable_long_req = (
-                remaining_prefill_tokens > short_token_threshold
-                and not req.filter_mark
-                and not req.wait_pause
-                and not req.paused
-                and not req.infer_aborted
-                and not req.finish_status.is_finished()
-                and not req.is_slave_req()
-            )
-            if is_runnable_long_req:
-                if has_kept_long_req:
-                    deferred_long_reqs.append(req)
-                    continue
-                has_kept_long_req = True
-            reordered_reqs.append(req)
+        def remaining_prefill_tokens(req: InferReq) -> int:
+            # cur_kv_len 已包含 prefix match 和之前完成的 chunk。
+            return max(0, req.shm_req.input_len - req.cur_kv_len)
 
-        return reordered_reqs + deferred_long_reqs
+        first_long_req = next(
+            (req for req in ready_reqs if remaining_prefill_tokens(req) > short_token_threshold), None
+        )
+        sorted_reqs = sorted(
+            ready_reqs,
+            key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
+        )
+        if first_long_req is not None:
+            sorted_reqs.remove(first_long_req)
+            sorted_reqs.insert(0, first_long_req)
+        return sorted_reqs
 
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
