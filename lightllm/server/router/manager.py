@@ -156,7 +156,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # Thus the page table needs 3 * mtp_step positions of MTP headroom.
             # Keep eight additional positions as a safety margin for future overlap
             # changes while preserving the historical +8 for non-MTP runs.
-            "max_seq_length": self.args.max_req_total_len + max(8, 3 * self.args.mtp_step + 8),
+            "max_seq_length": self.args.max_req_total_len + 3 * self.args.mtp_step + 8,
             "nccl_host": self.args.nccl_host,
             "nccl_port": get_shm_port_args().nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
