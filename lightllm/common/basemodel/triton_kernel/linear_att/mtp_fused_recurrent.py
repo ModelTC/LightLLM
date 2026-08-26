@@ -59,14 +59,17 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_write_indices_tok: tl.constexpr,
     SOFTPLUS_BETA: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
+    FIXED_SEQ_LEN: tl.constexpr,
 ):
     i_v, i_n, i_hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_hv // (HV // H)
-    bos, eos = (
-        tl.load(cu_seqlens + i_n).to(tl.int64),
-        tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-    )
-    T = eos - bos
+    if FIXED_SEQ_LEN > 0:
+        bos = i_n * FIXED_SEQ_LEN
+        T: tl.constexpr = FIXED_SEQ_LEN
+    else:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
 
     if T == 0:
         return
@@ -150,6 +153,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     dt_bias: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
+    fixed_seq_len: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -170,6 +174,8 @@ def mtp_fused_recurrent_gated_delta_rule(
         dt_bias: ``[HV]`` per-head dt bias.
         a_raw: ``[T, HV]`` raw alpha.
         b_raw: ``[T, HV]`` raw beta.
+        fixed_seq_len: Compile-time sequence length for dense fixed-width MTP
+            verification. Zero keeps the variable-length ``cu_seqlens`` path.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[1, T, HV, V]`` and
@@ -184,6 +190,12 @@ def mtp_fused_recurrent_gated_delta_rule(
     V = v.shape[-1]
     HV = v.shape[2]
     N = len(cu_seqlens) - 1
+    fixed_seq_len = int(fixed_seq_len)
+    assert fixed_seq_len >= 0
+    if fixed_seq_len:
+        assert q.shape[1] == N * fixed_seq_len, (
+            f"fixed_seq_len={fixed_seq_len} requires {N * fixed_seq_len} tokens, " f"got {q.shape[1]}"
+        )
     q, stride_q_tok = _ensure_qkv_token_strided(q)
     k, stride_k_tok = _ensure_qkv_token_strided(k)
     v, stride_v_tok = _ensure_qkv_token_strided(v)
@@ -191,7 +203,10 @@ def mtp_fused_recurrent_gated_delta_rule(
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw)
     BK = triton.next_power_of_2(K)
     assert K == BK, f"K={K} must be a power of 2"
-    BV = min(triton.next_power_of_2(V), 8)
+    # Qwen3.5 uses V=128. A 16-wide tile halves the program count versus the
+    # upstream 8-wide tile, while one warp is fastest for this small KxBV
+    # recurrent state on H100/H200 (and avoids the extra warp synchronization).
+    BV = min(triton.next_power_of_2(V), 16)
     num_warps = 1
     num_stages = 3
     NV = triton.cdiv(V, BV)
@@ -249,6 +264,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         stride_write_indices_tok=stride_write_indices_tok,
         SOFTPLUS_BETA=1.0,
         SOFTPLUS_THRESHOLD=20.0,
+        FIXED_SEQ_LEN=fixed_seq_len,
         num_warps=num_warps,
         num_stages=num_stages,
     )

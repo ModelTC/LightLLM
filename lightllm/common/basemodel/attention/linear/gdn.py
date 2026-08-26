@@ -247,7 +247,11 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             dtype=torch.int32,
             device=self.infer_state.b_req_idx.device,
         )
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
+        # Keep a strided view instead of copying one request index per MTP
+        # group for every GDN layer.  The MTP conv kernel consumes the tensor's
+        # actual stride, and advanced indexing below accepts non-contiguous
+        # indices, so materializing this tiny vector only adds a GPU launch.
+        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0]
         self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
@@ -393,7 +397,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             k=key,
             v=value,
             initial_state=ssm_states,
-            cu_seqlens=cu_seqlens_q.to(torch.long),
+            cu_seqlens=cu_seqlens_q,
             ssm_state_indices=self.b_ssm_buffer_idx,
             ssm_state_write_indices=self.b_ssm_buffer_idx,
             num_accepted_tokens=self.b_num_accepted_tokens,
@@ -401,5 +405,10 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             dt_bias=layer_weight.linear_dt_bias.weight,
             a_raw=a,
             b_raw=b,
+            fixed_seq_len=(
+                0
+                if backend.uses_dynamic_spec_verify_layout()
+                else backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model) + 1
+            ),
         )
         return core_attn_out
