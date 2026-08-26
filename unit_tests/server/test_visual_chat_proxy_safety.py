@@ -110,7 +110,7 @@ def test_private_execution_state_phrases_are_narrowly_blocked():
     )
 
 
-def test_anthropic_mixed_builtin_and_external_calls_are_rejected_before_visual_execution(
+def test_anthropic_mixed_builtin_and_external_calls_execute_builtin_and_surface_external_only(
     monkeypatch,
 ):
     request = ChatCompletionRequest.model_validate(
@@ -152,10 +152,9 @@ def test_anthropic_mixed_builtin_and_external_calls_are_rejected_before_visual_e
         system_messages = [
             message for message in main_request.messages if message.role == "system"
         ]
-        assert system_messages
-        assert (
-            visual_chat_proxy.ANTHROPIC_SEQUENTIAL_TOOL_PROMPT
-            in system_messages[0].content
+        assert not any(
+            visual_chat_proxy.ANTHROPIC_SEQUENTIAL_TOOL_PROMPT in (message.content or "")
+            for message in system_messages
         )
         return ChatCompletionResponse(
             model="agent",
@@ -191,25 +190,24 @@ def test_anthropic_mixed_builtin_and_external_calls_are_rejected_before_visual_e
 
     async def run_test():
         try:
-            with pytest.raises(
-                visual_chat_proxy.VisualChatProxyError,
-                match="mixed builtin and external",
-            ):
-                await visual_chat_proxy.visual_chat_completions_impl(
-                    request=request,
-                    raw_request=raw_request,
-                    runtime=runtime,
-                    main_chat_handler=fake_main_handler,
-                )
+            return await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=fake_main_handler,
+            )
         finally:
             await runtime.close()
 
-    asyncio.run(run_test())
+    response = asyncio.run(run_test())
 
-    assert not visual_called
+    assert visual_called
+    public_calls = response.choices[0].message.tool_calls
+    assert [call.function.name for call in public_calls] == ["get_weather"]
+    assert "vision_reader" not in response.model_dump_json()
 
 
-def test_anthropic_exposes_private_reader_then_caller_tools_in_separate_phases(
+def test_anthropic_keeps_builtin_and_caller_tools_available_in_every_phase(
     monkeypatch,
 ):
     request = ChatCompletionRequest.model_validate(
@@ -251,8 +249,8 @@ def test_anthropic_exposes_private_reader_then_caller_tools_in_separate_phases(
         nonlocal calls
         calls += 1
         tool_names = [tool.function.name for tool in main_request.tools or []]
+        assert tool_names == ["get_weather", "vision_reader"]
         if calls == 1:
-            assert tool_names == ["vision_reader"]
             message = ChatMessage(
                 role="assistant",
                 content="",
@@ -265,7 +263,6 @@ def test_anthropic_exposes_private_reader_then_caller_tools_in_separate_phases(
                 ],
             )
         else:
-            assert tool_names == ["get_weather"]
             message = ChatMessage(
                 role="assistant",
                 content="",
@@ -784,8 +781,8 @@ def test_visual_proxy_buffers_private_turns_and_projects_only_verified_results(m
 
     assert "I am inspecting the image now." in body
     assert "The visual evidence is sufficient." in body
-    assert "我先查看了图片 <image_1/>，The title is LightLLM." in body
-    assert "read the title" not in body
+    assert "仔细看了图片 <image_1/>" in body
+    assert "read the title" in body
     assert '"content": "The title is LightLLM."' in body
     assert '"name": "vision_reader"' not in body
     assert body.endswith("data: [DONE]\n\n")
@@ -816,20 +813,18 @@ def test_visual_proxy_buffers_private_turns_and_projects_only_verified_results(m
     )
     expected_reasoning = "\n".join(
         [
-            visual_chat_proxy.sanitize_reasoning("I am inspecting the image now. " * 4),
+            "I am inspecting the image now. " * 4,
             visual_chat_proxy._format_public_builtin_projection(
-                "<image_1/>", "The title is LightLLM.", 0
+                "<image_1/>", "read the title", "The title is LightLLM.", 0
             ),
-            visual_chat_proxy.sanitize_reasoning(
-                "The visual evidence is sufficient. " * 3
-            ),
+            "The visual evidence is sufficient. " * 3,
         ]
     )
     assert streamed_reasoning == expected_reasoning
     assert streamed_content == "The title is LightLLM."
 
 
-def test_empty_output_retry_does_not_replay_rejected_assistant_turn(monkeypatch):
+def test_empty_output_is_returned_without_proxy_retry_or_correction(monkeypatch):
     main_requests = []
 
     async def fake_main(request, _raw_request):
@@ -927,14 +922,12 @@ def test_empty_output_retry_does_not_replay_rejected_assistant_turn(monkeypatch)
         )
     )
 
-    second_history = [message.model_dump(exclude_none=True) for message in main_requests[1].messages]
-    assert not any("discarded retry reasoning" in json.dumps(message) for message in second_history)
-    assert second_history[-1] == visual_chat_proxy._build_empty_output_retry_feedback()
-    assert "discarded retry reasoning" not in (response.choices[0].message.reasoning or "")
-    assert "accepted reasoning" in (response.choices[0].message.reasoning or "")
+    assert len(main_requests) == 1
+    assert response.choices[0].message.content == ""
+    assert response.choices[0].message.reasoning == "discarded retry reasoning"
 
 
-def test_visual_guardrail_does_not_replay_rejected_assistant_turn(monkeypatch):
+def test_visual_answer_is_returned_without_proxy_evidence_guardrail(monkeypatch):
     main_requests = []
 
     async def fake_main(request, _raw_request):
@@ -1027,14 +1020,9 @@ def test_visual_guardrail_does_not_replay_rejected_assistant_turn(monkeypatch):
         )
     )
 
-    second_history = [message.model_dump(exclude_none=True) for message in main_requests[1].messages]
-    assert not any("discarded visual guess" in json.dumps(message) for message in second_history)
-    assert not any("The image is red." in json.dumps(message) for message in second_history[:-1])
-    assert second_history[-1] == visual_chat_proxy._build_output_guardrail_feedback(
-        ["<image_1/>"], "The image is red."
-    )
-    assert "discarded visual guess" not in (response.choices[0].message.reasoning or "")
-    assert response.choices[0].message.content == "The image is blue."
+    assert len(main_requests) == 1
+    assert response.choices[0].message.reasoning == "discarded visual guess"
+    assert response.choices[0].message.content == "The image is red."
 
 
 def test_anthropic_stream_maps_proxy_reasoning_to_thinking_deltas():
@@ -1255,7 +1243,7 @@ def test_client_disconnect_stops_waiting_for_visual_upstream_capacity():
     asyncio.run(run_test())
 
 
-def test_invalid_remote_200_opens_circuit_before_another_dsv4_allocation():
+def test_invalid_remote_and_open_circuit_are_returned_as_private_tool_errors():
     class InvalidRemoteClient:
         async def post(self, _url, json):
             return visual_chat_proxy.httpx.Response(200, json={"choices": []})
@@ -1284,13 +1272,31 @@ def test_invalid_remote_200_opens_circuit_before_another_dsv4_allocation():
     raw_request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
     dsv4_allocations = 0
     active_request_ids = set()
+    vision_error_codes = []
 
-    async def allocate_then_request_vision(_request, _raw_request):
+    async def allocate_then_request_vision(main_request, _raw_request):
         nonlocal dsv4_allocations
         dsv4_allocations += 1
         request_id = 30_000 + dsv4_allocations
         active_request_ids.add(request_id)
         try:
+            if main_request.messages[-1].role == "tool":
+                tool_error = json.loads(main_request.messages[-1].content)
+                vision_error_codes.append(tool_error["error"]["type"])
+                return ChatCompletionResponse(
+                    model="agent",
+                    choices=[
+                        ChatCompletionResponseChoice(
+                            index=0,
+                            finish_reason="stop",
+                            message=ChatMessage(
+                                role="assistant",
+                                content="Vision failed; model handled it.",
+                            ),
+                        )
+                    ],
+                    usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                )
             return ChatCompletionResponse(
                 model="agent",
                 choices=[
@@ -1316,36 +1322,25 @@ def test_invalid_remote_200_opens_circuit_before_another_dsv4_allocation():
             active_request_ids.discard(request_id)
 
     async def run_test():
-        for call_index in range(2):
-            with pytest.raises(
-                visual_chat_proxy.VisualProxyUpstreamError,
-                match=r"choices\[0\]",
-            ):
-                await visual_chat_proxy.visual_chat_completions_impl(
-                    request=request,
-                    raw_request=raw_request,
-                    runtime=runtime,
-                    main_chat_handler=allocate_then_request_vision,
-                )
-            assert dsv4_allocations == call_index + 1
-            assert active_request_ids == set()
-            assert runtime._request_semaphore._value == settings.max_inflight_requests
-            assert runtime._semaphore._value == settings.remote_max_concurrency
-
-        with pytest.raises(
-            visual_chat_proxy.VisualProxyUpstreamError,
-            match="circuit breaker is open",
-        ):
-            await visual_chat_proxy.visual_chat_completions_impl(
+        for call_index in range(3):
+            response = await visual_chat_proxy.visual_chat_completions_impl(
                 request=request,
                 raw_request=raw_request,
                 runtime=runtime,
                 main_chat_handler=allocate_then_request_vision,
             )
-        assert dsv4_allocations == 2
-        assert active_request_ids == set()
-        assert runtime._request_semaphore._value == settings.max_inflight_requests
-        assert runtime._semaphore._value == settings.remote_max_concurrency
+            assert response.choices[0].message.content == "Vision failed; model handled it."
+            assert "vision_reader" not in response.model_dump_json()
+            assert dsv4_allocations == (call_index + 1) * 2
+            assert active_request_ids == set()
+            assert runtime._request_semaphore._value == settings.max_inflight_requests
+            assert runtime._semaphore._value == settings.remote_max_concurrency
+
+        assert vision_error_codes == [
+            "vision_protocol_error",
+            "vision_protocol_error",
+            "vision_upstream_error",
+        ]
         await runtime.close()
 
     asyncio.run(run_test())
@@ -1471,7 +1466,7 @@ def test_anthropic_maps_seed_parallel_control_and_rejects_conflicting_thinking()
         )
 
 
-def test_parallel_tool_violation_on_last_step_keeps_specific_failure(monkeypatch):
+def test_provider_parallel_tool_output_is_not_corrected_by_proxy(monkeypatch):
     monkeypatch.setattr(visual_chat_proxy, "MAX_AGENT_STEPS", 1)
     request = ChatCompletionRequest.model_validate(
         {
@@ -1532,23 +1527,22 @@ def test_parallel_tool_violation_on_last_step_keeps_specific_failure(monkeypatch
 
     async def run_test():
         try:
-            with pytest.raises(
-                visual_chat_proxy.VisualChatProxyError,
-                match="parallel_tool_calls_violation",
-            ):
-                await visual_chat_proxy.visual_chat_completions_impl(
-                    request=request,
-                    raw_request=raw_request,
-                    runtime=runtime,
-                    main_chat_handler=fake_main,
-                )
+            return await visual_chat_proxy.visual_chat_completions_impl(
+                request=request,
+                raw_request=raw_request,
+                runtime=runtime,
+                main_chat_handler=fake_main,
+            )
         finally:
             await runtime.close()
 
-    asyncio.run(run_test())
+    response = asyncio.run(run_test())
+    assert [
+        call.function.name for call in response.choices[0].message.tool_calls
+    ] == ["alpha", "beta"]
 
 
-def test_explicit_thinking_off_hides_public_visual_reasoning(monkeypatch):
+def test_explicit_thinking_off_hides_model_reasoning_but_keeps_reversible_visual_trace(monkeypatch):
     calls = 0
 
     async def fake_main(request, _raw_request):
@@ -1631,11 +1625,15 @@ def test_explicit_thinking_off_hides_public_visual_reasoning(monkeypatch):
     response = asyncio.run(run_test())
     message = response.choices[0].message
     assert message.content == "The title is LightLLM."
-    assert message.reasoning is None
+    assert "仔细看了图片 <image_1/>" in message.reasoning
+    assert "read title" in message.reasoning
+    assert "The title is LightLLM." in message.reasoning
+    assert "private planning" not in message.reasoning
+    assert "private final reasoning" not in message.reasoning
     assert message.reasoning_content is None
 
 
-def test_all_current_turn_images_require_independent_evidence(monkeypatch):
+def test_model_decides_whether_each_current_turn_image_needs_vision(monkeypatch):
     main_requests = []
     visual_results = iter(["first result", "second result"])
 
@@ -1714,14 +1712,16 @@ def test_all_current_turn_images_require_independent_evidence(monkeypatch):
 
     response = asyncio.run(run_test())
     reasoning = response.choices[0].message.reasoning or ""
-    assert "我先查看了图片 <image_1/>，first result" in reasoning
-    assert "我接着查看了图片 <image_2/>，second result" in reasoning
-    assert "discard me" not in reasoning
+    assert len(main_requests) == 2
+    assert "仔细看了图片 <image_1/>" in reasoning
+    assert "first result" in reasoning
+    assert "<image_2/>" not in reasoning
+    assert "second result" not in reasoning
+    assert "discard me" in reasoning
     assert "vision_reader" not in reasoning
-    assert "first" not in reasoning.replace("first result", "")
 
 
-def test_latest_failed_reread_does_not_fall_back_in_public_projection(monkeypatch):
+def test_failed_reread_is_dropped_without_deleting_prior_successful_observation(monkeypatch):
     main_calls = 0
     visual_calls = 0
 
@@ -1801,8 +1801,9 @@ def test_latest_failed_reread_does_not_fall_back_in_public_projection(monkeypatc
     response = asyncio.run(run_test())
     reasoning = response.choices[0].message.reasoning or ""
     assert "image-two result" in reasoning
-    assert "old image-one result" not in reasoning
+    assert "old image-one result" in reasoning
     assert "truncated image-one result" not in reasoning
+    assert "task-3" not in reasoning
 
 
 def test_remote_image_target_rejects_mixed_private_dns_and_pins_public_ip(monkeypatch):
