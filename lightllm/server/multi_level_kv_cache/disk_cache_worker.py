@@ -44,9 +44,8 @@ class DiskCacheWorker:
 
         assert disk_cache_storage_size > 0
         storage_size = int(disk_cache_storage_size * (1024 ** 3))
-        # num_shard与KVCACHE_MAX_BLOCK_SIZE相关，KVCACHE_MAX_BLOCK_SIZE默认64MB前提下，
-        # num_shard设置8, 能使disk cache的容量利用率达到90%，继续增大num_shard会导致容量利用率下降
-        num_shard = 8
+        # 为了发挥afs性能，2TiB以内使用8个shard；容量超过2TiB后，每增加1TiB增加4个shard。
+        num_shard = max(8, math.ceil(disk_cache_storage_size / 1024) * 4)
         num_worker = 24
         # 读写同时进行时，分配8线程用来写，16线程用来读
         max_concurrent_write_tasks = 8
