@@ -29,7 +29,6 @@ import stat
 import time
 import traceback
 import uuid
-from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from html import escape as html_escape, unescape as html_unescape
@@ -107,6 +106,10 @@ _RAW_FC_LINE_RE = re.compile(
 )
 _PROVIDER_CONTROL_TAG_RE = re.compile(r"</?pcwpd_[A-Za-z0-9_.:-]+\s*>", re.IGNORECASE)
 _NATURAL_VISION_TRACE_RE = re.compile(r"^我(?:先|接着|随后)查看了图片\s+(<image_\d+/?>)，让内建读图能力完成这个任务：(.+?)(?:。)?$")
+_NATURAL_OBSERVATION_RE = re.compile(
+    r"^我(?:先|接着|随后)仔细看了图片\s+(<image_\d+/?>)，想确认\s*"
+)
+_NATURAL_OBSERVATION_RESULT_MARKER = "；从画面中得到的信息是 "
 _XML_BUILTIN_TRACE_PAIR_RE = re.compile(
     r"(<tool_call>\s*<function=vision_reader>\s*.*?</function>\s*</tool_call>)\s*"
     r"<tool_response>\s*(.*?)\s*</tool_response>",
@@ -1040,7 +1043,7 @@ class ImageRegistry:
 
 
 class EvidenceLedger:
-    """Bind accepted visual evidence to exact current-turn image tags."""
+    """Record visual execution outcomes for observability, never as an output gate."""
 
     def __init__(self, registry: ImageRegistry) -> None:
         self.registry = registry
@@ -1106,7 +1109,7 @@ class EvidenceLedger:
         missing = self.missing_tags(visual_answer_required=visual_answer_required)
         return {
             "schema_version": "lightllm.visual_proxy.image_evidence.v1",
-            "policy": "all_current_turn_images_for_visual_answer",
+            "policy": "observational_agent_decides_vision",
             "current_user_turn_image_tags": list(self.target_tags),
             "vision_results": copy.deepcopy(self.records),
             "covered_image_tags": self.covered_tags(),
@@ -1432,12 +1435,16 @@ def _safe_public_reasoning_fragment(value: Any) -> str:
     return clean
 
 
-def _format_public_builtin_projection(image: str, result: str, offset: int) -> str:
-    prefix = "我先" if offset == 0 else "我接着"
-    public_result = _one_line_trace_text(result)
-    if not public_result:
+def _format_public_builtin_projection(
+    image: str,
+    task: str,
+    result: str,
+    offset: int,
+    trace_format: str = "natural",
+) -> str:
+    if not task or not result:
         raise VisualChatProxyError("Cannot expose an empty builtin visual result")
-    return f"{prefix}查看了图片 {_canonical_image_reference(image)}，{public_result}"
+    return _format_builtin_trace(trace_format, image, task, result, "", offset)
 
 
 def reasoning_contains_raw_fc_serialization(text: Any) -> bool:
@@ -1470,7 +1477,11 @@ def _canonical_image_reference(value: str) -> str:
 def _natural_trace_prefix(existing_reasoning: str, offset: int) -> str:
     if offset > 0:
         return "我接着"
-    return "我接着" if "让内建读图能力完成这个任务：" in existing_reasoning else "我先"
+    has_prior_observation = (
+        "让内建读图能力完成这个任务：" in existing_reasoning
+        or "；从画面中得到的信息是 " in existing_reasoning
+    )
+    return "我接着" if has_prior_observation else "我先"
 
 
 def _natural_trace_header(image: str, task: str, prefix: str) -> str:
@@ -1483,10 +1494,19 @@ def _natural_trace_header(image: str, task: str, prefix: str) -> str:
 
 
 def _format_natural_builtin_trace(image: str, task: str, result: str, prefix: str) -> str:
-    response = _one_line_trace_text(result)
-    if not response:
+    image = _canonical_image_reference(image)
+    if not image or not task or not result:
         raise VisualChatProxyError("Cannot format natural builtin trace with an empty image, task, or response")
-    return _natural_trace_header(image, task, prefix) + response
+    # JSON string literals keep arbitrary quotes, control characters and
+    # multiline task/result bodies fully reversible while the surrounding
+    # sentence still reads like ordinary visual reasoning rather than a tool
+    # protocol.  No call id or implementation name crosses the public wire.
+    encoded_task = json.dumps(str(task), ensure_ascii=False)
+    encoded_result = json.dumps(str(result), ensure_ascii=False)
+    return (
+        f"{prefix}仔细看了图片 {image}，想确认 {encoded_task}"
+        f"{_NATURAL_OBSERVATION_RESULT_MARKER}{encoded_result}。"
+    )
 
 
 def _format_xml_builtin_trace(image: str, task: str, result: str) -> str:
@@ -1587,7 +1607,10 @@ class _BuiltinTraceStreamEmitter:
 
     async def feed(self, value: str) -> None:
         if self.trace_format == "natural":
-            value = self._one_line.feed(value)
+            # A reversible public sentence JSON-escapes the complete result.
+            # Buffer until the provider result is validated so chunk boundaries
+            # can never alter the wire representation.
+            return
         else:
             value = html_escape(value)
         if not value:
@@ -1602,6 +1625,19 @@ class _BuiltinTraceStreamEmitter:
         await self.callback("reasoning", value, separate)
 
     async def finish(self, result: str) -> bool:
+        if self.trace_format == "natural":
+            expected = _format_builtin_trace(
+                self.trace_format,
+                self.image,
+                self.task,
+                result,
+                self.existing_reasoning,
+                self.offset,
+            )
+            self._parts = [expected]
+            self.emitted = True
+            await self.callback("reasoning", expected, bool(self.existing_reasoning))
+            return True
         tail = self._one_line.finish() if self.trace_format == "natural" else ""
         if tail:
             await self.feed(tail)
@@ -1624,6 +1660,33 @@ class _BuiltinTraceStreamEmitter:
         return True
 
 
+def _parse_natural_observation(line: str) -> Optional[dict[str, str]]:
+    """Decode one public observation sentence without relying on delimiters inside its values."""
+
+    match = _NATURAL_OBSERVATION_RE.match(line)
+    if not match:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        task, task_end = decoder.raw_decode(line, match.end())
+    except (json.JSONDecodeError, RecursionError):
+        return None
+    if not isinstance(task, str) or not line.startswith(_NATURAL_OBSERVATION_RESULT_MARKER, task_end):
+        return None
+    result_start = task_end + len(_NATURAL_OBSERVATION_RESULT_MARKER)
+    try:
+        result, result_end = decoder.raw_decode(line, result_start)
+    except (json.JSONDecodeError, RecursionError):
+        return None
+    if not isinstance(result, str) or line[result_end:].strip() != "。":
+        return None
+    return {
+        "image": _canonical_image_reference(match.group(1)),
+        "task": task,
+        "tool_response": result,
+    }
+
+
 def _parse_natural_builtin_trace(reasoning: str) -> tuple[list[dict[str, str]], str]:
     lines = reasoning.splitlines()
     segments: list[dict[str, str]] = []
@@ -1631,19 +1694,32 @@ def _parse_natural_builtin_trace(reasoning: str) -> tuple[list[dict[str, str]], 
     index = 0
     while index < len(lines):
         line = lines[index].strip()
+        observation = _parse_natural_observation(line)
+        if observation is not None:
+            observation["reasoning"] = "\n".join(current_reasoning).strip()
+            segments.append(observation)
+            current_reasoning = []
+            index += 1
+            continue
         match = _NATURAL_VISION_TRACE_RE.fullmatch(line)
         if not match:
             current_reasoning.append(lines[index])
             index += 1
             continue
         if index + 1 >= len(lines):
-            raise ValueError("Malformed natural builtin trace: missing reading result line")
+            current_reasoning.append(lines[index])
+            index += 1
+            continue
         response_line = lines[index + 1].strip()
         if not response_line.startswith("读图结果："):
-            raise ValueError("Malformed natural builtin trace: expected a line starting with '读图结果：'")
+            current_reasoning.append(lines[index])
+            index += 1
+            continue
         response = response_line[len("读图结果：") :].strip()
         if not response:
-            raise ValueError("Malformed natural builtin trace: empty reading result")
+            current_reasoning.extend(lines[index : index + 2])
+            index += 2
+            continue
         segments.append(
             {
                 "reasoning": "\n".join(current_reasoning).strip(),
@@ -1751,7 +1827,7 @@ def expand_builtin_traces(
                 for key, value in message.items()
                 if key not in {"reasoning", "reasoning_content"}
             }
-            clean_reasoning = sanitize_reasoning(final_reasoning)
+            clean_reasoning = final_reasoning
             if clean_reasoning:
                 clean_message["reasoning"] = clean_reasoning
             expanded.append(clean_message)
@@ -1763,7 +1839,7 @@ def expand_builtin_traces(
                 "content": "",
                 "tool_calls": [tool_call],
             }
-            clean_segment_reasoning = sanitize_reasoning(segment["reasoning"])
+            clean_segment_reasoning = segment["reasoning"]
             if clean_segment_reasoning:
                 assistant_message["reasoning"] = clean_segment_reasoning
             expanded.append(assistant_message)
@@ -1778,7 +1854,7 @@ def expand_builtin_traces(
         trailing_message = {
             key: copy.deepcopy(value) for key, value in message.items() if key not in {"reasoning", "reasoning_content"}
         }
-        clean_final_reasoning = sanitize_reasoning(final_reasoning)
+        clean_final_reasoning = final_reasoning
         if clean_final_reasoning:
             trailing_message["reasoning"] = clean_final_reasoning
         if trailing_message.get("content") or trailing_message.get("reasoning") or trailing_message.get("tool_calls"):
@@ -1913,6 +1989,54 @@ def latest_user_message_depends_on_visual_content(
 def _valid_builtin_vision_result(value: str) -> bool:
     text = value.strip()
     return bool(text) and not any(marker in text for marker in _INVALID_BUILTIN_VISION_RESULT_MARKERS)
+
+
+def _builtin_vision_tool_error(
+    code: str,
+    message: str,
+    *,
+    retryable: bool,
+) -> str:
+    """Return a model-visible tool error that is never projected into public trajectory text."""
+
+    return json.dumps(
+        {
+            "ok": False,
+            "error": {
+                "type": code,
+                "message": str(message),
+                "retryable": retryable,
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _vision_tool_error_from_exception(exc: VisualChatProxyError) -> tuple[str, bool]:
+    message = str(exc)
+    lowered = message.casefold()
+    if isinstance(exc, VisualProxyTimeoutError):
+        return "vision_timeout", True
+    if isinstance(exc, VisualProxyCapacityError):
+        return "vision_capacity_exceeded", True
+    if isinstance(exc, VisualProxyUpstreamRejectedError):
+        return "vision_upstream_rejected", False
+    if "empty assistant message" in lowered or "empty" in lowered:
+        return "vision_empty_output", True
+    if any(
+        marker in lowered
+        for marker in (
+            "invalid json",
+            "non-object response",
+            "no choices",
+            "no choices[0].message",
+            "stream failed",
+            "non-streaming response",
+        )
+    ):
+        return "vision_protocol_error", True
+    return "vision_upstream_error", True
 
 
 def _message_has_builtin_vision_evidence(message: dict[str, Any]) -> bool:
@@ -2676,8 +2800,9 @@ async def _consume_main_model_stream(
     callback: StreamEventCallback,
     separate_from_prior_reasoning: bool,
     stream_content: bool,
+    preserve_model_text: bool = False,
 ) -> ChatCompletionResponse:
-    """Assemble one internal model turn while forwarding safe reasoning deltas."""
+    """Assemble one internal model turn, optionally preserving provider text exactly."""
 
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -2733,12 +2858,16 @@ async def _consume_main_model_stream(
                 raw_reasoning = delta.get("reasoning_content")
             if isinstance(raw_reasoning, str) and raw_reasoning:
                 reasoning_parts.append(raw_reasoning)
-                await emit_reasoning(sanitizer.feed(raw_reasoning))
+                await emit_reasoning(
+                    raw_reasoning if preserve_model_text else sanitizer.feed(raw_reasoning)
+                )
             content = delta.get("content")
             if isinstance(content, str):
                 content_parts.append(content)
                 if stream_content:
-                    clean_content = content_sanitizer.feed(content)
+                    clean_content = (
+                        content if preserve_model_text else content_sanitizer.feed(content)
+                    )
                     if clean_content:
                         await callback("content", clean_content, False)
             for raw_call in delta.get("tool_calls") or []:
@@ -2769,8 +2898,9 @@ async def _consume_main_model_stream(
         if close is not None:
             await close()
 
-    await emit_reasoning(sanitizer.finish())
-    if stream_content:
+    if not preserve_model_text:
+        await emit_reasoning(sanitizer.finish())
+    if stream_content and not preserve_model_text:
         clean_content = content_sanitizer.finish()
         if clean_content:
             await callback("content", clean_content, False)
@@ -2790,13 +2920,14 @@ async def _consume_main_model_stream(
                 },
             }
         )
-    if tool_calls and finish_reason == "stop":
+    if tool_calls and finish_reason == "stop" and not preserve_model_text:
         finish_reason = "tool_calls"
     message_data: dict[str, Any] = {
         "role": "assistant",
         "content": "".join(content_parts),
     }
-    reasoning = sanitize_reasoning("".join(reasoning_parts))
+    raw_reasoning = "".join(reasoning_parts)
+    reasoning = raw_reasoning if preserve_model_text else sanitize_reasoning(raw_reasoning)
     if reasoning:
         message_data["reasoning"] = reasoning
     if tool_calls:
@@ -3173,10 +3304,9 @@ async def _run_agent_choice(
     public_reasoning_enabled: bool = True,
     stream_callback: Optional[StreamEventCallback] = None,
 ) -> Union[tuple[ChatCompletionResponseChoice, UsageInfo], Response]:
-    """Run one evidence-bound agent choice using Nova's public/private split."""
+    """Run one observational agent choice while keeping builtin execution private."""
 
     payload = copy.deepcopy(request_payload)
-    is_anthropic_request = raw_request.url.path.rstrip("/") == "/v1/messages"
     public_separate_reasoning = payload.get("separate_reasoning")
     payload["separate_reasoning"] = True
     payload["stream"] = stream_callback is not None
@@ -3187,89 +3317,61 @@ async def _run_agent_choice(
     payload["n"] = 1
 
     external_tools = copy.deepcopy(payload.get("tools") or [])
-    if _has_external_vision_reader(external_tools):
-        raise ValueError(f"{VISION_READER_NAME!r} is reserved for the server-owned visual reader")
+    builtin_enabled = not _has_external_vision_reader(external_tools)
     original_tool_choice = payload.get("tool_choice", "auto")
-    choice_mode, _selected_name, selected_external_tools = _external_tool_choice(
-        original_tool_choice,
-        external_tools,
-    )
-    if is_anthropic_request:
-        payload["messages"] = _add_anthropic_sequential_tool_instruction(payload["messages"])
 
     ledger = EvidenceLedger(registry)
     aggregate_usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
     public_reasoning_parts: list[str] = []
-    pending_vision_by_image: OrderedDict[str, Optional[str]] = OrderedDict()
+    public_reasoning_is_trace: list[bool] = []
     public_trace_index = 0
-    empty_output_retry_count = 0
-    parallel_retry_count = 0
 
-    async def emit_public_reasoning(value: str) -> None:
-        if not public_reasoning_enabled or not value:
+    async def emit_public_reasoning(value: str, *, force: bool = False) -> None:
+        if (not public_reasoning_enabled and not force) or not value:
             return
         if len("\n".join((*public_reasoning_parts, value)).encode("utf-8")) > MAX_REASONING_CONTEXT_BYTES:
             raise VisualChatProxyError("Visual reasoning context exceeds the configured size limit")
         separate = bool(public_reasoning_parts)
         public_reasoning_parts.append(value)
+        public_reasoning_is_trace.append(force)
         if stream_callback is not None:
-            await stream_callback("reasoning", value, separate)
-
-    async def flush_pending_vision_results() -> None:
-        nonlocal public_trace_index
-        for image_tag, result in list(pending_vision_by_image.items()):
-            if result is None:
-                continue
-            public_result = result
-            if text_exposes_private_multimodal_mechanism(public_result):
-                public_result = "相关结果未在此处展开"
-            projection = _format_public_builtin_projection(
-                image_tag,
-                public_result,
-                public_trace_index,
-            )
-            public_trace_index += 1
-            await emit_public_reasoning(projection)
-        pending_vision_by_image.clear()
+            await stream_callback("trace" if force else "reasoning", value, separate)
 
     def public_message_from_model(message: ChatMessage) -> ChatMessage:
         data = message.model_dump(exclude_none=True)
         data.pop("reasoning", None)
         data.pop("reasoning_content", None)
-        base = ChatMessage.model_validate(data)
-        result = _message_with_reasoning(
-            base,
-            public_reasoning_parts if public_reasoning_enabled else [],
-        )
-        return _apply_separate_reasoning_contract(result, public_separate_reasoning)
+        reasoning = "\n".join(public_reasoning_parts)
+        if public_separate_reasoning is False:
+            model_reasoning = "\n".join(
+                value
+                for value, is_trace in zip(public_reasoning_parts, public_reasoning_is_trace)
+                if not is_trace
+            )
+            trace_reasoning = "\n".join(
+                value
+                for value, is_trace in zip(public_reasoning_parts, public_reasoning_is_trace)
+                if is_trace
+            )
+            if model_reasoning:
+                data["content"] = model_reasoning + (data.get("content") or "")
+            if trace_reasoning:
+                # The caller-carried Vision trajectory must remain reversible
+                # even when ordinary provider reasoning is folded into content.
+                data["reasoning"] = trace_reasoning
+        elif reasoning:
+            data["reasoning"] = reasoning
+        return ChatMessage.model_validate(data)
 
     def configure_tools_for_step() -> None:
-        missing = ledger.missing_tags(
-            visual_answer_required=user_question_depends_on_visual_content
-        )
-        private_reader_phase = bool(missing) and (
-            choice_mode in {"required", "named"}
-            or (is_anthropic_request and bool(external_tools))
-        )
-        if choice_mode == "none":
-            payload["tools"] = [copy.deepcopy(BUILTIN_VISION_READER_TOOL)]
-            payload["tool_choice"] = "auto"
-        elif private_reader_phase:
-            payload["tools"] = [copy.deepcopy(BUILTIN_VISION_READER_TOOL)]
-            payload["tool_choice"] = "auto"
-        elif choice_mode in {"required", "named"}:
-            payload["tools"] = copy.deepcopy(selected_external_tools)
-            payload["tool_choice"] = original_tool_choice
-        elif is_anthropic_request and external_tools and not missing:
-            # Anthropic signed assistant turns must never mix the private
-            # reader with caller-owned tools. Expose caller tools only after
-            # image evidence is complete.
-            payload["tools"] = copy.deepcopy(external_tools)
-            payload["tool_choice"] = original_tool_choice
-        else:
-            payload["tools"] = copy.deepcopy(external_tools)
+        # Match Nova's combined exposure policy: the provider sees caller tools
+        # and the private reader together and owns the decision/order.  A
+        # caller-defined vision_reader owns that namespace and disables the
+        # builtin implementation for this request.
+        payload["tools"] = copy.deepcopy(external_tools)
+        if builtin_enabled:
             payload["tools"].append(copy.deepcopy(BUILTIN_VISION_READER_TOOL))
-            payload["tool_choice"] = "auto"
+        payload["tool_choice"] = original_tool_choice
 
     for step in range(1, MAX_AGENT_STEPS + 1):
         if await _request_is_disconnected(raw_request):
@@ -3305,6 +3407,7 @@ async def _run_agent_choice(
                     callback=buffered_callback,
                     separate_from_prior_reasoning=False,
                     stream_content=False,
+                    preserve_model_text=True,
                 )
             elif stream_callback is not None and isinstance(response, ChatCompletionResponse):
                 await stream_callback("ready", "1", False)
@@ -3332,41 +3435,24 @@ async def _run_agent_choice(
             raise VisualChatProxyError("Main model returned no choices")
 
         choice = response.choices[0]
-        message = _sanitize_model_message(choice.message)
+        # The proxy observes the provider message but does not rewrite it.
+        # Builtin calls are removed only from the public projection below.
+        message = choice.message.model_copy(deep=True)
         builtin_calls: list[Any] = []
         external_calls: list[Any] = []
         for tool_call in message.tool_calls or []:
-            if tool_call.function.name == VISION_READER_NAME:
+            if builtin_enabled and tool_call.function.name == VISION_READER_NAME:
                 builtin_calls.append(tool_call)
             else:
                 external_calls.append(tool_call)
 
-        if payload.get("parallel_tool_calls") is False and len(external_calls) > 1:
-            if (
-                parallel_retry_count < runtime.settings.empty_output_retries
-                and step < MAX_AGENT_STEPS
-            ):
-                parallel_retry_count += 1
-                payload["messages"].append(_build_parallel_tool_calls_feedback(external_calls))
-                continue
-            raise VisualChatProxyError("parallel_tool_calls_violation")
-        if choice_mode == "none" and external_calls:
-            payload["messages"].append(_build_tool_choice_feedback("none"))
-            continue
-        if choice_mode == "named" and any(
-            call.function.name != _selected_name for call in external_calls
-        ):
-            payload["messages"].append(_build_tool_choice_feedback("named", _selected_name))
-            continue
-
-        if is_anthropic_request and builtin_calls and external_calls:
-            raise VisualChatProxyError(
-                "Anthropic response mixed builtin and external tool calls; response quarantined before tool execution."
-            )
-
-        if not builtin_calls:
-            await flush_pending_vision_results()
-        step_reasoning = _safe_public_reasoning_fragment(_message_reasoning(message))
+        step_reasoning = (
+            message.reasoning
+            if isinstance(message.reasoning, str)
+            else message.reasoning_content
+            if isinstance(message.reasoning_content, str)
+            else ""
+        )
 
         builtin_results: list[dict[str, Any]] = []
         for call_index, tool_call in enumerate(builtin_calls):
@@ -3374,6 +3460,7 @@ async def _run_agent_choice(
             task = ""
             call_id = tool_call.id or f"call_{uuid.uuid4().hex[:24]}"
             accepted = False
+            image: Optional[RegisteredImage] = None
             try:
                 arguments = _tool_arguments(tool_call)
                 image_label = str(arguments.get("image") or "")
@@ -3407,29 +3494,49 @@ async def _run_agent_choice(
                 finish_reason = str(getattr(visual_result, "finish_reason", "") or "")
                 image_digest = str(getattr(visual_result, "image_digest_sha256", "") or "")
                 _usage_add_mapping(aggregate_usage, getattr(visual_result, "usage", {}))
-                accepted = ledger.record(
-                    image_tag=image_label,
-                    result=raw_result,
-                    step=step,
-                    call_index=call_index,
-                    tool_call_id=call_id,
-                    task=task,
-                    finish_reason=finish_reason,
-                    image_digest_sha256=image_digest,
-                )
-                if accepted:
-                    result = raw_result
-                elif finish_reason in _TRUNCATED_FINISH_REASONS:
-                    result = (
-                        "Builtin vision_reader result was truncated and cannot be used as evidence; "
-                        "retry the same image with a narrower task."
+                if finish_reason in _TRUNCATED_FINISH_REASONS:
+                    ledger.record(
+                        image_tag=image_label,
+                        result=raw_result,
+                        step=step,
+                        call_index=call_index,
+                        tool_call_id=call_id,
+                        task=task,
+                        finish_reason=finish_reason,
+                        image_digest_sha256=image_digest,
+                        terminal_failed="vision_result_truncated",
+                    )
+                    result = _builtin_vision_tool_error(
+                        "vision_result_truncated",
+                        f"Vision result ended with finish_reason={finish_reason!r}; the partial result was discarded.",
+                        retryable=True,
                     )
                 else:
-                    result = "Builtin vision_reader returned no acceptable visual evidence; retry the image."
+                    accepted = ledger.record(
+                        image_tag=image_label,
+                        result=raw_result,
+                        step=step,
+                        call_index=call_index,
+                        tool_call_id=call_id,
+                        task=task,
+                        finish_reason=finish_reason,
+                        image_digest_sha256=image_digest,
+                    )
+                    if accepted:
+                        result = raw_result
+                    else:
+                        code = "vision_empty_output" if not raw_result.strip() else "vision_protocol_error"
+                        result = _builtin_vision_tool_error(
+                            code,
+                            "Vision returned no complete, verifiable result; the result was discarded.",
+                            retryable=True,
+                        )
             except ValueError as exc:
-                result = str(exc)
-                if not result.startswith("Builtin vision_reader"):
-                    result = f"Builtin vision_reader rejected the call: {result}"
+                result = _builtin_vision_tool_error(
+                    "vision_invalid_arguments",
+                    str(exc),
+                    retryable=False,
+                )
                 if image_label:
                     with suppress(ValueError):
                         image_label = registry.resolve(image_label).tag
@@ -3440,8 +3547,29 @@ async def _run_agent_choice(
                             call_index=call_index,
                             tool_call_id=call_id,
                             task=task,
-                            terminal_failed="invalid_arguments",
+                            terminal_failed="vision_invalid_arguments",
                         )
+            except (
+                VisualProxyUpstreamError,
+                VisualProxyTimeoutError,
+                VisualProxyCapacityError,
+            ) as exc:
+                code, retryable = _vision_tool_error_from_exception(exc)
+                result = _builtin_vision_tool_error(
+                    code,
+                    str(exc),
+                    retryable=retryable,
+                )
+                if image is not None:
+                    ledger.record(
+                        image_tag=image.tag,
+                        result="",
+                        step=step,
+                        call_index=call_index,
+                        tool_call_id=call_id,
+                        task=task,
+                        terminal_failed=code,
+                    )
             builtin_results.append(
                 {
                     "call": tool_call,
@@ -3457,20 +3585,19 @@ async def _run_agent_choice(
             if step_reasoning:
                 await emit_public_reasoning(step_reasoning)
             for item in builtin_results:
-                image_tag = item["image_tag"]
-                if image_tag:
-                    pending_vision_by_image[image_tag] = item["result"] if item["accepted"] else None
-
-            if external_calls:
-                await flush_pending_vision_results()
-                missing = ledger.missing_tags(
-                    visual_answer_required=user_question_depends_on_visual_content
-                )
-                if missing:
-                    payload["messages"].append(
-                        _build_output_guardrail_feedback(missing, "external tool call before visual evidence")
+                if item["accepted"]:
+                    projection = _format_public_builtin_projection(
+                        item["image_tag"],
+                        item["task"],
+                        item["result"],
+                        public_trace_index,
+                        runtime.settings.builtin_trace_format,
                     )
-                    continue
+                    public_trace_index += 1
+                    # Commit each validated observation at its original turn
+                    # boundary. The natural observation is the stateless replay
+                    # contract, so return it even when model reasoning is hidden.
+                    await emit_public_reasoning(projection, force=True)
 
             internal_message = message.model_dump(exclude_none=True)
             internal_message["tool_calls"] = []
@@ -3489,8 +3616,8 @@ async def _run_agent_choice(
                     }
                 )
             if external_calls:
-                # OpenAI can surface a caller tool after the private reader in
-                # the same turn only when coverage is already complete.
+                # Surface caller-owned calls unchanged.  Private builtin calls
+                # and their tool responses, including failures, stay internal.
                 message_data = message.model_dump(exclude_none=True)
                 message_data["tool_calls"] = [call.model_dump(exclude_none=True) for call in external_calls]
                 message_data.pop("reasoning", None)
@@ -3504,17 +3631,6 @@ async def _run_agent_choice(
             continue
 
         if external_calls:
-            missing = ledger.missing_tags(
-                visual_answer_required=user_question_depends_on_visual_content
-            )
-            if missing:
-                payload["messages"].append(
-                    _build_output_guardrail_feedback(missing, "external tool call before visual evidence")
-                )
-                continue
-            for call in external_calls:
-                if text_exposes_private_multimodal_mechanism(str(call.function.arguments)):
-                    raise VisualChatProxyError("External tool arguments exposed private visual mechanics")
             if step_reasoning:
                 await emit_public_reasoning(step_reasoning)
             message_data = message.model_dump(exclude_none=True)
@@ -3528,44 +3644,15 @@ async def _run_agent_choice(
                 finish_reason="tool_calls",
             ), aggregate_usage
 
-        answer = message.content or ""
-        if text_exposes_private_multimodal_mechanism(answer):
-            raise VisualChatProxyError("Main model answer exposed private visual mechanics")
-        if not answer.strip():
-            if empty_output_retry_count < runtime.settings.empty_output_retries:
-                empty_output_retry_count += 1
-                payload["messages"].append(_build_empty_output_retry_feedback())
-                continue
-            raise VisualChatProxyError(
-                "Main model returned no visible answer and no tool call after "
-                f"{empty_output_retry_count} empty-output retries"
-            )
-        if choice_mode in {"required", "named"}:
-            payload["messages"].append(_build_tool_choice_feedback(choice_mode, _selected_name))
-            continue
-        visual_answer_required = user_question_depends_on_visual_content or _has_visual_content_claim(answer)
-        missing = ledger.missing_tags(visual_answer_required=visual_answer_required)
-        if missing:
-            payload["messages"].append(_build_output_guardrail_feedback(missing, answer))
-            logger.warning(
-                "[visual-chat-proxy][output_guardrail] trace_id=%s step=%d missing_tags=%s",
-                trace_id,
-                step,
-                missing,
-            )
-            continue
-
         if step_reasoning:
             await emit_public_reasoning(step_reasoning)
         public_message = public_message_from_model(message)
         finish_reason = choice.finish_reason
-        if finish_reason == "tool_calls" and not public_message.tool_calls:
-            finish_reason = "stop"
         if trace_recorder.enabled:
             trace_recorder.event(
                 "image_evidence_ledger",
                 choice_trace_id=trace_id,
-                evidence=ledger.snapshot(visual_answer_required=visual_answer_required),
+                evidence=ledger.snapshot(visual_answer_required=False),
             )
         return ChatCompletionResponseChoice(
             index=0,
@@ -3651,10 +3738,14 @@ def _true_stream_response(
 
             task = asyncio.create_task(run_choice_with_timeout())
             try:
+                # Let the nested provider iterator enter its cancellation
+                # scope before the public keepalive comment is observable.
+                await asyncio.sleep(0)
                 if index == 0:
                     yield ": nova-stream-open\n\n"
                 role_emitted = False
                 reasoning_started = False
+                content_reasoning_started = False
                 streamed_content = ""
                 last_heartbeat = asyncio.get_running_loop().time()
                 while not task.done() or not queue.empty():
@@ -3671,11 +3762,20 @@ def _true_stream_response(
                         role_emitted = True
                     if kind == "ready":
                         continue
-                    if kind == "reasoning":
-                        if separate and reasoning_started:
-                            value = "\n" + value
-                        reasoning_started = True
-                        field = "reasoning" if separate_reasoning else "content"
+                    if kind in {"reasoning", "trace"}:
+                        field = (
+                            "reasoning"
+                            if separate_reasoning or kind == "trace"
+                            else "content"
+                        )
+                        if field == "reasoning":
+                            if reasoning_started:
+                                value = "\n" + value
+                            reasoning_started = True
+                        else:
+                            if content_reasoning_started:
+                                value = "\n" + value
+                            content_reasoning_started = True
                         if field == "content":
                             streamed_content += value
                         yield encode_choice(index, {field: value})
@@ -3768,7 +3868,9 @@ async def _visual_chat_completions_impl(
         max_total_image_bytes=runtime.settings.max_total_image_bytes,
     )
     request_payload["messages"] = replace_images_with_tags(request_payload["messages"], registry, runtime.settings)
-    request_payload["messages"] = strip_untrusted_builtin_traces(
+    # Restore only the proxy-owned, reversible public observation sentences.
+    # Ordinary model reasoning passes through byte-for-byte.
+    request_payload["messages"] = expand_builtin_traces(
         request_payload["messages"],
         runtime.settings.builtin_trace_format,
     )
@@ -3866,7 +3968,6 @@ async def visual_chat_completions_impl(
 
     if runtime is None:
         raise VisualChatProxyError("Visual proxy runtime is not initialized")
-    runtime.ensure_remote_available()
     trace_id = f"visual-{uuid.uuid4().hex[:16]}"
     trace_request: dict[str, Any] = {}
     if runtime.settings.trace_dump_dir is not None:
@@ -3933,6 +4034,10 @@ async def visual_chat_completions_impl(
                     if recorder.enabled:
                         recorder.finish_success({"stream": True, "completed": True})
                 finally:
+                    close = getattr(original_iterator, "aclose", None)
+                    if close is not None:
+                        with suppress(RuntimeError):
+                            await close()
                     await recorder.flush()
                     await request_slot.__aexit__(None, None, None)
 
