@@ -20,6 +20,7 @@
 
 import os
 import torch
+import triton
 import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Set, Union
@@ -234,15 +235,21 @@ class DistributeGroupManager:
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
                 self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
             )
-            num_rdma_bytes = _calculate_redundant_rdma_bytes(
-                decode_size_hint=decode_size_hint,
+            microbatch_count = len(self.groups)
+            min_prefill_reuse_buffer_bytes = _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
                 global_world_size=global_world_size,
                 prefill_tokens_per_rank=prefill_num_max_dispatch_tokens_per_rank,
                 hidden_size=hidden_size,
                 moe_intermediate_size=moe_intermediate_size,
                 hidden_dtype=get_torch_dtype(get_env_start_args().data_type),
-                microbatch_count=len(self.groups),
+                microbatch_count=microbatch_count,
             )
+            # Decode 和 prefill 不会同时使用 local RDMA storage，容量取两条路径的较大值。
+            num_rdma_bytes = max(decode_size_hint, min_prefill_reuse_buffer_bytes)
+            # DeepEP 返回的 decode hint 不保证能被 microbatch 均分；最终再对齐一次，
+            # 确保每个 workspace slice 的容量及起始位置仍保持 256-byte 对齐。
+            rdma_alignment = microbatch_count * 256
+            num_rdma_bytes = triton.cdiv(num_rdma_bytes, rdma_alignment) * rdma_alignment
             self.ep_low_latency_buffer = deep_ep.Buffer(
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
@@ -417,8 +424,7 @@ def _is_single_group(group: Optional[Union[ProcessGroup, CustomProcessGroup]]) -
         return dist.get_world_size(group=group) == 1
 
 
-def _calculate_redundant_rdma_bytes(
-    decode_size_hint: int,
+def _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
     global_world_size: int,
     prefill_tokens_per_rank: int,
     hidden_size: int,
@@ -426,12 +432,11 @@ def _calculate_redundant_rdma_bytes(
     hidden_dtype: torch.dtype,
     microbatch_count: int,
 ) -> int:
-    """计算 legacy DeepEP low-latency buffer 所需的保守 RDMA 容量。
+    """计算 ``chunked_expanded_moe_forward`` 极端情况下所需的最小复用 buffer。
 
-    该 buffer 在 decode 阶段首先要满足 DeepEP 给出的 ``decode_size_hint``；但
-    prefill 阶段不会运行 low-latency decode，因此其本地 RDMA storage 会被复用为
-    expanded grouped GEMM 的 workspace。两种场景不会并发，最终容量应取二者较大值
-    而不是相加。
+    Prefill 阶段会将空闲的 legacy DeepEP local RDMA storage 复用为 expanded
+    grouped GEMM 的 workspace。该函数只计算这条 prefill 路径的容量下限，不包含
+    low-latency decode 自身所需的 RDMA 容量。
 
     每个 prefill workspace 由全程常驻的 dense gather 输出和分块计算的临时峰值组成。
     gather 按 ``global_world_size * prefill_tokens_per_rank`` 估算最大可能接收行数，
@@ -446,7 +451,7 @@ def _calculate_redundant_rdma_bytes(
     """
 
     def align(value: int, alignment: int) -> int:
-        return (value + alignment - 1) // alignment * alignment
+        return triton.cdiv(value, alignment) * alignment
 
     def tensor_bytes(rows: int, columns: int, itemsize: int) -> int:
         # 沿用TensorBufferManager的256对齐规则
@@ -474,9 +479,8 @@ def _calculate_redundant_rdma_bytes(
     gather_bytes = tensor_bytes(align(global_world_size * prefill_tokens_per_rank, 1024), hidden_size, hidden_itemsize)
     per_workspace_bytes = gather_bytes + temporary_peak_bytes
 
-    prefill_workspace_bytes = per_workspace_bytes * microbatch_count
-    required_rdma_bytes = max(decode_size_hint, prefill_workspace_bytes)
-    return align(required_rdma_bytes, microbatch_count * 256)
+    reuse_buffer_bytes = per_workspace_bytes * microbatch_count
+    return align(reuse_buffer_bytes, microbatch_count * 256)
 
 
 dist_group_manager = DistributeGroupManager()
