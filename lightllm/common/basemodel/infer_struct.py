@@ -34,19 +34,16 @@ class InferStateInfo:
         self.b_req_idx: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
 
-        self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
-        self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
+        self.b_shared_seq_len: torch.Tensor = None  # raw decode radix-cache shared lengths.
+        self.b_shared_radix_node_id: torch.Tensor = None  # raw decode radix-node ids.
 
         self.b_mtp_index: torch.Tensor = None
-        # only for mrope model in decode phase used.
+        # MRoPE position offset propagated from ModelInput.
         self.b_position_delta: torch.Tensor = None
 
         self.b_seq_len: torch.Tensor = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
-        # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度
-        # 的sum值, 其值等于 sum(b_ready_cache_len)
-        self.prefix_total_token_num: int = None
         self.is_prefill: bool = None
 
         self.mem_manager: MemoryManager = None
@@ -67,6 +64,10 @@ class InferStateInfo:
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
         # 在一些细节场景下需要有该信息区分一些资源的申请和管理。
         self.microbatch_index: int = 0
+
+        # 当前 forward 独占的 hidden state 收集器。普通推理使用短生命周期实例；
+        # Prefill CUDA Graph 使用随 graph infer state 长期保存的实例。
+        self.hidden_collector = None
 
         # 衍生使用的管理变量，为了方便扩展接入其他的高性能attention推理算子，在
         # inferstate 基类上添加下面的标记变量，用于扩展。

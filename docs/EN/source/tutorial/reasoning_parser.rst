@@ -267,6 +267,12 @@ Configuration
 **stream_reasoning** (bool, default: False)
   Whether to stream reasoning content in real-time
 
+**reasoning_effort** (string, optional)
+  Accepted reasoning level: ``none``, ``minimal``, ``low``, ``medium``, ``high``, ``xhigh``, or ``max``.
+  Support for non-``none`` levels depends on the model's chat template.
+  ``none`` automatically disables thinking for compatible chat templates. Explicit
+  ``thinking`` or ``enable_thinking`` values in ``chat_template_kwargs`` take priority.
+
 **chat_template_kwargs** (object)
   - ``enable_thinking``: Enable reasoning (Qwen3, GLM45)
   - ``thinking``: Enable reasoning (DeepSeek-V3)

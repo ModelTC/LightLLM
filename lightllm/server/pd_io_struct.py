@@ -45,7 +45,7 @@ class ObjType(enum.Enum):
     PD_UPLOAD_GENERATE_ERROR = 8  # P/D 节点向 pd master 上报本地请求生成异常。
 
 
-PD_COMPACT_TOKEN_INFO_LEN = 9
+PD_COMPACT_TOKEN_INFO_LEN = 11
 PDCompactTokenInfo = Tuple[
     int,  # sub request id
     str,  # decoded text
@@ -53,6 +53,8 @@ PDCompactTokenInfo = Tuple[
     int,  # prompt_tokens
     int,  # prompt_cache_len
     int,  # mtp_accepted_token_num
+    int,  # mtp_verify_token_num
+    int,  # mtp_verify_step_num
     int,  # finish status
     Optional[str],  # node_mode, first token only
     Optional[Tuple[int, int, int]],  # input text/audio/image tokens, first token only
@@ -63,6 +65,8 @@ _PD_COMPACT_METADATA_KEYS = frozenset(
         "prompt_tokens",
         "prompt_cache_len",
         "mtp_accepted_token_num",
+        "mtp_verify_token_num",
+        "mtp_verify_step_num",
         "node_mode",
         "input_usage",
     }
@@ -93,6 +97,8 @@ def build_pd_compact_token_info(sub_req_id, text, metadata, finish_status) -> Op
         metadata["prompt_tokens"],
         metadata["prompt_cache_len"],
         metadata["mtp_accepted_token_num"],
+        metadata["mtp_verify_token_num"],
+        metadata["mtp_verify_step_num"],
         finish_status.status,
         metadata.get("node_mode"),
         compact_input_usage,
@@ -107,6 +113,8 @@ def unpack_pd_compact_token_info(token_info: PDCompactTokenInfo):
         prompt_tokens,
         prompt_cache_len,
         mtp_accepted_token_num,
+        mtp_verify_token_num,
+        mtp_verify_step_num,
         finish_status,
         node_mode,
         input_usage,
@@ -116,6 +124,8 @@ def unpack_pd_compact_token_info(token_info: PDCompactTokenInfo):
         "prompt_tokens": prompt_tokens,
         "prompt_cache_len": prompt_cache_len,
         "mtp_accepted_token_num": mtp_accepted_token_num,
+        "mtp_verify_token_num": mtp_verify_token_num,
+        "mtp_verify_step_num": mtp_verify_step_num,
     }
     if node_mode is not None:
         metadata["node_mode"] = node_mode

@@ -267,6 +267,12 @@ GPT-OSS
 **stream_reasoning** (布尔, 默认 False)
   是否实时流式传输推理内容
 
+**reasoning_effort** (字符串, 可选)
+  接受的推理强度：``none``、``minimal``、``low``、``medium``、``high``、``xhigh`` 或 ``max``；
+  非 ``none`` 级别的实际支持情况取决于模型的聊天模板。
+  对于兼容的聊天模板，``none`` 会自动关闭思考模式；``chat_template_kwargs`` 中显式设置的
+  ``thinking`` 或 ``enable_thinking`` 优先级更高。
+
 **chat_template_kwargs** (对象)
   - ``enable_thinking``: 启用推理（Qwen3, GLM45）
   - ``thinking``: 启用推理（DeepSeek-V3）

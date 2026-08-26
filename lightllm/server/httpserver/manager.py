@@ -427,7 +427,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             if self.pd_mode.is_P():
-                # 等待 decode 分配期间尚未进入本地推理，不应触发 prefill 推理健康超时。
+                # PD Prefill 节点上报 prompt ids 后，需要等待 PD master 从 Decode 节点取得
+                # decode_node_info 和 KV 资源信息。Decode 节点容量已满时，这个等待可能持续较长时间，
+                # 此时 Prefill 节点尚未进入本地推理。如果提前增加运行请求计数，期间又没有 token
+                # 刷新 latest_success_infer_time_mark，/health 会把正常的 Decode 资源等待误判成 Prefill
+                # 推理卡死。因此这里只在 Decode 资源分配完成、且确认确实需要执行 prefill 后登记。
+                #
+                # 这样会缩小 Prefill 节点自身健康检查的覆盖范围：prompt encode、资源上报及 Decode
+                # 资源等待阶段不再计入本地推理健康状态。资源分配异常应由 PD master 侧的运行请求计数、
+                # Decode 节点健康检查和等待资源的超时逻辑负责监控，不能依赖 Prefill 推理计数判断。
                 await self._register_running_request()
                 running_request_registered = True
 
@@ -726,6 +734,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
+        sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
+        sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -750,15 +760,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 for sub_req_id, out_str, metadata, finish_status in req_status.out_token_info_list:
                     # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                     metadata["prompt_tokens"] = prompt_tokens
-                    # p 节点返回 prompt_ids 信息，防止 d 节点重新 encode
-                    if self.pd_mode.is_P() and is_first_token:
-                        metadata["prompt_ids"] = prompt_ids
 
                     gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
                     metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+                    cur_mtp_verify_token_num = metadata.get("mtp_verify_token_num", 0)
+                    sub_req_id_to_mtp_verify_token_num[sub_req_id] = cur_mtp_verify_token_num
+                    cur_mtp_verify_step_num = metadata.get("mtp_verify_step_num", 0)
+                    sub_req_id_to_mtp_verify_step_num[sub_req_id] = cur_mtp_verify_step_num
 
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
@@ -788,9 +799,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
-                        mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
-                        )
+                        mtp_accepted_token_num = sum(sub_req_id_to_mtp_accepted_token_num.values())
+                        mtp_verify_token_num = sum(sub_req_id_to_mtp_verify_token_num.values())
+                        mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
+                        if mtp_total_verify_steps <= 0:
+                            mtp_total_verify_steps = out_token_counter - mtp_accepted_token_num
+                        mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
+                        mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
+                        mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
                             f"X-Request-Id:{x_request_id} "
@@ -808,7 +824,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                             f"disk cache hit: {disk_prompt_cache_len > 0} "
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
+                            f"mtp_accepted_token_num:{mtp_accepted_token_num} "
+                            f"mtp_total_verify_steps:{mtp_total_verify_steps} "
+                            f"mtp_total_verify_tokens:{mtp_verify_token_num} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
+                            f"mtp_avg_accepted_tokens_per_step:{mtp_avg_accepted_tokens_per_step} "
+                            f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
                         )
 
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
@@ -957,6 +978,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
                                     "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                                    "mtp_verify_token_num": req.mtp_verify_token_num,
+                                    "mtp_verify_step_num": req.mtp_verify_step_num,
                                 }
                                 metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
                                 if self.args.use_reward_model:
@@ -1005,6 +1028,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
         return
 
     async def _register_running_request(self):
+        """登记一个开始运行的请求，必须与 ``_unregister_running_request`` 配对调用。
+
+        当运行请求数从 0 变为 1 时，同时刷新健康检查时间，避免服务长时间空闲后
+        刚开始处理新请求就被误判为推理超时。
+        """
         async with self._run_reqs_count_lock:
             prev = self.run_reqs_count_mark.get_value()
             self.run_reqs_count_mark.set_value(prev + 1)
@@ -1012,6 +1040,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 self.latest_success_infer_time_mark.set_value(int(time.time()))
 
     async def _unregister_running_request(self):
+        """注销一个结束运行的请求，必须在 finally 中与登记操作配对调用。"""
         async with self._run_reqs_count_lock:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
 

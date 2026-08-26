@@ -224,7 +224,7 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
-    reasoning_effort: Optional[Literal["none", "low", "medium", "high", "max"]] = None
+    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
@@ -272,7 +272,13 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def sync_thinking_chat_template_kwargs(self):
-        """Mirror thinking <-> enable_thinking when only one is set (Qwen vs DeepSeek templates)."""
+        """Resolve reasoning effort and mirror the thinking template aliases."""
+        if self.reasoning_effort is not None:
+            if self.chat_template_kwargs is None:
+                self.chat_template_kwargs = {}
+            if "thinking" not in self.chat_template_kwargs and "enable_thinking" not in self.chat_template_kwargs:
+                self.chat_template_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+
         if not self.chat_template_kwargs:
             return self
         if "thinking" not in self.chat_template_kwargs and "enable_thinking" in self.chat_template_kwargs:

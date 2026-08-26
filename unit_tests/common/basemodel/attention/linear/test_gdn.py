@@ -60,6 +60,101 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     assert torch.equal(ssm_states, final_state.to(cache_dtype))
 
 
+def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
+    model = SimpleNamespace(
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
+    )
+    infer_state = SimpleNamespace(
+        batch_size=b_req_idx.shape[0],
+        b_req_idx=b_req_idx,
+        b_mtp_index=torch.zeros_like(b_req_idx),
+        req_manager=SimpleNamespace(
+            HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
+            req_to_mtp_state_index=req_to_mtp_state_index,
+        ),
+    )
+    return gdn.LinearAttDecodeAttState(
+        backend=SimpleNamespace(
+            model=model,
+            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
+        ),
+        infer_state=infer_state,
+    )
+
+
+def test_decode_state_initializes_normal_layout():
+    b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
+    state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
+
+    state.init_state()
+
+    assert state.b_conv_buffer_idx is b_req_idx
+    assert state.b_ssm_buffer_idx is b_req_idx
+    assert state.b1_mtp_cu_q_seq_len is None
+    assert state.b_num_accepted_tokens is None
+
+
+def test_decode_state_initializes_fixed_mtp_layout():
+    b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
+    req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
+    state = _create_decode_state(
+        draft_step=2,
+        dynamic_layout=False,
+        b_req_idx=b_req_idx,
+        req_to_mtp_state_index=req_to_mtp_state_index,
+    )
+
+    state.init_state()
+
+    torch.testing.assert_close(state.b1_mtp_cu_q_seq_len, torch.tensor([0, 3, 6], dtype=torch.int32))
+    torch.testing.assert_close(state.b_conv_buffer_idx, torch.tensor([2, 4], dtype=torch.int32))
+    torch.testing.assert_close(state.b_num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
+    torch.testing.assert_close(
+        state.b_ssm_buffer_idx,
+        torch.tensor([[6, 7, 8], [12, 13, 14]], dtype=torch.int32),
+    )
+
+
+def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
+    b_req_idx = torch.tensor([2, 2, 4, 4, 4], dtype=torch.int32)
+    req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
+    expected_cu_q_seq_len = torch.tensor([0, 2, 5, 5, 5, 5], dtype=torch.int32)
+    expected_conv_buffer_idx = torch.tensor([2, 4, 5, 5, 5], dtype=torch.int32)
+    expected_num_accepted_tokens = torch.tensor([2, 3, 1, 1, 1], dtype=torch.int32)
+    build_calls = []
+
+    def build_params(**kwargs):
+        build_calls.append(kwargs)
+        return expected_cu_q_seq_len, expected_conv_buffer_idx, expected_num_accepted_tokens
+
+    monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build_params)
+    state = _create_decode_state(
+        draft_step=2,
+        dynamic_layout=True,
+        b_req_idx=b_req_idx,
+        req_to_mtp_state_index=req_to_mtp_state_index,
+    )
+
+    state.init_state()
+
+    assert state.b1_mtp_cu_q_seq_len is expected_cu_q_seq_len
+    assert state.b_conv_buffer_idx is expected_conv_buffer_idx
+    assert state.b_num_accepted_tokens is expected_num_accepted_tokens
+    torch.testing.assert_close(
+        state.b_ssm_buffer_idx,
+        torch.tensor(
+            [[6, 7, 8], [12, 13, 14], [15, 16, 17], [15, 16, 17], [15, 16, 17]],
+            dtype=torch.int32,
+        ),
+    )
+    assert len(build_calls) == 1
+    assert build_calls[0]["b_req_idx"] is state.infer_state.b_req_idx
+    assert build_calls[0]["b_mtp_index"] is state.infer_state.b_mtp_index
+    assert build_calls[0]["req_to_mtp_state_index"] is req_to_mtp_state_index
+    assert build_calls[0]["hold_req_id"] == 5
+
+
 def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
     assert inspect.isabstract(gdn.LinearAttBackend)
     backend = object.__new__(TritonLinearAttBackend)

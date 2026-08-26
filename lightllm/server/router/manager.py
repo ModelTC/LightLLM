@@ -153,7 +153,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                 if self.args.run_mode in ["prefill", "normal"] and self.args.enable_dp_prompt_cache_fetch
                 else self.args.per_dp_running_max_req_size
             ),
-            "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
+            "max_seq_length": self.args.max_req_total_len + max(8, self.args.mtp_step * 2),
             "nccl_host": self.args.nccl_host,
             "nccl_port": get_shm_port_args().nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,

@@ -8,6 +8,9 @@ from .utils import should_init_decode_wrapper
 
 
 class FlashInferAttBackend(BaseAttBackend):
+    workspace_buffer_key = "flashinfer_fp"
+    workspace_buffer_size = 512 * 1024 * 1024
+
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
@@ -16,7 +19,6 @@ class FlashInferAttBackend(BaseAttBackend):
         self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
         head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
         self.head_dim = model.config.get("head_dim", head_dim)
-        self.workspace_buffer = torch.empty(512 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
         self.max_seq_length = model.max_seq_length
         self.kv_indices_buffer = [
             torch.empty(
@@ -65,7 +67,10 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             kv_indices,
         )
         self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
-            self.backend.workspace_buffer,
+            self.backend.get_gpu_workspace_buffer(
+                key_name=self.backend.workspace_buffer_key,
+                workspace_size=self.backend.workspace_buffer_size,
+            ),
             qo_indptr_buf=q_starts,
             paged_kv_indptr_buf=kv_starts,
             paged_kv_indices_buf=kv_indices,
@@ -166,7 +171,10 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
 
         assert self.decode_wrapper is None
         self.decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
-            self.backend.workspace_buffer,
+            self.backend.get_gpu_workspace_buffer(
+                key_name=self.backend.workspace_buffer_key,
+                workspace_size=self.backend.workspace_buffer_size,
+            ),
             "NHD",
             use_cuda_graph=True,
             use_tensor_cores=True,

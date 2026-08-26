@@ -38,6 +38,11 @@ def _set_envs_and_config(args: StartArgs):
 def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
+    if args.mtp_mode is not None:
+        assert (
+            not args.disable_cudagraph or args.run_mode == "prefill"
+        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
+
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
@@ -189,6 +194,11 @@ def _launch_subprocesses(args: StartArgs):
     # mtp params check
     if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:
+            assert args.mtp_mode not in (
+                "eagle3",
+                "dspark",
+                "dflash",
+            ), f"--mtp_draft_model_dir is required for {args.mtp_mode} mode"
             args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
         assert args.mtp_step > 0
     else:
@@ -422,13 +432,14 @@ def _launch_subprocesses(args: StartArgs):
         start_args=[(args,)],
     )
 
-    process_manager.start_submodule_processes(
+    router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
             (args,),
             (args,),
         ],
     )
+    process_manager.register_process_tree(router_process)
 
     return process_manager
 

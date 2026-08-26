@@ -225,14 +225,17 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
         """Commit DSV4 derived slots before BaseModel pads or scatters the generic input."""
-        if model_input.is_prefill and self.is_mtp_draft_model:
+        if model_input.batch_size == 0:
             return
-        if model_input.mem_indexes_cpu is None:
+        if model_input.is_prefill and self.is_mtp_draft_model:
             return
         if model_input.mem_indexes is None:
             model_input.mem_indexes = model_input.mem_indexes_cpu.cuda(non_blocking=True)
 
         if model_input.is_prefill:
+            if model_input.mem_indexes_cpu is None:
+                model_input.b_req_idx_cpu = model_input.b_req_idx.detach().cpu()
+                model_input.b_seq_len_cpu = model_input.b_seq_len.detach().cpu()
             self.req_manager.prepare_prefill(
                 b_req_idx_cpu=model_input.b_req_idx_cpu,
                 b_ready_cache_len_cpu=model_input.b_ready_cache_len,
@@ -242,6 +245,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             return
 
         if model_input.mtp_decode_slot_prepare_indices == ():
+            return
+        # GPU-only decode inputs are CUDA Graph warmup/HOLD layouts. Runtime
+        # DSV4 draft inputs carry CPU mirrors from the proposer and prepare slots here.
+        if model_input.mem_indexes_cpu is None:
             return
         self.req_manager.prepare_decode(
             model_input.b_req_idx_cpu,

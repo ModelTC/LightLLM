@@ -7,7 +7,9 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 from lightllm.common.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.deepseek_v4_mtp.layer_infer.pre_layer_infer import DeepseekV4MTPPreLayerInfer
 from lightllm.models.deepseek_v4_mtp.layer_infer.transformer_layer_infer import (
     DeepseekV4MTPTransformerLayerInfer,
@@ -25,6 +27,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+@DraftModelRegistry(model_type="deepseek_v4", spec_modes="eagle_with_att")
 class DeepseekV4MTPModel(DeepseekV4TpPartModel):
     is_mtp_draft_model = True
 
@@ -99,6 +102,11 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         super()._init_some_value()
         self.layers_num = 1
         return
+
+    def _microbatch_overlap_decode_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
+        self._prepare_dsv4_slots(model_input0)
+        self._prepare_dsv4_slots(model_input1)
+        return super()._microbatch_overlap_decode_cuda(model_input0, model_input1)
 
     def _gen_special_model_input(self, token_num: int):
         return {

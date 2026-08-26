@@ -3,16 +3,13 @@ import numpy as np
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.common.basemodel.batch_objs import ModelInput
-from lightllm.utils.envs_utils import (
-    enable_diverse_mode_gqa_decode_fast_kernel,
-    get_diverse_max_batch_shared_group_size,
-)
+
+INT64_MAX = torch.iinfo(torch.int64).max
 
 
 def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs = []
     total_token_num = 0
-    prefix_total_token_num = 0
     input_ids = []
     b_req_idx = []
     b_seq_len = []
@@ -44,7 +41,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_q_seq_len.append(input_token_len)
         input_ids.append(input_id)
         total_token_num += seq_len
-        prefix_total_token_num += req.cur_kv_len
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
         if hasattr(req, "is_decode_req_mixed_in_prefill"):
@@ -53,11 +49,13 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         else:
             b_is_decode_req.append(False)
 
-    max_kv_seq_len = max(b_seq_len)
-    max_cache_len = max(b_ready_cache_len)
-    max_q_seq_len = max(b_q_seq_len)
+    # DP 模式下某个 rank 可能没有本地请求。这里保留真实的 0 shape，
+    # 推理所需的 dummy request 统一由 BaseModel 在执行前补齐。
+    max_kv_seq_len = max(b_seq_len, default=0)
+    max_cache_len = max(b_ready_cache_len, default=0)
+    max_q_seq_len = max(b_q_seq_len, default=0)
 
-    input_ids = np.concatenate(input_ids, dtype=np.int64)
+    input_ids = np.concatenate(input_ids, dtype=np.int64) if input_ids else np.empty((0,), dtype=np.int64)
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
@@ -88,7 +86,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
-        prefix_total_token_num=prefix_total_token_num,
         multimodal_params=batch_multimodal_params,
     )
 
@@ -124,19 +121,24 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             multimodal_params.append(req.multimodal_params)
             b_q_seq_len.append(1)
 
-    max_kv_seq_len = max(b_seq_len)
-    max_q_seq_len = max(b_q_seq_len)
+    # 空 DP rank 同样构建完整的 decode ModelInput；BaseModel 会在 token
+    # gather 和 attention 初始化之前补入内部 dummy request。
+    max_kv_seq_len = max(b_seq_len, default=0)
+    max_q_seq_len = max(b_q_seq_len, default=1)
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_position_delta = build_b_position_delta(multimodal_params)
 
-    if enable_diverse_mode_gqa_decode_fast_kernel():
-        b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
-    else:
-        b_shared_seq_len = None
-        b_mark_shared_group = None
+    b_shared_seq_len = torch.tensor(
+        [req.get_radix_cache_shared_len() for req in run_reqs], dtype=torch.int32, device="cpu"
+    )
+    b_shared_radix_node_id = torch.tensor(
+        [-1 if req.shared_kv_node is None else req.shared_kv_node.time_id % INT64_MAX for req in run_reqs],
+        dtype=torch.int64,
+        device="cpu",
+    )
 
     # dynamic prompt cache 准备 token
     if g_infer_context.radix_cache is not None:
@@ -155,11 +157,61 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_seq_len=b_seq_len,
         b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
-        b_mark_shared_group=b_mark_shared_group,
+        b_shared_radix_node_id=b_shared_radix_node_id,
         is_prefill=False,
         multimodal_params=multimodal_params,
     )
     return model_input, run_reqs
+
+
+def overlap_prepare_decode_inputs(req_objs: List[InferReq]):
+    """按请求把 decode batch 拆成两个允许为空的 microbatch。"""
+
+    split_req_bound = (len(req_objs) + 1) // 2
+    decode_reqs0 = req_objs[:split_req_bound]
+    decode_reqs1 = req_objs[split_req_bound:]
+    model_input0, run_reqs0 = prepare_decode_inputs(
+        req_objs=decode_reqs0,
+    )
+    model_input1, run_reqs1 = prepare_decode_inputs(
+        req_objs=decode_reqs1,
+    )
+    return model_input0, run_reqs0, decode_reqs0, model_input1, run_reqs1, decode_reqs1
+
+
+def overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
+    """按当前 prefill token 负载把完整请求分配到两个 microbatch。
+
+    请求不能跨 microbatch 拆分，否则同一个 ``InferReq`` 会在后处理阶段被
+    重复更新。所有请求统一按照两侧已分配 token 数进行贪心均衡。这里不
+    创建 HOLD 请求，空侧保留完整的 0-shape ``ModelInput``，执行阶段需要
+    的 padding 由 BaseModel 统一处理。
+    """
+
+    req_input_token_nums = [len(req.get_chuncked_input_token_ids()) - req.cur_kv_len for req in req_objs]
+    assert all(token_num > 0 for token_num in req_input_token_nums)
+
+    left_token_num = 0
+    right_token_num = 0
+    left_reqs = []
+    right_reqs = []
+    for req, token_num in zip(req_objs, req_input_token_nums):
+        if left_token_num <= right_token_num:
+            left_reqs.append(req)
+            left_token_num += token_num
+        else:
+            right_reqs.append(req)
+            right_token_num += token_num
+
+    model_input0, run_reqs0 = prepare_prefill_inputs(
+        req_objs=left_reqs,
+        is_chuncked_mode=True,
+    )
+    model_input1, run_reqs1 = prepare_prefill_inputs(
+        req_objs=right_reqs,
+        is_chuncked_mode=True,
+    )
+    return model_input0, run_reqs0, model_input1, run_reqs1
 
 
 def build_b_position_delta(multimodal_params: List[dict]) -> torch.Tensor:
@@ -172,48 +224,3 @@ def build_b_position_delta(multimodal_params: List[dict]) -> torch.Tensor:
                 position_delta += grid_thwd[3]
         b_position_delta.append(position_delta)
     return torch.tensor(b_position_delta, dtype=torch.int32, device="cpu")
-
-
-def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Tensor, torch.Tensor]:
-    # b_shared_seq_len 和 b_mark_shared_group 只会在 diverse_mode 下的 decode 阶段真正被使用的参数,
-    # 用于记录请求间的共享关系。
-    # 举列说明:
-    # b_shared_seq_len : [10, 10, 10, 11, 11, 11, 11]
-    # b_mark_shared_group: [0, 0, 3, 0, 0, 0, 4]
-    # b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
-    # 同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。某些模式可以利用这两个
-    # 输入加速算子的运行。
-    max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
-    b_shared_seq_len = [req.get_radix_cache_shared_len() for req in run_reqs]
-    b_mark_shared_group = []
-    shared_nodes = [req.shared_kv_node for req in run_reqs]
-    _current_group = []
-    for node in shared_nodes:
-        if not _current_group:
-            _current_group.append(node)
-        elif node == _current_group[-1]:
-            _current_group.append(node)
-        else:
-            b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
-            b_mark_shared_group[-1] = len(_current_group)
-            _current_group.clear()
-            _current_group.append(node)
-
-        if len(_current_group) == max_batch_shared_group_size:
-            b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
-            b_mark_shared_group[-1] = len(_current_group)
-            _current_group.clear()
-    if _current_group:
-        b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
-        b_mark_shared_group[-1] = len(_current_group)
-        _current_group.clear()
-
-    assert len(b_mark_shared_group) == len(run_reqs)
-    # 如果一个 shared group 的长度为1， 则将其共享长度强制修改为0， 避免无效计算，提升
-    # 算子执行效率。
-    b_shared_seq_len = [
-        0 if group_size == 1 else shared_len for shared_len, group_size in zip(b_shared_seq_len, b_mark_shared_group)
-    ]
-    b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
-    b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
-    return b_shared_seq_len, b_mark_shared_group

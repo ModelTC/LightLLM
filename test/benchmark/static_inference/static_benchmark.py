@@ -5,6 +5,7 @@ chunked prefill, decode, and MTP decode cases.
 """
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -27,9 +28,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4MemoryManager
 from lightllm.common.req_manager import DeepseekV4ReqManager
+from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.models import get_model
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
@@ -37,9 +39,6 @@ from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.server.api_cli import make_argument_parser
-from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
-    prepare_mtp_prefill_inputs,
-)
 from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype, get_vocab_size
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import set_env_start_args
@@ -296,11 +295,15 @@ class StaticBenchmarkExecutor:
         current_next_ids = first_next_ids.cuda(non_blocking=True)
         mtp_candidates = [current_next_ids.detach().cpu()]
         for draft_index in range(self._num_mtp_modules()):
-            draft_input = prepare_mtp_prefill_inputs(
-                model_input=draft_input,
+            draft_input = copy.copy(draft_input)
+            draft_input.b_is_decode_req = torch.zeros_like(draft_input.b_req_idx, dtype=torch.bool)
+            draft_input.input_ids = gen_mtp_new_input_ids(
+                input_ids=draft_input.input_ids,
                 b_next_token_ids=current_next_ids,
-                mtp_draft_input_hiddens=draft_output.mtp_main_output_hiddens,
+                b_seq_len=draft_input.b_seq_len,
+                b_ready_cache_len=draft_input.b_ready_cache_len,
             )
+            draft_input.mtp_draft_input_hiddens = draft_output.mtp_collector.spec_hidden
             draft_output = self.draft_models[draft_index].forward(draft_input)
             current_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
             mtp_candidates.append(current_next_ids.detach().cpu())
@@ -429,7 +432,7 @@ class StaticBenchmarkExecutor:
 
         for step in range(self.args.mtp_step):
             draft_input.input_ids = draft_next_ids
-            draft_input.mtp_draft_input_hiddens = draft_output.mtp_main_output_hiddens
+            draft_input.mtp_draft_input_hiddens = draft_output.mtp_collector.spec_hidden
             draft_model = self.draft_models[step % self._num_mtp_modules()]
             draft_output = draft_model.forward(draft_input)
             draft_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
@@ -566,11 +569,11 @@ class StaticBenchmarkExecutor:
             max_q_seq_len=q_len,
             max_kv_seq_len=seq_len_value,
             max_cache_len=ready_cache_len,
-            prefix_total_token_num=ready_cache_len * batch_size,
             input_ids=input_ids,
             b_req_idx=req_idx,
             b_mtp_index=cpu_i32_zeros(batch_size),
             b_seq_len=b_seq_len,
+            b_is_decode_req=torch.zeros(batch_size, dtype=torch.bool, device="cpu"),
             mem_indexes_cpu=mem_indexes,
             is_prefill=True,
             b_ready_cache_len=b_ready_cache_len,
@@ -600,6 +603,8 @@ class StaticBenchmarkExecutor:
             b_mtp_index=mtp_index,
             b_seq_len=seq_len,
             b_position_delta=cpu_i32_zeros(batch_size),
+            b_shared_seq_len=cpu_i32_zeros(batch_size),
+            b_shared_radix_node_id=torch.full((batch_size,), -1, dtype=torch.int64, device="cpu"),
             mem_indexes_cpu=mem_indexes,
             is_prefill=False,
             multimodal_params=empty_multimodal_params(batch_size),
@@ -607,19 +612,21 @@ class StaticBenchmarkExecutor:
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
         if allow_overlap and self.args.enable_prefill_microbatch_overlap and model_input.batch_size > 1:
-            micro_input0, micro_input1 = self._split_prefill_input(model_input)
-            output0, output1 = self.model.microbatch_overlap_prefill(micro_input0, micro_input1)
-            return self._merge_model_outputs(output0, output1)
+            model_input0, model_input1 = self._split_prefill_input(model_input)
+            model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
+            return self._merge_overlap_model_outputs(model_output0, model_output1)
         return self.model.forward(model_input)
 
     def _forward_decode_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
-        if allow_overlap and self.args.enable_decode_microbatch_overlap and model_input.batch_size > 1:
-            micro_input0, micro_input1 = self._split_decode_input(model_input)
-            output0, output1 = self.model.microbatch_overlap_decode(micro_input0, micro_input1)
-            return self._merge_model_outputs(output0, output1)
+        if allow_overlap and self.args.enable_decode_microbatch_overlap:
+            model_input0, model_input1 = self._split_decode_input(model_input)
+            model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
+            return self._merge_overlap_model_outputs(model_output0, model_output1)
         return self.model.forward(model_input)
 
     def _split_prefill_input(self, model_input: ModelInput):
+        """在 benchmark 调用侧按请求构造两个 prefill microbatch。"""
+
         split_batch = model_input.batch_size // 2
         q_lens = model_input.b_seq_len - model_input.b_ready_cache_len
         split_tokens = int(q_lens[:split_batch].sum().item())
@@ -644,66 +651,101 @@ class StaticBenchmarkExecutor:
     ) -> ModelInput:
         b_seq_len = model_input.b_seq_len[batch_start:batch_end].clone()
         b_ready_cache_len = model_input.b_ready_cache_len[batch_start:batch_end].clone()
-        b_q_seq_len = b_seq_len - b_ready_cache_len
-        b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
+        q_lens = b_seq_len - b_ready_cache_len
+        b_prefill_start_loc = q_lens.cumsum(dim=0, dtype=torch.int32) - q_lens
         has_output = model_input.b_prefill_has_output_cpu
-        return ModelInput(
+        kwargs = dict(
             batch_size=batch_end - batch_start,
             total_token_num=int(b_seq_len.sum().item()),
-            max_q_seq_len=int(b_q_seq_len.max().item()),
+            max_q_seq_len=int(q_lens.max().item()),
             max_kv_seq_len=int(b_seq_len.max().item()),
             max_cache_len=int(b_ready_cache_len.max().item()),
-            prefix_total_token_num=int(b_ready_cache_len.sum().item()),
             input_ids=model_input.input_ids[token_start:token_end].contiguous(),
             b_req_idx=model_input.b_req_idx[batch_start:batch_end].clone(),
             b_mtp_index=model_input.b_mtp_index[batch_start:batch_end].clone(),
             b_seq_len=b_seq_len,
-            mem_indexes_cpu=model_input.mem_indexes_cpu[token_start:token_end].contiguous(),
+            b_is_decode_req=model_input.b_is_decode_req[batch_start:batch_end].clone(),
             is_prefill=True,
             b_ready_cache_len=b_ready_cache_len,
             b_prefill_start_loc=b_prefill_start_loc,
-            b_prefill_has_output_cpu=(has_output[batch_start:batch_end] if has_output is not None else None),
+            b_prefill_has_output_cpu=has_output[batch_start:batch_end],
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
         )
+        if model_input.mem_indexes_cpu is not None:
+            kwargs["mem_indexes_cpu"] = model_input.mem_indexes_cpu[token_start:token_end].contiguous()
+        else:
+            kwargs["mem_indexes"] = model_input.mem_indexes[token_start:token_end].contiguous()
+        if model_input.mtp_draft_input_hiddens is not None:
+            kwargs["mtp_draft_input_hiddens"] = model_input.mtp_draft_input_hiddens[token_start:token_end].contiguous()
+        return ModelInput(**kwargs)
 
     def _split_decode_input(self, model_input: ModelInput):
-        split_batch = model_input.batch_size // 2
+        split_batch = (model_input.batch_size + 1) // 2
         return (
             self._slice_decode_input(model_input, 0, split_batch),
             self._slice_decode_input(model_input, split_batch, model_input.batch_size),
         )
 
-    def _slice_decode_input(self, model_input: ModelInput, batch_start: int, batch_end: int) -> ModelInput:
+    @staticmethod
+    def _slice_decode_input(model_input: ModelInput, batch_start: int, batch_end: int) -> ModelInput:
+        batch_size = batch_end - batch_start
         b_seq_len = model_input.b_seq_len[batch_start:batch_end].clone()
         input_ids = model_input.input_ids
         if input_ids is not None:
             input_ids = input_ids[batch_start:batch_end].contiguous()
-        return ModelInput(
-            batch_size=batch_end - batch_start,
+        kwargs = dict(
+            batch_size=batch_size,
             total_token_num=int(b_seq_len.sum().item()),
-            max_q_seq_len=model_input.max_q_seq_len,
-            max_kv_seq_len=int(b_seq_len.max().item()),
+            max_q_seq_len=1,
+            max_kv_seq_len=int(b_seq_len.max().item()) if batch_size > 0 else 0,
             input_ids=input_ids,
             b_req_idx=model_input.b_req_idx[batch_start:batch_end].clone(),
             b_mtp_index=model_input.b_mtp_index[batch_start:batch_end].clone(),
             b_seq_len=b_seq_len,
             b_position_delta=model_input.b_position_delta[batch_start:batch_end].clone(),
-            mem_indexes_cpu=model_input.mem_indexes_cpu[batch_start:batch_end].contiguous(),
+            b_shared_seq_len=model_input.b_shared_seq_len[batch_start:batch_end].clone(),
+            b_shared_radix_node_id=model_input.b_shared_radix_node_id[batch_start:batch_end].clone(),
             is_prefill=False,
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
         )
+        if model_input.mem_indexes_cpu is not None:
+            kwargs["mem_indexes_cpu"] = model_input.mem_indexes_cpu[batch_start:batch_end].contiguous()
+        else:
+            kwargs["mem_indexes"] = model_input.mem_indexes[batch_start:batch_end].contiguous()
+        if model_input.mtp_draft_input_hiddens is not None:
+            kwargs["mtp_draft_input_hiddens"] = model_input.mtp_draft_input_hiddens[batch_start:batch_end].contiguous()
+        return ModelInput(**kwargs)
 
-    def _merge_model_outputs(self, output0: ModelOutput, output1: ModelOutput) -> ModelOutput:
-        mtp_hiddens = None
-        if output0.mtp_main_output_hiddens is not None and output1.mtp_main_output_hiddens is not None:
-            mtp_hiddens = torch.cat(
-                (output0.mtp_main_output_hiddens, output1.mtp_main_output_hiddens),
-                dim=0,
-            )
+    @staticmethod
+    def _merge_overlap_model_outputs(output0: ModelOutput, output1: ModelOutput) -> ModelOutput:
+        def concat_optional(value0: torch.Tensor | None, value1: torch.Tensor | None):
+            if value0 is None and value1 is None:
+                return None
+            assert value0 is not None and value1 is not None
+            return torch.cat((value0, value1), dim=0)
+
         return ModelOutput(
             logits=torch.cat((output0.logits, output1.logits), dim=0),
-            prefill_mem_indexes_ready_event=output0.prefill_mem_indexes_ready_event,
-            mtp_main_output_hiddens=mtp_hiddens,
+            mtp_collector=ModelMtpOutputCollector(
+                spec_hidden=concat_optional(
+                    output0.mtp_collector.spec_hidden,
+                    output1.mtp_collector.spec_hidden,
+                ),
+                draft_token_ids=concat_optional(
+                    output0.mtp_collector.draft_token_ids,
+                    output1.mtp_collector.draft_token_ids,
+                ),
+                confidence_logits=concat_optional(
+                    output0.mtp_collector.confidence_logits,
+                    output1.mtp_collector.confidence_logits,
+                ),
+            ),
+            prefill_mem_indexes_ready_event=(
+                output0.prefill_mem_indexes_ready_event
+                if output0.prefill_mem_indexes_ready_event is not None
+                else output1.prefill_mem_indexes_ready_event
+            ),
+            prompt_logics=concat_optional(output0.prompt_logics, output1.prompt_logics),
         )
 
     def _build_mtp_decode_index_tensors(self, req_idx: torch.Tensor, step_width: int):
@@ -1194,7 +1236,7 @@ def build_model_kvargs(args: SimpleNamespace, rank_id: int) -> Dict:
         "max_req_num": max(args.running_max_req_size, args.graph_max_batch_size),
         "batch_max_tokens": args.batch_max_tokens,
         "run_mode": "normal",
-        "max_seq_length": args.max_req_total_len,
+        "max_seq_length": args.max_req_total_len + max(8, args.mtp_step * 2),
         "disable_cudagraph": args.disable_cudagraph,
         "llm_prefill_att_backend": args.llm_prefill_att_backend,
         "llm_decode_att_backend": args.llm_decode_att_backend,

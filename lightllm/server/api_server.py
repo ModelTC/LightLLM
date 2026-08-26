@@ -1,12 +1,13 @@
 import torch
 from .api_cli import add_cli_args
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_node_role
 
 logger = init_logger(__name__)
 
 
 def launch_server(args: StartArgs):
+    set_log_node_role(args.run_mode)
     from .api_start import pd_master_start, normal_or_p_d_start, config_server_start, visual_only_start
 
     try:
