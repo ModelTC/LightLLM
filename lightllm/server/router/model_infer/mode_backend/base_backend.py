@@ -840,13 +840,23 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        return torch.argmax(logits, dim=-1)
+        candidate_indexes = torch.argmax(logits, dim=-1)
+        return self._map_logits_indexes_to_token_ids(model_output, candidate_indexes)
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
-        max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
+        max_probs, candidate_indexes = torch.max(probs, dim=-1)
+        draft_next_token_ids_gpu = self._map_logits_indexes_to_token_ids(model_output, candidate_indexes)
         return draft_next_token_ids_gpu, max_probs
+
+    @staticmethod
+    def _map_logits_indexes_to_token_ids(model_output: ModelOutput, candidate_indexes: torch.Tensor):
+        """Map sparse-logits columns to vocabulary ids; dense logits are identity-mapped."""
+
+        if model_output.logits_token_ids is None:
+            return candidate_indexes
+        return model_output.logits_token_ids.gather(1, candidate_indexes.long().view(-1, 1)).view(-1).long()
 
     def _sample_and_scatter_token(
         self,

@@ -7,15 +7,19 @@ from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerW
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
-from lightllm.distributed.communication_op import all_gather
+from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor
 
 
 class LlamaPostLayerInfer(PostLayerInferTpl):
     """ """
 
+    DEFAULT_DRAFT_LOGITS_TOPK = 128
+
     def __init__(self, network_config):
         super().__init__(network_config)
         self.eps_ = network_config["rms_norm_eps"]
+        self.draft_logits_topk_ = int(os.getenv("LIGHTLLM_DRAFT_LOGITS_TOPK", str(self.DEFAULT_DRAFT_LOGITS_TOPK)))
+        assert self.draft_logits_topk_ > 0
         return
 
     def _norm(self, input, infer_state, layer_weight: LlamaPreAndPostLayerWeight) -> torch.Tensor:
@@ -70,7 +74,13 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         input_embdings = None
 
         # 正常采样使用的 logits，始终只对应每个请求最后一个位置。
-        ans_logics = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
+        ans_logics = self._lm_head_and_gather(
+            last_input,
+            token_num,
+            layer_weight,
+            infer_state,
+            use_sparse_logits=getattr(infer_state, "is_mtp_draft_model", False),
+        )
         # 在 return_all_prompt_logics 模式下，prompt_logics 保存的是完整 prefill
         # 的 hidden state，需要在 norm/lm_head 之前取出来，避免被 input_embdings 置空。
         prompt_logics_hiddens = infer_state.prompt_logics
@@ -80,7 +90,11 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if prompt_logics_hiddens is not None:
             prompt_token_num = prompt_logics_hiddens.shape[0]
             infer_state.prompt_logics = self._lm_head_and_gather(
-                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state
+                prompt_logics_hiddens,
+                prompt_token_num,
+                layer_weight,
+                infer_state,
+                use_sparse_logits=False,
             )
 
         return ans_logics
@@ -91,11 +105,20 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         token_num: int,
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
+        use_sparse_logits: bool = False,
     ) -> torch.Tensor:
         normed = self._norm(hidden, infer_state, layer_weight)
         normed = normed.permute(1, 0).view(-1, token_num)
         logic_batch = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
         normed = None
+
+        if use_sparse_logits:
+            return self._gather_draft_topk_logits(
+                logic_batch=logic_batch,
+                token_num=token_num,
+                layer_weight=layer_weight,
+                infer_state=infer_state,
+            )
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
         if self.tp_world_size_ == 1:
@@ -114,6 +137,66 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None
+        return ans_logics
+
+    def _gather_draft_topk_logits(
+        self,
+        logic_batch: torch.Tensor,
+        token_num: int,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        infer_state: LlamaInferStateInfo,
+    ) -> torch.Tensor:
+        """Gather each TP rank's local top-k instead of the full vocabulary."""
+
+        lm_head = layer_weight.lm_head_weight_
+        vocab_size = lm_head.vocab_size
+        local_topk = min(self.draft_logits_topk_, vocab_size)
+
+        # Every TP vocabulary shard is expected to contain at least top-k rows,
+        # so every rank contributes the same fixed-shape tensors directly.
+        assert logic_batch.shape[0] >= local_topk, (
+            f"draft logits top-k ({local_topk}) exceeds the local vocabulary shard " f"size ({logic_batch.shape[0]})"
+        )
+        local_values, local_indexes = torch.topk(logic_batch, k=local_topk, dim=0, sorted=False)
+        local_values = local_values.float()
+        local_indexes = local_indexes.to(dtype=torch.int32)
+        local_token_ids = local_indexes + int(lm_head.tp_vocab_start_id)
+
+        if self.tp_world_size_ == 1:
+            candidate_values = local_values.permute(1, 0)
+            candidate_token_ids = local_token_ids.permute(1, 0)
+        else:
+            # Pack FP32 logits and the bit representation of INT32 token ids
+            # into one FP32 payload. Both element types are four bytes, so the
+            # ids can be restored losslessly after a single all-gather.
+            local_payload = self.alloc_tensor(
+                (local_topk * 2, token_num),
+                dtype=torch.float32,
+                device=local_values.device,
+            )
+            local_payload[:local_topk].copy_(local_values)
+            local_payload[local_topk:].view(torch.int32).copy_(local_token_ids)
+            gathered_payload = self.alloc_tensor(
+                (self.tp_world_size_, local_topk * 2, token_num),
+                dtype=torch.float32,
+                device=local_values.device,
+            )
+            all_gather_into_tensor(
+                output_=gathered_payload,
+                input_=local_payload,
+                group=infer_state.dist_group,
+                async_op=False,
+            )
+            gathered_values = gathered_payload[:, :local_topk, :]
+            gathered_token_ids = gathered_payload[:, local_topk:, :].view(torch.int32)
+            candidate_values = gathered_values.permute(2, 0, 1).reshape(token_num, -1)
+            candidate_token_ids = gathered_token_ids.permute(2, 0, 1).reshape(token_num, -1)
+
+        candidate_token_ids = candidate_token_ids.to(dtype=torch.int64)
+        candidate_count = candidate_values.shape[1]
+        ans_logics = self.alloc_tensor((token_num, candidate_count), dtype=torch.float32, device=logic_batch.device)
+        ans_logics.copy_(candidate_values)
+        infer_state.logits_token_ids = candidate_token_ids.contiguous()
         return ans_logics
 
     def token_forward(

@@ -53,6 +53,14 @@ class InferStateInfo:
 
         self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False
+        # Draft models only need a small candidate set from the vocabulary
+        # projection.  The model marker enables the sparse logits path in the
+        # post layer without changing the target-model sampling interface.
+        self.is_mtp_draft_model: bool = False
+        # When logits are sparse, each column maps to the corresponding token
+        # id in the model's own output vocabulary.  Dense target logits leave
+        # this field as None and keep the historical column-index semantics.
+        self.logits_token_ids: Optional[torch.Tensor] = None
         # 在开启 return_all_prompt_logics 模式时，保存整个 prefill 阶段每一个
         # token 位置的 logits，供后续回传 prompt logprobs 信息使用。
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。

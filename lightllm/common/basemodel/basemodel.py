@@ -389,6 +389,7 @@ class TpPartBaseModel:
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_token_healing = self.is_token_healing
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
+        infer_state.is_mtp_draft_model = self.is_mtp_draft_model
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
@@ -539,6 +540,8 @@ class TpPartBaseModel:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[0:origin_batch_size]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -551,6 +554,8 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[0:origin_batch_size]
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
@@ -742,6 +747,7 @@ class TpPartBaseModel:
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
@@ -771,6 +777,7 @@ class TpPartBaseModel:
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
         )
 
@@ -1025,11 +1032,13 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
+            logits_token_ids=infer_state1.logits_token_ids,
             mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
             prompt_logics=infer_state1.prompt_logics,
         )
@@ -1074,10 +1083,12 @@ class TpPartBaseModel:
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
+            logits_token_ids=infer_state.logits_token_ids,
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
         )
         model_output1 = ModelOutput(
             logits=predict_logits1.contiguous(),
+            logits_token_ids=infer_state1.logits_token_ids,
             mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
         )
 
