@@ -397,7 +397,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await pd_upload_websocket.send(
-                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("i", prompt_ids)))
+                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
                 )
                 try:
                     await asyncio.wait_for(pd_event.wait(), timeout=180)
