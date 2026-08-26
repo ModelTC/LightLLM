@@ -620,16 +620,14 @@ class ModeBackend:
             # cur_kv_len 已包含 prefix match 和之前完成的 chunk。
             return max(0, req.shm_req.input_len - req.cur_kv_len)
 
-        first_long_req = next(
-            (req for req in ready_reqs if remaining_prefill_tokens(req) > short_token_threshold), None
-        )
         sorted_reqs = sorted(
             ready_reqs,
             key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
         )
-        if first_long_req is not None:
-            sorted_reqs.remove(first_long_req)
-            sorted_reqs.insert(0, first_long_req)
+        for index, req in enumerate(sorted_reqs):
+            if remaining_prefill_tokens(req) > short_token_threshold:
+                sorted_reqs.insert(0, sorted_reqs.pop(index))
+                break
         return sorted_reqs
 
     # 一些可以复用的通用功能函数
