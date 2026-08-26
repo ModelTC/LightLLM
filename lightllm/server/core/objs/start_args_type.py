@@ -98,6 +98,7 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
+    short_prefill_token_threshold: Optional[int] = field(default=None)
     diverse_mode: bool = field(default=False)
     token_healing_mode: bool = field(default=False)
     output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
