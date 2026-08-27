@@ -119,15 +119,25 @@ def free_mem_indexes(
     """Free all KV indexes described by the unified MTP memory list."""
 
     mem_indexes_to_free = []
+    dspark_scratch_to_free = []
     for extra_mem_to_free in extra_mem_indexes_cpu:
         extra_indexes_cpu = extra_mem_to_free.mem_indexes_cpu
         if extra_mem_to_free.free_mask_cpu is not None:
             extra_indexes_cpu = extra_indexes_cpu[extra_mem_to_free.free_mask_cpu]
         if extra_indexes_cpu.numel() > 0:
-            mem_indexes_to_free.append(extra_indexes_cpu)
+            if extra_mem_to_free.swa_pages_cpu is None:
+                mem_indexes_to_free.append(extra_indexes_cpu)
+            else:
+                assert extra_mem_to_free.free_mask_cpu is None
+                dspark_scratch_to_free.append(
+                    (extra_indexes_cpu, extra_mem_to_free.swa_pages_cpu)
+                )
 
+    mem_manager = backend.model.req_manager.mem_manager
+    for mem_indexes_cpu, pages_cpu in dspark_scratch_to_free:
+        mem_manager.free_dspark_swa_block(mem_indexes_cpu, pages_cpu)
     if mem_indexes_to_free:
-        backend.model.req_manager.mem_manager.free(torch.cat(mem_indexes_to_free, dim=0))
+        mem_manager.free(torch.cat(mem_indexes_to_free, dim=0))
 
 
 __all__ = [

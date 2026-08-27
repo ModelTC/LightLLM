@@ -57,6 +57,10 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    # DSpark draft block 的临时 SWA page 所有权。CPU tensor 用于无 D2H
+    # 回收；GPU tensor 供 attention 直接计算 block 的物理 SWA 槽。
+    mtp_draft_swa_pages_cpu: Optional[torch.Tensor] = None
+    mtp_draft_swa_pages: Optional[torch.Tensor] = None
     # 主模型为 None: 准备所有 MTP 列；draft 首轮为 (): 无新槽；draft 追加后为 (k,): 只准备新槽。
     mtp_decode_slot_prepare_indices: Optional[tuple] = None
 

@@ -901,6 +901,48 @@ class DeepseekV4MemoryManager(MemoryManager):
             self._update_swa_page_counts(slots, 1)
         return
 
+    def alloc_dspark_swa_block(self, mem_indexes: torch.Tensor, block_size: int):
+        """Assign one temporary SWA scratch page to each DSpark proposal block.
+
+        Proposal KV is consumed by the draft model immediately and every full
+        slot is released after the following target verify.  Keeping the whole
+        block in a private page avoids the host-side sequence-length decision
+        required by the position-aligned target cache.  Attention still uses
+        the absolute positions stored in the request table; physical SWA slots
+        only identify the packed KV rows.
+        """
+        mem_indexes = mem_indexes.reshape(-1)
+        block_size = int(block_size)
+        assert block_size > 0
+        assert block_size <= DSV4_SWA_PAGE_SIZE
+        assert mem_indexes.numel() % block_size == 0
+
+        req_num = mem_indexes.numel() // block_size
+        if req_num == 0:
+            return (
+                torch.empty((0,), dtype=torch.int32, device="cpu"),
+                torch.empty((0,), dtype=torch.int32, device=self.full_to_swa_indexs.device),
+            )
+
+        device = self.full_to_swa_indexs.device
+        pages_cpu = self._alloc_swa_pages(req_num)
+        pages = pages_cpu.to(device, non_blocking=True)
+        # DSpark block 的物理槽由 attention index builder 直接从 page id
+        # 计算，不发布到 target 的全局 full->SWA 映射，也不参与 live count。
+        return pages_cpu, pages
+
+    def free_dspark_swa_block(
+        self,
+        mem_indexes_cpu: torch.Tensor,
+        pages_cpu: torch.Tensor,
+    ) -> None:
+        """Return DSpark scratch resources using their original CPU handles."""
+        assert not mem_indexes_cpu.is_cuda
+        assert not pages_cpu.is_cuda
+        self.swa_page_allocator.free(pages_cpu)
+        MemoryManager.free(self, mem_indexes_cpu)
+        return
+
     def evict_swa(self, full_slots: torch.Tensor) -> None:
         """回收 full 槽位对应的 swa 槽(出窗惰性回收 / free 级联 / 压力阀共用)。
         未映射(-1)的槽位跳过;页计数减到 0 时整页归还 allocator。"""
@@ -1107,6 +1149,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         eps: float,
         freqs_cis: torch.Tensor,
         positions: torch.Tensor,
+        swa_slots: Optional[torch.Tensor] = None,
     ):
         """同 pack_mla_kv_to_cache，但 rmsnorm + 尾部交错 rope 融合进写入 kernel
         并省掉 bf16 kv 中间量。kv 为 wkv 投影原始输出 [T, head_dim+rope_dim]。"""
@@ -1114,8 +1157,13 @@ class DeepseekV4MemoryManager(MemoryManager):
             fused_k_norm_rope_flashmla,
         )
 
-        swa_slots = self.full_to_swa_indexs[mem_index.reshape(-1)]
-        swa_slots = torch.where(swa_slots < 0, torch.full_like(swa_slots, self.swa_pool.HOLD_TOKEN_MEMINDEX), swa_slots)
+        if swa_slots is None:
+            swa_slots = self.full_to_swa_indexs[mem_index.reshape(-1)]
+            swa_slots = torch.where(
+                swa_slots < 0,
+                torch.full_like(swa_slots, self.swa_pool.HOLD_TOKEN_MEMINDEX),
+                swa_slots,
+            )
         fused_k_norm_rope_flashmla(
             kv=kv,
             kv_weight=kv_weight,

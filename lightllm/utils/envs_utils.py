@@ -340,6 +340,25 @@ def get_mtp_weight_layer_num() -> int:
 def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
+
+    if draft_config.get("model_type") == "deepseek_v4" and draft_config.get("dspark_block_size"):
+        target_layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
+        compress_ratios = draft_config.get("compress_ratios")
+        if target_layer_num is not None and isinstance(compress_ratios, list):
+            draft_layer_num = len(compress_ratios) - int(target_layer_num)
+            if draft_layer_num > 0:
+                draft_ratios = compress_ratios[-draft_layer_num:]
+                assert all(
+                    int(ratio) == 0 for ratio in draft_ratios
+                ), f"DeepSeek-V4 DSpark draft layers must be SWA-only, got {draft_ratios}"
+                target_layer_ids = draft_config.get("dspark_target_layer_ids")
+                if target_layer_ids is not None:
+                    assert len(target_layer_ids) == draft_layer_num, (
+                        f"DeepSeek-V4 DSpark target layer count {len(target_layer_ids)} does not match "
+                        f"draft layer count {draft_layer_num}"
+                    )
+                return draft_layer_num
+
     # Use the effective draft backbone config when the checkpoint stores it nested.
     draft_config.update(draft_config.get("dflash_config", {}))
     # A draft model may contain multiple attention layers; each layer needs a

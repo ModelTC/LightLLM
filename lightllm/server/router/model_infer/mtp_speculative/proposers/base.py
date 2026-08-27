@@ -21,8 +21,15 @@ class MtpMemIndexesToFree:
     # 与 mem_indexes_cpu 形状一致的 bool Tensor；True 表示释放对应索引。
     # 为 None 时表示 mem_indexes_cpu 中的全部索引都需要释放。
     free_mask_cpu: Optional[torch.Tensor] = None
+    # DSpark proposal 独占的 SWA scratch pages。page ids 从 CPU allocator
+    # 产生并一直保留在 CPU；非 None 时走直接回收，不再从 GPU 映射反查。
+    swa_pages_cpu: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
+        if self.swa_pages_cpu is not None:
+            assert isinstance(self.swa_pages_cpu, torch.Tensor)
+            assert not self.swa_pages_cpu.is_cuda
+            assert self.swa_pages_cpu.dtype == torch.int32
         if self.free_mask_cpu is None:
             return
         assert isinstance(self.free_mask_cpu, torch.Tensor)

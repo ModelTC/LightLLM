@@ -358,6 +358,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
             mem_index=infer_state.mem_index,
+            swa_slots=getattr(infer_state, "dsv4_swa_write_slots", None),
             kv=qkv[:, -self.head_dim_ :],
             kv_weight=layer_weight.kv_norm_.weight,
             eps=self.eps_,

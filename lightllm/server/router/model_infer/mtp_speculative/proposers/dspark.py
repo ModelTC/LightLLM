@@ -57,6 +57,8 @@ class DSparkProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
+        accept_len_cpu: torch.Tensor | None = None,
+        accept_len_ready_event: torch.cuda.Event | None = None,
     ) -> DSparkSpecProposal:
         """提交 target verify KV，并生成下一轮 DSpark block proposal。
 
@@ -144,8 +146,12 @@ class DSparkProposer(BaseSpecProposer):
             .contiguous()
         )
         draft_input.mem_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
-        draft_input.mem_indexes_cpu = None
+        draft_input.mem_indexes_cpu = extra_mem_indexes_cpu
+        draft_input.mtp_draft_swa_pages_cpu = None
+        draft_input.mtp_draft_swa_pages = None
+        draft_input.mtp_decode_slot_prepare_indices = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
+
         draft_output = draft_model.forward(draft_input)
 
         if draft_output.mtp_collector.draft_token_ids is None:
@@ -184,7 +190,12 @@ class DSparkProposer(BaseSpecProposer):
 
         return DSparkSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
+            extra_mem_indexes_cpu=[
+                MtpMemIndexesToFree(
+                    mem_indexes_cpu=extra_mem_indexes_cpu,
+                    swa_pages_cpu=draft_input.mtp_draft_swa_pages_cpu,
+                )
+            ],
             schedule_scores=schedule_scores,
             schedule_scores_cpu=schedule_scores_cpu,
         )

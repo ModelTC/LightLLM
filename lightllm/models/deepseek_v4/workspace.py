@@ -6,14 +6,26 @@ class DeepseekV4Workspace:
     def __init__(self, model):
         self.token_capacity = int(model.batch_max_tokens)
         self.sliding_window = int(model.config["sliding_window"])
+        args = get_env_start_args()
+        self.swa_capacity = self.sliding_window
+        if args.mtp_mode == "dspark":
+            dspark_width = self.sliding_window + int(args.mtp_step)
+            # FlashMLA sparse decode requires the physical top-k width to be block aligned.
+            # 128 covers both supported padded Q-head configurations; swa_lengths keeps
+            # the actual number of visible history + draft-block entries.
+            self.swa_capacity = ((dspark_width + 127) // 128) * 128
         self.index_topk = int(model.config["index_topk"])
         self.c128_cap = self.compress_cap(model.max_seq_length, 128)
-        args = get_env_start_args()
         overlap = args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap
         self.microbatch_count = 1 + int(overlap)
 
-        self.swa_indices = self._alloc(self.sliding_window)
+        self.swa_indices = self._alloc(self.swa_capacity)
         self.swa_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
+        self.dspark_swa_write_slots = torch.empty(
+            (self.microbatch_count, self.token_capacity),
+            dtype=torch.int32,
+            device="cuda",
+        )
         self.c4_indices = self._alloc(self.index_topk)
         self.c4_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
         self.c128_indices = self._alloc(self.c128_cap)
@@ -46,10 +58,24 @@ class DeepseekV4Workspace:
     def _view(buffer: torch.Tensor, token_num: int, width: int) -> torch.Tensor:
         return torch.as_strided(buffer, (token_num, width), (width, 1))
 
-    def swa(self, microbatch_index: int, token_num: int):
+    def swa(self, microbatch_index: int, token_num: int, width: int = None):
+        width = self.sliding_window if width is None else int(width)
+        assert width <= self.swa_capacity, f"swa width {width} exceeds allocated {self.swa_capacity}"
         return (
-            self._view(self.swa_indices[microbatch_index], token_num, self.sliding_window),
+            self._view(self.swa_indices[microbatch_index], token_num, width),
             self.swa_lengths[microbatch_index, :token_num],
+        )
+
+    def dspark_swa(self, microbatch_index: int, token_num: int):
+        indices, lengths = self.swa(
+            microbatch_index,
+            token_num,
+            width=self.swa_capacity,
+        )
+        return (
+            indices,
+            lengths,
+            self.dspark_swa_write_slots[microbatch_index, :token_num],
         )
 
     def c4(self, microbatch_index: int, token_num: int, width: int):

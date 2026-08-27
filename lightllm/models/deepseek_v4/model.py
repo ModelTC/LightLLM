@@ -223,6 +223,14 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         )
         return
 
+    def prepare_mtp_layer_hidden(self, layer_index: int, hidden):
+        """Materialize the official per-layer DSpark feature from the deferred mHC state."""
+        if isinstance(hidden, tuple):
+            streams = hc_post(*hidden)
+        else:
+            streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
+        return streams.mean(dim=1)
+
     def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
         """Commit DSV4 derived slots before BaseModel pads or scatters the generic input."""
         if model_input.batch_size == 0:
