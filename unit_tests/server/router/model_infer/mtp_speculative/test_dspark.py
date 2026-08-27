@@ -37,6 +37,36 @@ def test_dspark_prefill_uses_a_shallow_copy_for_target_hidden():
     assert model_input.mtp_draft_input_hiddens is None
 
 
+def test_dspark_empty_prefill_still_forwards_for_dp_collectives():
+    forwarded_inputs = []
+    draft_model = SimpleNamespace(forward=forwarded_inputs.append)
+    proposer = DSparkProposer(
+        backend=SimpleNamespace(draft_models=[draft_model]),
+        enable_dynmaic_mtp=False,
+    )
+    model_input = SimpleNamespace(
+        is_prefill=True,
+        b_position_delta=None,
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        mtp_draft_input_hiddens=None,
+    )
+    target_hidden = torch.empty((0, 8))
+
+    proposer.fill_draft_model_kv_state(
+        target_model_input=model_input,
+        target_model_output=SimpleNamespace(
+            mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
+        ),
+        target_next_token_ids=torch.empty((0,), dtype=torch.int64),
+    )
+
+    assert len(forwarded_inputs) == 1
+    assert forwarded_inputs[0] is not model_input
+    assert forwarded_inputs[0].mtp_draft_input_hiddens is target_hidden
+    assert model_input.mtp_draft_input_hiddens is None
+
+
 def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
     block_size = 3
     draft_token_ids = torch.tensor([30, 31, 32, 40, 41, 42], dtype=torch.int64)

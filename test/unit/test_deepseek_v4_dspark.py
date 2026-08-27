@@ -77,6 +77,43 @@ def test_dspark_cuda_graph_padding_extends_only_gpu_scratch_pages():
     assert padded_input.mtp_draft_swa_pages_cpu is pages_cpu
 
 
+def test_dspark_empty_decode_padding_builds_one_hold_block():
+    from lightllm.common.basemodel.batch_objs import ModelInput
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    block_size = 5
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.block_size = block_size
+    model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=127)
+    model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=255)
+    model_input = ModelInput(
+        batch_size=0,
+        total_token_num=0,
+        max_q_seq_len=1,
+        max_kv_seq_len=0,
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        b_mtp_index=torch.empty((0,), dtype=torch.int32),
+        b_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_position_delta=torch.empty((0,), dtype=torch.int32),
+        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
+        mem_indexes=torch.empty((0,), dtype=torch.int32),
+        is_prefill=False,
+        multimodal_params=[],
+    )
+
+    padded_input = model._create_padded_decode_model_input(model_input, 1)
+
+    assert model_input.batch_size == 0
+    assert padded_input.batch_size == block_size
+    assert padded_input.total_token_num == 2 * block_size
+    assert padded_input.input_ids.tolist() == [1] * block_size
+    assert padded_input.b_req_idx.tolist() == [127] * block_size
+    assert padded_input.b_seq_len.tolist() == [2] * block_size
+    assert padded_input.mem_indexes.tolist() == [255] * block_size
+
+
 def test_dspark_scratch_cleanup_keeps_page_ids_on_cpu():
     from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
     from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (

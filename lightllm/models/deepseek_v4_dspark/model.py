@@ -131,6 +131,16 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     def _create_padded_decode_model_input(
         self, model_input: ModelInput, new_batch_size: int
     ):
+        # A DSpark logical request always occupies one complete physical block.
+        # Keep the generic HOLD padding semantics, but make its requested size
+        # valid even for an empty eager-mode DP rank (0 -> one HOLD block).
+        assert model_input.batch_size <= new_batch_size
+        assert model_input.batch_size % self.block_size == 0
+        new_batch_size = max(new_batch_size, self.block_size)
+        new_batch_size = (
+            (new_batch_size + self.block_size - 1) // self.block_size
+        ) * self.block_size
+
         padded_input = super()._create_padded_decode_model_input(
             model_input, new_batch_size
         )
@@ -138,7 +148,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         if padded_input is model_input or scratch_pages is None:
             return padded_input
 
-        assert model_input.batch_size % self.block_size == 0
         assert new_batch_size % self.block_size == 0
         page_num = model_input.batch_size // self.block_size
         padded_page_num = new_batch_size // self.block_size
