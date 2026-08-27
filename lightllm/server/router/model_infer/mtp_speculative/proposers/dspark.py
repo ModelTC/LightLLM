@@ -90,9 +90,10 @@ class DSparkProposer(BaseSpecProposer):
         # target verify 的行布局和 mem_indexes 已经对应本轮所有被验证 token。
         # 仅附加 target hidden 后执行一次 draft forward，即可把这些行提交到
         # DSpark KV cache；浅副本保证 target_model_input 本身不被修改。
-        verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        draft_model.forward(verify_draft_input)
+        if req_num > 0:
+            verify_draft_input = copy.copy(target_model_input)
+            verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+            draft_model.forward(verify_draft_input)
 
         # DSpark 每个请求固定展开一个完整 block，临时 KV 在 target verify 完成
         # 后通过 proposal 统一释放。block 第一行是 accepted-tail anchor，其余行
