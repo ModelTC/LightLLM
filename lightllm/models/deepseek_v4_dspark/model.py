@@ -77,6 +77,14 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     def _verify_params(self):
         super()._verify_params()
         assert not self.enable_tpsp_mix_mode, "DeepSeek-V4 DSpark draft model does not support TP-SP"
+        checkpoint_block_size = int(self.config["dspark_block_size"])
+        assert 0 < self.args.mtp_step <= checkpoint_block_size, (
+            f"DeepSeek-V4 DSpark requires --mtp_step in [1, {checkpoint_block_size}], "
+            f"got {self.args.mtp_step}"
+        )
+        # The checkpoint block size is its maximum supported width. Runtime
+        # allocation, indexing, and Markov decoding follow --mtp_step.
+        self.config["block_size"] = self.args.mtp_step
 
     def _init_quant(self):
         super()._init_quant()
@@ -160,7 +168,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         self._cos_cached_compress = self.main_model._cos_cached_compress
         self._sin_cached_compress = self.main_model._sin_cached_compress
         self.dsv4_workspace = self.main_model.dsv4_workspace
-        self.block_size = self.config["dspark_block_size"]
+        self.block_size = int(self.config["block_size"])
         self.mask_token_id = self.config["dspark_noise_token_id"]
         for layer in self.layers_infer:
             layer.freqs_cis = self._freqs_cis_sliding

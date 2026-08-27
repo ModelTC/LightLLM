@@ -8,6 +8,37 @@ from lightllm.utils.envs_utils import _get_mtp_draft_backbone_layer_num
 from lightllm.utils.config_utils import get_deepseek_v4_compress_rates
 
 
+@pytest.mark.parametrize("mtp_step", [1, 4, 5])
+def test_deepseek_v4_dspark_runtime_width_follows_mtp_step(monkeypatch, mtp_step):
+    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    monkeypatch.setattr(DeepseekV4TpPartModel, "_verify_params", lambda self: None)
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.args = SimpleNamespace(mtp_step=mtp_step)
+    model.config = {"block_size": 5, "dspark_block_size": 5}
+    model.enable_tpsp_mix_mode = False
+
+    model._verify_params()
+
+    assert model.config["block_size"] == mtp_step
+
+
+@pytest.mark.parametrize("mtp_step", [0, 6])
+def test_deepseek_v4_dspark_rejects_invalid_runtime_width(monkeypatch, mtp_step):
+    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    monkeypatch.setattr(DeepseekV4TpPartModel, "_verify_params", lambda self: None)
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.args = SimpleNamespace(mtp_step=mtp_step)
+    model.config = {"block_size": 5, "dspark_block_size": 5}
+    model.enable_tpsp_mix_mode = False
+
+    with pytest.raises(AssertionError, match=r"requires --mtp_step in \[1, 5\]"):
+        model._verify_params()
+
+
 def test_deepseek_v4_dspark_layer_count_uses_trailing_swa_layers(tmp_path):
     config = {
         "model_type": "deepseek_v4",
