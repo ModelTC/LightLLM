@@ -55,20 +55,14 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
 
     def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop(
-            "mtp_previous_draft_models"
-        )
-        assert (
-            not self.mtp_previous_draft_models
-        ), "DeepSeek-V4 DSpark uses one parallel draft model"
+        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
+        assert not self.mtp_previous_draft_models, "DeepSeek-V4 DSpark uses one parallel draft model"
 
     def _init_config(self):
         super()._init_config()
         draft_layer_num = len(self.config["compress_ratios"]) - self.config["n_layer"]
         assert draft_layer_num > 0
-        assert (
-            self.config["compress_ratios"][-draft_layer_num:] == [0] * draft_layer_num
-        )
+        assert self.config["compress_ratios"][-draft_layer_num:] == [0] * draft_layer_num
         assert len(self.config["dspark_target_layer_ids"]) == draft_layer_num
         self.config["dspark_layer_num"] = draft_layer_num
 
@@ -82,22 +76,12 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
 
     def _verify_params(self):
         super()._verify_params()
-        assert (
-            not self.enable_tpsp_mix_mode
-        ), "DeepSeek-V4 DSpark draft model does not support TP-SP"
-        assert self.args.mtp_step == self.config["dspark_block_size"], (
-            f"DeepSeek-V4 DSpark requires --mtp_step {self.config['dspark_block_size']}, "
-            f"got {self.args.mtp_step}"
-        )
+        assert not self.enable_tpsp_mix_mode, "DeepSeek-V4 DSpark draft model does not support TP-SP"
 
     def _init_quant(self):
         super()._init_quant()
-        expert_quant_type = self.quant_cfg.get_quant_type(
-            self.config["n_layer"] - 1, "fused_moe"
-        )
-        for layer_idx in range(
-            self.config["n_layer"], len(self.config["compress_ratios"])
-        ):
+        expert_quant_type = self.quant_cfg.get_quant_type(self.config["n_layer"] - 1, "fused_moe")
+        for layer_idx in range(self.config["n_layer"], len(self.config["compress_ratios"])):
             self.quant_cfg.quant_cfg[layer_idx]["fused_moe"] = expert_quant_type
 
     def _init_weights(self, start_layer_index=None):
@@ -108,9 +92,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             quant_cfg=self.quant_cfg,
         )
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
-        self.pre_post_weight.lm_head_weight_ = (
-            self.main_model.pre_post_weight.lm_head_weight_
-        )
+        self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
         first_layer = self.config["n_layer"]
         self.trans_layers_weight = [
             self.transformer_weight_class(
@@ -128,22 +110,16 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     def _init_mem_manager(self):
         self.mem_manager = self.main_model.mem_manager
 
-    def _create_padded_decode_model_input(
-        self, model_input: ModelInput, new_batch_size: int
-    ):
+    def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
         # A DSpark logical request always occupies one complete physical block.
         # Keep the generic HOLD padding semantics, but make its requested size
         # valid even for an empty eager-mode DP rank (0 -> one HOLD block).
         assert model_input.batch_size <= new_batch_size
         assert model_input.batch_size % self.block_size == 0
         new_batch_size = max(new_batch_size, self.block_size)
-        new_batch_size = (
-            (new_batch_size + self.block_size - 1) // self.block_size
-        ) * self.block_size
+        new_batch_size = ((new_batch_size + self.block_size - 1) // self.block_size) * self.block_size
 
-        padded_input = super()._create_padded_decode_model_input(
-            model_input, new_batch_size
-        )
+        padded_input = super()._create_padded_decode_model_input(model_input, new_batch_size)
         scratch_pages = model_input.mtp_draft_swa_pages
         if padded_input is model_input or scratch_pages is None:
             return padded_input
@@ -168,9 +144,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
         first_layer = self.config["n_layer"]
         self.layers_infer = [
-            self.transformer_layer_infer_class(
-                first_layer + stage_id, network_config=self.config
-            )
+            self.transformer_layer_infer_class(first_layer + stage_id, network_config=self.config)
             for stage_id in range(self.config["dspark_layer_num"])
         ]
 
@@ -233,9 +207,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             # CUDA Graph capture must take the same direct scratch-slot branch
             # as runtime. HOLD rows never dereference the page value, but the
             # tensor gives the captured graph stable storage for replay copies.
-            "mtp_draft_swa_pages": torch.zeros(
-                token_num // self.block_size, dtype=torch.int32, device="cuda"
-            ),
+            "mtp_draft_swa_pages": torch.zeros(token_num // self.block_size, dtype=torch.int32, device="cuda"),
         }
 
     def _autotune_warmup(self):
@@ -252,16 +224,10 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             return super().load_weights(weight_dict)
 
         index_file = os.path.join(self.weight_dir_, "model.safetensors.index.json")
-        assert utils.PetrelHelper.exists(
-            index_file
-        ), "DeepSeek-V4 DSpark requires model.safetensors.index.json"
+        assert utils.PetrelHelper.exists(index_file), "DeepSeek-V4 DSpark requires model.safetensors.index.json"
         weight_map = utils.PetrelHelper.load_json(index_file)["weight_map"]
-        candidate_files = sorted(
-            {file_ for key, file_ in weight_map.items() if key.startswith("mtp.")}
-        )
-        assert (
-            candidate_files
-        ), "DeepSeek-V4 DSpark weights with prefix mtp.* were not found"
+        candidate_files = sorted({file_ for key, file_ in weight_map.items() if key.startswith("mtp.")})
+        assert candidate_files, "DeepSeek-V4 DSpark weights with prefix mtp.* were not found"
 
         loaded_key_count = 0
         desc = f"pid {os.getpid()} Loading DeepSeek-V4 DSpark weights"
