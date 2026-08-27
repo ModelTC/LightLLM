@@ -34,6 +34,49 @@ def test_deepseek_v4_dspark_extends_target_compress_rates_for_draft_layers():
     assert rates == target_rates + [0, 0, 0]
 
 
+def test_dspark_cuda_graph_padding_extends_only_gpu_scratch_pages():
+    from lightllm.common.basemodel.batch_objs import ModelInput
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    block_size = 5
+    batch_size = 14 * block_size
+    graph_batch_size = 16 * block_size
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.block_size = block_size
+    model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=127)
+    model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=255)
+    pages_cpu = torch.arange(14, dtype=torch.int32)
+    model_input = ModelInput(
+        batch_size=batch_size,
+        total_token_num=batch_size,
+        max_q_seq_len=1,
+        max_kv_seq_len=8,
+        input_ids=torch.ones(batch_size, dtype=torch.int64),
+        b_req_idx=torch.arange(batch_size, dtype=torch.int32),
+        b_mtp_index=torch.zeros(batch_size, dtype=torch.int32),
+        b_seq_len=torch.full((batch_size,), 8, dtype=torch.int32),
+        b_position_delta=torch.zeros(batch_size, dtype=torch.int32),
+        b_shared_seq_len=torch.zeros(batch_size, dtype=torch.int32),
+        b_shared_radix_node_id=torch.full((batch_size,), -1, dtype=torch.int64),
+        mem_indexes=torch.arange(batch_size, dtype=torch.int32),
+        is_prefill=False,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+        mtp_draft_swa_pages_cpu=pages_cpu,
+        mtp_draft_swa_pages=pages_cpu.clone(),
+    )
+
+    padded_input = model._create_padded_decode_model_input(
+        model_input, graph_batch_size
+    )
+
+    assert padded_input.mtp_draft_swa_pages.shape == (16,)
+    torch.testing.assert_close(padded_input.mtp_draft_swa_pages[:14], pages_cpu)
+    torch.testing.assert_close(
+        padded_input.mtp_draft_swa_pages[14:], torch.zeros(2, dtype=torch.int32)
+    )
+    assert padded_input.mtp_draft_swa_pages_cpu is pages_cpu
+
+
 def test_dspark_scratch_cleanup_keeps_page_ids_on_cpu():
     from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
     from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
