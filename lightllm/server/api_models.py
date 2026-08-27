@@ -1,5 +1,4 @@
 import time
-from typing_extensions import deprecated
 import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -293,7 +292,11 @@ class ChatCompletionRequest(BaseModel):
             if self.chat_template_kwargs is None:
                 self.chat_template_kwargs = {}
             if "thinking" not in self.chat_template_kwargs and "enable_thinking" not in self.chat_template_kwargs:
-                self.chat_template_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+                self.chat_template_kwargs["enable_thinking"] = self.reasoning_effort not in {
+                    "none",
+                    "off",
+                    "disabled",
+                }
 
         if not self.chat_template_kwargs:
             return self
