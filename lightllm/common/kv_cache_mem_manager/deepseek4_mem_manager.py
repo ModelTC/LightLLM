@@ -889,15 +889,21 @@ class DeepseekV4MemoryManager(MemoryManager):
                 cont_rows.append(i)
         mem_indexes = mem_indexes.reshape(-1)
         if cont_rows:
-            prev_full = prev_full_indexes.reshape(-1)[cont_rows]
+            # Steady decode normally puts every request on the same page offset.
+            # Avoid Python-list indexing in that case: PyTorch copies the list to
+            # CUDA synchronously and waits for the previous decode graph.
+            all_rows = len(cont_rows) == len(req_list)
+            prev_full = prev_full_indexes.reshape(-1) if all_rows else prev_full_indexes.reshape(-1)[cont_rows]
             prev_slots = self.full_to_swa_indexs[prev_full]
             slots = prev_slots + 1
-            self.full_to_swa_indexs[mem_indexes[cont_rows]] = slots
+            dst_indexes = mem_indexes if all_rows else mem_indexes[cont_rows]
+            self.full_to_swa_indexs[dst_indexes] = slots
             self._update_swa_page_counts(slots, 1)
         if new_rows:
             pages = self._alloc_swa_pages(len(new_rows)).to(self.full_to_swa_indexs.device, non_blocking=True)
             slots = pages * page
-            self.full_to_swa_indexs[mem_indexes[new_rows]] = slots
+            dst_indexes = mem_indexes if len(new_rows) == len(req_list) else mem_indexes[new_rows]
+            self.full_to_swa_indexs[dst_indexes] = slots
             self._update_swa_page_counts(slots, 1)
         return
 

@@ -759,14 +759,20 @@ class DeepseekV4ReqManager(ReqManager):
                 prev_meta = prev_meta.view(-1, 2)
                 prev_full = self.req_to_token_indexs[prev_meta[:, 0], prev_meta[:, 1]]
             else:
-                prev_full = prev_group_end_mem_indexes.reshape(-1)[cont_rows]
+                prev_full = (
+                    prev_group_end_mem_indexes.reshape(-1)
+                    if len(cont_rows) == len(req_list)
+                    else prev_group_end_mem_indexes.reshape(-1)[cont_rows]
+                )
             prev_slots = mapping[prev_full]
-            self._register_c4_slots(mem_indexes[cont_rows], prev_slots + 1)
+            dst_indexes = mem_indexes if len(cont_rows) == len(req_list) else mem_indexes[cont_rows]
+            self._register_c4_slots(dst_indexes, prev_slots + 1)
 
         if new_rows:
             self._realize_c4_pages(len(new_rows))  # 兑现: 精确需求, 复用已算的 new_rows
             pages = self.mem_manager.alloc_c4_pages(len(new_rows)).to(mapping.device, non_blocking=True)
-            self._register_c4_slots(mem_indexes[new_rows], pages * page)
+            dst_indexes = mem_indexes if len(new_rows) == len(req_list) else mem_indexes[new_rows]
+            self._register_c4_slots(dst_indexes, pages * page)
         return
 
     def _scatter_c128_slots(self, full_slots: torch.Tensor) -> None:
@@ -866,7 +872,10 @@ class DeepseekV4ReqManager(ReqManager):
                 if req_idx != self.HOLD_REQUEST_ID and seq_len > 0 and seq_len % ratio == 0
             ]
             if rows:
-                self._scatter_c128_slots(mem_indexes.reshape(-1)[rows])
+                full_slots = mem_indexes.reshape(-1)
+                if len(rows) != len(req_list):
+                    full_slots = full_slots[rows]
+                self._scatter_c128_slots(full_slots)
         return
 
     def alloc(self):
