@@ -125,9 +125,9 @@ def _launch_subprocesses(args: StartArgs):
         args.embed_cache_storage_size = 0.8
         args.graph_max_batch_size = 6
         logger.info(
-            f"performance_mode is personal, set running_max_req_size to 3,"
-            f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
-            f"graph_max_batch_size to 32"
+            "performance_mode is personal, set running_max_req_size to 3,"
+            "batch_max_tokens to 2048, chunked_prefill_size to 1024,"
+            "graph_max_batch_size to 32"
         )
 
     dp_size_in_node = max(1, args.dp // args.nnodes)
