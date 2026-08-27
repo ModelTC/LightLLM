@@ -5,10 +5,10 @@ from lightllm.server.core.objs.sampling_params import (
     RegularConstraint,
     AllowedTokenIds,
     ExponentialDecayLengthPenalty,
-    DecodeNode,
     SamplingParams,
     GuidedGrammar,
     GuidedJsonSchema,
+    NodeUUId,
     STOP_SEQUENCE_MAX_LENGTH,
     REGULAR_CONSTRAINT_MAX_LENGTH,
     ALLOWED_TOKEN_IDS_MAX_LENGTH,
@@ -117,22 +117,41 @@ def test_exponential_decay_length_penalty_initialization():
         penalty.initialize((5, 0.5))
 
 
-def test_decode_node_initialization():
-    node = DecodeNode()
-    data = {
-        "node_id": 12345678901234567890,  # 示例 UUID
-        "ip": "192.168.1.1",
-        "rpyc_port": 8080,
-        "max_new_tokens": 10,
-    }
-    node.initialize(data)
-    assert node.exists is True
-    assert node.node_id.node_id_high == (12345678901234567890 >> 64) & 0xFFFFFFFFFFFFFFFF
-    assert node.node_id.node_id_low == 12345678901234567890 & 0xFFFFFFFFFFFFFFFF
-    assert node.ip[0] == 192
-    assert node.ip[1] == 168
-    assert node.ip[2] == 1
-    assert node.ip[3] == 1
+def test_node_uuid_roundtrip():
+    node_id = 12345678901234567890
+    uuid = NodeUUId()
+    uuid.initialize(node_id)
+    assert uuid.node_id_high == (node_id >> 64) & 0xFFFFFFFFFFFFFFFF
+    assert uuid.node_id_low == node_id & 0xFFFFFFFFFFFFFFFF
+    assert uuid.get() == node_id
+
+
+def test_allowed_token_ids_rejects_non_int():
+    allowed_ids = AllowedTokenIds()
+    with pytest.raises(AssertionError):
+        allowed_ids.initialize([1, "2", 3])
+
+
+@pytest.mark.parametrize(
+    "stop_sequences, expected_token_ids, expected_strings",
+    [
+        # 全部有效，无过滤，token id 组与字符串一一对应。
+        (["stop1", "stop2"], [[1, 2], [3, 4]], ["stop1", "stop2"]),
+        # 前置的空字符串会被过滤掉，后面的条目不能因此错位。
+        (["", "stop1"], [[1, 2]], ["stop1"]),
+        # 前置的空 id 列表同理。
+        ([[], "stop2"], [[3, 4]], ["stop2"]),
+        # 被过滤掉的字符串条目不能把自己的字符串挂到后一个条目的 token id 上。
+        (["unknown", "stop2"], [[3, 4]], ["stop2"]),
+        # 纯 id 条目不携带字符串。
+        ([[7, 8], "stop1"], [[7, 8], [1, 2]], ["stop1"]),
+    ],
+)
+def test_stop_sequence_groups_keeps_ids_and_strings_aligned(stop_sequences, expected_token_ids, expected_strings):
+    groups = StopSequenceGroups()
+    groups.initialize(stop_sequences, MockTokenizer())
+    assert groups.to_list() == expected_token_ids
+    assert sorted(groups.to_strings()) == sorted(expected_strings)
 
 
 def test_sampling_params_initialization():
