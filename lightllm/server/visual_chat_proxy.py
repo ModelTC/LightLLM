@@ -214,10 +214,11 @@ BUILTIN_VISION_READER_TOOL = {
     "function": {
         "name": VISION_READER_NAME,
         "description": (
-            "BUILTIN tag-based vision reader. Call it before answering anything that depends on an image, "
+            "BUILTIN tag-based vision reader. MUST be called before answering anything that depends on an image, "
             "screenshot, chart, table, UI, OCR, object count, color, position, layout, or PDF appearance. "
             "The image argument must be an exact <image_n/> tag already visible in the conversation, never a "
             "path, URL, file URI, or base64 value."
+            "An available <image_n/> tag may also appear inside a tool response; when the next step depends on that image's visual content, call vision_reader with that exact tag before continuing, and never invent or renumber a tag."
         ),
         "parameters": {
             "type": "object",
