@@ -157,6 +157,7 @@ class CustomProcessGroup:
 class DistributeGroupManager:
     def __init__(self):
         self.groups = []
+        self.dp_control_group = None
         self.ep_balance_monitor_group = None
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
@@ -176,6 +177,8 @@ class DistributeGroupManager:
             if not args.disable_flashinfer_allreduce:
                 group.init_flashinfer_reduce()
             self.groups.append(group)
+        if args.dp > 1:
+            self.dp_control_group = dist.new_group(ranks=list(range(get_global_world_size())), backend="gloo")
         if (
             getattr(args, "enable_ep_moe", False)
             and not getattr(args, "disable_ep_balance_monitor", False)

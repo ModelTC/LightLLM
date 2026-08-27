@@ -211,14 +211,12 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
+            self.dp_control_tensor = torch.zeros(2, dtype=torch.int32, device="cpu", requires_grad=False)
             self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
-            )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        self.node_broadcast_tensor = torch.zeros(1, dtype=torch.int32, device="cpu", requires_grad=False)
+        self.node_gloo_group = create_new_group_for_current_node("gloo")
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
@@ -485,8 +483,8 @@ class ModeBackend:
                 self.node_broadcast_tensor.fill_(0)
 
         src_rank_id = self.args.node_rank * self.node_world_size
-        broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-        new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+        broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_gloo_group, async_op=False)
+        new_buffer_is_ready = self.node_broadcast_tensor.item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
@@ -499,8 +497,8 @@ class ModeBackend:
                     self.node_broadcast_tensor.fill_(0)
 
             src_rank_id = self.args.node_rank * self.node_world_size
-            broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-            new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+            broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_gloo_group, async_op=False)
+            new_buffer_is_ready = self.node_broadcast_tensor.item()
             if new_buffer_is_ready:
                 self._read_pd_trans_io_buffer_and_update_req_status()
         return
@@ -968,23 +966,26 @@ class ModeBackend:
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
-    def _dp_all_gather_prefill_and_decode_req_num(
+    def _dp_all_reduce_req_presence(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[bool, bool]:
         """
-        Gather the number of prefill requests across all DP ranks.
+        Return whether any DP rank has prefill or decode requests.
+
+        Request counts originate on the CPU and the scheduler only needs their
+        global presence. Keep this control-plane collective on the CPU so it can
+        overlap the previous CUDA graph instead of synchronizing that graph back
+        to the host every decode step.
         """
-        current_dp_prefill_num = len(prefill_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
-        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-
-        current_dp_decode_num = len(decode_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_decode_num)
-        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_decode_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-
-        return dp_prefill_req_nums, dp_decode_req_nums
+        self.dp_control_tensor[0] = bool(prefill_reqs)
+        self.dp_control_tensor[1] = bool(decode_reqs)
+        all_reduce(
+            self.dp_control_tensor,
+            op=dist.ReduceOp.MAX,
+            group=dist_group_manager.dp_control_group,
+            async_op=False,
+        )
+        return bool(self.dp_control_tensor[0]), bool(self.dp_control_tensor[1])
 
     def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
         """
