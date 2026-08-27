@@ -861,13 +861,23 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        return torch.argmax(logits, dim=-1)
+        candidate_indexes = torch.argmax(logits, dim=-1)
+        return self._map_logits_indexes_to_token_ids(model_output, candidate_indexes)
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         logits = model_output.logits
-        probs = torch.softmax(logits, dim=-1)
-        max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
-        return draft_next_token_ids_gpu, max_probs
+        if model_output.has_vocab_parallel_logits:
+            max_logits, candidate_indexes = torch.max(logits, dim=-1)
+            token_ids = self._map_logits_indexes_to_token_ids(model_output, candidate_indexes)
+            return token_ids, torch.exp(max_logits - model_output.logits_logsumexp)
+        max_probs, token_ids = torch.max(torch.softmax(logits, dim=-1), dim=-1)
+        return token_ids, max_probs
+
+    @staticmethod
+    def _map_logits_indexes_to_token_ids(model_output: ModelOutput, candidate_indexes: torch.Tensor):
+        if not model_output.has_vocab_parallel_logits:
+            return candidate_indexes
+        return model_output.logits_token_ids.gather(1, candidate_indexes.long().view(-1, 1)).view(-1).long()
 
     def _sample_and_scatter_token(
         self,

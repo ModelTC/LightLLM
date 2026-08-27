@@ -200,10 +200,46 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
+    # Vocab-parallel outputs keep logits as logits while mapping each sparse
+    # column back to its global token id. logits_logsumexp is computed over the
+    # complete vocabulary, so sparse argmax probabilities remain exact.
+    # Both fields are None for historical dense logits.
+    logits_token_ids: Optional[torch.Tensor] = None
+    logits_logsumexp: Optional[torch.Tensor] = None
+
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
+        assert (self.logits_token_ids is None) == (self.logits_logsumexp is None)
+        if self.logits_token_ids is not None:
+            assert self.logits.ndim == 2
+            assert self.logits_token_ids.shape == self.logits.shape
+            assert self.logits_token_ids.dtype in (torch.int32, torch.int64)
+            assert self.logits_token_ids.device == self.logits.device
+            assert self.logits_logsumexp.shape == (self.logits.shape[0],)
+            assert self.logits_logsumexp.dtype == torch.float32
+            assert self.logits_logsumexp.device == self.logits.device
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
+        if self.logits_token_ids is not None:
+            self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
+            self.logits_logsumexp = tensor_to_no_ref_tensor(self.logits_logsumexp)
         self.mtp_collector.to_no_ref_tensor()
+
+    @property
+    def has_vocab_parallel_logits(self) -> bool:
+        return self.logits_token_ids is not None
+
+    def index_select_logits_rows(self, index: torch.Tensor) -> "ModelOutput":
+        """Select logit rows without dropping their vocabulary metadata."""
+
+        return ModelOutput(
+            logits=self.logits.index_select(0, index),
+            logits_token_ids=(
+                self.logits_token_ids.index_select(0, index) if self.logits_token_ids is not None else None
+            ),
+            logits_logsumexp=(
+                self.logits_logsumexp.index_select(0, index) if self.logits_logsumexp is not None else None
+            ),
+        )

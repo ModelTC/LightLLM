@@ -181,7 +181,11 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
 
         logits = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
         block_logits = logits.reshape(num_reqs, self.block_size_, -1)
-        sampled_tokens = torch.argmax(block_logits, dim=-1)
+        if infer_state.logits_token_ids is None:
+            sampled_tokens = torch.argmax(block_logits, dim=-1)
+        else:
+            assert block_logits.shape[-1] == 1
+            sampled_tokens = infer_state.logits_token_ids.reshape(num_reqs, self.block_size_)
         confidence_logits = self.predict_confidence_logits(
             block_hidden,
             anchor_token_ids=anchor_token_ids,

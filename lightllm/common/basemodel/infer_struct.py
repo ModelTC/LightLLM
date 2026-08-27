@@ -52,6 +52,9 @@ class InferStateInfo:
         self.mem_index: torch.Tensor = None
 
         self.return_all_prompt_logics: bool = False
+        self.use_vocab_parallel_greedy: bool = False
+        self.logits_token_ids: Optional[torch.Tensor] = None
+        self.logits_logsumexp: Optional[torch.Tensor] = None
         # 在开启 return_all_prompt_logics 模式时，保存整个 prefill 阶段每一个
         # token 位置的 logits，供后续回传 prompt logprobs 信息使用。
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
