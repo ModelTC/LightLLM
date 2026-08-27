@@ -5,7 +5,7 @@ from lightllm.server.core.objs.sampling_params import (
     RegularConstraint,
     AllowedTokenIds,
     ExponentialDecayLengthPenalty,
-    DecodeNode,
+    NodeUUId,
     SamplingParams,
     GuidedGrammar,
     GuidedJsonSchema,
@@ -117,26 +117,20 @@ def test_exponential_decay_length_penalty_initialization():
         penalty.initialize((5, 0.5))
 
 
-def test_decode_node_initialization():
-    node = DecodeNode()
-    data = {
-        "node_id": 12345678901234567890,  # 示例 UUID
-        "ip": "192.168.1.1",
-        "rpyc_port": 8080,
-        "max_new_tokens": 10,
-    }
-    node.initialize(data)
-    assert node.exists is True
-    assert node.node_id.node_id_high == (12345678901234567890 >> 64) & 0xFFFFFFFFFFFFFFFF
-    assert node.node_id.node_id_low == 12345678901234567890 & 0xFFFFFFFFFFFFFFFF
-    assert node.ip[0] == 192
-    assert node.ip[1] == 168
-    assert node.ip[2] == 1
-    assert node.ip[3] == 1
+def test_node_uuid_initialization():
+    node_id = 12345678901234567890
+    node_uuid = NodeUUId()
+    node_uuid.initialize(node_id)
+
+    assert node_uuid.node_id_high == (node_id >> 64) & 0xFFFFFFFFFFFFFFFF
+    assert node_uuid.node_id_low == node_id & 0xFFFFFFFFFFFFFFFF
+    assert node_uuid.get() == node_id
 
 
 def test_sampling_params_initialization():
     params = SamplingParams()
+    pd_master_node_id = 12345678901234567890
+    pd_kv_trans_params = b"pd-kv-transport-params"
     data = {
         "best_of": 2,
         "n": 2,
@@ -161,7 +155,8 @@ def test_sampling_params_initialization():
         "allowed_token_ids": [1, 2, 3],
         "stop_sequences": [[2, 1], [3, 4]],
         "exponential_decay_length_penalty": (1, 1.0),
-        "move_kv_to_decode_node": None,
+        "pd_master_node_id": pd_master_node_id,
+        "pd_kv_trans_params": pd_kv_trans_params,
     }
     params.init(None, **data)
 
@@ -171,6 +166,8 @@ def test_sampling_params_initialization():
     assert params.presence_penalty == 0.5
     assert params.temperature == 1.0
     assert params.stop_sequences.size == 2
+    assert params.pd_master_node_id.get() == pd_master_node_id
+    assert params.pd_kv_trans_params.get() == pd_kv_trans_params
 
 
 # Mock tokenizer for testing
