@@ -77,21 +77,6 @@ class FinishStatus(ctypes.Structure):
         return None
 
 
-class PrefixTokenIdsStruct(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [("size", ctypes.c_int), ("data", ctypes.c_int64 * 10)]
-
-    def __init__(self):
-        self.size = 0
-
-    def set_token_ids(self, ids: List[int]):
-        self.size = len(ids)
-        self.data[: len(ids)] = ids
-
-    def get_token_ids(self):
-        return list(self.data[: self.size])
-
-
 class Req(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -122,7 +107,6 @@ class Req(ctypes.Structure):
         ("out_tokens_queue", CircularQueue),
         ("sample_params", SamplingParams),
         ("chunked_prefill_size", ctypes.c_int),  # 只有chunked prefill模式才使用的参数
-        ("prefix_token_ids", PrefixTokenIdsStruct),  # 只有 token_headling 模式使用的参数
         # can_released_mark的作用是：
         # 只有整个流程中的最后一个处理模块，一般是 detokenization 进程，标记这个参数为True后，主管理进程才能真
         # 的释放请求对像。
@@ -195,8 +179,6 @@ class Req(ctypes.Structure):
         else:
             self.sample_params = SamplingParams()
             self.sample_params.init(tokenizer=tokenizer, **sample_param)
-        self.prefix_token_ids = PrefixTokenIdsStruct()
-
         self.out_tokens_queue = CircularQueue()
         self.input_len = len(prompt_ids)
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
@@ -533,26 +515,3 @@ class ChunkedPrefillReq(Req):
     def get_first_router_need_tokens(self):
 
         return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
-
-
-class TokenHealingReq(ChunkedPrefillReq):
-    _pack_ = 4
-
-    def post_init(
-        self,
-    ):
-        for prefix_token_num in range(2, -1, -1):
-            if self.input_len > prefix_token_num:
-                self.input_len -= prefix_token_num
-                self.prefix_token_ids.set_token_ids(
-                    self.shm_prompt_ids.arr[self.input_len : (self.input_len + prefix_token_num)]
-                )
-                break
-
-        # 因为原始的输出token数量，会被中间的前缀补全占用decode次数，
-        # 所以默认多添加一些decode步数, token healing mode 下，由于
-        # 估计的生成token数据对应的生存周期可能会不准确,所以为了缓解调
-        # 度带来的显存估计问题，对于生成token的长度 + 6来缓解可能的估计
-        # 错误问题。
-        self.sample_params.max_new_tokens = self.sample_params.max_new_tokens + self.prefix_token_ids.size + 6
-        return

@@ -23,22 +23,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
     def _slice_get_last_input(self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo):
         embed_dim_ = input_embdings.shape[1]
-        if infer_state.is_prefill and infer_state.is_token_healing:
-            batch_size = infer_state.batch_size
-            b_seq_len_numpy = (infer_state.b_seq_len - infer_state.b_ready_cache_len).detach().cpu().numpy()
-            select_index = []
-            start_index = 0
-            select_token_num = 0
-            for cur_len in b_seq_len_numpy:
-                select_index.append(start_index + cur_len - 1)
-                start_index += cur_len
-                select_token_num += 1
-
-            last_index = torch.tensor(select_index, dtype=torch.long, device="cpu").cuda(non_blocking=True)
-            last_input = self.alloc_tensor((select_token_num, embed_dim_), dtype=input_embdings.dtype, device="cuda")
-            last_input[:, :] = input_embdings[last_index, :]
-            return last_input, select_token_num
-
         if infer_state.is_prefill:
             # logits 始终只取每个请求最后一个位置的 hidden state，用于正常采样。
             batch_size = infer_state.batch_size

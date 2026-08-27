@@ -268,8 +268,6 @@ Scheduling Parameters
 Output Constraint Parameters
 ----------------------------
 
-.. option:: --token_healing_mode
-
 .. option:: --output_constraint_mode
 
     Set the output constraint backend, optional values:

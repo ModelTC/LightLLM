@@ -7,8 +7,6 @@ from .dp_base_queue import DpQueue
 def _get_req_queue_class(args, router, dp_size_in_node: int):
     if args.diverse_mode:
         return ChunkedBeamContinuesBatchQueue
-    if args.token_healing_mode:
-        return ChunkedPrefillQueue
     if args.output_constraint_mode != "none":
         return ChunkedPrefillQueue
     if args.first_token_constraint_mode:

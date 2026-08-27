@@ -1193,7 +1193,6 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
             "load_way": main_kvargs["load_way"],
             "max_req_num": main_kvargs["max_req_num"],
             "max_seq_length": main_kvargs["max_seq_length"],
-            "is_token_healing": False,
             "return_all_prompt_logics": False,
             "disable_chunked_prefill": args.disable_chunked_prefill,
             "data_type": main_kvargs["data_type"],

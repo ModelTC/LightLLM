@@ -611,11 +611,6 @@ class InferReq:
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
-        # token healing mode 才被使用的管理对象
-        if self.shm_req.prefix_token_ids.size != 0:
-            self.prefix_token_ids = self.shm_req.prefix_token_ids.get_token_ids()
-        else:
-            self.prefix_token_ids = []
         self.multimodal_params = self.multimodal_params.to_dict()
         self.shared_kv_node: Union[TreeNode, LinearAttPagedTreeNode] = None
 

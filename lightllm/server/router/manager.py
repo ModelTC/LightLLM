@@ -162,7 +162,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
             "disable_chunked_prefill": self.args.disable_chunked_prefill,
             "chunked_prefill_size": self.args.chunked_prefill_size,
-            "is_token_healing": self.args.token_healing_mode,
             "use_reward_model": self.args.use_reward_model,
             "disable_dynamic_prompt_cache": self.args.disable_dynamic_prompt_cache,
             "data_type": self.args.data_type,

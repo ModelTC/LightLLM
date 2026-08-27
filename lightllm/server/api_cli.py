@@ -352,7 +352,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
-    parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
 
     parser.add_argument(
         "--output_constraint_mode",

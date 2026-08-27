@@ -128,9 +128,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.output_constraint_mode != "none":
         assert args.disable_dynamic_prompt_cache is False
         assert args.disable_chunked_prefill is False
-    if args.token_healing_mode:
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
     if args.diverse_mode:
         assert args.disable_dynamic_prompt_cache is False
         assert args.disable_chunked_prefill is False

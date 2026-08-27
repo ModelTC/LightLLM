@@ -1,6 +1,6 @@
 import pytest
 import easydict
-from lightllm.server.core.objs.req import Req, TokenHealingReq, ChunkedPrefillReq, SamplingParams
+from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 from lightllm.utils.envs_utils import set_env_start_args
 
@@ -69,12 +69,6 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
         {2: {"logprob": -0.5, "rank": 315, "decoded_token": None}},
         {3: {"logprob": -1.25, "rank": 4, "decoded_token": None}},
     ]
-
-
-def test_token_healing_req_post_init():
-    token_healing_req = TokenHealingReq()
-    token_healing_req.init(1, [1, 2, 3, 4], {"max_new_tokens": 1}, None)
-    assert token_healing_req.sample_params.max_new_tokens == 9
 
 
 # def test_chunked_req_get_tuple_tokens():

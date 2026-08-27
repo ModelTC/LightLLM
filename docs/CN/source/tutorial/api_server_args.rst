@@ -267,8 +267,6 @@ PD 分离模式参数
 输出约束参数
 ------------
 
-.. option:: --token_healing_mode
-
 .. option:: --output_constraint_mode
 
     设置输出约束后端，可选值：

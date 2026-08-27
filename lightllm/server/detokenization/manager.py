@@ -40,13 +40,8 @@ class DeTokenizationManager:
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out: Dict[int, DecodeReq] = {}
         self.eos_id = args.eos_id
-        self._init_get_token_id_to_token_str()
         self.is_pd_decode_mode = False
         self.shm_req_manager = ShmReqManager()
-
-    def _init_get_token_id_to_token_str(self):
-        self.token_id_to_token = {token_id: token for token, token_id in self.tokenizer.get_vocab().items()}
-        return
 
     def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
         for req_index in recv_obj.shm_req_indexes:
@@ -62,10 +57,6 @@ class DeTokenizationManager:
             decode_req = DecodeReq(req, self.is_pd_decode_mode)
             if self.is_pd_decode_mode:
                 decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
-            # token_healing mode 的特殊初始化
-            if self.args.token_healing_mode:
-                decode_req.init_token_healing_prefix_str(self.token_id_to_token, self.tokenizer)
-
             self.req_id_to_out[req.request_id] = decode_req
         return
 
@@ -120,19 +111,6 @@ class DeTokenizationManager:
                     int(new_token_id),
                     self.eos_id,
                 )
-
-                # 对应 token_healing 的特殊处理
-                if self.args.token_healing_mode:
-                    if new_text.startswith(decode_req.prefix_str):
-                        new_text = new_text[len(decode_req.prefix_str) :]
-                        decode_req.prefix_str = ""
-                    elif decode_req.prefix_str.startswith(new_text):
-                        decode_req.prefix_str = decode_req.prefix_str[len(new_text) :]
-                        new_text = ""
-                    else:
-                        logger.error(
-                            f"error token healing state, prefix_str {decode_req.prefix_str} new_text {new_text}"
-                        )
 
                 decode_req.output_strs.append(new_text)
 
