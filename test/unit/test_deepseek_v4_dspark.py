@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from lightllm.utils.envs_utils import _get_mtp_draft_backbone_layer_num
+from lightllm.utils.config_utils import get_deepseek_v4_compress_rates
 
 
 def test_deepseek_v4_dspark_layer_count_uses_trailing_swa_layers(tmp_path):
@@ -18,6 +19,19 @@ def test_deepseek_v4_dspark_layer_count_uses_trailing_swa_layers(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(config))
 
     assert _get_mtp_draft_backbone_layer_num(str(tmp_path)) == 3
+
+
+def test_deepseek_v4_dspark_extends_target_compress_rates_for_draft_layers():
+    target_rates = [0, 0] + [value for _ in range(20) for value in (4, 128)] + [4]
+    config = {
+        "num_hidden_layers": 43,
+        "num_nextn_predict_layers": 1,
+        "compress_ratios": target_rates + [0],
+    }
+
+    rates = get_deepseek_v4_compress_rates(config, layer_num=46)
+
+    assert rates == target_rates + [0, 0, 0]
 
 
 def test_dspark_scratch_cleanup_keeps_page_ids_on_cpu():

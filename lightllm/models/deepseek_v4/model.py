@@ -40,7 +40,10 @@ from lightllm.models.llama.yarn_rotary_utils import (
     linear_ramp_mask,
 )
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
-from lightllm.utils.config_utils import normalize_deepseek_v4_config
+from lightllm.utils.config_utils import (
+    get_deepseek_v4_compress_rates,
+    normalize_deepseek_v4_config,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -88,8 +91,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return
 
     def _get_compress_rates(self, layer_num):
-        rates = list(self.config["compress_ratios"])
-        return rates[:layer_num]
+        return get_deepseek_v4_compress_rates(self.config, layer_num)
 
     def _init_mem_manager(self):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()

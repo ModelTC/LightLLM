@@ -54,6 +54,27 @@ def normalize_deepseek_v4_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def get_deepseek_v4_compress_rates(config: Dict[str, Any], layer_num: int) -> List[int]:
+    """Build KV compression rates for target and runtime-added draft layers."""
+    target_layer_num = config.get("n_layer", config.get("num_hidden_layers"))
+    if target_layer_num is None:
+        raise ValueError("DeepSeek-V4 config is missing num_hidden_layers")
+    target_layer_num = int(target_layer_num)
+    rates = list(config["compress_ratios"])
+    if len(rates) < target_layer_num:
+        raise ValueError(
+            f"DeepSeek-V4 compress_ratios has {len(rates)} entries, "
+            f"but the target model has {target_layer_num} layers"
+        )
+
+    if len(rates) < layer_num:
+        # The draft layer count comes from the selected draft model and need not match
+        # num_nextn_predict_layers in the independently trained target. Missing draft
+        # KV layers use sliding-window attention, whose compression ratio is zero.
+        rates.extend([0] * (layer_num - len(rates)))
+    return rates[:layer_num]
+
+
 def get_config_json(model_path: str):
     with open(os.path.join(model_path, "config.json"), "r") as file:
         json_obj = json.load(file)

@@ -17,6 +17,7 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import (
+    get_deepseek_v4_compress_rates,
     get_config_json,
     get_num_key_value_heads,
     get_head_dim,
@@ -128,7 +129,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         config = get_config_json(args.model_dir)
         layer_num = get_layer_num(args.model_dir) + get_added_mtp_kv_layer_num()
         layout = DeepseekV4CpuCacheLayout.from_compress_rates(
-            compress_rates=config["compress_ratios"][:layer_num],
+            compress_rates=get_deepseek_v4_compress_rates(config, layer_num),
             token_page_size=args.cpu_cache_token_page_size,
             head_dim=get_head_dim(args.model_dir),
             indexer_head_dim=config["index_head_dim"],
