@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 import triton
 from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
@@ -20,6 +22,7 @@ from lightllm.models.deepseek_v4.triton_kernel.topk_transform import topk_transf
 
 
 _C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
+_DECODE_MULTI_STREAM_MAX_BATCH_SIZE = 64
 
 
 class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
@@ -61,6 +64,14 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
         self.dsv4_prefill_aux_stream = None
+        self.dsv4_decode_aux_streams = None
+
+    def _use_decode_multi_stream(self, infer_state: DeepseekV4InferStateInfo, token_num: int) -> bool:
+        return (
+            self.dsv4_decode_aux_streams is not None
+            and infer_state.is_cuda_graph
+            and token_num <= _DECODE_MULTI_STREAM_MAX_BATCH_SIZE
+        )
 
     # ------------------------------------------------------------------ forward (HC-threaded)
     def _hc_attn_in(self, input_embdings, layer_weight: DeepseekV4TransformerLayerWeight):
@@ -487,8 +498,93 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def token_attention_forward(
         self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
+        if self._use_decode_multi_stream(infer_state, x.shape[0]):
+            return self._token_attention_forward_multi_stream(x, infer_state, layer_weight)
         q, q_lora, full_x = self._get_qkv(x, infer_state, layer_weight)
         o = self._token_attention_kernel(q, q_lora, full_x, infer_state, layer_weight)
+        return self._get_o(o, infer_state, layer_weight)
+
+    def _token_attention_forward_multi_stream(
+        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope_cuda import fused_q_norm_rope
+
+        full_x = self._tpsp_allgather(input=x, infer_state=infer_state)
+        token_num = full_x.shape[0]
+        main_stream = torch.cuda.current_stream()
+        kv_stream, compressor_stream, indexer_stream = self.dsv4_decode_aux_streams[:3]
+        indexer_aux_streams = self.dsv4_decode_aux_streams[3:]
+
+        if self.compress_ratio:
+            compressor_stream.wait_stream(main_stream)
+            with torch.cuda.stream(compressor_stream):
+                full_x.record_stream(compressor_stream)
+                self.compressor.compress(
+                    full_x,
+                    infer_state,
+                    layer_weight,
+                    self.cos_compress_table,
+                    self.sin_compress_table,
+                    use_custom_tensor_manager=False,
+                )
+
+        qkv = layer_weight.wq_a_wkv_.mm(full_x)
+        kv_stream.wait_stream(main_stream)
+        with torch.cuda.stream(kv_stream):
+            qkv.record_stream(kv_stream)
+            infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
+                layer_index=self.layer_num_,
+                mem_index=infer_state.mem_index,
+                swa_slots=getattr(infer_state, "dsv4_swa_write_slots", None),
+                kv=qkv[:, -self.head_dim_ :],
+                kv_weight=layer_weight.kv_norm_.weight,
+                eps=self.eps_,
+                freqs_cis=self.freqs_cis,
+                positions=infer_state.position_ids,
+            )
+
+        q_lora = layer_weight.q_norm_(qkv[:, : -self.head_dim_], eps=self.eps_)
+        if self.compress_ratio == 4:
+            indexer_stream.wait_stream(main_stream)
+            with torch.cuda.stream(indexer_stream):
+                full_x.record_stream(indexer_stream)
+                q_lora.record_stream(indexer_stream)
+                self.index_infer.write_indexer_k(
+                    full_x,
+                    infer_state,
+                    layer_weight,
+                    self.cos_compress_table,
+                    self.sin_compress_table,
+                    use_custom_tensor_manager=False,
+                )
+                meta = self.index_infer.build_metadata(
+                    full_x,
+                    q_lora,
+                    infer_state,
+                    layer_weight,
+                    use_custom_tensor_manager=False,
+                    aux_streams=indexer_aux_streams,
+                )
+        else:
+            meta = self.index_infer.build_metadata(full_x, q_lora, infer_state, layer_weight)
+
+        q_in = layer_weight.wq_b_.mm(q_lora).view(token_num, self.tp_q_head_num_, self.head_dim_)
+        q = self.alloc_tensor(
+            (token_num, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device
+        )
+        q[:, self.tp_q_head_num_ :, :].zero_()
+        fused_q_norm_rope(q_in, q[:, : self.tp_q_head_num_, :], self.eps_, self.freqs_cis, infer_state.position_ids)
+
+        main_stream.wait_stream(kv_stream)
+        if self.compress_ratio:
+            main_stream.wait_stream(compressor_stream)
+        if self.compress_ratio == 4:
+            main_stream.wait_stream(indexer_stream)
+            for tensor in (meta.get("extra_indices"), meta.get("extra_lengths")):
+                if tensor is not None:
+                    tensor.record_stream(main_stream)
+
+        o = self._run_token_attention(q, meta, infer_state, layer_weight)
         return self._get_o(o, infer_state, layer_weight)
 
     def _token_attention_kernel(
@@ -497,6 +593,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.compressor.compress(x, infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
         self.index_infer.write_indexer_k(x, infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
         meta = self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
+        return self._run_token_attention(q, meta, infer_state, layer_weight)
+
+    def _run_token_attention(self, q, meta, infer_state, layer_weight):
         att_control = AttControl(
             nsa_decode=True,
             nsa_decode_dict={
@@ -534,14 +633,21 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             alloc_tensor_func=self.alloc_tensor,
         )
 
-    def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+    def _ffn_tp(
+        self,
+        input,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        use_custom_tensor_manager: bool = True,
+    ):
         input = input.view(-1, self.embed_dim_)
-        gate_up = layer_weight.gate_up_proj.mm(input)
-        shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
+        gate_up = layer_weight.gate_up_proj.mm(input, use_custom_tensor_mananger=use_custom_tensor_manager)
+        alloc_tensor = self.alloc_tensor if use_custom_tensor_manager else torch.empty
+        shared = alloc_tensor((input.size(0), gate_up.size(1) // 2), dtype=input.dtype, device=input.device)
         silu_and_mul_fwd(gate_up, shared, limit=self.swiglu_limit)
         input = None
         gate_up = None
-        out = layer_weight.down_proj.mm(shared)
+        out = layer_weight.down_proj.mm(shared, use_custom_tensor_mananger=use_custom_tensor_manager)
         shared = None
         return out
 
@@ -550,14 +656,31 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         logits = layer_weight.gate_weight_.mm(x, out_dtype=torch.float32)
-        weights, indices = self._select_experts(logits, infer_state, layer_weight)
-        # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
-        # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
+        # The non-EP FuseMoeTriton path can overwrite x, so it keeps shared first.
+        # EP uses the read-only DeepEP/DeepGEMM path and may overlap both branches.
         # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
         # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
-        shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
+        use_multi_stream = self.enable_ep_moe and self._use_decode_multi_stream(infer_state, x.shape[0])
+        if use_multi_stream:
+            main_stream = torch.cuda.current_stream()
+            shared_stream = self.dsv4_decode_aux_streams[0]
+            shared_stream.wait_stream(main_stream)
+            with torch.cuda.stream(shared_stream):
+                x.record_stream(shared_stream)
+                shared = self._ffn_tp(
+                    input=x,
+                    infer_state=infer_state,
+                    layer_weight=layer_weight,
+                    use_custom_tensor_manager=False,
+                )
+        weights, indices = self._select_experts(logits, infer_state, layer_weight)
+        if not use_multi_stream:
+            shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = self._routed_experts(x, weights, indices, infer_state, layer_weight)
         if self.enable_ep_moe:
+            if use_multi_stream:
+                main_stream.wait_stream(shared_stream)
+                shared.record_stream(main_stream)
             return routed + shared
         out = routed + shared
         return self._tpsp_reduce(input=out, infer_state=infer_state)
@@ -735,7 +858,13 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         )
 
     def build_metadata(
-        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
+        self,
+        x,
+        q_lora,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight,
+        use_custom_tensor_manager=True,
+        aux_streams=None,
     ):
         swa_indices = infer_state.dsv4_swa_indices.unsqueeze(1)
         swa_lengths = infer_state.dsv4_swa_lengths
@@ -743,7 +872,12 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         extra_indices = extra_lengths = None
         if self.compress_ratio == 4:
             idx_q_fp8, weights = self._indexer_q_weight(
-                x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=use_custom_tensor_manager
+                x,
+                q_lora,
+                infer_state,
+                layer_weight,
+                use_custom_tensor_manager=use_custom_tensor_manager,
+                aux_streams=aux_streams,
             )
             extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q_fp8, weights, positions)
         elif self.compress_ratio == 128:
@@ -757,7 +891,13 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         }
 
     def _indexer_q_weight(
-        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
+        self,
+        x,
+        q_lora,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight,
+        use_custom_tensor_manager=True,
+        aux_streams=None,
     ):
         # Fused: wq_b mm -> rope(last rope dims) -> 1/sqrt(d) Hadamard -> per-token fp8 quant, with the
         # per-token q scale + indexer_weight_scale folded into weights, all in ONE kernel (was 4 kernels:
@@ -772,25 +912,53 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             raise RuntimeError(
                 f"DeepSeek-V4 indexer expects full-token hidden states, got x={x.shape[0]} q_lora={token_num}"
             )
-        idx_q = layer_weight.idx_wq_b_.mm(q_lora, use_custom_tensor_mananger=use_custom_tensor_manager).view(
-            token_num, self.index_n_heads, self.index_head_dim
-        )
-        raw_w = layer_weight.idx_weights_proj_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager).view(
-            token_num, self.index_n_heads
-        )  # [T, H] raw
+        if aux_streams is None:
+            idx_q = layer_weight.idx_wq_b_.mm(q_lora, use_custom_tensor_mananger=use_custom_tensor_manager).view(
+                token_num, self.index_n_heads, self.index_head_dim
+            )
+            raw_w = layer_weight.idx_weights_proj_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager).view(
+                token_num, self.index_n_heads
+            )
+        else:
+            assert not use_custom_tensor_manager
+            q_stream, weight_stream = aux_streams
+            current_stream = torch.cuda.current_stream()
+            q_stream.wait_stream(current_stream)
+            weight_stream.wait_stream(current_stream)
+            with torch.cuda.stream(q_stream):
+                q_lora.record_stream(q_stream)
+                idx_q = layer_weight.idx_wq_b_.mm(q_lora, use_custom_tensor_mananger=False).view(
+                    token_num, self.index_n_heads, self.index_head_dim
+                )
+            with torch.cuda.stream(weight_stream):
+                x.record_stream(weight_stream)
+                raw_w = layer_weight.idx_weights_proj_.mm(x, use_custom_tensor_mananger=False).view(
+                    token_num, self.index_n_heads
+                )
+            q_stream.wait_stream(weight_stream)
+
         idx_q_fp8_out = weights_out = None
         if use_custom_tensor_manager:
             idx_q_fp8_out = self.alloc_tensor(idx_q.shape, torch.float8_e4m3fn, device=idx_q.device)
             weights_out = self.alloc_tensor((*idx_q.shape[:-1], 1), torch.float32, device=idx_q.device)
-        idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
-            idx_q,
-            raw_w,
-            self.indexer_weight_scale,
-            self.freqs_cis,
-            infer_state.position_ids,
-            q_fp8=idx_q_fp8_out,
-            weights_out=weights_out,
-        )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
+        target_stream = q_stream if aux_streams is not None else None
+        stream_context = torch.cuda.stream(target_stream) if target_stream is not None else nullcontext()
+        with stream_context:
+            if target_stream is not None:
+                raw_w.record_stream(target_stream)
+            idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
+                idx_q,
+                raw_w,
+                self.indexer_weight_scale,
+                self.freqs_cis,
+                infer_state.position_ids,
+                q_fp8=idx_q_fp8_out,
+                weights_out=weights_out,
+            )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
+        if target_stream is not None:
+            current_stream.wait_stream(target_stream)
+            idx_q_fp8.record_stream(current_stream)
+            weights.record_stream(current_stream)
         return idx_q_fp8, weights.squeeze(-1)
 
     def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions):

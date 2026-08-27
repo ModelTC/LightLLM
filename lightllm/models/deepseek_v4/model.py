@@ -154,6 +154,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     def _init_custom(self):
         self._init_to_get_rotary()
         self.dsv4_workspace = DeepseekV4Workspace(self)
+        if self.args.enable_ep_moe and not self.args.enable_decode_microbatch_overlap:
+            decode_aux_streams = tuple(torch.cuda.Stream() for _ in range(5))
+            for layer in self.layers_infer:
+                layer.dsv4_decode_aux_streams = decode_aux_streams
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()
             for layer in self.layers_infer:
