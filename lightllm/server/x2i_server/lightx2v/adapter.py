@@ -10,14 +10,14 @@ import os
 import time
 from PIL import Image
 import io
-import base64
+from typing import Callable
 
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType, OutputFormatType
+from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType, OutputFormatType, X2IHttpRequestState
 from ..past_kv_cache_client import PastKVCacheClient
 from ..rng_state_cache import RngStateCache
 
@@ -60,11 +60,24 @@ def process_images_after_vae_decoder(self):
     else:
         raise ValueError(f"Unsupported output format: {output_format}")
 
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return buffer.getvalue()
+
+
+_origin_run_infer_step = None
+
+
+def _run_infer_step(self, step_index: int, infer_steps: int) -> None:
+    if self.cancel_func():
+        return
+    return _origin_run_infer_step(self, step_index, infer_steps)
 
 
 def set_resolution(self, r_width, r_height):
     self.target_shape = (r_height, r_width)
+
+
+def set_check_cancel(self, cancel_func: Callable):
+    self.cancel_func = cancel_func
 
 
 class LightX2VServer:
@@ -85,6 +98,7 @@ class LightX2VServer:
             self.result_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.http_server_port_for_x2i}")
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=False)
+        self.x2i_http_request_state = X2IHttpRequestState(create=False)
 
         logger.info(f"set device for x2v server {rank}/{world_size} {os.environ.get('CUDA_VISIBLE_DEVICES')}")
         torch.cuda.set_device(self.rank)
@@ -112,6 +126,10 @@ class LightX2VServer:
         # monkey patch
         NeoppRunner.process_images_after_vae_decoder = process_images_after_vae_decoder
         NeoppRunner.set_resolution = set_resolution
+        NeoppRunner.set_check_cancel = set_check_cancel
+        global _origin_run_infer_step
+        _origin_run_infer_step = NeoppRunner._run_infer_step
+        NeoppRunner._run_infer_step = _run_infer_step
 
         self.pipe = LightX2VPipeline(
             model_path=self.args.model_dir,
@@ -221,6 +239,7 @@ class LightX2VServer:
                 )
         logger.info(f"seed: {seed} param.seed: {param.seed} first_image: {param.first_image} session_id: {session_id}")
         self.pipe.runner.set_resolution(param.r_width, param.r_height)
+        self.pipe.runner.set_check_cancel(lambda: self.x2i_http_request_state.is_cancel(param.request_id))
         image = self.pipe.generate(
             seed=seed,
             save_result_path="",

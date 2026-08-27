@@ -33,7 +33,7 @@ class PastKVCacheClient(object):
         self.free_pages: List[int] = list(range(self.page_num))
         self.lock = Lock()
         self.cond = Condition(self.lock)
-        print("PastKVCacheClient init, page num: ", self.page_num, flush=True)
+        logger.info(f"PastKVCacheClient init, page num: {self.page_num}")
 
         if not only_create_meta_data:
             if init_shm_data:

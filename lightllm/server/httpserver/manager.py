@@ -99,6 +99,7 @@ class HttpServerManager:
 
         if args.enable_multimodal_x2i:
             from lightllm.server.x2i_server.past_kv_cache_client import PastKVCacheClient
+            from lightllm.server.core.objs.x2i_params import X2IHttpRequestState
 
             self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=True, init_shm_data=False)
             self.send_to_x2i = context.socket(zmq.PUSH)
@@ -106,6 +107,7 @@ class HttpServerManager:
             self.recv_from_x2i = context.socket(zmq.PULL)
             self.recv_from_x2i.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
             self.req_id_to_x2i_reqs: Dict[int, X2IReqStatus] = {}
+            self.x2i_http_request_state = X2IHttpRequestState(create=False)
 
         self.shm_req_manager = ShmReqManager()
 
@@ -577,11 +579,27 @@ class HttpServerManager:
             req_status = X2IReqStatus(generation_params, generate_req_ids)
             self.req_id_to_x2i_reqs[generation_params.request_id] = req_status
 
+            self.x2i_http_request_state.set_cancel(x2i_req_id, 0)
+
             # send generation_params to generation server for image generation
             await self.send_to_x2i.send_pyobj(generation_params, protocol=pickle.HIGHEST_PROTOCOL)
 
+            async def wait_for_cancel():
+                while True:
+                    if await request.is_disconnected():
+                        self.x2i_http_request_state.set_cancel(x2i_req_id, 1)
+                        logger.warning(f"reqeust {x2i_req_id} is disconnected while generating image")
+                        break
+                    await asyncio.sleep(0.1)
+
+            wait_cancel = asyncio.create_task(wait_for_cancel())
+
             await req_status.event.wait()
             assert req_status.response is not None
+
+            if not wait_cancel.done():
+                wait_cancel.cancel()
+            await asyncio.gather(wait_cancel, return_exceptions=True)
 
             self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
             generation_params.first_image = False

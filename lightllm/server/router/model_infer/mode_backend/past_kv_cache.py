@@ -60,28 +60,38 @@ class PastKVCacheModule(object):
         """
         true_finished_reqs = []
         for req in finished_reqs:
-            # filter out non-img-gen reqs
-            if not req.shm_req.sample_params.img_gen_prefill:
+            try:
+                # filter out aborted reqs
+                if req.infer_aborted:
+                    true_finished_reqs.append(req)
+                    continue
+
+                # filter out non-img-gen reqs
+                if not req.shm_req.sample_params.img_gen_prefill:
+                    true_finished_reqs.append(req)
+                    continue
+
+                if req.past_kv_cache_task_status.is_finished():
+                    true_finished_reqs.append(req)
+                    continue
+
+                if req.past_kv_cache_task_status.is_running():
+                    continue
+
+                assert (
+                    req.past_kv_cache_task_status.is_not_started()
+                ), f"req {req.req_id} has invalid past kv cache task status {req.past_kv_cache_task_status}"
+
+                if self.need_sync_compute_stream():
+                    g_infer_context.get_overlap_stream().synchronize()
+
+                trans_task = self._start_kv_cache_offload(req=req)
+                assert trans_task is not None, f"req {req.req_id} start kv cache offload failed"
+                self.past_kv_cache_task.append(trans_task)
+
+            except Exception as e:
+                logger.error(f"req {req.req_id} offload past kv cache failed: {e}, will be freed in infer batch.")
                 true_finished_reqs.append(req)
-                continue
-
-            if req.past_kv_cache_task_status.is_finished():
-                true_finished_reqs.append(req)
-                continue
-
-            if req.past_kv_cache_task_status.is_running():
-                continue
-
-            assert (
-                req.past_kv_cache_task_status.is_not_started()
-            ), f"req {req.req_id} has invalid past kv cache task status {req.past_kv_cache_task_status}"
-
-            if self.need_sync_compute_stream():
-                g_infer_context.get_overlap_stream().synchronize()
-
-            trans_task = self._start_kv_cache_offload(req=req)
-            assert trans_task is not None, f"req {req.req_id} start kv cache offload failed"
-            self.past_kv_cache_task.append(trans_task)
 
         return true_finished_reqs
 
@@ -102,8 +112,8 @@ class PastKVCacheModule(object):
             )
             num_tokens = req.shm_req.input_len
 
-            assert req.cur_kv_len >= num_tokens
-            assert num_tokens <= len(page_indexes) * self.past_kv_cache_client.token_page_size
+            assert req.cur_kv_len >= num_tokens, f"req {req.req_id} cur_kv_len {req.cur_kv_len} < num_tokens {num_tokens}"
+            assert num_tokens <= len(page_indexes) * self.past_kv_cache_client.token_page_size, f"req {req.req_id} lack of enough pages for offloading past kv cache to CPU."
 
             cuda_page_indexes = self.page_index_buffer[start:end]
             cuda_page_indexes.copy_(page_indexes)

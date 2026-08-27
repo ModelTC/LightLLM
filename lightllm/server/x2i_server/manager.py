@@ -17,7 +17,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType
+from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, X2IHttpRequestState
 from lightllm.utils.dist_utils import set_current_device_id
 from lightllm.utils.start_utils import start_submodule_processes
 from lightllm.utils.net_utils import alloc_can_use_network_port
@@ -62,6 +62,8 @@ class X2IManager:
             # send to workers
             self.worker_pub = context.socket(zmq.PUSH)
             self.worker_pub.bind(f"{args.zmq_mode}127.0.0.1:{args.x2i_worker_task_port}")
+
+        self.x2i_http_request_state = X2IHttpRequestState(create=True)
 
         self.waiting_reqs: List[X2IParams] = []
 

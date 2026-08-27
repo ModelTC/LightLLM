@@ -1,8 +1,12 @@
+import os
+import numpy as np
 import ctypes
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from enum import IntEnum
+from lightllm.utils.envs_utils import get_unique_server_name
 from .token_chunck_hash_list import PastKVCachePageList
+from .shm_array import ShmArray
 
 
 class CfgNormType(IntEnum):
@@ -128,7 +132,7 @@ class X2IParams(ctypes.Structure):
         self.first_image = True
 
     def init_from_image_config(self, image_config: Any) -> None:
-        """从 HTTP `image_config`（api_models.ImageConfig）填充，与 `init(**kwargs)` 共用默认值逻辑。"""
+        """从 HTTP `image_config`(api_models.ImageConfig)填充，与 `init(**kwargs)` 共用默认值逻辑。"""
         from lightllm.server.api_models import ImageConfig
 
         if not isinstance(image_config, ImageConfig):
@@ -202,6 +206,28 @@ class X2IParams(ctypes.Structure):
 
     def __repr__(self):
         return self.to_string()
+
+
+class X2IHttpRequestState:
+    def __init__(self, create: bool = True):
+        self.shm_array = ShmArray(f"{get_unique_server_name()}_x2i_http_request_state", (2048, ), np.int32)
+        from lightllm.server.req_id_generator import MAX_BEST_OF
+        self.max_best_of = MAX_BEST_OF
+        self.init(create)
+
+    def init(self, create: bool = True):
+        if create:
+            self.shm_array.create_shm()
+        else:
+            self.shm_array.link_shm()
+
+    def set_cancel(self, req_id: int, state: int = 1):
+        req_id = (req_id // self.max_best_of) % 2048
+        self.shm_array.arr[req_id] = state
+
+    def is_cancel(self, req_id: int):
+        req_id = (req_id // self.max_best_of) % 2048
+        return self.shm_array.arr[req_id] == 1
 
 
 @dataclass
