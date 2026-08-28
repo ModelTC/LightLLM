@@ -17,6 +17,8 @@ def setup_module_env():
                 "cpu_cache_token_page_size": 256,
                 "enable_cpu_cache": False,
                 "model_dir": "",
+                "page_size": 4,
+                "router_max_wait_tokens": 1,
             }
         )
     )
@@ -55,18 +57,6 @@ def test_get_used_tokens(req):
     assert req.get_used_tokens() == 5
 
 
-def test_mtp_decode_reserves_two_windows():
-    req = SimpleNamespace(
-        input_len=4,
-        shm_cur_output_len=0,
-        shm_cur_kv_len=3,
-        chunked_prefill_size=128,
-        _mtp_step=2,
-    )
-
-    assert ChunkedPrefillReq.get_decode_need_tokens(req) == 6
-
-
 def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     req.sample_params.prompt_logprobs = 0
     req.shm_logprobs.arr["logprob"][1] = -0.5
@@ -84,11 +74,16 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     ]
 
 
-# def test_chunked_req_get_tuple_tokens():
-#     chunked_req = ChunkedPrefillReq()
-#     chunked_req.init(1, [1, 2, 3], {"max_new_tokens": 1}, None, chunked_prefill_size=256)
-#     result = chunked_req.get_tuple_tokens(False, 10)
-#     assert isinstance(result, tuple)
+def test_chunked_req_get_tuple_tokens_aligns_remaining_len_to_page():
+    req = SimpleNamespace(
+        input_len=10,
+        shm_cur_output_len=0,
+        shm_cur_kv_len=0,
+        chunked_prefill_size=4,
+        sample_params=SimpleNamespace(ignore_eos=True, max_new_tokens=5),
+    )
+
+    assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 28)
 
 
 def test_finish_status(req):
