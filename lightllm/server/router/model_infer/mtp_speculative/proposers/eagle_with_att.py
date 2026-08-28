@@ -5,11 +5,7 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
-    BaseSpecProposer,
-    MtpMemIndexesToFree,
-)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
@@ -96,11 +92,6 @@ class EagleWithAttProposer(BaseSpecProposer):
                 schedule_scores=torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None,
             )
 
-        # 后续递归每步、每请求各写一个临时 KV。proposal 在 verify 完成后
-        # 统一释放这些 slot，因此同时保留 CPU 索引用于资源回收。
-        extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * (draft_step - 1))
-        extra_mem_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
-
         # 一次 Triton kernel 合并抽取 accepted-tail 的 hidden、请求索引、
         # 序列长度、position delta 和共享 radix 元数据，构造 req_num 行的
         # 单 token decode 输入。通用算子同时返回 accepted-tail input ids，
@@ -114,7 +105,6 @@ class EagleWithAttProposer(BaseSpecProposer):
             b_req_idx=target_model_input.b_req_idx,
             b_mtp_index=target_model_input.b_mtp_index,
             b_seq_len=target_model_input.b_seq_len,
-            mem_indexes=target_model_input.mem_indexes,
             b_shared_seq_len=target_model_input.b_shared_seq_len,
             b_shared_radix_node_id=target_model_input.b_shared_radix_node_id,
             b_position_delta=target_model_input.b_position_delta,
@@ -136,14 +126,11 @@ class EagleWithAttProposer(BaseSpecProposer):
         draft_input.b_position_delta = selected_rows.b_position_delta
         draft_input.b_shared_seq_len = selected_rows.b_shared_seq_len
         draft_input.b_shared_radix_node_id = selected_rows.b_shared_radix_node_id
-        draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(req_num)]
 
         for step in range(1, draft_step):
-            mem_start = (step - 1) * req_num
             draft_input.input_ids = draft_token_ids
             draft_input.mtp_draft_input_hiddens = draft_hidden
-            draft_input.mem_indexes = extra_mem_indexes[mem_start : mem_start + req_num]
             draft_input.max_kv_seq_len = max_kv_seq_len + step
             draft_input.total_token_num = req_num * draft_input.max_kv_seq_len
             draft_output = draft_model.forward(draft_input)
@@ -161,7 +148,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         schedule_scores = torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
+            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )
 

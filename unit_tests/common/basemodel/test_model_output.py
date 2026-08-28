@@ -88,7 +88,6 @@ def _create_empty_decode_input():
         b_position_delta=torch.empty((0,), dtype=torch.int32),
         b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
         b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
-        mem_indexes=torch.empty((0,), dtype=torch.int32),
         is_prefill=False,
         multimodal_params=[],
     )
@@ -96,8 +95,6 @@ def _create_empty_decode_input():
 
 @torch.no_grad()
 def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
-    monkeypatch.setattr(basemodel, "copy_kv_index_to_req", lambda *args: None)
-
     execution_configs = (
         # eager 普通模式：空 batch 只补一个 dummy request。
         (None, False, 1, False, 1),
@@ -135,7 +132,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
             infer_state = SimpleNamespace(
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,
-                mem_index=model_input.mem_indexes,
+                mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32),
                 init_some_extra_state=lambda _: None,
                 is_cuda_graph=False,
             )

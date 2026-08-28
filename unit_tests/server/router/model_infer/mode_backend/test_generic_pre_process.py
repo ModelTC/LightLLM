@@ -60,7 +60,6 @@ def test_prepare_prefill_inputs_allows_empty_batch(monkeypatch):
     assert run_reqs == []
     assert model_input.batch_size == 0
     assert model_input.input_ids.shape == (0,)
-    assert model_input.mem_indexes_cpu is None
     assert model_input.b_req_idx.shape == (0,)
     assert model_input.b_prefill_start_loc.shape == (0,)
     assert model_input.b_prefill_has_output_cpu == []
@@ -76,7 +75,6 @@ def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
     assert run_reqs == []
     assert model_input.batch_size == 0
     assert model_input.input_ids is None
-    assert model_input.mem_indexes_cpu is None
     assert model_input.b_req_idx.shape == (0,)
     assert model_input.b_position_delta.shape == (0,)
     assert model_input.b_shared_seq_len.shape == (0,)
@@ -176,4 +174,3 @@ def test_overlap_decode_preserves_empty_microbatch(monkeypatch):
     assert run_reqs1 == []
     assert model_input1.batch_size == 0
     assert model_input1.b_req_idx.shape == (0,)
-    assert model_input1.mem_indexes_cpu is None

@@ -15,10 +15,8 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
-    copy_kv_index_to_req,
     select_kv_index_from_req,
     select_kv_index_from_req_prefill,
 )
@@ -383,19 +381,15 @@ class TpPartBaseModel:
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
         model_input.to_cuda()
-        self._select_page_mem_indexes(model_input)
-        assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
             return self._prefill(model_input=model_input)
         else:
             return self._decode(model_input)
 
-    def _select_page_mem_indexes(self, model_input: ModelInput):
-        if not model_input.mem_indexes_from_req_table or model_input.mem_indexes is not None:
-            return
+    def _select_mem_indexes(self, model_input: ModelInput):
         if model_input.is_prefill:
-            model_input.mem_indexes = select_kv_index_from_req_prefill(
+            return select_kv_index_from_req_prefill(
                 req_to_token_indexs=self.req_manager.req_to_token_indexs,
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,
@@ -404,13 +398,11 @@ class TpPartBaseModel:
                 max_q_seq_len=model_input.max_q_seq_len,
                 token_num=model_input.input_ids.shape[0],
             )
-        else:
-            model_input.mem_indexes = select_kv_index_from_req(
-                req_to_token_indexs=self.req_manager.req_to_token_indexs,
-                b_req_idx=model_input.b_req_idx,
-                b_seq_len=model_input.b_seq_len,
-            )
-        return
+        return select_kv_index_from_req(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=model_input.b_req_idx,
+            b_seq_len=model_input.b_seq_len,
+        )
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
@@ -442,7 +434,7 @@ class TpPartBaseModel:
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
 
-        infer_state.mem_index = model_input.mem_indexes
+        infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
 
@@ -487,12 +479,6 @@ class TpPartBaseModel:
             new_model_input.b_position_delta = F.pad(
                 new_model_input.b_position_delta, (0, padded_batch_size), mode="constant", value=0
             )
-        new_model_input.mem_indexes = F.pad(
-            new_model_input.mem_indexes,
-            (0, padded_batch_size),
-            mode="constant",
-            value=self.mem_manager.HOLD_TOKEN_MEMINDEX + (1 % self.mem_manager.page_size),
-        )
         new_model_input.multimodal_params = new_model_input.multimodal_params + [
             {"images": [], "audios": []} for _ in range(padded_batch_size)
         ]
@@ -530,18 +516,6 @@ class TpPartBaseModel:
         new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
         new_model_input.max_cache_len = max(0, model_input.max_cache_len)
         new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_token_num), mode="constant", value=1)
-        hold_mem_indexes = (
-            self.mem_manager.HOLD_TOKEN_MEMINDEX
-            + torch.arange(
-                padded_token_num,
-                dtype=new_model_input.mem_indexes.dtype,
-                device=new_model_input.mem_indexes.device,
-            )
-            % self.mem_manager.page_size
-        )
-        new_model_input.mem_indexes = torch.cat(
-            (new_model_input.mem_indexes, hold_mem_indexes),
-        )
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
         )
@@ -629,16 +603,6 @@ class TpPartBaseModel:
         )
 
         infer_state = self._create_inferstate(model_input)
-        if not model_input.mem_indexes_from_req_table:
-            init_req_to_token_indexes(
-                req_to_token_indexs=self.req_manager.req_to_token_indexs,
-                b_req_idx=infer_state.b_req_idx,
-                b_seq_len=infer_state.b_seq_len,
-                b_ready_cache_len=infer_state.b_ready_cache_len,
-                b_start_loc=model_input.b_prefill_start_loc,
-                alloc_mem_index=infer_state.mem_index,
-                max_q_seq_len=infer_state.max_q_seq_len,
-            )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
@@ -698,13 +662,6 @@ class TpPartBaseModel:
         # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
         # 因此必须在 init_att_state 之前完成赋值。
         infer_state.is_cuda_graph = need_capture
-        if not model_input.mem_indexes_from_req_table:
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state.b_req_idx,
-                infer_state.b_seq_len,
-                infer_state.mem_index,
-            )
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
 
@@ -823,7 +780,6 @@ class TpPartBaseModel:
 
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
-            self._select_page_mem_indexes(model_input)
             if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
                 gather_token_prefill_decode_mixed(
                     input_ids=model_input.input_ids,
@@ -836,9 +792,6 @@ class TpPartBaseModel:
         return self._microbatch_overlap_prefill_cuda(model_input0, model_input1)
 
     def _microbatch_overlap_prefill_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
-        assert model_input0.mem_indexes.is_cuda
-        assert model_input1.mem_indexes.is_cuda
-
         assert self.args.enable_tpsp_mix_mode
         origin_handle_token_num0 = model_input0.input_ids.shape[0]
         origin_handle_token_num1 = model_input1.input_ids.shape[0]
@@ -861,30 +814,10 @@ class TpPartBaseModel:
         )
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        if not model_input0.mem_indexes_from_req_table:
-            init_req_to_token_indexes(
-                req_to_token_indexs=self.req_manager.req_to_token_indexs,
-                b_req_idx=infer_state0.b_req_idx,
-                b_seq_len=infer_state0.b_seq_len,
-                b_ready_cache_len=infer_state0.b_ready_cache_len,
-                b_start_loc=model_input0.b_prefill_start_loc,
-                alloc_mem_index=infer_state0.mem_index,
-                max_q_seq_len=infer_state0.max_q_seq_len,
-            )
         infer_state0.init_some_extra_state(self)
         infer_state0.init_att_state()
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        if not model_input1.mem_indexes_from_req_table:
-            init_req_to_token_indexes(
-                req_to_token_indexs=self.req_manager.req_to_token_indexs,
-                b_req_idx=infer_state1.b_req_idx,
-                b_seq_len=infer_state1.b_seq_len,
-                b_ready_cache_len=infer_state1.b_ready_cache_len,
-                b_start_loc=model_input1.b_prefill_start_loc,
-                alloc_mem_index=infer_state1.mem_index,
-                max_q_seq_len=infer_state1.max_q_seq_len,
-            )
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
 
@@ -916,7 +849,6 @@ class TpPartBaseModel:
 
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
-            self._select_page_mem_indexes(model_input)
             if model_input.input_ids is None:
                 if model_input.batch_size > 0:
                     model_input.input_ids = gather_token(
@@ -934,8 +866,6 @@ class TpPartBaseModel:
 
     def _microbatch_overlap_decode_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
         assert self.args.enable_tpsp_mix_mode
-        assert model_input0.mem_indexes.is_cuda
-        assert model_input1.mem_indexes.is_cuda
 
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
@@ -950,25 +880,11 @@ class TpPartBaseModel:
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             infer_state0.is_cuda_graph = need_capture
-            if not padded_model_input0.mem_indexes_from_req_table:
-                copy_kv_index_to_req(
-                    self.req_manager.req_to_token_indexs,
-                    infer_state0.b_req_idx,
-                    infer_state0.b_seq_len,
-                    infer_state0.mem_index,
-                )
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state1.is_cuda_graph = need_capture
-            if not padded_model_input1.mem_indexes_from_req_table:
-                copy_kv_index_to_req(
-                    self.req_manager.req_to_token_indexs,
-                    infer_state1.b_req_idx,
-                    infer_state1.b_seq_len,
-                    infer_state1.mem_index,
-                )
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -990,24 +906,10 @@ class TpPartBaseModel:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
-            if not model_input0.mem_indexes_from_req_table:
-                copy_kv_index_to_req(
-                    self.req_manager.req_to_token_indexs,
-                    infer_state0.b_req_idx,
-                    infer_state0.b_seq_len,
-                    infer_state0.mem_index,
-                )
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(model_input1, 1)
-            if not model_input1.mem_indexes_from_req_table:
-                copy_kv_index_to_req(
-                    self.req_manager.req_to_token_indexs,
-                    infer_state1.b_req_idx,
-                    infer_state1.b_seq_len,
-                    infer_state1.mem_index,
-                )
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -1149,6 +1051,7 @@ class TpPartBaseModel:
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
             mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+            self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1163,7 +1066,6 @@ class TpPartBaseModel:
                 max_kv_seq_len=self.batch_max_tokens,
                 max_cache_len=0,
                 input_ids=dummy_input_ids,
-                mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
@@ -1228,6 +1130,7 @@ class TpPartBaseModel:
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
                 mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+                self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1242,7 +1145,6 @@ class TpPartBaseModel:
                     max_kv_seq_len=input_len,
                     max_cache_len=0,
                     input_ids=dummy_input_ids,
-                    mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
                     b_mtp_index=b_mtp_index,
@@ -1291,9 +1193,6 @@ class TpPartBaseModel:
         b_req_idx = torch.tensor(
             [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
         )
-        mem_indexes = torch.tensor(
-            [self.mem_manager.HOLD_TOKEN_MEMINDEX for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-        )
         b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
         b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         b_q_seq_len = b_seq_len - b_ready_cache_len
@@ -1308,7 +1207,6 @@ class TpPartBaseModel:
             max_kv_seq_len=prefill_input_len,
             max_cache_len=0,
             input_ids=dummy_input_ids,
-            mem_indexes=mem_indexes,
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,
             b_seq_len=b_seq_len,
@@ -1327,7 +1225,6 @@ class TpPartBaseModel:
         del model_input
         del dummy_input_ids
         del b_req_idx
-        del mem_indexes
         del b_seq_len
         del b_ready_cache_len
         del model_output

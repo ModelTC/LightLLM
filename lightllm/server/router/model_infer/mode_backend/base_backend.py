@@ -415,6 +415,7 @@ class ModeBackend:
             return
 
         mgr = PromptLogprobsCaptureManager.get_instance()
+        mem_indexes = self.model._select_mem_indexes(model_input)
 
         start_loc = 0
         for req_obj in run_reqs:
@@ -448,7 +449,7 @@ class ModeBackend:
                     top_token_ids = torch.nn.functional.pad(top_token_ids, padding, value=-1)
                     top_logprobs = torch.nn.functional.pad(top_logprobs, padding, value=float("-inf"))
                 mgr.capture(
-                    mem_indexes=model_input.mem_indexes[start_loc : start_loc + capture_count],
+                    mem_indexes=mem_indexes[start_loc : start_loc + capture_count],
                     top_token_ids=top_token_ids,
                     top_logprobs=top_logprobs,
                 )

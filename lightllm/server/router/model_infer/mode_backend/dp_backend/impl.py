@@ -19,7 +19,6 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from .control_state import DPControlState
 
 
@@ -604,14 +603,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 verify_run_reqs=run_reqs,
             )
 
-            if not model_input.mem_indexes_from_req_table:
-                proposal.extra_mem_indexes_cpu.append(
-                    MtpMemIndexesToFree(
-                        mem_indexes_cpu=model_input.mem_indexes_cpu,
-                        free_mask_cpu=accepted_index_cpu == 0,
-                    ),
-                )
-
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
                 run_reqs=verify_ok_reqs,
@@ -890,21 +881,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 req_num=req_num,
                 accept_lengths_cpu=mtp_accept_len_cpu,
             )
-            if not model_input0.mem_indexes_from_req_table:
-                proposal.extra_mem_indexes_cpu.append(
-                    MtpMemIndexesToFree(
-                        mem_indexes_cpu=model_input0.mem_indexes_cpu,
-                        free_mask_cpu=accepted_index_cpu0 == 0,
-                    )
-                )
-            if not model_input1.mem_indexes_from_req_table:
-                proposal.extra_mem_indexes_cpu.append(
-                    MtpMemIndexesToFree(
-                        mem_indexes_cpu=model_input1.mem_indexes_cpu,
-                        free_mask_cpu=accepted_index_cpu1 == 0,
-                    )
-                )
-
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
                 run_reqs=verify_ok_reqs,

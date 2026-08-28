@@ -255,8 +255,6 @@ class CudaGraph:
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
             input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-            mem_indexes.fill_(model.mem_manager.HOLD_TOKEN_MEMINDEX + (1 % model.mem_manager.page_size))
             b_req_idx = torch.tensor(
                 [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
             )
@@ -271,7 +269,6 @@ class CudaGraph:
                 max_q_seq_len=1,
                 max_kv_seq_len=max_len_in_batch,
                 input_ids=input_ids,
-                mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
@@ -285,7 +282,6 @@ class CudaGraph:
             model_output: ModelOutput = model.forward(model_input)
             del model_output
             del input_ids
-            del mem_indexes
             del b_req_idx
             del b_seq_len
 
@@ -317,8 +313,6 @@ class CudaGraph:
                 total_token_num = batch_size * seq_len
                 max_len_in_batch = self.graph_max_len_in_batch
                 input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-                mem_indexes.fill_(model.mem_manager.HOLD_TOKEN_MEMINDEX + (1 % model.mem_manager.page_size))
                 b_req_idx = torch.tensor(
                     [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
                 )
@@ -335,7 +329,6 @@ class CudaGraph:
                     max_kv_seq_len=max_len_in_batch,
                     input_ids=input_ids,
                     b_mtp_index=b_mtp_index,
-                    mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
                     b_shared_seq_len=b_shared_seq_len,

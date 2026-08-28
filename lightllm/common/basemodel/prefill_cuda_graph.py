@@ -194,11 +194,6 @@ class PrefillCudaGraph:
             logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num}")
             total_token_num = handle_token_num
             input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-            mem_indexes.copy_(
-                model.mem_manager.HOLD_TOKEN_MEMINDEX
-                + torch.arange(total_token_num, dtype=torch.int32, device="cuda") % model.mem_manager.page_size
-            )
             b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
             b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(total_token_num)
@@ -214,7 +209,6 @@ class PrefillCudaGraph:
                 max_kv_seq_len=total_token_num,
                 max_cache_len=0,
                 input_ids=input_ids,
-                mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_mtp_index=b_mtp_index,
                 b_seq_len=b_seq_len,
@@ -229,7 +223,6 @@ class PrefillCudaGraph:
             model_output: ModelOutput = model.forward(model_input)
             del model_output
             del input_ids
-            del mem_indexes
             del b_req_idx
             del b_seq_len
 
@@ -259,11 +252,6 @@ class PrefillCudaGraph:
                 # dummy prefill, capture the cudagraph
                 total_token_num = handle_token_num
                 input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-                mem_indexes.copy_(
-                    model.mem_manager.HOLD_TOKEN_MEMINDEX
-                    + torch.arange(total_token_num, dtype=torch.int32, device="cuda") % model.mem_manager.page_size
-                )
                 b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
                 b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(total_token_num)
@@ -279,7 +267,6 @@ class PrefillCudaGraph:
                     max_kv_seq_len=total_token_num,
                     max_cache_len=0,
                     input_ids=input_ids,
-                    mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     b_seq_len=b_seq_len,
