@@ -142,9 +142,9 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
 
     model_input, _ = generic_pre_process.prepare_decode_inputs([req])
 
-    assert req.hold_kv_len == 12
-    assert context.req_manager.mem_manager.alloc_sizes == [9]
-    assert context.req_manager.req_to_token_indexs[0, :12].tolist() == list(range(12))
+    assert req.hold_kv_len == 9
+    assert context.req_manager.mem_manager.alloc_sizes == [6]
+    assert context.req_manager.req_to_token_indexs[0, :9].tolist() == list(range(9))
 
 
 def test_page_size_one_frees_all_preallocated_indexes():
