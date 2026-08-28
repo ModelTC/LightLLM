@@ -62,9 +62,7 @@ def _build_dspark_swa_index_kernel(
     valid = is_history | is_block
     output = tl.where(valid, swa_slot, -1)
     output = tl.where(is_hold, HOLD_SWA_SLOT, output).to(tl.int32)
-    tl.store(
-        swa_index_ptr + token_idx * swa_index_stride0 + column, output, mask=in_width
-    )
+    tl.store(swa_index_ptr + token_idx * swa_index_stride0 + column, output, mask=in_width)
 
     length = tl.where(is_hold, 1, history_len + BLOCK_SIZE).to(tl.int32)
     tl.store(swa_length_ptr + token_idx, length)

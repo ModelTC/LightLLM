@@ -25,12 +25,8 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
             dim=1,
         )
         prev_embeddings = self._markov_prev_embeddings(prev_token_ids, layer_weight)
-        features = torch.cat(
-            [block_hidden, prev_embeddings.to(dtype=block_hidden.dtype)], dim=-1
-        )
-        logits = layer_weight.confidence_head_weight_.mm(
-            features.flatten(0, -2).float()
-        )
+        features = torch.cat([block_hidden, prev_embeddings.to(dtype=block_hidden.dtype)], dim=-1)
+        logits = layer_weight.confidence_head_weight_.mm(features.flatten(0, -2).float())
         return logits.view(features.shape[:-1])
 
     def token_forward(
@@ -60,15 +56,11 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
         last_input, token_num = self._slice_get_last_input(collapsed, infer_state)
         num_reqs = token_num // self.block_size_
         block_hidden = last_input.reshape(num_reqs, self.block_size_, -1)
-        anchor_token_ids = infer_state.input_ids.reshape(num_reqs, self.block_size_)[
-            :, 0
-        ]
+        anchor_token_ids = infer_state.input_ids.reshape(num_reqs, self.block_size_)[:, 0]
 
         normed_input = self._norm(last_input, infer_state, layer_weight)
         lm_head_input = normed_input.permute(1, 0).reshape(-1, token_num)
-        local_logits = layer_weight.lm_head_weight_(
-            input=lm_head_input, alloc_func=self.alloc_tensor
-        )
+        local_logits = layer_weight.lm_head_weight_(input=lm_head_input, alloc_func=self.alloc_tensor)
         sampled_tokens = self._sample_markov(
             local_logits,
             block_hidden=block_hidden,

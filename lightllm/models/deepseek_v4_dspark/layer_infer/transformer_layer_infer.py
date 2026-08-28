@@ -16,9 +16,7 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         super().__init__(layer_num, network_config)
         final_layer = network_config["n_layer"] + network_config["dspark_layer_num"] - 1
         self.is_last_layer = layer_num == final_layer
-        assert (
-            self.compress_ratio == 0
-        ), "DeepSeek-V4 DSpark draft layers must be SWA-only"
+        assert self.compress_ratio == 0, "DeepSeek-V4 DSpark draft layers must be SWA-only"
 
     def context_forward(
         self,

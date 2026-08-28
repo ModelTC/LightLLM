@@ -129,9 +129,7 @@ def free_mem_indexes(
                 mem_indexes_to_free.append(extra_indexes_cpu)
             else:
                 assert extra_mem_to_free.free_mask_cpu is None
-                dspark_scratch_to_free.append(
-                    (extra_indexes_cpu, extra_mem_to_free.swa_pages_cpu)
-                )
+                dspark_scratch_to_free.append((extra_indexes_cpu, extra_mem_to_free.swa_pages_cpu))
 
     mem_manager = backend.model.req_manager.mem_manager
     for mem_indexes_cpu, pages_cpu in dspark_scratch_to_free:

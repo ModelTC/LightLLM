@@ -18,11 +18,7 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
             # pages and replace these base indices below.
             return
 
-        (
-            self.dsv4_swa_indices,
-            self.dsv4_swa_lengths,
-            self.dsv4_swa_write_slots,
-        ) = model.dsv4_workspace.dspark_swa(
+        (self.dsv4_swa_indices, self.dsv4_swa_lengths, self.dsv4_swa_write_slots,) = model.dsv4_workspace.dspark_swa(
             self.microbatch_index,
             self.position_ids.numel(),
         )

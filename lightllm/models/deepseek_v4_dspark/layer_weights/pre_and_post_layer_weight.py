@@ -122,9 +122,9 @@ class DeepseekV4DSparkPreAndPostLayerWeight(PreAndPostLayerWeight):
 
         scale_name = self.main_proj_weight_.weight_scale_names[0]
         if scale_name is None:
-            weights[weight_name] = dequant_fp8_block_to_bf16(
-                weights[weight_name], weights[scale_key]
-            ).to(self.data_type_)
+            weights[weight_name] = dequant_fp8_block_to_bf16(weights[weight_name], weights[scale_key]).to(
+                self.data_type_
+            )
         else:
             weights[scale_name] = weights[scale_key].to(torch.float32)
         del weights[scale_key]

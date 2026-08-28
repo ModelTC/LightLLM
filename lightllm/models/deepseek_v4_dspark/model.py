@@ -79,8 +79,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         assert not self.enable_tpsp_mix_mode, "DeepSeek-V4 DSpark draft model does not support TP-SP"
         checkpoint_block_size = int(self.config["dspark_block_size"])
         assert 0 < self.args.mtp_step <= checkpoint_block_size, (
-            f"DeepSeek-V4 DSpark requires --mtp_step in [1, {checkpoint_block_size}], "
-            f"got {self.args.mtp_step}"
+            f"DeepSeek-V4 DSpark requires --mtp_step in [1, {checkpoint_block_size}], " f"got {self.args.mtp_step}"
         )
         # The checkpoint block size is its maximum supported width. Runtime
         # allocation, indexing, and Markov decoding follow --mtp_step.
