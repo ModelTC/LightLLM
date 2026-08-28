@@ -684,6 +684,7 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.hold_kv_len = self.cur_kv_len
+                assert self.hold_kv_len % self.args.page_size == 0
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
