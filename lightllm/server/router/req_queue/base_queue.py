@@ -27,11 +27,6 @@ class BaseQueue:
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
 
-    def add_kv_page_reservation(self, token_num: int, req_num: int) -> int:
-        """Conservatively include each running request's incomplete tail page."""
-        page_size = self.args.page_size
-        return token_num + req_num * (page_size - 1)
-
     def free_aborted_req_cpu_cache_pages(self, req: Req):
         if self.args.enable_cpu_cache:
             self.router.cpu_cache_client.lock.acquire_sleep1ms()
