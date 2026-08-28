@@ -449,9 +449,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state1.hook()
             infer_state1.hook = None
 
-        _0_topk_weight, _0_topk_idx, _0_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
-            _0_input1, _0_router_logits
-        )
+        (
+            _0_topk_weight,
+            _0_topk_idx,
+            _0_qinput_tensor,
+        ) = layer_weight.experts.select_experts_and_quant_input(_0_input1, _0_router_logits)
         from deep_ep import ElasticBuffer
 
         _0_overlap_event = ElasticBuffer.capture()
@@ -480,7 +482,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_num_recv_tokens_per_expert_list,
             _0_handle,
             _0_hook,
-        ) = layer_weight.experts.dispatch(_0_qinput_tensor, _0_topk_idx, _0_topk_weight, overlap_event=_0_overlap_event)
+        ) = layer_weight.experts.dispatch(
+            _0_qinput_tensor,
+            _0_topk_idx,
+            _0_topk_weight,
+            overlap_event=_0_overlap_event,
+        )
         infer_state.hook = _0_hook
 
         # wait 0 dispatch
@@ -488,9 +495,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.hook()
             infer_state.hook = None
 
-        _1_topk_weight, _1_topk_idx, _1_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
-            _1_input1, _1_router_logits
-        )
+        (
+            _1_topk_weight,
+            _1_topk_idx,
+            _1_qinput_tensor,
+        ) = layer_weight.experts.select_experts_and_quant_input(_1_input1, _1_router_logits)
         _1_overlap_event = ElasticBuffer.capture()
 
         # 0 shared expert
@@ -520,7 +529,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_num_recv_tokens_per_expert_list,
             _1_handle,
             _1_hook,
-        ) = layer_weight.experts.dispatch(_1_qinput_tensor, _1_topk_idx, _1_topk_weight, overlap_event=_1_overlap_event)
+        ) = layer_weight.experts.dispatch(
+            _1_qinput_tensor,
+            _1_topk_idx,
+            _1_topk_weight,
+            overlap_event=_1_overlap_event,
+        )
         infer_state1.hook = _1_hook
 
         # wait 1 dispatch

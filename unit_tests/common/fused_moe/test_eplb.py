@@ -1,5 +1,3 @@
-import os
-import statistics
 import threading
 import time
 from collections import deque
@@ -1643,12 +1641,6 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
     _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     topk_ids = torch.tensor([[3, 127]], dtype=torch.int32)
     monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), topk_ids))
-    monkeypatch.setattr(
-        deepgemm_module,
-        "eplb_map_to_physical_long_fast",
-        lambda *_args, **_kwargs: pytest.fail("decode must not map"),
-    )
-
     _, selected, origin = impl._select_experts(
         torch.empty((1, 4)),
         torch.empty((1, 128)),
@@ -1665,24 +1657,21 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
     assert selected.data_ptr() == origin.data_ptr()
 
 
-def test_select_experts_and_quant_input_keeps_prefill_ids_logical(monkeypatch):
-    from lightllm.common.basemodel.triton_kernel.fused_moe import topk_select
+def test_eplb_prefill_uses_single_fused_path_for_global_and_scale(monkeypatch):
+    from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_topk
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
     impl.quant_method = object()
     _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
-    logical_ids = torch.tensor([[3, 127]], dtype=torch.int32)
-    monkeypatch.setattr(
-        topk_select,
-        "select_experts",
-        lambda **_kwargs: (torch.ones((1, 2)), logical_ids),
-    )
-    monkeypatch.setattr(
-        deepgemm_module,
-        "eplb_map_to_physical_long_fast",
-        lambda *_args, **_kwargs: pytest.fail("selection must not map"),
-    )
+    physical_ids = torch.tensor([[130, 131]], dtype=torch.long)
+    calls = []
+
+    def fused_topk(**kwargs):
+        calls.append(kwargs)
+        return torch.ones((1, 2)), physical_ids, None
+
+    monkeypatch.setattr(grouped_topk, "triton_grouped_topk_eplb", fused_topk)
     monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
 
     weights, topk_idx, qinput = impl.select_experts_and_quant_input(
@@ -1696,30 +1685,21 @@ def test_select_experts_and_quant_input_keeps_prefill_ids_logical(monkeypatch):
         0,
         0,
         "softmax",
+        per_expert_scale=torch.tensor([2.0]),
     )
 
     assert weights.tolist() == [[1.0, 1.0]]
+    assert topk_idx is physical_ids
     assert topk_idx.dtype is torch.long
-    assert topk_idx.tolist() == [[3, 127]]
     assert qinput == "qinput"
+    assert not calls[0]["use_grouped_topk"]
+    assert calls[0]["per_expert_scale"].tolist() == [2.0]
+    assert not calls[0]["return_logical_ids"]
 
 
-def test_prepare_prefill_topk_ids_returns_identity_without_eplb(monkeypatch):
-    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    _set_expert_parallel_state(impl, _test_parallel_state())
-    logical_ids = torch.tensor([[1, 2]], dtype=torch.int64)
-    monkeypatch.setattr(
-        deepgemm_module,
-        "eplb_map_to_physical_long_fast",
-        lambda *_args, **_kwargs: pytest.fail("must not map"),
-    )
+def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
+    from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_topk
 
-    assert impl._prepare_prefill_topk_ids(logical_ids) is logical_ids
-
-
-def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_routing_stream(
-    monkeypatch,
-):
     class Buffer:
         def dispatch(self, _qinput, **kwargs):
             calls.append(kwargs)
@@ -1732,20 +1712,79 @@ def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_rout
             )
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    _set_expert_parallel_state(impl, _test_parallel_state())
+    impl.routed_scaling_factor = 1.0
+    impl.quant_method = object()
+    state = _test_parallel_state(
+        eplb=True,
+        route_counter=torch.zeros((3, 128), dtype=torch.int64),
+        recording=True,
+    )
+    _set_expert_parallel_state(impl, state)
+    impl.ep_balance_counters = None
+    calls, fused_calls = [], []
+    physical_ids = torch.tensor([[130, 131]], dtype=torch.long)
+
+    def fused_topk(**kwargs):
+        fused_calls.append(kwargs)
+        return torch.ones((1, 2)), physical_ids, None
+
+    monkeypatch.setattr(grouped_topk, "triton_grouped_topk_eplb", fused_topk)
+    monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
+    monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_deepep_num_max_dispatch_tokens_per_rank_prefill",
+        lambda: 16,
+    )
+    monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
+
+    weights, topk_idx, qinput = impl.select_experts_and_quant_input(
+        torch.empty((1, 4)),
+        torch.empty((1, 128)),
+        None,
+        object(),
+        True,
+        2,
+        False,
+        1,
+        8,
+        "sigmoid",
+    )
+    caller_event = object()
+    impl.dispatch(
+        qinput,
+        topk_idx,
+        weights,
+        overlap_event=caller_event,
+    )
+
+    assert topk_idx is physical_ids
+    assert len(fused_calls) == 1
+    assert fused_calls[0]["sample_index"] == 0
+    assert fused_calls[0]["record_load"]
+    assert state.eplb.recorded_sample_count == 1
+    assert calls[0]["topk_idx"] is physical_ids
+    assert calls[0]["topk_idx"].dtype is torch.long
+    assert calls[0]["previous_event"] is caller_event
+
+
+def test_prefill_dispatch_preserves_event(monkeypatch):
+    class Buffer:
+        def dispatch(self, _qinput, **kwargs):
+            calls.append(kwargs)
+            return (
+                (torch.empty((4, 2)),),
+                "recv_idx",
+                "recv_weight",
+                SimpleNamespace(num_recv_tokens_per_expert_list=[4]),
+                SimpleNamespace(current_stream_wait=lambda: None),
+            )
+
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     impl.ep_balance_counters = None
     calls = []
     caller_event = object()
-    monkeypatch.setattr(
-        deepgemm_module,
-        "_get_prefill_routing_stream",
-        lambda _device: pytest.fail("must not create routing stream"),
-    )
-    monkeypatch.setattr(
-        deepgemm_module.ElasticBuffer,
-        "capture",
-        lambda: pytest.fail("must not capture routing event"),
-    )
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
     monkeypatch.setattr(
         deepgemm_module,
@@ -1756,7 +1795,7 @@ def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_rout
 
     impl.dispatch(
         "qinput",
-        torch.tensor([[1, 2]], dtype=torch.int32),
+        torch.tensor([[1, 2]], dtype=torch.long),
         torch.ones((1, 2)),
         caller_event,
     )
@@ -1765,114 +1804,29 @@ def test_prefill_dispatch_without_routing_policy_preserves_event_and_avoids_rout
     assert calls[0]["topk_idx"].dtype is torch.long
 
 
-def test_prefill_dispatch_routes_external_logical_ids_once(monkeypatch):
-    class Buffer:
-        def dispatch(self, _qinput, **kwargs):
-            calls.append(kwargs)
-            return (
-                (torch.empty((4, 2)),),
-                "recv_idx",
-                "recv_weight",
-                SimpleNamespace(num_recv_tokens_per_expert_list=[4]),
-                SimpleNamespace(current_stream_wait=lambda: None),
-            )
-
-    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    _set_expert_parallel_state(
-        impl,
-        _test_parallel_state(
-            eplb=True,
-            num_logical_experts=128,
-            world_size=2,
-            num_redundant_experts_per_rank=1,
-            route_counter=torch.zeros((3, 128), dtype=torch.int64),
-        ),
-    )
-    impl.ep_balance_counters = None
-    mapped = []
-    calls = []
-
-    def map_to_physical_long(topk_ids, *_args, **_kwargs):
-        mapped.append(topk_ids)
-        assert topk_ids.dtype is torch.int64
-        assert topk_ids.is_contiguous()
-        order.append("map")
-        return topk_ids + 10
-
-    monkeypatch.setattr(deepgemm_module, "eplb_map_to_physical_long_fast", map_to_physical_long)
-    monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
-    monkeypatch.setattr(
-        deepgemm_module,
-        "get_deepep_num_max_dispatch_tokens_per_rank_prefill",
-        lambda: 16,
-    )
-    monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
-    order = []
-    source_event = SimpleNamespace(current_stream_wait=lambda: order.append("source_wait"))
-    dispatch_event = object()
-
-    @contextmanager
-    def fake_routing_stream(_stream):
-        yield
-
-    monkeypatch.setattr(deepgemm_module, "_get_prefill_routing_stream", lambda _device: object())
-    monkeypatch.setattr(torch.cuda, "stream", fake_routing_stream)
-    monkeypatch.setattr(
-        deepgemm_module.ElasticBuffer,
-        "capture",
-        lambda: order.append("capture") or dispatch_event,
-    )
-    logical_ids = torch.tensor([[1, 2]], dtype=torch.int64)
-
-    result = impl.dispatch("qinput", logical_ids, torch.ones((1, 2)), source_event)
-
-    assert len(mapped) == 1
-    assert order == ["source_wait", "map", "capture"]
-    assert calls[0]["topk_idx"].dtype is torch.long
-    assert calls[0]["topk_idx"].tolist() == [[11, 12]]
-    assert logical_ids.tolist() == [[1, 2]]
-    assert calls[0]["previous_event"] is dispatch_event
-    assert calls[0]["num_experts"] == 130
-    assert result[3] == [4]
-
-
 def test_deepgemm_constructor_configures_eplb():
     state = _validated_expert_parallel_state()
     impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
     assert impl.expert_parallel_state is state
 
 
-def test_prefill_eplb_keeps_logical_ids_without_capture_clone(monkeypatch):
-    from lightllm.common.basemodel.triton_kernel.fused_moe import topk_select
+def test_prefill_eplb_returns_requested_logical_ids(monkeypatch):
+    from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_topk
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
-    _set_expert_parallel_state(
-        impl,
-        _test_parallel_state(
-            eplb=True,
-            route_counter=torch.zeros((2, 128), dtype=torch.int64),
-        ),
-    )
-    impl._fused_experts = lambda **kwargs: kwargs["topk_ids"]
+    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
 
-    def select(**_kwargs):
-        return torch.ones((1, 2)), torch.tensor([[3, 4]], dtype=torch.int32)
+    def fused_topk(**kwargs):
+        assert kwargs["return_logical_ids"]
+        return (
+            torch.ones((1, 2)),
+            torch.tensor([[13, 14]], dtype=torch.int32),
+            torch.tensor([[3, 4]], dtype=torch.int32),
+        )
 
-    def map_to_physical_long(topk_ids, *_args, **_kwargs):
-        return topk_ids.to(torch.long) + 10
-
-    monkeypatch.setattr(topk_select, "select_experts", select)
-    monkeypatch.setattr(deepgemm_module, "eplb_map_to_physical_long_fast", map_to_physical_long)
-    clone_calls = []
-    original_clone = torch.Tensor.clone
-
-    def clone_spy(tensor, *args, **kwargs):
-        clone_calls.append(tensor.data_ptr())
-        return original_clone(tensor, *args, **kwargs)
-
-    monkeypatch.setattr(torch.Tensor, "clone", clone_spy)
-    _, physical_ids, origin_ids = impl._select_experts(
+    monkeypatch.setattr(grouped_topk, "triton_grouped_topk_eplb", fused_topk)
+    _, physical_ids, logical_ids = impl._select_experts(
         torch.empty((1, 4)),
         torch.empty((1, 128)),
         None,
@@ -1885,49 +1839,9 @@ def test_prefill_eplb_keeps_logical_ids_without_capture_clone(monkeypatch):
         is_prefill=True,
         preserve_logical_ids=True,
     )
-    assert physical_ids.dtype is torch.long
+
     assert physical_ids.tolist() == [[13, 14]]
-    assert origin_ids.dtype is torch.int32
-    assert origin_ids.tolist() == [[3, 4]]
-    assert physical_ids.data_ptr() != origin_ids.data_ptr()
-    assert clone_calls == []
-
-    result = impl(
-        torch.empty((1, 4)),
-        torch.empty((1, 128)),
-        None,
-        None,
-        None,
-        "softmax",
-        2,
-        False,
-        False,
-        0,
-        0,
-        is_prefill=True,
-    )
-    assert result.tolist() == [[13, 14]]
-    assert clone_calls == []
-
-    captured = []
-    result = impl(
-        torch.empty((1, 4)),
-        torch.empty((1, 128)),
-        None,
-        None,
-        None,
-        "softmax",
-        2,
-        False,
-        False,
-        0,
-        0,
-        is_prefill=True,
-        moe_capture_callback=lambda ids: captured.append(ids.clone()),
-    )
-    assert result.tolist() == [[13, 14]]
-    assert captured[0].tolist() == [[3, 4]]
-    assert len(clone_calls) == 1
+    assert logical_ids.tolist() == [[3, 4]]
 
 
 def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(
@@ -3276,144 +3190,11 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-def test_eplb_record_flag_controls_counter_without_changing_mapping():
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
-
-    topk_ids = torch.tensor([[0, 1], [0, 2]], dtype=torch.int64, device="cuda")
-    logical_to_physical = torch.tensor([[0, 4], [1, -1], [2, -1], [3, -1]], dtype=torch.int64, device="cuda")
-    replica_count = torch.tensor([2, 1, 1, 1], dtype=torch.int64, device="cuda")
-    expert_counter = torch.zeros((2, 4), dtype=torch.int64, device="cuda")
-    record_load = torch.ones((), dtype=torch.int32, device="cuda")
-
-    eplb_map(
-        topk_ids,
-        logical_to_physical,
-        replica_count,
-        expert_counter,
-        record_load,
-        sample_index=0,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(topk_ids.cpu(), torch.tensor([[0, 1], [4, 2]]))
-    assert torch.equal(expert_counter.cpu(), torch.tensor([[2, 1, 1, 0], [0, 0, 0, 0]]))
-
-    logical_topk_ids = torch.tensor([[0, 1], [0, 2]], dtype=torch.int64, device="cuda")
-    graph_topk_ids = torch.empty_like(logical_topk_ids)
-    expert_counter.zero_()
-    record_load.fill_(1)
-    graph_topk_ids.copy_(logical_topk_ids)
-    eplb_map(
-        graph_topk_ids,
-        logical_to_physical,
-        replica_count,
-        expert_counter,
-        record_load,
-        sample_index=1,
-    )
-    torch.cuda.synchronize()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        graph_topk_ids.copy_(logical_topk_ids)
-        eplb_map(
-            graph_topk_ids,
-            logical_to_physical,
-            replica_count,
-            expert_counter,
-            record_load,
-            sample_index=1,
-        )
-
-    expert_counter.zero_()
-    graph.replay()
-    torch.cuda.synchronize()
-    assert torch.equal(graph_topk_ids.cpu(), torch.tensor([[0, 1], [4, 2]]))
-    assert torch.equal(expert_counter.cpu(), torch.tensor([[0, 0, 0, 0], [2, 1, 1, 0]]))
-
-    expert_counter.zero_()
-    record_load.fill_(0)
-    graph.replay()
-    torch.cuda.synchronize()
-    assert torch.equal(graph_topk_ids.cpu(), torch.tensor([[0, 1], [4, 2]]))
-    assert torch.equal(expert_counter.cpu(), torch.zeros((2, 4), dtype=torch.int64))
-
-    topk_ids.copy_(torch.tensor([[0, 1], [0, 2]], dtype=torch.int64, device="cuda"))
-    record_load.fill_(0)
-    eplb_map(
-        topk_ids,
-        logical_to_physical,
-        replica_count,
-        expert_counter,
-        record_load,
-        sample_index=0,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(topk_ids.cpu(), torch.tensor([[0, 1], [4, 2]]))
-    assert torch.equal(expert_counter.cpu(), torch.zeros((2, 4), dtype=torch.int64))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-def test_eplb_map_decorrelates_replica_phase_between_topk_experts():
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
-
-    # For token 0, logical expert 0 hashes to replica phase 0 while logical
-    # expert 1 hashes to phase 1.  The two top-k assignments therefore no
-    # longer select the same replica phase merely because they share a token.
-    logical_to_physical = torch.tensor([[0, 4], [1, 5]], dtype=torch.int32, device="cuda")
-    replica_count = torch.tensor([2, 2], dtype=torch.int32, device="cuda")
-    topk_ids = torch.tensor([[0, 1], [0, 1]], dtype=torch.int64, device="cuda")
-    counter = torch.zeros((1, 2), dtype=torch.int64, device="cuda")
-    eplb_map(
-        topk_ids,
-        logical_to_physical,
-        replica_count,
-        counter,
-        torch.zeros((), dtype=torch.int32, device="cuda"),
-        sample_index=0,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(topk_ids.cpu(), torch.tensor([[0, 5], [4, 1]]))
-
-    # Decode's single-token route retains the historic primary-copy choice.
-    topk_ids.copy_(torch.tensor([[0, 1], [0, 1]], dtype=torch.int64, device="cuda"))
-    eplb_map(
-        topk_ids[:1],
-        logical_to_physical,
-        replica_count,
-        counter,
-        torch.zeros((), dtype=torch.int32, device="cuda"),
-        sample_index=0,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(topk_ids[:1].cpu(), torch.tensor([[0, 1]]))
-
-
-def _cuda_eplb_map_inputs(tokens: int, topk: int, experts: int, dtype: torch.dtype):
-    logical_ids = (torch.arange(tokens * topk, device="cuda") % experts).reshape(tokens, topk).to(dtype)
-    logical_to_physical = torch.stack(
-        (
-            torch.arange(experts, dtype=torch.int32, device="cuda"),
-            torch.arange(experts, dtype=torch.int32, device="cuda") + experts,
-        ),
-        dim=1,
-    )
-    replica_count = torch.where(
-        torch.arange(experts, device="cuda") % 3 == 0,
-        torch.full((experts,), 2, dtype=torch.int32, device="cuda"),
-        torch.ones(experts, dtype=torch.int32, device="cuda"),
-    )
-    return logical_ids, logical_to_physical, replica_count
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
 @pytest.mark.parametrize("record_load", [False, True])
 @pytest.mark.parametrize("tokens", [1, 32])
 @pytest.mark.parametrize("scoring_func", ["sigmoid", "softmax"])
 @pytest.mark.parametrize("renormalize", [False, True])
-def test_grouped_topk_eplb_matches_grouped_topk_and_eplb_map(record_load, tokens, scoring_func, renormalize):
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
-        eplb_map_to_physical_long_fast,
-    )
+def test_grouped_topk_eplb_matches_topk_mapping_and_counting(record_load, tokens, scoring_func, renormalize):
     from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import (
         triton_grouped_topk,
         triton_grouped_topk_eplb,
@@ -3452,15 +3233,22 @@ def test_grouped_topk_eplb_matches_grouped_topk_and_eplb_map(record_load, tokens
         scoring_func,
         2,
     )
-    expected_ids = eplb_map_to_physical_long_fast(
-        logical_ids,
-        logical_to_physical,
-        logical_replica_count,
-        expected_counter,
-        sample_index=1,
-        record_load=record_load,
-    )
-    fused_weights, fused_ids = triton_grouped_topk_eplb(
+    if tokens == 1:
+        replica_indices = torch.zeros_like(logical_ids)
+    else:
+        token_indices = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1)
+        replica_indices = (
+            (((token_indices * 2654435769) & 0xFFFFFFFF) + ((logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF))
+            & 0xFFFFFFFF
+        ) % logical_replica_count[logical_ids.to(torch.long)].to(torch.int64)
+    expected_ids = logical_to_physical[logical_ids.to(torch.long), replica_indices.to(torch.long)].to(torch.long)
+    if record_load:
+        expected_counter[1].scatter_add_(
+            0,
+            logical_ids.reshape(-1).to(torch.long),
+            torch.ones(logical_ids.numel(), dtype=torch.int64, device="cuda"),
+        )
+    fused_weights, fused_ids, fused_logical_ids = triton_grouped_topk_eplb(
         hidden_states,
         gating_output,
         correction_bias,
@@ -3474,165 +3262,114 @@ def test_grouped_topk_eplb_matches_grouped_topk_and_eplb_map(record_load, tokens
         fused_counter,
         sample_index=1,
         record_load=record_load,
+        use_grouped_topk=True,
         group_score_used_topk_num=2,
     )
     torch.cuda.synchronize()
 
     torch.testing.assert_close(fused_weights, expected_weights, rtol=1e-5, atol=1e-6)
     assert torch.equal(fused_ids, expected_ids)
+    assert fused_logical_ids is None
     assert torch.equal(fused_counter, expected_counter)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-@pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize(
-    ("record_load", "tokens"),
-    [
-        (False, 32),
-        (True, 2),
-        (True, 2048),
-    ],
-)
-def test_eplb_map_to_physical_long_fast_matches_legacy_pipeline(input_dtype, record_load, tokens):
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
-        eplb_map_fast,
-        eplb_map_to_physical_long_fast,
+@pytest.mark.parametrize("record_load", [False, True])
+@pytest.mark.parametrize("tokens", [1, 32])
+def test_global_topk_eplb_supports_scale_logical_ids_and_counting(record_load, tokens):
+    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
+
+    torch.manual_seed(1234)
+    topk = 4
+    experts = 64
+    gating_output = torch.randn((tokens, experts), dtype=torch.float32, device="cuda")
+    scale = torch.linspace(0.5, 1.5, experts, dtype=torch.float32, device="cuda")
+    logical_to_physical = torch.stack(
+        (
+            torch.arange(experts, dtype=torch.int32, device="cuda"),
+            torch.arange(experts, dtype=torch.int32, device="cuda") + experts,
+        ),
+        dim=1,
     )
+    logical_replica_count = torch.where(
+        torch.arange(experts, device="cuda") % 3 == 0,
+        torch.full((experts,), 2, dtype=torch.int32, device="cuda"),
+        torch.ones((experts,), dtype=torch.int32, device="cuda"),
+    )
+    expected_counter = torch.zeros((2, experts), dtype=torch.int64, device="cuda")
+    fused_counter = torch.zeros_like(expected_counter)
+    expected_weights, expected_logical_ids = torch.softmax(gating_output, dim=-1).topk(topk, dim=-1)
+    if tokens == 1:
+        replica_indices = torch.zeros_like(expected_logical_ids)
+    else:
+        token_indices = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1)
+        replica_indices = (
+            (
+                ((token_indices * 2654435769) & 0xFFFFFFFF)
+                + ((expected_logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF)
+            )
+            & 0xFFFFFFFF
+        ) % logical_replica_count[expected_logical_ids].to(torch.int64)
+    expected_ids = logical_to_physical[expected_logical_ids, replica_indices.to(torch.long)].to(torch.long)
+    if record_load:
+        expected_counter[1].scatter_add_(
+            0,
+            expected_logical_ids.reshape(-1),
+            torch.ones(expected_logical_ids.numel(), dtype=torch.int64, device="cuda"),
+        )
+    expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
+    expected_weights = expected_weights * scale[expected_logical_ids]
 
-    topk = 8
-    experts = 256
-    logical_ids, logical_to_physical, replica_count = _cuda_eplb_map_inputs(tokens, topk, experts, input_dtype)
-    logical_before = logical_ids.clone()
-    legacy_counter = torch.zeros((2, experts), dtype=torch.int64, device="cuda")
-    fused_counter = torch.zeros_like(legacy_counter)
-
-    legacy_ids = logical_ids.clone().to(dtype=torch.int32).contiguous()
-    eplb_map_fast(
-        legacy_ids,
-        logical_to_physical,
-        replica_count,
-        legacy_counter,
+    weights, physical_ids, logical_ids = triton_grouped_topk_eplb(
+        hidden_states=torch.empty((tokens, 1), dtype=torch.float32, device="cuda"),
+        gating_output=gating_output,
+        correction_bias=torch.randn((experts,), dtype=torch.float32, device="cuda"),
+        topk=topk,
+        renormalize=True,
+        num_expert_group=8,
+        topk_group=4,
+        scoring_func="sigmoid",
+        logical_to_physical_map=logical_to_physical,
+        logical_replica_count=logical_replica_count,
+        expert_counter=fused_counter,
         sample_index=1,
         record_load=record_load,
-    )
-    legacy_physical_ids = legacy_ids.to(torch.long)
-    fused_physical_ids = eplb_map_to_physical_long_fast(
-        logical_ids,
-        logical_to_physical,
-        replica_count,
-        fused_counter,
-        sample_index=1,
-        record_load=record_load,
+        use_grouped_topk=False,
+        per_expert_scale=scale,
+        return_logical_ids=True,
     )
     torch.cuda.synchronize()
 
-    assert fused_physical_ids.dtype is torch.long
-    assert torch.equal(fused_physical_ids, legacy_physical_ids)
-    assert torch.equal(fused_counter, legacy_counter)
-    assert torch.equal(logical_ids, logical_before)
+    torch.testing.assert_close(weights, expected_weights, rtol=1e-5, atol=1e-6)
+    assert torch.equal(physical_ids, expected_ids)
+    assert torch.equal(logical_ids, expected_logical_ids)
+    assert torch.equal(fused_counter, expected_counter)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-def test_eplb_map_to_physical_long_fast_empty_tensor_preserves_shape_and_dtype():
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
-        eplb_map_to_physical_long_fast,
-    )
+def test_triton_grouped_topk_eplb_empty_tokens_skips_kernel():
+    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
 
-    logical_ids, logical_to_physical, replica_count = _cuda_eplb_map_inputs(1, 8, 256, torch.int32)
-    empty_ids = logical_ids[:0]
-    counter = torch.zeros((2, 256), dtype=torch.int64, device="cuda")
-
-    physical_ids = eplb_map_to_physical_long_fast(
-        empty_ids,
-        logical_to_physical,
-        replica_count,
-        counter,
-        sample_index=0,
-        record_load=False,
-    )
-
-    assert physical_ids.shape == empty_ids.shape
-    assert physical_ids.dtype is torch.long
-    assert physical_ids.is_cuda
-    assert torch.equal(counter, torch.zeros_like(counter))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-@pytest.mark.skipif(
-    os.getenv("LIGHTLLM_RUN_EPLB_PERF") != "1",
-    reason="set LIGHTLLM_RUN_EPLB_PERF=1 to run the opt-in EPLB CUDA microbenchmark",
-)
-def test_eplb_map_to_physical_long_fast_reduces_external_prefill_pipeline_latency():
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
-        eplb_map_fast,
-        eplb_map_to_physical_long_fast,
-    )
-
-    tokens = 8192
-    topk = 8
-    experts = 256
-    logical_ids, logical_to_physical, replica_count = _cuda_eplb_map_inputs(tokens, topk, experts, torch.int64)
+    experts = 64
     counter = torch.zeros((1, experts), dtype=torch.int64, device="cuda")
-
-    def legacy_pipeline():
-        physical_ids = logical_ids.to(dtype=torch.int32).contiguous()
-        eplb_map_fast(
-            physical_ids,
-            logical_to_physical,
-            replica_count,
-            counter,
-            sample_index=0,
-            record_load=False,
-        )
-        return physical_ids.to(torch.long)
-
-    def fused_pipeline():
-        return eplb_map_to_physical_long_fast(
-            logical_ids,
-            logical_to_physical,
-            replica_count,
-            counter,
-            sample_index=0,
-            record_load=False,
-        )
-
-    legacy_output = legacy_pipeline()
-    fused_output = fused_pipeline()
-    torch.cuda.synchronize()
-    assert legacy_output.dtype is torch.long
-    assert fused_output.dtype is torch.long
-    assert torch.equal(legacy_output, fused_output)
-
-    def measure_us(fn, rounds=200):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(rounds):
-            output = fn()
-        end.record()
-        end.synchronize()
-        assert output.dtype is torch.long
-        return start.elapsed_time(end) * 1000 / rounds
-
-    for _ in range(50):
-        legacy_pipeline()
-        fused_pipeline()
-    torch.cuda.synchronize()
-    legacy_rounds = []
-    fused_rounds = []
-    for round_index in range(7):
-        if round_index % 2 == 0:
-            legacy_rounds.append(measure_us(legacy_pipeline))
-            fused_rounds.append(measure_us(fused_pipeline))
-        else:
-            fused_rounds.append(measure_us(fused_pipeline))
-            legacy_rounds.append(measure_us(legacy_pipeline))
-    legacy_median = statistics.median(legacy_rounds)
-    fused_median = statistics.median(fused_rounds)
-    speedup = legacy_median / fused_median
-    print(
-        "EPLB external prefill map microbenchmark "
-        f"old_us={legacy_rounds} new_us={fused_rounds} "
-        f"old_median_us={legacy_median:.2f} new_median_us={fused_median:.2f} speedup={speedup:.2f}x"
+    weights, physical_ids, logical_ids = triton_grouped_topk_eplb(
+        hidden_states=torch.empty((0, 1), device="cuda"),
+        gating_output=torch.empty((0, experts), device="cuda"),
+        correction_bias=None,
+        topk=4,
+        renormalize=False,
+        num_expert_group=8,
+        topk_group=4,
+        scoring_func="softmax",
+        logical_to_physical_map=torch.zeros((experts, 1), dtype=torch.int32, device="cuda"),
+        logical_replica_count=torch.ones((experts,), dtype=torch.int32, device="cuda"),
+        expert_counter=counter,
+        sample_index=0,
+        record_load=True,
+        use_grouped_topk=False,
+        return_logical_ids=True,
     )
-    assert speedup >= 1.5
+
+    assert weights.shape == physical_ids.shape == logical_ids.shape == (0, 4)
+    assert physical_ids.dtype is logical_ids.dtype is torch.long
+    assert torch.equal(counter, torch.zeros_like(counter))
