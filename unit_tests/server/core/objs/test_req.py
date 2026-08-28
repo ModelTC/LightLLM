@@ -86,6 +86,17 @@ def test_chunked_req_get_tuple_tokens_aligns_remaining_len_to_page():
     assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 28)
 
 
+def test_chunked_req_get_pd_decode_mode_tuple_tokens_uses_decode_estimation():
+    req = SimpleNamespace(
+        input_len=10,
+        shm_cur_output_len=3,
+        shm_cur_kv_len=12,
+        sample_params=SimpleNamespace(ignore_eos=True, max_new_tokens=20),
+    )
+
+    assert ChunkedPrefillReq.get_pd_decode_mode_tuple_tokens(req, False, 10) == (16, 32)
+
+
 def test_finish_status(req):
     req.finish_status.set_status(req.finish_status.FINISHED_STOP)
     assert req.finish_status.is_finished()
