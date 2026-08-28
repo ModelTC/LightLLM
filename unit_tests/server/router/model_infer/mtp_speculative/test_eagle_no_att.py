@@ -33,7 +33,6 @@ def test_eagle_no_att_recurrently_proposes_from_accepted_tails():
                 "draft_hidden": model_input.mtp_draft_input_hiddens.cpu(),
                 "b_req_idx": model_input.b_req_idx.cpu(),
                 "b_seq_len": model_input.b_seq_len.cpu(),
-                "mem_indexes": model_input.mem_indexes.cpu(),
             }
         )
         return draft_outputs[len(draft_calls) - 1]
@@ -53,8 +52,6 @@ def test_eagle_no_att_recurrently_proposes_from_accepted_tails():
         b_req_idx=torch.tensor([7, 7, 7, 9, 9], dtype=torch.int32, device=device),
         b_mtp_index=torch.tensor([0, 1, 2, 0, 1], dtype=torch.int32, device=device),
         b_seq_len=torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32, device=device),
-        mem_indexes=torch.tensor([100, 101, 102, 103, 104], dtype=torch.int32, device=device),
-        mem_indexes_cpu=torch.tensor([100, 101, 102, 103, 104], dtype=torch.int32),
         b_position_delta=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32, device=device),
         b_shared_seq_len=torch.tensor([8, 8, 8, 6, 6], dtype=torch.int32, device=device),
         b_shared_radix_node_id=torch.tensor([70, 70, 70, 90, 90], dtype=torch.int64, device=device),
@@ -82,7 +79,6 @@ def test_eagle_no_att_recurrently_proposes_from_accepted_tails():
     torch.testing.assert_close(draft_calls[0]["draft_hidden"], torch.tensor([[2.0, 3.0], [8.0, 9.0]]))
     torch.testing.assert_close(draft_calls[0]["b_req_idx"], torch.tensor([7, 9], dtype=torch.int32))
     torch.testing.assert_close(draft_calls[0]["b_seq_len"], torch.tensor([11, 21], dtype=torch.int32))
-    torch.testing.assert_close(draft_calls[0]["mem_indexes"], torch.tensor([101, 104], dtype=torch.int32))
     torch.testing.assert_close(draft_calls[1]["input_ids"], torch.tensor([21, 24]))
     torch.testing.assert_close(
         draft_calls[1]["draft_hidden"],

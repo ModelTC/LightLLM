@@ -66,12 +66,10 @@ def test_model_selects_reserved_indexes_when_execution_starts():
     )
     model_input = SimpleNamespace(
         is_prefill=False,
-        mem_indexes_from_req_table=True,
         b_req_idx=torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
         b_seq_len=torch.tensor([3, 4], dtype=torch.int32, device="cuda"),
-        mem_indexes=None,
     )
 
-    model._select_page_mem_indexes(model_input)
+    mem_indexes = model._select_mem_indexes(model_input)
 
-    assert model_input.mem_indexes.cpu().tolist() == [22, 13]
+    assert mem_indexes.cpu().tolist() == [22, 13]

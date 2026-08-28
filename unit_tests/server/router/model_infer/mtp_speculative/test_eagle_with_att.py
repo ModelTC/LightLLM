@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
@@ -144,7 +143,6 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
                 "b_req_idx": model_input.b_req_idx.clone(),
                 "b_mtp_index": model_input.b_mtp_index.clone(),
                 "b_seq_len": model_input.b_seq_len.clone(),
-                "mem_indexes": model_input.mem_indexes.clone(),
                 "max_kv_seq_len": model_input.max_kv_seq_len,
                 "total_token_num": model_input.total_token_num,
             }
@@ -177,17 +175,12 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
         b_req_idx=torch.tensor([7, 7, 7, 9, 9, 9], dtype=torch.int32, device=device),
         b_mtp_index=torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.int32, device=device),
         b_seq_len=torch.tensor([10, 11, 12, 20, 21, 22], dtype=torch.int32, device=device),
-        mem_indexes=torch.tensor([100, 101, 102, 103, 104, 105], dtype=torch.int32, device=device),
-        mem_indexes_cpu=torch.tensor([100, 101, 102, 103, 104, 105], dtype=torch.int32),
         b_position_delta=torch.tensor([0, 1, 2, 3, 4, 5], dtype=torch.int32, device=device),
         b_shared_seq_len=torch.tensor([8, 8, 8, 6, 6, 6], dtype=torch.int32, device=device),
         b_shared_radix_node_id=torch.tensor([70, 70, 70, 90, 90, 90], dtype=torch.int64, device=device),
         multimodal_params=[{"images": [], "audios": []} for _ in range(6)],
         mtp_draft_input_hiddens=None,
     )
-    extra_mem_indexes_cpu = torch.tensor([200, 201], dtype=torch.int32)
-    monkeypatch.setattr(mtp_utils, "alloc_mem_indexes", lambda token_count: extra_mem_indexes_cpu)
-
     proposal = proposer.propose_next(
         target_model_input=target_input,
         target_model_output=SimpleNamespace(mtp_collector=SimpleNamespace(spec_hidden=target_hidden)),
@@ -200,14 +193,12 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
     assert isinstance(proposal, EagleSpecProposal)
     torch.testing.assert_close(proposal.token_ids, torch.tensor([[32, 40], [34, 41]], device=device))
     torch.testing.assert_close(proposal.schedule_scores, torch.tensor([[0.32, 0.40], [0.34, 0.41]], device=device))
-    assert len(proposal.extra_mem_indexes_cpu) == 1
-    assert proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu is extra_mem_indexes_cpu
+    assert proposal.extra_mem_indexes_cpu == []
     assert len(draft_calls) == 2
     assert draft_calls[0]["model_input"] is not target_input
     assert draft_calls[0]["batch_size"] == 6
     torch.testing.assert_close(draft_calls[0]["input_ids"], original_input_ids)
     torch.testing.assert_close(draft_calls[0]["draft_hidden"], target_hidden)
-    torch.testing.assert_close(draft_calls[0]["mem_indexes"], target_input.mem_indexes)
     assert draft_calls[1]["batch_size"] == 2
     torch.testing.assert_close(draft_calls[1]["input_ids"], torch.tensor([32, 34], device=device))
     torch.testing.assert_close(
@@ -217,7 +208,6 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
     torch.testing.assert_close(draft_calls[1]["b_req_idx"], torch.tensor([7, 9], dtype=torch.int32, device=device))
     torch.testing.assert_close(draft_calls[1]["b_mtp_index"], torch.zeros(2, dtype=torch.int32, device=device))
     torch.testing.assert_close(draft_calls[1]["b_seq_len"], torch.tensor([13, 22], dtype=torch.int32, device=device))
-    torch.testing.assert_close(draft_calls[1]["mem_indexes"], extra_mem_indexes_cpu.to(device))
     assert draft_calls[1]["max_kv_seq_len"] == 23
     assert draft_calls[1]["total_token_num"] == 46
     assert target_input.input_ids is original_input_ids

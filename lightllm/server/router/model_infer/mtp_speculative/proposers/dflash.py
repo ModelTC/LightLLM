@@ -5,11 +5,7 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
-    BaseSpecProposer,
-    MtpMemIndexesToFree,
-)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
     DFlashSpecProposal,
 )
@@ -90,9 +86,7 @@ class DFlashProposer(BaseSpecProposer):
         draft_model.forward(verify_draft_input)
 
         # 每个请求始终展开完整 block，未被本轮 proposal 返回的 block 尾部仍会
-        # 参与 parallel forward。所有临时 KV slot 在 verify 后通过 proposal
-        # 统一释放。
-        extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * block_size)
+        # 参与 parallel forward；KV 位置由请求页表和序列位置确定。
         block_input_ids = target_next_token_ids.new_full(
             (req_num * block_size,),
             fill_value=draft_model.mask_token_id,
@@ -140,8 +134,6 @@ class DFlashProposer(BaseSpecProposer):
             .repeat_interleave(block_size)
             .contiguous()
         )
-        draft_input.mem_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
-        draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         draft_output = draft_model.forward(draft_input)
 
@@ -160,6 +152,6 @@ class DFlashProposer(BaseSpecProposer):
             schedule_scores = block_draft_token_probs[:, :draft_step].float().contiguous()
         return DFlashSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
+            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )

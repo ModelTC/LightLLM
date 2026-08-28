@@ -238,7 +238,6 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
         batch_size=0,
         b_req_idx=empty_i32,
         b_mtp_index=empty_i32,
-        mem_indexes_cpu=torch.empty((0,), dtype=torch.int32),
     )
     model_output = SimpleNamespace(logits=torch.empty((0, 8), device=device))
     calls = []
