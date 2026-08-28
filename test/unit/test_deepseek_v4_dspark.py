@@ -96,15 +96,11 @@ def test_dspark_cuda_graph_padding_extends_only_gpu_scratch_pages():
         mtp_draft_swa_pages=pages_cpu.clone(),
     )
 
-    padded_input = model._create_padded_decode_model_input(
-        model_input, graph_batch_size
-    )
+    padded_input = model._create_padded_decode_model_input(model_input, graph_batch_size)
 
     assert padded_input.mtp_draft_swa_pages.shape == (16,)
     torch.testing.assert_close(padded_input.mtp_draft_swa_pages[:14], pages_cpu)
-    torch.testing.assert_close(
-        padded_input.mtp_draft_swa_pages[14:], torch.zeros(2, dtype=torch.int32)
-    )
+    torch.testing.assert_close(padded_input.mtp_draft_swa_pages[14:], torch.zeros(2, dtype=torch.int32))
     assert padded_input.mtp_draft_swa_pages_cpu is pages_cpu
 
 
@@ -242,9 +238,7 @@ def test_build_dspark_swa_index_exposes_history_and_complete_block():
         device="cuda",
     )
     torch.testing.assert_close(indices, expected_indices)
-    torch.testing.assert_close(
-        lengths, torch.tensor([7, 7, 7, 5, 5, 5], dtype=torch.int32, device="cuda")
-    )
+    torch.testing.assert_close(lengths, torch.tensor([7, 7, 7, 5, 5, 5], dtype=torch.int32, device="cuda"))
     torch.testing.assert_close(
         write_slots,
         torch.tensor([256, 257, 258, 384, 385, 386], dtype=torch.int32, device="cuda"),

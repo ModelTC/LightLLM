@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Convert DeepSeek-V4 ``mtp.*`` checkpoint tensors to BF16.
+"""Convert DeepSeek-V4 checkpoint tensors to BF16.
 
 The DeepSeek-V4-Flash checkpoint stores dense MTP matrices as block-FP8 and
 routed-expert matrices as packed MXFP4.  Casting those tensors directly would
 not recover their values.  This tool performs the corresponding dequantization,
-removes the paired scale tensors from the output index, and writes every MTP
-tensor as BF16.
+removes the paired scale tensors from the output index, writes quantized and
+low-precision weight tensors as BF16, and preserves source FP32 state tensors.
 
-Non-MTP shards are linked or copied into a new model directory.  The source
-model is never modified.  This changes checkpoint storage only; the runtime
-must select the no-quantization path for the converted MTP layers while keeping
-the target layers on their original quantization path.
+By default only ``mtp.*`` tensors are converted and non-MTP shards are linked
+or copied into the new model directory.  ``--all-weights`` converts the entire
+checkpoint, preserves integer routing tables, and removes the checkpoint's
+quantization configuration.  The source model is never modified.
 """
 
 from __future__ import annotations
@@ -77,6 +77,7 @@ class TensorSpec:
     source_dtype: str
     source_shape: Tuple[int, ...]
     output_shape: Tuple[int, ...]
+    output_dtype: str
     output_nbytes: int
     conversion: str
     scale_name: str | None = None
@@ -105,13 +106,13 @@ def _parse_size(value: str) -> int:
     units = {
         "B": 1,
         "KB": 1000,
-        "MB": 1000**2,
-        "GB": 1000**3,
-        "TB": 1000**4,
+        "MB": 1000 ** 2,
+        "GB": 1000 ** 3,
+        "TB": 1000 ** 4,
         "KIB": 1024,
-        "MIB": 1024**2,
-        "GIB": 1024**3,
-        "TIB": 1024**4,
+        "MIB": 1024 ** 2,
+        "GIB": 1024 ** 3,
+        "TIB": 1024 ** 4,
     }
     for suffix in sorted(units, key=len, reverse=True):
         if text.endswith(suffix):
@@ -149,9 +150,7 @@ def dequantize_fp8_block(
     rows, cols = (int(dim) for dim in output_shape)
     expected_scale_shape = (math.ceil(rows / block_size), math.ceil(cols / block_size))
     if tuple(scale.shape) != expected_scale_shape:
-        raise ValueError(
-            f"FP8 scale shape mismatch: expected {expected_scale_shape}, got {tuple(scale.shape)}"
-        )
+        raise ValueError(f"FP8 scale shape mismatch: expected {expected_scale_shape}, got {tuple(scale.shape)}")
 
     output = torch.empty((rows, cols), dtype=torch.bfloat16, device="cpu")
     for row_start in range(0, rows, row_chunk_size):
@@ -160,16 +159,12 @@ def dequantize_fp8_block(
         scale_row_end = math.ceil(row_end / block_size)
         scale_row_offset = row_start - scale_row_start * block_size
 
-        weight_chunk = _to_device(weight_slice[row_start:row_end], device).to(
-            torch.float32
-        )
-        scale_chunk = _to_device(scale[scale_row_start:scale_row_end], device).to(
-            torch.float32
-        )
+        weight_chunk = _to_device(weight_slice[row_start:row_end], device).to(torch.float32)
+        scale_chunk = _to_device(scale[scale_row_start:scale_row_end], device).to(torch.float32)
         expanded_scale = scale_chunk.repeat_interleave(block_size, dim=0)
-        expanded_scale = expanded_scale[
-            scale_row_offset : scale_row_offset + row_end - row_start
-        ].repeat_interleave(block_size, dim=1)[:, :cols]
+        expanded_scale = expanded_scale[scale_row_offset : scale_row_offset + row_end - row_start].repeat_interleave(
+            block_size, dim=1
+        )[:, :cols]
         converted = (weight_chunk * expanded_scale).to(torch.bfloat16).cpu()
         output[row_start:row_end].copy_(converted)
         del weight_chunk, scale_chunk, expanded_scale, converted
@@ -190,28 +185,20 @@ def dequantize_mxfp4(
     rows, packed_cols = (int(dim) for dim in packed_shape)
     logical_cols = packed_cols * 2
     if logical_cols % block_size != 0:
-        raise ValueError(
-            f"MXFP4 logical K dimension {logical_cols} is not divisible by block size {block_size}"
-        )
+        raise ValueError(f"MXFP4 logical K dimension {logical_cols} is not divisible by block size {block_size}")
     expected_scale_shape = (rows, logical_cols // block_size)
     if tuple(scale.shape) != expected_scale_shape:
-        raise ValueError(
-            f"MXFP4 scale shape mismatch: expected {expected_scale_shape}, got {tuple(scale.shape)}"
-        )
+        raise ValueError(f"MXFP4 scale shape mismatch: expected {expected_scale_shape}, got {tuple(scale.shape)}")
 
     output = torch.empty((rows, logical_cols), dtype=torch.bfloat16, device="cpu")
     lookup = torch.tensor(FP4_VALUES, dtype=torch.float32, device=device)
     for row_start in range(0, rows, row_chunk_size):
         row_end = min(row_start + row_chunk_size, rows)
-        packed = _to_device(packed_weight_slice[row_start:row_end], device).view(
-            torch.uint8
-        )
+        packed = _to_device(packed_weight_slice[row_start:row_end], device).view(torch.uint8)
         low = (packed & 0x0F).to(torch.long)
         high = (packed >> 4).to(torch.long)
 
-        values = torch.empty(
-            (row_end - row_start, logical_cols), dtype=torch.float32, device=device
-        )
+        values = torch.empty((row_end - row_start, logical_cols), dtype=torch.float32, device=device)
         values[:, 0::2] = lookup[low]
         values[:, 1::2] = lookup[high]
         scale_chunk = _to_device(scale[row_start:row_end], device).to(torch.float32)
@@ -237,22 +224,22 @@ def _inspect_specs(
     model_dir: Path,
     weight_map: Mapping[str, str],
     *,
-    prefix: str,
+    prefix: str | None,
     fp8_block_size: int,
     mxfp4_block_size: int,
 ) -> Tuple[List[TensorSpec], set[str], int]:
-    mtp_weight_map = {
-        name: shard for name, shard in weight_map.items() if name.startswith(prefix)
+    selected_weight_map = {
+        name: shard for name, shard in weight_map.items() if prefix is None or name.startswith(prefix)
     }
-    if not mtp_weight_map:
+    if not selected_weight_map:
         raise ValueError(f"no checkpoint tensors start with {prefix!r}")
 
     names_by_shard: Dict[str, List[str]] = {}
-    for name, shard in mtp_weight_map.items():
+    for name, shard in selected_weight_map.items():
         names_by_shard.setdefault(shard, []).append(name)
 
     tensor_meta: Dict[str, Tuple[str, Tuple[int, ...]]] = {}
-    original_mtp_nbytes = 0
+    original_nbytes = 0
     for shard, names in names_by_shard.items():
         shard_path = model_dir / shard
         if not shard_path.is_file():
@@ -261,19 +248,17 @@ def _inspect_specs(
             shard_keys = set(file.keys())
             missing = set(names) - shard_keys
             if missing:
-                raise ValueError(
-                    f"{shard} is missing indexed tensors: {sorted(missing)[:5]}"
-                )
+                raise ValueError(f"{shard} is missing indexed tensors: {sorted(missing)[:5]}")
             for name in names:
                 tensor_slice = file.get_slice(name)
                 dtype = tensor_slice.get_dtype()
                 shape = tuple(int(dim) for dim in tensor_slice.get_shape())
                 tensor_meta[name] = (dtype, shape)
-                original_mtp_nbytes += _tensor_nbytes(dtype, shape)
+                original_nbytes += _tensor_nbytes(dtype, shape)
 
     paired_scales: set[str] = set()
     specs: List[TensorSpec] = []
-    for name in mtp_weight_map:
+    for name in selected_weight_map:
         dtype, shape = tensor_meta[name]
         if dtype == "F8_E8M0":
             continue
@@ -282,9 +267,7 @@ def _inspect_specs(
                 raise ValueError(f"FP8 tensor must be 2-D: {name} has shape {shape}")
             scale_name = _scale_name(name)
             if tensor_meta.get(scale_name, (None,))[0] != "F8_E8M0":
-                raise ValueError(
-                    f"missing E8M0 scale for {name}: expected {scale_name}"
-                )
+                raise ValueError(f"missing E8M0 scale for {name}: expected {scale_name}")
             scale_shape = tensor_meta[scale_name][1]
             expected_scale_shape = (
                 math.ceil(shape[0] / fp8_block_size),
@@ -296,17 +279,14 @@ def _inspect_specs(
                 )
             paired_scales.add(scale_name)
             output_shape = shape
+            output_dtype = "BF16"
             conversion = "fp8_block"
         elif dtype == "I8":
             if len(shape) != 2:
-                raise ValueError(
-                    f"packed MXFP4 tensor must be 2-D: {name} has shape {shape}"
-                )
+                raise ValueError(f"packed MXFP4 tensor must be 2-D: {name} has shape {shape}")
             scale_name = _scale_name(name)
             if tensor_meta.get(scale_name, (None,))[0] != "F8_E8M0":
-                raise ValueError(
-                    f"missing E8M0 scale for {name}: expected {scale_name}"
-                )
+                raise ValueError(f"missing E8M0 scale for {name}: expected {scale_name}")
             output_shape = (shape[0], shape[1] * 2)
             expected_scale_shape = (
                 output_shape[0],
@@ -318,40 +298,42 @@ def _inspect_specs(
                     f"got {tensor_meta[scale_name][1]}"
                 )
             paired_scales.add(scale_name)
+            output_dtype = "BF16"
             conversion = "mxfp4"
-        elif dtype in {"BF16", "F16", "F32"}:
+        elif dtype in {"BF16", "F16"}:
             scale_name = None
             output_shape = shape
+            output_dtype = "BF16"
             conversion = "cast"
+        elif dtype in {"F32", "I64"}:
+            scale_name = None
+            output_shape = shape
+            output_dtype = dtype
+            conversion = "preserve"
         else:
-            raise ValueError(
-                f"cannot convert {name} with dtype {dtype} to BF16 without model-specific semantics"
-            )
+            raise ValueError(f"cannot convert {name} with dtype {dtype} to BF16 without model-specific semantics")
 
         specs.append(
             TensorSpec(
                 name=name,
-                source_shard=mtp_weight_map[name],
+                source_shard=selected_weight_map[name],
                 source_dtype=dtype,
                 source_shape=shape,
                 output_shape=output_shape,
-                output_nbytes=_numel(output_shape) * 2,
+                output_dtype=output_dtype,
+                output_nbytes=_tensor_nbytes(output_dtype, output_shape),
                 conversion=conversion,
                 scale_name=scale_name,
             )
         )
 
-    orphan_scales = {
-        name for name, (dtype, _) in tensor_meta.items() if dtype == "F8_E8M0"
-    } - paired_scales
+    orphan_scales = {name for name, (dtype, _) in tensor_meta.items() if dtype == "F8_E8M0"} - paired_scales
     if orphan_scales:
-        raise ValueError(f"orphan MTP E8M0 scales: {sorted(orphan_scales)[:10]}")
-    return specs, paired_scales, original_mtp_nbytes
+        raise ValueError(f"orphan E8M0 scales: {sorted(orphan_scales)[:10]}")
+    return specs, paired_scales, original_nbytes
 
 
-def _plan_shards(
-    specs: Sequence[TensorSpec], max_shard_size: int
-) -> List[List[TensorSpec]]:
+def _plan_shards(specs: Sequence[TensorSpec], max_shard_size: int) -> List[List[TensorSpec]]:
     shards: List[List[TensorSpec]] = []
     current: List[TensorSpec] = []
     current_size = 0
@@ -415,6 +397,8 @@ def _convert_spec(
 ) -> torch.Tensor:
     if spec.conversion == "cast":
         return source_file.get_tensor(spec.name).to(torch.bfloat16).contiguous()
+    if spec.conversion == "preserve":
+        return source_file.get_tensor(spec.name).contiguous()
 
     assert spec.scale_name is not None
     weight_slice = source_file.get_slice(spec.name)
@@ -440,6 +424,19 @@ def _convert_spec(
     raise AssertionError(f"unknown conversion: {spec.conversion}")
 
 
+def _output_shard_name(prefix: str, shard_index: int, shard_count: int) -> str:
+    return f"{prefix}-{shard_index:05d}-of-{shard_count:05d}.safetensors"
+
+
+def _planned_weight_map(shard_plan: Sequence[Sequence[TensorSpec]], output_shard_prefix: str) -> Dict[str, str]:
+    shard_count = len(shard_plan)
+    return {
+        spec.name: _output_shard_name(output_shard_prefix, shard_index, shard_count)
+        for shard_index, shard_specs in enumerate(shard_plan, start=1)
+        for spec in shard_specs
+    }
+
+
 def _write_converted_shards(
     source_dir: Path,
     output_dir: Path,
@@ -449,21 +446,42 @@ def _write_converted_shards(
     mxfp4_block_size: int,
     row_chunk_size: int,
     device: torch.device,
+    output_shard_prefix: str,
+    worker_index: int,
+    worker_count: int,
+    resume: bool,
 ) -> Dict[str, str]:
-    source_shards = sorted(
-        {spec.source_shard for shard in shard_plan for spec in shard}
-    )
+    assigned_shards = [
+        (shard_index, shard_specs)
+        for shard_index, shard_specs in enumerate(shard_plan, start=1)
+        if (shard_index - 1) % worker_count == worker_index
+    ]
+    source_shards = sorted({spec.source_shard for _, shard_specs in assigned_shards for spec in shard_specs})
     output_weight_map: Dict[str, str] = {}
     with ExitStack() as stack:
         source_files = {
-            shard: stack.enter_context(
-                safe_open(source_dir / shard, framework="pt", device="cpu")
-            )
+            shard: stack.enter_context(safe_open(source_dir / shard, framework="pt", device="cpu"))
             for shard in source_shards
         }
         shard_count = len(shard_plan)
-        for shard_index, shard_specs in enumerate(shard_plan, start=1):
-            output_name = f"mtp-bf16-{shard_index:05d}-of-{shard_count:05d}.safetensors"
+        print(
+            f"worker {worker_index}/{worker_count}: assigned {len(assigned_shards)} " f"of {shard_count} shards",
+            flush=True,
+        )
+        for shard_index, shard_specs in assigned_shards:
+            output_name = _output_shard_name(output_shard_prefix, shard_index, shard_count)
+            output_path = output_dir / output_name
+            if output_path.exists():
+                if not resume:
+                    raise FileExistsError(f"output shard already exists: {output_path}")
+                existing_weight_map = {spec.name: output_name for spec in shard_specs}
+                _verify_output(output_dir, shard_specs, existing_weight_map)
+                output_weight_map.update(existing_weight_map)
+                print(
+                    f"[{shard_index}/{shard_count}] verified existing {output_name}",
+                    flush=True,
+                )
+                continue
             planned_bytes = sum(spec.output_nbytes for spec in shard_specs)
             print(
                 f"[{shard_index}/{shard_count}] converting {len(shard_specs)} tensors "
@@ -481,8 +499,7 @@ def _write_converted_shards(
                 )
                 for spec in shard_specs
             }
-            temporary_path = output_dir / f".{output_name}.tmp"
-            output_path = output_dir / output_name
+            temporary_path = output_dir / f".{output_name}.{os.getpid()}.tmp"
             save_file(tensors, temporary_path, metadata={"format": "pt"})
             os.replace(temporary_path, output_path)
             for spec in shard_specs:
@@ -501,9 +518,7 @@ def _verify_output(
 ) -> None:
     expected_by_shard: Dict[str, Dict[str, TensorSpec]] = {}
     for spec in specs:
-        expected_by_shard.setdefault(converted_weight_map[spec.name], {})[
-            spec.name
-        ] = spec
+        expected_by_shard.setdefault(converted_weight_map[spec.name], {})[spec.name] = spec
 
     for shard, expected in expected_by_shard.items():
         with safe_open(output_dir / shard, framework="pt", device="cpu") as file:
@@ -515,14 +530,10 @@ def _verify_output(
                 )
             for name, spec in expected.items():
                 tensor_slice = file.get_slice(name)
-                if tensor_slice.get_dtype() != "BF16":
-                    raise ValueError(
-                        f"{name} is {tensor_slice.get_dtype()}, expected BF16"
-                    )
+                if tensor_slice.get_dtype() != spec.output_dtype:
+                    raise ValueError(f"{name} is {tensor_slice.get_dtype()}, expected {spec.output_dtype}")
                 if tuple(tensor_slice.get_shape()) != spec.output_shape:
-                    raise ValueError(
-                        f"{name} shape is {tuple(tensor_slice.get_shape())}, expected {spec.output_shape}"
-                    )
+                    raise ValueError(f"{name} shape is {tuple(tensor_slice.get_shape())}, expected {spec.output_shape}")
 
 
 def convert(args: argparse.Namespace) -> None:
@@ -532,78 +543,95 @@ def convert(args: argparse.Namespace) -> None:
         raise ValueError("source and output directories must be different")
     if args.row_chunk_size <= 0:
         raise ValueError("--row-chunk-size must be positive")
+    if args.worker_count <= 0:
+        raise ValueError("--worker-count must be positive")
+    if not 0 <= args.worker_index < args.worker_count:
+        raise ValueError("--worker-index must be in [0, --worker-count)")
+    if args.worker_count > 1 and not args.resume:
+        raise ValueError("multi-worker conversion requires --resume")
 
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA conversion requested but torch.cuda.is_available() is false"
-        )
+        raise RuntimeError("CUDA conversion requested but torch.cuda.is_available() is false")
 
     _, index = _load_index(source_dir)
     weight_map: Dict[str, str] = index["weight_map"]
-    specs, paired_scales, original_mtp_nbytes = _inspect_specs(
+    selected_prefix = None if args.all_weights else args.prefix
+    specs, paired_scales, original_nbytes = _inspect_specs(
         source_dir,
         weight_map,
-        prefix=args.prefix,
+        prefix=selected_prefix,
         fp8_block_size=args.fp8_block_size,
         mxfp4_block_size=args.mxfp4_block_size,
     )
     shard_plan = _plan_shards(specs, args.max_shard_size)
-    output_mtp_nbytes = sum(spec.output_nbytes for spec in specs)
+    output_nbytes = sum(spec.output_nbytes for spec in specs)
+    output_shard_prefix = "model" if args.all_weights else "mtp-bf16"
+    converted_weight_map = _planned_weight_map(shard_plan, output_shard_prefix)
     conversion_counts: Dict[str, int] = {}
     for spec in specs:
-        conversion_counts[spec.conversion] = (
-            conversion_counts.get(spec.conversion, 0) + 1
-        )
+        conversion_counts[spec.conversion] = conversion_counts.get(spec.conversion, 0) + 1
 
     print(f"source: {source_dir}")
     print(f"output: {output_dir}")
-    print(f"MTP output tensors: {len(specs)}; removed scales: {len(paired_scales)}")
+    scope = "all checkpoint tensors" if args.all_weights else f"prefix {args.prefix!r}"
+    print(f"scope: {scope}")
+    print(f"output tensors: {len(specs)}; removed scales: {len(paired_scales)}")
     print(f"conversions: {conversion_counts}")
     print(
-        f"MTP size: {original_mtp_nbytes / 1024**3:.2f} GiB -> "
-        f"{output_mtp_nbytes / 1024**3:.2f} GiB in {len(shard_plan)} shards"
+        f"selected size: {original_nbytes / 1024**3:.2f} GiB -> "
+        f"{output_nbytes / 1024**3:.2f} GiB in {len(shard_plan)} shards"
     )
     if args.dry_run:
         return
 
-    non_mtp_weight_map = {
-        name: shard
-        for name, shard in weight_map.items()
-        if not name.startswith(args.prefix)
-    }
-    _prepare_output_dir(
-        source_dir,
-        output_dir,
-        referenced_non_mtp_shards=non_mtp_weight_map.values(),
-        link_mode=args.link_mode,
-    )
-    converted_weight_map = _write_converted_shards(
-        source_dir,
-        output_dir,
-        shard_plan,
-        fp8_block_size=args.fp8_block_size,
-        mxfp4_block_size=args.mxfp4_block_size,
-        row_chunk_size=args.row_chunk_size,
-        device=device,
-    )
+    if args.resume or args.finalize_only:
+        if not output_dir.is_dir():
+            raise FileNotFoundError(f"output directory does not exist: {output_dir}")
+    else:
+        unchanged_weight_map = {
+            name: shard
+            for name, shard in weight_map.items()
+            if selected_prefix is not None and not name.startswith(selected_prefix)
+        }
+        _prepare_output_dir(
+            source_dir,
+            output_dir,
+            referenced_non_mtp_shards=unchanged_weight_map.values(),
+            link_mode=args.link_mode,
+        )
+
+    if not args.finalize_only:
+        _write_converted_shards(
+            source_dir,
+            output_dir,
+            shard_plan,
+            fp8_block_size=args.fp8_block_size,
+            mxfp4_block_size=args.mxfp4_block_size,
+            row_chunk_size=args.row_chunk_size,
+            device=device,
+            output_shard_prefix=output_shard_prefix,
+            worker_index=args.worker_index,
+            worker_count=args.worker_count,
+            resume=args.resume,
+        )
+        if args.worker_count > 1:
+            print(f"worker {args.worker_index}/{args.worker_count} complete")
+            return
 
     new_weight_map: Dict[str, str] = {}
     for name, shard in weight_map.items():
-        if not name.startswith(args.prefix):
+        selected = selected_prefix is None or name.startswith(selected_prefix)
+        if not selected:
             new_weight_map[name] = shard
         elif name in converted_weight_map:
             new_weight_map[name] = converted_weight_map[name]
         elif name not in paired_scales:
-            raise AssertionError(
-                f"MTP tensor was neither converted nor removed: {name}"
-            )
+            raise AssertionError(f"selected tensor was neither converted nor removed: {name}")
 
     metadata = dict(index.get("metadata") or {})
     if "total_size" in metadata:
-        metadata["total_size"] = (
-            int(metadata["total_size"]) - original_mtp_nbytes + output_mtp_nbytes
-        )
+        metadata["total_size"] = int(metadata["total_size"]) - original_nbytes + output_nbytes
     new_index = {"metadata": metadata, "weight_map": new_weight_map}
     index_path = output_dir / "model.safetensors.index.json"
     temporary_index_path = output_dir / ".model.safetensors.index.json.tmp"
@@ -612,22 +640,53 @@ def convert(args: argparse.Namespace) -> None:
         file.write("\n")
     os.replace(temporary_index_path, index_path)
 
-    manifest = {
-        "source_model_dir": str(source_dir),
-        "weight_prefix": args.prefix,
-        "output_dtype": "bfloat16",
-        "runtime_note": (
-            "Configure converted MTP layers with quant type 'none'; target layers "
-            "remain on their original quantization path."
-        ),
-        "fp8_block_size": args.fp8_block_size,
-        "mxfp4_block_size": args.mxfp4_block_size,
-        "converted_tensor_count": len(specs),
-        "removed_scale_count": len(paired_scales),
-        "original_mtp_bytes": original_mtp_nbytes,
-        "output_mtp_bytes": output_mtp_nbytes,
-    }
-    with (output_dir / "mtp_bf16_conversion.json").open("w", encoding="utf-8") as file:
+    if args.all_weights:
+        source_config_path = source_dir / "config.json"
+        with source_config_path.open("r", encoding="utf-8") as file:
+            config = json.load(file)
+        config["torch_dtype"] = "bfloat16"
+        config.pop("quantization_config", None)
+        config.pop("expert_dtype", None)
+        temporary_config_path = output_dir / ".config.json.tmp"
+        with temporary_config_path.open("w", encoding="utf-8") as file:
+            json.dump(config, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        os.replace(temporary_config_path, output_dir / "config.json")
+
+    if args.all_weights:
+        manifest = {
+            "source_model_dir": str(source_dir),
+            "conversion_scope": "all_weights",
+            "output_dtype": "bfloat16_with_fp32_preserved",
+            "source_fp32_tensors_preserved": sum(spec.source_dtype == "F32" for spec in specs),
+            "source_fp32_bytes_preserved": sum(spec.output_nbytes for spec in specs if spec.source_dtype == "F32"),
+            "integer_aux_tensors_preserved": sum(spec.source_dtype == "I64" for spec in specs),
+            "fp8_block_size": args.fp8_block_size,
+            "mxfp4_block_size": args.mxfp4_block_size,
+            "output_tensor_count": len(specs),
+            "removed_scale_count": len(paired_scales),
+            "original_selected_bytes": original_nbytes,
+            "output_selected_bytes": output_nbytes,
+        }
+        manifest_name = "bf16_conversion.json"
+    else:
+        manifest = {
+            "source_model_dir": str(source_dir),
+            "weight_prefix": args.prefix,
+            "output_dtype": "bfloat16_with_fp32_preserved",
+            "runtime_note": (
+                "Configure converted MTP layers with quant type 'none'; target layers "
+                "remain on their original quantization path."
+            ),
+            "fp8_block_size": args.fp8_block_size,
+            "mxfp4_block_size": args.mxfp4_block_size,
+            "converted_tensor_count": len(specs),
+            "removed_scale_count": len(paired_scales),
+            "original_mtp_bytes": original_nbytes,
+            "output_mtp_bytes": output_nbytes,
+        }
+        manifest_name = "mtp_bf16_conversion.json"
+    with (output_dir / manifest_name).open("w", encoding="utf-8") as file:
         json.dump(manifest, file, ensure_ascii=False, indent=2)
         file.write("\n")
 
@@ -641,8 +700,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_model_dir", help="source Hugging Face model directory")
     parser.add_argument("output_model_dir", help="new output model directory")
-    parser.add_argument(
-        "--prefix", default="mtp.", help="checkpoint key prefix to convert"
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--prefix", default="mtp.", help="checkpoint key prefix to convert")
+    selection.add_argument(
+        "--all-weights",
+        action="store_true",
+        help="convert quantized/low-precision weights and preserve FP32 state and integer routing tables",
     )
     parser.add_argument(
         "--device",
@@ -678,6 +741,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-verify",
         action="store_true",
         help="skip the final dtype/key/shape verification",
+    )
+    parser.add_argument(
+        "--worker-count",
+        type=int,
+        default=1,
+        help="number of independent shard workers sharing the output directory",
+    )
+    parser.add_argument(
+        "--worker-index",
+        type=int,
+        default=0,
+        help="zero-based index of this shard worker",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse verified output shards in an existing output directory",
+    )
+    parser.add_argument(
+        "--finalize-only",
+        action="store_true",
+        help="write metadata and verify all planned shards without converting",
     )
     return parser
 
