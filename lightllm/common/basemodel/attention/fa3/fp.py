@@ -1,5 +1,6 @@
 import dataclasses
 import torch
+import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
@@ -18,6 +19,7 @@ class Fa3AttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
+        self.page_size = model.args.page_size
 
     # 延迟到首次获取 page table 时再初始化，避免 PD 分离模式下的 prefill 节点
     # 分配仅供 decode 使用的 buffer，减少显存浪费。
@@ -37,7 +39,7 @@ class Fa3AttBackend(BaseAttBackend):
         self.page_table_max_batch_size = max(running_max_batch_size, model.graph_max_batch_size)
         # max_seq_length is max_req_total_len plus the MTP headroom reserved when
         # the model is initialized.
-        self.page_table_max_seq_len = model.max_seq_length
+        self.page_table_max_seq_len = triton.cdiv(model.max_seq_length, self.page_size)
         buffer_count = 2 if args.enable_decode_microbatch_overlap else 1
         workspace_size = self.page_table_max_batch_size * self.page_table_max_seq_len
         self.page_table_buffers = [
@@ -57,12 +59,13 @@ class Fa3AttBackend(BaseAttBackend):
                 f"FA3 attention batch size {att_batch_size} exceeds page-table capacity "
                 f"{self.page_table_max_batch_size}"
             )
-        if max_kv_len > self.page_table_max_seq_len:
+        max_page_len = triton.cdiv(max_kv_len, self.page_size)
+        if max_page_len > self.page_table_max_seq_len:
             raise RuntimeError(
                 f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity " f"{self.page_table_max_seq_len}"
             )
-        return self.page_table_buffers[microbatch_index][: att_batch_size * max_kv_len].reshape(
-            att_batch_size, max_kv_len
+        return self.page_table_buffers[microbatch_index][: att_batch_size * max_page_len].reshape(
+            att_batch_size, max_page_len
         )
 
     def create_att_prefill_state(self, infer_state) -> "Fa3PrefillAttState":
@@ -84,14 +87,18 @@ class Fa3PrefillAttState(BasePrefillAttState):
         self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
         self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
         self.page_table = torch.empty(
-            (self.infer_state.batch_size, self.infer_state.max_kv_seq_len),
+            (
+                self.infer_state.batch_size,
+                triton.cdiv(self.infer_state.max_kv_seq_len, self.backend.page_size),
+            ),
             dtype=torch.int32,
             device=self.infer_state.input_ids.device,
         )
-        self.page_table.copy_(
-            self.infer_state.req_manager.req_to_token_indexs[
-                self.infer_state.b_req_idx, : self.infer_state.max_kv_seq_len
-            ]
+        page_table_copy(
+            page_table=self.page_table,
+            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=self.infer_state.b_req_idx,
+            page_size=self.backend.page_size,
         )
 
     def prefill_att(
@@ -131,8 +138,8 @@ class Fa3PrefillAttState(BasePrefillAttState):
         sm_scale = 1.0 / (Lq ** 0.5)
         o = flash_attn_with_kvcache(
             q=q,
-            k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
-            v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
+            k_cache=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
+            v_cache=v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.infer_state.b_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
@@ -225,6 +232,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
         actual_max_kv_len = self.infer_state.max_kv_seq_len
+        actual_max_page_len = triton.cdiv(actual_max_kv_len, self.backend.page_size)
         page_table_width = actual_max_kv_len
         if model.graph is not None and model.graph.can_run(
             batch_size=self.infer_state.batch_size,
@@ -242,9 +250,10 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         )
 
         page_table_copy(
-            page_table=self.page_table[:, :actual_max_kv_len],
+            page_table=self.page_table[:, :actual_max_page_len],
             req_to_token_indexs=model.req_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
+            page_size=self.backend.page_size,
         )
 
     def copy_for_decode_cuda_graph(self, new_state: "Fa3DecodeAttState"):
@@ -290,8 +299,8 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         sm_scale = 1.0 / (Lq ** 0.5)
         o = flash_attn_with_kvcache_autotune(
             q=q,
-            k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
-            v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
+            k_cache=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
+            v_cache=v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,

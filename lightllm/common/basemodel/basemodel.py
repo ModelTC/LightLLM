@@ -123,6 +123,14 @@ class TpPartBaseModel:
         # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
         # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
         self.req_manager.mem_manager = self.mem_manager
+        hold_row = self.req_manager.req_to_token_indexs[self.req_manager.HOLD_REQUEST_ID]
+        hold_page = torch.arange(
+            self.mem_manager.HOLD_TOKEN_MEMINDEX,
+            self.mem_manager.HOLD_TOKEN_MEMINDEX + self.mem_manager.page_size,
+            dtype=hold_row.dtype,
+            device=hold_row.device,
+        )
+        hold_row.view(-1, self.mem_manager.page_size).copy_(hold_page)
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -457,7 +465,7 @@ class TpPartBaseModel:
             new_model_input.mem_indexes,
             (0, padded_batch_size),
             mode="constant",
-            value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
+            value=self.mem_manager.HOLD_TOKEN_MEMINDEX + (1 % self.mem_manager.page_size),
         )
         new_model_input.multimodal_params = new_model_input.multimodal_params + [
             {"images": [], "audios": []} for _ in range(padded_batch_size)
@@ -496,11 +504,17 @@ class TpPartBaseModel:
         new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
         new_model_input.max_cache_len = max(0, model_input.max_cache_len)
         new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_token_num), mode="constant", value=1)
-        new_model_input.mem_indexes = F.pad(
-            new_model_input.mem_indexes,
-            (0, padded_token_num),
-            mode="constant",
-            value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
+        hold_mem_indexes = (
+            self.mem_manager.HOLD_TOKEN_MEMINDEX
+            + torch.arange(
+                padded_token_num,
+                dtype=new_model_input.mem_indexes.dtype,
+                device=new_model_input.mem_indexes.device,
+            )
+            % self.mem_manager.page_size
+        )
+        new_model_input.mem_indexes = torch.cat(
+            (new_model_input.mem_indexes, hold_mem_indexes),
         )
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID

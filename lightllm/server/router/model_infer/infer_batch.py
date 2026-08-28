@@ -129,7 +129,7 @@ class InferenceContext:
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.hold_kv_len])
         elif CacheTier.GPU not in req.cache_tiers:
             self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
         else:
@@ -139,12 +139,13 @@ class InferenceContext:
                 self._linear_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.linear_att_len_to_big_page_id) == 0
         req.cur_kv_len = 0
+        req.hold_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
     def _free_req_mem_without_radix_insert(self, free_token_index: List, req: "InferReq"):
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.hold_kv_len])
 
         if self.is_linear_att_mixed_model:
             # 释放请求尾部尚未移交给 radix cache 的 linear attention 小页状态。
@@ -167,14 +168,18 @@ class InferenceContext:
         return
 
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
+        page_size = self.args.page_size
+        cache_kv_len = req.cur_kv_len // page_size * page_size
         input_token_ids = req.get_input_token_ids()
-        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+        key = torch.tensor(input_token_ids[0:cache_kv_len], dtype=torch.int64, device="cpu")
         # .cpu() 是 流内阻塞操作
-        value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+        value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_kv_len].detach().cpu()
 
         prefix_len, _ = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+        if page_size > 1:
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
@@ -560,6 +565,9 @@ class InferReq:
         self.shm_index = shm_index
         self.multimodal_params = multimodal_params
         self.vocab_size = vocab_size
+        # cur_kv_len is the logical length already written; hold_kv_len is the
+        # page-aligned physical capacity owned by this request.
+        self.hold_kv_len = 0
 
         # 请求需要被暂停
         self.wait_pause = False
@@ -676,6 +684,7 @@ class InferReq:
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                self.hold_kv_len = self.cur_kv_len
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
@@ -945,15 +954,27 @@ class InferReq:
         else:
             input_token_ids = self.get_input_token_ids()
 
-        seq_len = len(input_token_ids)
-        input_token_len = seq_len - self.cur_kv_len
-        return input_token_len
+        return len(input_token_ids) - self.cur_kv_len
+
+    def prefill_kv_alloc_need(self, is_chuncked_prefill: bool) -> int:
+        if is_chuncked_prefill:
+            target_kv_len = len(self.get_chuncked_input_token_ids())
+        else:
+            target_kv_len = len(self.get_input_token_ids())
+        return self._kv_cache_alloc_need(target_kv_len)
 
     def decode_need_token_num(self) -> int:
         raise NotImplementedError("error")
 
     def _normal_decode_need_token_num(self) -> int:
-        return 1
+        return self._kv_cache_alloc_need(self.cur_kv_len + 1)
+
+    def _kv_cache_alloc_need(self, target_kv_len: int) -> int:
+        page_size = self.args.page_size
+        if page_size == 1:
+            return target_kv_len - self.cur_kv_len
+        target_hold_len = (target_kv_len + page_size - 1) // page_size * page_size
+        return target_hold_len - self.hold_kv_len
 
     def _mtp_decode_need_token_num(self) -> int:
         return (1 + self.mtp_step) * 2

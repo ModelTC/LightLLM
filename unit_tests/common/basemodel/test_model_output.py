@@ -118,7 +118,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         model = TpPartBaseModel.__new__(TpPartBaseModel)
         model.args = SimpleNamespace(enable_tpsp_mix_mode=enable_tpsp_mix_mode)
         model.tp_world_size_ = tp_world_size
-        model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=99)
+        model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1)
         model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
 
         pad_batch_sizes = []

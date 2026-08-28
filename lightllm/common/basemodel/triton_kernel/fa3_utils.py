@@ -18,6 +18,7 @@ def page_table_copy_kernel(
     page_table_stride_1,
     req_to_token_stride_0,
     req_to_token_stride_1,
+    PAGE_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     cur_batch = tl.program_id(axis=0)
@@ -27,10 +28,10 @@ def page_table_copy_kernel(
     offs = cur_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < max_seq_len_k
 
-    input_pos = cur_req_idx * req_to_token_stride_0 + offs * req_to_token_stride_1
+    input_pos = cur_req_idx * req_to_token_stride_0 + offs * PAGE_SIZE * req_to_token_stride_1
     output_pos = cur_batch * page_table_stride_0 + offs * page_table_stride_1
 
-    mem_index = tl.load(req_to_token_indexs_ptr + input_pos, mask=mask)
+    mem_index = tl.load(req_to_token_indexs_ptr + input_pos, mask=mask) // PAGE_SIZE
     tl.store(page_table_ptr + output_pos, mem_index, mask=mask)
 
 
@@ -38,6 +39,7 @@ def page_table_copy(
     page_table,  # destination tensor [batch, seq]
     req_to_token_indexs,  # source tensor [batch, seq]
     b_req_idx,  # request index to copy from
+    page_size: int = 1,
 ):
     assert page_table.dim() == 2, "page_table should be 2D"
     assert req_to_token_indexs.dim() == 2, "req_to_token_indexs should be 2D"
@@ -58,6 +60,7 @@ def page_table_copy(
         page_table_stride_1=page_table.stride(1),
         req_to_token_stride_0=req_to_token_indexs.stride(0),
         req_to_token_stride_1=req_to_token_indexs.stride(1),
+        PAGE_SIZE=page_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 

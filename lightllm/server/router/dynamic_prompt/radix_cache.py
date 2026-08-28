@@ -20,7 +20,8 @@ time_gen = UniqueTimeIdGenerator()
 
 
 class TreeNode:
-    def __init__(self):
+    def __init__(self, page_size: int = 1):
+        self.page_size = page_size
         self.children: Dict[int, TreeNode] = {}  # 这里的键 为 token_id_key 的第一个元素
         self.parent: TreeNode = None
         self.token_id_key: torch.Tensor = None
@@ -34,14 +35,21 @@ class TreeNode:
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
+    def get_child_key(self, token_ids: torch.Tensor):
+        first_page = token_ids[: self.page_size]
+        if self.page_size == 1:
+            return first_page.item()
+        return tuple(first_page.tolist())
+
     def split_node(self, prefix_len):
-        split_parent_node = TreeNode()
+        assert prefix_len > 0 and prefix_len % self.page_size == 0
+        split_parent_node = TreeNode(page_size=self.page_size)
         split_parent_node.parent = self.parent
-        split_parent_node.parent.children[self.token_id_key[0].item()] = split_parent_node
+        split_parent_node.parent.children[self.get_child_key(self.token_id_key)] = split_parent_node
         split_parent_node.token_id_key = self.token_id_key[0:prefix_len]
         split_parent_node.token_mem_index_value = self.token_mem_index_value[0:prefix_len]
         split_parent_node.children = {}
-        split_parent_node.children[self.token_id_key[prefix_len].item()] = self
+        split_parent_node.children[self.get_child_key(self.token_id_key[prefix_len:])] = self
         split_parent_node.ref_counter = self.ref_counter
 
         new_len = len(split_parent_node.token_mem_index_value)
@@ -57,12 +65,12 @@ class TreeNode:
         return split_parent_node
 
     def add_and_return_new_child(self, token_id_key, token_mem_index_value):
-        child = TreeNode()
+        child = TreeNode(page_size=self.page_size)
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
-        first_token_key = child.token_id_key[0].item()
-        assert first_token_key not in self.children.keys()
-        self.children[first_token_key] = child
+        child_key = child.get_child_key(child.token_id_key)
+        assert child_key not in self.children.keys()
+        self.children[child_key] = child
         child.parent = self
 
         new_len = len(child.token_mem_index_value)
@@ -71,7 +79,7 @@ class TreeNode:
         return child
 
     def remove_child(self, child_node: "TreeNode"):
-        del self.children[child_node.token_id_key[0].item()]
+        del self.children[child_node.get_child_key(child_node.token_id_key)]
         child_node.parent = None
         return
 
@@ -103,15 +111,18 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
+    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None, page_size: int = 1):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         self.total_token_num = total_token_num
         self.mem_manager: MemoryManager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
+        self.page_size = page_size
 
-        self.root_node = TreeNode()
+        self.root_node = TreeNode(page_size=page_size)
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
@@ -131,8 +142,11 @@ class RadixCache:
             value = key
 
         assert len(key) == len(value)  # and len(key) >= 1
-        if len(key) == 0:
+        aligned_len = len(key) // self.page_size * self.page_size
+        if aligned_len == 0:
             return 0, None
+        key = key[:aligned_len]
+        value = value[:aligned_len]
         return self._insert_helper(self.root_node, key, value)
 
     def _insert_helper(self, node: TreeNode, key, value) -> Tuple[int, Optional[TreeNode]]:
@@ -172,10 +186,12 @@ class RadixCache:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
 
-        first_key_id = key[0].item()
+        first_key_id = node.get_child_key(key)
         if first_key_id in node.children.keys():
             child: TreeNode = node.children[first_key_id]
             prefix_len = match(key, child.token_id_key)
+            prefix_len = prefix_len // self.page_size * self.page_size
+            assert prefix_len > 0
             if prefix_len == len(key):
                 if prefix_len == len(child.token_id_key):
                     if child.is_leaf():
@@ -232,7 +248,10 @@ class RadixCache:
             return 0, new_node
 
     def match_prefix(self, key, update_refs=False):
-        assert len(key) != 0
+        aligned_len = len(key) // self.page_size * self.page_size
+        if aligned_len == 0:
+            return None, 0, None
+        key = key[:aligned_len]
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         if tree_node != self.root_node:
@@ -291,12 +310,14 @@ class RadixCache:
         if len(key) == 0:
             return node
 
-        first_key_id = key[0].item()
+        first_key_id = node.get_child_key(key)
         if first_key_id not in node.children.keys():
             return node
         else:
             child = node.children[first_key_id]
             prefix_len = match(key, child.token_id_key)
+            prefix_len = prefix_len // self.page_size * self.page_size
+            assert prefix_len > 0
             if prefix_len == len(child.token_id_key):
                 ans_value_list.append(child.token_mem_index_value)
                 return (child, key[prefix_len:])
@@ -374,7 +395,7 @@ class RadixCache:
         child_node.time_id = max(parent_node.time_id, child_node.time_id)
 
         grandparent_node = parent_node.parent
-        key_in_grandparent = parent_node.token_id_key[0].item()
+        key_in_grandparent = parent_node.get_child_key(parent_node.token_id_key)
         grandparent_node.children[key_in_grandparent] = child_node
         child_node.parent = grandparent_node
 

@@ -45,7 +45,8 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
 
         # prefill token 计算, 因为对beam的prefill计算过程是共享的，所以只计算一个请求对应的token数量
         new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
-        ok_token_num = need_max_token_num < self.max_total_tokens
+        estimated_need_token_num = self.add_kv_page_reservation(need_max_token_num, len(self.cache_len_list))
+        ok_token_num = estimated_need_token_num < self.max_total_tokens
 
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 
@@ -56,9 +57,9 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         )
 
         if ok_token_num and ok_req_num and ok_prefill:
-            self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
+            self.router.shared_token_load.set_estimated_peak_token_count(estimated_need_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
-                need_max_token_num / self.max_total_tokens,
+                estimated_need_token_num / self.max_total_tokens,
                 self.dp_index,
             )
             return True, new_batch_first_router_need_tokens
@@ -144,7 +145,5 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
                 assert cur_input_len - req.input_len >= 0
                 cumsum_len += cur_input_len - req.input_len  # 减去共享的部分
                 need_max_token_num = max(need_max_token_num, cumsum_len + index * cur_ouput_len)
-        return (
-            need_max_token_num,
-            need_max_token_num / self.max_total_tokens,
-        )
+        estimated_need_token_num = self.add_kv_page_reservation(need_max_token_num, len(self.cache_len_list))
+        return (estimated_need_token_num, estimated_need_token_num / self.max_total_tokens)

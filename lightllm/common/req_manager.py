@@ -67,6 +67,8 @@ class ReqManager:
         # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
         # 这样让 DP 的实现更为简化一些。
         self.req_list = _ReqLinkedList(max_request_num)
+        page_size = get_env_start_args().page_size
+        max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )

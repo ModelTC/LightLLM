@@ -180,6 +180,7 @@ class ModeBackend:
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
+                    page_size=self.args.page_size,
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:
@@ -742,12 +743,13 @@ class ModeBackend:
                     continue
 
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+                alloc_token_num = req_obj.prefill_kv_alloc_need(is_chuncked_prefill=not self.disable_chunked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                if token_num <= can_alloc_token_num:
+                if alloc_token_num <= can_alloc_token_num:
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
-                    can_alloc_token_num -= token_num
+                    can_alloc_token_num -= alloc_token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
@@ -966,14 +968,20 @@ class ModeBackend:
         )
         prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
         intact_kv_len = len(model_cfg["prompt_cache_token_ids"])
-        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
-        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
+        page_size = self.args.page_size
+        cache_kv_len = intact_kv_len // page_size * page_size
+        intact_hold_len = (intact_kv_len + page_size - 1) // page_size * page_size
+        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_hold_len)
+        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index[:intact_kv_len], prompt_cache_kv_buffer)
         self.radix_cache.insert(
-            torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"),
-            intact_kv_index,
+            torch.tensor(model_cfg["prompt_cache_token_ids"][:cache_kv_len], dtype=torch.int64, device="cpu"),
+            intact_kv_index[:cache_kv_len],
         )
+        if intact_hold_len > cache_kv_len:
+            self.radix_cache.mem_manager.free(intact_kv_index[cache_kv_len:intact_hold_len])
         self.radix_cache.match_prefix(
-            torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"), update_refs=True
+            torch.tensor(model_cfg["prompt_cache_token_ids"][:cache_kv_len], dtype=torch.int64, device="cpu"),
+            update_refs=True,
         )
 
     def init_rank_infos(self):

@@ -163,6 +163,28 @@ def _launch_subprocesses(args: StartArgs):
                 f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
             )
 
+    if args.page_size < 1:
+        raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
+
+    if args.page_size > 1:
+        unsupported_options = {
+            "MTP": args.mtp_mode is not None,
+            "PD split mode": args.run_mode in ("prefill", "decode"),
+            "CPU KV cache": args.enable_cpu_cache,
+            "DP prompt-cache fetch": args.enable_dp_prompt_cache_fetch,
+            "DP prefill balance": args.enable_dp_prefill_balance,
+            "diverse mode": args.diverse_mode,
+            "hybrid linear attention": is_linear_att_mixed_model(args.model_dir),
+        }
+        enabled_unsupported = [name for name, enabled in unsupported_options.items() if enabled]
+        if enabled_unsupported:
+            raise ValueError(
+                f"--page_size > 1 does not yet support {', '.join(enabled_unsupported)}; "
+                "use --page_size 1 for this configuration"
+            )
+        if args.llm_kv_type != "None":
+            raise ValueError("--page_size > 1 currently supports only the unquantized LLM KV cache")
+
     # mtp params check
     if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:
