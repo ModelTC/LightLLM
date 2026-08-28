@@ -33,6 +33,9 @@ class ModelInput:
     # radix node；该 id 只用于重建 diverse attention 的 b_mark_shared_group。
     b_shared_radix_node_id: torch.Tensor = None
     mem_indexes: torch.Tensor = None
+    # The scheduler reserves KV capacity directly in req_to_token_indexs;
+    # BaseModel resolves the logical indexes when execution starts.
+    mem_indexes_from_req_table: bool = False
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
     # Request/row-aligned MRoPE position offset. It is decode-only; prefill
@@ -59,7 +62,7 @@ class ModelInput:
         self.check_input()
 
         # Prefill 和 decode 都必须提供的公共张量。
-        if self.mem_indexes is None:
+        if self.mem_indexes is None and self.mem_indexes_cpu is not None:
             self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
@@ -94,7 +97,7 @@ class ModelInput:
         assert self.b_mtp_index is not None
         assert self.b_seq_len is not None
         assert self.multimodal_params is not None
-        assert self.mem_indexes is not None or self.mem_indexes_cpu is not None
+        assert self.mem_indexes_from_req_table or self.mem_indexes is not None or self.mem_indexes_cpu is not None
 
         assert self.b_req_idx.shape == (self.batch_size,)
         assert self.b_mtp_index.shape == self.b_req_idx.shape
@@ -124,7 +127,8 @@ class ModelInput:
             assert self.b_shared_radix_node_id.shape == self.b_req_idx.shape
 
         mem_indexes = self.mem_indexes if self.mem_indexes is not None else self.mem_indexes_cpu
-        assert mem_indexes.ndim == 1
+        if mem_indexes is not None:
+            assert mem_indexes.ndim == 1
 
 
 @dataclass

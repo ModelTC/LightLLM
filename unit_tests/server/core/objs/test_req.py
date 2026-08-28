@@ -1,5 +1,6 @@
 import pytest
 import easydict
+from types import SimpleNamespace
 from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 from lightllm.utils.envs_utils import set_env_start_args
@@ -52,6 +53,18 @@ def test_detach_shm_arrays(req):
 def test_get_used_tokens(req):
     req.shm_cur_kv_len = 5
     assert req.get_used_tokens() == 5
+
+
+def test_mtp_decode_reserves_three_windows():
+    req = SimpleNamespace(
+        input_len=4,
+        shm_cur_output_len=0,
+        shm_cur_kv_len=3,
+        chunked_prefill_size=128,
+        _mtp_step=2,
+    )
+
+    assert ChunkedPrefillReq.get_decode_need_tokens(req) == 9
 
 
 def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
