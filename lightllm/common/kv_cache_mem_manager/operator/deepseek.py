@@ -8,7 +8,9 @@ logger = init_logger(__name__)
 
 class Deepseek2MemOperator(NormalMemOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.deepseek2_mem_manager import Deepseek2MemoryManager
+        from lightllm.common.kv_cache_mem_manager.deepseek2_mem_manager import (
+            Deepseek2MemoryManager,
+        )
 
         mem_manager: Deepseek2MemoryManager = self.mem_manager
 
@@ -30,7 +32,9 @@ class Deepseek2MemOperator(NormalMemOperator):
 
 class Deepseek3_2MemOperator(Deepseek2MemOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.deepseek3_2mem_manager import Deepseek3_2MemoryManager
+        from lightllm.common.kv_cache_mem_manager.deepseek3_2mem_manager import (
+            Deepseek3_2MemoryManager,
+        )
 
         mem_manager: Deepseek3_2MemoryManager = self.mem_manager
         from ...basemodel.triton_kernel.kv_copy.mla_copy_kv import destindex_copy_kv
@@ -182,5 +186,54 @@ class FP8PerTokenGroupQuantDeepseek3_2MemOperator(BaseMemManagerOperator):
             tp_index=rank_in_dp,
             tp_world_size=dp_world_size,
             grid_num=16,
+        )
+        return
+
+
+class DeepseekV4MemOperator(BaseMemManagerOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
+            DeepseekV4MemoryManager,
+        )
+
+        mem_manager: DeepseekV4MemoryManager = self.mem_manager
+        mem_manager.pack_mla_kv_to_cache(layer_index, mem_index, kv)
+        return
+
+    def pack_cpu_cache_pages(self, source_mem_indexes: torch.Tensor, staging: torch.Tensor) -> None:
+        """Pack complete DS4 checkpoints into caller-owned CUDA staging."""
+        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import pack_gpu_cache_to_staging
+
+        pack_gpu_cache_to_staging(self.mem_manager, source_mem_indexes, staging)
+        return
+
+    def scatter_packed_cpu_cache_pages(
+        self,
+        staging: torch.Tensor,
+        page_indexes: torch.Tensor,
+        cpu_cache_client,
+    ) -> None:
+        """Write packed checkpoints to their pinned shared-memory pages."""
+        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import scatter_staging_to_cpu_pages
+
+        scatter_staging_to_cpu_pages(staging, cpu_cache_client.cpu_kv_cache_tensor, page_indexes)
+        return
+
+    def load_cpu_cache_pages(
+        self,
+        plan,
+        page_indexes: torch.Tensor,
+        cpu_cache_client,
+        first_page_history_offset_tokens: int = 0,
+    ) -> None:
+        """Selectively restore compressed history and the final resume window."""
+        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import unpack_cpu_cache_to_gpu
+
+        unpack_cpu_cache_to_gpu(
+            self.mem_manager,
+            plan,
+            cpu_cache_client.cpu_kv_cache_tensor,
+            page_indexes,
+            first_page_history_offset_tokens,
         )
         return

@@ -108,6 +108,7 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -161,6 +162,7 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
 def test_overlap_eagle_supports_empty_verify_rows(monkeypatch):
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -203,6 +205,7 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -310,6 +313,7 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(

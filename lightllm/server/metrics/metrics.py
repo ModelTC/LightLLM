@@ -27,6 +27,11 @@ MONITOR_INFO = {
     "lightllm_cache_ratio": "cache length / input_length",
     "lightllm_batch_current_max_tokens": "dynamic max token used for current batch",
     "lightllm_request_mtp_avg_token_per_step": "Average number of tokens per step",
+    "lightllm_pd_forward_queue_duration": "Time tokens wait on a P/D node before websocket forwarding (s)",
+    "lightllm_pd_master_ingress_queue_duration": "Time token packets wait in the PD master ingress queue (s)",
+    "lightllm_pd_master_request_queue_duration": "Time tokens wait for their PD master request consumer (s)",
+    "lightllm_pd_master_http_send_duration": "Maximum ASGI body send duration in the latest sample window (s)",
+    "lightllm_pd_master_http_send_bytes": "Largest ASGI body sent in the latest sample window (bytes)",
     "lightllm_prompt_tokens_total": "Total number of prefill tokens processed",
     "lightllm_generation_tokens_total": "Total number of generation tokens processed",
     "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
@@ -97,10 +102,15 @@ class Monitor:
         self.create_histogram("lightllm_request_mean_time_per_token_duration", self.duration_buckets)
         self.create_histogram("lightllm_request_first_token_duration", self.duration_buckets)
         self.create_histogram("lightllm_request_queue_duration_bucket", self.duration_buckets)
+        self.create_histogram("lightllm_pd_forward_queue_duration", self.duration_buckets)
+        self.create_histogram("lightllm_pd_master_ingress_queue_duration", self.duration_buckets)
+        self.create_histogram("lightllm_pd_master_request_queue_duration", self.duration_buckets)
+        self.create_histogram("lightllm_pd_master_http_send_duration", self.duration_buckets)
         self.create_histogram("lightllm_batch_inference_duration_bucket", self.duration_buckets, labelnames=["method"])
         self.gateway_url = args.metric_gateway
 
         self.create_gauge("lightllm_queue_size")
+        self.create_gauge("lightllm_pd_master_http_send_bytes")
         self.create_gauge("lightllm_batch_current_size")
         self.create_gauge("lightllm_batch_pause_size")
         self.create_gauge("lightllm_batch_current_max_tokens")

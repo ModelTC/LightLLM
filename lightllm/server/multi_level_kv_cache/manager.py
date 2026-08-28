@@ -9,7 +9,7 @@ import time
 import threading
 import concurrent.futures
 import setproctitle
-from queue import Queue
+from queue import Empty, Queue
 from typing import List
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
@@ -45,6 +45,9 @@ class MultiLevelKVCacheManager:
         # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。
         self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
+        # ZeroMQ sockets are not thread-safe. Cache workers enqueue completed
+        # requests so the recv_loop thread remains the sole socket owner.
+        self.send_to_router_queue = Queue()
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
 
@@ -144,7 +147,7 @@ class MultiLevelKVCacheManager:
         # 超时时，放弃进行 cache page 的匹配。
         current_time = time.time()
         if current_time - start_time >= self.cpu_cache_time_out:
-            self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+            self.send_to_router_queue.put(group_req_indexes)
             logger.warning(
                 f"cache matching time out {current_time - start_time}s, "
                 f"group_req_id: {group_req_indexes.group_req_id}"
@@ -211,14 +214,23 @@ class MultiLevelKVCacheManager:
         for req in reqs:
             self.shm_req_manager.put_back_req_obj(req)
 
-        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        self.send_to_router_queue.put(group_req_indexes)
         return
+
+    def _send_finished_group_reqs(self):
+        while True:
+            try:
+                group_req_indexes = self.send_to_router_queue.get_nowait()
+            except Empty:
+                return
+            self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
 
     def recv_loop(self):
         try:
             recv_max_count = 128
 
             while True:
+                self._send_finished_group_reqs()
                 recv_objs = []
                 try:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。

@@ -5,6 +5,8 @@ chunked prefill, decode, and MTP decode cases.
 """
 
 import argparse
+import copy
+import json
 import math
 import os
 import queue
@@ -27,16 +29,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4MemoryManager
+from lightllm.common.req_manager import DeepseekV4ReqManager
+from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.models import get_model
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
-from lightllm.models.glm5_2_mtp.model import Glm5_2MTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.server.api_cli import make_argument_parser
-from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
-    prepare_mtp_prefill_inputs,
-)
 from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype, get_vocab_size
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import set_env_start_args
@@ -293,11 +295,15 @@ class StaticBenchmarkExecutor:
         current_next_ids = first_next_ids.cuda(non_blocking=True)
         mtp_candidates = [current_next_ids.detach().cpu()]
         for draft_index in range(self._num_mtp_modules()):
-            draft_input = prepare_mtp_prefill_inputs(
-                model_input=draft_input,
+            draft_input = copy.copy(draft_input)
+            draft_input.b_is_decode_req = torch.zeros_like(draft_input.b_req_idx, dtype=torch.bool)
+            draft_input.input_ids = gen_mtp_new_input_ids(
+                input_ids=draft_input.input_ids,
                 b_next_token_ids=current_next_ids,
-                mtp_draft_input_hiddens=draft_output.mtp_main_output_hiddens,
+                b_seq_len=draft_input.b_seq_len,
+                b_ready_cache_len=draft_input.b_ready_cache_len,
             )
+            draft_input.mtp_draft_input_hiddens = draft_output.mtp_collector.spec_hidden
             draft_output = self.draft_models[draft_index].forward(draft_input)
             current_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
             mtp_candidates.append(current_next_ids.detach().cpu())
@@ -412,38 +418,30 @@ class StaticBenchmarkExecutor:
         real_batch_size: int,
         step_width: int,
     ):
-        draft_input = model_input
+        draft_input = model_input.make_mtp_draft_input()
         draft_output = model_output
         draft_next_ids = self._argmax_ids(model_output.logits).cuda(non_blocking=True)
         generated = [draft_next_ids.detach()]
 
         temporary_mem = None
         if self.args.mtp_mode.startswith("eagle"):
-            extra_mem_cpu = self.model.req_manager.mem_manager.alloc(real_batch_size * self.args.mtp_step)
-            temporary_mem = extra_mem_cpu
-            extra_mem = extra_mem_cpu.cuda(non_blocking=True)
+            temporary_mem = self.model.req_manager.mem_manager.alloc(real_batch_size * self.args.mtp_step)
+            temporary_mem_gpu = temporary_mem.cuda(non_blocking=True)
         else:
-            extra_mem = None
+            temporary_mem_gpu = None
 
         for step in range(self.args.mtp_step):
             draft_input.input_ids = draft_next_ids
-            draft_input.mtp_draft_input_hiddens = draft_output.mtp_main_output_hiddens
+            draft_input.mtp_draft_input_hiddens = draft_output.mtp_collector.spec_hidden
             draft_model = self.draft_models[step % self._num_mtp_modules()]
             draft_output = draft_model.forward(draft_input)
             draft_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
             generated.append(draft_next_ids.detach())
 
-            if self.args.mtp_mode.startswith("eagle") and step + 1 < self.args.mtp_step:
-                draft_input.b_seq_len += 1
-                draft_input.max_kv_seq_len += 1
-                mem_i = extra_mem[step * real_batch_size : (step + 1) * real_batch_size]
-                draft_input.mem_indexes = torch.cat(
-                    [
-                        draft_input.mem_indexes.view(-1, step_width)[:, 1:],
-                        mem_i.view(-1, 1),
-                    ],
-                    dim=1,
-                ).reshape(-1)
+            if self.args.mtp_mode.startswith("eagle"):
+                mem_i_cpu = temporary_mem[step * real_batch_size : (step + 1) * real_batch_size]
+                mem_i = temporary_mem_gpu[step * real_batch_size : (step + 1) * real_batch_size]
+                draft_input.advance_mtp_decode_step(mem_i_cpu, mem_i, self.args.mtp_step)
 
         return torch.stack(generated[:step_width], dim=1), temporary_mem
 
@@ -523,6 +521,38 @@ class StaticBenchmarkExecutor:
         req_idx_gpu = req_idx.cuda(non_blocking=True)
         mem_indexes_gpu = mem_indexes.reshape(batch_size, cached_len).cuda(non_blocking=True)
         self.model.req_manager.req_to_token_indexs[req_idx_gpu, :cached_len] = mem_indexes_gpu
+        self._materialize_cached_prefix_extra_slots(req_idx, cached_len, mem_indexes_gpu)
+
+    def _materialize_cached_prefix_extra_slots(
+        self, req_idx: torch.Tensor, cached_len: int, mem_indexes_gpu: torch.Tensor
+    ):
+        req_manager = self.model.req_manager
+        if not isinstance(req_manager, DeepseekV4ReqManager):
+            return
+        batch_size = int(req_idx.shape[0])
+        req_list = req_idx.tolist()
+        seq_list = [cached_len] * batch_size
+
+        swa_ready_len = self._cached_prefix_swa_ready_len(cached_len)
+        req_manager.prepare_prefill_swa(
+            req_list=req_list,
+            ready_list=[swa_ready_len] * batch_size,
+            seq_list=seq_list,
+            mem_indexes=mem_indexes_gpu[:, swa_ready_len:].contiguous(),
+        )
+        req_manager.prepare_prefill_compress_slots(
+            req_list=req_list,
+            ready_list=[0] * batch_size,
+            seq_list=seq_list,
+            mem_indexes=mem_indexes_gpu,
+        )
+
+    def _cached_prefix_swa_ready_len(self, cached_len: int) -> int:
+        req_manager: DeepseekV4ReqManager = self.model.req_manager
+        retain_len = int(req_manager._swa_retain_len())
+        ready_len = max(0, int(cached_len) - retain_len)
+        page_size = int(req_manager.get_prompt_cache_page_size())
+        return ready_len // page_size * page_size
 
     def _make_prefill_input(self, token_chunk: np.ndarray, req_idx: torch.Tensor, ready_cache_len: int) -> ModelInput:
         batch_size, q_len = token_chunk.shape
@@ -543,6 +573,7 @@ class StaticBenchmarkExecutor:
             b_req_idx=req_idx,
             b_mtp_index=cpu_i32_zeros(batch_size),
             b_seq_len=b_seq_len,
+            b_is_decode_req=torch.zeros(batch_size, dtype=torch.bool, device="cpu"),
             mem_indexes_cpu=mem_indexes,
             is_prefill=True,
             b_ready_cache_len=b_ready_cache_len,
@@ -979,6 +1010,38 @@ def decode_profile_batch_divisor(args: SimpleNamespace, case: BenchmarkCase) -> 
     return max(1, case.context_len + case.output_len + mtp_width + 8)
 
 
+def filter_capacity_decode_cases(
+    args: SimpleNamespace,
+    cases: Sequence[BenchmarkCase],
+    mem_manager,
+) -> List[BenchmarkCase]:
+    if not getattr(args, "decode_filter_capacity", False):
+        return list(cases)
+
+    resolved: List[BenchmarkCase] = []
+    capacity_tokens = int(mem_manager.size)
+    for case in cases:
+        if case.stage != "decode":
+            resolved.append(case)
+            continue
+        divisor = decode_profile_batch_divisor(args, case)
+        fits_capacity = case.batch_size * divisor <= capacity_tokens
+        if fits_capacity and isinstance(mem_manager, DeepseekV4MemoryManager) and mem_manager.n_c4 > 0:
+            c4_page_size = int(mem_manager.c4_pool.page_size)
+            c4_entries_per_req = divisor // 4
+            c4_pages_per_req = (c4_entries_per_req + c4_page_size - 1) // c4_page_size
+            fits_capacity = case.batch_size * c4_pages_per_req <= mem_manager.c4_num_pages
+        if fits_capacity:
+            resolved.append(
+                replace(
+                    case,
+                    profiled_max_total_token_num=capacity_tokens,
+                    profiled_batch_divisor=divisor,
+                )
+            )
+    return resolved
+
+
 def resolve_profile_decode_cases(
     args: SimpleNamespace,
     cases: Sequence[BenchmarkCase],
@@ -1103,7 +1166,12 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
         and args.max_total_token_num is None
     )
     prefill_batch_size_needs_profile = args.benchmark in {"all", "prefill"} and args.max_total_token_num is None
-    needs_profiled_batch_size = decode_batch_size_needs_profile or prefill_batch_size_needs_profile
+    decode_capacity_needs_profile = (
+        args.benchmark in {"all", "decode"} and args.decode_filter_capacity and args.max_total_token_num is None
+    )
+    needs_profiled_batch_size = (
+        decode_batch_size_needs_profile or prefill_batch_size_needs_profile or decode_capacity_needs_profile
+    )
 
     if args.max_total_token_num is None and not needs_profiled_batch_size:
         args.max_total_token_num = max_batch * (args.max_req_total_len + mtp_width + 8)
@@ -1168,7 +1236,7 @@ def build_model_kvargs(args: SimpleNamespace, rank_id: int) -> Dict:
         "max_req_num": max(args.running_max_req_size, args.graph_max_batch_size),
         "batch_max_tokens": args.batch_max_tokens,
         "run_mode": "normal",
-        "max_seq_length": args.max_req_total_len,
+        "max_seq_length": args.max_req_total_len + max(8, args.mtp_step * 2),
         "disable_cudagraph": args.disable_cudagraph,
         "llm_prefill_att_backend": args.llm_prefill_att_backend,
         "llm_decode_att_backend": args.llm_decode_att_backend,
@@ -1214,6 +1282,9 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
                 "eagle_with_att",
             }, f"{model_type} MTP requires *_with_att mode"
             draft_models.append(Deepseek3MTPModel(mtp_kvargs))
+        elif model_type == "deepseek_v4":
+            assert args.mtp_mode == "eagle_with_att", f"{model_type} MTP requires eagle_with_att mode"
+            draft_models.append(DeepseekV4MTPModel(mtp_kvargs))
         elif model_type == "qwen3_moe":
             assert args.mtp_mode in {
                 "vanilla_no_att",
@@ -1232,12 +1303,6 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
                 "eagle_with_att",
             }, f"{model_type} MTP requires *_with_att mode"
             draft_models.append(Glm4MoeLiteMTPModel(mtp_kvargs))
-        elif model_type == "glm_moe_dsa":
-            assert args.mtp_mode in {
-                "vanilla_with_att",
-                "eagle_with_att",
-            }, f"{model_type} MTP requires *_with_att mode"
-            draft_models.append(Glm5_2MTPModel(mtp_kvargs))
         else:
             raise ValueError(f"unsupported MTP draft model_type={model_type} from {draft_dir}")
     return draft_models
@@ -1304,6 +1369,9 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         model, _ = get_model(model_cfg, model_kvargs)
         cases = resolve_batch_max_prefill_cases(args, cases, model.mem_manager.size)
         cases = resolve_profile_decode_cases(args, cases, model.mem_manager.size)
+        cases = filter_capacity_decode_cases(args, cases, model.mem_manager)
+        if not cases:
+            raise ValueError("no benchmark cases remain after capacity filtering")
         if defer_cudagraph:
             init_deferred_cudagraph(args, cases, model_kvargs, model)
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
@@ -1616,6 +1684,11 @@ def add_static_benchmark_args(parser: argparse.ArgumentParser):
         ),
     )
     parser.add_argument(
+        "--decode_filter_capacity",
+        action="store_true",
+        help="drop explicit decode cases whose batch size cannot fit profiled KV capacity",
+    )
+    parser.add_argument(
         "--mtp_accept_rate",
         type=float,
         default=1.0,
@@ -1624,6 +1697,7 @@ def add_static_benchmark_args(parser: argparse.ArgumentParser):
     parser.add_argument("--warmup_iters", type=int, default=1)
     parser.add_argument("--bench_iters", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--dump_file", type=str, default=None, help="write aggregated benchmark results as JSON")
 
 
 def main(argv: Optional[Sequence[str]] = None):
@@ -1639,7 +1713,12 @@ def main(argv: Optional[Sequence[str]] = None):
     args = normalize_args(args, cases)
     set_env_start_args(args)
 
-    run_benchmark(args, cases)
+    results = run_benchmark(args, cases)
+    if args.dump_file and args.node_rank == 0:
+        dump_path = Path(args.dump_file)
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"args": vars(args), "results": results}
+        dump_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

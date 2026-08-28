@@ -121,7 +121,15 @@ class SpecEngine:
         b_req_mtp_start_loc: torch.Tensor,  # [req_num]
         draft_step: int,
         accept_len: Optional[torch.Tensor] = None,  # [req_num]
+        accept_len_cpu: Optional[torch.Tensor] = None,  # [req_num]
+        accept_len_ready_event: Optional[torch.cuda.Event] = None,
     ) -> SpecProposal:
+        proposer_kwargs = {}
+        if self.backend.is_deepseek_v4:
+            proposer_kwargs = {
+                "accept_len_cpu": accept_len_cpu,
+                "accept_len_ready_event": accept_len_ready_event,
+            }
         return self.proposer.propose_next(
             target_model_input=target_model_input,
             target_model_output=target_model_output,
@@ -129,6 +137,7 @@ class SpecEngine:
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=draft_step,
             accept_len=accept_len,
+            **proposer_kwargs,
         )
 
     # Planner runtime statistics.

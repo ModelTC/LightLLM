@@ -16,7 +16,15 @@ from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
 
 
-class _FailingManager:
+class _PDProcessManager:
+    def __init__(self):
+        self.cancelled_group_request_ids = []
+
+    def cancel_pd_request_registration(self, group_request_id):
+        self.cancelled_group_request_ids.append(group_request_id)
+
+
+class _FailingManager(_PDProcessManager):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -24,7 +32,7 @@ class _FailingManager:
         yield
 
 
-class _CancelledManager:
+class _CancelledManager(_PDProcessManager):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -32,14 +40,14 @@ class _CancelledManager:
         yield
 
 
-class _SuccessfulManager:
+class _SuccessfulManager(_PDProcessManager):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
-        yield 123, "token", {}, FinishStatus(FinishStatus.FINISHED_STOP)
+        yield 123, "token", {"count_output_tokens": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
 
 
-class _StopPrefillManager:
+class _StopPrefillManager(_PDProcessManager):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -51,7 +59,7 @@ class _FatalGenerateError(BaseException):
     pass
 
 
-class _FatalManager:
+class _FatalManager(_PDProcessManager):
     args = SimpleNamespace(run_mode="decode")
 
     async def generate(self, **_kwargs):
@@ -64,9 +72,10 @@ def test_pd_node_reports_generate_error_to_master():
         sampling_params = SamplingParams()
         sampling_params.group_request_id = 123
         websocket = AsyncMock()
+        manager = _FailingManager()
 
         await _pd_process_generate(
-            manager=_FailingManager(),
+            manager=manager,
             prompt="prompt",
             sampling_params=sampling_params,
             multimodal_params=MagicMock(),
@@ -82,6 +91,7 @@ def test_pd_node_reports_generate_error_to_master():
             123,
             "RuntimeError: prefill failed",
         )
+        assert manager.cancelled_group_request_ids == [123]
 
     asyncio.run(run())
 
@@ -113,9 +123,10 @@ def test_pd_node_success_forwards_token_without_error_report():
         sampling_params.group_request_id = 123
         websocket = AsyncMock()
         forwarding_queue = AsyncMock()
+        manager = _SuccessfulManager()
 
         await _pd_process_generate(
-            manager=_SuccessfulManager(),
+            manager=manager,
             prompt="prompt",
             sampling_params=sampling_params,
             multimodal_params=MagicMock(),
@@ -131,6 +142,7 @@ def test_pd_node_success_forwards_token_without_error_report():
         assert forwarded[2]["node_mode"] == "prefill"
         assert forwarded[3].is_finished()
         websocket.send.assert_not_awaited()
+        assert manager.cancelled_group_request_ids == [123]
 
     asyncio.run(run())
 
@@ -210,6 +222,7 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
+        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
         p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
@@ -260,7 +273,7 @@ def test_pd_master_generate_error_wakes_resource_wait(event_name):
             )
         )
 
-        await req_status.set_error("RuntimeError: node failed")
+        req_status.set_error("RuntimeError: node failed")
         await asyncio.wait_for(wait_task, timeout=1)
 
         with pytest.raises(
