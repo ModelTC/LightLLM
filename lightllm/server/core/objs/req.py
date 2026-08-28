@@ -504,8 +504,8 @@ class ChunkedPrefillReq(Req):
         # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
         need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
         if need_tokens == 1 and self._mtp_step > 0:
-            # target verify 及后续 MTP 操作统一预留三倍窗口。
-            need_tokens = (self._mtp_step + 1) * 3
+            # target verify 及后续 MTP 操作统一预留两倍窗口。
+            need_tokens = (self._mtp_step + 1) * 2
 
         return need_tokens
 

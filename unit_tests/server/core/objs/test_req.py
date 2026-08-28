@@ -55,7 +55,7 @@ def test_get_used_tokens(req):
     assert req.get_used_tokens() == 5
 
 
-def test_mtp_decode_reserves_three_windows():
+def test_mtp_decode_reserves_two_windows():
     req = SimpleNamespace(
         input_len=4,
         shm_cur_output_len=0,
@@ -64,7 +64,7 @@ def test_mtp_decode_reserves_three_windows():
         _mtp_step=2,
     )
 
-    assert ChunkedPrefillReq.get_decode_need_tokens(req) == 9
+    assert ChunkedPrefillReq.get_decode_need_tokens(req) == 6
 
 
 def test_final_token_metadata_read_returns_actual_prompt_tokens(req):

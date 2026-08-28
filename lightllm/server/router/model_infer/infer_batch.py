@@ -952,7 +952,7 @@ class InferReq:
         return self._kv_cache_alloc_need(target_kv_len)
 
     def decode_need_token_num(self) -> int:
-        decode_token_num = 1 if self.mtp_step == 0 else 3 * (1 + self.mtp_step)
+        decode_token_num = 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
         return self._kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
 
     def _kv_cache_alloc_need(self, target_kv_len: int) -> int:
