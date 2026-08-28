@@ -56,6 +56,56 @@ def repack_kv_index(kv_index, req_index, seq_len, start_loc, max_seq_len, out_kv
     return
 
 
+@triton.jit
+def _fwd_kernel_repack_page_kv_index(
+    kv_index,
+    req_index,
+    out_kv_index,
+    page_len,
+    start_loc,
+    kv_stride_h,
+    PAGE_SIZE: tl.constexpr,
+    SEQ_BLOCK: tl.constexpr,
+):
+    cur_batch = tl.program_id(0)
+    start_page = tl.program_id(1)
+    cur_page_len = tl.load(page_len + cur_batch)
+    cur_req_idx = tl.load(req_index + cur_batch)
+    cur_start_loc = tl.load(start_loc + cur_batch)
+
+    page_offsets = start_page * SEQ_BLOCK + tl.arange(0, SEQ_BLOCK)
+    token_offsets = page_offsets * PAGE_SIZE
+    token_index = tl.load(
+        kv_index + kv_stride_h * cur_req_idx + token_offsets,
+        mask=page_offsets < cur_page_len,
+        other=0,
+    )
+    tl.store(
+        out_kv_index + cur_start_loc + page_offsets,
+        token_index // PAGE_SIZE,
+        mask=page_offsets < cur_page_len,
+    )
+
+
+@torch.no_grad()
+def repack_page_kv_index(kv_index, req_index, page_len, start_loc, max_page_len, out_kv_index, page_size):
+    """Pack one physical page id per logical request page."""
+    batch_size = req_index.shape[0]
+    block = 64
+    _fwd_kernel_repack_page_kv_index[(batch_size, triton.cdiv(max_page_len, block))](
+        kv_index,
+        req_index,
+        out_kv_index,
+        page_len,
+        start_loc,
+        kv_index.stride(0),
+        PAGE_SIZE=page_size,
+        SEQ_BLOCK=block,
+        num_warps=8,
+        num_stages=1,
+    )
+
+
 def repack_kv_ref(req_to_token_indexs, b_req_idx, b_seq_len, b_start_loc, output):
     for b, sl, start in zip(b_req_idx, b_seq_len, b_start_loc):
         output[start : start + sl] = req_to_token_indexs[b][:sl]

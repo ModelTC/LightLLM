@@ -7,6 +7,42 @@ from lightllm.common.basemodel.batch_objs import ModelInput
 INT64_MAX = torch.iinfo(torch.int64).max
 
 
+def _alloc_kv_mem_indexes(reqs: List[InferReq], target_kv_lens: List[int], token_num: int) -> torch.Tensor:
+    """Allocate KV slots for this step; page ownership stays in the caller."""
+    req_manager = g_infer_context.req_manager
+    mem_manager = req_manager.mem_manager
+    page_size = g_infer_context.args.page_size
+
+    if page_size == 1:
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_num)
+        return mem_manager.alloc(token_num)
+
+    assert len(reqs) == len(target_kv_lens)
+    alloc_need = sum(req._kv_cache_alloc_need(target_len) for req, target_len in zip(reqs, target_kv_lens))
+    if g_infer_context.radix_cache is not None:
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_need)
+
+    for req, target_len in zip(reqs, target_kv_lens):
+        assert req.cur_kv_len <= target_len and req.cur_kv_len <= req.hold_kv_len
+        assert req.hold_kv_len % page_size == 0
+        new_hold_kv_len = (target_len + page_size - 1) // page_size * page_size
+        if new_hold_kv_len > req.hold_kv_len:
+            new_page_indexes = mem_manager.alloc(new_hold_kv_len - req.hold_kv_len)
+            req_manager.req_to_token_indexs[req.req_idx, req.hold_kv_len : new_hold_kv_len] = new_page_indexes
+            req.hold_kv_len = new_hold_kv_len
+
+    # The request table is the source of truth. Return only the logical slots
+    # consumed by this step; the reserved tail remains owned by the request.
+    step_indexes = [
+        req_manager.req_to_token_indexs[req.req_idx, req.cur_kv_len : target_len]
+        for req, target_len in zip(reqs, target_kv_lens)
+    ]
+    if step_indexes:
+        return torch.cat(step_indexes)
+    return torch.empty((0,), dtype=torch.int32, device=req_manager.req_to_token_indexs.device)
+
+
 def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs = []
     total_token_num = 0
@@ -66,9 +102,8 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
     # dynamic prompt cache 准备 token
-    if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0])
+    target_kv_lens = [int(seq_len) for seq_len in b_seq_len]
+    mem_indexes = _alloc_kv_mem_indexes(run_reqs, target_kv_lens, input_ids.shape[0])
 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
@@ -77,7 +112,8 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         max_kv_seq_len=max_kv_seq_len,
         max_cache_len=max_cache_len,
         input_ids=input_ids,
-        mem_indexes_cpu=mem_indexes,
+        mem_indexes=mem_indexes if mem_indexes.is_cuda else None,
+        mem_indexes_cpu=mem_indexes if not mem_indexes.is_cuda else None,
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
@@ -141,9 +177,8 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     )
 
     # dynamic prompt cache 准备 token
-    if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0])
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0])
+    target_kv_lens = [req.cur_kv_len + 1 for req in req_objs]
+    mem_indexes = _alloc_kv_mem_indexes(req_objs, target_kv_lens, b_seq_len.shape[0])
 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
@@ -151,7 +186,8 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         input_ids=None,
-        mem_indexes_cpu=mem_indexes,
+        mem_indexes=mem_indexes if mem_indexes.is_cuda else None,
+        mem_indexes_cpu=mem_indexes if not mem_indexes.is_cuda else None,
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,

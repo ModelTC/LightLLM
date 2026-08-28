@@ -1,5 +1,6 @@
 import dataclasses
 import torch
+import triton
 from ..base_att import BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -153,6 +154,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
         actual_max_kv_len = self.infer_state.max_kv_seq_len
+        actual_max_page_len = triton.cdiv(actual_max_kv_len, self.backend.page_size)
         page_table_width = actual_max_kv_len
         if model.graph is not None and model.graph.can_run(
             batch_size=self.infer_state.batch_size,
@@ -170,9 +172,10 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         )
 
         page_table_copy(
-            page_table=self.page_table[:, :actual_max_kv_len],
+            page_table=self.page_table[:, :actual_max_page_len],
             req_to_token_indexs=model.req_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
+            page_size=self.backend.page_size,
         )
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFa3DecodeAttState"):
@@ -213,8 +216,8 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         kv = k
         qk_rope_head_dim = 64
         kv_lora_rank = kv.shape[-1] - qk_rope_head_dim
-        k_rope = kv[:, :, -qk_rope_head_dim:].view(-1, 1, 1, qk_rope_head_dim)
-        kv_nope = kv[:, :, :-qk_rope_head_dim].view(-1, 1, 1, kv_lora_rank)
+        k_rope = kv[:, :, -qk_rope_head_dim:].view(-1, self.backend.page_size, 1, qk_rope_head_dim)
+        kv_nope = kv[:, :, :-qk_rope_head_dim].view(-1, self.backend.page_size, 1, kv_lora_rank)
         k_descale, v_descale = None, None
         assert att_control.mla_decode
         softmax_scale = att_control.mla_decode_dict["softmax_scale"]

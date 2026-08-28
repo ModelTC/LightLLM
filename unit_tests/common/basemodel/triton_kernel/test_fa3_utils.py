@@ -4,7 +4,19 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
-from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params
+from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
+
+
+def test_page_table_copy_uses_page_bases():
+    req_to_token_indexs = torch.tensor([list(range(40, 52)), list(range(80, 92))], dtype=torch.int32, device="cuda")
+    page_table = torch.empty((2, 3), dtype=torch.int32, device="cuda")
+    page_table_copy(
+        page_table=page_table,
+        req_to_token_indexs=req_to_token_indexs,
+        b_req_idx=torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
+        page_size=4,
+    )
+    assert page_table.cpu().tolist() == [[20, 21, 22], [10, 11, 12]]
 
 
 def _reference_dynamic_spec_fa3_decode_params(b_req_idx, b_seq_len, b_mark_mtp_shared_group, hold_req_id):
