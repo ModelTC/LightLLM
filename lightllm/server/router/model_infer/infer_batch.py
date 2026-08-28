@@ -178,8 +178,7 @@ class InferenceContext:
         prefix_len, _ = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
-        if page_size > 1:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
@@ -971,13 +970,11 @@ class InferReq:
 
     def _kv_cache_alloc_need(self, target_kv_len: int) -> int:
         page_size = self.args.page_size
-        if page_size == 1:
-            return target_kv_len - self.cur_kv_len
         target_hold_len = (target_kv_len + page_size - 1) // page_size * page_size
-        return target_hold_len - self.hold_kv_len
+        return max(target_hold_len - self.hold_kv_len, 0)
 
     def _mtp_decode_need_token_num(self) -> int:
-        return (1 + self.mtp_step) * 2
+        return self._kv_cache_alloc_need(self.cur_kv_len + 3 * (1 + self.mtp_step))
 
 
 class InferReqUpdatePack:

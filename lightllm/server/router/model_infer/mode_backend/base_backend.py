@@ -639,6 +639,23 @@ class ModeBackend:
         return ready_reqs
 
     # 一些可以复用的通用功能函数
+    def _alloc_req_kv_mem(self, req_obj: InferReq, alloc_token_num: int):
+        if alloc_token_num == 0:
+            return
+
+        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
+
+        old_hold_kv_len = req_obj.hold_kv_len
+        new_hold_kv_len = old_hold_kv_len + alloc_token_num
+        mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
+        g_infer_context.req_manager.req_to_token_indexs[
+            req_obj.req_idx, old_hold_kv_len:new_hold_kv_len
+        ] = mem_indexes
+        req_obj.hold_kv_len = new_hold_kv_len
+        return
+
     def _get_classed_reqs(
         self,
         req_ids: List[int] = None,
@@ -729,6 +746,7 @@ class ModeBackend:
             if is_decode:
                 token_num = req_obj.decode_need_token_num()
                 if token_num <= can_alloc_token_num:
+                    self._alloc_req_kv_mem(req_obj, token_num)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
@@ -747,6 +765,7 @@ class ModeBackend:
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
                 if alloc_token_num <= can_alloc_token_num:
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num

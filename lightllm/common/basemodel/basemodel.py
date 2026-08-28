@@ -17,7 +17,11 @@ from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_cl
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
+    copy_kv_index_to_req,
+    select_kv_index_from_req,
+    select_kv_index_from_req_prefill,
+)
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
@@ -379,12 +383,34 @@ class TpPartBaseModel:
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
         model_input.to_cuda()
+        self._select_page_mem_indexes(model_input)
         assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
             return self._prefill(model_input=model_input)
         else:
             return self._decode(model_input)
+
+    def _select_page_mem_indexes(self, model_input: ModelInput):
+        if not model_input.mem_indexes_from_req_table or model_input.mem_indexes is not None:
+            return
+        if model_input.is_prefill:
+            model_input.mem_indexes = select_kv_index_from_req_prefill(
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=model_input.b_req_idx,
+                b_seq_len=model_input.b_seq_len,
+                b_ready_cache_len=model_input.b_ready_cache_len,
+                b_start_loc=model_input.b_prefill_start_loc,
+                max_q_seq_len=model_input.max_q_seq_len,
+                token_num=model_input.input_ids.shape[0],
+            )
+        else:
+            model_input.mem_indexes = select_kv_index_from_req(
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=model_input.b_req_idx,
+                b_seq_len=model_input.b_seq_len,
+            )
+        return
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
@@ -603,15 +629,16 @@ class TpPartBaseModel:
         )
 
         infer_state = self._create_inferstate(model_input)
-        init_req_to_token_indexes(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state.b_req_idx,
-            b_seq_len=infer_state.b_seq_len,
-            b_ready_cache_len=infer_state.b_ready_cache_len,
-            b_start_loc=model_input.b_prefill_start_loc,
-            alloc_mem_index=infer_state.mem_index,
-            max_q_seq_len=infer_state.max_q_seq_len,
-        )
+        if not model_input.mem_indexes_from_req_table:
+            init_req_to_token_indexes(
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=infer_state.b_req_idx,
+                b_seq_len=infer_state.b_seq_len,
+                b_ready_cache_len=infer_state.b_ready_cache_len,
+                b_start_loc=model_input.b_prefill_start_loc,
+                alloc_mem_index=infer_state.mem_index,
+                max_q_seq_len=infer_state.max_q_seq_len,
+            )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
@@ -671,12 +698,13 @@ class TpPartBaseModel:
         # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
         # 因此必须在 init_att_state 之前完成赋值。
         infer_state.is_cuda_graph = need_capture
-        copy_kv_index_to_req(
-            self.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_seq_len,
-            infer_state.mem_index,
-        )
+        if not model_input.mem_indexes_from_req_table:
+            copy_kv_index_to_req(
+                self.req_manager.req_to_token_indexs,
+                infer_state.b_req_idx,
+                infer_state.b_seq_len,
+                infer_state.mem_index,
+            )
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
 
@@ -795,6 +823,7 @@ class TpPartBaseModel:
 
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
+            self._select_page_mem_indexes(model_input)
             if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
                 gather_token_prefill_decode_mixed(
                     input_ids=model_input.input_ids,
@@ -832,28 +861,30 @@ class TpPartBaseModel:
         )
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        init_req_to_token_indexes(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state0.b_req_idx,
-            b_seq_len=infer_state0.b_seq_len,
-            b_ready_cache_len=infer_state0.b_ready_cache_len,
-            b_start_loc=model_input0.b_prefill_start_loc,
-            alloc_mem_index=infer_state0.mem_index,
-            max_q_seq_len=infer_state0.max_q_seq_len,
-        )
+        if not model_input0.mem_indexes_from_req_table:
+            init_req_to_token_indexes(
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=infer_state0.b_req_idx,
+                b_seq_len=infer_state0.b_seq_len,
+                b_ready_cache_len=infer_state0.b_ready_cache_len,
+                b_start_loc=model_input0.b_prefill_start_loc,
+                alloc_mem_index=infer_state0.mem_index,
+                max_q_seq_len=infer_state0.max_q_seq_len,
+            )
         infer_state0.init_some_extra_state(self)
         infer_state0.init_att_state()
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        init_req_to_token_indexes(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state1.b_req_idx,
-            b_seq_len=infer_state1.b_seq_len,
-            b_ready_cache_len=infer_state1.b_ready_cache_len,
-            b_start_loc=model_input1.b_prefill_start_loc,
-            alloc_mem_index=infer_state1.mem_index,
-            max_q_seq_len=infer_state1.max_q_seq_len,
-        )
+        if not model_input1.mem_indexes_from_req_table:
+            init_req_to_token_indexes(
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=infer_state1.b_req_idx,
+                b_seq_len=infer_state1.b_seq_len,
+                b_ready_cache_len=infer_state1.b_ready_cache_len,
+                b_start_loc=model_input1.b_prefill_start_loc,
+                alloc_mem_index=infer_state1.mem_index,
+                max_q_seq_len=infer_state1.max_q_seq_len,
+            )
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
 
@@ -885,6 +916,7 @@ class TpPartBaseModel:
 
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
+            self._select_page_mem_indexes(model_input)
             if model_input.input_ids is None:
                 if model_input.batch_size > 0:
                     model_input.input_ids = gather_token(
@@ -918,23 +950,25 @@ class TpPartBaseModel:
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             infer_state0.is_cuda_graph = need_capture
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
+            if not padded_model_input0.mem_indexes_from_req_table:
+                copy_kv_index_to_req(
+                    self.req_manager.req_to_token_indexs,
+                    infer_state0.b_req_idx,
+                    infer_state0.b_seq_len,
+                    infer_state0.mem_index,
+                )
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state1.is_cuda_graph = need_capture
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
+            if not padded_model_input1.mem_indexes_from_req_table:
+                copy_kv_index_to_req(
+                    self.req_manager.req_to_token_indexs,
+                    infer_state1.b_req_idx,
+                    infer_state1.b_seq_len,
+                    infer_state1.mem_index,
+                )
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -956,22 +990,24 @@ class TpPartBaseModel:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
+            if not model_input0.mem_indexes_from_req_table:
+                copy_kv_index_to_req(
+                    self.req_manager.req_to_token_indexs,
+                    infer_state0.b_req_idx,
+                    infer_state0.b_seq_len,
+                    infer_state0.mem_index,
+                )
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(model_input1, 1)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
+            if not model_input1.mem_indexes_from_req_table:
+                copy_kv_index_to_req(
+                    self.req_manager.req_to_token_indexs,
+                    infer_state1.b_req_idx,
+                    infer_state1.b_seq_len,
+                    infer_state1.mem_index,
+                )
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 

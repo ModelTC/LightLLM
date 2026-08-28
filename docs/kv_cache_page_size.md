@@ -11,18 +11,20 @@ KV 存储和请求表，但资源的申请、缓存和释放以完整物理页�
    `cur_kv_len <= hold_kv_len` 且 `hold_kv_len % page_size == 0`。
 2. 一个物理页内的 KV 槽连续，页首索引可被 `page_size` 整除。请求表保存已持有页的全部 token 索引，
    包括尚未使用的尾部槽位。
-3. `ModelInput.mem_indexes` / `InferState.mem_index` 只包含本轮真实参与计算的 token，不能包含预留尾部。
+3. `req_to_token_indexs` 保存请求拥有的完整页；模型创建 `InferState` 时再从中选出本轮真实参与计算的
+   token，`InferState.mem_index` 不包含预留尾部。
 4. Radix Cache 只插入、拆分、命中和淘汰完整页；不足一页的请求尾部在请求结束或暂停时整页回收。
-5. `page_size=1` 继续走原有批量申请和 token 级页表路径，不改变默认行为。
+5. `page_size=1` 与多 token 页使用相同的调度期预留和模型执行期索引选择路径。
 
-页容量计算、整页申请和本轮索引组装由 Prefill/Decode 输入构造层负责；`ReqManager` 只保留请求 ID、
-请求表及其原有生命周期职责，不提供 page allocator 接口。
+页容量计算和整页申请由调度层在请求获准进入 Prefill/Decode batch 时完成；输入构造层只构造本轮输入，
+真实推理索引由模型执行层从请求表选取。
+`ReqManager` 只保留请求 ID、请求表及其原有生命周期职责，不提供 page allocator 接口。
 
 ## 生命周期
 
-- Prefill：按每个请求的目标 KV 长度将容量向上对齐。新页一次申请并写入请求表，本轮只返回
+- Prefill：请求通过调度后，按目标 KV 长度将容量向上对齐，新页一次申请并完整写入请求表。模型执行时再选择
   `[cur_kv_len, target_kv_len)` 对应的真实索引。
-- Decode：若尾页仍有预留槽位，不再访问 allocator；跨页时申请一个新页。
+- Decode：请求通过调度后，若尾页仍有预留槽位则不再访问 allocator；容量不足时先补齐完整页再执行。
 - Prefix Cache 命中：命中长度天然是整页，`cur_kv_len` 与 `hold_kv_len` 同时初始化为命中长度。
 - 完成/暂停：完整逻辑页可进入 Radix Cache；重复页和未完成尾页按物理页展开后释放。
 - Attention：FA3/FlashInfer 页表每项由物理 token 页首索引除以 `page_size` 得到，KV buffer 视为
