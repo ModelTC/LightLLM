@@ -368,6 +368,7 @@ def get_dtype(model_path: str):
 @lru_cache(maxsize=None)
 def get_fixed_kv_len():
     start_args = get_env_start_args()
+    assert start_args.page_size == 1, "fixed KV cache only supports page_size == 1"
     model_cfg = get_config_json(start_args.model_dir)
     if "prompt_cache_token_ids" in model_cfg:
         return len(model_cfg["prompt_cache_token_ids"])
