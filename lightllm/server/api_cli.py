@@ -857,7 +857,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--disk_cache_dir",
         type=str,
         default=None,
-        help="""Directory used to persist disk cache data. Defaults to a temp directory when not set.""",
+        help="""Base directory used to persist disk cache data. A unique service name is appended so every server
+        instance uses a separate subdirectory. Defaults to a temp directory when not set.""",
     )
     parser.add_argument(
         "--enable_dp_prompt_cache_fetch",
