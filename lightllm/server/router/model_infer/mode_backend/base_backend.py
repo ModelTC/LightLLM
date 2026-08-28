@@ -419,7 +419,10 @@ class ModeBackend:
 
         start_loc = 0
         for req_obj in run_reqs:
-            q_len = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+            if self.disable_chunked_prefill:
+                q_len = req_obj.get_cur_total_len() - req_obj.cur_kv_len
+            else:
+                q_len = req_obj.get_chuncked_input_token_len() - req_obj.cur_kv_len
             topk = req_obj.sampling_param.shm_param.prompt_logprobs
             capture_count = min(q_len, req_obj.shm_req.input_len - req_obj.cur_kv_len - 1)
             if capture_count > 0 and topk == 0 and self.is_master_in_dp:
@@ -745,11 +748,11 @@ class ModeBackend:
                     is_decode = False
 
             if is_decode:
-                token_num = req_obj.decode_need_token_num()
-                if token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, token_num)
+                alloc_token_num = req_obj.decode_need_token_num()
+                if alloc_token_num <= can_alloc_token_num:
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
                     decode_reqs.append(req_obj)
-                    can_alloc_token_num -= token_num
+                    can_alloc_token_num -= alloc_token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
@@ -761,10 +764,15 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
-                token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
-                alloc_token_num = req_obj.prefill_kv_alloc_need(is_chuncked_prefill=not self.disable_chunked_prefill)
+                if self.disable_chunked_prefill:
+                    token_num = req_obj.get_cur_total_len() - req_obj.cur_kv_len
+                else:
+                    token_num = req_obj.get_chuncked_input_token_len() - req_obj.cur_kv_len
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
+                alloc_token_num = req_obj.prefill_need_token_num(
+                    is_chuncked_prefill=not self.disable_chunked_prefill
+                )
                 if alloc_token_num <= can_alloc_token_num:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num)
                     prefill_tokens += token_num

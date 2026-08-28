@@ -613,10 +613,6 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
-        if self.mtp_step > 0:
-            self.decode_need_token_num = self._mtp_decode_need_token_num
-        else:
-            self.decode_need_token_num = self._normal_decode_need_token_num
 
         if g_infer_context.is_linear_att_mixed_model:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_linear_att
@@ -950,32 +946,21 @@ class InferReq:
 
     def prefill_need_token_num(self, is_chuncked_prefill: bool):
         if is_chuncked_prefill:
-            input_token_ids = self.get_chuncked_input_token_ids()
+            target_kv_len = self.get_chuncked_input_token_len()
         else:
-            input_token_ids = self.get_input_token_ids()
-
-        return len(input_token_ids) - self.cur_kv_len
-
-    def prefill_kv_alloc_need(self, is_chuncked_prefill: bool) -> int:
-        if is_chuncked_prefill:
-            target_kv_len = len(self.get_chuncked_input_token_ids())
-        else:
-            target_kv_len = len(self.get_input_token_ids())
+            target_kv_len = self.get_cur_total_len()
         return self._kv_cache_alloc_need(target_kv_len)
 
     def decode_need_token_num(self) -> int:
-        raise NotImplementedError("error")
-
-    def _normal_decode_need_token_num(self) -> int:
-        return self._kv_cache_alloc_need(self.cur_kv_len + 1)
+        decode_token_num = 1 if self.mtp_step == 0 else 3 * (1 + self.mtp_step)
+        return self._kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
 
     def _kv_cache_alloc_need(self, target_kv_len: int) -> int:
         page_size = self.args.page_size
         target_hold_len = (target_kv_len + page_size - 1) // page_size * page_size
-        return max(target_hold_len - self.hold_kv_len, 0)
-
-    def _mtp_decode_need_token_num(self) -> int:
-        return self._kv_cache_alloc_need(self.cur_kv_len + 3 * (1 + self.mtp_step))
+        alloc_token_num = max(target_hold_len - self.hold_kv_len, 0)
+        assert alloc_token_num % page_size == 0
+        return alloc_token_num
 
 
 class InferReqUpdatePack:
