@@ -69,6 +69,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--disable_pd_master_decode_capacity_limit",
+        action="store_true",
+        help="Disable PD master admission control based on the total capacity of registered decode nodes.",
+    )
+    parser.add_argument(
         "--pd_trans_mode",
         type=str,
         choices=["nccl", "nixl"],
@@ -341,8 +346,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
+    parser.add_argument(
+        "--short_prefill_token_threshold",
+        type=int,
+        default=None,
+        help="""Enable long/short prefill scheduling and set the maximum remaining tokens of a short request.
+        The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
+    )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
-    parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
 
     parser.add_argument(
         "--output_constraint_mode",

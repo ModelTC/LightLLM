@@ -53,8 +53,6 @@ def format_tgi_params(params, num_beam: int = 1):
     params.pop("details", False)
     params.pop("decoder_input_details", False)
     params.pop("seed", 0)
-    params.pop("token_healing_top_k", 0)
-    params.pop("token_healing_unmerge_last_token", 0)
     return params
 
 

@@ -246,7 +246,7 @@ async def _pd_process_generate(
         ):
             metadata.pop("prompt_ids", None)
             if not return_output_logprobs:
-                for key in ("id", "logprob", "cumlogprob", "special", "logprobs"):
+                for key in ("logprob", "cumlogprob", "special", "logprobs"):
                     metadata.pop(key, None)
             if metadata.get("count_output_tokens") == 1:
                 metadata["node_mode"] = manager.args.run_mode

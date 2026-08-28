@@ -132,7 +132,6 @@ class ModeBackend:
             "load_way": self.load_way,
             "max_req_num": kvargs.get("max_req_num", 1000),
             "max_seq_length": kvargs.get("max_seq_length", 1024 * 5),
-            "is_token_healing": kvargs.get("is_token_healing", False),
             "return_all_prompt_logics": self.args.enable_prompt_logprobs,
             "disable_chunked_prefill": self.disable_chunked_prefill,
             "data_type": kvargs.get("data_type", "float16"),
@@ -336,7 +335,6 @@ class ModeBackend:
                 "load_way": main_kvargs["load_way"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
                 "max_seq_length": main_kvargs.get("max_seq_length", 1024 * 5),
-                "is_token_healing": False,
                 "return_all_prompt_logics": False,
                 "disable_chunked_prefill": self.disable_chunked_prefill,
                 "data_type": main_kvargs.get("data_type", "float16"),
@@ -626,6 +624,28 @@ class ModeBackend:
             )
         return
 
+    def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
+        """
+        保留第一个长请求的调度位置，其余请求优先调度剩余 prefill token 更少的请求。
+        """
+        short_token_threshold = self.args.short_prefill_token_threshold
+        if short_token_threshold is None:
+            return ready_reqs
+
+        def remaining_prefill_tokens(req: InferReq) -> int:
+            # cur_kv_len 已包含 prefix match 和之前完成的 chunk。
+            return max(0, req.shm_req.input_len - req.cur_kv_len)
+
+        sorted_reqs = sorted(
+            ready_reqs,
+            key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
+        )
+        for index, req in enumerate(sorted_reqs):
+            if remaining_prefill_tokens(req) > short_token_threshold:
+                sorted_reqs.insert(0, sorted_reqs.pop(index))
+                break
+        return sorted_reqs
+
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
         self,
@@ -669,6 +689,7 @@ class ModeBackend:
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
+        ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
 
         wait_pause_reqs = []
         paused_reqs = []

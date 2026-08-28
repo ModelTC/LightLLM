@@ -51,7 +51,6 @@ class InferStateInfo:
 
         self.mem_index: torch.Tensor = None
 
-        self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False
         # 在开启 return_all_prompt_logics 模式时，保存整个 prefill 阶段每一个
         # token 位置的 logits，供后续回传 prompt logprobs 信息使用。

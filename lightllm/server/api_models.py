@@ -293,11 +293,16 @@ class PromptTokensDetails(BaseModel):
     audio_tokens: int = 0
 
 
+class CompletionTokensDetails(BaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: Optional[int] = 0
     total_tokens: int = 0
     prompt_tokens_details: Optional[PromptTokensDetails] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
 
 
 class ChatMessage(BaseModel):

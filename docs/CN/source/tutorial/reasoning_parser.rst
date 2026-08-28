@@ -175,6 +175,20 @@ GPT-OSS
     // 答案块
     {"choices": [{"delta": {"content": "答案片段"}}]}
 
+启用 ``--reasoning_parser`` 后，Chat Completions 的 usage 会返回生成的推理
+token 数量（不包含推理分隔符）：
+
+.. code-block:: json
+
+    {
+        "usage": {
+            "completion_tokens": 128,
+            "completion_tokens_details": {"reasoning_tokens": 96}
+        }
+    }
+
+Responses API 会在 ``usage.output_tokens_details.reasoning_tokens`` 中返回相同计数。
+
 高级功能
 --------
 

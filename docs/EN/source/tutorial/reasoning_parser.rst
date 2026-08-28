@@ -175,6 +175,21 @@ Response Format
     // Answer chunk
     {"choices": [{"delta": {"content": "Answer fragment"}}]}
 
+When ``--reasoning_parser`` is enabled, Chat Completions usage reports the
+number of generated reasoning tokens (excluding reasoning delimiters):
+
+.. code-block:: json
+
+    {
+        "usage": {
+            "completion_tokens": 128,
+            "completion_tokens_details": {"reasoning_tokens": 96}
+        }
+    }
+
+The Responses API exposes the same count as
+``usage.output_tokens_details.reasoning_tokens``.
+
 Advanced Features
 -----------------
 

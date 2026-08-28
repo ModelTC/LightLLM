@@ -45,7 +45,7 @@ class ObjType(enum.Enum):
     PD_UPLOAD_GENERATE_ERROR = 8  # P/D 节点向 pd master 上报本地请求生成异常。
 
 
-PD_COMPACT_TOKEN_INFO_LEN = 11
+PD_COMPACT_TOKEN_INFO_LEN = 12
 PDCompactTokenInfo = Tuple[
     int,  # sub request id
     str,  # decoded text
@@ -58,10 +58,12 @@ PDCompactTokenInfo = Tuple[
     int,  # finish status
     Optional[str],  # node_mode, first token only
     Optional[Tuple[int, int, int]],  # input text/audio/image tokens, first token only
+    Optional[int],  # token id
 ]
 _PD_COMPACT_METADATA_KEYS = frozenset(
     {
         "count_output_tokens",
+        "id",
         "prompt_tokens",
         "prompt_cache_len",
         "mtp_accepted_token_num",
@@ -102,6 +104,7 @@ def build_pd_compact_token_info(sub_req_id, text, metadata, finish_status) -> Op
         finish_status.status,
         metadata.get("node_mode"),
         compact_input_usage,
+        metadata.get("id"),
     )
 
 
@@ -118,8 +121,10 @@ def unpack_pd_compact_token_info(token_info: PDCompactTokenInfo):
         finish_status,
         node_mode,
         input_usage,
+        token_id,
     ) = token_info
     metadata = {
+        "id": token_id,
         "count_output_tokens": count_output_tokens,
         "prompt_tokens": prompt_tokens,
         "prompt_cache_len": prompt_cache_len,

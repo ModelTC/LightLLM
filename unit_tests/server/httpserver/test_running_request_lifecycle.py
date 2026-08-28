@@ -1,4 +1,5 @@
 import asyncio
+import pickle
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,7 +7,7 @@ import pytest
 
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
-from lightllm.server.pd_io_struct import NodeRole
+from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
 
 
@@ -116,6 +117,28 @@ def test_prefill_full_cache_hit_never_enters_running_request_count():
         manager._register_running_request.assert_not_awaited()
         manager._unregister_running_request.assert_not_awaited()
         websocket.send.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_prefill_upload_preserves_int64_multimodal_prompt_ids():
+    async def run():
+        manager = _make_manager(NodeRole.P)
+        multimodal_token_id = 2 ** 32
+        manager._encode.return_value = [10, multimodal_token_id, 12]
+        websocket = AsyncMock()
+        pd_event = asyncio.Event()
+        pd_event.decode_node_info = SimpleNamespace(ready_kv_len=2)
+        pd_event.set()
+
+        with pytest.raises(PDPrefillNodeStopGenToken):
+            await _drain_generate(manager, _sampling_params(), _multimodal_params(), websocket, pd_event)
+
+        obj_type, group_request_id, prompt_ids = pickle.loads(websocket.send.await_args.args[0])
+        assert obj_type == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS
+        assert group_request_id == 123
+        assert prompt_ids.itemsize == 8
+        assert prompt_ids.tolist() == [10, multimodal_token_id, 12]
 
     asyncio.run(run())
 
