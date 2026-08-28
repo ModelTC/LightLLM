@@ -11,8 +11,8 @@ KV 存储和请求表，但资源的申请、缓存和释放以完整物理页�
    `cur_kv_len <= hold_kv_len` 且 `hold_kv_len % page_size == 0`。
 2. 一个物理页内的 KV 槽连续，页首索引可被 `page_size` 整除。请求表保存已持有页的全部 token 索引，
    包括尚未使用的尾部槽位。
-3. `req_to_token_indexs` 保存请求拥有的完整页；模型创建 `InferState` 时再从中选出本轮真实参与计算的
-   token，`InferState.mem_index` 不包含预留尾部。
+3. `req_to_token_indexs` 保存请求拥有的完整页；创建 `InferState` 时根据请求索引和序列位置直接聚合本轮
+   真实参与计算的 token，`ModelInput` 不携带物理 KV 索引，`InferState.mem_index` 不包含预留尾部。
 4. Radix Cache 只插入、拆分、命中和淘汰完整页；不足一页的请求尾部在请求结束或暂停时整页回收。
 5. `page_size=1` 与多 token 页使用相同的调度期预留和模型执行期索引选择路径。
 

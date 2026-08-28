@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import torch
 
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import DFlashSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
@@ -60,8 +59,6 @@ def test_dflash_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         ),
         enable_dynmaic_mtp=True,
     )
-    extra_mem_indexes_cpu = torch.arange(100, 106, dtype=torch.int32)
-    monkeypatch.setattr(mtp_utils, "alloc_mem_indexes", lambda token_num: extra_mem_indexes_cpu)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, non_blocking=False: self)
     monkeypatch.setattr(
         g_pin_mem_manager,
@@ -83,8 +80,6 @@ def test_dflash_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         b_position_delta=torch.tensor([1, 1, 1, 2, 2], dtype=torch.int32),
         b_shared_seq_len=torch.tensor([3, 3, 3, 6, 6], dtype=torch.int32),
         b_shared_radix_node_id=torch.tensor([17, 17, 17, 19, 19], dtype=torch.int64),
-        mem_indexes=torch.arange(5, dtype=torch.int32),
-        mem_indexes_cpu=torch.arange(5, dtype=torch.int32),
         multimodal_params=[{"images": [], "audios": []} for _ in range(5)],
         mtp_draft_input_hiddens=None,
     )
@@ -113,13 +108,10 @@ def test_dflash_commits_verify_kv_and_builds_parallel_block(monkeypatch):
     assert torch.equal(block_draft_input.b_seq_len, torch.tensor([6, 7, 8, 10, 11, 12], dtype=torch.int32))
     assert torch.equal(block_draft_input.b_position_delta, torch.tensor([1, 1, 1, 2, 2, 2], dtype=torch.int32))
     assert block_draft_input.mtp_draft_input_hiddens is None
-    assert block_draft_input.mem_indexes is extra_mem_indexes_cpu
-    assert block_draft_input.mem_indexes_cpu is None
 
     assert torch.equal(proposal.token_ids, torch.tensor([[30, 31], [40, 41]], dtype=torch.int64))
     torch.testing.assert_close(
         proposal.schedule_scores,
         flat_draft_token_probs.reshape(2, block_size)[:, :2].float(),
     )
-    assert len(proposal.extra_mem_indexes_cpu) == 1
-    assert proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu is extra_mem_indexes_cpu
+    assert proposal.extra_mem_indexes_cpu == []

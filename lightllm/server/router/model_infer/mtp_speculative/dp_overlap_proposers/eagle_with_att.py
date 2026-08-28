@@ -4,14 +4,12 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
     BaseDpOverlapProposer,
 )
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.utils import (
     get_dp_overlap_req_start_rows,
 )
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
@@ -185,21 +183,12 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
                 empty_multimodal_params = {"images": [], "audios": []}
                 model_input.multimodal_params = [empty_multimodal_params] * model_input.batch_size
 
-        extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * (draft_step - 1))
-        extra_mem_indexes = extra_mem_indexes_cpu.to(device=target_next_token_ids0.device, non_blocking=True)
-
         for step in range(1, draft_step):
-            mem_start = (step - 1) * req_num
-            step_mem_indexes = extra_mem_indexes[mem_start : mem_start + req_num]
-            mem_offset = 0
             for batch_index, model_input in enumerate(model_inputs):
-                batch_req_num = req_num_by_batch[batch_index]
                 model_input.input_ids = draft_token_ids_by_batch[batch_index]
                 model_input.mtp_draft_input_hiddens = draft_hiddens_by_batch[batch_index]
-                model_input.mem_indexes = step_mem_indexes[mem_offset : mem_offset + batch_req_num]
                 model_input.max_kv_seq_len = max_kv_seq_lens_by_batch[batch_index] + step
                 model_input.total_token_num = model_input.batch_size * model_input.max_kv_seq_len
-                mem_offset += batch_req_num
 
             draft_outputs = draft_model._microbatch_overlap_decode_cuda(*model_inputs)
             for batch_index, draft_output in enumerate(draft_outputs):
@@ -221,7 +210,7 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
 
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
+            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )
 

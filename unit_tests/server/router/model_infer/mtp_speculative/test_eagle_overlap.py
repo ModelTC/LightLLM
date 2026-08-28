@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers import eagle_with_att
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.utils import (
     get_dp_overlap_req_start_rows,
@@ -78,8 +77,6 @@ def _target_input(batch_size, b_mtp_index=None, device="cpu"):
         b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device=device),
         b_shared_seq_len=torch.zeros(batch_size, dtype=torch.int32, device=device),
         b_shared_radix_node_id=torch.arange(batch_size, dtype=torch.int64, device=device),
-        mem_indexes=torch.arange(batch_size, dtype=torch.int32, device=device),
-        mem_indexes_cpu=torch.arange(batch_size, dtype=torch.int32),
         max_kv_seq_len=16,
         max_cache_len=16,
         is_prefill=False,
@@ -118,11 +115,6 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
     proposer = DpOverlapEagleWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
-    monkeypatch.setattr(
-        mtp_utils,
-        "alloc_mem_indexes",
-        lambda token_count: torch.arange(token_count, dtype=torch.int32),
-    )
     model_input0 = _target_input(batch_size=3)
     model_input1 = _target_input(batch_size=6)
 
@@ -148,17 +140,10 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
     assert draft_model.decode_batch_sizes == [(3, 6), (1, 2)]
     assert proposal.token_ids.shape == (3, 2)
     assert torch.equal(proposal.token_ids, torch.tensor([[1, 0], [0, 0], [5, 1]]))
-    assert len(proposal.extra_mem_indexes_cpu) == 1
-    assert torch.equal(
-        proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu,
-        torch.arange(3, dtype=torch.int32),
-    )
-    assert proposal.extra_mem_indexes_cpu[0].free_mask_cpu is None
-    assert torch.equal(model_input0.mem_indexes, torch.arange(3, dtype=torch.int32))
-    assert torch.equal(model_input1.mem_indexes, torch.arange(6, dtype=torch.int32))
+    assert proposal.extra_mem_indexes_cpu == []
 
 
-def test_overlap_eagle_supports_empty_verify_rows(monkeypatch):
+def test_overlap_eagle_supports_empty_verify_rows():
     draft_model = _DraftModel()
     backend = SimpleNamespace(
         max_draft_step=2,
@@ -171,11 +156,6 @@ def test_overlap_eagle_supports_empty_verify_rows(monkeypatch):
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
     proposer = DpOverlapEagleWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
-    monkeypatch.setattr(
-        mtp_utils,
-        "alloc_mem_indexes",
-        lambda token_count: torch.arange(token_count, dtype=torch.int32),
-    )
 
     proposal = proposer.propose_next_overlap(
         target_model_input0=_target_input(batch_size=0),
@@ -216,11 +196,6 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
         ),
     )
     proposer = DpOverlapEagleWithAttProposer(backend=backend, enable_dynmaic_mtp=True)
-    monkeypatch.setattr(
-        mtp_utils,
-        "alloc_mem_indexes",
-        lambda token_count: torch.arange(token_count, dtype=torch.int32),
-    )
 
     proposal = proposer.propose_next_overlap(
         target_model_input0=_target_input(
@@ -320,11 +295,6 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
     )
     proposer = DpOverlapEagle3Proposer(backend=backend, enable_dynmaic_mtp=False)
-    monkeypatch.setattr(
-        mtp_utils,
-        "alloc_mem_indexes",
-        lambda token_count: torch.arange(token_count, dtype=torch.int32),
-    )
     model_input0 = _target_input(batch_size=3)
     model_input1 = _target_input(batch_size=6)
 
@@ -354,12 +324,7 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     assert draft_model.decode_batch_sizes == [(3, 6), (1, 2)]
     assert proposal.token_ids.shape == (3, 2)
     assert torch.equal(proposal.token_ids, torch.tensor([[1, 0], [0, 0], [5, 1]]))
-    assert len(proposal.extra_mem_indexes_cpu) == 1
-    assert torch.equal(
-        proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu,
-        torch.arange(3, dtype=torch.int32),
-    )
-    assert proposal.extra_mem_indexes_cpu[0].free_mask_cpu is None
+    assert proposal.extra_mem_indexes_cpu == []
 
 
 def test_eagle3_maps_draft_token_ids_in_proposer():

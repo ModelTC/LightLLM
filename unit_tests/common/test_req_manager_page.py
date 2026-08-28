@@ -99,7 +99,6 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
 
     assert run_reqs == [req, req, req]
     assert model_input.b_seq_len.tolist() == [4, 5, 6]
-    assert model_input.mem_indexes_cpu is None
     assert req.hold_kv_len == 12
     assert context.req_manager.mem_manager.alloc_sizes == [8]
     assert context.req_manager.req_to_token_indexs[0, :12].tolist() == list(range(12))
@@ -126,8 +125,6 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
 
     model_input, _ = generic_pre_process.prepare_decode_inputs([req])
 
-    assert model_input.mem_indexes_cpu is None
-    assert model_input.mem_indexes_from_req_table is True
     assert req.hold_kv_len == 12
     assert context.req_manager.mem_manager.alloc_sizes == [9]
     assert context.req_manager.req_to_token_indexs[0, :12].tolist() == list(range(12))

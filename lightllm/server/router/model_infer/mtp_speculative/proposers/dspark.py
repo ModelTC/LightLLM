@@ -5,12 +5,8 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
-    BaseSpecProposer,
-    MtpMemIndexesToFree,
-)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
     DSparkSpecProposal,
 )
@@ -92,10 +88,9 @@ class DSparkProposer(BaseSpecProposer):
         verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
         draft_model.forward(verify_draft_input)
 
-        # DSpark 每个请求固定展开一个完整 block，临时 KV 在 target verify 完成
-        # 后通过 proposal 统一释放。block 第一行是 accepted-tail anchor，其余行
-        # 使用 mask token，由 parallel backbone 一次并行计算。
-        extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * block_size)
+        # DSpark 每个请求固定展开一个完整 block。block 第一行是
+        # accepted-tail anchor，其余行使用 mask token，由 parallel backbone
+        # 一次并行计算；KV 位置由请求页表和序列位置确定。
         block_input_ids = target_next_token_ids.new_full(
             (req_num * block_size,),
             fill_value=draft_model.mask_token_id,
@@ -143,8 +138,6 @@ class DSparkProposer(BaseSpecProposer):
             .repeat_interleave(block_size)
             .contiguous()
         )
-        draft_input.mem_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
-        draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         draft_output = draft_model.forward(draft_input)
 
@@ -184,7 +177,7 @@ class DSparkProposer(BaseSpecProposer):
 
         return DSparkSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
+            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
             schedule_scores_cpu=schedule_scores_cpu,
         )

@@ -81,17 +81,6 @@ class SpecEngine:
             return model_input, None
 
         from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import prepare_dynamic_mtp_model_input
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-        if not model_input.mem_indexes_from_req_table:
-            # 兼容外部构造的旧式 ModelInput：尚未绑定请求位置的临时 KV slot
-            # 可以随动态 verify 行一起裁剪并立即释放。
-            unused_mem_indexes_cpu = model_input.mem_indexes_cpu[plan.dynamic_batch_size :]
-            model_input.mem_indexes_cpu = model_input.mem_indexes_cpu[: plan.dynamic_batch_size]
-            if model_input.mem_indexes is not None:
-                model_input.mem_indexes = model_input.mem_indexes[: plan.dynamic_batch_size]
-            if unused_mem_indexes_cpu.numel() > 0:
-                g_infer_context.req_manager.mem_manager.free(unused_mem_indexes_cpu)
 
         model_input, selected_row_mask = prepare_dynamic_mtp_model_input(
             model_input=model_input,
