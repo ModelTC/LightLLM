@@ -6,7 +6,8 @@ import torch
 
 @dataclass
 class EPLBState:
-    redundant_experts_per_rank: int
+    num_redundant_experts_per_rank: int
+    initial_redundant_expert_ids_by_rank: torch.Tensor
     logical_to_physical_map: torch.Tensor
     logical_replica_count: torch.Tensor
     route_counter: torch.Tensor
@@ -16,15 +17,15 @@ class EPLBState:
 
 @dataclass(frozen=True)
 class ExpertParallelState:
-    logical_experts: int
+    num_logical_experts: int
     world_size: int
     eplb: Optional[EPLBState] = None
 
     @property
-    def primary_experts_per_rank(self) -> int:
-        return self.logical_experts // self.world_size
+    def num_primary_experts_per_rank(self) -> int:
+        return self.num_logical_experts // self.world_size
 
     @property
-    def total_physical_experts(self) -> int:
-        redundant_experts_per_rank = 0 if self.eplb is None else self.eplb.redundant_experts_per_rank
-        return self.logical_experts + self.world_size * redundant_experts_per_rank
+    def num_total_physical_experts(self) -> int:
+        num_redundant_experts_per_rank = 0 if self.eplb is None else self.eplb.num_redundant_experts_per_rank
+        return self.num_logical_experts + self.world_size * num_redundant_experts_per_rank

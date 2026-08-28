@@ -89,16 +89,15 @@ class FusedMoeWeight(BaseWeightTpl):
         args = get_env_start_args()
         self.expert_parallel_state: Optional[ExpertParallelState] = None
         # Initial placement metadata is used only while loading checkpoint rows.
-        # Rebalancing changes live redundant rows and must not update this metadata.
         self._initial_redundant_expert_ids = []
         self._initial_redundant_expert_idx_to_local_idx = {}
         eplb = None
         if args.enable_prefill_eplb:
-            redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
+            num_redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
             all_initial_ids = build_initial_redundant_expert_ids(
                 self.n_routed_experts,
                 self.global_world_size,
-                redundant_experts_per_rank,
+                num_redundant_experts_per_rank,
             )
             self._initial_redundant_expert_ids = all_initial_ids[self.global_rank_].tolist()
             logical_to_physical, logical_replica_count = build_logical_to_physical_map(
@@ -107,12 +106,13 @@ class FusedMoeWeight(BaseWeightTpl):
                 source_rank=self.global_rank_,
                 node_world_size=get_node_world_size(),
             )
-            # The initial dense window needs room for the common two prefill
-            # dispatches per manager step.  In steady sparse mode the reset
-            # ring only uses its newest roughly two rows; the full capacity is
-            # not copied to the planner.
+            # route_counter 每次 prefill dispatch 记录一行。初始阶段连续采样
+            # step_interval 个 manager step，兼顾micro batch overlap的两次 dispatch，因此容量设为
+            # 2 * step_interval。稳定阶段复用该环形缓冲区，但只把当前短采样窗口内
+            # 实际记录的最近行传给 planner，不复制整个缓冲区。
             eplb = EPLBState(
-                redundant_experts_per_rank=redundant_experts_per_rank,
+                num_redundant_experts_per_rank=num_redundant_experts_per_rank,
+                initial_redundant_expert_ids_by_rank=all_initial_ids,
                 logical_to_physical_map=logical_to_physical.cuda(),
                 logical_replica_count=logical_replica_count.cuda(),
                 route_counter=torch.zeros(
@@ -123,7 +123,7 @@ class FusedMoeWeight(BaseWeightTpl):
             )
         if self.enable_ep_moe:
             self.expert_parallel_state = ExpertParallelState(
-                logical_experts=self.n_routed_experts,
+                num_logical_experts=self.n_routed_experts,
                 world_size=self.global_world_size,
                 eplb=eplb,
             )
@@ -143,20 +143,20 @@ class FusedMoeWeight(BaseWeightTpl):
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
             eplb = self.expert_parallel_state.eplb
-            redundant_experts_per_rank = 0 if eplb is None else eplb.redundant_experts_per_rank
+            num_redundant_experts_per_rank = 0 if eplb is None else eplb.num_redundant_experts_per_rank
             logger.debug(
                 f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
                 f"initial_redundant_expert_ids: {self._initial_redundant_expert_ids}"
             )
-            n_experts_per_rank = self.expert_parallel_state.primary_experts_per_rank
-            self.local_n_routed_experts = n_experts_per_rank + redundant_experts_per_rank
-            start_expert_id = self.global_rank_ * n_experts_per_rank
+            num_primary_experts_per_rank = self.expert_parallel_state.num_primary_experts_per_rank
+            self.local_n_routed_experts = num_primary_experts_per_rank + num_redundant_experts_per_rank
+            start_expert_id = self.global_rank_ * num_primary_experts_per_rank
             self.expert_idx_to_local_idx = {
                 expert_idx: expert_idx - start_expert_id
-                for expert_idx in range(start_expert_id, start_expert_id + n_experts_per_rank)
+                for expert_idx in range(start_expert_id, start_expert_id + num_primary_experts_per_rank)
             }
             self._initial_redundant_expert_idx_to_local_idx = {
-                redundant_expert_idx: n_experts_per_rank + i
+                redundant_expert_idx: num_primary_experts_per_rank + i
                 for (i, redundant_expert_idx) in enumerate(self._initial_redundant_expert_ids)
             }
         else:
