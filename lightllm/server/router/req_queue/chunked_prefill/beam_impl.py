@@ -21,7 +21,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         return
 
     # @calculate_time(show=True, min_cost_ms=0.1)
-    def _can_add_new_group_reqs(self, cur_handle_group_reqs: List[Req], is_busy, new_batch_first_router_need_tokens):
+    def _can_add_new_group_reqs(self, cur_handle_group_reqs: List[Req], is_busy):
         for req in cur_handle_group_reqs:
             self.cache_len_list.append(
                 (req, req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len))
@@ -43,28 +43,20 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
                 cumsum_len += cur_input_len - req.input_len  # 减去共享的部分
                 need_max_token_num = max(need_max_token_num, cumsum_len + index * cur_ouput_len)
 
-        # prefill token 计算, 因为对beam的prefill计算过程是共享的，所以只计算一个请求对应的token数量
-        new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
         estimated_need_token_num = self.add_kv_page_reservation(need_max_token_num, len(self.cache_len_list))
         ok_token_num = estimated_need_token_num < self.max_total_tokens
 
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 
-        # 长短请求模式由 Infer 控制单轮 prefill token 上限。
-        ok_prefill = (
-            self.args.short_prefill_token_threshold is not None
-            or new_batch_first_router_need_tokens <= self.batch_max_tokens
-        )
-
-        if ok_token_num and ok_req_num and ok_prefill:
+        if ok_token_num and ok_req_num:
             self.router.shared_token_load.set_estimated_peak_token_count(estimated_need_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
                 estimated_need_token_num / self.max_total_tokens,
                 self.dp_index,
             )
-            return True, new_batch_first_router_need_tokens
+            return True
         else:
-            return False, new_batch_first_router_need_tokens
+            return False
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
@@ -86,16 +78,13 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
 
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
-        new_batch_first_router_need_tokens = 0  # 主要是对 prefill 大块计算时候的token数量限制
         cur_group_reqs = []
         for req in self.waiting_req_list:
 
             if self._add_to_group(cur_group_reqs, req):
                 continue
 
-            ok_insert, new_batch_first_router_need_tokens = self._can_add_new_group_reqs(
-                cur_group_reqs, is_busy, new_batch_first_router_need_tokens
-            )
+            ok_insert = self._can_add_new_group_reqs(cur_group_reqs, is_busy)
             if ok_insert:
                 can_run_list.extend(cur_group_reqs)
                 cur_group_reqs = [req]  # 等待判断的组
@@ -104,9 +93,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
                 break
 
         if len(cur_group_reqs) != 0:
-            ok_insert, new_batch_first_router_need_tokens = self._can_add_new_group_reqs(
-                cur_group_reqs, is_busy, new_batch_first_router_need_tokens
-            )
+            ok_insert = self._can_add_new_group_reqs(cur_group_reqs, is_busy)
             if ok_insert:
                 can_run_list.extend(cur_group_reqs)
 

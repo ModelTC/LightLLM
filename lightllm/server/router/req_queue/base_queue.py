@@ -23,8 +23,6 @@ class BaseQueue:
         # 在极端情况下减少，在非特定模式下，get_fixed_kv_len() 返回的都是
         # 0， 不会有任何影响。
         self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
-        assert args.batch_max_tokens is not None
-        self.batch_max_tokens = args.batch_max_tokens
         self.running_max_req_size = args.running_max_req_size  # Maximum number of concurrent requests
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
