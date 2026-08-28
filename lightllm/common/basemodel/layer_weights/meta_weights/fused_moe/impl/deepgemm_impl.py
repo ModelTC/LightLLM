@@ -1,8 +1,5 @@
-import threading
-
 import torch
 from typing import Optional, Tuple, Any
-from deep_ep import ElasticBuffer
 from .base_impl import FuseMoeBaseImpl
 from ..expert_parallel_state import ExpertParallelState
 from lightllm.distributed import dist_group_manager
@@ -20,7 +17,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_to_physical_long_fast
 
 
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
@@ -83,6 +79,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_group: int,
         n_group: int,
         scoring_func: str,
+        per_expert_scale: Optional[torch.Tensor] = None,
     ):
         topk_weights, topk_idx, _ = self._select_experts(
             input_tensor=hidden_states,
@@ -95,8 +92,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_expert_group=n_group,
             scoring_func=scoring_func,
             is_prefill=True,
-            # batch overlap prefill 当前保留 logical ID，之后 dispatch 等待 overlap event 后映射为 physical ID。
-            map_to_physical_ids_now=False,
+            per_expert_scale=per_expert_scale,
         )
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
@@ -108,7 +104,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_weights: torch.Tensor,
         overlap_event: Optional[Any] = None,
     ):
-        topk_idx, dispatch_event = self._prepare_prefill_dispatch_topk_ids(topk_idx, overlap_event)
         buffer = dist_group_manager.ep_buffer
         num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
@@ -119,7 +114,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             expert_alignment=128,
             num_sms=get_ep_num_sms(),
-            previous_event=dispatch_event,
+            previous_event=overlap_event,
             async_with_compute_stream=True,
             allocate_on_comm_stream=True,
             do_cpu_sync=True,
@@ -256,14 +251,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
 
         return combined_x, hook
 
-    def _next_eplb_sample_index(self) -> int:
-        eplb = self.eplb
-        if not eplb.recording:
-            return 0
-        sample_index = eplb.recorded_sample_count % eplb.route_counter.shape[0]
-        eplb.recorded_sample_count += 1
-        return sample_index
-
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -279,30 +266,16 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         shared_expert_gate: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
-        map_to_physical_ids_now: bool = True,
     ):
-        """选择 expert；`map_to_physical_ids_now=False` 时保留 logical ID，由 dispatch 延后映射。"""
+        """选择 expert；EPLB prefill 统一由融合路径返回 physical ID。"""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         eplb = self.eplb
         eplb_active = eplb is not None
-        # 仅可立即完成 EPLB 映射的 grouped prefill 使用融合 kernel，并直接返回 physical ID。
-        # per-expert scale、回调需保留 logical ID；autotune warmup 走通用 select_experts，
-        # 以固定种子随机化 top-k ID 来覆盖 expert 负载。
-        fused_eplb_grouped_topk = (
-            is_prefill is True
-            and map_to_physical_ids_now
-            and eplb_active
-            and use_grouped_topk
-            and per_expert_scale is None
-            and not preserve_logical_ids
-            and not Autotuner.is_autotune_warmup()
-        )
-        if fused_eplb_grouped_topk:
+        if is_prefill is True and eplb_active:
             from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
 
             group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
-            sample_index = self._next_eplb_sample_index()
-            topk_weights, topk_ids = triton_grouped_topk_eplb(
+            topk_weights, topk_ids, logical_topk_ids = triton_grouped_topk_eplb(
                 hidden_states=input_tensor,
                 gating_output=router_logits,
                 correction_bias=correction_bias,
@@ -314,10 +287,14 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 logical_to_physical_map=eplb.logical_to_physical_map,
                 logical_replica_count=eplb.logical_replica_count,
                 expert_counter=eplb.route_counter,
-                sample_index=sample_index,
+                sample_index=eplb.next_sample_index(),
                 record_load=eplb.recording,
+                use_grouped_topk=use_grouped_topk,
+                per_expert_scale=per_expert_scale,
+                return_logical_ids=preserve_logical_ids,
                 group_score_used_topk_num=group_score_topk_num,
             )
+            origin_topk_ids = logical_topk_ids if logical_topk_ids is not None else topk_ids
         else:
             from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
@@ -332,21 +309,11 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 num_expert_group=num_expert_group,
                 scoring_func=scoring_func,
             )
+            if per_expert_scale is not None:
+                topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
+            origin_topk_ids = topk_ids
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
-        if per_expert_scale is not None:
-            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
-        origin_topk_ids = topk_ids
-        if map_to_physical_ids_now and is_prefill is True and eplb_active and not fused_eplb_grouped_topk:
-            sample_index = self._next_eplb_sample_index()
-            topk_ids = eplb_map_to_physical_long_fast(
-                topk_ids,
-                eplb.logical_to_physical_map,
-                eplb.logical_replica_count,
-                eplb.route_counter,
-                sample_index,
-                record_load=eplb.recording,
-            )
         return topk_weights, topk_ids, origin_topk_ids
 
     def _fused_experts(
@@ -380,46 +347,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         )
         return output
 
-    def _prepare_prefill_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
-        eplb = self.eplb
-        if eplb is None:
-            return topk_ids
-        if not topk_ids.is_contiguous():
-            topk_ids = topk_ids.contiguous()
-        sample_index = self._next_eplb_sample_index()
-        return eplb_map_to_physical_long_fast(
-            topk_ids,
-            eplb.logical_to_physical_map,
-            eplb.logical_replica_count,
-            eplb.route_counter,
-            sample_index,
-            record_load=eplb.recording,
-        )
-
-    def _prepare_prefill_dispatch_topk_ids(
-        self,
-        topk_ids: torch.Tensor,
-        overlap_event: Optional[Any],
-    ) -> Tuple[torch.Tensor, Optional[Any]]:
-        """准备供 DeepEP dispatch 使用的 ID，以及保证 ID 可见的事件。
-
-        未启用 EPLB 时保持原有路径：只进行既有的 long 转换，并透传调用方事件。
-        启用 EPLB 后，共享 routing stream 在调用方输入事件之后，直接将 logical ID
-        映射到新分配的 int64 physical-ID Tensor，再捕获映射完成事件交给 DeepEP。
-        """
-        if self.eplb is None:
-            return topk_ids.to(torch.long), overlap_event
-
-        source_event = overlap_event
-        if source_event is None:
-            source_event = ElasticBuffer.capture()
-        routing_stream = _get_prefill_routing_stream(topk_ids.device)
-        with torch.cuda.stream(routing_stream):
-            source_event.current_stream_wait()
-            topk_ids = self._prepare_prefill_topk_ids(topk_ids)
-            dispatch_event = ElasticBuffer.capture()
-        return topk_ids, dispatch_event
-
     def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
         """返回所有 decode 路径使用的缓存本地主副本视图。"""
         if self.eplb is None:
@@ -446,26 +373,3 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             )
             cache[cache_key] = primary
         return primary
-
-
-# 调用方捕获 overlap event 后才启动 dispatch 的策略映射。每个设备复用一条独立的
-# routing stream；该 stream 等待已捕获的输入事件，但不会阻塞 compute stream
-# 继续执行后续 microbatch。
-_PREFILL_ROUTING_STREAMS = {}
-_PREFILL_ROUTING_STREAMS_LOCK = threading.Lock()
-
-
-def _get_prefill_routing_stream(device: torch.device):
-    device_index = device.index
-    if device_index is None:
-        device_index = torch.cuda.current_device()
-    key = (device.type, device_index)
-    stream = _PREFILL_ROUTING_STREAMS.get(key)
-    if stream is not None:
-        return stream
-    with _PREFILL_ROUTING_STREAMS_LOCK:
-        stream = _PREFILL_ROUTING_STREAMS.get(key)
-        if stream is None:
-            stream = torch.cuda.Stream(device=device)
-            _PREFILL_ROUTING_STREAMS[key] = stream
-        return stream

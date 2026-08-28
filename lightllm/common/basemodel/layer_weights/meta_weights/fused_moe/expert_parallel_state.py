@@ -14,6 +14,13 @@ class EPLBState:
     recording: bool = False
     recorded_sample_count: int = 0
 
+    def next_sample_index(self) -> int:
+        if not self.recording:
+            return 0
+        sample_index = self.recorded_sample_count % self.route_counter.shape[0]
+        self.recorded_sample_count += 1
+        return sample_index
+
 
 @dataclass(frozen=True)
 class ExpertParallelState:

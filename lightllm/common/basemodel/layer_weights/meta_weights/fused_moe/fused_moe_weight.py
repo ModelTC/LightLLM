@@ -231,6 +231,7 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=self.topk_group,
             n_group=self.n_group,
             scoring_func=self.scoring_func,
+            per_expert_scale=self.per_expert_scale,
         )
 
     def dispatch(
