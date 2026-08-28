@@ -41,7 +41,7 @@ def _make_context(monkeypatch):
 
 def _make_req(req_idx):
     req = SimpleNamespace(req_idx=req_idx, cur_kv_len=0, hold_kv_len=0)
-    req._kv_cache_alloc_need = lambda target_len: (target_len + 3) // 4 * 4 - req.hold_kv_len
+    req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
     return req
 
 
@@ -49,17 +49,17 @@ def test_request_reuses_reserved_page_tail_before_allocating_next_page(monkeypat
     context, backend = _make_context(monkeypatch)
     req = _make_req(0)
 
-    backend._alloc_req_kv_mem(req, req._kv_cache_alloc_need(3))
+    backend._alloc_req_kv_mem(req, alloc_token_num=4)
     assert req.hold_kv_len == 4
     assert context.req_manager.mem_manager.alloc_sizes == [4]
     assert context.req_manager.req_to_token_indexs[0, :4].tolist() == [0, 1, 2, 3]
 
     req.cur_kv_len = 3
-    backend._alloc_req_kv_mem(req, req._kv_cache_alloc_need(4))
+    backend._alloc_req_kv_mem(req, alloc_token_num=0)
     assert context.req_manager.mem_manager.alloc_sizes == [4]
 
     req.cur_kv_len = 4
-    backend._alloc_req_kv_mem(req, req._kv_cache_alloc_need(6))
+    backend._alloc_req_kv_mem(req, alloc_token_num=4)
     assert req.hold_kv_len == 8
     assert context.req_manager.mem_manager.alloc_sizes == [4, 4]
     assert context.req_manager.req_to_token_indexs[0, :8].tolist() == list(range(8))
@@ -70,12 +70,31 @@ def test_reservation_fills_each_request_table_row(monkeypatch):
     req0 = _make_req(0)
     req1 = _make_req(1)
 
-    backend._alloc_req_kv_mem(req0, req0._kv_cache_alloc_need(2))
-    backend._alloc_req_kv_mem(req1, req1._kv_cache_alloc_need(3))
+    backend._alloc_req_kv_mem(req0, alloc_token_num=4)
+    backend._alloc_req_kv_mem(req1, alloc_token_num=4)
 
     assert generic_pre_process.g_infer_context.req_manager.req_to_token_indexs[0, :4].tolist() == [0, 1, 2, 3]
     assert generic_pre_process.g_infer_context.req_manager.req_to_token_indexs[1, :4].tolist() == [4, 5, 6, 7]
     assert req0.hold_kv_len == req1.hold_kv_len == 4
+
+
+def test_need_token_num_returns_page_aligned_allocation():
+    req = SimpleNamespace(
+        args=SimpleNamespace(page_size=4),
+        cur_kv_len=3,
+        hold_kv_len=4,
+        mtp_step=0,
+        get_chuncked_input_token_len=lambda: 6,
+        get_cur_total_len=lambda: 10,
+    )
+    req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
+
+    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=True) == 4
+    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=False) == 8
+    assert InferReq.decode_need_token_num(req) == 0
+
+    req.cur_kv_len = 4
+    assert InferReq.decode_need_token_num(req) == 4
 
 
 def test_decode_reserves_mtp_headroom(monkeypatch):
@@ -92,7 +111,7 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
 
     context.req_manager.req_to_token_indexs[0, :4] = torch.arange(4, dtype=torch.int32)
     context.req_manager.mem_manager.next_index = 4
-    alloc_token_num = InferReq._mtp_decode_need_token_num(req)
+    alloc_token_num = InferReq.decode_need_token_num(req)
     backend._alloc_req_kv_mem(req, alloc_token_num)
 
     model_input, run_reqs = generic_pre_process.prepare_decode_inputs([req])
@@ -116,11 +135,9 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
     req.get_cur_total_len = lambda: 4
     req.get_radix_cache_shared_len = lambda: 0
     req.args = context.args
-    req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
-
     context.req_manager.req_to_token_indexs[0, :3] = torch.arange(3, dtype=torch.int32)
     context.req_manager.mem_manager.next_index = 3
-    alloc_token_num = InferReq._mtp_decode_need_token_num(req)
+    alloc_token_num = InferReq.decode_need_token_num(req)
     backend._alloc_req_kv_mem(req, alloc_token_num)
 
     model_input, _ = generic_pre_process.prepare_decode_inputs([req])
