@@ -423,12 +423,6 @@ class Req(ctypes.Structure):
     def get_tuple_tokens(self, is_busy, ema_req_out_len):
         raise NotImplementedError("Subclasses should implement this method")
 
-    def get_decode_need_tokens(self):
-        raise NotImplementedError("Subclasses should implement this method")
-
-    def get_first_router_need_tokens(self):
-        raise NotImplementedError("Subclasses should implement this method")
-
     def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
         token_id = int(self.shm_prompt_ids.arr[src_index])
         rank = int(self.shm_logprobs.arr["rank"][src_index])
@@ -494,21 +488,6 @@ class ChunkedPrefillReq(Req):
             - 1
         )
         b_len = max(0, b_len) + ADDED_OUTPUT_LEN
+        b_len = (b_len + args.page_size - 1) // args.page_size * args.page_size
 
         return (a_len, b_len)
-
-    def get_decode_need_tokens(self):
-        """
-        chunkedprefill 调度模式的实现
-        """
-        # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
-        need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
-        if need_tokens == 1 and self._mtp_step > 0:
-            # target verify 及后续 MTP 操作统一预留两倍窗口。
-            need_tokens = (self._mtp_step + 1) * 2
-
-        return need_tokens
-
-    def get_first_router_need_tokens(self):
-
-        return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
