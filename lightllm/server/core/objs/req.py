@@ -3,6 +3,7 @@ import math
 import ctypes
 import asyncio
 import numpy as np
+import triton
 import time
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
@@ -423,6 +424,9 @@ class Req(ctypes.Structure):
     def get_tuple_tokens(self, is_busy, ema_req_out_len):
         raise NotImplementedError("Subclasses should implement this method")
 
+    def get_pd_decode_mode_tuple_tokens(self, is_busy, ema_req_out_len):
+        raise NotImplementedError("Subclasses should implement this method")
+
     def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
         token_id = int(self.shm_prompt_ids.arr[src_index])
         rank = int(self.shm_logprobs.arr["rank"][src_index])
@@ -490,4 +494,25 @@ class ChunkedPrefillReq(Req):
         b_len = max(0, b_len) + ADDED_OUTPUT_LEN
         b_len = (b_len + args.page_size - 1) // args.page_size * args.page_size
 
+        return (a_len, b_len)
+
+    def get_pd_decode_mode_tuple_tokens(self, is_busy, ema_req_out_len):
+        args = get_env_start_args()
+        has_out_len = self.shm_cur_output_len
+        if self.sample_params.ignore_eos:
+            cur_max_new_token_len = self.sample_params.max_new_tokens
+        elif is_busy:
+            cur_max_new_token_len = self.sample_params.max_new_tokens
+        else:
+            cur_max_new_token_len = min(
+                self.sample_params.max_new_tokens,
+                max(int(1.1 * has_out_len), ema_req_out_len),
+            )
+
+        # PD decode 节点只运行 decode，不需要考虑 chunked prefill 带来的调度等待时间。
+        # 当前占用和预计剩余增长分别按 page_size 对齐，使后续峰值计算直接使用物理 KV 容量。
+        a_len = max(self.input_len + has_out_len + 1, self.shm_cur_kv_len + 1)
+        a_len = triton.cdiv(a_len, args.page_size) * args.page_size
+        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + ADDED_OUTPUT_LEN
+        b_len = triton.cdiv(b_len, args.page_size) * args.page_size
         return (a_len, b_len)

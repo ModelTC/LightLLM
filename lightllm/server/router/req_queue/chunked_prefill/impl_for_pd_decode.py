@@ -1,17 +1,22 @@
 import uuid
 import numpy as np
+import triton
 from typing import Tuple
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 
 
-class PDQueue(BaseQueue):
+class PDDecodeQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
-        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+        # 新请求尚未进入 decode 阶段，缺少实际输出长度等运行信息，只能按输入长度加最大输出长度
+        # 保守估算该请求最多可能占用的 KV 资源。
+        req_token_num = req.input_len + req.sample_params.max_new_tokens
+        req_token_num = triton.cdiv(req_token_num, self.args.page_size) * self.args.page_size
+        estimated_peak_token_num += req_token_num
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -34,13 +39,21 @@ class PDQueue(BaseQueue):
             for req in batch.reqs:
                 if req.sample_params.suggested_dp_index == self.dp_index:
                     if req.is_infer_decode():
+                        # 请求进入 decode 阶段后，可以结合已经运行的 token 数量和预计剩余输出长度，
+                        # 使用连续批处理峰值算法估算其动态 KV 占用。
                         decoding_req_list.append(
-                            req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+                            req.get_pd_decode_mode_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                         )
                     else:
-                        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+                        # 尚未进入 decode 阶段的请求没有足够的动态信息，仍按输入长度加最大输出长度
+                        # 预留其最大 KV 资源。
+                        req_token_num = req.input_len + req.sample_params.max_new_tokens
+                        req_token_num = triton.cdiv(req_token_num, self.args.page_size) * self.args.page_size
+                        estimated_peak_token_num += req_token_num
 
         if decoding_req_list:
+            # 按预计剩余输出长度排序，计算每个请求结束时仍存活请求的 KV 占用峰值，
+            # 再与未进入 decode 阶段请求的保守占用相加，得到整个 batch 的最终峰值 token 估算。
             decoding_req_list.sort(key=lambda x: -x[1])
             left_out_len_array = np.array([e[1] for e in decoding_req_list])
             has_run_len_array = np.array([e[0] for e in decoding_req_list])
