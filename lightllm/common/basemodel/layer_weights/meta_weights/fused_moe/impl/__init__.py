@@ -29,6 +29,7 @@ def create_fuse_moe_impl(
             routed_scaling_factor=routed_scaling_factor,
             quant_method=quant_method,
         )
+
     return FuseMoeTriton(
         n_routed_experts=n_routed_experts,
         num_fused_shared_experts=num_fused_shared_experts,

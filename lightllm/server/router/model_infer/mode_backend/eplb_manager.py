@@ -8,10 +8,9 @@ import torch.distributed as dist
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
-    build_initial_redundant_expert_ids,
-    build_logical_to_physical_map,
+    build_logical_to_physical_maps_for_layers,
     plan_redundant_experts,
-    _select_improving_placements_with_loads,
+    select_improving_placements,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
@@ -33,33 +32,6 @@ EPLB_CONTROL_ERROR = -1
 EPLB_STEADY_SAMPLE_STEPS = 4
 
 
-def _imbalance_summary(rank_load: torch.Tensor) -> Dict[str, float]:
-    if rank_load.ndim == 2:
-        critical = rank_load.max(dim=1).values
-        mean = rank_load.mean(dim=1)
-    elif rank_load.ndim == 3:
-        critical = rank_load.max(dim=2).values.sum(dim=0)
-        mean = rank_load.mean(dim=2).sum(dim=0)
-    else:
-        raise ValueError("rank_load must be [layers, ranks] or [samples, layers, ranks]")
-    layer_imbalance = critical / mean.clamp_min(1.0)
-    sorted_imbalance = torch.sort(layer_imbalance).values
-    p95_index = max(0, (95 * layer_imbalance.numel() + 99) // 100 - 1)
-    return {
-        "max": float(layer_imbalance.max().item()),
-        "p95": float(sorted_imbalance[p95_index].item()),
-    }
-
-
-def _find_fused_moe_weights(model):
-    weights_by_id = {}
-    for layer in model.trans_layers_weight:
-        for value in getattr(layer, "__dict__", {}).values():
-            if isinstance(value, FusedMoeWeight) and value.enable_ep_moe:
-                weights_by_id[id(value)] = value
-    return sorted(weights_by_id.values(), key=lambda weight: weight.layer_num_)
-
-
 class EPLBManager:
     """Online EPLB with asynchronous GPU expert migration."""
 
@@ -75,16 +47,14 @@ class EPLBManager:
         self.placement_stickiness = get_eplb_placement_stickiness()
         self.sampling_interval = self.step_interval
         self.prefill_steps = 0
-        self.rebalanced = False
-        routed = {weight.expert_parallel_state.logical_experts for weight in self.weights}
-        redundant = {state.redundant_experts_per_rank for state in self._eplb_states}
+        routed = {weight.expert_parallel_state.num_logical_experts for weight in self.weights}
+        redundant = {state.num_redundant_experts_per_rank for state in self._eplb_states}
         assert len(routed) == len(redundant) == 1
         self.num_logical_experts = routed.pop()
-        self.redundant_experts_per_rank = redundant.pop()
-        initial = build_initial_redundant_expert_ids(
-            self.num_logical_experts, self.world_size, self.redundant_experts_per_rank
+        self.num_redundant_experts_per_rank = redundant.pop()
+        self.current_placement = torch.stack(
+            [state.initial_redundant_expert_ids_by_rank for state in self._eplb_states]
         )
-        self.current_placement = initial.unsqueeze(0).expand(len(self.weights), -1, -1).clone()
         self.in_flight = False
         self.target_placement = None
         self.target_metadata = None
@@ -116,12 +86,46 @@ class EPLBManager:
         if self.global_rank == 0:
             logger.info(
                 "eplb enabled "
-                f"layers={len(self.weights)} logical_experts={self.num_logical_experts} "
-                f"redundant_experts_per_rank={self.redundant_experts_per_rank} "
+                f"layers={len(self.weights)} num_logical_experts={self.num_logical_experts} "
+                f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} "
                 f"rebalance_gain_threshold={self.rebalance_gain_threshold:.4f} "
                 f"placement_stickiness={self.placement_stickiness:.4f}"
             )
+
+    def poll(self):
+        """Poll only from a globally ordered pre-forward boundary."""
+        if self.in_flight:
+            self._poll_in_flight()
+            return
+        if self.evaluation_in_flight and self._evaluation_ready_on_all_ranks():
+            self._poll_evaluation()
+
+    def step(self):
+        if self.in_flight or self.evaluation_in_flight:
+            return
+        self.prefill_steps += 1
+        continuous_start = self._continuous_collection_start_step
+        continuous_end = self._continuous_collection_end_step
+        if continuous_end is not None:
+            if continuous_start is not None and self.prefill_steps == continuous_start:
+                self._set_recording(True)
+            if self.prefill_steps >= continuous_end:
+                self._start_evaluation()
+            return
+        sampling_interval = self.sampling_interval
+        phase = self.prefill_steps % sampling_interval
+        if self._sampling_pending:
+            steady_collection_end_step = self._steady_collection_end_step
+            if steady_collection_end_step is None or self.prefill_steps >= steady_collection_end_step:
+                self._clear_steady_collection()
+                self._start_evaluation()
+            return
+        if sampling_interval == 1:
+            self._start_evaluation()
+            return
+        if phase == sampling_interval - self._steady_sample_window_steps():
+            self._arm_steady_collection(self.prefill_steps + self._steady_sample_window_steps())
 
     def _set_recording(self, enabled: bool):
         for state in self._eplb_states:
@@ -136,10 +140,7 @@ class EPLBManager:
 
     def _control_count(self, value: int) -> torch.Tensor:
         """Return the main-thread-only reusable control collective scalar."""
-        tensor = getattr(self, "_control_ready_count", None)
-        if tensor is None:
-            tensor = self._control_ready_count = torch.empty(1, dtype=torch.int32)
-        return tensor.fill_(value)
+        return self._control_ready_count.fill_(value)
 
     def _clear_continuous_collection(self):
         self._continuous_collection_start_step = None
@@ -150,7 +151,7 @@ class EPLBManager:
         self._steady_collection_end_step = None
 
     def _steady_sample_window_steps(self) -> int:
-        return min(EPLB_STEADY_SAMPLE_STEPS, getattr(self, "sampling_interval", self.step_interval))
+        return min(EPLB_STEADY_SAMPLE_STEPS, self.sampling_interval)
 
     def _arm_steady_collection(self, collection_end_step: int):
         """Start the fixed sparse window without moving its evaluation boundary."""
@@ -179,7 +180,7 @@ class EPLBManager:
             # There is no later pre-boundary manager step at which to arm a
             # full clamped window, so arm immediately but keep the same next
             # fixed boundary.
-            self._arm_steady_collection(getattr(self, "prefill_steps", 0) + self.sampling_interval)
+            self._arm_steady_collection(self.prefill_steps + self.sampling_interval)
         else:
             self._reset_recorded_samples()
             self._set_recording(False)
@@ -217,17 +218,7 @@ class EPLBManager:
 
     def _commit_layer_metadata(self, layer_index: int):
         eplb_state = self._eplb_states[layer_index]
-        metadata = self.target_metadata[layer_index] if self.target_metadata is not None else None
-        if metadata is None:
-            # Unit tests and external callers may still construct a legacy
-            # result by hand. Production planned results always precompute.
-            metadata = build_logical_to_physical_map(
-                self.target_placement[layer_index],
-                self.num_logical_experts,
-                source_rank=self.global_rank,
-                node_world_size=self.node_world_size,
-            )
-        logical_to_physical, replica_count = metadata
+        logical_to_physical, replica_count = self.target_metadata[layer_index]
         eplb_state.logical_to_physical_map.copy_(logical_to_physical, non_blocking=True)
         eplb_state.logical_replica_count.copy_(replica_count, non_blocking=True)
 
@@ -236,7 +227,6 @@ class EPLBManager:
         self.target_placement = None
         self.target_metadata = None
         self.in_flight = False
-        self.rebalanced = True
         self._prepare_next_sampling_window()
         if self.global_rank == 0:
             logger.info(f"eplb completed wall_time={time.time() - self.in_flight_started_at:.2f}s")
@@ -293,13 +283,13 @@ class EPLBManager:
                     candidate = plan_redundant_experts(
                         global_load,
                         self.world_size,
-                        self.redundant_experts_per_rank,
+                        self.num_redundant_experts_per_rank,
                         expert_alignment=EPLB_EXPERT_ALIGNMENT,
                         node_world_size=self.node_world_size,
                         current_placement=self.current_placement,
                         stickiness=self.placement_stickiness,
                     )
-                    placement, improved, metrics, before_load, after_load = _select_improving_placements_with_loads(
+                    placement, improved, metrics, before_load, after_load = select_improving_placements(
                         global_load,
                         self.current_placement,
                         candidate,
@@ -348,7 +338,7 @@ class EPLBManager:
             recorded_sample_count = int(local_load.shape[0])
             sample_window_steps = (
                 self.step_interval
-                if getattr(self, "_continuous_collection_end_step", None) is not None
+                if self._continuous_collection_end_step is not None
                 else self._steady_sample_window_steps()
             )
             num_nodes = self.world_size // self.node_world_size
@@ -364,14 +354,19 @@ class EPLBManager:
             if result["kind"] == "planned":
                 metadata = [None] * len(self.weights)
                 layer_plans = []
-                for layer_index, is_improved in enumerate(result["improved"]):
-                    if bool(is_improved):
+                improved_layer_indices = torch.nonzero(result["improved"], as_tuple=False).flatten()
+                if improved_layer_indices.numel():
+                    maps_for_improved_layers, counts_for_improved_layers = build_logical_to_physical_maps_for_layers(
+                        result["placement"][improved_layer_indices],
+                        self.num_logical_experts,
+                        source_rank=self.global_rank,
+                        node_world_size=self.node_world_size,
+                    )
+                    for improved_layer_offset, layer_index in enumerate(improved_layer_indices.tolist()):
                         placement = result["placement"][layer_index]
-                        metadata[layer_index] = build_logical_to_physical_map(
-                            placement,
-                            self.num_logical_experts,
-                            source_rank=self.global_rank,
-                            node_world_size=self.node_world_size,
+                        metadata[layer_index] = (
+                            maps_for_improved_layers[improved_layer_offset],
+                            counts_for_improved_layers[improved_layer_offset],
                         )
                         layer_plans.append(
                             (
@@ -405,7 +400,7 @@ class EPLBManager:
         self._evaluation_thread.start()
 
     def _poll_evaluation(self):
-        if not getattr(self, "evaluation_in_flight", False):
+        if not self.evaluation_in_flight:
             return False
         with self._evaluation_lock:
             error = self._evaluation_error
@@ -492,25 +487,13 @@ class EPLBManager:
         return bool(ready_count)
 
     def _start_rebalance(self, result):
-        placement, improved = result["placement"], result["improved"]
-        layer_plans = result.get("layer_plans")
-        if layer_plans is None:
-            layer_plans = []
-            for layer_index, is_improved in enumerate(improved):
-                if bool(is_improved):
-                    plan = build_transfer_plan(
-                        self.current_placement[layer_index],
-                        placement[layer_index],
-                        self.num_logical_experts,
-                        self.world_size,
-                        self.node_world_size,
-                    )
-                    layer_plans.append((layer_index, plan))
+        placement = result["placement"]
+        layer_plans = result["layer_plans"]
         self.sampling_interval = self.step_interval
         self._clear_continuous_collection()
         self._reset_recorded_samples()
         self.target_placement = placement
-        self.target_metadata = result.get("metadata")
+        self.target_metadata = result["metadata"]
         self.in_flight_layers = [layer_index for layer_index, _ in layer_plans]
         self.in_flight = True
         self.in_flight_started_at = time.time()
@@ -544,36 +527,29 @@ class EPLBManager:
                 result.get("sample_window_steps"),
             )
 
-    def poll(self):
-        """Poll only from a globally ordered pre-forward boundary."""
-        if self.in_flight:
-            self._poll_in_flight()
-            return
-        if self.evaluation_in_flight and self._evaluation_ready_on_all_ranks():
-            self._poll_evaluation()
 
-    def step(self):
-        if self.in_flight or self.evaluation_in_flight:
-            return
-        self.prefill_steps += 1
-        continuous_start = self._continuous_collection_start_step
-        continuous_end = self._continuous_collection_end_step
-        if continuous_end is not None:
-            if continuous_start is not None and self.prefill_steps == continuous_start:
-                self._set_recording(True)
-            if self.prefill_steps >= continuous_end:
-                self._start_evaluation()
-            return
-        sampling_interval = self.sampling_interval
-        phase = self.prefill_steps % sampling_interval
-        if self._sampling_pending:
-            steady_collection_end_step = getattr(self, "_steady_collection_end_step", None)
-            if steady_collection_end_step is None or self.prefill_steps >= steady_collection_end_step:
-                self._clear_steady_collection()
-                self._start_evaluation()
-            return
-        if sampling_interval == 1:
-            self._start_evaluation()
-            return
-        if phase == sampling_interval - self._steady_sample_window_steps():
-            self._arm_steady_collection(self.prefill_steps + self._steady_sample_window_steps())
+def _imbalance_summary(rank_load: torch.Tensor) -> Dict[str, float]:
+    if rank_load.ndim == 2:
+        critical = rank_load.max(dim=1).values
+        mean = rank_load.mean(dim=1)
+    elif rank_load.ndim == 3:
+        critical = rank_load.max(dim=2).values.sum(dim=0)
+        mean = rank_load.mean(dim=2).sum(dim=0)
+    else:
+        raise ValueError("rank_load must be [layers, ranks] or [samples, layers, ranks]")
+    layer_imbalance = critical / mean.clamp_min(1.0)
+    sorted_imbalance = torch.sort(layer_imbalance).values
+    p95_index = max(0, (95 * layer_imbalance.numel() + 99) // 100 - 1)
+    return {
+        "max": float(layer_imbalance.max().item()),
+        "p95": float(sorted_imbalance[p95_index].item()),
+    }
+
+
+def _find_fused_moe_weights(model):
+    weights_by_id = {}
+    for layer in model.trans_layers_weight:
+        for value in getattr(layer, "__dict__", {}).values():
+            if isinstance(value, FusedMoeWeight) and value.enable_ep_moe:
+                weights_by_id[id(value)] = value
+    return sorted(weights_by_id.values(), key=lambda weight: weight.layer_num_)

@@ -37,7 +37,7 @@ def extract_expert_tensors(weight) -> List[Tuple[str, torch.Tensor]]:
 def commit_staging_rows(
     live: torch.Tensor,
     staging: torch.Tensor,
-    experts_per_rank: int,
+    num_experts_per_rank: int,
     changed_dst_slots: Sequence[int],
 ) -> None:
     slots = sorted(set(changed_dst_slots))
@@ -49,7 +49,7 @@ def commit_staging_rows(
             previous = dst_slot
             continue
         run_length = previous - run_start + 1
-        live.narrow(0, experts_per_rank + run_start, run_length).copy_(
+        live.narrow(0, num_experts_per_rank + run_start, run_length).copy_(
             staging.narrow(0, run_start, run_length), non_blocking=True
         )
         if dst_slot is not None:
@@ -92,18 +92,24 @@ def build_transfer_plan(
     node_world_size: int,
 ) -> List[TransferStep]:
     assert tuple(current.shape) == tuple(target.shape) == (world_size, current.shape[1])
-    experts_per_rank = num_logical_experts // world_size
+    num_experts_per_rank = num_logical_experts // world_size
     current_rows = current.tolist()
     aligned_target_rows = align_target_placement(current, target).tolist()
     # A logical expert has one primary row and at most one redundant row per
     # rank, so this source list is already unique.  Build it once instead of
     # allocating/sorting a set for every destination slot.
     candidates_by_expert = [
-        [(expert // experts_per_rank, expert % experts_per_rank)] for expert in range(num_logical_experts)
+        [
+            (
+                expert // num_experts_per_rank,
+                expert % num_experts_per_rank,
+            )
+        ]
+        for expert in range(num_logical_experts)
     ]
     for rank, row in enumerate(current_rows):
         for slot, expert in enumerate(row):
-            candidates_by_expert[expert].append((rank, experts_per_rank + slot))
+            candidates_by_expert[expert].append((rank, num_experts_per_rank + slot))
     source_load = [0] * world_size
     plan = []
     for dst_rank in range(world_size):
@@ -134,16 +140,20 @@ class _EPLBTransferBase:
         self.transfer_group = transfer_group
         self.global_rank = global_rank
         self.world_size = world_size
-        self.experts_per_rank = weights[0].expert_parallel_state.primary_experts_per_rank
+        self.num_experts_per_rank = weights[0].expert_parallel_state.num_primary_experts_per_rank
         self.device = weights[0].w13.weight.device
         self.live = [extract_expert_tensors(weight) for weight in weights]
         self._validate_live_layout(weights)
-        redundant_slots = self._eplb_states[0].redundant_experts_per_rank
+        num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
         self.staging = [
             [
                 (
                     name,
-                    torch.empty((redundant_slots,) + tuple(tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device),
+                    torch.empty(
+                        (num_redundant_slots_per_rank,) + tuple(tensor.shape[1:]),
+                        dtype=tensor.dtype,
+                        device=tensor.device,
+                    ),
                 )
                 for name, tensor in self.live[0]
             ]
@@ -163,11 +173,13 @@ class _EPLBTransferBase:
 
     def _validate_live_layout(self, weights) -> None:
         reference = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in self.live[0]]
-        redundant_slots = self._eplb_states[0].redundant_experts_per_rank
+        num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
         for layer_index, (state, tensors) in enumerate(zip(self._eplb_states, self.live)):
             layout = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in tensors]
             assert layout == reference, f"EPLB layer {layer_index} has incompatible expert tensor layout"
-            assert state.redundant_experts_per_rank == redundant_slots, "EPLB redundant slot count must match"
+            assert (
+                state.num_redundant_experts_per_rank == num_redundant_slots_per_rank
+            ), "EPLB redundant slot count must match"
 
     def _copy_layer(self, layer_index: int, plan: Sequence[TransferStep], staging) -> None:
         raise NotImplementedError
@@ -238,7 +250,12 @@ class _EPLBTransferBase:
             self._pending.popleft()
             changed_dst_slots = self._changed_dst_slots[buffer_index]
         for (_, live), (_, staging) in zip(self.live[layer_index], self.staging[buffer_index]):
-            commit_staging_rows(live, staging, self.experts_per_rank, changed_dst_slots)
+            commit_staging_rows(
+                live,
+                staging,
+                self.num_experts_per_rank,
+                changed_dst_slots,
+            )
         if post_copy is not None:
             post_copy()
         self._consumed_events[buffer_index].record(torch.cuda.current_stream())

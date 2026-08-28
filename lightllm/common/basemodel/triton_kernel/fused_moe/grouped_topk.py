@@ -235,6 +235,7 @@ def grouped_topk_eplb_kernel(
     COUNTER_NUM_EXPERTS: tl.constexpr,
     MAP_SLOTS: tl.constexpr,
     RECORD_LOAD: tl.constexpr,
+    SINGLE_TOKEN: tl.constexpr,
 ):
     """Grouped top-k, EPLB accounting, and replica mapping without a global score workspace."""
     token_index = tl.program_id(axis=0)
@@ -299,7 +300,7 @@ def grouped_topk_eplb_kernel(
     candidate_scores = tl.reshape(candidate_scores, (sort_block_size,))
     topk_offsets = tl.arange(0, TOPK_BLOCK_SIZE)
     selected_weights = tl.zeros((TOPK_BLOCK_SIZE,), tl.float32)
-    selected_physical_ids = tl.zeros((TOPK_BLOCK_SIZE,), tl.int32)
+    selected_logical_ids = tl.zeros((TOPK_BLOCK_SIZE,), tl.int32)
     sum_scores = 0.0
     for topk_index in range(TOPK_NUM):
         selected_offset = tl.argmax(candidate_scores, axis=0)
@@ -316,19 +317,31 @@ def grouped_topk_eplb_kernel(
         sum_scores += selected_weight
         topk_lane = topk_offsets == topk_index
         selected_weights = tl.where(topk_lane, selected_weight, selected_weights)
-
-        if RECORD_LOAD:
-            tl.atomic_add(
-                expert_counter_ptr + sample_index * COUNTER_NUM_EXPERTS + selected_logical_id,
-                1,
-            )
-        replica_count = tl.load(logical_replica_count_ptr + selected_logical_id)
-        replica_index = eplb_replica_index(token_index, selected_logical_id, replica_count)
-        physical_id = tl.load(logical_to_physical_ptr + selected_logical_id * MAP_SLOTS + replica_index)
-        selected_physical_ids = tl.where(topk_lane, physical_id, selected_physical_ids)
+        selected_logical_ids = tl.where(topk_lane, selected_logical_id, selected_logical_ids)
         candidate_scores = tl.where(flat_offsets == selected_offset, -float("inf"), candidate_scores)
 
     topk_mask = topk_offsets < TOPK_NUM
+    if RECORD_LOAD:
+        tl.atomic_add(
+            expert_counter_ptr + sample_index * COUNTER_NUM_EXPERTS + selected_logical_ids,
+            1,
+            mask=topk_mask,
+            sem="relaxed",
+        )
+    if SINGLE_TOKEN:
+        replica_indices = tl.zeros((TOPK_BLOCK_SIZE,), tl.int32)
+    else:
+        replica_counts = tl.load(
+            logical_replica_count_ptr + selected_logical_ids,
+            mask=topk_mask,
+            other=1,
+        )
+        replica_indices = eplb_replica_index(token_index, selected_logical_ids, replica_counts)
+    selected_physical_ids = tl.load(
+        logical_to_physical_ptr + selected_logical_ids * MAP_SLOTS + replica_indices,
+        mask=topk_mask,
+        other=-1,
+    )
     if RENORMALIZE:
         selected_weights /= sum_scores
     tl.store(
@@ -458,6 +471,7 @@ def triton_grouped_topk_eplb(
         COUNTER_NUM_EXPERTS=expert_counter.shape[1],
         MAP_SLOTS=logical_to_physical_map.shape[1],
         RECORD_LOAD=record_load,
+        SINGLE_TOKEN=token_num == 1,
         num_warps=num_warps,
         num_stages=1,
     )

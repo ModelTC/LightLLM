@@ -23,249 +23,13 @@ from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map_to_physical_long_fast
 
 
-# Dispatch policy mapping is launched after the caller has captured its
-# overlap event.  One routing stream per device lets that mapping wait for the
-# captured inputs without serializing subsequent compute-stream microbatches.
-_PREFILL_ROUTING_STREAMS = {}
-_PREFILL_ROUTING_STREAMS_LOCK = threading.Lock()
-
-
-def _get_prefill_routing_stream(device: torch.device):
-    device_index = device.index
-    if device_index is None:
-        device_index = torch.cuda.current_device()
-    key = (device.type, device_index)
-    stream = _PREFILL_ROUTING_STREAMS.get(key)
-    if stream is not None:
-        return stream
-    with _PREFILL_ROUTING_STREAMS_LOCK:
-        stream = _PREFILL_ROUTING_STREAMS.get(key)
-        if stream is None:
-            stream = torch.cuda.Stream(device=device)
-            _PREFILL_ROUTING_STREAMS[key] = stream
-        return stream
-
-
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
     def __init__(self, *args, expert_parallel_state: ExpertParallelState, **kwargs):
         super().__init__(*args, **kwargs)
         self.expert_parallel_state = expert_parallel_state
-        self.eplb_state = expert_parallel_state.eplb
+        self.eplb = expert_parallel_state.eplb
         self.ep_balance_counters = None
         self._primary_weight_pack_cache = {}
-
-    def _next_eplb_sample_index(self) -> int:
-        eplb = self.eplb_state
-        if not eplb.recording:
-            return 0
-        sample_index = eplb.recorded_sample_count % eplb.route_counter.shape[0]
-        eplb.recorded_sample_count += 1
-        return sample_index
-
-    def _select_experts(
-        self,
-        input_tensor: torch.Tensor,
-        router_logits: torch.Tensor,
-        correction_bias: Optional[torch.Tensor],
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool,
-        topk_group: int,
-        num_expert_group: int,
-        scoring_func: str,
-        per_expert_scale: Optional[torch.Tensor] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
-        preserve_logical_ids: bool = False,
-        route_prefill: bool = True,
-    ):
-        """Select experts and return topk weights and ids."""
-        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
-        eplb = self.eplb_state
-        eplb_active = eplb is not None
-        # For grouped prefill, selecting logical IDs, then launching a second
-        # kernel to count and remap them is avoidable.  Keep every observable
-        # logical-ID path on the generic implementation: callbacks and
-        # autotune need logical routing IDs, and per-expert scales index them.
-        fused_eplb_grouped_topk = (
-            is_prefill is True
-            and route_prefill
-            and eplb_active
-            and use_grouped_topk
-            and per_expert_scale is None
-            and not preserve_logical_ids
-            and not Autotuner.is_autotune_warmup()
-        )
-        if fused_eplb_grouped_topk:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
-
-            group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
-            sample_index = self._next_eplb_sample_index()
-            topk_weights, topk_ids = triton_grouped_topk_eplb(
-                hidden_states=input_tensor,
-                gating_output=router_logits,
-                correction_bias=correction_bias,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-                logical_to_physical_map=eplb.logical_to_physical_map,
-                logical_replica_count=eplb.logical_replica_count,
-                expert_counter=eplb.route_counter,
-                sample_index=sample_index,
-                record_load=eplb.recording,
-                group_score_used_topk_num=group_score_topk_num,
-            )
-        else:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
-
-            topk_weights, topk_ids = select_experts(
-                hidden_states=input_tensor,
-                router_logits=router_logits,
-                correction_bias=correction_bias,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                scoring_func=scoring_func,
-            )
-        if self.routed_scaling_factor != 1.0:
-            topk_weights.mul_(self.routed_scaling_factor)
-        if per_expert_scale is not None:
-            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
-        origin_topk_ids = topk_ids
-        if route_prefill and is_prefill is True and eplb_active and not fused_eplb_grouped_topk:
-            sample_index = self._next_eplb_sample_index()
-            topk_ids = eplb_map_to_physical_long_fast(
-                topk_ids,
-                eplb.logical_to_physical_map,
-                eplb.logical_replica_count,
-                eplb.route_counter,
-                sample_index,
-                record_load=eplb.recording,
-            )
-        return topk_weights, topk_ids, origin_topk_ids
-
-    def _fused_experts(
-        self,
-        input_tensor: torch.Tensor,
-        w13: WeightPack,
-        w2: WeightPack,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        router_logits: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
-    ):
-        if is_prefill is False:
-            w13 = self._primary_weight_pack(w13)
-            w2 = self._primary_weight_pack(w2)
-            num_experts = self.n_routed_experts
-        else:
-            num_experts = self.expert_parallel_state.total_physical_experts
-        output = fused_experts(
-            hidden_states=input_tensor,
-            w13=w13,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_idx=topk_ids.to(torch.long),
-            num_experts=num_experts,
-            quant_method=self.quant_method,
-            is_prefill=is_prefill,
-            previous_event=None,  # for overlap
-            ep_balance_counters=self.ep_balance_counters,
-        )
-        return output
-
-    def fused_experts_with_topk(
-        self,
-        input_tensor: torch.Tensor,
-        w13: WeightPack,
-        w2: WeightPack,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        is_prefill: Optional[bool] = None,
-    ):
-        if is_prefill is True:
-            topk_ids = self._prepare_prefill_topk_ids(topk_ids)
-        return self._fused_experts(
-            input_tensor=input_tensor,
-            w13=w13,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            is_prefill=is_prefill,
-        )
-
-    def _prepare_prefill_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
-        eplb = self.eplb_state
-        if eplb is None:
-            return topk_ids
-        if not topk_ids.is_contiguous():
-            topk_ids = topk_ids.contiguous()
-        sample_index = self._next_eplb_sample_index()
-        return eplb_map_to_physical_long_fast(
-            topk_ids,
-            eplb.logical_to_physical_map,
-            eplb.logical_replica_count,
-            eplb.route_counter,
-            sample_index,
-            record_load=eplb.recording,
-        )
-
-    def _prepare_prefill_dispatch_topk_ids(
-        self,
-        topk_ids: torch.Tensor,
-        overlap_event: Optional[Any],
-    ) -> Tuple[torch.Tensor, Optional[Any]]:
-        """Prepare dispatch IDs and the event which makes them visible to DeepEP.
-
-        Policy-free dispatch deliberately retains the original path: it only
-        performs the existing long conversion and forwards the caller event.
-        A policy maps logical IDs directly to a freshly allocated int64
-        physical-ID tensor on a shared routing stream after the caller's input
-        event, then hands DeepEP an event captured after that map.
-        """
-        if self.eplb_state is None:
-            return topk_ids.to(torch.long), overlap_event
-
-        source_event = overlap_event
-        if source_event is None:
-            source_event = ElasticBuffer.capture()
-        routing_stream = _get_prefill_routing_stream(topk_ids.device)
-        with torch.cuda.stream(routing_stream):
-            source_event.current_stream_wait()
-            topk_ids = self._prepare_prefill_topk_ids(topk_ids)
-            dispatch_event = ElasticBuffer.capture()
-        return topk_ids, dispatch_event
-
-    def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
-        """Return the cached local-primary view used by all decode paths."""
-        if self.eplb_state is None:
-            return weight_pack
-        cache = getattr(self, "_primary_weight_pack_cache", None)
-        if cache is None:
-            cache = self._primary_weight_pack_cache = {}
-        cache_key = id(weight_pack)
-        primary = cache.get(cache_key)
-        if primary is None:
-            primary_experts_per_rank = self.expert_parallel_state.primary_experts_per_rank
-            primary = WeightPack(
-                weight=weight_pack.weight[:primary_experts_per_rank],
-                weight_scale=(
-                    weight_pack.weight_scale[:primary_experts_per_rank]
-                    if weight_pack.weight_scale is not None
-                    else None
-                ),
-                weight_zero_point=(
-                    getattr(weight_pack, "weight_zero_point", None)[:primary_experts_per_rank]
-                    if getattr(weight_pack, "weight_zero_point", None) is not None
-                    else None
-                ),
-            )
-            cache[cache_key] = primary
-        return primary
 
     def low_latency_dispatch(
         self,
@@ -299,8 +63,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             topk_idx=topk_idx,
             x=hidden_states,
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
-            # Decode is deliberately isolated from EPLB's physical redundant
-            # rows: DeepEP sees the original logical expert IDs.
+            # decode 与 EPLB 的物理冗余行刻意隔离：DeepEP 使用原始 logical expert ID。
             num_experts=self.n_routed_experts,
             use_fp8=use_fp8_w8a8,
             async_finish=False,
@@ -332,7 +95,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_expert_group=n_group,
             scoring_func=scoring_func,
             is_prefill=True,
-            route_prefill=False,
+            # batch overlap prefill 当前保留 logical ID，之后 dispatch 等待 overlap event 后映射为 physical ID。
+            map_to_physical_ids_now=False,
         )
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
@@ -351,7 +115,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_experts=self.expert_parallel_state.total_physical_experts,
+            num_experts=self.expert_parallel_state.num_total_physical_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             expert_alignment=128,
             num_sms=get_ep_num_sms(),
@@ -491,3 +255,217 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             event.current_stream_wait()
 
         return combined_x, hook
+
+    def _next_eplb_sample_index(self) -> int:
+        eplb = self.eplb
+        if not eplb.recording:
+            return 0
+        sample_index = eplb.recorded_sample_count % eplb.route_counter.shape[0]
+        eplb.recorded_sample_count += 1
+        return sample_index
+
+    def _select_experts(
+        self,
+        input_tensor: torch.Tensor,
+        router_logits: torch.Tensor,
+        correction_bias: Optional[torch.Tensor],
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool,
+        topk_group: int,
+        num_expert_group: int,
+        scoring_func: str,
+        per_expert_scale: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
+        is_prefill: Optional[bool] = None,
+        preserve_logical_ids: bool = False,
+        map_to_physical_ids_now: bool = True,
+    ):
+        """选择 expert；`map_to_physical_ids_now=False` 时保留 logical ID，由 dispatch 延后映射。"""
+        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
+        eplb = self.eplb
+        eplb_active = eplb is not None
+        # 仅可立即完成 EPLB 映射的 grouped prefill 使用融合 kernel，并直接返回 physical ID。
+        # per-expert scale、回调需保留 logical ID；autotune warmup 走通用 select_experts，
+        # 以固定种子随机化 top-k ID 来覆盖 expert 负载。
+        fused_eplb_grouped_topk = (
+            is_prefill is True
+            and map_to_physical_ids_now
+            and eplb_active
+            and use_grouped_topk
+            and per_expert_scale is None
+            and not preserve_logical_ids
+            and not Autotuner.is_autotune_warmup()
+        )
+        if fused_eplb_grouped_topk:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
+
+            group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
+            sample_index = self._next_eplb_sample_index()
+            topk_weights, topk_ids = triton_grouped_topk_eplb(
+                hidden_states=input_tensor,
+                gating_output=router_logits,
+                correction_bias=correction_bias,
+                topk=top_k,
+                renormalize=renormalize,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                scoring_func=scoring_func,
+                logical_to_physical_map=eplb.logical_to_physical_map,
+                logical_replica_count=eplb.logical_replica_count,
+                expert_counter=eplb.route_counter,
+                sample_index=sample_index,
+                record_load=eplb.recording,
+                group_score_used_topk_num=group_score_topk_num,
+            )
+        else:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
+
+            topk_weights, topk_ids = select_experts(
+                hidden_states=input_tensor,
+                router_logits=router_logits,
+                correction_bias=correction_bias,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                scoring_func=scoring_func,
+            )
+        if self.routed_scaling_factor != 1.0:
+            topk_weights.mul_(self.routed_scaling_factor)
+        if per_expert_scale is not None:
+            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
+        origin_topk_ids = topk_ids
+        if map_to_physical_ids_now and is_prefill is True and eplb_active and not fused_eplb_grouped_topk:
+            sample_index = self._next_eplb_sample_index()
+            topk_ids = eplb_map_to_physical_long_fast(
+                topk_ids,
+                eplb.logical_to_physical_map,
+                eplb.logical_replica_count,
+                eplb.route_counter,
+                sample_index,
+                record_load=eplb.recording,
+            )
+        return topk_weights, topk_ids, origin_topk_ids
+
+    def _fused_experts(
+        self,
+        input_tensor: torch.Tensor,
+        w13: WeightPack,
+        w2: WeightPack,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        router_logits: Optional[torch.Tensor] = None,
+        is_prefill: Optional[bool] = None,
+    ):
+        if is_prefill is False:
+            w13 = self._primary_weight_pack(w13)
+            w2 = self._primary_weight_pack(w2)
+            num_experts = self.n_routed_experts
+        else:
+            num_experts = self.expert_parallel_state.num_total_physical_experts
+
+        output = fused_experts(
+            hidden_states=input_tensor,
+            w13=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_idx=topk_ids.to(torch.long),
+            num_experts=num_experts,
+            quant_method=self.quant_method,
+            is_prefill=is_prefill,
+            previous_event=None,  # for overlap
+            ep_balance_counters=self.ep_balance_counters,
+        )
+        return output
+
+    def _prepare_prefill_topk_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        eplb = self.eplb
+        if eplb is None:
+            return topk_ids
+        if not topk_ids.is_contiguous():
+            topk_ids = topk_ids.contiguous()
+        sample_index = self._next_eplb_sample_index()
+        return eplb_map_to_physical_long_fast(
+            topk_ids,
+            eplb.logical_to_physical_map,
+            eplb.logical_replica_count,
+            eplb.route_counter,
+            sample_index,
+            record_load=eplb.recording,
+        )
+
+    def _prepare_prefill_dispatch_topk_ids(
+        self,
+        topk_ids: torch.Tensor,
+        overlap_event: Optional[Any],
+    ) -> Tuple[torch.Tensor, Optional[Any]]:
+        """准备供 DeepEP dispatch 使用的 ID，以及保证 ID 可见的事件。
+
+        未启用 EPLB 时保持原有路径：只进行既有的 long 转换，并透传调用方事件。
+        启用 EPLB 后，共享 routing stream 在调用方输入事件之后，直接将 logical ID
+        映射到新分配的 int64 physical-ID Tensor，再捕获映射完成事件交给 DeepEP。
+        """
+        if self.eplb is None:
+            return topk_ids.to(torch.long), overlap_event
+
+        source_event = overlap_event
+        if source_event is None:
+            source_event = ElasticBuffer.capture()
+        routing_stream = _get_prefill_routing_stream(topk_ids.device)
+        with torch.cuda.stream(routing_stream):
+            source_event.current_stream_wait()
+            topk_ids = self._prepare_prefill_topk_ids(topk_ids)
+            dispatch_event = ElasticBuffer.capture()
+        return topk_ids, dispatch_event
+
+    def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
+        """返回所有 decode 路径使用的缓存本地主副本视图。"""
+        if self.eplb is None:
+            return weight_pack
+        cache = getattr(self, "_primary_weight_pack_cache", None)
+        if cache is None:
+            cache = self._primary_weight_pack_cache = {}
+        cache_key = id(weight_pack)
+        primary = cache.get(cache_key)
+        if primary is None:
+            num_primary_experts_per_rank = self.expert_parallel_state.num_primary_experts_per_rank
+            primary = WeightPack(
+                weight=weight_pack.weight[:num_primary_experts_per_rank],
+                weight_scale=(
+                    weight_pack.weight_scale[:num_primary_experts_per_rank]
+                    if weight_pack.weight_scale is not None
+                    else None
+                ),
+                weight_zero_point=(
+                    getattr(weight_pack, "weight_zero_point", None)[:num_primary_experts_per_rank]
+                    if getattr(weight_pack, "weight_zero_point", None) is not None
+                    else None
+                ),
+            )
+            cache[cache_key] = primary
+        return primary
+
+
+# 调用方捕获 overlap event 后才启动 dispatch 的策略映射。每个设备复用一条独立的
+# routing stream；该 stream 等待已捕获的输入事件，但不会阻塞 compute stream
+# 继续执行后续 microbatch。
+_PREFILL_ROUTING_STREAMS = {}
+_PREFILL_ROUTING_STREAMS_LOCK = threading.Lock()
+
+
+def _get_prefill_routing_stream(device: torch.device):
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    key = (device.type, device_index)
+    stream = _PREFILL_ROUTING_STREAMS.get(key)
+    if stream is not None:
+        return stream
+    with _PREFILL_ROUTING_STREAMS_LOCK:
+        stream = _PREFILL_ROUTING_STREAMS.get(key)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            _PREFILL_ROUTING_STREAMS[key] = stream
+        return stream

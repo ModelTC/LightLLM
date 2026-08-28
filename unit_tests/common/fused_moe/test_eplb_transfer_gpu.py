@@ -14,6 +14,9 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
     build_transfer_plan,
 )
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
+    build_initial_redundant_expert_ids,
+)
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
     EPLBState,
     ExpertParallelState,
@@ -41,10 +44,11 @@ class _FakeWeight:
     def __init__(self, rank, layer_index, row_elements):
         self.n_routed_experts = 32
         self.expert_parallel_state = ExpertParallelState(
-            logical_experts=32,
+            num_logical_experts=32,
             world_size=2,
             eplb=EPLBState(
-                redundant_experts_per_rank=16,
+                num_redundant_experts_per_rank=16,
+                initial_redundant_expert_ids_by_rank=build_initial_redundant_expert_ids(32, 2, 16),
                 logical_to_physical_map=torch.zeros((32, 2), dtype=torch.int32, device="cuda"),
                 logical_replica_count=torch.ones(32, dtype=torch.int32, device="cuda"),
                 route_counter=torch.zeros((1, 32), dtype=torch.int64, device="cuda"),
