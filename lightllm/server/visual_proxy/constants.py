@@ -20,11 +20,20 @@ BUILTIN_VISION_READER_TOOL: Final[dict[str, Any]] = {
     "function": {
         "name": VISION_READER_NAME,
         "description": (
-            "BUILTIN tag-based vision reader. MUST be called before answering anything that depends on an image, "
-            "screenshot, chart, table, UI, OCR, object count, color, position, layout, or PDF appearance. "
-            "The image argument must be an exact <image_n/> tag already visible in the conversation, never a "
-            "path, URL, file URI, or base64 value. "
-            "An available <image_n/> tag may also appear inside a tool response; when the next step depends on that image's visual content, call vision_reader with that exact tag before continuing, and never invent or renumber a tag."
+            "BUILTIN tag-based vision reader for inspecting an image already materialized as an exact "
+            "<image_n/> tag. Before answering anything that depends on visual content—including an image, "
+            "screenshot, chart, table, UI, OCR, object count, color, position, layout, or PDF appearance—"
+            "first identify the image targeted by the latest user request. "
+            "If that target is represented by an exact <image_n/> tag in the latest request or in a matching "
+            "tool response generated for it, MUST call vision_reader with that exact tag before answering. "
+            "vision_reader cannot load a workspace filename, path, URL, file URI, or base64 value. "
+            "If the latest target is only such an unloaded resource and has no matching current-request tag, "
+            "DO NOT call vision_reader on any historical tag and DO NOT answer from historical visual results; "
+            "first call an available external tool, such as vision_analyze, to load that exact resource. "
+            "After its matching tool response exposes a new <image_n/> tag, MUST call vision_reader with that "
+            "exact new tag before answering. "
+            "Use a historical tag only when the latest request explicitly targets that historical image. "
+            "Never invent or renumber image tags."
         ),
         "parameters": {
             "type": "object",
