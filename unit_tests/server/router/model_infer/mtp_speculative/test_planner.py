@@ -704,6 +704,7 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
         batch_size=4,
         mem_indexes=torch.tensor([20, 21, 22, 23], dtype=torch.int32),
         mem_indexes_cpu=torch.tensor([10, 11, 12, 13], dtype=torch.int32),
+        mem_indexes_from_req_table=False,
     )
     plan = SpecDecodePlan(origin_batch_size=4, dynamic_batch_size=2, draft_step=1, pre_draft_step=1)
 

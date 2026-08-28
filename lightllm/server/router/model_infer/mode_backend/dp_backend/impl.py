@@ -604,12 +604,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                 verify_run_reqs=run_reqs,
             )
 
-            proposal.extra_mem_indexes_cpu.append(
-                MtpMemIndexesToFree(
-                    mem_indexes_cpu=model_input.mem_indexes_cpu,
-                    free_mask_cpu=accepted_index_cpu == 0,
-                ),
-            )
+            if not model_input.mem_indexes_from_req_table:
+                proposal.extra_mem_indexes_cpu.append(
+                    MtpMemIndexesToFree(
+                        mem_indexes_cpu=model_input.mem_indexes_cpu,
+                        free_mask_cpu=accepted_index_cpu == 0,
+                    ),
+                )
 
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
@@ -889,18 +890,20 @@ class DPChunkedPrefillBackend(ModeBackend):
                 req_num=req_num,
                 accept_lengths_cpu=mtp_accept_len_cpu,
             )
-            proposal.extra_mem_indexes_cpu.extend(
-                (
+            if not model_input0.mem_indexes_from_req_table:
+                proposal.extra_mem_indexes_cpu.append(
                     MtpMemIndexesToFree(
                         mem_indexes_cpu=model_input0.mem_indexes_cpu,
                         free_mask_cpu=accepted_index_cpu0 == 0,
-                    ),
+                    )
+                )
+            if not model_input1.mem_indexes_from_req_table:
+                proposal.extra_mem_indexes_cpu.append(
                     MtpMemIndexesToFree(
                         mem_indexes_cpu=model_input1.mem_indexes_cpu,
                         free_mask_cpu=accepted_index_cpu1 == 0,
-                    ),
+                    )
                 )
-            )
 
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(

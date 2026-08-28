@@ -377,12 +377,13 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        proposal.extra_mem_indexes_cpu.append(
-            MtpMemIndexesToFree(
-                mem_indexes_cpu=model_input.mem_indexes_cpu,
-                free_mask_cpu=accepted_index_cpu == 0,
-            ),
-        )
+        if not model_input.mem_indexes_from_req_table:
+            proposal.extra_mem_indexes_cpu.append(
+                MtpMemIndexesToFree(
+                    mem_indexes_cpu=model_input.mem_indexes_cpu,
+                    free_mask_cpu=accepted_index_cpu == 0,
+                ),
+            )
         mtp_utils.free_mem_indexes(
             backend=self,
             extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,

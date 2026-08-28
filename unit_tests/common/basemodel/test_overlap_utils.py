@@ -92,7 +92,7 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     monkeypatch.setattr(basemodel, "gather_token_prefill_decode_mixed", fake_gather)
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_prefill_decode_mixed=True)
+    model.args = SimpleNamespace(enable_prefill_decode_mixed=True, page_size=1)
     model.req_manager = SimpleNamespace(
         req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=object()),
     )
@@ -138,6 +138,7 @@ def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch
     monkeypatch.setattr(basemodel, "gather_token", fake_gather)
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.args = SimpleNamespace(page_size=1)
     model.req_manager = SimpleNamespace(
         req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=object()),
     )
@@ -182,7 +183,7 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model_input1.to_cuda()
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)
     model.tp_world_size_ = 2
     model.graph = None
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
