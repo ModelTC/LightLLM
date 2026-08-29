@@ -97,11 +97,8 @@ def select_improving_placements(
     assert current_placement.shape == candidate_placement.shape
     current_rank_load = _estimate_rank_load(expert_load, current_placement, expert_alignment, node_world_size)
     candidate_rank_load = _estimate_rank_load(expert_load, candidate_placement, expert_alignment, node_world_size)
-    current_critical = current_rank_load.max(dim=-1).values
-    candidate_critical = candidate_rank_load.max(dim=-1).values
-    if current_rank_load.ndim == 3:
-        current_critical = current_critical.sum(dim=0)
-        candidate_critical = candidate_critical.sum(dim=0)
+    current_critical = current_rank_load.max(dim=-1).values.sum(dim=0)
+    candidate_critical = candidate_rank_load.max(dim=-1).values.sum(dim=0)
     # Each changed layer must reduce its own critical load. All selected
     # changes must then collectively meet the configured model-level
     # critical-load reduction threshold, avoiding low-gain migrations.
@@ -144,31 +141,28 @@ def plan_redundant_experts(
     current_placement: torch.Tensor | None = None,
     stickiness: float = 0.0,
 ) -> torch.Tensor:
-    """Plan replicas using source-node-local copies, with global fallback.
+    """Plan replicas from [samples, layers, source_nodes, experts] loads.
 
-    With ``current_placement`` and a positive ``stickiness``, a candidate that
+    With ``current_placement`` and positive ``stickiness``, a candidate that
     keeps an expert on its current rank receives a bonus of
     ``stickiness * mean per-layer expert load``. This preserves rank
     membership, not a particular redundant physical slot; target slots are
     canonicalized against the current live rows before transfer and metadata
     publication. A rank membership only changes when the move improves the
     critical-load objective by more than that margin.
-    Without them the planning is bit-identical to the legacy behavior.
+    With zero stickiness, placement is determined solely by the load objective.
     """
-    assert expert_load.ndim in (2, 3, 4)
     if expert_alignment is not None:
         assert expert_alignment > 0
-    use_legacy_topology_preference = expert_load.ndim < 4
-    legacy_node_world_size = node_world_size if use_legacy_topology_preference else None
-    source_load, _squeeze_sample, node_world_size = _as_source_node_load(expert_load, num_ranks, node_world_size)
-    num_samples, num_layers, num_nodes, num_logical_experts = source_load.shape
+    node_world_size = _resolve_node_world_size(expert_load, num_ranks, node_world_size)
+    num_samples, num_layers, num_nodes, num_logical_experts = expert_load.shape
     assert num_logical_experts % num_ranks == 0
     assert num_redundant_experts_per_rank > 0
     num_experts_per_rank = num_logical_experts // num_ranks
     num_redundant = num_ranks * num_redundant_experts_per_rank
     assert num_redundant <= num_logical_experts * (num_ranks - 1)
 
-    load = source_load.to(dtype=torch.float64, device="cpu")
+    load = expert_load.to(dtype=torch.float64, device="cpu")
     placement = torch.full((num_layers, num_ranks, num_redundant_experts_per_rank), -1, dtype=torch.int64)
     owner_rank = torch.arange(num_logical_experts, dtype=torch.int64) // num_experts_per_rank
     if current_placement is not None:
@@ -189,12 +183,6 @@ def plan_redundant_experts(
     remaining_slots = torch.full((num_layers, num_ranks), num_redundant_experts_per_rank, dtype=torch.int64)
     layer_indices = torch.arange(num_layers, dtype=torch.int64)
     expert_ids = torch.arange(num_logical_experts, dtype=torch.int64)
-    rank_nodes = (
-        torch.arange(num_ranks, dtype=torch.int64) // legacy_node_world_size
-        if legacy_node_world_size is not None and legacy_node_world_size < num_ranks
-        else None
-    )
-
     # Every iteration fills one slot per layer.  Candidate expert evaluation
     # is vectorized across all layers and logical experts, which keeps large
     # GLM/Qwen planning comfortably on the CPU fast path.
@@ -207,15 +195,6 @@ def plan_redundant_experts(
                 if remaining_slots[layer, target_rank] == 0:
                     continue
                 candidate_legal = (owner_rank != target_rank) & ~locations[layer, :, target_rank]
-                # Legacy 2D/3D callers have no source-node axis.  Retain the
-                # previous topology preference for that compatibility path;
-                # node-aware [S,L,N,E] planning uses only the exact load
-                # objective below.
-                if rank_nodes is not None:
-                    existing_on_target_node = locations[layer, :, rank_nodes == rank_nodes[target_rank]].any(dim=1)
-                    new_node_legal = candidate_legal & ~existing_on_target_node
-                    if torch.any(new_node_legal):
-                        candidate_legal = new_node_legal
                 if torch.any(candidate_legal):
                     target_ranks[layer] = target_rank
                     legal[layer] = candidate_legal
@@ -397,18 +376,13 @@ def _estimate_rank_load(
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
 ) -> torch.Tensor:
-    """Estimate runtime source-node-local routing load per physical expert.
+    """Estimate [samples, layers, ranks] load from source-node-local routing.
 
-    ``expert_load`` accepts the historic ``[layers, experts]`` and
-    ``[samples, layers, experts]`` forms, which are both one source node, and
-    the distributed ``[samples, layers, source_nodes, experts]`` form.  Source
-    loads are kept separate until they are assigned to physical replicas, then
-    combined before applying the per-expert alignment used by DeepEP.
+    Source loads remain separate until assigned to physical replicas, then
+    combine before the per-expert alignment used by DeepEP.
     """
-    source_load, squeeze_sample, node_world_size = _as_source_node_load(
-        expert_load, redundant_expert_ids.shape[1], node_world_size
-    )
-    num_samples, num_layers, num_nodes, num_logical_experts = source_load.shape
+    node_world_size = _resolve_node_world_size(expert_load, redundant_expert_ids.shape[1], node_world_size)
+    num_samples, num_layers, num_nodes, num_logical_experts = expert_load.shape
     assert redundant_expert_ids.ndim == 3 and redundant_expert_ids.shape[0] == num_layers
     num_ranks, num_redundant_experts_per_rank = redundant_expert_ids.shape[1:]
     assert num_logical_experts % num_ranks == 0
@@ -416,37 +390,25 @@ def _estimate_rank_load(
         assert expert_alignment > 0
 
     rank_load = _expert_rank_load_all(
-        source_load,
+        expert_load,
         _expert_locations(redundant_expert_ids, num_logical_experts),
         num_nodes,
         node_world_size,
         expert_alignment,
     ).sum(dim=2)
-    return rank_load.squeeze(0) if squeeze_sample else rank_load
+    return rank_load
 
 
-def _as_source_node_load(
-    expert_load: torch.Tensor, num_ranks: int, node_world_size: int | None
-) -> Tuple[torch.Tensor, bool, int]:
-    """Normalize load to ``[samples, layers, source_nodes, experts]``."""
-    assert expert_load.ndim in (2, 3, 4)
-    squeeze_sample = expert_load.ndim == 2
-    if expert_load.ndim == 2:
-        source_load = expert_load.unsqueeze(0).unsqueeze(2)
-    elif expert_load.ndim == 3:
-        source_load = expert_load.unsqueeze(2)
-    else:
-        source_load = expert_load
-    num_nodes = source_load.shape[2]
-    # Historic 2D/3D loads represent one source node containing every rank.
-    if expert_load.ndim < 4:
-        return source_load, squeeze_sample, num_ranks
+def _resolve_node_world_size(expert_load: torch.Tensor, num_ranks: int, node_world_size: int | None) -> int:
+    """Validate production [samples, layers, source_nodes, experts] planner loads."""
+    assert expert_load.ndim == 4
+    num_nodes = expert_load.shape[2]
     if node_world_size is None:
         assert num_ranks % num_nodes == 0
         node_world_size = num_ranks // num_nodes
     assert 0 < node_world_size <= num_ranks and num_ranks % node_world_size == 0
     assert num_nodes == num_ranks // node_world_size
-    return source_load, squeeze_sample, node_world_size
+    return node_world_size
 
 
 def _expert_locations(redundant_expert_ids: torch.Tensor, num_logical_experts: int) -> torch.Tensor:

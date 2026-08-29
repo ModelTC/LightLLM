@@ -292,7 +292,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
 
             group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
             topk_weights, topk_ids, logical_topk_ids = triton_grouped_topk_eplb(
-                hidden_states=input_tensor,
                 gating_output=router_logits,
                 correction_bias=correction_bias,
                 topk=top_k,
@@ -378,11 +377,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 weight_scale=(
                     weight_pack.weight_scale[:num_primary_experts_per_rank]
                     if weight_pack.weight_scale is not None
-                    else None
-                ),
-                weight_zero_point=(
-                    getattr(weight_pack, "weight_zero_point", None)[:num_primary_experts_per_rank]
-                    if getattr(weight_pack, "weight_zero_point", None) is not None
                     else None
                 ),
             )

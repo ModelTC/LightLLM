@@ -3,8 +3,46 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
+from lightllm.common.eplb_utils import extract_eplb_expert_tensors
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.utils import profile_max_tokens
+
+
+def _expert(rows=4, redundant=2):
+    def pack(cols, scale=True):
+        return SimpleNamespace(
+            weight=torch.empty((rows, cols), dtype=torch.uint8),
+            weight_scale=torch.empty((rows, 2), dtype=torch.float32) if scale else None,
+        )
+
+    return SimpleNamespace(
+        w13=pack(8),
+        w2=pack(4, False),
+        expert_parallel_state=SimpleNamespace(
+            eplb=SimpleNamespace(num_redundant_experts_per_rank=redundant)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "enable,draft,redundant,exclusion",
+    [
+        (True, False, 2, 40),
+        (True, False, 0, 0),
+        (False, False, 2, 0),
+        (True, True, 2, 0),
+    ],
+)
+def test_eplb_mtp_weight_exclusion_and_model_dedupe(enable, draft, redundant, exclusion):
+    expert = _expert(redundant=redundant)
+    model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    model.is_mtp_draft_model = draft
+    model.args = SimpleNamespace(enable_prefill_eplb=enable)
+    model.trans_layers_weight = [SimpleNamespace(experts_=expert), SimpleNamespace(experts_=expert)]
+    weights = model._get_eplb_weights()
+    assert weights == ([expert] if enable and not draft else [])
+    assert model.get_mtp_profile_weight_exclusion() == exclusion
+    assert sum(tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(expert)) == 20
 
 
 @pytest.mark.parametrize("exclusion,expected", [(0, 1000), (200, 800), (None, 1000)])
@@ -46,20 +84,3 @@ def test_mtp_profile_exclusion_validation(monkeypatch, exclusion):
     with pytest.raises(ValueError, match="invalid MTP profile exclusion"):
         with profile_max_tokens.profile_mtp_weight_memory(model):
             pass
-
-
-@pytest.mark.parametrize("reservations,expected", [({}, 252), ({"x": 20}, 247)])
-def test_memory_manager_profile_reservation_once(monkeypatch, reservations, expected):
-    monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.torch.cuda.empty_cache", lambda: None)
-    monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.dist.get_world_size", lambda: 1)
-    monkeypatch.setattr(
-        "lightllm.common.kv_cache_mem_manager.mem_manager.get_available_gpu_memory", lambda w: 1024 / 1024 ** 3
-    )
-    monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.get_total_gpu_memory", lambda: 0)
-    m = MemoryManager.__new__(MemoryManager)
-    m.size = None
-    m.memory_reservations = reservations
-    m.get_cell_size = lambda: 4
-    m.get_fixed_memory_size = lambda: 16
-    m.profile_size(1)
-    assert m.size == expected

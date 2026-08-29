@@ -35,7 +35,6 @@ class MemoryManager:
         layer_num,
         always_copy=False,
         mem_fraction=0.9,
-        memory_reservations=None,
     ):
         self.size = size
         self.head_num = head_num
@@ -43,13 +42,6 @@ class MemoryManager:
         self.layer_num = layer_num
         self.always_copy = always_copy
         self.dtype = dtype
-        # Named reservations are allocations made after KV profiling.  They are
-        # deliberately outside get_fixed_memory_size(): model-specific exact KV
-        # geometry owns fixed bytes, while these values are deducted once from
-        # the profile budget only.
-        self.memory_reservations = dict(memory_reservations or {})
-        if any(value < 0 for value in self.memory_reservations.values()):
-            raise ValueError(f"memory reservations must be non-negative: {self.memory_reservations}")
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
@@ -87,14 +79,11 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         fixed_memory_size = self.get_fixed_memory_size()
-        reservations = getattr(self, "memory_reservations", {})
-        reserved_memory_size = sum(reservations.values())
-        available_memory_bytes = available_memory * 1024 ** 3 - fixed_memory_size - reserved_memory_size
+        available_memory_bytes = available_memory * 1024 ** 3 - fixed_memory_size
         if available_memory_bytes <= 0:
             raise RuntimeError(
                 f"{type(self).__name__} fixed buffers require {fixed_memory_size / 1024**3:.2f} GB, "
-                f"plus {reserved_memory_size / 1024**3:.2f} GB reservations, "
-                f"but only {available_memory:.2f} GB is available"
+                f"but only {available_memory:.2f} GB is available for KV cache"
             )
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
@@ -104,7 +93,6 @@ class MemoryManager:
         logger.info(
             f"{str(available_memory)} GB space is available after load the model weight\n"
             f"{str(fixed_memory_size / 1024 ** 2)} MB is reserved for fixed KV cache buffers\n"
-            f"{reservations} bytes are reserved for post-profile model buffers\n"
             f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
             f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
         )

@@ -46,6 +46,7 @@ from lightllm.utils.config_utils import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.common.eplb_utils import extract_eplb_expert_tensors
 
 logger = init_logger(__name__)
 
@@ -116,6 +117,35 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         )
         self.req_manager.mem_manager = self.mem_manager
         return
+
+    def _get_eplb_weights(self):
+        if self.is_mtp_draft_model or not self.args.enable_prefill_eplb:
+            return []
+        weights = []
+        seen = set()
+        for layer_weight in self.trans_layers_weight:
+            experts = getattr(layer_weight, "experts_", None)
+            state = getattr(experts, "expert_parallel_state", None)
+            if getattr(state, "eplb", None) is None or id(experts) in seen:
+                continue
+            seen.add(id(experts))
+            weights.append(experts)
+        return weights
+
+    def get_mtp_profile_weight_exclusion(self):
+        """Rows present only in target EPLB; the DSpark draft disables EPLB."""
+        total = 0
+        seen = set()
+        for experts in self._get_eplb_weights():
+            eplb = experts.expert_parallel_state.eplb
+            redundant = eplb.num_redundant_experts_per_rank
+            for _, tensor in extract_eplb_expert_tensors(experts):
+                key = (tensor.data_ptr(), tensor.numel(), tensor.element_size())
+                if key in seen:
+                    continue
+                seen.add(key)
+                total += redundant * tensor[0].numel() * tensor.element_size()
+        return total
 
     def _init_att_backend(self):
         args = get_env_start_args()

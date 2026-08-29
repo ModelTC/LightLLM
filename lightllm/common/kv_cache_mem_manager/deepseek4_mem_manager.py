@@ -459,7 +459,15 @@ class DeepseekV4MemoryManager(MemoryManager):
                 self.layer_to_c128_idx[lid] = c128
                 c128 += 1
 
-        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            dtype,
+            head_num,
+            head_dim,
+            layer_num,
+            always_copy,
+            mem_fraction,
+        )
 
     # ------------------------------------------------------------------ sizing
     def _planned_swa_size(self, full_size: int) -> int:
