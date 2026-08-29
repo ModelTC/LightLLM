@@ -524,14 +524,10 @@ class EPLBManager:
 
 
 def _imbalance_summary(rank_load: torch.Tensor) -> Dict[str, float]:
-    if rank_load.ndim == 2:
-        critical = rank_load.max(dim=1).values
-        mean = rank_load.mean(dim=1)
-    elif rank_load.ndim == 3:
-        critical = rank_load.max(dim=2).values.sum(dim=0)
-        mean = rank_load.mean(dim=2).sum(dim=0)
-    else:
-        raise ValueError("rank_load must be [layers, ranks] or [samples, layers, ranks]")
+    if rank_load.ndim != 3:
+        raise ValueError("rank_load must be [samples, layers, ranks]")
+    critical = rank_load.max(dim=2).values.sum(dim=0)
+    mean = rank_load.mean(dim=2).sum(dim=0)
     layer_imbalance = critical / mean.clamp_min(1.0)
     sorted_imbalance = torch.sort(layer_imbalance).values
     p95_index = max(0, (95 * layer_imbalance.numel() + 99) // 100 - 1)

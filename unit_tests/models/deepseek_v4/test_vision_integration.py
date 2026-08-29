@@ -336,10 +336,11 @@ def test_router_uses_bias_vl_only_for_image_tokens(is_hash):
         gate_tid2eid_=SimpleNamespace(weight=hash_table),
         gate_bias_=SimpleNamespace(weight=text_bias),
         gate_bias_vl_=SimpleNamespace(weight=vision_bias),
+        experts_=SimpleNamespace(expert_parallel_state=None),
     )
     infer_state = SimpleNamespace(is_prefill=True, input_ids=torch.tensor([2, 100_000], device="cuda"))
 
-    weights, indices = router._select_experts(logits, infer_state, layer_weight)
+    weights, indices, _ = router._select_experts(logits, infer_state, layer_weight)
 
     scores = torch.sqrt(torch.nn.functional.softplus(logits))
     text_indices = hash_table[infer_state.input_ids[0]] if is_hash else (scores[0] + text_bias).topk(6).indices
@@ -349,6 +350,25 @@ def test_router_uses_bias_vl_only_for_image_tokens(is_hash):
     expected = scores.gather(1, expected_indices)
     expected = expected / expected.sum(dim=-1, keepdim=True) * 1.5
     torch.testing.assert_close(weights, expected, rtol=2e-5, atol=1e-6)
+
+
+def test_eplb_rejects_vision_routing():
+    from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+
+    router = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
+    router.has_vision = True
+    router.is_hash = False
+    router.vocab_size = 32
+    logits = torch.zeros((1, 256), dtype=torch.float32)
+    infer_state = SimpleNamespace(is_prefill=True, input_ids=torch.tensor([100_000]))
+    layer_weight = SimpleNamespace(
+        gate_bias_=SimpleNamespace(weight=torch.zeros(256, dtype=torch.float32)),
+        gate_bias_vl_=SimpleNamespace(weight=torch.zeros(256, dtype=torch.float32)),
+        experts_=SimpleNamespace(expert_parallel_state=SimpleNamespace(eplb=object())),
+    )
+
+    with pytest.raises(RuntimeError, match="does not support vision routing"):
+        router._select_experts(logits, infer_state, layer_weight)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

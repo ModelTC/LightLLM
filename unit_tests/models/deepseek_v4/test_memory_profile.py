@@ -3,8 +3,57 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.eplb_utils import extract_eplb_expert_tensors
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
+from lightllm.models.deepseek_v4.model import (
+    DeepseekV4TpPartModel,
+    _get_eplb_sampling_peak_nbytes,
+    _get_eplb_staging_nbytes,
+)
 from lightllm.utils import profile_max_tokens
+
+
+def _expert(rows=4, redundant=2):
+    def pack(cols, scale=True):
+        return SimpleNamespace(
+            weight=torch.empty((rows, cols), dtype=torch.uint8),
+            weight_scale=torch.empty((rows, 2), dtype=torch.float32) if scale else None,
+        )
+
+    counter = torch.zeros((5, 4), dtype=torch.int64)
+    return SimpleNamespace(
+        w13=pack(8),
+        w2=pack(4, False),
+        expert_parallel_state=SimpleNamespace(
+            eplb=SimpleNamespace(num_redundant_experts_per_rank=redundant, route_counter=counter)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "enable,draft,redundant,staging,sampling,exclusion",
+    [
+        (True, False, 2, 40, 1536, 40),
+        (True, False, 0, 0, 1536, 0),
+        (False, False, 2, 0, 0, 0),
+        (True, True, 2, 0, 0, 0),
+    ],
+)
+def test_eplb_helpers_and_model_dedupe(enable, draft, redundant, staging, sampling, exclusion):
+    expert = _expert(redundant=redundant)
+    model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    model.is_mtp_draft_model = draft
+    model.args = SimpleNamespace(enable_prefill_eplb=enable)
+    model.trans_layers_weight = [SimpleNamespace(experts_=expert), SimpleNamespace(experts_=expert)]
+    weights = model._get_eplb_weights()
+    assert weights == ([expert] if enable and not draft else [])
+    assert _get_eplb_staging_nbytes(weights) == staging
+    assert _get_eplb_sampling_peak_nbytes(weights) == sampling
+    assert model.get_mtp_profile_weight_exclusion() == exclusion
+    assert sum(tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(expert)) == 20
+    assert model._get_post_profile_memory_reservations() == {
+        name: value for name, value in (("eplb_staging", staging), ("eplb_sampling", sampling)) if value
+    }
 
 
 @pytest.mark.parametrize("exclusion,expected", [(0, 1000), (200, 800), (None, 1000)])

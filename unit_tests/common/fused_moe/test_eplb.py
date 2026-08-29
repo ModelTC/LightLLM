@@ -303,11 +303,15 @@ def test_build_initial_redundant_expert_ids(
 
 
 def test_plan_redundant_experts_never_uses_owner_or_duplicate_rank():
-    expert_load = torch.tensor(
-        [
-            [100, 90, 80, 70, 60, 50, 40, 30],
-            [30, 40, 50, 60, 70, 80, 90, 100],
-        ]
+    expert_load = (
+        torch.tensor(
+            [
+                [100, 90, 80, 70, 60, 50, 40, 30],
+                [30, 40, 50, 60, 70, 80, 90, 100],
+            ]
+        )
+        .unsqueeze(0)
+        .unsqueeze(2)
     )
     placement = plan_redundant_experts(expert_load, num_ranks=4, num_redundant_experts_per_rank=2)
 
@@ -318,7 +322,7 @@ def test_plan_redundant_experts_never_uses_owner_or_duplicate_rank():
 
 
 def test_plan_redundant_experts_minimizes_samplewise_aligned_critical_load():
-    samples = torch.tensor([[[300, 20, 20, 200]], [[100, 300, 40, 160]]])
+    samples = torch.tensor([[[300, 20, 20, 200]], [[100, 300, 40, 160]]]).unsqueeze(2)
     placement = plan_redundant_experts(samples, num_ranks=2, num_redundant_experts_per_rank=1, expert_alignment=128)
     candidates = [torch.tensor([[[left], [right]]]) for left in (2, 3) for right in (0, 1)]
 
@@ -330,7 +334,7 @@ def test_plan_redundant_experts_minimizes_samplewise_aligned_critical_load():
 
 
 def test_select_improving_placements_rejects_regressing_layer():
-    expert_load = torch.tensor([[8649, 5740, 5002, 3441]])
+    expert_load = torch.tensor([[8649, 5740, 5002, 3441]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     regressing_candidate = torch.tensor([[[1], [0]]])
 
@@ -350,7 +354,7 @@ def test_select_improving_placements_rejects_regressing_layer():
 
 
 def test_select_improving_placements_rejects_near_balance_when_gain_is_below_threshold():
-    expert_load = torch.tensor([[1, 2, 1, 17]])
+    expert_load = torch.tensor([[1, 2, 1, 17]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[3], [0]]])
     candidate = torch.tensor([[[3], [1]]])
 
@@ -369,7 +373,7 @@ def test_select_improving_placements_rejects_near_balance_when_gain_is_below_thr
 
 
 def test_select_improving_placements_accepts_alignment_aware_gain_even_when_current_ranks_are_balanced():
-    expert_load = torch.tensor([[100, 129, 100, 129]])
+    expert_load = torch.tensor([[100, 129, 100, 129]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     candidate = torch.tensor([[[3], [1]]])
 
@@ -388,7 +392,7 @@ def test_select_improving_placements_accepts_alignment_aware_gain_even_when_curr
 
 
 def test_select_improving_placements_rejects_insufficient_rebalance_gain():
-    expert_load = torch.tensor([[1, 1, 6, 7]])
+    expert_load = torch.tensor([[1, 1, 6, 7]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     candidate = torch.tensor([[[3], [0]]])
 
@@ -422,7 +426,7 @@ def test_select_improving_placements_rejects_insufficient_rebalance_gain():
 def test_select_improving_placements_rejects_invalid_rebalance_gain_threshold(
     rebalance_gain_threshold,
 ):
-    expert_load = torch.tensor([[1, 1, 1, 2]])
+    expert_load = torch.tensor([[1, 1, 1, 2]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     candidate = torch.tensor([[[3], [0]]])
 
@@ -436,7 +440,7 @@ def test_select_improving_placements_rejects_invalid_rebalance_gain_threshold(
 
 
 def test_select_improving_placements_accepts_sufficient_rebalance_gain():
-    expert_load = torch.tensor([[1, 1, 1, 2]])
+    expert_load = torch.tensor([[1, 1, 1, 2]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     candidate = torch.tensor([[[3], [0]]])
 
@@ -457,7 +461,7 @@ def test_select_improving_placements_accepts_sufficient_rebalance_gain():
 
 
 def test_select_improving_placements_rejects_raw_improvement_that_does_not_improve_aligned_compute():
-    expert_load = torch.tensor([[1, 1, 1, 8]])
+    expert_load = torch.tensor([[1, 1, 1, 8]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     raw_improving_candidate = torch.tensor([[[3], [0]]])
 
@@ -478,15 +482,15 @@ def test_select_improving_placements_rejects_raw_improvement_that_does_not_impro
 
 
 def test_estimate_rank_load_aligns_each_sample_before_accumulation():
-    samples = torch.tensor([[[20, 0, 0, 0]], [[20, 0, 0, 0]]])
+    samples = torch.tensor([[[20, 0, 0, 0]], [[20, 0, 0, 0]]]).unsqueeze(2)
     placement = torch.tensor([[[2], [0]]])
 
     per_sample = _estimate_rank_load(samples, placement, expert_alignment=128)
-    accumulated = _estimate_rank_load(samples.sum(dim=0), placement, expert_alignment=128)
+    accumulated = _estimate_rank_load(samples.sum(dim=0, keepdim=True), placement, expert_alignment=128)
 
     assert torch.equal(per_sample[:, 0], torch.tensor([[128.0, 128.0], [128.0, 128.0]]))
     assert torch.equal(per_sample.sum(dim=0)[0], torch.tensor([256.0, 256.0]))
-    assert torch.equal(accumulated[0], torch.tensor([128.0, 128.0]))
+    assert torch.equal(accumulated[0, 0], torch.tensor([128.0, 128.0]))
 
 
 def test_select_improving_placements_rejects_lower_ratio_when_critical_is_unchanged():
@@ -496,7 +500,7 @@ def test_select_improving_placements_rejects_lower_ratio_when_critical_is_unchan
             [[172, 278, 51, 238]],
             [[249, 291, 284, 183]],
         ]
-    )
+    ).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     mean_inflating_candidate = torch.tensor([[[2], [1]]])
 
@@ -525,7 +529,7 @@ def test_select_improving_placements_accepts_five_percent_critical_reduction():
             [[287, 175, 236, 179]],
             [[316, 99, 266, 353]],
         ]
-    )
+    ).unsqueeze(2)
     current = torch.tensor([[[2], [0]]])
     candidate = torch.tensor([[[2], [1]]])
 
@@ -540,7 +544,7 @@ def test_select_improving_placements_accepts_five_percent_critical_reduction():
 def test_select_improving_placements_rejects_single_layer_gain_below_model_threshold():
     # Layer 0 becomes better, but layer 1 dominates model critical load.  The
     # aggregate estimated critical-load reduction gain is below 5%, so neither layer may be changed.
-    expert_load = torch.tensor([[1, 1, 1, 2], [0, 0, 0, 10]])
+    expert_load = torch.tensor([[1, 1, 1, 2], [0, 0, 0, 10]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]], [[2], [0]]])
     candidate = torch.tensor([[[3], [0]], [[2], [0]]])
 
@@ -555,7 +559,7 @@ def test_select_improving_placements_rejects_single_layer_gain_below_model_thres
 
 
 def test_select_improving_placements_accepts_only_when_model_gain_reaches_threshold():
-    expert_load = torch.tensor([[1, 1, 1, 2], [0, 0, 0, 5]])
+    expert_load = torch.tensor([[1, 1, 1, 2], [0, 0, 0, 5]]).unsqueeze(0).unsqueeze(2)
     current = torch.tensor([[[2], [0]], [[2], [0]]])
     candidate = torch.tensor([[[3], [0]], [[2], [0]]])
 
@@ -674,22 +678,23 @@ def test_logical_to_physical_maps_for_layers_match_single_layer_api(source_rank,
     assert torch.all(maps_by_layer[~valid] == -1)
 
 
-def test_plan_redundant_experts_prefers_first_replica_on_new_node():
-    # One redundant slot per rank leaves legal alternatives on both nodes;
-    # topology preference therefore puts every first replica away from its
-    # primary node before considering same-node duplicates.
+def test_plan_redundant_experts_prefers_local_node_load_relief():
+    source_load = torch.zeros((1, 1, 2, 8), dtype=torch.int64)
+    source_load[0, 0, 0, 0] = 1024
     placement = plan_redundant_experts(
-        torch.tensor([[1000, 900, 800, 700, 600, 500, 400, 300]]),
+        source_load,
         num_ranks=4,
         num_redundant_experts_per_rank=1,
+        expert_alignment=128,
         node_world_size=2,
     )
-    for rank, expert in enumerate(placement[0, :, 0].tolist()):
-        assert expert // 2 // 2 != rank // 2
+    assert placement[0, 1, 0] == 0
+    predicted = _estimate_rank_load(source_load, placement, expert_alignment=128, node_world_size=2)
+    assert torch.equal(predicted, _manual_runtime_rank_load(source_load, placement, node_world_size=2, alignment=128))
 
 
 def test_plan_redundant_experts_single_node_matches_default_behavior():
-    load = torch.tensor([[1000, 900, 800, 700, 600, 500, 400, 300]])
+    load = torch.tensor([[1000, 900, 800, 700, 600, 500, 400, 300]]).unsqueeze(0).unsqueeze(2)
     default = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=1)
     single_node = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=1, node_world_size=4)
     assert torch.equal(single_node, default)
@@ -705,7 +710,7 @@ def test_source_node_estimate_matches_local_first_runtime_replica_sharing():
 
     predicted = _estimate_rank_load(source_load, placement, expert_alignment=128, node_world_size=2)
     runtime = _manual_runtime_rank_load(source_load, placement, node_world_size=2, alignment=128)
-    collapsed_global = _estimate_rank_load(source_load.sum(dim=2), placement, expert_alignment=128)
+    collapsed_global = _estimate_rank_load(source_load.sum(dim=2, keepdim=True), placement, expert_alignment=128)
 
     assert torch.equal(predicted, runtime)
     assert torch.equal(predicted[0, 0], torch.tensor([256.0, 0.0, 128.0, 0.0]))
@@ -783,7 +788,7 @@ def _count_moved_slots(current: torch.Tensor, target: torch.Tensor) -> int:
 
 def test_sticky_plan_reproduces_current_when_load_unchanged():
     generator = torch.Generator().manual_seed(7)
-    load = torch.randint(1, 1000, (3, 16, 32), generator=generator)
+    load = torch.randint(1, 1000, (3, 16, 32), generator=generator).unsqueeze(2)
     placement = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=2)
 
     replanned = plan_redundant_experts(
@@ -801,9 +806,9 @@ def test_sticky_plan_reproduces_current_when_load_unchanged():
 
 def test_sticky_plan_bounded_moves_under_small_perturbation():
     generator = torch.Generator().manual_seed(11)
-    load = torch.randint(100, 1000, (4, 16, 32), generator=generator)
+    load = torch.randint(100, 1000, (4, 16, 32), generator=generator).unsqueeze(2)
     placement = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=2)
-    noise = torch.rand((4, 16, 32), generator=generator) * 0.1 + 0.95
+    noise = torch.rand((4, 16, 32), generator=generator).unsqueeze(2) * 0.1 + 0.95
     perturbed = (load.double() * noise).round().to(torch.int64)
 
     sticky = plan_redundant_experts(perturbed, 4, 2, current_placement=placement, stickiness=0.1)
@@ -828,6 +833,8 @@ def test_sticky_plan_still_churns_under_phase_shift():
     for layer in range(layers):
         before[layer, (4 * layer + offsets) % experts] = 5000
         after[layer, (4 * layer + 16 + offsets) % experts] = 5000
+    before = before.unsqueeze(0).unsqueeze(2)
+    after = after.unsqueeze(0).unsqueeze(2)
     placement = plan_redundant_experts(before, num_ranks=4, num_redundant_experts_per_rank=2)
 
     replanned = plan_redundant_experts(
@@ -902,7 +909,7 @@ def test_plan_and_broadcast_publishes_canonical_placement(monkeypatch):
     broadcasts = []
 
     def fixed_selector(*_args, **_kwargs):
-        rank_load = torch.full((1, 4), 100.0)
+        rank_load = torch.full((1, 1, 4), 100.0)
         return candidate.clone(), torch.tensor([True]), {}, rank_load, rank_load
 
     def record_broadcast(result_list, **_kwargs):
@@ -922,10 +929,10 @@ def test_plan_and_broadcast_publishes_canonical_placement(monkeypatch):
     assert broadcasts and torch.equal(broadcasts[0]["placement"], manager.current_placement)
 
 
-def test_stickiness_zero_matches_legacy():
+def test_stickiness_zero_matches_unbiased_plan():
     generator = torch.Generator().manual_seed(17)
-    load = torch.randint(1, 1000, (2, 8, 16), generator=generator)
-    legacy = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=2)
+    load = torch.randint(1, 1000, (2, 8, 16), generator=generator).unsqueeze(2)
+    unbiased = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=2)
     unrelated = build_initial_redundant_expert_ids(16, 4, 2).unsqueeze(0).expand(8, -1, -1).clone()
 
     replanned = plan_redundant_experts(
@@ -936,7 +943,7 @@ def test_stickiness_zero_matches_legacy():
         stickiness=0.0,
     )
 
-    assert torch.equal(replanned, legacy)
+    assert torch.equal(replanned, unbiased)
 
 
 def test_plan_and_broadcast_propagates_rank_zero_error_after_existing_broadcast(
@@ -2003,19 +2010,17 @@ def test_transfer_plan_cross_node_and_stable_source_load_tie_break():
     ]
 
 
-def test_extract_expert_tensors_includes_weight_scale_and_zero_point_in_order():
+def test_extract_expert_tensors_includes_weight_and_scale_in_order():
     class Pack:
-        def __init__(self, offset, scale=True, zero=True):
+        def __init__(self, offset, scale=True):
             self.weight = torch.full((3, 2), offset)
             self.weight_scale = torch.full((3, 1), offset + 1) if scale else None
-            self.weight_zero_point = torch.full((3, 1), offset + 2) if zero else None
 
-    weight = type("Weight", (), {"w13": Pack(1), "w2": Pack(10, scale=False, zero=False)})()
+    weight = type("Weight", (), {"w13": Pack(1), "w2": Pack(10, scale=False)})()
     tensors = extract_eplb_expert_tensors(weight)
     assert [name for name, _ in tensors] == [
         "w13.weight",
         "w13.weight_scale",
-        "w13.weight_zero_point",
         "w2.weight",
     ]
 
@@ -2358,6 +2363,8 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
     transfer._error = None
     transfer._thread = None
     transfer._needs_staging_reuse_barrier = True
+    transfer._start_transfer_generation = lambda: None
+    transfer._finish_transfer_generation = lambda: None
     transfer.transfer_group = "transfer-group"
     copied = []
 
@@ -2377,7 +2384,7 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
     )
 
     plans = [(0, []), (1, []), (2, [])]
-    prepared_batches = transfer.prepare_transfer(plans)
+    prepared_batches = [(batch, None) for batch in transfer._make_batches(plans)]
     monkeypatch.setattr(transfer, "_make_batches", lambda _plans: pytest.fail("start must reuse prepared batches"))
     transfer.start(plans, prepared_batches)
     deadline = time.monotonic() + 2
@@ -2426,6 +2433,7 @@ def test_transfer_finalization_failure_stays_in_worker_and_success_finalizes_onc
         transfer._thread = None
         transfer._needs_staging_reuse_barrier = False
         transfer._copy_batch = lambda _batch, _prepared_batch: None
+        transfer._start_transfer_generation = lambda: None
         transfer._finish_transfer_generation = finalize
         return transfer
 
@@ -2433,13 +2441,13 @@ def test_transfer_finalization_failure_stays_in_worker_and_success_finalizes_onc
 
     finalized_before_publish = []
     success = make_transfer(lambda: finalized_before_publish.append(len(success._pending)))
-    success.start([(0, [])])
+    success.start([(0, [])], [([(0, [], 0, [])], None)])
     success.finish()
     assert finalized_before_publish == [0]
     assert success.pending_layers() == [(0, 0)]
 
     failed = make_transfer(lambda: (_ for _ in ()).throw(RuntimeError("cache boom")))
-    failed.start([(0, [])])
+    failed.start([(0, [])], [([(0, [], 0, [])], None)])
     failed._thread.join()
     assert list(failed._pending) == []
     with pytest.raises(RuntimeError, match="EPLB migration worker failed") as exc_info:
@@ -2899,12 +2907,12 @@ def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
         [
             ("w13.weight", 1000, 32),
             ("w13.weight_scale", 2000, 32),
-            ("w13.weight_zero_point", 3000, 32),
+            ("w2.weight", 3000, 32),
         ]
     ]
     transfer._push_staging_row_layout = {
-        1: [[("w13.weight", 4000, 32), ("w13.weight_scale", 5000, 32), ("w13.weight_zero_point", 6000, 32)]],
-        2: [[("w13.weight", 7000, 32), ("w13.weight_scale", 8000, 32), ("w13.weight_zero_point", 9000, 32)]],
+        1: [[("w13.weight", 4000, 32), ("w13.weight_scale", 5000, 32), ("w2.weight", 6000, 32)]],
+        2: [[("w13.weight", 7000, 32), ("w13.weight_scale", 8000, 32), ("w2.weight", 9000, 32)]],
     }
     transfer._get_remote_read = lambda *_args: None
     transfer._wait_xfers = lambda _xfers: None
@@ -3537,7 +3545,6 @@ def test_grouped_topk_eplb_matches_topk_mapping_and_counting(record_load, tokens
             torch.ones(logical_ids.numel(), dtype=torch.int64, device="cuda"),
         )
     fused_weights, fused_ids, fused_logical_ids = triton_grouped_topk_eplb(
-        hidden_states,
         gating_output,
         correction_bias,
         topk,
@@ -3607,7 +3614,6 @@ def test_global_topk_eplb_supports_logical_ids_and_counting(record_load, tokens)
     expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
 
     weights, physical_ids, logical_ids = triton_grouped_topk_eplb(
-        hidden_states=torch.empty((tokens, 1), dtype=torch.float32, device="cuda"),
         gating_output=gating_output,
         correction_bias=torch.randn((experts,), dtype=torch.float32, device="cuda"),
         topk=topk,
@@ -3638,7 +3644,6 @@ def test_triton_grouped_topk_eplb_empty_tokens_skips_kernel():
     experts = 64
     counter = torch.zeros((1, experts), dtype=torch.int64, device="cuda")
     weights, physical_ids, logical_ids = triton_grouped_topk_eplb(
-        hidden_states=torch.empty((0, 1), device="cuda"),
         gating_output=torch.empty((0, experts), device="cuda"),
         correction_bias=None,
         topk=4,

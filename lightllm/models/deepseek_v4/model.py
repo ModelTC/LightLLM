@@ -46,6 +46,10 @@ from lightllm.utils.config_utils import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.common.eplb_utils import (
+    EPLB_MAX_STAGING_DEPTH,
+    extract_eplb_expert_tensors,
+)
 
 logger = init_logger(__name__)
 
@@ -97,6 +101,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     def _init_mem_manager(self):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
         state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
+        reservations = self._get_post_profile_memory_reservations()
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
@@ -113,9 +118,46 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 else self.args.cpu_cache_token_page_size
             ),
             mem_fraction=self.mem_fraction,
+            memory_reservations=reservations,
         )
         self.req_manager.mem_manager = self.mem_manager
         return
+
+    def _get_post_profile_memory_reservations(self):
+        """Only buffers which are not yet visible to cuda.mem_get_info()."""
+        weights = self._get_eplb_weights()
+        staging = _get_eplb_staging_nbytes(weights)
+        sampling = _get_eplb_sampling_peak_nbytes(weights)
+        return {name: value for name, value in (("eplb_staging", staging), ("eplb_sampling", sampling)) if value}
+
+    def _get_eplb_weights(self):
+        if self.is_mtp_draft_model or not self.args.enable_prefill_eplb:
+            return []
+        weights = []
+        seen = set()
+        for layer_weight in self.trans_layers_weight:
+            experts = getattr(layer_weight, "experts_", None)
+            state = getattr(experts, "expert_parallel_state", None)
+            if getattr(state, "eplb", None) is None or id(experts) in seen:
+                continue
+            seen.add(id(experts))
+            weights.append(experts)
+        return weights
+
+    def get_mtp_profile_weight_exclusion(self):
+        """Rows present only in target EPLB; the DSpark draft disables EPLB."""
+        total = 0
+        seen = set()
+        for experts in self._get_eplb_weights():
+            eplb = experts.expert_parallel_state.eplb
+            redundant = eplb.num_redundant_experts_per_rank
+            for _, tensor in extract_eplb_expert_tensors(experts):
+                key = (tensor.data_ptr(), tensor.numel(), tensor.element_size())
+                if key in seen:
+                    continue
+                seen.add(key)
+                total += redundant * tensor[0].numel() * tensor.element_size()
+        return total
 
     def _init_att_backend(self):
         args = get_env_start_args()
@@ -545,3 +587,46 @@ class DeepSeekV4Tokenizer:
         if tokenize:
             return self.tokenizer.encode(prompt, add_special_tokens=False)
         return prompt
+
+
+def _get_eplb_staging_nbytes(weights) -> int:
+    """Owned bytes for NIXL's reusable staging rows, excluding live expert weights."""
+    if not weights:
+        return 0
+    depth = min(EPLB_MAX_STAGING_DEPTH, len(weights))
+    redundant = weights[0].expert_parallel_state.eplb.num_redundant_experts_per_rank
+    one_row_nbytes = sum(
+        tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(weights[0])
+    )
+    return depth * redundant * one_row_nbytes
+
+
+def _get_eplb_sampling_peak_nbytes(weights) -> int:
+    """Peak temporary bytes of EPLB sample collection, excluding route counters.
+
+    _collect_local_samples keeps stack(counters), index_select output and index
+    temporaries live together.  Counters are persistent state and intentionally
+    excluded.  CUDA allocator rounding is represented by 512-byte alignment.
+    """
+    counters = []
+    seen = set()
+    for weight in weights:
+        state = getattr(weight, "expert_parallel_state", None)
+        eplb = getattr(state, "eplb", None)
+        counter = getattr(eplb, "route_counter", None)
+        if counter is None or id(counter) in seen:
+            continue
+        seen.add(id(counter))
+        counters.append(counter)
+    if not counters:
+        return 0
+    first = counters[0]
+    if any(tuple(counter.shape) != tuple(first.shape) or counter.dtype != first.dtype for counter in counters):
+        raise ValueError("EPLB route counters must have identical shape and dtype")
+    align = lambda value: (value + 511) // 512 * 512
+    stack_bytes = align(len(counters) * first.numel() * first.element_size())
+    # index_select has the stack shape.  The int64 selection index is bounded
+    # by one ring axis; this is the selection peak, not a claim that every
+    # arithmetic intermediate remains live.
+    index_temp_bytes = align(first.shape[0] * 8)
+    return 2 * stack_bytes + index_temp_bytes
