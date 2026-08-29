@@ -421,6 +421,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
+        memory_reservations=None,
     ):
         assert head_num == 1, "DeepSeek-V4 是 MLA(MQA)，dense latent 的 head_num 必须为 1"
         assert head_dim == self.mla_head_dim, f"DeepSeek-V4 packed KV 期望 head_dim={self.mla_head_dim}"
@@ -459,7 +460,16 @@ class DeepseekV4MemoryManager(MemoryManager):
                 self.layer_to_c128_idx[lid] = c128
                 c128 += 1
 
-        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            dtype,
+            head_num,
+            head_dim,
+            layer_num,
+            always_copy,
+            mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
     # ------------------------------------------------------------------ sizing
     def _planned_swa_size(self, full_size: int) -> int:
@@ -582,8 +592,8 @@ class DeepseekV4MemoryManager(MemoryManager):
         return total
 
     def get_profiled_size(self, available_memory_bytes):
-        # Fixed KV bytes were deducted by base; add them back for the exact
-        # payload comparison.
+        # available_memory_bytes has already deducted reservations.  Compare
+        # only variable payload here because fixed bytes were deducted by base.
         budget = int(available_memory_bytes) + self.get_fixed_memory_size()
         if self.get_kv_memory_size(0) > budget:
             raise RuntimeError(

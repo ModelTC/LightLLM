@@ -3,9 +3,31 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.eplb_utils import extract_eplb_expert_tensors
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
-from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+from lightllm.models.deepseek_v4.model import (
+    DeepseekV4TpPartModel,
+    _get_eplb_sampling_peak_nbytes,
+    _get_eplb_staging_nbytes,
+)
 from lightllm.utils import profile_max_tokens
+
+
+def _expert(rows=4, redundant=2):
+    def pack(cols, scale=True):
+        return SimpleNamespace(
+            weight=torch.empty((rows, cols), dtype=torch.uint8),
+            weight_scale=torch.empty((rows, 2), dtype=torch.float32) if scale else None,
+        )
+
+    counter = torch.zeros((5, 4), dtype=torch.int64)
+    return SimpleNamespace(
+        w13=pack(8),
+        w2=pack(4, False),
+        expert_parallel_state=SimpleNamespace(
+            eplb=SimpleNamespace(num_redundant_experts_per_rank=redundant, route_counter=counter)
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -16,7 +38,9 @@ def test_auto_profile_only_initializes_main_persistent(monkeypatch, size, draft,
     model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
     model.max_total_token_num = size
     model.is_mtp_draft_model = draft
-    model.args = SimpleNamespace(run_mode="prefill", mtp_step=4, cpu_cache_token_page_size=None)
+    model.args = SimpleNamespace(
+        run_mode="prefill", mtp_step=4, cpu_cache_token_page_size=None, enable_prefill_eplb=False
+    )
     model.config = {"n_layer": 1, "head_dim": 512, "index_head_dim": 128, "compress_ratios": [0]}
     model.data_type = torch.bfloat16
     model.mem_fraction = 0.8
@@ -31,6 +55,29 @@ def test_auto_profile_only_initializes_main_persistent(monkeypatch, size, draft,
     )
     model._init_mem_manager()
     assert events == expected
+
+
+@pytest.mark.parametrize(
+    "enable,draft,redundant,staging,sampling,exclusion",
+    [
+        (True, False, 2, 40, 1536, 40),
+        (True, False, 0, 0, 1536, 0),
+        (False, False, 2, 0, 0, 0),
+        (True, True, 2, 0, 0, 0),
+    ],
+)
+def test_eplb_helpers_and_model_dedupe(enable, draft, redundant, staging, sampling, exclusion):
+    expert = _expert(redundant=redundant)
+    model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    model.is_mtp_draft_model = draft
+    model.args = SimpleNamespace(enable_prefill_eplb=enable)
+    model.trans_layers_weight = [SimpleNamespace(experts_=expert), SimpleNamespace(experts_=expert)]
+    weights = model._get_eplb_weights()
+    assert weights == ([expert] if enable and not draft else [])
+    assert _get_eplb_staging_nbytes(weights) == staging
+    assert _get_eplb_sampling_peak_nbytes(weights) == sampling
+    assert model.get_mtp_profile_weight_exclusion() == exclusion
+    assert sum(tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(expert)) == 20
 
 
 @pytest.mark.parametrize("exclusion,expected", [(0, 1000), (200, 800), (None, 1000)])
@@ -79,7 +126,7 @@ def test_memory_manager_profile_reservation_once(monkeypatch, reservations, expe
     monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.torch.cuda.empty_cache", lambda: None)
     monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.dist.get_world_size", lambda: 1)
     monkeypatch.setattr(
-        "lightllm.common.kv_cache_mem_manager.mem_manager.get_available_gpu_memory", lambda w: 1024 / 1024**3
+        "lightllm.common.kv_cache_mem_manager.mem_manager.get_available_gpu_memory", lambda w: 1024 / 1024 ** 3
     )
     monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.get_total_gpu_memory", lambda: 0)
     m = MemoryManager.__new__(MemoryManager)
