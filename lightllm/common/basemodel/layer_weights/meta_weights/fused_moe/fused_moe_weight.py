@@ -206,10 +206,11 @@ class FusedMoeWeight(BaseWeightTpl):
         infer_state=None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        logical_topk_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
-            moe_capture_callback(topk_ids)
+            moe_capture_callback(logical_topk_ids if logical_topk_ids is not None else topk_ids)
         return self.fuse_moe_impl._fused_experts(
             input_tensor=input_tensor,
             w13=self.w13,
