@@ -8,6 +8,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
 )
+from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import (
     Deepseek3_2TransformerLayerInfer,
 )
@@ -185,7 +186,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x0, residual0, post_mix0, res_mix0 = self._hc_ffn_in(x0, residual0, post_mix0, res_mix0, layer_weight)
         x0 = self._tpsp_allgather(x0.view(-1, self.embed_dim_), infer_state)
         logits0 = layer_weight.gate_weight_.mm(x0, out_dtype=torch.float32)
-        weights0, indices0 = self._select_experts(logits0, infer_state, layer_weight)
+        weights0, indices0, _ = self._select_experts(logits0, infer_state, layer_weight)
         qinput0 = experts.quantize_dispatch_input(x0)
         from deep_ep import ElasticBuffer
 
@@ -197,7 +198,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x1, residual1, post_mix1, res_mix1 = self._hc_ffn_in(x1, residual1, post_mix1, res_mix1, layer_weight)
         x1 = self._tpsp_allgather(x1.view(-1, self.embed_dim_), infer_state1)
         logits1 = layer_weight.gate_weight_.mm(x1, out_dtype=torch.float32)
-        weights1, indices1 = self._select_experts(logits1, infer_state1, layer_weight)
+        weights1, indices1, _ = self._select_experts(logits1, infer_state1, layer_weight)
 
         (recv_x0, recv_indices0, recv_weights0, recv_count0, handle0, dispatch_hook0,) = experts.dispatch(
             qinput0,
@@ -287,7 +288,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x0, residual0, post_mix0, res_mix0 = self._hc_ffn_in(x0, residual0, post_mix0, res_mix0, layer_weight)
         x0 = self._tpsp_allgather(x0.view(-1, self.embed_dim_), infer_state)
         logits0 = layer_weight.gate_weight_.mm(x0, out_dtype=torch.float32)
-        weights0, indices0 = self._select_experts(logits0, infer_state, layer_weight)
+        weights0, indices0, _ = self._select_experts(logits0, infer_state, layer_weight)
         infer_state1.call_overlap_hook()
 
         shared0 = self._ffn_tp(x0, infer_state, layer_weight)
@@ -305,7 +306,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x1, residual1, post_mix1, res_mix1 = self._hc_ffn_in(x1, residual1, post_mix1, res_mix1, layer_weight)
         x1 = self._tpsp_allgather(x1.view(-1, self.embed_dim_), infer_state1)
         logits1 = layer_weight.gate_weight_.mm(x1, out_dtype=torch.float32)
-        weights1, indices1 = self._select_experts(logits1, infer_state1, layer_weight)
+        weights1, indices1, _ = self._select_experts(logits1, infer_state1, layer_weight)
         dispatch_hook0()
 
         shared1 = self._ffn_tp(x1, infer_state1, layer_weight)
@@ -618,6 +619,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x,
         weights,
         indices,
+        logical_topk_ids,
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
@@ -625,6 +627,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             input_tensor=x,
             topk_weights=weights,
             topk_ids=indices,
+            logical_topk_ids=logical_topk_ids,
             is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
             clamp_limit=float(self.swiglu_limit),
@@ -657,13 +660,16 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         logits = layer_weight.gate_weight_.mm(x, out_dtype=torch.float32)
-        weights, indices = self._select_experts(logits, infer_state, layer_weight)
+        need_logical_ids = get_moe_capture_callback(infer_state, self.layer_num_) is not None
+        weights, indices, logical_topk_ids = self._select_experts(
+            logits, infer_state, layer_weight, return_logical_ids=need_logical_ids
+        )
         # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
         # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
         # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
         # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
-        routed = self._routed_experts(x, weights, indices, infer_state, layer_weight)
+        routed = self._routed_experts(x, weights, indices, logical_topk_ids, infer_state, layer_weight)
         if self.enable_ep_moe:
             return routed + shared
         out = routed + shared
@@ -674,6 +680,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         logits,
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
+        return_logical_ids: bool = False,
     ):
         M = logits.shape[0]
         bias = None
@@ -686,6 +693,30 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             input_tokens = infer_state.input_ids.to(dtype=indices_dtype)
         else:
             bias = layer_weight.gate_bias_.weight
+
+        eplb = None
+        if layer_weight.experts_.expert_parallel_state is not None:
+            eplb = layer_weight.experts_.expert_parallel_state.eplb
+        if infer_state.is_prefill is True and eplb is not None:
+            from lightllm.models.deepseek_v4.triton_kernel.moe_topk import (
+                deepseek_v4_eplb_topk,
+            )
+
+            return deepseek_v4_eplb_topk(
+                logits=logits,
+                bias=bias,
+                input_tokens=input_tokens,
+                hash_indices_table=hash_indices_table,
+                topk=self.num_experts_per_tok,
+                routed_scaling_factor=self.routed_scaling_factor,
+                logical_to_physical_map=eplb.logical_to_physical_map,
+                logical_replica_count=eplb.logical_replica_count,
+                expert_counter=eplb.route_counter,
+                sample_index=eplb.next_sample_index(),
+                record_load=eplb.recording,
+                alloc_tensor_func=self.alloc_tensor,
+                return_logical_ids=return_logical_ids,
+            )
 
         weights = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.float32, device=logits.device)
         indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=indices_dtype, device=logits.device)
@@ -701,7 +732,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             input_tokens,
             hash_indices_table,
         )
-        return weights, indices
+        return weights, indices, indices if return_logical_ids else None
 
 
 class CompressorInfer(BaseLayerInfer):
