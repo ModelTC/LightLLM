@@ -26,11 +26,14 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
     def load_cpu_cache_to_gpu(
         self,
+        move_token_num: int,
         mem_indexes: torch.Tensor,
         page_indexes: torch.Tensor,
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
+        # mem_indexes 中包含pad的部分，所以真实需要的move_token_num 是小于 len(mem_indexes) 的。
+        assert move_token_num <= len(mem_indexes)
         assert mem_indexes.is_cuda and page_indexes.is_cuda
         args = get_env_start_args()
         assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
@@ -41,7 +44,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         mem_manager: Qwen3NextMemManager = self.mem_manager
 
         big_page_num = len(mem_indexes) // args.cpu_cache_token_page_size
-        max_kv_len = (req.cur_kv_len // args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
+        total_kv_len = req.cur_kv_len + move_token_num
+        max_kv_len = (total_kv_len // args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
         assert max_kv_len % args.cpu_cache_token_page_size == 0
 
         big_page_buffer_ids_cpu = []
