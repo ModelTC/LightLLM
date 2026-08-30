@@ -608,25 +608,24 @@ class ModeBackend:
 
     def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
         """
-        保留第一个长请求的调度位置，其余请求优先调度剩余 prefill token 更少的请求。
+        提升一个短 prefill 请求的优先级。
         """
         short_token_threshold = self.args.short_prefill_token_threshold
         if short_token_threshold is None:
             return ready_reqs
 
         def remaining_prefill_tokens(req: InferReq) -> int:
-            # cur_kv_len 已包含 prefix match 和之前完成的 chunk。
             return max(0, req.shm_req.input_len - req.cur_kv_len)
 
         sorted_reqs = sorted(
             ready_reqs,
             key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
         )
-        for index, req in enumerate(sorted_reqs):
-            if remaining_prefill_tokens(req) > short_token_threshold:
-                sorted_reqs.insert(0, sorted_reqs.pop(index))
-                break
-        return sorted_reqs
+        if sorted_reqs and remaining_prefill_tokens(sorted_reqs[0]) <= short_token_threshold:
+            target_req = sorted_reqs[0]
+            ready_reqs.remove(target_req)
+            ready_reqs.insert(0, target_req)
+        return ready_reqs
 
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(

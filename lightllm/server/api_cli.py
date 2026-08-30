@@ -348,7 +348,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--short_prefill_token_threshold",
         type=int,
         default=None,
-        help="""Enable long/short prefill scheduling and set the maximum remaining tokens of a short request.
+        help="""Enable short prefill request priority scheduling.
         The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
