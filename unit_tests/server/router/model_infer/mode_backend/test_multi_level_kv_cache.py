@@ -42,15 +42,15 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     released_refs = []
     context = InferenceContext()
     context.is_linear_att_mixed_model = False
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14]]))
+    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
-    req = SimpleNamespace(req_idx=0, cur_kv_len=5, shared_kv_node=shared_node)
+    req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
     free_token_indexes = []
 
     context._free_req_mem_without_radix_insert(free_token_indexes, req)
 
-    assert free_token_indexes[0].tolist() == [12, 13, 14]
+    assert free_token_indexes[0].tolist() == [12, 13, 14, 15, 16]
     assert released_refs == [shared_node]
     assert req.shared_kv_node is None
 
@@ -144,6 +144,7 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=3,
+        hold_kv_len=3,
         shared_kv_node=None,
         tail_linear_att_small_page_buffer_id=7,
         linear_att_len_to_big_page_id={128: 8, 256: 9},
