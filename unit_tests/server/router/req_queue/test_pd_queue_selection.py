@@ -54,7 +54,7 @@ def test_pd_prefill_peak_tokens_do_not_use_decode_estimation():
     assert queue._caclu_batch_estimated_peak_token_num(batch) == 64
 
 
-def test_pd_decode_aligns_non_decode_requests_to_page_size():
+def test_pd_decode_adds_page_reserve_for_non_decode_requests():
     queue = PDDecodeQueue.__new__(PDDecodeQueue)
     queue.args = SimpleNamespace(page_size=16)
     queue.dp_index = 0
@@ -75,7 +75,7 @@ def test_pd_decode_aligns_non_decode_requests_to_page_size():
     ]
     batch = Batch(batch_id=1, reqs=reqs, dp_size_in_node=2)
 
-    assert queue._caclu_batch_estimated_peak_token_num(batch) == 32
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 37
 
 
 def test_pd_decode_uses_tuple_estimation():

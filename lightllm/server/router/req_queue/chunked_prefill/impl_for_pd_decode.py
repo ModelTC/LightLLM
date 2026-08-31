@@ -1,6 +1,5 @@
 import uuid
 import numpy as np
-import triton
 from typing import Tuple
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
@@ -15,7 +14,7 @@ class PDDecodeQueue(BaseQueue):
         # 新请求尚未进入 decode 阶段，缺少实际输出长度等运行信息，只能按输入长度加最大输出长度
         # 保守估算该请求最多可能占用的 KV 资源。
         req_token_num = req.input_len + req.sample_params.max_new_tokens
-        req_token_num = triton.cdiv(req_token_num, self.args.page_size) * self.args.page_size
+        req_token_num += self.args.page_size
         estimated_peak_token_num += req_token_num
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
@@ -48,7 +47,7 @@ class PDDecodeQueue(BaseQueue):
                         # 尚未进入 decode 阶段的请求没有足够的动态信息，仍按输入长度加最大输出长度
                         # 预留其最大 KV 资源。
                         req_token_num = req.input_len + req.sample_params.max_new_tokens
-                        req_token_num = triton.cdiv(req_token_num, self.args.page_size) * self.args.page_size
+                        req_token_num += self.args.page_size
                         estimated_peak_token_num += req_token_num
 
         if decoding_req_list:
