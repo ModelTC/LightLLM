@@ -42,7 +42,7 @@ class PDDecodeQueue(BaseQueue):
                         # 请求进入 decode 阶段后，可以结合已经运行的 token 数量和预计剩余输出长度，
                         # 使用连续批处理峰值算法估算其动态 KV 占用。
                         decoding_req_list.append(
-                            req.get_pd_decode_mode_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+                            req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                         )
                     else:
                         # 与新请求准入使用相同的历史输出长度估算。

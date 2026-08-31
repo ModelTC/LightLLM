@@ -18,7 +18,6 @@ def setup_module_env():
                 "enable_cpu_cache": False,
                 "model_dir": "",
                 "page_size": 4,
-                "router_max_wait_tokens": 1,
             }
         )
     )
@@ -74,27 +73,15 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     ]
 
 
-def test_chunked_req_get_tuple_tokens_aligns_remaining_len_to_page():
+def test_chunked_req_get_tuple_tokens_adds_page_reserve():
     req = SimpleNamespace(
         input_len=10,
         shm_cur_output_len=0,
         shm_cur_kv_len=0,
-        chunked_prefill_size=4,
         sample_params=SimpleNamespace(ignore_eos=True, max_new_tokens=5),
     )
 
-    assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 28)
-
-
-def test_chunked_req_get_pd_decode_mode_tuple_tokens_uses_decode_estimation():
-    req = SimpleNamespace(
-        input_len=10,
-        shm_cur_output_len=3,
-        shm_cur_kv_len=12,
-        sample_params=SimpleNamespace(ignore_eos=True, max_new_tokens=20),
-    )
-
-    assert ChunkedPrefillReq.get_pd_decode_mode_tuple_tokens(req, False, 10) == (16, 32)
+    assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 8)
 
 
 def test_finish_status(req):
