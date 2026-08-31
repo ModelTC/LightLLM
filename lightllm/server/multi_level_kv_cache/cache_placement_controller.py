@@ -208,17 +208,22 @@ def create_cache_placement_controller(
         )
     else:
         assert args.cache_placement_strategy == "adaptive"
+        from lightllm.utils.envs_utils import get_cache_placement_gpu_capacity_ratio
         from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
 
         cpu_cache_meta = calcu_cpu_cache_meta()
         page_size_tokens = args.cpu_cache_token_page_size
+        gpu_capacity_ratio = get_cache_placement_gpu_capacity_ratio()
 
         if radix_cache is None:
+            physical_gpu_capacity_tokens = 0
             gpu_capacity_tokens = 0
         else:
             # CPU/Disk cache 在节点内由所有 DP 实例共享，GPU 容量需按当前节点的 DP 数量汇总。
             dp_size_in_node = max(1, args.dp // args.nnodes)
-            gpu_capacity_tokens = radix_cache.total_token_num * dp_size_in_node
+            physical_gpu_capacity_tokens = radix_cache.total_token_num * dp_size_in_node
+            # 为运行态请求预留部分 GPU KV 容量，只用指定比例估算可长期保留的 GPU cache 容量。
+            gpu_capacity_tokens = int(physical_gpu_capacity_tokens * gpu_capacity_ratio)
 
         cpu_capacity_tokens = cpu_cache_meta.page_num * page_size_tokens
 
@@ -229,8 +234,10 @@ def create_cache_placement_controller(
             disk_capacity_tokens = 0
 
         logger.info(
-            "cache placement capacities in tokens: gpu=%d, cpu=%d, disk=%d",
+            "cache placement capacities in tokens: gpu=%d, physical_gpu=%d, gpu_ratio=%.4f, cpu=%d, disk=%d",
             gpu_capacity_tokens,
+            physical_gpu_capacity_tokens,
+            gpu_capacity_ratio,
             cpu_capacity_tokens,
             disk_capacity_tokens,
         )

@@ -145,11 +145,12 @@ def test_factory_creates_legacy_controller_for_legacy_strategy():
     assert isinstance(controller, LegacyCachePlacementController)
 
 
-def test_factory_calculates_adaptive_cache_capacities_across_local_dp_replicas(monkeypatch):
-    from lightllm.utils import kv_cache_utils
+def test_factory_calculates_adaptive_cache_capacities_across_local_dp_replicas_and_applies_gpu_ratio(monkeypatch):
+    from lightllm.utils import envs_utils, kv_cache_utils
 
     cpu_cache_meta = SimpleNamespace(page_num=10, calcu_one_page_size=lambda: 64)
     monkeypatch.setattr(kv_cache_utils, "calcu_cpu_cache_meta", lambda: cpu_cache_meta)
+    monkeypatch.setattr(envs_utils, "get_cache_placement_gpu_capacity_ratio", lambda: 0.5)
     args = SimpleNamespace(
         enable_cpu_cache=True,
         enable_disk_cache=True,
@@ -167,10 +168,39 @@ def test_factory_calculates_adaptive_cache_capacities_across_local_dp_replicas(m
 
     assert isinstance(controller, AdaptiveCachePlacementController)
     assert controller._capacity == CacheCapacityConfig(
-        gpu_tokens=160,
+        gpu_tokens=80,
         cpu_tokens=160,
         disk_tokens=int(1024 ** 3) // 64 * 16,
     )
+
+
+@pytest.mark.parametrize(
+    ("configured_ratio", "expected_ratio"),
+    [
+        (None, 0.8),
+        ("0.5", 0.5),
+        ("1", 1.0),
+    ],
+)
+def test_cache_placement_gpu_capacity_ratio_from_environment(monkeypatch, configured_ratio, expected_ratio):
+    from lightllm.utils.envs_utils import get_cache_placement_gpu_capacity_ratio
+
+    if configured_ratio is None:
+        monkeypatch.delenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", raising=False)
+    else:
+        monkeypatch.setenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", configured_ratio)
+
+    assert get_cache_placement_gpu_capacity_ratio() == expected_ratio
+
+
+@pytest.mark.parametrize("configured_ratio", ["0", "-0.1", "1.1", "nan"])
+def test_cache_placement_gpu_capacity_ratio_rejects_out_of_range_values(monkeypatch, configured_ratio):
+    from lightllm.utils.envs_utils import get_cache_placement_gpu_capacity_ratio
+
+    monkeypatch.setenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", configured_ratio)
+
+    with pytest.raises(AssertionError):
+        get_cache_placement_gpu_capacity_ratio()
 
 
 def test_set_req_cache_way_uses_recent_input_lengths_and_capacity_ratio():

@@ -231,6 +231,12 @@ def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
 
 
+def get_cache_placement_gpu_capacity_ratio() -> float:
+    ratio = float(os.getenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", 0.8))
+    assert 0 < ratio <= 1
+    return ratio
+
+
 @lru_cache(maxsize=None)
 def enable_huge_page():
     """

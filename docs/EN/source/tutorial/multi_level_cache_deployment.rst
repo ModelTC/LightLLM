@@ -47,7 +47,7 @@ Cache Placement Strategies
 
 ``--cache_placement_strategy`` controls where completed-request KV Cache is stored:
 
-- ``adaptive`` (default): During cold start, it first collects 128 requests to quickly establish an initial boundary between GPU and the lower-tier cache path. It then switches to a maximum 512-request statistics window, updating the boundary and clearing the window whenever it fills to improve stability. Short requests stay on GPU; long requests move to CPU, or follow the asynchronous CPU → Disk path when Disk is enabled. Because Disk must pass through CPU, the effective lower-tier capacity is the larger of CPU and Disk capacity rather than their sum. Until the initial small window is full and a boundary is available, placement uses ``legacy`` behavior.
+- ``adaptive`` (default): During cold start, it first collects 128 requests to quickly establish an initial boundary between GPU and the lower-tier cache path. It then keeps a sliding window of the latest 512 requests and updates the boundary every 36 placement steps. Short requests stay on GPU; long requests move to CPU, or follow the asynchronous CPU → Disk path when Disk is enabled. Because Disk must pass through CPU, the effective lower-tier capacity is the larger of CPU and Disk capacity rather than their sum. By default, only 80% of physical GPU token capacity is used for placement estimation, leaving capacity for running requests. Until the initial small window is full and a boundary is available, placement uses ``legacy`` behavior.
 - ``legacy``: Preserves the previous cascading-copy behavior. A request always remains in GPU cache and is also copied to every enabled lower tier. Enabling CPU cache stores it in GPU and CPU; enabling Disk cache as well stores it in GPU, CPU, and Disk.
 
 When ``--enable_cpu_cache`` is not enabled, this option does not change runtime behavior and every completed request uses GPU cache only.
@@ -116,6 +116,7 @@ CPU Cache Parameters
   - This value needs to balance memory utilization and transfer overhead
 
 - ``--cache_placement_strategy adaptive``: **Cache placement strategy**. Adaptive tier placement is the default; use ``legacy`` to retain the previous GPU + CPU cascading-copy behavior
+- ``LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO=0.8``: Ratio of physical GPU token capacity used by adaptive placement estimation. The default is ``0.8`` and the valid range is ``(0, 1]``
 
 **Performance Optimization Suggestions:**
 

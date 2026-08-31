@@ -47,7 +47,7 @@ LightLLM 的多级缓存系统采用分层设计:
 
 ``--cache_placement_strategy`` 用于选择请求完成后的 KV Cache 放置策略，可选值如下：
 
-- ``adaptive``（默认）：冷启动阶段先收集 128 个请求，快速生成 GPU 与低层缓存路径之间的首个长度分界点；之后切换到最大 512 个请求的统计窗口，每填满一次更新分界点并清空窗口，以提高稳定性。短请求放入 GPU，长请求放入 CPU；开启 Disk 时，长请求沿 CPU → Disk 路径异步落盘。由于 Disk 必须经过 CPU，计算比例时低层有效容量取 CPU 与 Disk 容量的较大值，而不是二者之和。首次小窗口尚未填满、没有可用分界点时，使用 ``legacy`` 行为完成冷启动。
+- ``adaptive``（默认）：冷启动阶段先收集 128 个请求，快速生成 GPU 与低层缓存路径之间的首个长度分界点；之后保留最近 512 个请求的滑动窗口，每 36 个放置步更新一次分界点。短请求放入 GPU，长请求放入 CPU；开启 Disk 时，长请求沿 CPU → Disk 路径异步落盘。由于 Disk 必须经过 CPU，计算比例时低层有效容量取 CPU 与 Disk 容量的较大值，而不是二者之和。默认只使用物理 GPU token 容量的 80% 进行放置估算，为运行态请求预留容量。首次小窗口尚未填满、没有可用分界点时，使用 ``legacy`` 行为完成冷启动。
 - ``legacy``：兼容原有的逐层备份行为。请求始终保留在 GPU cache，同时复制到所有已开启的下级缓存；开启 CPU cache 时写入 GPU 和 CPU，同时开启 Disk cache 时写入 GPU、CPU 和 Disk。
 
 未开启 ``--enable_cpu_cache`` 时，该参数不会改变运行行为，所有完成请求都只写入 GPU cache。
@@ -116,6 +116,7 @@ CPU 缓存参数
   - 该值需要权衡内存利用率和传输开销
 
 - ``--cache_placement_strategy adaptive``: **缓存放置策略**，默认使用自适应分层；如需保持原有的 GPU + CPU 逐层备份行为，设置为 ``legacy``
+- ``LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO=0.8``: **GPU 容量估算比例**，adaptive 默认使用物理 GPU token 容量的 ``0.8`` 进行放置估算，合法范围为 ``(0, 1]``
 
 **性能优化建议:**
 
