@@ -19,6 +19,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
     ep_gather_chunk,
     ep_zero_padding,
 )
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_balance import PrefillEPBalanceCounters
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
@@ -201,6 +202,7 @@ def fused_experts(
     quant_method: Any,
     is_prefill: Optional[bool],
     previous_event: Optional[Any] = None,
+    ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
 ):
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
@@ -222,6 +224,7 @@ def fused_experts(
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,
         previous_event=previous_event,
+        ep_balance_counters=ep_balance_counters,
     )
 
 
@@ -240,6 +243,7 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     previous_event: Optional[Any] = None,
+    ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -290,6 +294,12 @@ def fused_experts_impl(
             do_expand=True,
             use_tma_aligned_col_major_sf=True,
         )
+        if ep_balance_counters is not None:
+            # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
+            ep_balance_counters.accumulate(
+                route_load=topk_idx.numel(),
+                compute_load=recv_x[0].shape[0],
+            )
         # Dispatch is synchronous in this path.  Its FP8 source is no longer
         # needed once the received tensors have been produced.
         del qinput_tensor, input_scale
