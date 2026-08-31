@@ -50,6 +50,11 @@ def _pinned_remote_image_request(
     settings: Any,
 ) -> tuple[tuple[str, ...], str, Optional[str]]:
     """Validate every DNS answer and return IP-pinned request targets."""
+    if not settings.allow_remote_image_urls:
+        raise ValueError(
+            "Remote image URLs are disabled; explicitly enable "
+            "--visual_allow_remote_image_urls"
+        )
 
     parsed = urlsplit(source)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -60,7 +65,7 @@ def _pinned_remote_image_request(
         host = parsed.hostname.encode("idna").decode("ascii").lower().rstrip(".")
     except UnicodeError as exc:
         raise ValueError("Image URL contains an invalid hostname") from exc
-    if host not in settings.remote_image_hosts:
+    if settings.remote_image_hosts and host not in settings.remote_image_hosts:
         raise ValueError(
             "Image URL host is not in the configured visual remote-image allowlist"
         )
@@ -164,14 +169,15 @@ def _validate_data_image(source: str, max_image_bytes: int) -> str:
             "Image data URLs must use a supported raster image media type with "
             "base64 encoding"
         )
-    estimated_size = (len(payload) * 3) // 4
-    if estimated_size > max_image_bytes + 2:
-        raise ValueError(f"Image exceeds the {max_image_bytes}-byte limit")
+    if max_image_bytes > 0:
+        estimated_size = (len(payload) * 3) // 4
+        if estimated_size > max_image_bytes + 2:
+            raise ValueError(f"Image exceeds the {max_image_bytes}-byte limit")
     try:
         decoded = base64.b64decode(payload, validate=True)
     except Exception as exc:
         raise ValueError("Image data URL contains invalid base64") from exc
-    if len(decoded) > max_image_bytes:
+    if max_image_bytes > 0 and len(decoded) > max_image_bytes:
         raise ValueError(f"Image exceeds the {max_image_bytes}-byte limit")
     sniffed_media_type = _sniff_supported_image_media_type(decoded)
     if sniffed_media_type is None:
@@ -205,7 +211,8 @@ def image_url_for_visual_provider(source: str, settings: Any) -> str:
             raise ValueError(
                 "Image URL must be an absolute URL without embedded credentials"
             )
-        if parsed.hostname.lower().rstrip(".") not in settings.remote_image_hosts:
+        host = parsed.hostname.encode("idna").decode("ascii").lower().rstrip(".")
+        if settings.remote_image_hosts and host not in settings.remote_image_hosts:
             raise ValueError(
                 "Image URL host is not in the configured visual remote-image allowlist"
             )
@@ -245,12 +252,21 @@ def image_url_for_visual_provider(source: str, settings: Any) -> str:
             file_stat = os.fstat(image_file.fileno())
             if not stat.S_ISREG(file_stat.st_mode):
                 raise ValueError("Local visual input must be a regular file")
-            if file_stat.st_size > settings.max_image_bytes:
+
+            if (
+                settings.max_image_bytes > 0
+                and file_stat.st_size > settings.max_image_bytes
+            ):
                 raise ValueError(
                     f"Image exceeds the {settings.max_image_bytes}-byte limit"
                 )
-            image_bytes = image_file.read(settings.max_image_bytes + 1)
-        if len(image_bytes) > settings.max_image_bytes:
+
+            if settings.max_image_bytes > 0:
+                image_bytes = image_file.read(settings.max_image_bytes + 1)
+            else:
+                image_bytes = image_file.read()
+
+        if settings.max_image_bytes > 0 and len(image_bytes) > settings.max_image_bytes:
             raise ValueError(f"Image exceeds the {settings.max_image_bytes}-byte limit")
         sniffed_media_type = _sniff_supported_image_media_type(image_bytes)
         if sniffed_media_type is None or sniffed_media_type != mime_type:
