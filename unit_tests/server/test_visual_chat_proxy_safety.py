@@ -22,6 +22,7 @@ from lightllm.server.api_anthropic import (
     _anthropic_to_chat_request,
     _openai_sse_to_anthropic_events,
 )
+from lightllm.server.core.objs.start_args_type import StartArgs
 
 VALID_PNG_DATA_URL = (
     "data:image/png;base64,"
@@ -335,6 +336,83 @@ def test_visual_capacity_and_timeout_defaults_are_production_sized():
         settings.remote_queue_timeout,
         settings.agent_timeout,
     ) == (180.0, 10.0, 10.0, 600.0)
+
+
+def test_visual_image_limits_are_disabled_by_default(monkeypatch):
+    for environment_variable in (
+        "THINKING_POLICY",
+        "EMPTY_OUTPUT_RETRIES",
+        "LIGHTLLM_VISUAL_REMOTE_API_KEY",
+        "LIGHTLLM_VISUAL_REMOTE_HEADERS",
+        "LIGHTLLM_VISUAL_TRACE_DUMP",
+        "LIGHTLLM_VISUAL_TRACE_DUMP_DIR",
+    ):
+        monkeypatch.delenv(environment_variable, raising=False)
+
+    parser = argparse.ArgumentParser()
+    api_cli.add_cli_args(parser)
+    args = parser.parse_args([])
+    settings = visual_chat_proxy.VisualProxySettings(
+        remote_url="http://127.0.0.1:18180/generate"
+    )
+    fallback_settings = visual_chat_proxy.VisualProxySettings.from_args(
+        argparse.Namespace(
+            visual_remote_url="https://vision.example.com/v1/chat/completions"
+        )
+    )
+    start_args = StartArgs()
+
+    assert (
+        args.visual_max_images,
+        args.visual_max_image_bytes,
+        args.visual_max_total_image_bytes,
+    ) == (0, 0, 0)
+    assert (
+        settings.max_images,
+        settings.max_image_bytes,
+        settings.max_total_image_bytes,
+    ) == (0, 0, 0)
+    assert (
+        fallback_settings.max_images,
+        fallback_settings.max_image_bytes,
+        fallback_settings.max_total_image_bytes,
+    ) == (0, 0, 0)
+    assert (
+        start_args.visual_max_images,
+        start_args.visual_max_image_bytes,
+        start_args.visual_max_total_image_bytes,
+    ) == (0, 0, 0)
+
+    registry = visual_chat_proxy.ImageRegistry()
+    for index in range(9):
+        registry.add(
+            f"https://images.example.com/{index}.png",
+            "user",
+            byte_size=5 * 1024 * 1024,
+        )
+
+    assert len(registry) == 9
+
+
+def test_visual_image_limits_can_still_be_enabled_explicitly():
+    count_limited = visual_chat_proxy.ImageRegistry(
+        max_images=1,
+        max_total_image_bytes=0,
+    )
+    count_limited.add("https://images.example.com/1.png", "user")
+    with pytest.raises(ValueError, match="at most 1 image"):
+        count_limited.add("https://images.example.com/2.png", "user")
+
+    byte_limited = visual_chat_proxy.ImageRegistry(
+        max_images=0,
+        max_total_image_bytes=1,
+    )
+    with pytest.raises(ValueError, match="1-byte request limit"):
+        byte_limited.add(
+            "https://images.example.com/1.png",
+            "user",
+            byte_size=2,
+        )
 
 
 def test_visual_request_matches_nova_formal_profile():
