@@ -53,9 +53,9 @@ class VisualProxySettings:
     circuit_failure_threshold: int = 5
     circuit_recovery_seconds: float = 30.0
     agent_timeout: float = 600.0
-    max_images: int = 8
-    max_image_bytes: int = 20 * 1024 * 1024
-    max_total_image_bytes: int = 40 * 1024 * 1024
+    max_images: int = 0
+    max_image_bytes: int = 0
+    max_total_image_bytes: int = 0
     max_remote_response_bytes: int = 64 * 1024
     max_upstream_body_bytes: int = 1024 * 1024
     max_choices: int = 4
@@ -171,13 +171,9 @@ class VisualProxySettings:
                 getattr(args, "visual_circuit_recovery_seconds", 30.0)
             ),
             agent_timeout=float(getattr(args, "visual_agent_timeout", 600.0)),
-            max_images=int(getattr(args, "visual_max_images", 8)),
-            max_image_bytes=int(
-                getattr(args, "visual_max_image_bytes", 20 * 1024 * 1024)
-            ),
-            max_total_image_bytes=int(
-                getattr(args, "visual_max_total_image_bytes", 40 * 1024 * 1024)
-            ),
+            max_images=int(getattr(args, "visual_max_images", 0)),
+            max_image_bytes=int(getattr(args, "visual_max_image_bytes", 0)),
+            max_total_image_bytes=int(getattr(args, "visual_max_total_image_bytes", 0)),
             max_remote_response_bytes=int(
                 getattr(args, "visual_max_remote_response_bytes", 64 * 1024)
             ),

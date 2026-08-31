@@ -37,8 +37,8 @@ class ImageRegistry:
 
     def __init__(
         self,
-        max_images: int = 8,
-        max_total_image_bytes: int = 40 * 1024 * 1024,
+        max_images: int = 0,
+        max_total_image_bytes: int = 0,
     ) -> None:
         self._images: list[RegisteredImage] = []
         self._max_images = max_images

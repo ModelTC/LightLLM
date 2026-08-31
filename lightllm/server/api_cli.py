@@ -211,9 +211,24 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "Both formats are replayed through the model's native chat template on later turns."
         ),
     )
-    parser.add_argument("--visual_max_images", type=int, default=8)
-    parser.add_argument("--visual_max_image_bytes", type=int, default=20 * 1024 * 1024)
-    parser.add_argument("--visual_max_total_image_bytes", type=int, default=40 * 1024 * 1024)
+    parser.add_argument(
+        "--visual_max_images",
+        type=int,
+        default=0,
+        help="Maximum images per visual request; 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--visual_max_image_bytes",
+        type=int,
+        default=0,
+        help="Maximum bytes per image; 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--visual_max_total_image_bytes",
+        type=int,
+        default=0,
+        help="Maximum aggregate bytes for data/local images; 0 disables the limit.",
+    )
     parser.add_argument("--visual_max_remote_response_bytes", type=int, default=64 * 1024)
     parser.add_argument("--visual_max_upstream_body_bytes", type=int, default=1024 * 1024)
     parser.add_argument("--visual_max_choices", type=int, default=4)
