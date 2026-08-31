@@ -46,6 +46,10 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
+from lightllm.server.multi_level_kv_cache import (
+    CacheTier,
+    create_cache_placement_controller,
+)
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
@@ -184,12 +188,18 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
 
+        cache_placement_controller = create_cache_placement_controller(
+            args=self.args,
+            radix_cache=self.radix_cache,
+        )
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
+            cache_placement_controller=cache_placement_controller,
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
@@ -743,12 +753,24 @@ class ModeBackend:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 
-        self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
-        # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
+        # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
+        cache_controller = g_infer_context.cache_placement_controller
+        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
+        cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
-            true_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
-                finished_reqs=finished_reqs
+            offload_reqs = [
+                req for req in finished_reqs if CacheTier.CPU in req.cache_tiers or CacheTier.DISK in req.cache_tiers
+            ]
+            offload_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
+                finished_reqs=offload_reqs
             )
+            offload_finished_req_ids = {req.req_id for req in offload_finished_reqs}
+            true_finished_reqs = [
+                req
+                for req in finished_reqs
+                if (CacheTier.CPU not in req.cache_tiers and CacheTier.DISK not in req.cache_tiers)
+                or req.req_id in offload_finished_req_ids
+            ]
         else:
             true_finished_reqs = finished_reqs
 
@@ -774,12 +796,6 @@ class ModeBackend:
                 decode_reqs = []
 
         return prefill_reqs, decode_reqs
-
-    def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
-        """
-        给 PD 分离模式下，prefill node 使用的继承钩子函数，用于发起 kv 传输任务。
-        """
-        pass
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

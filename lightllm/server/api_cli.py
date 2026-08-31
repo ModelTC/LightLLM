@@ -826,6 +826,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=256,
         help="""The token page size of cpu cache""",
     )
+    parser.add_argument(
+        "--cache_placement_strategy",
+        type=str,
+        choices=["adaptive", "legacy"],
+        default="adaptive",
+        help="""Cache placement strategy used when CPU cache is enabled.
+        adaptive: place requests between GPU and the lower-tier cache path based on recent input lengths and capacity;
+        Disk placement is offloaded through CPU cache, so CPU and Disk capacities are not additive.
+        legacy: retain GPU cache and also copy each request to every enabled lower cache level.""",
+    )
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
