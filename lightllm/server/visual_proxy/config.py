@@ -219,6 +219,14 @@ class VisualProxySettings:
             )
         if self.empty_output_retries < 0:
             raise ValueError("--visual_empty_output_retries must be non-negative")
+        non_negative_values = {
+            "visual_max_images": self.max_images,
+            "visual_max_image_bytes": self.max_image_bytes,
+            "visual_max_total_image_bytes": self.max_total_image_bytes,
+        }
+        for name, value in non_negative_values.items():
+            if value < 0:
+                raise ValueError(f"--{name} must be non-negative; 0 disables the limit")
         positive_values = {
             "visual_remote_timeout": self.remote_timeout,
             "visual_remote_connect_timeout": self.remote_connect_timeout,
@@ -228,9 +236,6 @@ class VisualProxySettings:
             "visual_circuit_failure_threshold": self.circuit_failure_threshold,
             "visual_circuit_recovery_seconds": self.circuit_recovery_seconds,
             "visual_agent_timeout": self.agent_timeout,
-            "visual_max_images": self.max_images,
-            "visual_max_image_bytes": self.max_image_bytes,
-            "visual_max_total_image_bytes": self.max_total_image_bytes,
             "visual_max_remote_response_bytes": self.max_remote_response_bytes,
             "visual_max_upstream_body_bytes": self.max_upstream_body_bytes,
             "visual_max_choices": self.max_choices,
@@ -249,11 +254,6 @@ class VisualProxySettings:
             raise ValueError(
                 "--visual_allow_private_remote_image_urls requires "
                 "--visual_allow_remote_image_urls"
-            )
-        if self.allow_remote_image_urls and not self.remote_image_hosts:
-            raise ValueError(
-                "--visual_allow_remote_image_urls requires at least one "
-                "--visual_remote_image_host"
             )
         if not self.allow_remote_image_urls and self.remote_image_hosts:
             raise ValueError(

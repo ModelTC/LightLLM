@@ -55,11 +55,15 @@ class ImageRegistry:
         *,
         current_user_turn: bool = False,
     ) -> str:
-        if len(self._images) >= self._max_images:
+        if self._max_images > 0 and len(self._images) >= self._max_images:
             raise ValueError(
                 f"Visual proxy accepts at most {self._max_images} images per request"
             )
-        if self._total_image_bytes + byte_size > self._max_total_image_bytes:
+
+        if (
+            self._max_total_image_bytes > 0
+            and self._total_image_bytes + byte_size > self._max_total_image_bytes
+        ):
             raise ValueError(
                 "Visual proxy image payloads exceed the "
                 f"{self._max_total_image_bytes}-byte request limit"
