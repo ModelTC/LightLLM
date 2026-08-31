@@ -255,7 +255,7 @@ def test_set_req_cache_way_does_not_use_disabled_tiers():
     )
 
 
-def test_length_boundary_updates_only_when_history_window_is_full_and_then_clears_history():
+def test_length_boundary_keeps_history_after_initial_update():
     controller = make_controller(1, 1, 1, history_size=3)
 
     controller.set_req_cache_way([make_req(0, 100), make_req(1, 200)])
@@ -264,31 +264,34 @@ def test_length_boundary_updates_only_when_history_window_is_full_and_then_clear
 
     controller.set_req_cache_way([make_req(2, 300)])
     assert controller._gpu_max_input_len == 300
-    assert list(controller._recent_input_lengths) == []
+    assert list(controller._recent_input_lengths) == [100, 200, 300]
 
     latest_req = make_req(3, 1000)
     controller.set_req_cache_way([latest_req])
 
     assert controller._gpu_max_input_len == 300
-    assert list(controller._recent_input_lengths) == [1000]
+    assert list(controller._recent_input_lengths) == [200, 300, 1000]
     assert latest_req.cache_tiers == (CacheTier.CPU, CacheTier.DISK)
 
 
-def test_history_window_switches_from_small_initial_window_to_stable_max_window():
+def test_length_boundary_updates_every_36_steps_after_initial_update():
     controller = make_controller(1, 1, 1, history_size=4, initial_history_size=2)
 
     controller.set_req_cache_way([make_req(0, 100), make_req(1, 200)])
     assert controller._gpu_max_input_len == 200
-    assert controller._current_history_size == 4
-    assert list(controller._recent_input_lengths) == []
+    assert controller._steps_since_last_update == 0
+    assert list(controller._recent_input_lengths) == [100, 200]
 
-    controller.set_req_cache_way([make_req(2, 1000), make_req(3, 1000), make_req(4, 1000)])
+    for step in range(35):
+        controller.set_req_cache_way([make_req(step + 2, 1000)])
     assert controller._gpu_max_input_len == 200
-    assert list(controller._recent_input_lengths) == [1000, 1000, 1000]
+    assert controller._steps_since_last_update == 35
+    assert list(controller._recent_input_lengths) == [1000, 1000, 1000, 1000]
 
-    controller.set_req_cache_way([make_req(5, 100)])
+    controller.set_req_cache_way([make_req(37, 1000)])
     assert controller._gpu_max_input_len == 1000
-    assert list(controller._recent_input_lengths) == []
+    assert controller._steps_since_last_update == 0
+    assert list(controller._recent_input_lengths) == [1000, 1000, 1000, 1000]
 
 
 def test_history_window_keeps_latest_requests_when_single_extend_exceeds_limit():
@@ -298,7 +301,7 @@ def test_history_window_keeps_latest_requests_when_single_extend_exceeds_limit()
     controller.set_req_cache_way(reqs)
 
     assert controller._gpu_max_input_len == 400
-    assert list(controller._recent_input_lengths) == []
+    assert list(controller._recent_input_lengths) == [300, 400, 500]
 
 
 def test_repeated_assignment_is_rejected():

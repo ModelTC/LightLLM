@@ -90,13 +90,15 @@ class AdaptiveCachePlacementController(CachePlacementController):
     """
     根据近期请求长度和缓存容量，在 GPU 与低层缓存路径之间自适应放置请求。
 
-    控制器按固定大小的窗口收集请求输入长度，窗口填满时根据累计 token 数量和
-    GPU 与低层有效容量比例更新长度分界点并清空窗口。Disk 必须通过 CPU 中转，因此
-    低层有效容量取 CPU、Disk 容量的较大值，Disk 目标使用 ``(CPU, Disk)`` 路径表示。
+    控制器先用较小的初始窗口快速生成长度分界点，之后保留最近的请求输入长度，
+    每隔固定步数根据累计 token 数量和 GPU 与低层有效容量比例更新分界点。Disk 必须
+    通过 CPU 中转，因此低层有效容量取 CPU、Disk 容量的较大值，Disk 目标使用
+    ``(CPU, Disk)`` 路径表示。
     """
 
     INITIAL_HISTORY_SIZE = 128
     MAX_HISTORY_SIZE = 512
+    UPDATE_INTERVAL_STEPS = 36
 
     def __init__(
         self,
@@ -108,10 +110,10 @@ class AdaptiveCachePlacementController(CachePlacementController):
         assert 0 < initial_history_size <= max_history_size
         self._capacity = capacity
         self._args = args
-        self._max_history_size = max_history_size
-        self._current_history_size = initial_history_size
+        self._initial_history_size = initial_history_size
         self._recent_input_lengths: Deque[int] = deque(maxlen=max_history_size)
         self._gpu_max_input_len: Optional[int] = None
+        self._steps_since_last_update = 0
         self._legacy_controller = LegacyCachePlacementController(
             enable_cpu_cache=args.enable_cpu_cache,
             enable_disk_cache=args.enable_disk_cache,
@@ -146,13 +148,17 @@ class AdaptiveCachePlacementController(CachePlacementController):
                     assert cache_tiers in _VALID_CACHE_TIER_TUPLES
                     req.cache_tiers = cache_tiers
 
-            # 先用小窗口快速生成首个边界，随后切换到最大窗口以提高边界稳定性。
-            # deque 超过 maxlen 时会自动从左侧淘汰旧数据；累计满当前窗口后更新边界并清空。
+            # 先用小窗口快速生成首个边界；之后保留最近最多 max_history_size 条数据形成滑动窗口。
+            # deque 超过 maxlen 时会自动从左侧淘汰旧数据，每累计固定步数重新计算以跟踪负载变化趋势。
             self._recent_input_lengths.extend(input_lengths)
-            if len(self._recent_input_lengths) >= self._current_history_size:
-                self._gpu_max_input_len = self._calculate_gpu_max_input_len()
-                self._recent_input_lengths.clear()
-                self._current_history_size = self._max_history_size
+            if self._gpu_max_input_len is None:
+                if len(self._recent_input_lengths) >= self._initial_history_size:
+                    self._gpu_max_input_len = self._calculate_gpu_max_input_len()
+            else:
+                self._steps_since_last_update += 1
+                if self._steps_since_last_update >= self.UPDATE_INTERVAL_STEPS:
+                    self._gpu_max_input_len = self._calculate_gpu_max_input_len()
+                    self._steps_since_last_update = 0
 
     def _calculate_gpu_max_input_len(self) -> int:
         # 没有 GPU radix cache 容量时，不应将任何正常请求分配到 GPU cache。
