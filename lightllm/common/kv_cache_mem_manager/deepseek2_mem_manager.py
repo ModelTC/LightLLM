@@ -12,7 +12,6 @@ logger = init_logger(__name__)
 
 
 class Deepseek2MemoryManager(MemoryManager):
-
     operator_class = Deepseek2MemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
@@ -28,14 +27,8 @@ class Deepseek2MemoryManager(MemoryManager):
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
 
-    def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        self.kv_move_buffer = torch.empty(
-            (page_num, page_size, self.layer_num, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
-        )
-        self._buffer_mem_indexes_tensors = [
-            torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
-        ]
-        return self.kv_move_buffer
+    def get_paged_kv_move_buffer_shape(self, page_num, page_size):
+        return (page_num, page_size, self.layer_num, self.head_num, self.head_dim)
 
     def write_mem_to_page_kv_move_buffer(
         self,
