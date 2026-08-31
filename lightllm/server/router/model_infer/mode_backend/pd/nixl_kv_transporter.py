@@ -229,11 +229,12 @@ class NixlKVTransporter:
                 remote_agent_name=decode_agent_name,
                 notif_msg=pickle.dumps(new_trans_task),
             )
+            return True
         except BaseException as e:
             logger.error(f"send error info to decode node failed: {trans_task.to_str()}")
             logger.exception(str(e))
             self.remove_remote_agent(peer_name=decode_agent_name)
-        return
+            return False
 
     def write_blocks_paged(
         self,
