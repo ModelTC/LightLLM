@@ -244,7 +244,7 @@ class VisualProxyRuntime:
                     )
 
                 declared_length = response.headers.get("Content-Length")
-                if declared_length is not None:
+                if declared_length is not None and self.settings.max_image_bytes > 0:
                     try:
                         if int(declared_length) > self.settings.max_image_bytes:
                             raise ValueError(
@@ -276,7 +276,10 @@ class VisualProxyRuntime:
                             "Remote image download timed out"
                         ) from exc
                     body.extend(chunk)
-                    if len(body) > self.settings.max_image_bytes:
+                    if (
+                        self.settings.max_image_bytes > 0
+                        and len(body) > self.settings.max_image_bytes
+                    ):
                         raise ValueError(
                             "Remote image exceeds the "
                             f"{self.settings.max_image_bytes}-byte limit"
@@ -290,9 +293,12 @@ class VisualProxyRuntime:
                 declared_type = _normalized_image_content_type(
                     response.headers.get("Content-Type", "")
                 )
-                if declared_type != media_type:
-                    raise ValueError(
-                        "Remote image Content-Type does not match its magic bytes"
+                if declared_type and declared_type != media_type:
+                    logger.warning(
+                        "Remote image Content-Type %s does not match detected type %s; "
+                        "using detected type",
+                        declared_type,
+                        media_type,
                     )
                 logger.info(
                     "[visual-chat-proxy][remote_image_frozen] "

@@ -230,9 +230,24 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "Both formats are replayed through the model's native chat template on later turns."
         ),
     )
-    parser.add_argument("--visual_max_images", type=int, default=8)
-    parser.add_argument("--visual_max_image_bytes", type=int, default=20 * 1024 * 1024)
-    parser.add_argument("--visual_max_total_image_bytes", type=int, default=40 * 1024 * 1024)
+    parser.add_argument(
+        "--visual_max_images",
+        type=int,
+        default=0,
+        help="Maximum images per visual request; 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--visual_max_image_bytes",
+        type=int,
+        default=0,
+        help="Maximum bytes per image; 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--visual_max_total_image_bytes",
+        type=int,
+        default=0,
+        help="Maximum aggregate bytes for data/local images; 0 disables the limit.",
+    )
     parser.add_argument("--visual_max_remote_response_bytes", type=int, default=64 * 1024)
     parser.add_argument("--visual_max_upstream_body_bytes", type=int, default=1024 * 1024)
     parser.add_argument("--visual_max_choices", type=int, default=4)
@@ -250,7 +265,20 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--visual_allow_remote_image_urls",
         action="store_true",
-        help="Allow the visual upstream to fetch HTTPS image URLs. Disabled by default to prevent SSRF.",
+        help=(
+            "Allow remote HTTPS image URLs. When no "
+            "--visual_remote_image_host is configured, any public hostname "
+            "is allowed."
+        ),
+    )
+    parser.add_argument(
+        "--visual_remote_image_host",
+        action="append",
+        default=[],
+        help=(
+            "Optional exact hostname allowlist for remote image URLs. "
+            "Repeat as needed; omit to allow any public hostname."
+        ),
     )
     parser.add_argument(
         "--visual_allow_http_image_urls",
@@ -265,13 +293,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "Disabled by default; intended only for isolated trusted development networks."
         ),
     )
-    parser.add_argument(
-        "--visual_remote_image_host",
-        action="append",
-        default=[],
-        help="Exact allowed hostname for remote image URLs. Repeat as needed.",
-    )
-
     parser.add_argument(
         "--model_dir",
         type=str,
