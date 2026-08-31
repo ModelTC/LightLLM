@@ -1,5 +1,4 @@
 import uuid
-import triton
 from typing import Tuple
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
@@ -14,13 +13,13 @@ class PDPrefillQueue(BaseQueue):
         super().__init__(args, router, dp_index, dp_size_in_node)
         logger.info(
             "PD prefill requests normally generate only one output token; "
-            "estimate peak KV usage by summing their page-aligned token counts"
+            "estimate peak KV usage by adding one page to each request and summing the token counts"
         )
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
         req_token_num = req.input_len + req.sample_params.max_new_tokens
-        req_token_num = triton.cdiv(req_token_num, self.args.page_size) * self.args.page_size
+        req_token_num += self.args.page_size
         estimated_peak_token_num += req_token_num
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
@@ -42,9 +41,9 @@ class PDPrefillQueue(BaseQueue):
             for req in batch.reqs:
                 if req.sample_params.suggested_dp_index == self.dp_index:
                     # PD prefill 请求通常只生成一个 token，其 KV 占用不会像 decode 请求一样持续增长，
-                    # 因此将每个请求按 page_size 对齐后的 token 数量直接线性相加即可完成估算。
+                    # 因此为每个请求额外增加一个 page_size 后直接线性相加即可完成估算。
                     req_token_num = req.input_len + req.sample_params.max_new_tokens
-                    req_token_num = triton.cdiv(req_token_num, self.args.page_size) * self.args.page_size
+                    req_token_num += self.args.page_size
                     estimated_peak_token_num += req_token_num
 
         return estimated_peak_token_num

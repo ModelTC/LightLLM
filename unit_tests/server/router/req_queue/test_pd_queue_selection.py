@@ -51,7 +51,7 @@ def test_pd_prefill_peak_tokens_do_not_use_decode_estimation():
     ]
     batch = Batch(batch_id=1, reqs=reqs, dp_size_in_node=2)
 
-    assert queue._caclu_batch_estimated_peak_token_num(batch) == 48
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 64
 
 
 def test_pd_decode_aligns_non_decode_requests_to_page_size():
