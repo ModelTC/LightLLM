@@ -41,13 +41,16 @@ class HttpServerManagerForPDMaster:
         self.metric_client = MetricClient(get_shm_port_args().metric_port)
         self.id_gen = ReqIDGenerator()
 
-        self.pd_manager = PDManager(args)
+        self.pd_manager = PDManager(args, self.metric_client)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
+        self.pd_stage_waiting_request_counts = {"prefill": 0, "decode": 0}
+        for stage in self.pd_stage_waiting_request_counts:
+            self.metric_client.gauge_set("lightllm_pd_master_stage_waiting_requests", 0, labels={"stage": stage})
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -359,6 +362,28 @@ class HttpServerManagerForPDMaster:
             except asyncio.TimeoutError:
                 continue
 
+    def _change_pd_stage_waiting_requests(self, stage: str, delta: int) -> None:
+        self.pd_stage_waiting_request_counts[stage] += delta
+        self.metric_client.gauge_set(
+            "lightllm_pd_master_stage_waiting_requests",
+            self.pd_stage_waiting_request_counts[stage],
+            labels={"stage": stage},
+        )
+
+    async def _wait_for_pd_stage(
+        self,
+        event: asyncio.Event,
+        request: Request,
+        timeout: float,
+        group_request_id: int,
+        stage: str,
+    ) -> None:
+        self._change_pd_stage_waiting_requests(stage, 1)
+        try:
+            await self._wait_for_event_or_disconnect(event, request, timeout, group_request_id, stage)
+        finally:
+            self._change_pd_stage_waiting_requests(stage, -1)
+
     async def _log_req_header(self, request: Request, group_request_id: int):
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
@@ -393,7 +418,7 @@ class HttpServerManagerForPDMaster:
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
-            await self._wait_for_event_or_disconnect(
+            await self._wait_for_pd_stage(
                 prefill_prompt_ids_event,
                 request,
                 timeout=60,
@@ -414,7 +439,7 @@ class HttpServerManagerForPDMaster:
         )
 
         try:
-            await self._wait_for_event_or_disconnect(
+            await self._wait_for_pd_stage(
                 up_status_event,
                 request,
                 timeout=180,
@@ -436,13 +461,19 @@ class HttpServerManagerForPDMaster:
 
         first_token_gen = False
         needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
-        prompt_cache_len_from_prefill = await self._wait_for_prefill_token_if_needed(
-            req_status=req_status,
-            request=request,
-            group_request_id=group_request_id,
-            needs_prefill_first_token=needs_prefill_first_token,
-            ready_kv_len=decode_node_info.ready_kv_len,
-        )
+        if needs_prefill_first_token:
+            self._change_pd_stage_waiting_requests("prefill", 1)
+        try:
+            prompt_cache_len_from_prefill = await self._wait_for_prefill_token_if_needed(
+                req_status=req_status,
+                request=request,
+                group_request_id=group_request_id,
+                needs_prefill_first_token=needs_prefill_first_token,
+                ready_kv_len=decode_node_info.ready_kv_len,
+            )
+        finally:
+            if needs_prefill_first_token:
+                self._change_pd_stage_waiting_requests("prefill", -1)
 
         while True:
             await req_status.wait_to_ready()
@@ -754,8 +785,9 @@ class ReqStatus:
 
 
 class PDManager:
-    def __init__(self, args: StartArgs):
+    def __init__(self, args: StartArgs, metric_client=None):
         self.args: StartArgs = args
+        self.metric_client = metric_client
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
         self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
@@ -879,6 +911,12 @@ class PDManager:
             total_token_usage_rate = load_info["total_token_usage_rate"]
             pd_client = self.url_to_pd_nodes.get(client_ip_port)
             pd_client.run_status.total_token_usage_rate = total_token_usage_rate
+            if self.metric_client is not None:
+                self.metric_client.gauge_set(
+                    "lightllm_pd_node_token_usage_ratio",
+                    total_token_usage_rate,
+                    labels={"role": pd_client.mode, "endpoint": client_ip_port},
+                )
         except BaseException as e:
             logger.warning(f"udpate node load info failed, load_info: {load_info} error: {str(e)}")
         return

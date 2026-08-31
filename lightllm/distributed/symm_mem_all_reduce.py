@@ -55,7 +55,16 @@ class SymmMemAllreduce:
         self.use_multimem = self.world_size in _WORLD_SIZES_MULTIMEM.get(cap_str, [])
 
         try:
-            self.buffer = torch_symm_mem.empty(self.max_size // dtype.itemsize, device=device, dtype=dtype)
+            # The optional out-of-place path adopts this storage through
+            # ``Tensor.data``.  PyTorch cannot safely mix a normal tensor's
+            # version-counter state into an inference tensor, so make the
+            # reusable communication workspace explicitly inference-only.
+            with torch.inference_mode():
+                self.buffer = torch_symm_mem.empty(
+                    self.max_size // dtype.itemsize,
+                    device=device,
+                    dtype=dtype,
+                )
             handle = torch_symm_mem.rendezvous(self.buffer, group.group_name)
         except RuntimeError as e:
             logger.warning("SymmMemAllreduce: rendezvous failed (%s). Disabling.", e)
@@ -82,11 +91,29 @@ class SymmMemAllreduce:
         # CustomProcessGroup.all_reduce: FlashInfer claims small messages first.
         return nbytes < self.max_size
 
+    def _reduce_to_workspace(self, inp: torch.Tensor) -> torch.Tensor:
+        # Mutating an inference tensor is only legal inside inference mode.
+        # Enter it explicitly as capability probes also call this helper from
+        # ordinary no-grad code.
+        with torch.inference_mode():
+            n = inp.numel()
+            output = self.buffer[:n]
+            output.copy_(inp.view(-1))
+            if self.use_multimem:
+                torch.ops.symm_mem.multimem_all_reduce_(output, "sum", self.group.group_name)
+            else:
+                torch.ops.symm_mem.two_shot_all_reduce_(output, "sum", self.group.group_name)
+            return output.view_as(inp)
+
     def all_reduce(self, inp: torch.Tensor) -> None:
-        n = inp.numel()
-        self.buffer[:n].copy_(inp.view(-1))
-        if self.use_multimem:
-            torch.ops.symm_mem.multimem_all_reduce_(self.buffer[:n], "sum", self.group.group_name)
-        else:
-            torch.ops.symm_mem.two_shot_all_reduce_(self.buffer[:n], "sum", self.group.group_name)
-        inp.view(-1).copy_(self.buffer[:n])
+        inp.copy_(self._reduce_to_workspace(inp))
+
+    def all_reduce_out_of_place(self, inp: torch.Tensor) -> torch.Tensor:
+        """Reduce into symmetric memory and return its shaped workspace view.
+
+        The result aliases the single reusable communication workspace.  This
+        is suitable for the model's serialized current-stream all-reduces:
+        each result is consumed before the next reduction overwrites it.
+        """
+
+        return self._reduce_to_workspace(inp)

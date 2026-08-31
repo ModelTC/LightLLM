@@ -17,6 +17,7 @@ from .flashinfer.fp import FlashInferAttBackend
 from .flashinfer.mla import MlaFlashInferAttBackend
 from .nsa.flashmla_sparse import NsaFlashMlaSparseAttBackend
 from .nsa.fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend
+from .nsa.tilelang_sparse import NsaTilelangSparseAttBackend
 
 logger = init_logger(__name__)
 
@@ -56,7 +57,8 @@ mla_data_type_to_backend = {
 nsa_data_type_to_backend = {
     "None": {
         "flashmla_sparse": NsaFlashMlaSparseAttBackend,
-        # Future backends: "fa3", "tilelang", "aiter"
+        "tilelang": NsaTilelangSparseAttBackend,
+        # Future backends: "fa3", "aiter"
     },
     "fp8kv_dsa": {
         "flashmla_sparse": NsaFlashMlaFp8SparseAttBackend,

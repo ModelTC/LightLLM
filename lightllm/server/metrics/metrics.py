@@ -32,6 +32,8 @@ MONITOR_INFO = {
     "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
     "lightllm_gen_throughput": "Generation throughput of latest completed request (tokens/s)",
     "lightllm_num_running_reqs": "Number of running requests",
+    "lightllm_pd_node_token_usage_ratio": "Token capacity usage ratio reported by a PD node",
+    "lightllm_pd_master_stage_waiting_requests": "Requests waiting for a PD stage to become ready",
 }
 
 
@@ -111,6 +113,8 @@ class Monitor:
         self.create_gauge("lightllm_cache_hit_rate")
         self.create_gauge("lightllm_gen_throughput")
         self.create_gauge("lightllm_num_running_reqs")
+        self.create_gauge("lightllm_pd_node_token_usage_ratio", labelnames=["role", "endpoint"])
+        self.create_gauge("lightllm_pd_master_stage_waiting_requests", labelnames=["stage"])
 
     def create_histogram(self, name, buckets, labelnames=None):
         all_labels = ["model_name"] + (labelnames or [])
@@ -122,8 +126,9 @@ class Monitor:
         counter = Counter(name, MONITOR_INFO[name], labelnames=all_labels, registry=self.registry)
         self.monitor_registry[name] = counter
 
-    def create_gauge(self, name):
-        gauge = Gauge(name, MONITOR_INFO[name], labelnames=["model_name"], registry=self.registry)
+    def create_gauge(self, name, labelnames=None):
+        all_labels = ["model_name"] + (labelnames or [])
+        gauge = Gauge(name, MONITOR_INFO[name], labelnames=all_labels, registry=self.registry)
         self.monitor_registry[name] = gauge
 
     def counter_inc(self, name, label=None):
@@ -141,8 +146,11 @@ class Monitor:
         else:
             self.monitor_registry[name].labels(model_name=self.model_name, method=label).observe(value)
 
-    def gauge_set(self, name, value):
-        self.monitor_registry[name].labels(model_name=self.model_name).set(value)
+    def gauge_set(self, name, value, labels=None):
+        metric_labels = {"model_name": self.model_name}
+        if labels:
+            metric_labels.update(labels)
+        self.monitor_registry[name].labels(**metric_labels).set(value)
 
     def push_metrices(self):
         if self.gateway_url is not None:

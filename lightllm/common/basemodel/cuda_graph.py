@@ -1,14 +1,18 @@
 import os
+import math
 import torch
 import torch.distributed as dist
 import copy
 import bisect
 import triton
-from typing import Optional
+from typing import Iterable, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
+    is_vocab_parallel_greedy_enabled,
+)
 from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
@@ -46,7 +50,11 @@ class CudaGraph:
         batch_sizes = sorted({size for size in batch_sizes if size < max_batch_size} | {max_batch_size})
 
         if args.enable_tpsp_mix_mode:
-            batch_sizes = sorted({triton.cdiv(size, tp_world_size) * tp_world_size for size in batch_sizes})
+            # Static speculative verification stores one request in a fixed
+            # block of ``batch_step_size_before_split`` rows. TP/SP padding
+            # must preserve both that block and an even split across TP ranks.
+            alignment = math.lcm(tp_world_size, batch_step_size_before_split)
+            batch_sizes = sorted({triton.cdiv(size, alignment) * alignment for size in batch_sizes})
         assert batch_sizes[-1] == max_batch_size
         return batch_sizes
 
@@ -59,6 +67,7 @@ class CudaGraph:
         max_len_in_batch=8192,
         tp_world_size: int = 1,
         capture_infer_cost: bool = False,
+        extra_batch_sizes: Optional[Iterable[int]] = None,
     ):
         self.graph = {}
         self.tp_world_size = tp_world_size
@@ -78,6 +87,11 @@ class CudaGraph:
             max_batch_size=self.max_batch_size,
             tp_world_size=self.tp_world_size,
         )
+        if extra_batch_sizes is not None:
+            self.cuda_graph_batch_sizes = sorted(
+                set(self.cuda_graph_batch_sizes)
+                | {int(batch_size) for batch_size in extra_batch_sizes if 0 < int(batch_size) <= self.max_batch_size}
+            )
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 
     def can_run(self, batch_size, max_len_in_batch):
@@ -279,6 +293,7 @@ class CudaGraph:
                 b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                use_vocab_parallel_greedy=is_vocab_parallel_greedy_enabled(),
                 **model._gen_special_model_input(batch_size),
             )
             model_output: ModelOutput = model.forward(model_input)
@@ -340,6 +355,7 @@ class CudaGraph:
                     b_shared_radix_node_id=b_shared_radix_node_id,
                     b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                     multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                    use_vocab_parallel_greedy=is_vocab_parallel_greedy_enabled(),
                     **model._gen_special_model_input(batch_size),
                 )
                 decode_batches.append(micro_batch)

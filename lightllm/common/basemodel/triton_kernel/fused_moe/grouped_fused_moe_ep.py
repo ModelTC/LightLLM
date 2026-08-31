@@ -1,5 +1,7 @@
 """Fused MoE kernel."""
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -12,7 +14,9 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quan
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
+    tma_align_input_scale,
 )
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_legacy_layout import ep_gather, ep_scatter
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
     ep_build_m_indices,
     ep_compact_metadata,
@@ -24,7 +28,7 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.utils.device_utils import is_sm100_gpu
+from lightllm.utils.device_utils import is_sm90_gpu, is_sm100_gpu
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
@@ -51,6 +55,21 @@ def use_sm100_mega_moe(quant_method: Any) -> bool:
     return is_sm100_gpu() and quant_method.method_name == "fp4fp8-b32-deepgemm"
 
 
+def use_sm90_mega_moe(quant_method: Any) -> bool:
+    return (
+        is_sm90_gpu()
+        and os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper() in {"1", "ON", "TRUE"}
+        and quant_method.method_name == "fp8w8a8-b128-deepgemm"
+        and HAS_DEEPGEMM
+        and hasattr(deep_gemm, "fp8_mega_moe")
+        and hasattr(deep_gemm, "mega_moe_pre_dispatch_sm90")
+    )
+
+
+def use_mega_moe(quant_method: Any) -> bool:
+    return use_sm90_mega_moe(quant_method) or use_sm100_mega_moe(quant_method)
+
+
 def check_ep_expert_dtype(quant_method: Any):
     expert_dtype = getattr(quant_method, "method_name", None)
     if expert_dtype not in SUPPORTED_EP_EXPERT_DTYPES:
@@ -75,6 +94,9 @@ def masked_group_gemm(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     expected_m: int,
+    swiglu_limit=None,
+    swiglu_alpha=1.0,
+    swiglu_clamp_up_add_one=True,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
@@ -86,7 +108,16 @@ def masked_group_gemm(
     qsilu_out = torch.empty((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
-    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
+    silu_and_mul_masked_post_quant_fwd(
+        gemm_out_a,
+        qsilu_out,
+        qsilu_out_scale,
+        block_size,
+        masked_m,
+        limit=swiglu_limit,
+        alpha=swiglu_alpha,
+        clamp_up_add_one=swiglu_clamp_up_add_one,
+    )
     del gemm_out_a
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
@@ -120,6 +151,76 @@ def _get_mega_moe_cumulative_stats(num_local_experts: int, device: torch.device,
     return stats
 
 
+def prepare_sm90_mega_moe_weights(w13: Any) -> None:
+    """Replace standard gate/up FP8 weights with SM90 Mega-MoE layout."""
+
+    if getattr(w13, "sm90_mega_moe_prepared", False):
+        return
+    weight = w13.weight
+    num_groups, n, *rest = weight.shape
+    granularity = 8
+    half = n // 2
+    assert half % granularity == 0
+    gate = weight[:, :half].reshape(num_groups, half // granularity, granularity, *rest)
+    up = weight[:, half:].reshape(num_groups, half // granularity, granularity, *rest)
+    w13.weight = torch.stack((gate, up), dim=2).reshape(num_groups, n, *rest)
+    w13.sm90_mega_moe_prepared = True
+
+
+def _sm90_mega_moe_impl(
+    hidden_states: torch.Tensor,
+    w13: Any,
+    w2: Any,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation_clamp: Optional[float],
+):
+    buffer = getattr(dist_group_manager, "ep_mega_moe_buffer", None)
+    if buffer is None:
+        raise RuntimeError("SM90 Mega MoE buffer is not initialized")
+    if hidden_states.shape[0] > buffer.num_max_tokens_per_rank:
+        raise RuntimeError(
+            f"SM90 Mega MoE got {hidden_states.shape[0]} tokens, exceeding "
+            f"num_max_tokens_per_rank={buffer.num_max_tokens_per_rank}"
+        )
+    if not getattr(w13, "sm90_mega_moe_prepared", False):
+        raise RuntimeError("SM90 Mega MoE weights were not prepared after loading")
+
+    num_tokens = hidden_states.shape[0]
+    deep_gemm.mega_moe_pre_dispatch_sm90(
+        hidden_states,
+        topk_ids.to(torch.int32),
+        topk_weights.to(torch.float32),
+        buffer.x,
+        buffer.x_sf,
+        buffer.topk_idx,
+        buffer.topk_weights,
+        num_tokens=num_tokens,
+        group_size=128,
+        routed_scaling_factor=1.0,
+    )
+    # Match DeepGEMM's SM90 integration exactly.  In particular, do not pass
+    # cumulative expert statistics here: the production SGLang path leaves the
+    # optional pointer null, and the SM90 persistent collective must not gain an
+    # extra per-layer side effect across repeated decode launches.
+    output = torch.empty(
+        (max(num_tokens, 1), hidden_states.shape[1]),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
+    deep_gemm.fp8_mega_moe(
+        output,
+        (w13.weight, w13.weight_scale),
+        (w2.weight, w2.weight_scale),
+        buffer,
+        recipe=(128, 128, 128),
+        activation="swiglu",
+        activation_clamp=activation_clamp,
+        fast_math=True,
+    )
+    return output[:num_tokens]
+
+
 def mega_moe_impl(
     hidden_states: torch.Tensor,
     w13: Any,
@@ -127,7 +228,17 @@ def mega_moe_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_method: Any,
+    swiglu_limit: Optional[float] = None,
 ):
+    if use_sm90_mega_moe(quant_method):
+        return _sm90_mega_moe_impl(
+            hidden_states,
+            w13,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation_clamp=swiglu_limit,
+        )
     if not (HAS_DEEPGEMM and hasattr(deep_gemm, "fp8_fp4_mega_moe")):
         raise RuntimeError("deep_gemm does not provide fp8-fp4 Mega MoE kernel")
 
@@ -174,7 +285,7 @@ def quantize_fused_experts_input(
     quant_method: Any,
 ):
     check_ep_expert_dtype(quant_method)
-    if use_sm100_mega_moe(quant_method):
+    if use_mega_moe(quant_method):
         from deep_gemm.utils import per_token_cast_to_fp8
 
         return per_token_cast_to_fp8(
@@ -191,6 +302,114 @@ def quantize_fused_experts_input(
     return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
 
 
+def legacy_normal_moe_forward(
+    num_recv_tokens_per_expert_list: List[int],
+    recv_x: Tuple[torch.Tensor, torch.Tensor],
+    recv_topk_idx: torch.Tensor,
+    recv_topk_weights: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    hidden_dtype: torch.dtype,
+    swiglu_limit=None,
+    swiglu_alpha=1.0,
+    swiglu_clamp_up_add_one=True,
+) -> torch.Tensor:
+    """Run MoE on the token layout returned by DeepEP's legacy normal buffer."""
+    hidden_size = recv_x[0].shape[1]
+    intermediate_twice = w1.shape[1]
+    intermediate_size = intermediate_twice // 2
+    block_size_k = w1.shape[2] // w1_scale.shape[2]
+    all_tokens = sum(num_recv_tokens_per_expert_list)
+    gather_out = torch.empty(
+        (recv_x[0].shape[0], hidden_size),
+        device=recv_x[0].device,
+        dtype=hidden_dtype,
+    )
+    if all_tokens == 0:
+        if Autotuner.is_autotune_warmup():
+            gemm_out_a = torch.zeros((1, intermediate_twice), device=recv_x[0].device, dtype=hidden_dtype)
+            silu_out = torch.zeros((1, intermediate_size), device=recv_x[0].device, dtype=hidden_dtype)
+            silu_and_mul_fwd(
+                gemm_out_a,
+                silu_out,
+                limit=swiglu_limit,
+                alpha=swiglu_alpha,
+                clamp_up_add_one=swiglu_clamp_up_add_one,
+            )
+        return gather_out
+
+    input_tensor = torch.empty(
+        (all_tokens, hidden_size),
+        device=recv_x[0].device,
+        dtype=recv_x[0].dtype,
+    )
+    input_scale = torch.empty(
+        (all_tokens, hidden_size // block_size_k),
+        device=recv_x[0].device,
+        dtype=recv_x[1].dtype,
+    )
+    m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
+    output_index = torch.empty_like(recv_topk_idx, dtype=torch.int32)
+    padded_counts = torch.tensor(
+        num_recv_tokens_per_expert_list,
+        dtype=torch.int32,
+        pin_memory=True,
+        device="cpu",
+    ).cuda(non_blocking=True)
+    valid_expert_ids = recv_topk_idx[recv_topk_idx >= 0].to(torch.int64)
+    valid_counts = torch.bincount(valid_expert_ids, minlength=w1.shape[0]).to(torch.int32)
+    expert_start_loc = torch.empty_like(padded_counts)
+    ep_scatter(
+        recv_x[0],
+        recv_x[1],
+        recv_topk_idx,
+        padded_counts,
+        valid_counts,
+        expert_start_loc,
+        input_tensor,
+        input_scale,
+        m_indices,
+        output_index,
+    )
+
+    gemm_out_a = torch.empty(
+        (all_tokens, intermediate_twice),
+        device=recv_x[0].device,
+        dtype=hidden_dtype,
+    )
+    input_scale = tma_align_input_scale(input_scale)
+    deepgemm_grouped_fp8_nt_contiguous((input_tensor, input_scale), (w1, w1_scale), gemm_out_a, m_indices)
+    silu_out = torch.empty(
+        (all_tokens, intermediate_size),
+        device=recv_x[0].device,
+        dtype=hidden_dtype,
+    )
+    silu_and_mul_fwd(
+        gemm_out_a,
+        silu_out,
+        limit=swiglu_limit,
+        alpha=swiglu_alpha,
+        clamp_up_add_one=swiglu_clamp_up_add_one,
+    )
+    quant_silu = per_token_group_quant_fp8(
+        silu_out,
+        block_size_k,
+        dtype=w2.dtype,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+    )
+    gemm_out_b = torch.empty(
+        (all_tokens, hidden_size),
+        device=recv_x[0].device,
+        dtype=hidden_dtype,
+    )
+    deepgemm_grouped_fp8_nt_contiguous(quant_silu, (w2, w2_scale), gemm_out_b, m_indices)
+    ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
+    return gather_out
+
+
 def fused_experts(
     hidden_states: torch.Tensor,
     w13: Any,
@@ -201,10 +420,21 @@ def fused_experts(
     quant_method: Any,
     is_prefill: Optional[bool],
     previous_event: Optional[Any] = None,
+    swiglu_limit=None,
+    swiglu_alpha=1.0,
+    swiglu_clamp_up_add_one=True,
 ):
     check_ep_expert_dtype(quant_method)
-    if use_sm100_mega_moe(quant_method):
-        return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
+    if use_mega_moe(quant_method):
+        return mega_moe_impl(
+            hidden_states,
+            w13,
+            w2,
+            topk_weights,
+            topk_idx,
+            quant_method,
+            swiglu_limit=swiglu_limit,
+        )
 
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
     return fused_experts_impl(
@@ -222,6 +452,9 @@ def fused_experts(
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,
         previous_event=previous_event,
+        swiglu_limit=swiglu_limit,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_clamp_up_add_one=swiglu_clamp_up_add_one,
     )
 
 
@@ -240,6 +473,9 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     previous_event: Optional[Any] = None,
+    swiglu_limit=None,
+    swiglu_alpha=1.0,
+    swiglu_clamp_up_add_one=True,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -263,6 +499,57 @@ def fused_experts_impl(
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
         allocate_on_comm_stream = previous_event is not None
+        if dist_group_manager.ep_prefill_uses_legacy_buffer:
+            (
+                num_tokens_per_rank,
+                num_tokens_per_rdma_rank,
+                num_tokens_per_expert,
+                is_token_in_rank,
+                layout_event,
+            ) = buffer.get_dispatch_layout(
+                topk_idx,
+                num_experts,
+                previous_event=previous_event,
+                async_finish=False,
+                allocate_on_comm_stream=False,
+            )
+            (recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _,) = buffer.dispatch(
+                (qinput_tensor, input_scale),
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                previous_event=layout_event,
+                async_finish=False,
+                allocate_on_comm_stream=False,
+                expert_alignment=128,
+            )
+            gather_out = legacy_normal_moe_forward(
+                num_recv_tokens_per_expert_list,
+                recv_x,
+                recv_topk_idx,
+                recv_topk_weights,
+                w1,
+                w1_scale,
+                w2,
+                w2_scale,
+                hidden_states.dtype,
+                swiglu_limit,
+                swiglu_alpha,
+                swiglu_clamp_up_add_one,
+            )
+            combined_x, _, _ = buffer.combine(
+                gather_out,
+                handle,
+                topk_weights=None,
+                previous_event=previous_event,
+                async_finish=False,
+                allocate_on_comm_stream=False,
+            )
+            return combined_x
+
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
         #   recv_x[0]: [num_expanded_tokens, hidden]
         #   recv_x[1]: [num_expanded_tokens, hidden // block_size_k], with a
@@ -309,6 +596,9 @@ def fused_experts_impl(
                 block_size_k=block_size_k,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
                 hidden_dtype=hidden_states.dtype,
+                swiglu_limit=swiglu_limit,
+                swiglu_alpha=swiglu_alpha,
+                swiglu_clamp_up_add_one=swiglu_clamp_up_add_one,
             )
         else:
             gather_out = torch.empty(
@@ -324,7 +614,13 @@ def fused_experts_impl(
                 N = w1.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
                 _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(
+                    _gemm_out_a.view(-1, N),
+                    _silu_out,
+                    limit=swiglu_limit,
+                    alpha=swiglu_alpha,
+                    clamp_up_add_one=swiglu_clamp_up_add_one,
+                )
                 _gemm_out_a, _silu_out = None, None
         del recv_x
 
@@ -350,7 +646,19 @@ def fused_experts_impl(
             return_recv_hook=False,
         )
         # deepgemm
-        gemm_out_b = masked_group_gemm(recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m)
+        gemm_out_b = masked_group_gemm(
+            recv_x,
+            masked_m,
+            hidden_states.dtype,
+            w1,
+            w1_scale,
+            w2,
+            w2_scale,
+            expected_m,
+            swiglu_limit,
+            swiglu_alpha,
+            swiglu_clamp_up_add_one,
+        )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
@@ -468,6 +776,9 @@ def chunked_expanded_moe_forward(
     block_size_k: int,
     workspace: torch.Tensor,  # [workspace_bytes], uint8
     hidden_dtype: torch.dtype,  # scalar dtype descriptor
+    swiglu_limit=None,
+    swiglu_alpha=1.0,
+    swiglu_clamp_up_add_one=True,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     alignment = 128
@@ -535,7 +846,13 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out)
+            silu_and_mul_fwd(
+                gemm_out_a,
+                silu_out,
+                limit=swiglu_limit,
+                alpha=swiglu_alpha,
+                clamp_up_add_one=swiglu_clamp_up_add_one,
+            )
             workspace_manager.free(gemm_out_a)
             del gemm_out_a
 
@@ -588,6 +905,8 @@ def _deepgemm_grouped_fp8_nt_masked(
     expected_m: int,
 ):
     if HAS_DEEPGEMM:
+        if hasattr(deep_gemm, "fp8_m_grouped_gemm_nt_masked"):
+            return deep_gemm.fp8_m_grouped_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
             return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):

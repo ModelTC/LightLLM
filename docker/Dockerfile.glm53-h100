@@ -1,0 +1,188 @@
+# This is the exact SGLang GLM-5.3 runtime used for the H200 validation.
+ARG BASE_IMAGE=lmsysorg/sglang@sha256:92afb4c878eef9cbb17ca9a2c1d15d5cda58585f90bbf5915a79f0f6284aad10
+FROM ${BASE_IMAGE} AS prepared
+
+ARG PIP_INDEX_URL
+
+WORKDIR /opt/lightllm
+
+COPY docker/requirements-glm53-runtime.txt /tmp/requirements-glm53-runtime.txt
+RUN --mount=type=cache,id=glm53-pip,target=/root/.cache/pip \
+    python -m pip install --no-deps --require-hashes \
+      -r /tmp/requirements-glm53-runtime.txt && \
+    rm /tmp/requirements-glm53-runtime.txt
+
+COPY setup.py LICENSE README.md ./
+COPY lightllm ./lightllm
+COPY docker/glm53-h100.openvex.json /usr/share/doc/lightllm/glm53-h100.openvex.json
+RUN --mount=type=cache,id=glm53-pip,target=/root/.cache/pip \
+    python -m pip install --no-deps . && \
+    rm -rf \
+      /etc/ssh/ssh_host_*_key* \
+      /opt/nvidia/nsight-compute/2025.3.1/host/target-linux-x64/plugins/efa_metrics \
+      /opt/nvidia/nsight-systems-cli/2026.4.1/target-linux-x64/plugins/efa_metrics \
+      /root/.cargo/registry \
+      /sgl-workspace/sglang/python/sglang/multimodal_gen \
+      /sgl-workspace/sglang/python/sglang/srt/disaggregation \
+      /sgl-workspace/sglang/scripts/playground/replay_request_dump.py \
+      /opt/sglang/bin/pip \
+      /opt/sglang/bin/pip3 \
+      /opt/sglang/bin/pip3.12 \
+      /opt/sglang/lib/python3.12/site-packages/pip \
+      /opt/sglang/lib/python3.12/site-packages/pip-*.dist-info \
+      /opt/sglang/lib/python3.12/site-packages/setuptools \
+      /opt/sglang/lib/python3.12/site-packages/setuptools-*.dist-info \
+      /opt/sglang/lib/python3.12/site-packages/wheel \
+      /opt/sglang/lib/python3.12/site-packages/wheel-*.dist-info && \
+    python -c "import frozendict, hypercorn, importlib.metadata as metadata, importlib.util, lightllm.server.api_start, msgpack, redis, rpyc, ujson; from sglang.srt.layers.moe.moe_runner.triton_utils import fused_moe; assert metadata.version('hypercorn') == '0.18.0'; assert msgpack.__version__ == '1.2.2'; assert redis.__version__ == '7.3.0'; assert rpyc.__version__ == '6.0.2'; assert importlib.util.find_spec('pip') is None; assert importlib.util.find_spec('setuptools') is None; print('Hardened LightLLM GLM-5.3 runtime import OK')" && \
+    test ! -e /etc/ssh/ssh_host_rsa_key && \
+    test ! -e /sgl-workspace/sglang/python/sglang/multimodal_gen && \
+    test ! -e /sgl-workspace/sglang/python/sglang/srt/disaggregation
+
+# Flatten the prepared root filesystem so deleted base-image host keys and
+# developer-only vulnerable components are absent from published layers,
+# rather than merely hidden by an OCI whiteout. Size-bound the clean content
+# layers because the private registry's cross-region gateway cannot reliably
+# accept one multi-gigabyte upload stream; the merged filesystem is unchanged.
+FROM prepared AS partitioned
+
+COPY docker/split_glm53_rootfs.py /tmp/split_glm53_rootfs.py
+RUN /usr/bin/python3 /tmp/split_glm53_rootfs.py
+
+FROM prepared AS prepared_remainder
+
+RUN rm -rf \
+      /opt \
+      /root \
+      /sgl-workspace \
+      /usr/include \
+      /usr/lib/x86_64-linux-gnu \
+      /usr/libexec \
+      /usr/local \
+      /usr/share
+
+FROM scratch AS runtime
+
+ARG OCI_CREATED
+ARG OCI_REVISION
+ARG OCI_SOURCE=https://github.com/sufubao/LightLLM
+ARG OCI_VERSION
+ARG BASE_NAME=lmsysorg/sglang:glm-5.3-flash
+ARG BASE_DIGEST=sha256:92afb4c878eef9cbb17ca9a2c1d15d5cda58585f90bbf5915a79f0f6284aad10
+
+COPY --from=prepared_remainder / /
+COPY --from=partitioned /__image_layers/00/ /
+COPY --from=partitioned /__image_layers/01/ /
+COPY --from=partitioned /__image_layers/02/ /
+COPY --from=partitioned /__image_layers/03/ /
+COPY --from=partitioned /__image_layers/04/ /
+COPY --from=partitioned /__image_layers/05/ /
+COPY --from=partitioned /__image_layers/06/ /
+COPY --from=partitioned /__image_layers/07/ /
+COPY --from=partitioned /__image_layers/08/ /
+COPY --from=partitioned /__image_layers/09/ /
+COPY --from=partitioned /__image_layers/10/ /
+COPY --from=partitioned /__image_layers/11/ /
+COPY --from=partitioned /__image_layers/12/ /
+COPY --from=partitioned /__image_layers/13/ /
+COPY --from=partitioned /__image_layers/14/ /
+COPY --from=partitioned /__image_layers/15/ /
+COPY --from=partitioned /__image_layers/16/ /
+COPY --from=partitioned /__image_layers/17/ /
+COPY --from=partitioned /__image_layers/18/ /
+COPY --from=partitioned /__image_layers/19/ /
+COPY --from=partitioned /__image_layers/20/ /
+COPY --from=partitioned /__image_layers/21/ /
+COPY --from=partitioned /__image_layers/22/ /
+COPY --from=partitioned /__image_layers/23/ /
+COPY --from=partitioned /__image_layers/24/ /
+COPY --from=partitioned /__image_layers/25/ /
+COPY --from=partitioned /__image_layers/26/ /
+COPY --from=partitioned /__image_layers/27/ /
+COPY --from=partitioned /__image_layers/28/ /
+COPY --from=partitioned /__image_layers/29/ /
+COPY --from=partitioned /__image_layers/30/ /
+COPY --from=partitioned /__image_layers/31/ /
+
+LABEL org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.version="${OCI_VERSION}" \
+      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100/H200 TP8 optimized text" \
+      org.opencontainers.image.base.name="${BASE_NAME}" \
+      org.opencontainers.image.base.digest="${BASE_DIGEST}" \
+      ai.lightllm.model="GLM-5.3-Flash" \
+      ai.lightllm.accelerator="NVIDIA H100/H200" \
+      ai.lightllm.tensor-parallel-size="8" \
+      ai.lightllm.profile="text-16k256-tp8-kpool-c256-no-prompt-cache" \
+      ai.lightllm.security-profile="flattened-no-sglang-server-components"
+
+ENV PATH=/opt/sglang/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64 \
+    LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
+    CUDA_HOME=/usr/local/cuda \
+    CUDA_VERSION=13.0.3 \
+    NVARCH=x86_64 \
+    NVIDIA_REQUIRE_CUDA="cuda>=13.0" \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LOADWORKER=18 \
+    LIGHTLLM_USE_SGLANG_TRITON_MOE=1 \
+    LIGHTLLM_SGLANG_FUSED_MOE_SUM=1 \
+    LIGHTLLM_VOCAB_PARALLEL_GREEDY=1 \
+    LIGHTLLM_SYMM_MEM_OUT_OF_PLACE=1 \
+    LIGHTLLM_LOG_LEVEL=warning \
+    NCCL_CUMEM_ENABLE=1 \
+    NCCL_NVLS_ENABLE=1 \
+    CUDA_DEVICE_MAX_CONNECTIONS=8 \
+    TRTLLM_ENABLE_PDL=1 \
+    NCCL_GRAPH_MIXING_SUPPORT=0
+
+WORKDIR /opt/lightllm
+
+RUN test "$(command -v python)" = /opt/sglang/bin/python && \
+    python -c "import hypercorn, importlib.metadata as metadata, lightllm.server.api_start, redis, rpyc, torch; assert metadata.version('hypercorn') == '0.18.0'; assert redis.__version__ == '7.3.0'; assert rpyc.__version__ == '6.0.2'; print(torch.__version__)"
+
+EXPOSE 8002
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
+    CMD /opt/sglang/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/v1/models', timeout=3).read()" || exit 1
+
+# Exact 16K-input/256-output profile validated on an eight-H100 80 GB node.
+# The larger KV capacity keeps a 64-request prompt wave resident, and decode
+# CUDA graphs cover batches through 128.
+CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
+     "--model_dir", "/model", \
+     "--model_name", "glm-5.3-flash", \
+     "--tp", "8", \
+     "--host", "0.0.0.0", \
+     "--port", "8002", \
+     "--httpserver_workers", "16", \
+     "--mem_fraction", ".90", \
+     "--max_total_token_num", "1120000", \
+     "--running_max_req_size", "256", \
+     "--max_req_total_len", "532480", \
+     "--batch_max_tokens", "32768", \
+     "--chunked_prefill_size", "32768", \
+     "--linear_att_ssm_data_type", "bfloat16", \
+     "--linear_att_cache_size", "256", \
+     "--graph_max_batch_size", "128", \
+     "--graph_split_batch_size", "8", \
+     "--graph_grow_step_size", "8", \
+     "--graph_max_len_in_batch", "32768", \
+     "--disable_flashinfer_allreduce", \
+     "--enable_fused_shared_experts", \
+     "--disable_dynamic_prompt_cache", \
+     "--router_max_wait_tokens", "64", \
+     "--disable_vision", \
+     "--cache_capacity", "64", \
+     "--schedule_time_interval", "0.001", \
+     "--reasoning_parser", "glm45", \
+     "--tool_call_parser", "glm47"]

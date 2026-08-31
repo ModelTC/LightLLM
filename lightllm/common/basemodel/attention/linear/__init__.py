@@ -5,6 +5,7 @@ from .gdn import (
 )
 from .flashqla import FlashQlaLinearAttBackend
 from .triton import TritonLinearAttBackend
+from .kda import KDALinearAttBackend
 
 __all__ = [
     "LinearAttBackend",
@@ -12,4 +13,5 @@ __all__ = [
     "LinearAttDecodeAttState",
     "FlashQlaLinearAttBackend",
     "TritonLinearAttBackend",
+    "KDALinearAttBackend",
 ]

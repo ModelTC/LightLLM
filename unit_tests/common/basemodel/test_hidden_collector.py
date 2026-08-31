@@ -103,18 +103,22 @@ def test_noop_collector_keeps_normal_forward_output_minimal():
 def test_mtp_head_output_collector_returns_and_clears_outputs():
     collector = MtpHeadOutputCollector()
     draft_token_ids = torch.arange(6)
+    draft_token_probs = torch.linspace(0.1, 0.6, 6)
     confidence_logits = torch.arange(6).view(2, 3)
 
     collector.add_mtp_outputs(
         draft_token_ids=draft_token_ids,
+        draft_token_probs=draft_token_probs,
         confidence_logits=confidence_logits,
     )
     output = collector.finish_output(infer_state=None)
 
     assert output.spec_hidden is None
     assert output.draft_token_ids is draft_token_ids
+    assert output.draft_token_probs is draft_token_probs
     assert output.confidence_logits is confidence_logits
     assert collector.draft_token_ids is None
+    assert collector.draft_token_probs is None
     assert collector.confidence_logits is None
 
 

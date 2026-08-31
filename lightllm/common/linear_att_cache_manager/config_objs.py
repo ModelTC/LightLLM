@@ -113,7 +113,14 @@ class LinearAttCacheConfig:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        assert model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]
+        assert model_type in [
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+            "glm5_next",
+            "glm5_next_text",
+        ]
         llm_config = model_cfg
         try:
             llm_config = llm_config["text_config"]
@@ -121,6 +128,30 @@ class LinearAttCacheConfig:
             pass
 
         n_layer = llm_config["num_hidden_layers"]
+
+        if model_type in ["glm5_next", "glm5_next_text"]:
+            linear = llm_config["linear_attn_config"]
+            tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+            return LinearAttCacheConfig(
+                tp_world_size=tp_world_size,
+                full_att_all_num_kv_heads=1,
+                full_att_dtype=get_torch_dtype(args.data_type),
+                full_att_num_kv_heads=1,
+                full_att_head_dim=llm_config["kv_lora_rank"],
+                global_linear_k_heads=linear["num_heads"],
+                global_linear_v_heads=linear["num_heads"],
+                num_linear_k_heads=linear["num_heads"] // tp_world_size,
+                num_linear_v_heads=linear["num_heads"] // tp_world_size,
+                head_linear_k_dim=linear["head_dim"],
+                head_linear_v_dim=linear["head_dim"],
+                conv_kernel_size=linear["short_conv_kernel_size"],
+                linear_layer_num=len(linear["kda_layers"]),
+                conv_state_dtype=get_torch_dtype(args.data_type),
+                ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
+                full_attention_interval=4,
+                all_layer_num=n_layer,
+                draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num(),
+            )
 
         tp_world_size = get_env_start_args().tp // get_env_start_args().dp
         return LinearAttCacheConfig(

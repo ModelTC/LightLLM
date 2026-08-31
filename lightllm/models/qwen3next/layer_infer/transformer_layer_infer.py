@@ -319,7 +319,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         num_tokens = z.shape[0]
         core_attn_out = core_attn_out.view(-1, core_attn_out.shape[-1])
-        z = z.contiguous().view(-1, z.shape[-1])
         norm_out = layer_weight.linear_norm(core_attn_out, z, self.eps_)
         core_attn_out = norm_out.view(num_tokens, -1)
         output = layer_weight.linear_out_proj.mm(core_attn_out)

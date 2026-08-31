@@ -76,3 +76,31 @@ def test_batch_step_size_after_split_controls_capture_range(_graph_args):
         42,
         56,
     ]
+
+
+def test_extra_batch_sizes_are_merged_and_bounded(_graph_args):
+    graph = CudaGraph(
+        batch_step_size_before_split=6,
+        split_batch_size=24,
+        batch_step_size_after_split=96,
+        max_batch_size=384,
+        extra_batch_sizes=[1, 2, 4, 20, 36, 52, 64, 999],
+    )
+
+    assert graph.cuda_graph_batch_sizes == [
+        1,
+        2,
+        4,
+        6,
+        12,
+        18,
+        20,
+        24,
+        36,
+        52,
+        64,
+        120,
+        216,
+        312,
+        384,
+    ]

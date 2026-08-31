@@ -8,8 +8,12 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 from .chunk import chunk_gated_delta_rule
 from .fused_recurrent import fused_recurrent_gated_delta_rule
+from .kda import chunk_kda_with_fused_gate, fused_recurrent_kda, kda_safe_gate
 
 __all__ = [
     "chunk_gated_delta_rule",
     "fused_recurrent_gated_delta_rule",
+    "fused_recurrent_kda",
+    "chunk_kda_with_fused_gate",
+    "kda_safe_gate",
 ]

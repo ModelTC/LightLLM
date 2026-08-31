@@ -24,6 +24,7 @@ NUM_WARPS = [2, 4, 8, 16]
     {
         "USE_G": lambda args: args["g"] is not None,
         "USE_GK": lambda args: args["gk"] is not None,
+        "USE_EXP2": lambda args: args["use_exp2"],
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
@@ -43,6 +44,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
+    use_exp2,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -52,6 +54,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
@@ -169,7 +172,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 mask=(o_k1 < K),
                 other=0.0,
             )
-            b_h1 *= exp(b_gk_last1)[:, None]
+            b_h1 *= (tl.exp2(b_gk_last1) if USE_EXP2 else exp(b_gk_last1))[:, None]
             if K > 64:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(
@@ -177,7 +180,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k2 < K),
                     other=0.0,
                 )
-                b_h2 *= exp(b_gk_last2)[:, None]
+                b_h2 *= (tl.exp2(b_gk_last2) if USE_EXP2 else exp(b_gk_last2))[:, None]
             if K > 128:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(
@@ -185,7 +188,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k3 < K),
                     other=0.0,
                 )
-                b_h3 *= exp(b_gk_last3)[:, None]
+                b_h3 *= (tl.exp2(b_gk_last3) if USE_EXP2 else exp(b_gk_last3))[:, None]
             if K > 192:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(
@@ -193,7 +196,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k4 < K),
                     other=0.0,
                 )
-                b_h4 *= exp(b_gk_last4)[:, None]
+                b_h4 *= (tl.exp2(b_gk_last4) if USE_EXP2 else exp(b_gk_last4))[:, None]
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
@@ -264,6 +267,8 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    use_exp2: bool = False,
     run_config=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
@@ -272,7 +277,8 @@ def chunk_gated_delta_rule_fwd_h(
     H = u.shape[-2]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -311,6 +317,7 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        use_exp2=use_exp2,
         T=T,
         H=H,
         Hg=Hg,

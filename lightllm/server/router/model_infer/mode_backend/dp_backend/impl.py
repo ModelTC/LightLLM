@@ -187,7 +187,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=model_output.logits,
+                    model_output=model_output,
                     b_req_idx=model_input.b_req_idx,
                     b_mtp_index=model_input.b_mtp_index,
                     run_reqs=run_reqs,
@@ -240,7 +240,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=model_output.logits,
+                    model_output=model_output,
                     b_req_idx=model_input.b_req_idx,
                     b_mtp_index=model_input.b_mtp_index,
                     run_reqs=run_reqs,
@@ -287,13 +287,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
             self._capture_prompt_logprobs_if_needed(model_input1, run_reqs1, model_output1.prompt_logics)
-            logits0 = model_output0.logits
-            logits1 = model_output1.logits
-
             req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
-            logits = torch.empty((req_num0 + req_num1, logits0.shape[1]), dtype=logits0.dtype, device=logits0.device)
-            logits[0:req_num0, :].copy_(logits0, non_blocking=True)
-            logits[req_num0 : req_num0 + req_num1, :].copy_(logits1, non_blocking=True)
+            sampled_output = ModelOutput.concat_logits_rows([model_output0, model_output1])
 
             run_reqs = run_reqs0 + run_reqs1
             b_has_out_cpu = model_input0.b_prefill_has_output_cpu + model_input1.b_prefill_has_output_cpu
@@ -307,7 +302,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=logits,
+                    model_output=sampled_output,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
@@ -356,7 +351,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             if req_num0 + req_num1 > 0:
-                logits = torch.cat((model_output0.logits, model_output1.logits), dim=0)
+                sampled_output = ModelOutput.concat_logits_rows([model_output0, model_output1])
                 b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
                 b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
                 (
@@ -365,7 +360,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=logits,
+                    model_output=sampled_output,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
@@ -421,7 +416,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=model_output.logits,
+                    model_output=model_output,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
@@ -499,11 +494,11 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             if req_num > 0:
                 next_token_ids, next_token_logprobs = sample(
-                    model_output.logits,
+                    model_output,
                     run_reqs,
                     self.eos_id,
                 )
-                next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
+                next_token_ranks = self._get_next_token_ranks(model_output, next_token_ids)
 
                 b_req_mtp_start_loc = gen_b_req_mtp_start_loc(
                     b_mtp_index=model_input.b_mtp_index,
@@ -649,17 +644,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
             self._capture_prompt_logprobs_if_needed(model_input1, run_reqs1, model_output1.prompt_logics)
-            logits0 = model_output0.logits
-            logits1 = model_output1.logits
             req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
             req_num = req_num0 + req_num1
-            logits = torch.empty(
-                (req_num0 + req_num1, logits0.shape[1]),
-                dtype=logits0.dtype,
-                device=logits0.device,
-            )
-            logits[0:req_num0, :].copy_(logits0, non_blocking=True)
-            logits[req_num0 : (req_num0 + req_num1), :].copy_(logits1, non_blocking=True)
+            sampled_output = ModelOutput.concat_logits_rows([model_output0, model_output1])
 
             run_reqs = run_reqs0 + run_reqs1
             b_has_out_cpu = model_input0.b_prefill_has_output_cpu + model_input1.b_prefill_has_output_cpu
@@ -673,7 +660,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=logits,
+                    model_output=sampled_output,
                     run_reqs=run_reqs,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
@@ -681,7 +668,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                 )
             else:
-                next_token_ids = torch.empty((0,), dtype=torch.int64, device=logits.device)
+                next_token_ids = torch.empty((0,), dtype=torch.int64, device=sampled_output.logits.device)
 
             target_next_token_ids_gpu0 = next_token_ids[:req_num0]
             target_next_token_ids_gpu1 = next_token_ids[req_num0:]
@@ -769,20 +756,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             verify_row_num0 = model_input0.batch_size
             verify_row_num1 = model_input1.batch_size
             verify_row_num = verify_row_num0 + verify_row_num1
-            logits0 = model_output0.logits
-            logits1 = model_output1.logits
             run_reqs = run_reqs0 + run_reqs1
             if req_num > 0:
                 assert len(run_reqs) == verify_row_num
-                logits = torch.empty(
-                    (verify_row_num, logits0.shape[1]),
-                    dtype=logits0.dtype,
-                    device=logits0.device,
-                )
-                logits[:verify_row_num0, :].copy_(logits0, non_blocking=True)
-                logits[verify_row_num0:, :].copy_(logits1, non_blocking=True)
-                next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
-                next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
+                sampled_output = ModelOutput.concat_logits_rows([model_output0, model_output1])
+                next_token_ids, next_token_logprobs = sample(sampled_output, run_reqs, self.eos_id)
+                next_token_ranks = self._get_next_token_ranks(sampled_output, next_token_ids)
                 (
                     next_token_ids_cpu,
                     next_token_logprobs_cpu,

@@ -1,0 +1,48 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/sufubao/LightLLM/security/vex/glm53-h100-sglang-unused-components",
+  "author": "https://github.com/sufubao/LightLLM",
+  "timestamp": "2026-08-28T11:45:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-3059"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/sglang@0.0.0.dev1%2Bgf609d677b"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The image removes sglang/multimodal_gen; LightLLM only imports SGLang's Triton MoE kernels."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-3060"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/sglang@0.0.0.dev1%2Bgf609d677b"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The image removes sglang/srt/disaggregation; LightLLM does not expose SGLang's disaggregation service."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-3989"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/sglang@0.0.0.dev1%2Bgf609d677b"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The image removes SGLang's replay_request_dump.py developer utility."
+    }
+  ]
+}

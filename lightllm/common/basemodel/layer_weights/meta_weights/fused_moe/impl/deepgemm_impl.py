@@ -12,7 +12,9 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     get_ep_num_sms,
     masked_group_gemm,
     chunked_expanded_moe_forward,
+    legacy_normal_moe_forward,
     quantize_fused_experts_input,
+    use_sm90_mega_moe,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
@@ -77,16 +79,20 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
+        fused_topk_ids = topk_ids if use_sm90_mega_moe(self.quant_method) else topk_ids.to(torch.long)
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
             w2=w2,
             topk_weights=topk_weights,
-            topk_idx=topk_ids.to(torch.long),
+            topk_idx=fused_topk_ids,
             num_experts=self.total_expert_num_contain_redundancy,  # number of all experts contain redundancy
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
+            swiglu_limit=self.swiglu_limit,
+            swiglu_alpha=self.swiglu_alpha,
+            swiglu_clamp_up_add_one=self.swiglu_clamp_up_add_one,
         )
         return output
 
@@ -163,6 +169,42 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         overlap_event: Optional[Any] = None,
     ):
         buffer = dist_group_manager.ep_buffer
+        if dist_group_manager.ep_prefill_uses_legacy_buffer:
+            (
+                num_tokens_per_rank,
+                num_tokens_per_rdma_rank,
+                num_tokens_per_expert,
+                is_token_in_rank,
+                layout_event,
+            ) = buffer.get_dispatch_layout(
+                topk_idx,
+                self.total_expert_num_contain_redundancy,
+                previous_event=overlap_event,
+                async_finish=False,
+                allocate_on_comm_stream=False,
+            )
+            (recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _,) = buffer.dispatch(
+                qinput_tensor,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                previous_event=layout_event,
+                async_finish=False,
+                allocate_on_comm_stream=False,
+                expert_alignment=128,
+            )
+            return (
+                recv_x,
+                recv_topk_idx,
+                recv_topk_weights,
+                num_recv_tokens_per_expert_list,
+                handle,
+                lambda: None,
+            )
+
         num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
             qinput_tensor,
@@ -206,6 +248,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2_weight,
             w2_scale,
             expected_m=expected_m,
+            swiglu_limit=self.swiglu_limit,
+            swiglu_alpha=self.swiglu_alpha,
+            swiglu_clamp_up_add_one=self.swiglu_clamp_up_add_one,
         )
 
     def prefilled_group_gemm(
@@ -223,6 +268,22 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
+        if dist_group_manager.ep_prefill_uses_legacy_buffer:
+            return legacy_normal_moe_forward(
+                num_recv_tokens_per_expert_list,
+                recv_x,
+                recv_topk_idx,
+                recv_topk_weights,
+                w13_weight,
+                w13_scale,
+                w2_weight,
+                w2_scale,
+                hidden_dtype,
+                self.swiglu_limit,
+                self.swiglu_alpha,
+                self.swiglu_clamp_up_add_one,
+            )
+
         assert recv_topk_idx is None
         all_tokens = sum(num_recv_tokens_per_expert_list)
         if all_tokens > 0:
@@ -239,6 +300,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 block_size_k=self.quant_method.block_size,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
+                swiglu_limit=self.swiglu_limit,
+                swiglu_alpha=self.swiglu_alpha,
+                swiglu_clamp_up_add_one=self.swiglu_clamp_up_add_one,
             )
         else:
             gather_out = torch.empty(
@@ -254,7 +318,13 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 N = w13_weight.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=recv_x[0].device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(
+                    _gemm_out_a.view(-1, N),
+                    _silu_out,
+                    limit=self.swiglu_limit,
+                    alpha=self.swiglu_alpha,
+                    clamp_up_add_one=self.swiglu_clamp_up_add_one,
+                )
                 _gemm_out_a, _silu_out = None, None
         del recv_x
         return gather_out
@@ -278,6 +348,17 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         overlap_event: Optional[Any] = None,
     ):
         # normal combine
+        if dist_group_manager.ep_prefill_uses_legacy_buffer:
+            combined_x, _, _ = dist_group_manager.ep_buffer.combine(
+                gemm_out_b,
+                handle,
+                topk_weights=None,
+                previous_event=overlap_event,
+                async_finish=False,
+                allocate_on_comm_stream=False,
+            )
+            return combined_x, lambda: None
+
         combined_x, _, event = dist_group_manager.ep_buffer.combine(
             gemm_out_b,
             handle,

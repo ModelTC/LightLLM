@@ -13,6 +13,7 @@ from .flashinfer.mla import MlaFlashInferAttBackend
 # NSA backend
 from .nsa.flashmla_sparse import NsaFlashMlaSparseAttBackend
 from .nsa.fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend
+from .nsa.tilelang_sparse import NsaTilelangSparseAttBackend
 
 from .create_utils import (
     get_prefill_att_backend_class,

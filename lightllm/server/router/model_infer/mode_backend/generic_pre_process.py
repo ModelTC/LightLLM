@@ -3,6 +3,9 @@ import numpy as np
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import (
+    can_use_vocab_parallel_greedy,
+)
 
 INT64_MAX = torch.iinfo(torch.int64).max
 
@@ -13,6 +16,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     input_ids = []
     b_req_idx = []
     b_seq_len = []
+    b_input_len = []
     b_q_seq_len = []
     batch_multimodal_params = []
     b_ready_cache_len = []
@@ -38,6 +42,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         input_id = input_token_ids[req.cur_kv_len :]
 
         b_seq_len.append(seq_len)
+        b_input_len.append(req.shm_req.input_len)
         b_q_seq_len.append(input_token_len)
         input_ids.append(input_id)
         total_token_num += seq_len
@@ -59,6 +64,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    b_input_len = torch.tensor(b_input_len, dtype=torch.int32, device="cpu")
     b_is_decode_req = torch.tensor(b_is_decode_req, dtype=torch.bool, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
@@ -81,12 +87,14 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_input_len=b_input_len,
         b_is_decode_req=b_is_decode_req,
         b_ready_cache_len=b_ready_cache_len,
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
         multimodal_params=batch_multimodal_params,
+        use_vocab_parallel_greedy=can_use_vocab_parallel_greedy(run_reqs),
     )
 
     return model_input, run_reqs
@@ -98,6 +106,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_req_idx = []
     b_mtp_index = []
     b_seq_len = []
+    b_input_len = []
     b_q_seq_len = []
     multimodal_params = []
     for req in req_objs:
@@ -106,6 +115,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         seq_len = req.get_cur_total_len()
         assert req.cur_kv_len == seq_len - 1, f"{req.cur_kv_len} {seq_len}"
         b_seq_len.append(seq_len)
+        b_input_len.append(req.shm_req.input_len)
         b_q_seq_len.append(1)
         total_token_num += seq_len
         b_mtp_index.append(0)
@@ -116,6 +126,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
             b_req_idx.append(req.req_idx)
             seq_len += 1
             b_seq_len.append(seq_len)
+            b_input_len.append(req.shm_req.input_len)
             total_token_num += seq_len
             b_mtp_index.append(step + 1)
             multimodal_params.append(req.multimodal_params)
@@ -128,6 +139,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
 
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    b_input_len = torch.tensor(b_input_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_position_delta = build_b_position_delta(multimodal_params)
 
@@ -155,11 +167,13 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_input_len=b_input_len,
         b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
         b_shared_radix_node_id=b_shared_radix_node_id,
         is_prefill=False,
         multimodal_params=multimodal_params,
+        use_vocab_parallel_greedy=can_use_vocab_parallel_greedy(run_reqs),
     )
     return model_input, run_reqs
 
@@ -176,6 +190,9 @@ def overlap_prepare_decode_inputs(req_objs: List[InferReq]):
     model_input1, run_reqs1 = prepare_decode_inputs(
         req_objs=decode_reqs1,
     )
+    use_vocab_parallel_greedy = can_use_vocab_parallel_greedy(run_reqs0 + run_reqs1)
+    model_input0.use_vocab_parallel_greedy = use_vocab_parallel_greedy
+    model_input1.use_vocab_parallel_greedy = use_vocab_parallel_greedy
     return model_input0, run_reqs0, decode_reqs0, model_input1, run_reqs1, decode_reqs1
 
 
@@ -211,6 +228,9 @@ def overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
         req_objs=right_reqs,
         is_chuncked_mode=True,
     )
+    use_vocab_parallel_greedy = can_use_vocab_parallel_greedy(run_reqs0 + run_reqs1)
+    model_input0.use_vocab_parallel_greedy = use_vocab_parallel_greedy
+    model_input1.use_vocab_parallel_greedy = use_vocab_parallel_greedy
     return model_input0, run_reqs0, model_input1, run_reqs1
 
 

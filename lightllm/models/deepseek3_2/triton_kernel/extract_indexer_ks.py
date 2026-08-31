@@ -43,7 +43,12 @@ def _fwd_kernel_extract_indexer_ks(
     store_start_index = tl.sum(b_seq_len)
 
     for i in range(token_start_index, cur_seq_len, tl.num_programs(1)):
-        mem_index = tl.load(req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n)
+        # Token slots can exceed INT32_MAX / stride_in_fp8_bs when the KV
+        # cache packs multiple states into one row.  Promote before pointer
+        # arithmetic so large cache offsets do not wrap around.
+        mem_index = tl.load(req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n).to(
+            tl.int64
+        )
 
         in_fp8_ptrs = in_fp8 + mem_index * stride_in_fp8_bs + 0 * stride_in_fp8_h + stride_in_fp8_d * offs_d
         kv_fp8 = tl.load(in_fp8_ptrs)
@@ -58,6 +63,86 @@ def _fwd_kernel_extract_indexer_ks(
         tl.store(o_scale_ptr, kv_scale)
 
     return
+
+
+@triton.jit
+def _fwd_kernel_extract_indexer_ks_dynamic(
+    in_fp8,
+    stride_in_fp8_bs,
+    stride_in_fp8_h,
+    stride_in_fp8_d,
+    in_fp8_scale,
+    stride_in_scale_bs,
+    stride_in_scale_h,
+    stride_in_scale_d,
+    req_to_token_indexs,
+    stride_req_to_token_m,
+    stride_req_to_token_n,
+    b_seq_len,
+    b_req_idx,
+    b_mtp_index,
+    batch_size,
+    O_fp8,
+    stride_o_fp8_bs,
+    stride_o_fp8_d,
+    O_scale,
+    stride_o_scale_bs,
+    stride_o_scale_d,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_BATCH: tl.constexpr,
+):
+    """Extract one packed K sequence per variable-width MTP request.
+
+    Dynamic verification keeps each request's selected rows contiguous and
+    starts every request (and every CUDA-graph padding row) at MTP index zero.
+    A request's last row therefore has either no successor or a successor with
+    MTP index zero.  Using that boundary instead of a process-wide fixed width
+    lets the sparse indexer consume LightSpec's compacted verify layout.
+    """
+
+    cur_row = tl.program_id(0)
+    token_start_index = tl.program_id(1)
+    next_mtp_index = tl.load(
+        b_mtp_index + cur_row + 1,
+        mask=cur_row + 1 < batch_size,
+        other=0,
+    )
+    is_group_end = (cur_row == batch_size - 1) | (next_mtp_index == 0)
+    if not is_group_end:
+        return
+
+    cur_req_idx = tl.load(b_req_idx + cur_row)
+    cur_seq_len = tl.load(b_seq_len + cur_row)
+
+    rows = tl.arange(0, BLOCK_BATCH)
+    next_rows = rows + 1
+    next_mtp_indices = tl.load(
+        b_mtp_index + next_rows,
+        mask=next_rows < batch_size,
+        other=0,
+    )
+    prior_group_ends = (rows < cur_row) & (next_mtp_indices == 0)
+    prior_group_seq_lens = tl.load(
+        b_seq_len + rows,
+        mask=prior_group_ends,
+        other=0,
+    )
+    store_start_index = tl.sum(prior_group_seq_lens)
+
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    for i in range(token_start_index, cur_seq_len, tl.num_programs(1)):
+        mem_index = tl.load(req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n).to(
+            tl.int64
+        )
+
+        in_fp8_ptrs = in_fp8 + mem_index * stride_in_fp8_bs + stride_in_fp8_d * offs_d
+        kv_fp8 = tl.load(in_fp8_ptrs)
+        in_scale_ptr = in_fp8_scale + mem_index * stride_in_scale_bs
+        kv_scale = tl.load(in_scale_ptr)
+
+        o_fp8_ptrs = O_fp8 + (store_start_index + i) * stride_o_fp8_bs + stride_o_fp8_d * offs_d
+        tl.store(o_fp8_ptrs, kv_fp8)
+        tl.store(O_scale + (store_start_index + i) * stride_o_scale_bs, kv_scale)
 
 
 @torch.no_grad()
@@ -109,6 +194,68 @@ def extract_indexer_ks(
         BLOCK_DMODEL=head_dim,
         BLOCK_SEQ_LEN=triton.next_power_of_2(b_seq_len.shape[0] // (mtp_step + 1)),
         num_warps=num_warps,
+        num_stages=1,
+    )
+
+    return O_fp8, O_scale.squeeze(-1)
+
+
+@torch.no_grad()
+def extract_indexer_ks_dynamic(
+    I_buffer: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_mtp_index: torch.Tensor,
+    req_to_token_indexs: torch.Tensor,
+    max_kv_seq_len: int,
+    max_request_num: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Extract packed indexer keys for a variable-width MTP verify batch."""
+
+    head_dim = 128
+    batch_size = b_seq_len.shape[0]
+    assert I_buffer.dtype == torch.uint8, f"Expected I_buffer dtype=uint8, got {I_buffer.dtype}"
+    assert I_buffer.shape[2] == 132, f"Expected I_buffer last dim=132, got {I_buffer.shape[2]}"
+    assert b_req_idx.shape == b_seq_len.shape == b_mtp_index.shape
+
+    in_fp8 = I_buffer[:, :, 0:128].view(dtype=torch.float8_e4m3fn)
+    in_fp8_scale = I_buffer[:, :, 128:132].view(dtype=torch.float32)
+
+    # At most max_request_num rows belong to distinct real requests. Any
+    # remaining CUDA-graph padding rows have a fixed sequence length of two.
+    # This static upper bound avoids allocating batch_size * max_kv_seq_len for
+    # every captured graph while remaining safe for every compacted layout.
+    max_real_groups = min(batch_size, max_request_num)
+    output_capacity = max_real_groups * max_kv_seq_len + (batch_size - max_real_groups) * 2
+    O_fp8 = torch.empty((output_capacity, head_dim), dtype=torch.float8_e4m3fn, device=I_buffer.device)
+    O_scale = torch.empty((output_capacity, 1), dtype=torch.float32, device=I_buffer.device)
+
+    grid = (batch_size, min(256, max_kv_seq_len))
+    _fwd_kernel_extract_indexer_ks_dynamic[grid](
+        in_fp8,
+        stride_in_fp8_bs=in_fp8.stride(0),
+        stride_in_fp8_h=in_fp8.stride(1),
+        stride_in_fp8_d=in_fp8.stride(2),
+        in_fp8_scale=in_fp8_scale,
+        stride_in_scale_bs=in_fp8_scale.stride(0),
+        stride_in_scale_h=in_fp8_scale.stride(1),
+        stride_in_scale_d=in_fp8_scale.stride(2),
+        req_to_token_indexs=req_to_token_indexs,
+        stride_req_to_token_m=req_to_token_indexs.stride(0),
+        stride_req_to_token_n=req_to_token_indexs.stride(1),
+        b_seq_len=b_seq_len,
+        b_req_idx=b_req_idx,
+        b_mtp_index=b_mtp_index,
+        batch_size=batch_size,
+        O_fp8=O_fp8,
+        stride_o_fp8_bs=O_fp8.stride(0),
+        stride_o_fp8_d=O_fp8.stride(1),
+        O_scale=O_scale,
+        stride_o_scale_bs=O_scale.stride(0),
+        stride_o_scale_d=O_scale.stride(1),
+        BLOCK_DMODEL=head_dim,
+        BLOCK_BATCH=triton.next_power_of_2(batch_size),
+        num_warps=1,
         num_stages=1,
     )
 

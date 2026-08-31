@@ -81,6 +81,7 @@ class StartArgs:
     )
     chat_template: Optional[str] = field(default=None)
     running_max_req_size: int = field(default=256)
+    per_dp_max_req_size: Optional[int] = field(default=None)
     tp: int = field(default=1)
     dp: int = field(default=1)
     nnodes: int = field(default=1)
@@ -150,6 +151,9 @@ class StartArgs:
     disable_cudagraph: bool = field(default=False)
     enable_prefill_cudagraph: bool = field(default=False)
     prefill_cudagraph_max_handle_token: int = field(default=8192)
+    prefill_cudagraph_token_nums: Optional[List[int]] = field(default=None)
+    prefill_cudagraph_batch_sizes: Optional[List[int]] = field(default=None)
+    prefill_cudagraph_capture_attention: bool = field(default=False)
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
@@ -161,7 +165,7 @@ class StartArgs:
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     llm_prefill_att_backend: List[str] = field(
         default_factory=lambda: ["auto"],
-        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla"]},
+        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla", "tilelang"]},
     )
     llm_decode_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
@@ -220,6 +224,7 @@ class StartArgs:
     enable_mps: bool = field(default=False)
     multinode_router_gloo_port: int = field(default=20001)
     schedule_time_interval: float = field(default=0.03)
+    prefill_coalesce_interval: float = field(default=0.0)
     use_dynamic_prompt_cache: bool = field(default=False)
     enable_rl: bool = field(default=False)
     enable_torch_memory_saver: bool = field(default=False)

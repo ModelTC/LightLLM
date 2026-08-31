@@ -20,6 +20,9 @@ class ModelInput:
     b_req_idx: torch.Tensor = None
     b_mtp_index: torch.Tensor = None
     b_seq_len: torch.Tensor = None
+    # Original prompt length per request/row.  This remains on CPU and is used
+    # only for one-time model-specific fast-path eligibility decisions.
+    b_input_len: torch.Tensor = None
     # 在 prefill 阶段，用于在 enable_prefill_decode_mixed 开启下，
     # 用于标识请求是否为 decode 请求混合在 prefill 请求中。
     # 其对应的 input_ids 需要特殊处理, 从 req_to_next_token_ids 中获取。
@@ -55,6 +58,17 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # Whether every request in this prefill batch starts and ends on an
+    # index-kpool boundary.  BaseModel computes this once while the length
+    # tensors are still on CPU; NSA layers reuse it without a per-layer GPU
+    # synchronization.
+    kpool_prefill_aligned: bool = False
+    kpool_decode_aligned: bool = False
+
+    # The router enables sparse vocabulary output only when target sampling is
+    # exact, unmodified greedy. Draft models always consume greedy proposals.
+    use_vocab_parallel_greedy: bool = False
+
     def to_cuda(self):
         self.check_input()
 
@@ -85,6 +99,11 @@ class ModelInput:
         self.check_input()
 
     def check_input(self):
+        if self.b_input_len is None:
+            # Internal warmup/padding inputs predate this metadata.  Their
+            # synthetic prompt occupies the whole sequence, so b_seq_len is
+            # the correct conservative default.
+            self.b_input_len = self.b_seq_len
         if self.input_ids is not None:
             assert (
                 self.input_ids.dtype == torch.int64
@@ -93,12 +112,14 @@ class ModelInput:
         assert self.b_req_idx is not None
         assert self.b_mtp_index is not None
         assert self.b_seq_len is not None
+        assert self.b_input_len is not None
         assert self.multimodal_params is not None
         assert self.mem_indexes is not None or self.mem_indexes_cpu is not None
 
         assert self.b_req_idx.shape == (self.batch_size,)
         assert self.b_mtp_index.shape == self.b_req_idx.shape
         assert self.b_seq_len.shape == self.b_req_idx.shape
+        assert self.b_input_len.shape == self.b_req_idx.shape
         assert len(self.multimodal_params) == self.batch_size
 
         if self.is_prefill:
@@ -140,12 +161,14 @@ class ModelMtpOutputCollector:
     # - 未启用 MTP 时不收集投机特征，该字段同样为 None。
     spec_hidden: Optional[torch.Tensor] = None
 
-    # DSpark block draft 模型直接生成的 token id，形状通常为
-    # [request_count * block_size]。
-    # - 仅 DSpark 启用 Markov head（markov_rank > 0）时由 head 直接生成并返回。
-    # - DSpark 未启用 Markov head 时为 None，调用方从普通 logits 执行 argmax。
-    # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
+    # Draft head 直接生成的 token id。Block drafter 通常返回
+    # [request_count * block_size]，autoregressive drafter 通常返回
+    # [request_count]。未提供时，调用方从普通 logits 执行 argmax。
     draft_token_ids: Optional[torch.Tensor] = None
+
+    # 与 draft_token_ids 一一对应的精确最大 token 概率。Vocab-parallel
+    # draft head 可直接返回该值，避免为了动态 verify 聚合完整词表。
+    draft_token_probs: Optional[torch.Tensor] = None
 
     # DSpark confidence head 输出的原始置信度 logits，形状通常为
     # [request_count, block_size]，供动态 MTP verify 计算各 draft 位置的调度分数。
@@ -159,6 +182,8 @@ class ModelMtpOutputCollector:
             self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)
         if self.draft_token_ids is not None:
             self.draft_token_ids = tensor_to_no_ref_tensor(self.draft_token_ids)
+        if self.draft_token_probs is not None:
+            self.draft_token_probs = tensor_to_no_ref_tensor(self.draft_token_probs)
         if self.confidence_logits is not None:
             self.confidence_logits = tensor_to_no_ref_tensor(self.confidence_logits)
 
@@ -168,6 +193,8 @@ class ModelMtpOutputCollector:
             collector.spec_hidden = collector.spec_hidden[:origin_batch_size]
         if collector.draft_token_ids is not None:
             collector.draft_token_ids = collector.draft_token_ids[:origin_batch_size]
+        if collector.draft_token_probs is not None:
+            collector.draft_token_probs = collector.draft_token_probs[:origin_batch_size]
         if collector.confidence_logits is not None:
             confidence_row_count = collector.confidence_logits.shape[0]
             assert confidence_row_count > 0 and padded_batch_size % confidence_row_count == 0
@@ -200,10 +227,59 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
+    # Vocab-parallel outputs keep logits as logits while mapping each sparse
+    # column back to its global token id. logits_logsumexp is computed over the
+    # complete vocabulary, so sparse argmax probabilities remain exact.
+    # Both fields are None for historical dense logits.
+    logits_token_ids: Optional[torch.Tensor] = None
+    logits_logsumexp: Optional[torch.Tensor] = None
+
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
+        assert (self.logits_token_ids is None) == (self.logits_logsumexp is None)
+        if self.logits_token_ids is not None:
+            assert self.logits.ndim == 2
+            assert self.logits_token_ids.shape == self.logits.shape
+            assert self.logits_token_ids.dtype in (torch.int32, torch.int64)
+            assert self.logits_token_ids.device == self.logits.device
+            assert self.logits_logsumexp.shape == (self.logits.shape[0],)
+            assert self.logits_logsumexp.dtype == torch.float32
+            assert self.logits_logsumexp.device == self.logits.device
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
+        if self.logits_token_ids is not None:
+            self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
+            self.logits_logsumexp = tensor_to_no_ref_tensor(self.logits_logsumexp)
         self.mtp_collector.to_no_ref_tensor()
+
+    @property
+    def has_vocab_parallel_logits(self) -> bool:
+        return self.logits_token_ids is not None
+
+    def index_select_logits_rows(self, index: torch.Tensor) -> "ModelOutput":
+        """Select logit rows without dropping their vocabulary metadata."""
+
+        return ModelOutput(
+            logits=self.logits.index_select(0, index),
+            logits_token_ids=(
+                self.logits_token_ids.index_select(0, index) if self.logits_token_ids is not None else None
+            ),
+            logits_logsumexp=(
+                self.logits_logsumexp.index_select(0, index) if self.logits_logsumexp is not None else None
+            ),
+        )
+
+    @classmethod
+    def concat_logits_rows(cls, outputs: List["ModelOutput"]) -> "ModelOutput":
+        """Concatenate compatible dense or sparse-vocabulary logit rows."""
+
+        assert outputs
+        sparse = outputs[0].has_vocab_parallel_logits
+        assert all(output.has_vocab_parallel_logits == sparse for output in outputs)
+        return cls(
+            logits=torch.cat([output.logits for output in outputs], dim=0),
+            logits_token_ids=(torch.cat([output.logits_token_ids for output in outputs], dim=0) if sparse else None),
+            logits_logsumexp=(torch.cat([output.logits_logsumexp for output in outputs], dim=0) if sparse else None),
+        )

@@ -60,6 +60,7 @@ def _run_both(
         dt_bias=dt_bias,
         a_raw=a_raw,
         b_raw=b_raw,
+        fixed_seq_len=0,
     )
 
     return o_old, o_new, fs_old, fs_new

@@ -1,0 +1,66 @@
+# Fast release path for environments where the original Docker Hub base is
+# unavailable. The pinned base is the already-flattened GLM-5.3 runtime; this
+# layer replaces only the public LightLLM source and the validated default CMD.
+ARG BASE_IMAGE=registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm@sha256:3801951c8697edcab68ac5d38efc1807fcda0cba3d7946125a04103c302a3845
+FROM ${BASE_IMAGE}
+
+ARG OCI_CREATED
+ARG OCI_REVISION
+ARG OCI_SOURCE=https://github.com/sufubao/LightLLM
+ARG OCI_VERSION
+ARG BASE_NAME=registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm
+ARG BASE_DIGEST=sha256:3801951c8697edcab68ac5d38efc1807fcda0cba3d7946125a04103c302a3845
+
+WORKDIR /opt/lightllm
+
+COPY lightllm ./lightllm
+
+RUN test -f 'lightllm/common/triton_utils/autotune_kernel_configs/triton_3.7.1/NVIDIA_H100_80GB_HBM3/chunk_gated_delta_rule_fwd_h/{BT=64,H=8,K=128,V=128}_NVIDIA_H100_80GB_HBM3.json' && \
+    test -f 'lightllm/common/triton_utils/autotune_kernel_configs/triton_3.7.1/NVIDIA_H100_80GB_HBM3/silu_and_mul_fwd:v1/{N=1536,out_dtype=torch.bfloat16}_NVIDIA_H100_80GB_HBM3.json' && \
+    test -f 'lightllm/common/triton_utils/autotune_kernel_configs/triton_3.7.1/NVIDIA_H100_80GB_HBM3/silu_and_mul_fwd:v1/{N=2048,out_dtype=torch.bfloat16}_NVIDIA_H100_80GB_HBM3.json' && \
+    python -c "import lightllm.server.api_start; print('Updated LightLLM GLM-5.3 runtime import OK')"
+
+LABEL org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.version="${OCI_VERSION}" \
+      org.opencontainers.image.title="LightLLM GLM-5.3-Flash H100/H200 TP8 optimized text" \
+      org.opencontainers.image.base.name="${BASE_NAME}" \
+      org.opencontainers.image.base.digest="${BASE_DIGEST}" \
+      ai.lightllm.model="GLM-5.3-Flash" \
+      ai.lightllm.accelerator="NVIDIA H100/H200" \
+      ai.lightllm.tensor-parallel-size="8" \
+      ai.lightllm.profile="text-16k256-tp8-kpool-c256-no-prompt-cache" \
+      ai.lightllm.security-profile="flattened-base-plus-source-overlay"
+
+# Exact 16K-input/256-output profile validated on an eight-H100 80 GB node.
+# The larger KV capacity keeps a 64-request prompt wave resident, and decode
+# CUDA graphs cover batches through 128.
+CMD ["/opt/sglang/bin/python", "-m", "lightllm.server.api_server", \
+     "--model_dir", "/model", \
+     "--model_name", "glm-5.3-flash", \
+     "--tp", "8", \
+     "--host", "0.0.0.0", \
+     "--port", "8002", \
+     "--httpserver_workers", "16", \
+     "--mem_fraction", ".90", \
+     "--max_total_token_num", "1120000", \
+     "--running_max_req_size", "256", \
+     "--max_req_total_len", "532480", \
+     "--batch_max_tokens", "32768", \
+     "--chunked_prefill_size", "32768", \
+     "--linear_att_ssm_data_type", "bfloat16", \
+     "--linear_att_cache_size", "256", \
+     "--graph_max_batch_size", "128", \
+     "--graph_split_batch_size", "8", \
+     "--graph_grow_step_size", "8", \
+     "--graph_max_len_in_batch", "32768", \
+     "--disable_flashinfer_allreduce", \
+     "--enable_fused_shared_experts", \
+     "--disable_dynamic_prompt_cache", \
+     "--router_max_wait_tokens", "64", \
+     "--disable_vision", \
+     "--cache_capacity", "64", \
+     "--schedule_time_interval", "0.001", \
+     "--reasoning_parser", "glm45", \
+     "--tool_call_parser", "glm47"]

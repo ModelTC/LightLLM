@@ -8,7 +8,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    use_sm100_mega_moe,
+    use_mega_moe,
 )
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
@@ -213,6 +213,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
+    def _shared_ffn_tp(self, input, infer_state, layer_weight):
+        """Shared-expert FFN hook for model-specific activation semantics."""
+        return LlamaTransformerLayerInfer._ffn_tp(self, input, infer_state, layer_weight)
+
     def _moe_ffn_tp(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
@@ -222,7 +226,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # if fused_shared_experts is not enabled, compute shared_output
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
-            shared_output = LlamaTransformerLayerInfer._ffn_tp(self, hidden_states, infer_state, layer_weight)
+            shared_output = self._shared_ffn_tp(hidden_states, infer_state, layer_weight)
 
         moe_gate_dtype = layer_weight.moe_gate.data_type_
         router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
@@ -234,6 +238,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
         )
 
@@ -249,7 +254,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
         if self.n_shared_experts is not None:
-            shared_output = LlamaTransformerLayerInfer._ffn_tp(self, hidden_states, infer_state, layer_weight)
+            shared_output = self._shared_ffn_tp(hidden_states, infer_state, layer_weight)
 
         moe_gate_dtype = layer_weight.moe_gate.data_type_
         router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
@@ -300,7 +305,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: Deepseek2InferStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
     ):
-        if not self.is_moe or use_sm100_mega_moe(layer_weight.experts.quant_method):
+        if not self.is_moe or use_mega_moe(layer_weight.experts.quant_method):
             return super().overlap_tpsp_token_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
@@ -324,7 +329,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 0 shared expert
         if self.n_shared_experts is not None:
-            _0_shared_output = LlamaTransformerLayerInfer._ffn_tp(self, _0_input1, infer_state, layer_weight)
+            _0_shared_output = self._shared_ffn_tp(_0_input1, infer_state, layer_weight)
 
         # 0 dispatch
         (
@@ -359,7 +364,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 1 shared expert
         if self.n_shared_experts is not None:
-            _1_shared_output = LlamaTransformerLayerInfer._ffn_tp(self, _1_input1, infer_state1, layer_weight)
+            _1_shared_output = self._shared_ffn_tp(_1_input1, infer_state1, layer_weight)
 
         # 1 dispatch
         (
@@ -426,7 +431,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: Deepseek2InferStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
     ):
-        if not self.is_moe or use_sm100_mega_moe(layer_weight.experts.quant_method):
+        if not self.is_moe or use_mega_moe(layer_weight.experts.quant_method):
             return super().overlap_tpsp_context_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
@@ -495,17 +500,17 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 0 shared expert
         if self.n_shared_experts is not None:
-            _0_shared_output = LlamaTransformerLayerInfer._ffn_tp(self, _0_input1, infer_state, layer_weight)
+            _0_shared_output = self._shared_ffn_tp(_0_input1, infer_state, layer_weight)
 
         # 1 shared expert
         if self.n_shared_experts is not None:
-            _1_shared_output = LlamaTransformerLayerInfer._ffn_tp(self, _1_input1, infer_state1, layer_weight)
+            _1_shared_output = self._shared_ffn_tp(_1_input1, infer_state1, layer_weight)
 
         # 0 moe calu
         _0_moe_out = layer_weight.experts.prefilled_group_gemm(
             _0_num_recv_tokens_per_expert_list,
-            _0_handle.num_unaligned_recv_tokens_per_expert,
-            _0_handle.recv_src_metadata,
+            getattr(_0_handle, "num_unaligned_recv_tokens_per_expert", None),
+            getattr(_0_handle, "recv_src_metadata", None),
             _0_recv_x,
             _0_recv_topk_idx,
             _0_recv_topk_weight,
@@ -536,8 +541,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         # 1 moe calc
         _1_moe_out = layer_weight.experts.prefilled_group_gemm(
             _1_num_recv_tokens_per_expert_list,
-            _1_handle.num_unaligned_recv_tokens_per_expert,
-            _1_handle.recv_src_metadata,
+            getattr(_1_handle, "num_unaligned_recv_tokens_per_expert", None),
+            getattr(_1_handle, "recv_src_metadata", None),
             _1_recv_x,
             _1_recv_topk_idx,
             _1_recv_topk_weight,

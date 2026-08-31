@@ -38,12 +38,11 @@ class DiversehBackend(ChunkedPrefillBackend):
         model_input, group_run_reqs = prepare_prefill_inputs(
             group_reqs, is_chuncked_mode=not self.disable_chunked_prefill
         )
+        model_input.use_vocab_parallel_greedy = False
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
             model_output = self.model.forward(model_input)
-            logits = model_output.logits
-
             batch_idx, run_reqs = self._diverse_copy(
                 master_reqs=group_reqs, b_prefill_has_out=model_input.b_prefill_has_output_cpu
             )
@@ -60,11 +59,11 @@ class DiversehBackend(ChunkedPrefillBackend):
                 non_blocking=True
             )
 
-            logits = logits[batch_idx]
+            sampled_output = model_output.index_select_logits_rows(batch_idx)
             b_mtp_index = model_input.b_mtp_index[batch_idx]
 
-            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
-            next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
+            next_token_ids, next_token_logprobs = sample(sampled_output, run_reqs, self.eos_id)
+            next_token_ranks = self._get_next_token_ranks(sampled_output, next_token_ids)
 
             scatter_token(
                 next_token_ids=next_token_ids,

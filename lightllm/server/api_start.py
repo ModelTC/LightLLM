@@ -1,8 +1,9 @@
 import multiprocessing as mp
 import os
-import uuid
-import subprocess
 import math
+import subprocess
+import sys
+import uuid
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
@@ -36,10 +37,10 @@ def _set_envs_and_config(args: StartArgs):
 def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
-    if args.mtp_mode is not None:
+    if args.mtp_mode is not None and args.mtp_dynamic_verify:
         assert (
             not args.disable_cudagraph or args.run_mode == "prefill"
-        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
+        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_dynamic_verify is enabled"
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -413,12 +414,19 @@ def _hypercorn_config_args(args: StartArgs):
     return ["--keep-alive", "10"]
 
 
+def _hypercorn_entrypoint():
+    # Launch from the active Python environment instead of relying on a
+    # console-script wrapper being present on PATH (for example, packages
+    # installed with pip --target do not install that wrapper).
+    return [sys.executable, "-m", "hypercorn"]
+
+
 def normal_or_p_d_start(args: StartArgs):
     process_manager = _launch_subprocesses(args)
 
     # 启动 Hypercorn
     command = [
-        "hypercorn",
+        *_hypercorn_entrypoint(),
         *_hypercorn_config_args(args),
         "--workers",
         f"{args.httpserver_workers}",
@@ -481,7 +489,7 @@ def pd_master_start(args: StartArgs):
     )
 
     command = [
-        "hypercorn",
+        *_hypercorn_entrypoint(),
         *_hypercorn_config_args(args),
         "--workers",
         "1",
@@ -569,7 +577,7 @@ def config_server_start(args):
         start_redis_service(args)
 
     command = [
-        "hypercorn",
+        *_hypercorn_entrypoint(),
         *_hypercorn_config_args(args),
         "--workers",
         "1",

@@ -38,7 +38,7 @@ from lightllm.utils.dist_utils import (
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
-from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
+from lightllm.utils.device_utils import get_device_sm_count, is_sm90_gpu, is_sm100_gpu
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 logger = init_logger(__name__)
@@ -57,6 +57,7 @@ class CustomProcessGroup:
     def __init__(self):
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
+        self.symm_mem_out_of_place = os.getenv("LIGHTLLM_SYMM_MEM_OUT_OF_PLACE", "0").upper() in {"1", "ON", "TRUE"}
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
         if get_env_start_args().enable_dp_prefill_balance:
@@ -97,7 +98,10 @@ class CustomProcessGroup:
             input_.data = self.flashinfer_reduce.all_reduce(input_)
             return
         if self.symm_mem_reduce is not None and self.symm_mem_reduce.should_use(input_):
-            self.symm_mem_reduce.all_reduce(input_)
+            if self.symm_mem_out_of_place:
+                input_.data = self.symm_mem_reduce.all_reduce_out_of_place(input_)
+            else:
+                self.symm_mem_reduce.all_reduce(input_)
             return
         return dist.all_reduce(input_, group=self.device_group)
 
@@ -109,6 +113,7 @@ class DistributeGroupManager:
     def __init__(self):
         self.groups = []
         self.ep_buffer = None
+        self.ep_prefill_uses_legacy_buffer = False
         self.ep_low_latency_buffer = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
@@ -175,6 +180,7 @@ class DistributeGroupManager:
         decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if not enable_ep_moe:
             self.ep_buffer = None
+            self.ep_prefill_uses_legacy_buffer = False
             self.ep_low_latency_buffer = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
@@ -194,14 +200,38 @@ class DistributeGroupManager:
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
         self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
-        self.ep_buffer = deep_ep.ElasticBuffer(
-            deepep_group,
-            num_max_tokens_per_rank=self.ll_num_tokens,
-            hidden=self.ll_hidden,
-            num_topk=num_experts_per_tok,
-            use_fp8_dispatch=True,
-            allow_multiple_reduction=True,
-        )
+        # ElasticBuffer uses NCCL GIN even for an intra-node group.  GIN is not
+        # available on many otherwise fully-connected NVLink hosts.  The legacy
+        # normal DeepEP buffer is the native intra-node transport and avoids that
+        # unnecessary network dependency; keep ElasticBuffer for multi-node EP.
+        self.ep_prefill_uses_legacy_buffer = get_env_start_args().nnodes == 1
+        if self.ep_prefill_uses_legacy_buffer:
+            hidden_bytes = self.ll_hidden * get_torch_dtype(get_env_start_args().data_type).itemsize
+            dispatch_config = deep_ep.Buffer.get_dispatch_config(global_world_size)
+            combine_config = deep_ep.Buffer.get_combine_config(global_world_size)
+            num_nvl_bytes = max(
+                dispatch_config.get_nvl_buffer_size_hint(hidden_bytes, global_world_size),
+                combine_config.get_nvl_buffer_size_hint(hidden_bytes, global_world_size),
+            )
+            num_rdma_bytes = max(
+                dispatch_config.get_rdma_buffer_size_hint(hidden_bytes, global_world_size),
+                combine_config.get_rdma_buffer_size_hint(hidden_bytes, global_world_size),
+            )
+            self.ep_buffer = deep_ep.Buffer(
+                deepep_group,
+                num_nvl_bytes=num_nvl_bytes,
+                num_rdma_bytes=num_rdma_bytes,
+                low_latency_mode=False,
+            )
+        else:
+            self.ep_buffer = deep_ep.ElasticBuffer(
+                deepep_group,
+                num_max_tokens_per_rank=self.ll_num_tokens,
+                hidden=self.ll_hidden,
+                num_topk=num_experts_per_tok,
+                use_fp8_dispatch=True,
+                allow_multiple_reduction=True,
+            )
         self.ep_mega_moe_buffer = None
         self.ep_low_latency_buffer = None
 
@@ -209,7 +239,13 @@ class DistributeGroupManager:
             raise ValueError("No valid MoE quant method was found while initializing DeepEP buffers")
 
         mega_moe_quant_method = "fp4fp8-b32-deepgemm"
+        sm90_mega_moe_quant_method = "fp8w8a8-b128-deepgemm"
         is_sm100 = is_sm100_gpu()
+        enable_sm90_mega_moe = is_sm90_gpu() and os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper() in {
+            "1",
+            "ON",
+            "TRUE",
+        }
 
         # Buffer 选择规则：
         # 1. 非 SM100 不支持 Mega MoE，只初始化 legacy low-latency buffer；
@@ -222,6 +258,13 @@ class DistributeGroupManager:
             has_mega_moe_layer = mega_moe_quant_method in expert_quant_method_names
             has_legacy_moe_layer = any(
                 method_name != mega_moe_quant_method for method_name in expert_quant_method_names
+            )
+            enable_mega_moe_buffer = has_mega_moe_layer
+            enable_low_latency_buffer = has_legacy_moe_layer
+        elif enable_sm90_mega_moe:
+            has_mega_moe_layer = sm90_mega_moe_quant_method in expert_quant_method_names
+            has_legacy_moe_layer = any(
+                method_name != sm90_mega_moe_quant_method for method_name in expert_quant_method_names
             )
             enable_mega_moe_buffer = has_mega_moe_layer
             enable_low_latency_buffer = has_legacy_moe_layer
@@ -265,6 +308,9 @@ class DistributeGroupManager:
 
             import deep_gemm
 
+            mega_moe_kwargs = {}
+            if enable_sm90_mega_moe:
+                mega_moe_kwargs.update(use_fp8_dispatch=True, activation="swiglu")
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
                 self.ll_num_experts,
@@ -272,14 +318,25 @@ class DistributeGroupManager:
                 num_experts_per_tok,
                 self.ll_hidden,
                 moe_intermediate_size,
+                **mega_moe_kwargs,
             )
         logger.info(
-            "Initialize DeepEP MoE buffers: low_latency=%s, mega_moe=%s, expert_quant_method_names=%s",
+            "Initialize DeepEP MoE buffers: legacy_prefill=%s, low_latency=%s, mega_moe=%s, "
+            "expert_quant_method_names=%s",
+            self.ep_prefill_uses_legacy_buffer,
             enable_low_latency_buffer,
             enable_mega_moe_buffer,
             sorted(expert_quant_method_names),
         )
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+        theoretical_sms = (
+            0
+            if enable_mega_moe_buffer and not enable_low_latency_buffer
+            else (
+                deep_ep.Buffer.num_sms
+                if self.ep_prefill_uses_legacy_buffer
+                else self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+            )
+        )
         self._set_num_sms_for_deep_gemm(theoretical_sms)
 
     def _set_num_sms_for_deep_gemm(self, deepep_sms: int):

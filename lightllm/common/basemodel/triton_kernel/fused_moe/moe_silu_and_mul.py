@@ -24,6 +24,7 @@ def _silu_and_mul_kernel_fast(
     NEED_MASK: tl.constexpr,
     layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
+    CLAMP_UP_ADD_ONE: tl.constexpr = True,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
@@ -70,11 +71,9 @@ def _silu_and_mul_kernel_fast(
             up = tl.minimum(tl.maximum(up, -limit), limit)
             gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
             gate = gate.to(input_ptr.dtype.element_ty)
-            tl.store(
-                output_ptr + out_offsets,
-                (up + 1) * gate,
-                mask=mask,
-            )
+            if CLAMP_UP_ADD_ONE:
+                up += 1
+            tl.store(output_ptr + out_offsets, up * gate, mask=mask)
         else:
             if USE_TANH_APPROXIMATE_GELU:
                 # tanh-approx GELU, matching Gemma's gelu_pytorch_tanh MLP.
@@ -120,6 +119,7 @@ def silu_and_mul_fwd(
     layout="blocked",
     limit=None,
     alpha=None,
+    clamp_up_add_one=True,
     run_config=None,
 ):
     assert input.stride(-1) == 1
@@ -171,6 +171,7 @@ def silu_and_mul_fwd(
         num_warps=num_warps,
         layout=layout,
         USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
+        CLAMP_UP_ADD_ONE=clamp_up_add_one,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
     )
     return

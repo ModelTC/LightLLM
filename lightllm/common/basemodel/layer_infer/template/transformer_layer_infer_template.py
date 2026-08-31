@@ -6,6 +6,7 @@ from ...infer_struct import InferStateInfo
 from lightllm.distributed import all_reduce
 from typing import Tuple
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
@@ -102,6 +103,13 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         self, q: torch.Tensor, cache_kv: torch.Tensor, infer_state: InferStateInfo, layer_weight
     ) -> torch.Tensor:
         if torch.cuda.is_current_stream_capturing():
+            # Exact-layout graphs can opt into capturing attention as part of
+            # the main graph. This avoids one CPU callback and one graph split
+            # per attention layer. The fixed layout is validated by
+            # PrefillCudaGraph before capture starts.
+            if bool(getattr(get_env_start_args(), "prefill_cudagraph_capture_attention", False)):
+                return self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
             q = q.contiguous()
             # cache_kv is None for layers that own no K/V slot (e.g. gemma4
             # KV-shared layers, which read K/V from a prior layer's cache and
@@ -110,6 +118,24 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
             cache_kv = cache_kv.contiguous() if cache_kv is not None else None
             _q = tensor_to_no_ref_tensor(q)
             _cache_kv = tensor_to_no_ref_tensor(cache_kv) if cache_kv is not None else None
+
+            # Some attention implementations stash graph-produced tensors in
+            # a short-lived infer-state dict between QKV projection and the
+            # CPU attention callback (for example NSA indexer inputs).  Python
+            # attribute assignment is not replayed by CUDA Graph, and the
+            # shape-probing call below may consume/delete the dict.  Preserve
+            # fixed-address, non-owning views and restore them for every CPU
+            # callback invocation.
+            callback_tensor_dicts = {}
+            for attr_name, attr_value in vars(infer_state).items():
+                if (
+                    isinstance(attr_value, dict)
+                    and attr_value
+                    and all(isinstance(value, torch.Tensor) for value in attr_value.values())
+                ):
+                    callback_tensor_dicts[attr_name] = {
+                        key: tensor_to_no_ref_tensor(value.contiguous()) for key, value in attr_value.items()
+                    }
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
             pre_capture_graph.__exit__(None, None, None)
 
@@ -135,6 +161,8 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
             _o = tensor_to_no_ref_tensor(o)
 
             def att_func(new_infer_state: InferStateInfo):
+                for attr_name, attr_value in callback_tensor_dicts.items():
+                    setattr(new_infer_state, attr_name, attr_value)
                 tmp_o = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
                 assert tmp_o.shape == _o.shape
                 _o.copy_(tmp_o)

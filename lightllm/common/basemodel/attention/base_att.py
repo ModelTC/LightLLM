@@ -120,6 +120,18 @@ class BasePrefillAttState(ABC):
     backend: BaseAttBackend = None
     infer_state: "InferStateInfo" = None
 
+    def copy_for_prefill_cuda_graph(self, new_state: "BasePrefillAttState"):
+        """Refresh fixed-address attention metadata before graph replay."""
+        for attr_name, attr_value in vars(new_state).items():
+            if isinstance(attr_value, torch.Tensor):
+                graph_attr = getattr(self, attr_name, None)
+                if (
+                    graph_attr is not None
+                    and graph_attr.data_ptr() != attr_value.data_ptr()
+                    and graph_attr.shape == attr_value.shape
+                ):
+                    graph_attr.copy_(attr_value, non_blocking=True)
+
     @abstractmethod
     def init_state(self):
         pass

@@ -8,12 +8,17 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
+import os
+
 import torch
 
 import triton
 import triton.language as tl
 
 from .op import exp
+
+
+ENABLE_FAST_MTP_KDA = os.getenv("LIGHTLLM_ENABLE_FAST_MTP_KDA", "0") == "1"
 
 
 @triton.heuristics(
@@ -45,6 +50,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     a_raw,  # [B*T, HV] raw alpha values (before softplus)
     b_raw,  # [B*T, HV] raw beta values (before sigmoid)
     scale,
+    kda_lower_bound,
     N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
     B: tl.constexpr,
@@ -105,8 +111,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if FUSE_GATING:
         # Fused gating: load per-head constants once, compute g/beta inline per token
         b_A_log = tl.load(A_log + i_hv).to(tl.float32)
-        b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
-        p_a_raw = a_raw + bos * stride_a_tok + i_hv
+        if IS_KDA:
+            p_dt_bias = dt_bias + i_hv * K + o_k
+            p_a_raw = a_raw + bos * stride_a_tok + i_hv * K + o_k
+        else:
+            b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
+            p_a_raw = a_raw + bos * stride_a_tok + i_hv
         p_b_raw = b_raw + bos * stride_b_tok + i_hv
     else:
         if IS_BETA_HEADWISE:
@@ -151,16 +161,23 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = b_q * scale
         # [BK, BV]
         if FUSE_GATING:
-            # Compute g = -exp(A_log) * softplus(a_raw + dt_bias) inline
-            b_a = tl.load(p_a_raw).to(tl.float32)
-            x = b_a + b_dt_bias
-            softplus_x = tl.where(
-                SOFTPLUS_BETA * x <= SOFTPLUS_THRESHOLD,
-                (1.0 / SOFTPLUS_BETA) * tl.log(1.0 + tl.exp(SOFTPLUS_BETA * x)),
-                x,
-            )
-            b_g = -tl.exp(b_A_log) * softplus_x
-            b_h *= exp(b_g)
+            if IS_KDA:
+                # GLM-5 safe gate is a K-wide vector per value head.
+                b_a = tl.load(p_a_raw, mask=mask_k, other=0).to(tl.float32)
+                b_dt_bias = tl.load(p_dt_bias, mask=mask_k, other=0).to(tl.float32)
+                b_gk = kda_lower_bound * tl.sigmoid(tl.exp(b_A_log) * (b_a + b_dt_bias))
+                b_h *= exp(b_gk[:, None])
+            else:
+                # GDN scalar gate: g = -exp(A_log) * softplus(a_raw + dt_bias).
+                b_a = tl.load(p_a_raw).to(tl.float32)
+                x = b_a + b_dt_bias
+                softplus_x = tl.where(
+                    SOFTPLUS_BETA * x <= SOFTPLUS_THRESHOLD,
+                    (1.0 / SOFTPLUS_BETA) * tl.log(1.0 + tl.exp(SOFTPLUS_BETA * x)),
+                    x,
+                )
+                b_g = -tl.exp(b_A_log) * softplus_x
+                b_h *= exp(b_g)
             # Compute beta = sigmoid(b_raw) inline
             b_b = tl.load(p_b_raw).to(tl.float32)
             b_beta = tl.sigmoid(b_b)
@@ -267,6 +284,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     a_raw: torch.Tensor | None = None,
     b_raw: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    is_kda: bool = False,
+    kda_lower_bound: float = -5.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -277,15 +296,28 @@ def fused_recurrent_gated_delta_rule_fwd(
     q, stride_q_tok = _ensure_qkv_token_strided(q, H * K)
     k, stride_k_tok = _ensure_qkv_token_strided(k, H * K)
     v, stride_v_tok = _ensure_qkv_token_strided(v, HV * V)
-    a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV)
+    a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV * K if is_kda else HV)
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw, HV)
     BK = triton.next_power_of_2(K)
+    is_spec_verify = ENABLE_FAST_MTP_KDA and cu_seqlens is not None and num_accepted_tokens is not None
     if T == 1:
         # Decode path: use larger BV to reduce kernel instances (4 blocks instead of 16)
         # and more warps for better SM utilization at T=1 where there's no pipelining benefit
         BV = min(triton.next_power_of_2(V), 32)
         num_warps = 4
         num_stages = 1
+    elif is_spec_verify:
+        # MTP verification is represented as one packed tensor, so ``T`` is the
+        # total physical token count even though every sequence is only a few
+        # tokens long.  Treating this as prefill creates 16 single-warp value
+        # tiles per head for GLM-5 (V=128).  The short recurrent loop benefits
+        # from the same BV=32 shape used by SGLang's KDA target-verify kernel,
+        # cutting the launch grid to four value tiles.  Keep this opt-in because
+        # the wider tile can alter bf16 rounding at the 1e-5 level even though
+        # the recurrence is mathematically identical.
+        BV = min(triton.next_power_of_2(V), 32)
+        num_warps = 1
+        num_stages = 3
     else:
         # Prefill path: small BV for better pipelining across sequence length
         BV = min(triton.next_power_of_2(V), 8)
@@ -346,6 +378,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         a_raw=a_raw,
         b_raw=b_raw,
         scale=scale,
+        kda_lower_bound=kda_lower_bound,
         N=N,
         T=T,
         B=B,
@@ -371,7 +404,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         IS_BETA_HEADWISE=False if fuse_gating else (beta.ndim == v.ndim),
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
-        IS_KDA=False,
+        IS_KDA=is_kda,
         FUSE_GATING=fuse_gating,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -402,6 +435,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
         a_raw: torch.Tensor | None = None,
         b_raw: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
+        is_kda: bool = False,
+        kda_lower_bound: float = -5.0,
     ):
         # q/k/v/a_raw/b_raw may be non-contiguous column views of one projection
         # output; the kernel handles them via per-token strides (no copies).
@@ -424,6 +459,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             a_raw=a_raw,
             b_raw=b_raw,
             out=out,
+            is_kda=is_kda,
+            kda_lower_bound=kda_lower_bound,
         )
 
         return o, final_state
@@ -449,6 +486,8 @@ def fused_recurrent_gated_delta_rule(
     a_raw: torch.Tensor | None = None,
     b_raw: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    is_kda: bool = False,
+    kda_lower_bound: float = -5.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -531,5 +570,7 @@ def fused_recurrent_gated_delta_rule(
         a_raw,
         b_raw,
         out,
+        is_kda,
+        kda_lower_bound,
     )
     return o, final_state

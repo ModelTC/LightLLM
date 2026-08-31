@@ -83,8 +83,30 @@ def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_decode():
-    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
+    # DeepEP requires this limit to cover the physical rows passed to one
+    # decode dispatch and to be a multiple of eight.  Speculative target
+    # decode widens every logical request to ``mtp_step + 1`` rows, so the old
+    # fixed default of 256 failed as soon as (for example) a 64-request MTP5
+    # CUDA Graph reached 264 rows.
+    configured = os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", None)
+    if configured is not None:
+        return int(configured)
+
+    args = get_env_start_args()
+    logical_batch_size = max(
+        int(args.get("graph_max_batch_size", 0) or 0),
+        int(args.get("running_max_req_size", 0) or 0),
+        1,
+    )
+    verify_width = int(args.get("mtp_step", 0) or 0) + 1 if args.get("mtp_mode", None) is not None else 1
+    required_tokens = logical_batch_size * verify_width
+    # In TP/SP + EP mode each rank dispatches only its sequence-parallel slice
+    # to DeepEP.  CUDA Graph batch sizes are TP-aligned, but use ceil here as a
+    # defensive bound for non-graph decode as well.
+    if args.get("enable_tpsp_mix_mode", False) and args.get("enable_ep_moe", False):
+        tp = max(int(args.get("tp", 1) or 1), 1)
+        required_tokens = (required_tokens + tp - 1) // tp
+    return ((max(required_tokens, 256) + 7) // 8) * 8
 
 
 @lru_cache(maxsize=None)

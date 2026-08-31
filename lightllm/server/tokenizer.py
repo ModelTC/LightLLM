@@ -122,6 +122,14 @@ def get_tokenizer(
         tokenizer = QWen3_5Tokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
+    elif model_type == "glm5_next" and model_cfg.get("vision_config") is not None:
+        from transformers import AutoProcessor
+        from ..models.glm5_next.tokenizer import Glm5NextTokenizer
+
+        processor = AutoProcessor.from_pretrained(tokenizer_name)
+        tokenizer = Glm5NextTokenizer(
+            tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
+        )
     elif model_cfg.get("thinker_config") is not None:
         from transformers import AutoProcessor
 

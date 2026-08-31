@@ -55,8 +55,9 @@ class MetricServer(rpyc.Service):
     def exposed_histogram_observe(self, name: str, value: float, label: str = None) -> None:
         return self.monitor.histogram_observe(name, value, label)
 
-    def exposed_gauge_set(self, name: str, value: float) -> None:
-        return self.monitor.gauge_set(name, value)
+    def exposed_gauge_set(self, name: str, value: float, labels: dict = None) -> None:
+        local_labels = None if labels is None else {key: labels[key] for key in labels}
+        return self.monitor.gauge_set(name, value, local_labels)
 
     def exposed_generate_latest(self) -> bytes:
         data = generate_latest(self.monitor.registry)

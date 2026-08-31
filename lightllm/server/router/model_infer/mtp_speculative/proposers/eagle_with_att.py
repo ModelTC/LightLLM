@@ -79,14 +79,25 @@ class EagleWithAttProposer(BaseSpecProposer):
         verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
         extend_output = draft_model.forward(verify_draft_input)
 
-        # 只在 req_num 行 logits 上进行 argmax，避免为未接受的 verify 行执行
-        # vocabulary reduction。第一列 proposal 来自每个请求的 accepted tail。
-        accepted_tail_output = ModelOutput(logits=extend_output.logits.index_select(0, accepted_tail_rows))
-        if self.enable_dynmaic_mtp:
-            draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(accepted_tail_output)
-            schedule_scores_by_step.append(draft_token_probs.float().unsqueeze(1))
+        # 第一列 proposal 来自每个请求的 accepted tail。Specialized draft
+        # heads can return vocab-parallel Top-1 directly; generic heads retain
+        # the full-logits fallback.
+        head_token_ids = extend_output.mtp_collector.draft_token_ids
+        if head_token_ids is not None:
+            draft_token_ids = head_token_ids.index_select(0, accepted_tail_rows)
+            if self.enable_dynmaic_mtp:
+                head_token_probs = extend_output.mtp_collector.draft_token_probs
+                if head_token_probs is None:
+                    raise RuntimeError("draft head returned token ids without token probabilities")
+                draft_token_probs = head_token_probs.index_select(0, accepted_tail_rows)
+                schedule_scores_by_step.append(draft_token_probs.float().unsqueeze(1))
         else:
-            draft_token_ids = self._gen_argmax_token_ids(accepted_tail_output)
+            accepted_tail_output = extend_output.index_select_logits_rows(accepted_tail_rows)
+            if self.enable_dynmaic_mtp:
+                draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(accepted_tail_output)
+                schedule_scores_by_step.append(draft_token_probs.float().unsqueeze(1))
+            else:
+                draft_token_ids = self._gen_argmax_token_ids(accepted_tail_output)
         proposal_token_ids_by_step.append(draft_token_ids.unsqueeze(1))
 
         if draft_step == 1:

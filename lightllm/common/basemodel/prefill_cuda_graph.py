@@ -10,6 +10,9 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_greedy import (
+    is_vocab_parallel_greedy_enabled,
+)
 from .infer_struct import InferStateInfo
 from .cuda_graph import CudaGraph
 
@@ -33,16 +36,64 @@ class PrefillCudaGraph:
         if self.args.batch_max_tokens is not None:
             self.max_handle_token_num = min(self.max_handle_token_num, self.args.batch_max_tokens)
 
-        graph_handle_token_nums = (
-            list(range(4, 33, 4))
-            + list(range(48, 257, 16))
-            + list(range(288, 513, 32))
-            + list(range(576, 1024 + 1, 64))
-            + list(range(1280, 4096 + 1, 256))
-            + list(range(4608, self.max_handle_token_num + 1, 512))
-        )
-        graph_handle_token_nums = [e for e in graph_handle_token_nums if e <= self.max_handle_token_num]
-        graph_handle_token_nums.append(self.max_handle_token_num)
+        configured_token_nums = getattr(self.args, "prefill_cudagraph_token_nums", None)
+        configured_batch_sizes = getattr(self.args, "prefill_cudagraph_batch_sizes", None)
+        self.use_exact_token_nums = configured_token_nums is not None
+        self.capture_attention = bool(getattr(self.args, "prefill_cudagraph_capture_attention", False))
+        if self.capture_attention and not self.use_exact_token_nums:
+            raise ValueError(
+                "--prefill_cudagraph_capture_attention requires "
+                "--prefill_cudagraph_token_nums and --prefill_cudagraph_batch_sizes"
+            )
+        self.exact_batch_size_by_token_num = {}
+        if self.use_exact_token_nums:
+            if configured_batch_sizes is None:
+                raise ValueError("--prefill_cudagraph_batch_sizes is required with " "--prefill_cudagraph_token_nums")
+            if len(configured_token_nums) != len(configured_batch_sizes):
+                raise ValueError(
+                    "--prefill_cudagraph_token_nums and --prefill_cudagraph_batch_sizes "
+                    "must contain the same number of entries"
+                )
+
+            graph_handle_token_nums = []
+            for raw_token_num, raw_batch_size in zip(configured_token_nums, configured_batch_sizes):
+                token_num = int(raw_token_num)
+                batch_size = int(raw_batch_size)
+                if not 0 < token_num <= self.max_handle_token_num:
+                    continue
+                if batch_size <= 0:
+                    raise ValueError("--prefill_cudagraph_batch_sizes entries must be positive")
+                if token_num % batch_size != 0:
+                    raise ValueError(
+                        "Each --prefill_cudagraph_token_nums entry must be divisible by its paired "
+                        "--prefill_cudagraph_batch_sizes entry"
+                    )
+                old_batch_size = self.exact_batch_size_by_token_num.get(token_num)
+                if old_batch_size is not None and old_batch_size != batch_size:
+                    raise ValueError(
+                        f"Conflicting prefill CUDA Graph batch sizes for token count {token_num}: "
+                        f"{old_batch_size} and {batch_size}"
+                    )
+                self.exact_batch_size_by_token_num[token_num] = batch_size
+                graph_handle_token_nums.append(token_num)
+            if not graph_handle_token_nums:
+                raise ValueError(
+                    "--prefill_cudagraph_token_nums must contain a positive value no larger than "
+                    "--prefill_cudagraph_max_handle_token and --batch_max_tokens"
+                )
+        else:
+            if configured_batch_sizes is not None:
+                raise ValueError("--prefill_cudagraph_batch_sizes requires --prefill_cudagraph_token_nums")
+            graph_handle_token_nums = (
+                list(range(4, 33, 4))
+                + list(range(48, 257, 16))
+                + list(range(288, 513, 32))
+                + list(range(576, 1024 + 1, 64))
+                + list(range(1280, 4096 + 1, 256))
+                + list(range(4608, self.max_handle_token_num + 1, 512))
+            )
+            graph_handle_token_nums = [e for e in graph_handle_token_nums if e <= self.max_handle_token_num]
+            graph_handle_token_nums.append(self.max_handle_token_num)
 
         graph_handle_token_nums = list(set[int](graph_handle_token_nums))
         graph_handle_token_nums.sort()
@@ -55,8 +106,25 @@ class PrefillCudaGraph:
 
         self.graph_handle_token_nums = graph_handle_token_nums
         logger.info(f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
+        if self.exact_batch_size_by_token_num:
+            logger.info(
+                "prefill cuda graph exact layouts (token_num -> batch_size): " f"{self.exact_batch_size_by_token_num}"
+            )
 
-    def can_run(self, handle_token_num: int):
+    def can_run(
+        self,
+        handle_token_num: int,
+        batch_size: Optional[int] = None,
+        max_q_seq_len: Optional[int] = None,
+        max_kv_seq_len: Optional[int] = None,
+        max_cache_len: Optional[int] = None,
+    ):
+        if self.use_exact_token_nums:
+            configured_batch_size = self.exact_batch_size_by_token_num.get(handle_token_num)
+            if configured_batch_size is None or batch_size != configured_batch_size:
+                return False
+            uniform_seq_len = handle_token_num // configured_batch_size
+            return max_q_seq_len == uniform_seq_len and max_kv_seq_len == uniform_seq_len and max_cache_len == 0
         return handle_token_num <= self.max_handle_token_num
 
     def need_capture(self, handle_token_num: int):
@@ -191,23 +259,31 @@ class PrefillCudaGraph:
 
         # prefill cuda graph init
         for handle_token_num in self.graph_handle_token_nums[::-1]:
-            logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num}")
+            batch_size = self.exact_batch_size_by_token_num.get(handle_token_num, 1)
+            if handle_token_num % batch_size != 0:
+                raise ValueError(
+                    f"Prefill CUDA Graph token count {handle_token_num} is not divisible by batch size {batch_size}"
+                )
+            seq_len = handle_token_num // batch_size
+            logger.info(
+                "Capture prefill cudagraph, "
+                f"handle_token_num: {handle_token_num}, batch_size: {batch_size}, seq_len: {seq_len}"
+            )
             total_token_num = handle_token_num
             input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
             mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-            b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
-            b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
-            b_seq_len.fill_(total_token_num)
-            b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
-            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_req_idx = torch.full((batch_size,), model.req_manager.HOLD_REQUEST_ID, dtype=torch.int32, device="cuda")
+            b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
+            b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+            b_is_decode_req = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
+            b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+            b_prefill_start_loc = torch.arange(0, total_token_num, seq_len, dtype=torch.int32, device="cuda")
 
             model_input = ModelInput(
-                batch_size=1,
+                batch_size=batch_size,
                 total_token_num=total_token_num,
-                max_q_seq_len=total_token_num,
-                max_kv_seq_len=total_token_num,
+                max_q_seq_len=seq_len,
+                max_kv_seq_len=seq_len,
                 max_cache_len=0,
                 input_ids=input_ids,
                 mem_indexes=mem_indexes,
@@ -218,8 +294,9 @@ class PrefillCudaGraph:
                 b_ready_cache_len=b_ready_cache_len,
                 b_prefill_start_loc=b_prefill_start_loc,
                 is_prefill=True,
-                b_prefill_has_output_cpu=[False],
-                multimodal_params=[{"images": [], "audios": []}],
+                b_prefill_has_output_cpu=[False for _ in range(batch_size)],
+                multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                use_vocab_parallel_greedy=is_vocab_parallel_greedy_enabled(),
                 **model._gen_special_model_input(token_num=total_token_num),
             )
             model_output: ModelOutput = model.forward(model_input)
@@ -281,6 +358,7 @@ class PrefillCudaGraph:
                     is_prefill=True,
                     b_prefill_has_output_cpu=[False],
                     multimodal_params=[{"images": [], "audios": []}],
+                    use_vocab_parallel_greedy=is_vocab_parallel_greedy_enabled(),
                     **model._gen_special_model_input(token_num=total_token_num),
                 )
 

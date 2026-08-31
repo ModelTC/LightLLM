@@ -1009,6 +1009,7 @@ def fused_experts_impl(
     layout="blocked",
     limit=None,
     alpha=None,
+    clamp_up_add_one=True,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -1087,6 +1088,7 @@ def fused_experts_impl(
             intermediate_cache2.view(-1, N // 2),
             limit=limit,
             alpha=alpha,
+            clamp_up_add_one=clamp_up_add_one,
             layout=layout,
         )
 
@@ -1133,6 +1135,7 @@ def inplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1152,6 +1155,7 @@ def inplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
+        clamp_up_add_one=clamp_up_add_one,
     )
 
 
@@ -1173,6 +1177,7 @@ def inplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     pass
 
@@ -1203,6 +1208,7 @@ def outplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     return fused_experts_impl(
         hidden_states,
@@ -1222,6 +1228,7 @@ def outplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
+        clamp_up_add_one=clamp_up_add_one,
     )
 
 
@@ -1243,6 +1250,7 @@ def outplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     return torch.empty_like(hidden_states)
 
@@ -1274,6 +1282,7 @@ def fused_experts(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ):
     if inplace:
         torch.ops.lightllm.inplace_fused_experts_impl(
@@ -1293,6 +1302,7 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
         return hidden_states
     else:
@@ -1313,4 +1323,5 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )

@@ -53,8 +53,8 @@ def test_decode_batch_multiplier(monkeypatch, spec_mode, is_draft_model, expecte
     [
         (False, False, 8),
         (True, False, 1),
-        (False, True, 1),
-        (True, True, 1),
+        (False, True, 8),
+        (True, True, 8),
     ],
 )
 def test_decode_cuda_graph_grow_step_size(monkeypatch, dynamic_verify, is_draft_model, expected):
@@ -66,6 +66,40 @@ def test_decode_cuda_graph_grow_step_size(monkeypatch, dynamic_verify, is_draft_
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
 
     assert MtpManager.get_instance().get_decode_cuda_graph_grow_step_size(is_draft_model) == expected
+
+
+@pytest.mark.parametrize(
+    "spec_mode,is_draft_model,expected",
+    [
+        ("eagle_with_att", True, 8),
+        ("eagle3", True, 8),
+        ("eagle_no_att", True, 1),
+        ("vanilla_with_att", True, 8),
+        ("eagle_with_att", False, 8),
+    ],
+)
+def test_decode_cuda_graph_batch_multiplier(monkeypatch, spec_mode, is_draft_model, expected):
+    args = SimpleNamespace(mtp_mode=spec_mode, mtp_step=7, mtp_dynamic_verify=False)
+    monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
+
+    manager = MtpManager.get_instance()
+    assert manager.get_decode_cuda_graph_batch_multiplier(is_draft_model) == expected
+
+
+@pytest.mark.parametrize(
+    "spec_mode,expected",
+    [
+        ("eagle_with_att", True),
+        ("eagle3", True),
+        ("eagle_no_att", False),
+        ("vanilla_with_att", False),
+    ],
+)
+def test_recurrent_attention_draft_keeps_logical_graph_schedule(monkeypatch, spec_mode, expected):
+    args = SimpleNamespace(mtp_mode=spec_mode, mtp_step=7, mtp_dynamic_verify=False)
+    monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
+
+    assert MtpManager.get_instance().draft_model_needs_logical_batch_graphs(True) is expected
 
 
 @pytest.mark.parametrize(

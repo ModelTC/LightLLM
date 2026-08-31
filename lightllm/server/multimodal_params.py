@@ -1,7 +1,6 @@
 """Multimodal parameters for text generation."""
 import asyncio
 import os
-import librosa
 import base64
 import numpy as np
 from typing import List, Tuple, Optional
@@ -54,6 +53,8 @@ class AudioItem:
                 raise ValueError(f"cannot read audio which type is {self._type}!")
 
             # check if valid audio bytes
+            import librosa
+
             audio_values, _ = await asyncio.to_thread(librosa.load, BytesIO(audio_data), sr=16000)
             audio_values = np.asarray(audio_values, dtype=np.float32)
 

@@ -1,3 +1,5 @@
+import os
+
 import torch
 import time
 from typing import List
@@ -27,6 +29,15 @@ class ChunkedPrefillBackend(ModeBackend):
     def __init__(self) -> None:
         super().__init__()
 
+        # Mega-MoE owns one symmetric communication workspace per rank.  Keep
+        # the CPU pre/post pipeline enabled, but do not let its two host threads
+        # enqueue a second model forward while that workspace is still live.
+        self._serialize_sm90_mega_moe_forwards = os.getenv("LIGHTLLM_ENABLE_SM90_MEGA_MOE", "0").upper() in {
+            "1",
+            "ON",
+            "TRUE",
+        }
+
         # 用于控制每一步是执行prefill 和 decode 还是跳过
         self.control_state_machine = ControlState()
 
@@ -39,6 +50,24 @@ class ChunkedPrefillBackend(ModeBackend):
             self.decode = self.decode_normal
 
         self.classed_req_strict_prefill = False
+        return
+
+    def _record_forward_completion(self) -> torch.cuda.Event:
+        sync_event = torch.cuda.Event()
+        sync_event.record()
+        return sync_event
+
+    def _notify_next_forward_when_safe(self, event_pack: OverlapEventPack, sync_event: torch.cuda.Event):
+        if self._serialize_sm90_mega_moe_forwards:
+            # Mega-MoE owns one symmetric communication workspace per rank. Let
+            # this iteration's CPU bookkeeping overlap its GPU work, but wait for
+            # the workspace to be released before waking the next forward thread.
+            sync_event.synchronize()
+            event_pack.notify_forward_and_wait_post_handle()
+        else:
+            # Preserve the regular two-forward overlap path.
+            event_pack.notify_forward_and_wait_post_handle()
+            sync_event.synchronize()
         return
 
     def init_spec_engine(self):
@@ -107,11 +136,13 @@ class ChunkedPrefillBackend(ModeBackend):
     ):
         # 第一阶段: 模型推理
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        if self.prefill_mask_func is not None:
+            model_input.use_vocab_parallel_greedy = False
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
-                logits=model_output.logits,
+                model_output=model_output,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -123,16 +154,14 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
-            sync_event = torch.cuda.Event()
-            sync_event.record()
+            sync_event = self._record_forward_completion()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
         # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
+        self._notify_next_forward_when_safe(event_pack, sync_event)
         self._post_handle(
             run_reqs=run_reqs,
             next_token_ids=next_token_ids_cpu,
@@ -152,26 +181,26 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        if self.decode_mask_func is not None:
+            model_input.use_vocab_parallel_greedy = False
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
-                logits=model_output.logits,
+                model_output=model_output,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
                 is_prefill=False,
                 mask_func=self.decode_mask_func,
             )
-            sync_event = torch.cuda.Event()
-            sync_event.record()
+            sync_event = self._record_forward_completion()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
 
         # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
+        self._notify_next_forward_when_safe(event_pack, sync_event)
         self._post_handle(
             run_reqs=run_reqs,
             next_token_ids=next_token_ids_cpu,
@@ -191,6 +220,8 @@ class ChunkedPrefillBackend(ModeBackend):
         prefill_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        if self.prefill_mask_func is not None:
+            model_input.use_vocab_parallel_greedy = False
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
@@ -200,7 +231,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs_cpu,
                 next_token_ranks_cpu,
             ) = self._sample_and_scatter_token(
-                logits=model_output.logits,
+                model_output=model_output,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -219,16 +250,14 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
-            sync_event = torch.cuda.Event()
-            sync_event.record()
+            sync_event = self._record_forward_completion()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
         # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
+        self._notify_next_forward_when_safe(event_pack, sync_event)
 
         self._post_handle(
             run_reqs=run_reqs,
@@ -251,6 +280,8 @@ class ChunkedPrefillBackend(ModeBackend):
     ):
         """Run the speculative draft-and-verify decode flow."""
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        if self.decode_mask_func is not None:
+            model_input.use_vocab_parallel_greedy = False
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
 
@@ -272,11 +303,11 @@ class ChunkedPrefillBackend(ModeBackend):
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
             next_token_ids, next_token_logprobs = sample(
-                model_output.logits,
+                model_output,
                 run_reqs,
                 self.eos_id,
             )
-            next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
+            next_token_ranks = self._get_next_token_ranks(model_output, next_token_ids)
 
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
             mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
@@ -331,8 +362,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ranks=next_token_ranks,
             )
 
-            sync_event = torch.cuda.Event()
-            sync_event.record()
+            sync_event = self._record_forward_completion()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
@@ -350,8 +380,7 @@ class ChunkedPrefillBackend(ModeBackend):
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
+        self._notify_next_forward_when_safe(event_pack, sync_event)
 
         spec_engine.update_planner_statics(
             plan=spec_plan,

@@ -1,6 +1,6 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/mamba/causal_conv1d.py
 
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
@@ -15,6 +15,7 @@ def causal_conv1d_fn(
     conv_states: Optional[torch.Tensor] = None,
     activation: Optional[str] = "silu",
     pad_slot_id: int = -1,
+    seq_lens_cpu: Optional[List[int]] = None,
     **kwargs,
 ):
     """
@@ -48,6 +49,32 @@ def causal_conv1d_fn(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
+    # The compiled CUDA kernel requires sequence-contiguous input.  KDA's
+    # projection is token-major, so its dim-major transpose would otherwise
+    # materialize a large copy at every linear-attention layer.  SGLang's
+    # Triton fallback accepts arbitrary input/output strides and is already a
+    # runtime dependency in the optimized GLM-5 deployment image.
+    if x.stride(-1) != 1 and seq_lens_cpu is not None:
+        try:
+            from sglang.kernels.ops.mamba.causal_conv1d_triton import (
+                causal_conv1d_fn as causal_conv1d_strided,
+            )
+        except ImportError:
+            pass
+        else:
+            return causal_conv1d_strided(
+                x,
+                weight,
+                bias,
+                conv_states=conv_states,
+                query_start_loc=query_start_loc,
+                seq_lens_cpu=seq_lens_cpu,
+                cache_indices=cache_indices,
+                has_initial_state=has_initial_state,
+                activation=activation,
+                pad_slot_id=pad_slot_id,
+            )
+
     from sgl_kernel import causal_conv1d_fwd
 
     if x.stride(-1) != 1:

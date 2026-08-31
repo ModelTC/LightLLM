@@ -90,6 +90,125 @@ def argsort(x, x_1, ids, dim: tl.core.constexpr = None, descending: tl.core.cons
 
 
 @triton.jit
+def single_group_sigmoid_topk_kernel(
+    gating_output_ptr,
+    gating_output_stride_m,
+    correction_bias_ptr,
+    out_topk_weights,
+    out_topk_weights_stride_m,
+    out_topk_ids,
+    out_topk_ids_stride_m,
+    total_expert_num,
+    HAS_CORRECTION_BIAS: tl.constexpr,
+    EXPERT_BLOCK_SIZE: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
+    TOPK_NUM: tl.constexpr,
+    RENORMALIZE: tl.constexpr,
+):
+    """Select biased sigmoid top-k when every expert belongs to one group.
+
+    GLM-5.3-Flash declares one expert group.  The generic grouped kernel still
+    materializes a scratch buffer, synchronizes twice, and bitonic-sorts the
+    full power-of-two expert block.  Repeated reductions are substantially
+    cheaper for the small fixed top-k used by MoE decode.
+    """
+
+    token_index = tl.program_id(axis=0)
+    offs_n = tl.arange(0, EXPERT_BLOCK_SIZE)
+    valid = offs_n < total_expert_num
+    hidden_states = tl.load(
+        gating_output_ptr + token_index * gating_output_stride_m + offs_n,
+        mask=valid,
+        other=-float("inf"),
+    ).to(tl.float32)
+    old_scores = tl.sigmoid(hidden_states)
+    if HAS_CORRECTION_BIAS:
+        scores = old_scores + tl.load(correction_bias_ptr + offs_n, mask=valid, other=0.0)
+    else:
+        scores = old_scores
+    scores = tl.where(valid, scores, -float("inf"))
+
+    for topk_index in tl.static_range(0, TOPK_NUM):
+        selected_index = tl.argmax(scores, axis=0)
+        selected_weight = tl.sum(tl.where(offs_n == selected_index, old_scores, 0.0), axis=0)
+        tl.store(
+            out_topk_weights + token_index * out_topk_weights_stride_m + topk_index,
+            selected_weight,
+        )
+        tl.store(
+            out_topk_ids + token_index * out_topk_ids_stride_m + topk_index,
+            selected_index,
+        )
+        scores = tl.where(offs_n == selected_index, -float("inf"), scores)
+
+    if RENORMALIZE:
+        topk_offs = tl.arange(0, TOPK_BLOCK_SIZE)
+        topk_mask = topk_offs < TOPK_NUM
+        weights = tl.load(
+            out_topk_weights + token_index * out_topk_weights_stride_m + topk_offs,
+            mask=topk_mask,
+            other=0.0,
+        )
+        weight_sum = tl.sum(weights, axis=0)
+        tl.store(
+            out_topk_weights + token_index * out_topk_weights_stride_m + topk_offs,
+            weights / weight_sum,
+            mask=topk_mask,
+        )
+
+
+@triton.jit
+def single_group_sigmoid_topk_bitonic_kernel(
+    gating_output_ptr,
+    gating_output_stride_m,
+    correction_bias_ptr,
+    out_topk_weights,
+    out_topk_weights_stride_m,
+    out_topk_ids,
+    out_topk_ids_stride_m,
+    total_expert_num,
+    HAS_CORRECTION_BIAS: tl.constexpr,
+    EXPERT_BLOCK_SIZE: tl.constexpr,
+    TOPK_NUM: tl.constexpr,
+    RENORMALIZE: tl.constexpr,
+):
+    """Scratch-free single-group path retaining the legacy bitonic order."""
+
+    token_index = tl.program_id(axis=0)
+    offs_n = tl.arange(0, EXPERT_BLOCK_SIZE)
+    hidden_states = tl.load(
+        gating_output_ptr + token_index * gating_output_stride_m + offs_n,
+        mask=offs_n < total_expert_num,
+        other=-10000000.0,
+    ).to(tl.float32)
+    old_scores = tl.sigmoid(hidden_states)
+    if HAS_CORRECTION_BIAS:
+        scores = old_scores + tl.load(
+            correction_bias_ptr + offs_n,
+            mask=offs_n < total_expert_num,
+            other=-10000000.0,
+        )
+    else:
+        scores = old_scores
+
+    _, sorted_scores, sorted_indexes = argsort(scores, old_scores, offs_n, descending=True)
+    if RENORMALIZE:
+        sum_scores = tl.sum(tl.where(offs_n < TOPK_NUM, sorted_scores, 0.0))
+        sorted_scores = sorted_scores / sum_scores
+
+    tl.store(
+        out_topk_weights + token_index * out_topk_weights_stride_m + offs_n,
+        sorted_scores,
+        mask=offs_n < TOPK_NUM,
+    )
+    tl.store(
+        out_topk_ids + token_index * out_topk_ids_stride_m + offs_n,
+        sorted_indexes,
+        mask=offs_n < TOPK_NUM,
+    )
+
+
+@triton.jit
 def grouped_topk_kernel(
     gating_output_ptr,
     gating_output_stride_m,
@@ -212,6 +331,7 @@ def triton_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     group_score_used_topk_num=2,
+    use_single_group_fast_path: bool = True,
 ):
 
     if correction_bias is not None:
@@ -220,6 +340,29 @@ def triton_grouped_topk(
         has_correction_bias = False
 
     token_num, total_expert_num = gating_output.shape
+
+    if use_single_group_fast_path and num_expert_group == 1 and topk_group == 1 and scoring_func == "sigmoid":
+        out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device="cuda")
+        out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device="cuda")
+        single_group_sigmoid_topk_kernel[(token_num,)](
+            gating_output,
+            gating_output.stride(0),
+            correction_bias,
+            out_topk_weights,
+            out_topk_weights.stride(0),
+            out_topk_ids,
+            out_topk_ids.stride(0),
+            total_expert_num,
+            HAS_CORRECTION_BIAS=has_correction_bias,
+            EXPERT_BLOCK_SIZE=triton.next_power_of_2(total_expert_num),
+            TOPK_BLOCK_SIZE=triton.next_power_of_2(topk),
+            TOPK_NUM=topk,
+            RENORMALIZE=renormalize,
+            num_warps=1,
+            num_stages=1,
+        )
+        return out_topk_weights, out_topk_ids
+
     if gating_output.dtype == torch.float64:
         dtype = torch.float64
     else:

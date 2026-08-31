@@ -15,6 +15,46 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import autotune
+
+
+_MTP_RECURRENT_BV_SIZES = (4, 8, 16, 32, 64)
+
+
+def _get_mtp_fused_recurrent_configs():
+    return [
+        {"BV": bv, "num_warps": num_warps, "num_stages": num_stages}
+        for bv in _MTP_RECURRENT_BV_SIZES
+        for num_warps in (1, 2, 4, 8)
+        for num_stages in (1, 2, 3)
+    ]
+
+
+def _get_mtp_fused_recurrent_static_key(q, v, initial_state, fixed_seq_len):
+    return {
+        "H": q.shape[2],
+        "HV": v.shape[2],
+        "K": q.shape[3],
+        "V": v.shape[3],
+        "dtype": str(q.dtype),
+        "state_dtype": str(initial_state.dtype),
+        "fixed_seq_len": int(fixed_seq_len),
+    }
+
+
+def _get_mtp_fused_recurrent_run_key(q, cu_seqlens):
+    sequence_count = int(cu_seqlens.shape[0] - 1)
+    total_tokens = int(q.shape[1])
+    return sequence_count * 10 ** 9 + total_tokens
+
+
+def _default_mtp_fused_recurrent_config(V):
+    return {
+        "BV": min(triton.next_power_of_2(V), 8),
+        "num_warps": 1,
+        "num_stages": 3,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Triton kernel
@@ -59,14 +99,17 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_write_indices_tok: tl.constexpr,
     SOFTPLUS_BETA: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
+    FIXED_SEQ_LEN: tl.constexpr,
 ):
     i_v, i_n, i_hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_hv // (HV // H)
-    bos, eos = (
-        tl.load(cu_seqlens + i_n).to(tl.int64),
-        tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-    )
-    T = eos - bos
+    if FIXED_SEQ_LEN > 0:
+        bos = i_n * FIXED_SEQ_LEN
+        T: tl.constexpr = FIXED_SEQ_LEN
+    else:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
 
     if T == 0:
         return
@@ -133,11 +176,18 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Public API — directly launches the triton kernel (no autograd.Function)
+# Autotuned implementation — directly launches the Triton kernel
 # ---------------------------------------------------------------------------
 
 
-def mtp_fused_recurrent_gated_delta_rule(
+@autotune(
+    kernel_name="mtp_fused_recurrent_gated_delta_rule:v1",
+    configs_gen_func=_get_mtp_fused_recurrent_configs,
+    static_key_func=_get_mtp_fused_recurrent_static_key,
+    run_key_func=_get_mtp_fused_recurrent_run_key,
+    mutates_args=["initial_state"],
+)
+def _mtp_fused_recurrent_gated_delta_rule_autotuned(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -150,6 +200,8 @@ def mtp_fused_recurrent_gated_delta_rule(
     dt_bias: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
+    fixed_seq_len: int,
+    run_config: dict = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -170,6 +222,8 @@ def mtp_fused_recurrent_gated_delta_rule(
         dt_bias: ``[HV]`` per-head dt bias.
         a_raw: ``[T, HV]`` raw alpha.
         b_raw: ``[T, HV]`` raw beta.
+        fixed_seq_len: Compile-time sequence length for dense fixed-width MTP
+            verification. Zero keeps the variable-length ``cu_seqlens`` path.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[1, T, HV, V]`` and
@@ -184,6 +238,12 @@ def mtp_fused_recurrent_gated_delta_rule(
     V = v.shape[-1]
     HV = v.shape[2]
     N = len(cu_seqlens) - 1
+    fixed_seq_len = int(fixed_seq_len)
+    assert fixed_seq_len >= 0
+    if fixed_seq_len:
+        assert q.shape[1] == N * fixed_seq_len, (
+            f"fixed_seq_len={fixed_seq_len} requires {N * fixed_seq_len} tokens, " f"got {q.shape[1]}"
+        )
     q, stride_q_tok = _ensure_qkv_token_strided(q)
     k, stride_k_tok = _ensure_qkv_token_strided(k)
     v, stride_v_tok = _ensure_qkv_token_strided(v)
@@ -191,17 +251,18 @@ def mtp_fused_recurrent_gated_delta_rule(
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw)
     BK = triton.next_power_of_2(K)
     assert K == BK, f"K={K} must be a power of 2"
-    BV = min(triton.next_power_of_2(V), 8)
-    num_warps = 1
-    num_stages = 3
+    if run_config is None:
+        run_config = _default_mtp_fused_recurrent_config(V)
+    BV = run_config["BV"]
+    num_warps = run_config.get("num_warps", 1)
+    num_stages = run_config["num_stages"]
     NV = triton.cdiv(V, BV)
 
-    o = q.new_empty(v.shape)
+    output = q.new_empty(v.shape)
     final_state = initial_state
-
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
-    stride_o_tok = o.stride(1)
+    stride_o_tok = output.stride(1)
     assert stride_o_tok == HV * V, f"stride_o_tok={stride_o_tok} must be HV*V"
     stride_state_hv = K * V
 
@@ -216,7 +277,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         q=q,
         k=k,
         v=v,
-        o=o,
+        o=output,
         h0=initial_state,
         ht=final_state,
         cu_seqlens=cu_seqlens,
@@ -249,10 +310,49 @@ def mtp_fused_recurrent_gated_delta_rule(
         stride_write_indices_tok=stride_write_indices_tok,
         SOFTPLUS_BETA=1.0,
         SOFTPLUS_THRESHOLD=20.0,
+        FIXED_SEQ_LEN=fixed_seq_len,
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    return o, final_state
+    return output, final_state
+
+
+def mtp_fused_recurrent_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    ssm_state_write_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    a_raw: torch.Tensor,
+    b_raw: torch.Tensor,
+    fixed_seq_len: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the autotuned fused recurrent GDN kernel.
+
+    ``fixed_seq_len=0`` preserves the variable-length behavior of the original
+    public API. The private autotuned implementation always receives the value
+    explicitly so its cache key does not depend on generic default handling.
+    """
+    return _mtp_fused_recurrent_gated_delta_rule_autotuned(
+        q=q,
+        k=k,
+        v=v,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        ssm_state_write_indices=ssm_state_write_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        a_raw=a_raw,
+        b_raw=b_raw,
+        fixed_seq_len=fixed_seq_len,
+    )
 
 
 # ---------------------------------------------------------------------------

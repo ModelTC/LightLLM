@@ -1,4 +1,5 @@
 import time
+import math
 import uvloop
 import asyncio
 import pickle
@@ -42,6 +43,23 @@ from .multinode_tp_helper import RouterMultiNodeTpHelper
 logger = init_logger(__name__)
 
 
+def resolve_model_max_req_num(args: StartArgs) -> int:
+    """Resolve the request-state capacity allocated by each model process."""
+
+    configured = getattr(args, "per_dp_max_req_size", None)
+    if configured is None:
+        return args.running_max_req_size
+
+    local_dp_size = max(1, args.dp // args.nnodes)
+    min_balanced_capacity = math.ceil(args.running_max_req_size / local_dp_size)
+    if configured < min_balanced_capacity:
+        raise ValueError(
+            "per_dp_max_req_size must be at least ceil(running_max_req_size / local_dp_size): "
+            f"got {configured}, minimum {min_balanced_capacity}"
+        )
+    return configured
+
+
 class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
     def __init__(self, args: StartArgs):
         self.args = args
@@ -52,6 +70,8 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.node_rank = args.node_rank
         self.dp_size = args.dp
         self.schedule_time_interval = args.schedule_time_interval  # 默认30ms 的调度周期
+        self.prefill_coalesce_interval = max(0.0, args.prefill_coalesce_interval)
+        self._prefill_coalesce_deadline = None
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
         self.dp_world_size = self.world_size // self.dp_size
@@ -148,7 +168,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "max_req_num": self.args.running_max_req_size,
+            "max_req_num": resolve_model_max_req_num(self.args),
             # MTP length stopping is asynchronous, so up to mtp_step accepted
             # positions may already be committed when FINISHED_LENGTH is observed.
             # The overlapped iteration then needs mtp_step positions for target
@@ -444,6 +464,43 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
         return
 
+    def _should_defer_prefill_batch(self):
+        """Hold a partial request burst briefly so prefill can run as one batch."""
+        if self.prefill_coalesce_interval <= 0.0:
+            return False
+
+        waiting_req_num = self.req_queue.get_wait_req_num()
+        if waiting_req_num <= 0:
+            self._prefill_coalesce_deadline = None
+            return False
+
+        scheduled_req_num = 0
+        if self.running_batch is not None:
+            scheduled_req_num += len(self.running_batch.reqs)
+        if self.schedule_new_batch is not None:
+            scheduled_req_num += len(self.schedule_new_batch.reqs)
+        runnable_slots = max(0, self.args.running_max_req_size - scheduled_req_num)
+
+        now = time.monotonic()
+        if self._prefill_coalesce_deadline is None:
+            self._prefill_coalesce_deadline = now + self.prefill_coalesce_interval
+
+        # There is no reason to wait once all currently runnable slots can be filled.
+        if runnable_slots > 0 and waiting_req_num >= runnable_slots:
+            self._prefill_coalesce_deadline = None
+            return False
+
+        # Preserve the original deadline while the running batch is full. This lets a
+        # queued burst launch immediately when capacity becomes available.
+        if runnable_slots == 0:
+            return True
+
+        if now < self._prefill_coalesce_deadline:
+            return True
+
+        self._prefill_coalesce_deadline = None
+        return False
+
     async def _recv_new_reqs_and_schedule(self):
         if not hasattr(self, "recv_max_count"):
             self.recv_max_count = 64
@@ -470,7 +527,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         if self.is_multinode_tp:
             self.multinode_tp_generate_new_batch()
         else:
-            if self._get_paused_req_num() == 0:
+            if self._get_paused_req_num() == 0 and not self._should_defer_prefill_batch():
                 self._generate_new_batch()
         return
 

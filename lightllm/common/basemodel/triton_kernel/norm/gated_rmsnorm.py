@@ -18,20 +18,27 @@ def gated_rmsnorm_forward_kernel(
     Z,  # pointer to the other branch (required, not optional)
     stride_x_row,  # how much to increase the pointer when moving by 1 row
     stride_y_row,
-    stride_z_row,
+    stride_z_token,
+    stride_z_head,
     M,  # number of rows in X
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     BLOCK_N: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
+    SIGMOID_GATE: tl.constexpr,
+    Z_HEADS: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
     group = tl.program_id(1)
     X += row * stride_x_row + group * N
     Y += row * stride_y_row + group * N
-    Z += row * stride_z_row + group * N
+    # X is flattened to [tokens * heads, N], while GDN can keep Z as a
+    # zero-copy [tokens, heads, N] slice of its packed projection output.
+    z_token = row // Z_HEADS
+    z_head = row % Z_HEADS
+    Z += z_token * stride_z_token + z_head * stride_z_head + group * N
     W += group * N
     if HAS_BIAS:
         B += group * N
@@ -40,7 +47,7 @@ def gated_rmsnorm_forward_kernel(
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if not NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=cols < N).to(tl.float32)
-        x *= z * tl.sigmoid(z)
+        x *= tl.sigmoid(z) if SIGMOID_GATE else z * tl.sigmoid(z)
     # RMS norm: compute variance directly without mean subtraction
     xbar = tl.where(cols < N, x, 0.0)
     var = tl.sum(xbar * xbar, axis=0) / N
@@ -55,7 +62,7 @@ def gated_rmsnorm_forward_kernel(
     y = x_hat * w + b if HAS_BIAS else x_hat * w
     if NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=mask).to(tl.float32)
-        y *= z * tl.sigmoid(z)
+        y *= tl.sigmoid(z) if SIGMOID_GATE else z * tl.sigmoid(z)
     # Write output
     tl.store(Y + cols, y, mask=mask)
 
@@ -102,6 +109,7 @@ def gated_rmsnorm_forward(
     out: torch.Tensor = None,
     group_size: int = None,
     norm_before_gate: bool = True,
+    activation: str = "silu",
     run_config: dict = None,
 ):
     M, N = x.shape
@@ -112,8 +120,21 @@ def gated_rmsnorm_forward(
     assert x.stride(-1) == 1
     # z is required for gated_rmsnorm
     assert z is not None, "z cannot be None for gated_rmsnorm_forward"
+    assert activation in ("silu", "sigmoid"), f"unsupported gate activation: {activation}"
+    # Accept GDN's strided 3D gate without materializing a flattened copy.
+    assert z.ndim in (2, 3), f"z must be [M, N] or [tokens, heads, N], got shape={z.shape}"
     assert z.stride(-1) == 1
-    assert z.shape == (M, N)
+    if z.ndim == 2:
+        assert z.shape == (M, N)
+        z_heads = 1
+        stride_z_token = z.stride(0)
+        stride_z_head = 0
+    else:
+        assert z.shape[-1] == N, f"z.shape[-1]={z.shape[-1]} must match N={N}"
+        assert z.shape[0] * z.shape[1] == M, f"z token/head rows={z.shape[0] * z.shape[1]} must match M={M}"
+        z_heads = z.shape[1]
+        stride_z_token = z.stride(0)
+        stride_z_head = z.stride(1)
     assert weight.shape == (N,)
     assert weight.stride(-1) == 1
     if bias is not None:
@@ -156,12 +177,15 @@ def gated_rmsnorm_forward(
         z,
         x.stride(0),
         out.stride(0),
-        z.stride(0),
+        stride_z_token,
+        stride_z_head,
         M,
         group_size,
         eps,
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
+        SIGMOID_GATE=activation == "sigmoid",
+        Z_HEADS=z_heads,
         num_warps=num_warps,
     )
     return out

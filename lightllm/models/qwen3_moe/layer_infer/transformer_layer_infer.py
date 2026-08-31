@@ -7,7 +7,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    use_sm100_mega_moe,
+    use_mega_moe,
 )
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.envs_utils import get_env_start_args
@@ -138,7 +138,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: LlamaInferStateInfo,
         layer_weight: Qwen3MOETransformerLayerWeight,
     ):
-        if not self.is_moe or use_sm100_mega_moe(layer_weight.experts.quant_method):
+        if not self.is_moe or use_mega_moe(layer_weight.experts.quant_method):
             return super().overlap_tpsp_token_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
@@ -250,7 +250,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: LlamaInferStateInfo,
         layer_weight: Qwen3MOETransformerLayerWeight,
     ):
-        if not self.is_moe or use_sm100_mega_moe(layer_weight.experts.quant_method):
+        if not self.is_moe or use_mega_moe(layer_weight.experts.quant_method):
             return super().overlap_tpsp_context_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
@@ -318,8 +318,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         # 0 moe calu
         _0_moe_out = layer_weight.experts.prefilled_group_gemm(
             _0_num_recv_tokens_per_expert_list,
-            _0_handle.num_unaligned_recv_tokens_per_expert,
-            _0_handle.recv_src_metadata,
+            getattr(_0_handle, "num_unaligned_recv_tokens_per_expert", None),
+            getattr(_0_handle, "recv_src_metadata", None),
             _0_recv_x,
             _0_recv_topk_idx,
             _0_recv_topk_weight,
@@ -350,8 +350,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         # 1 moe calc
         _1_moe_out = layer_weight.experts.prefilled_group_gemm(
             _1_num_recv_tokens_per_expert_list,
-            _1_handle.num_unaligned_recv_tokens_per_expert,
-            _1_handle.recv_src_metadata,
+            getattr(_1_handle, "num_unaligned_recv_tokens_per_expert", None),
+            getattr(_1_handle, "recv_src_metadata", None),
             _1_recv_x,
             _1_recv_topk_idx,
             _1_recv_topk_weight,

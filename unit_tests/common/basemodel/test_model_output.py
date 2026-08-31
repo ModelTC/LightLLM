@@ -7,20 +7,46 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 
 
+def test_vocab_parallel_metadata_follows_row_selection():
+    output = ModelOutput(
+        logits=torch.tensor([[8.0], [7.0], [6.0]]),
+        logits_token_ids=torch.tensor([[4], [9], [2]]),
+        logits_logsumexp=torch.tensor([8.5, 7.25, 6.75]),
+    )
+
+    selected = output.index_select_logits_rows(torch.tensor([2, 0]))
+
+    torch.testing.assert_close(selected.logits.view(-1), torch.tensor([6.0, 8.0]))
+    torch.testing.assert_close(selected.logits_token_ids.view(-1), torch.tensor([2, 4]))
+    torch.testing.assert_close(selected.logits_logsumexp, torch.tensor([6.75, 8.5]))
+
+
 def test_decode_unpad_slices_spec_output_with_logits():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(24).view(6, 4),
-        mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(18).view(6, 3)),
+        logits_token_ids=torch.arange(100, 124).view(6, 4),
+        logits_logsumexp=torch.arange(6, dtype=torch.float32),
+        mtp_collector=ModelMtpOutputCollector(
+            spec_hidden=torch.arange(18).view(6, 3),
+            draft_token_ids=torch.arange(6),
+            draft_token_probs=torch.linspace(0.1, 0.6, 6),
+        ),
     )
 
     unpadded = model._create_unpad_decode_model_output(output, origin_batch_size=4)
 
     assert unpadded.logits.shape == (4, 4)
+    assert unpadded.logits_token_ids.shape == (4, 4)
+    assert unpadded.logits_logsumexp.shape == (4,)
     assert unpadded.mtp_collector.spec_hidden.shape == (4, 3)
+    assert unpadded.mtp_collector.draft_token_ids.shape == (4,)
+    assert unpadded.mtp_collector.draft_token_probs.shape == (4,)
     # Unpadding returns a shallow output copy and leaves the graph-owned
     # tensors on the original ModelOutput intact.
     assert output.logits.shape == (6, 4)
+    assert output.logits_token_ids.shape == (6, 4)
+    assert output.logits_logsumexp.shape == (6,)
     assert output.mtp_collector.spec_hidden.shape == (6, 3)
 
 
@@ -28,6 +54,8 @@ def test_prefill_unpad_uses_token_rows_for_spec_hidden():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(20).view(5, 4),
+        logits_token_ids=torch.arange(100, 120).view(5, 4),
+        logits_logsumexp=torch.arange(5, dtype=torch.float32),
         mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(24).view(8, 3)),
         prompt_logics=torch.arange(32).view(8, 4),
     )
@@ -39,6 +67,8 @@ def test_prefill_unpad_uses_token_rows_for_spec_hidden():
     )
 
     assert unpadded.logits.shape == (3, 4)
+    assert unpadded.logits_token_ids.shape == (3, 4)
+    assert unpadded.logits_logsumexp.shape == (3,)
     assert unpadded.mtp_collector.spec_hidden.shape == (6, 3)
     assert unpadded.prompt_logics.shape == (6, 4)
 
@@ -118,6 +148,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         model = TpPartBaseModel.__new__(TpPartBaseModel)
         model.args = SimpleNamespace(enable_tpsp_mix_mode=enable_tpsp_mix_mode)
         model.tp_world_size_ = tp_world_size
+        model.decode_batch_multiplier = 1
         model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=99)
         model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
 

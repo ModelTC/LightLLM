@@ -233,6 +233,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--running_max_req_size", type=int, default=256, help="the max size for forward requests in the same time"
     )
+    parser.add_argument(
+        "--per_dp_max_req_size",
+        type=int,
+        default=None,
+        help=(
+            "Optional request-state capacity allocated by each local DP replica. "
+            "Defaults to running_max_req_size for backward compatibility; lowering it can "
+            "substantially reduce hybrid linear-attention state memory in balanced DP workloads."
+        ),
+    )
     parser.add_argument("--nnodes", type=int, default=1, help="the number of nodes")
     parser.add_argument("--node_rank", type=int, default=0, help="the rank of the current node")
     parser.add_argument(
@@ -423,11 +433,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer", "flashqla"],
+        choices=["auto", "triton", "fa3", "flashinfer", "flashqla", "tilelang"],
         default=["auto"],
         help="""prefill attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
                 (priority: fa3 > flashinfer > triton)
+                for NSA/DSA models, tilelang selects SGLang's sparse prefill kernel
                 for hybrid linear-attention models, the second value selects the linear-attention backend
                 (priority: flashqla > triton); when omitted, it defaults to auto""",
     )
@@ -599,6 +610,36 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=8192,
         help="max handle token num for prefill cudagraph",
+    )
+    parser.add_argument(
+        "--prefill_cudagraph_token_nums",
+        nargs="+",
+        type=int,
+        default=None,
+        help=(
+            "Optional exact prefill token counts to capture. Requests with other token counts "
+            "run eagerly instead of being padded to one of these graphs."
+        ),
+    )
+    parser.add_argument(
+        "--prefill_cudagraph_batch_sizes",
+        nargs="+",
+        type=int,
+        default=None,
+        help=(
+            "Batch size paired with each --prefill_cudagraph_token_nums entry. "
+            "Exact-layout graphs require uniform uncached sequences, so each token count "
+            "must be divisible by its paired batch size."
+        ),
+    )
+    parser.add_argument(
+        "--prefill_cudagraph_capture_attention",
+        action="store_true",
+        help=(
+            "Capture prefill attention inside the main CUDA Graph instead of running it "
+            "between graph segments. This experimental mode requires exact token-count and "
+            "batch-size layouts."
+        ),
     )
 
     parser.add_argument(
@@ -790,6 +831,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=float,
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
+    )
+    parser.add_argument(
+        "--prefill_coalesce_interval",
+        type=float,
+        default=0.0,
+        help="""Maximum time in seconds to collect a burst of waiting requests before scheduling
+        a prefill batch. Disabled by default. A full runnable batch is scheduled immediately.""",
     )
     parser.add_argument(
         "--afs_image_embed_dir",

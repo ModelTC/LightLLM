@@ -1,0 +1,46 @@
+.git
+.git/**
+.github
+.idea
+.vscode
+.pytest_cache
+.mypy_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Local environments, credentials, and host configuration.
+.env
+.env.*
+.aws
+.sco
+.netrc
+*.key
+*.pem
+id_rsa*
+venv
+.venv
+
+# Models, caches, traces, and experiment output never belong in an image.
+models
+checkpoints
+cache*
+.cache
+traces
+trace-*
+*.log
+*.jsonl
+*.pt
+*.pth
+*.safetensors
+
+# Runtime images only need the package and release Docker inputs.
+assets
+demos
+docs
+skills
+test
+unit_tests
+tools
+format_out

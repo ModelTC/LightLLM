@@ -45,6 +45,8 @@ class InferStateInfo:
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
         self.is_prefill: bool = None
+        self.kpool_prefill_aligned: bool = False
+        self.kpool_decode_aligned: bool = False
 
         self.mem_manager: MemoryManager = None
         self.req_manager: ReqManager = None
@@ -52,6 +54,9 @@ class InferStateInfo:
         self.mem_index: torch.Tensor = None
 
         self.return_all_prompt_logics: bool = False
+        self.use_vocab_parallel_greedy: bool = False
+        self.logits_token_ids: Optional[torch.Tensor] = None
+        self.logits_logsumexp: Optional[torch.Tensor] = None
         # 在开启 return_all_prompt_logics 模式时，保存整个 prefill 阶段每一个
         # token 位置的 logits，供后续回传 prompt logprobs 信息使用。
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
@@ -394,4 +399,8 @@ class InferStateInfo:
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr() and attr_.shape == attr_value.shape:
                     attr_.copy_(attr_value, non_blocking=True)
+
+        self.prefill_att_state.copy_for_prefill_cuda_graph(new_infer_state.prefill_att_state)
+        if self.prefill_att_state1 is not None:
+            self.prefill_att_state1.copy_for_prefill_cuda_graph(new_infer_state.prefill_att_state1)
         return

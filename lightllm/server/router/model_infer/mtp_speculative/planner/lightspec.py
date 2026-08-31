@@ -211,7 +211,15 @@ class LightSpecPlanner(BaseMtpPlanner):
 
         if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):
             return self.draft_infer_costs.estimate(req_num) * draft_step
-        if self.spec_mode in ("vanilla_with_att", "eagle_with_att", "eagle3"):
+        if self.spec_mode == "vanilla_with_att":
+            assert draft_step > 0, f"{self.spec_mode} requires draft_step to be greater than 0"
+            # Every level in the chained Vanilla proposer forwards the full
+            # (possibly compacted) verify layout so that its fixed-depth KV
+            # state covers every committed position.  Pricing only the first
+            # level at B and the remaining levels at N systematically makes a
+            # wide verify budget look cheaper than the work actually run.
+            return self.draft_infer_costs.estimate(verify_batch_size) * draft_step
+        if self.spec_mode in ("eagle_with_att", "eagle3"):
             assert draft_step > 0, f"{self.spec_mode} requires draft_step to be greater than 0"
             draft_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
             if draft_step > 1:

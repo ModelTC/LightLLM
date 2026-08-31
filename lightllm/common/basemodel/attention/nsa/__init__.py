@@ -10,6 +10,7 @@ from .fp8_flashmla_sparse import (
     NsaFlashMlaFp8SparsePrefillAttState,
     NsaFlashMlaFp8SparseDecodeAttState,
 )
+from .tilelang_sparse import NsaTilelangSparseAttBackend, NsaTilelangSparsePrefillAttState
 
 __all__ = [
     "NsaFlashMlaSparseAttBackend",

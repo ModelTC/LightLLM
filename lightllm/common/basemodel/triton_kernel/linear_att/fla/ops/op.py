@@ -13,6 +13,7 @@ import triton.language as tl
 from .utils import is_gather_supported
 
 exp = tl.exp
+exp2 = tl.exp2
 log = tl.log
 log2 = tl.log2
 

@@ -68,6 +68,9 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
+        self.fuse_moe_impl.swiglu_limit = self.swiglu_limit
+        self.fuse_moe_impl.swiglu_alpha = self.swiglu_alpha
+        self.fuse_moe_impl.swiglu_clamp_up_add_one = self.swiglu_clamp_up_add_one
         self.lock = threading.Lock()
         self._create_weight()
 
@@ -79,6 +82,9 @@ class FusedMoeWeight(BaseWeightTpl):
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.scoring_func = network_config.get("scoring_func", "softmax")
+        self.swiglu_limit = network_config.get("swiglu_limit")
+        self.swiglu_alpha = network_config.get("swiglu_alpha", 1.0)
+        self.swiglu_clamp_up_add_one = network_config.get("swiglu_clamp_up_add_one", True)
 
     def _init_redundancy_expert_params(self):
         self.redundancy_expert_num = get_redundancy_expert_num()
@@ -285,14 +291,36 @@ class FusedMoeWeight(BaseWeightTpl):
             self._load_weight(self.redundancy_expert_idx_to_local_idx, weights)
 
     def verify_load(self):
-        weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
+        if getattr(self, "_sm90_mega_moe_weights_prepared", False):
+            weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w2_list)
+        else:
+            weight_load_ok = all(
+                all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list
+            )
         per_expert_scale_load_ok = (
             True if self.per_expert_scale is None else getattr(self.per_expert_scale, "load_ok", False)
         )
         e_score_correction_bias_load_ok = (
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
-        return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        load_ok = weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        if load_ok and self.enable_ep_moe and not getattr(self, "_sm90_mega_moe_weights_prepared", False):
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
+                prepare_sm90_mega_moe_weights,
+                use_sm90_mega_moe,
+            )
+
+            if use_sm90_mega_moe(self.quant_method):
+                prepare_sm90_mega_moe_weights(self.w13)
+                # The loader-only gate/up views retain the original storage.
+                # Drop them after replacement so all layers do not keep a
+                # second full copy of their routed-expert L1 weights.
+                self.w1 = None
+                self.w3 = None
+                self.w1_list = []
+                self.w3_list = []
+                self._sm90_mega_moe_weights_prepared = True
+        return load_ok
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size

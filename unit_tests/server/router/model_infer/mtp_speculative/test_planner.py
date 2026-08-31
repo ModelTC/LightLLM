@@ -739,7 +739,7 @@ def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
     assert plan.draft_step >= 1
 
 
-def test_vanilla_with_attention_planner_prices_extend_then_normal_batches():
+def test_vanilla_with_attention_planner_prices_every_chained_level_at_verify_batch():
     planner = build_lightspec_planner(spec_mode="vanilla_with_att")
     planner.draft_infer_costs.update(batch_size=2, infer_cost_ms=0.1)
 
@@ -749,7 +749,7 @@ def test_vanilla_with_attention_planner_prices_extend_then_normal_batches():
         draft_step=3,
     )
 
-    assert np.isclose(draft_cost_ms, 0.8)
+    assert np.isclose(draft_cost_ms, 1.2)
     with pytest.raises(AssertionError, match="requires draft_step to be greater than 0"):
         planner._get_draft_cost_ms(req_num=4, verify_batch_size=8, draft_step=0)
 
