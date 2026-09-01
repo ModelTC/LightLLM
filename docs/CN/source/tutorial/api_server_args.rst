@@ -89,10 +89,22 @@ PD 分离模式参数
 
 .. option:: --enable_pd_node_self_request_limit
 
-    在 PD 分离模式的 Prefill 和 Decode 节点上启用本地请求准入控制。启用后，如果节点在指定超时时间内
-    无法为请求分配本地 ``shm_req`` 对象，会主动拒绝该请求，并由 PD Master 向客户端返回
-    HTTP 429。超时时间通过环境变量 ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 设置，单位为秒，
-    默认值为 20。例如，设置 ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS=30`` 表示最长等待 30 秒。
+    在 PD 分离模式的 Prefill 和 Decode 节点上启用本地请求准入控制。启用后，节点根据动态 QPS 和
+    当前运行请求总数决定新请求是否可以进入本地 ``shm_req`` 申请流程。超过上限时，节点会主动拒绝新请求，并由 PD Master
+    向客户端返回 HTTP 429；已经准入的请求会持续等待可用的 ``shm_req`` 对象，不再进行等待超时判断。
+    服务启动后，QPS 记录器累计完成的请求数未达到 ``running_max_req_size`` 时，最大允许进入请求数直接使用
+    ``running_max_req_size``，使冷启动阶段可以快速接收请求并积累足够的完成样本。累计完成请求数达到
+    ``running_max_req_size`` 且首个 16 请求 QPS 窗口生成后，最大允许进入请求数改为
+    ``int(QPS * 平均整包时间秒数) + 6``。如果 ``running_max_req_size`` 小于 16，节点会继续使用基础容量，
+    直到 QPS 完成初始化，避免使用尚未初始化的零值 QPS 过早切换到仅 6 个探测请求。
+    稳定运行阶段额外放行 6 个请求作为探测余量，避免低流量或长时间空闲导致 QPS 降低后，
+    系统被限制在过低的并发并且难以重新爬升。
+    这里的平均整包时间表示希望一个请求从进入
+    节点到整包完成所处的时间范围，用于将完成 QPS 换算为合理的在途请求数量。Prefill 阶段通常只负责输入
+    处理和首 token，默认值为 20 秒，避免短阶段积压过多请求；Decode 阶段需要持续生成 token，默认值为
+    60 秒，以覆盖更长的整包处理时间。可以通过环境变量
+    ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` 显式设置统一值；设置后 Prefill 和 Decode
+    节点都会采用该值。
     该参数默认关闭，在 ``normal`` 和 ``pd_master`` 模式下不生效。
 
 .. option:: --config_server_host

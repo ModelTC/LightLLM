@@ -72,8 +72,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--enable_pd_node_self_request_limit",
         action="store_true",
         help=(
-            "Allow Prefill and Decode nodes in PD mode to reject a request when no local shm_req object "
-            "can be allocated within 20 seconds. Default: disabled."
+            "Allow Prefill and Decode nodes in PD mode to limit the total running request count "
+            "according to the dynamically measured QPS. Default: disabled."
         ),
     )
     parser.add_argument(

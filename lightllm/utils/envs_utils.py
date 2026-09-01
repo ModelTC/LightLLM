@@ -312,9 +312,27 @@ def get_pd_split_max_new_tokens() -> int:
 
 
 @lru_cache(maxsize=None)
-def get_pd_node_shm_req_alloc_timeout_seconds() -> int:
-    """PD 节点申请 shm_req 对象的最长等待时间，单位为秒。"""
-    return int(os.getenv("LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS", 20))
+def get_pd_request_limit_max_allowed_request_count_seconds(run_mode: str) -> int:
+    """获取 PD 节点根据 QPS 估算最大在途请求数时使用的平均整包时间。
+
+    该值与完成 QPS 相乘，用于估算节点在目标平均整包时间内可以容纳的在途请求数。
+    Prefill 节点主要处理输入和首 token，整包占用时间通常较短，默认使用 20 秒；
+    Decode 节点负责持续生成 token，整包占用时间通常更长，默认使用 60 秒。
+    显式设置环境变量时，Prefill 和 Decode 节点都使用用户提供的值。
+    """
+    configured_seconds = os.getenv("LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS")
+    if configured_seconds is None:
+        default_seconds = {"prefill": 20, "decode": 60}
+        if run_mode not in default_seconds:
+            raise ValueError(f"unsupported PD run mode for request limiting: {run_mode}")
+        seconds = default_seconds[run_mode]
+    else:
+        seconds = int(configured_seconds)
+    if seconds < 0:
+        raise ValueError(
+            "LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS must be greater than or equal to 0"
+        )
+    return seconds
 
 
 @lru_cache(maxsize=None)

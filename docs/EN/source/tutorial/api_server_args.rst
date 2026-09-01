@@ -92,10 +92,23 @@ PD disaggregation Mode Parameters
 .. option:: --enable_pd_node_self_request_limit
 
     Enable local admission control on Prefill and Decode nodes in PD disaggregation mode. When enabled,
-    a node rejects a request through PD Master with HTTP 429 if it cannot allocate the request's local
-    ``shm_req`` object within the configured timeout. The timeout is controlled by the
-    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` environment variable and defaults to 20 seconds.
-    For example, set ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS=30`` to wait for 30 seconds.
+    each node uses the dynamically measured QPS and its total running request count to decide whether a new request
+    may enter local ``shm_req`` allocation. Once the limit is exceeded, the node rejects new requests through PD Master with HTTP 429. Admitted requests
+    keep waiting for an available ``shm_req`` object without an allocation timeout. While the QPS recorder has completed
+    fewer than ``running_max_req_size`` requests since startup, that base capacity is returned
+    directly so the cold-start phase can quickly collect enough completion samples. Once the cumulative completed request
+    count reaches ``running_max_req_size`` and the first 16-request QPS window is available, the maximum admitted request
+    count becomes ``int(QPS * average whole-request seconds) + 6``. If
+    ``running_max_req_size`` is below 16, the base
+    capacity remains in effect until QPS initialization, preventing an uninitialized zero QPS from reducing the limit
+    prematurely. During steady state, six extra requests are admitted as probing headroom, preventing low traffic or a
+    long idle period from trapping the service at very low concurrency.
+    This duration represents the desired
+    average time range from node admission until the whole request finishes and converts completion QPS into a
+    reasonable in-flight request count. Prefill defaults to 20 seconds because it mainly handles input processing and
+    the first token; Decode defaults to 60 seconds because incremental token generation usually keeps the request active
+    longer. Set ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` to override both node defaults with one
+    explicit value.
     The option is disabled by default and has no effect in ``normal`` or ``pd_master`` mode.
 
 .. option:: --config_server_host
