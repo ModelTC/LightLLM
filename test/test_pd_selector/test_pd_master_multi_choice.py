@@ -262,12 +262,14 @@ def test_pd_master_accounts_each_split_prefill_on_the_same_node():
         dispatched_prompts = []
         dispatched_loads = []
         dispatched_req_counts = []
+        bypass_request_limit_flags = []
 
         async def wait_to_token_package(selected_p_node, _d_node, _start_time, block_prompt, sampling_params, *_args):
             dispatched_nodes.append(selected_p_node)
             dispatched_prompts.append(block_prompt)
             dispatched_loads.append(selected_p_node.dispatched_prompt_chars)
             dispatched_req_counts.append(selected_p_node.dispatched_req_num)
+            bypass_request_limit_flags.append(sampling_params.bypass_pd_node_request_limit)
             yield (
                 sampling_params.group_request_id,
                 "x",
@@ -293,6 +295,7 @@ def test_pd_master_accounts_each_split_prefill_on_the_same_node():
         assert dispatched_prompts == ["prompt", "promptx"]
         assert dispatched_loads == [other_request_load + len("prompt"), other_request_load + len("promptx")]
         assert dispatched_req_counts == [other_request_count + 1, other_request_count + 1]
+        assert bypass_request_limit_flags == [False, True]
         assert p_node.dispatched_prompt_chars == other_request_load
         assert p_node.dispatched_req_num == other_request_count
         assert len(results) == 2

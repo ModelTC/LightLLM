@@ -433,8 +433,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储
-            alloced_req_indexes = await self._alloc_shm_req_indexes(sampling_params.n)
+            # 申请资源并存储。PD 分段续跑请求可以绕过本地 shm_req 分配超时，避免
+            # 已经成功完成首段的用户请求因为下一段暂时拿不到对象而被 429 中断。
+            if self.pd_node_request_limit_enabled and sampling_params.bypass_pd_node_request_limit:
+                logger.info(
+                    f"PD {self.args.run_mode} node request {group_request_id} bypasses the local shm_req "
+                    f"allocation timeout and will wait for {sampling_params.n} object(s)"
+                )
+            alloced_req_indexes = await self._alloc_shm_req_indexes(
+                sampling_params.n,
+                bypass_pd_node_request_limit=sampling_params.bypass_pd_node_request_limit,
+            )
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
                 req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
@@ -540,12 +549,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         return image_tokens, audio_tokens
 
-    async def _alloc_shm_req_indexes(self, req_num: int) -> List[int]:
+    async def _alloc_shm_req_indexes(
+        self,
+        req_num: int,
+        bypass_pd_node_request_limit: bool = False,
+    ) -> List[int]:
         """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。"""
         alloced_req_indexes = []
         alloc_deadline = (
             time.monotonic() + self.pd_node_shm_req_alloc_timeout_seconds
-            if self.pd_node_request_limit_enabled
+            if self.pd_node_request_limit_enabled and not bypass_pd_node_request_limit
             else None
         )
 
