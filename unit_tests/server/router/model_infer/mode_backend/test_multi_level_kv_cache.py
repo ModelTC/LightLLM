@@ -158,3 +158,71 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     assert freed_big_pages == [8, 9]
     assert req.tail_linear_att_small_page_buffer_id is None
     assert req.linear_att_len_to_big_page_id == {}
+
+
+def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
+    table = torch.full((1, 136), -1, dtype=torch.int32)
+    table[0, :4] = torch.arange(4, dtype=torch.int32)
+    next_index = 4
+    alloc_sizes = []
+    loaded_indexes = []
+
+    def alloc(need_size):
+        nonlocal next_index
+        alloc_sizes.append(need_size)
+        mem_indexes = torch.arange(next_index, next_index + need_size, dtype=torch.int32)
+        next_index += need_size
+        return mem_indexes
+
+    def alloc_req_kv_mem(req, alloc_token_num):
+        mem_indexes = alloc(alloc_token_num)
+        new_hold_kv_len = req.hold_kv_len + alloc_token_num
+        table[req.req_idx, req.hold_kv_len : new_hold_kv_len] = mem_indexes
+        req.hold_kv_len = new_hold_kv_len
+        return mem_indexes
+
+    operator = SimpleNamespace(
+        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist())
+    )
+    backend = SimpleNamespace(
+        is_master_in_dp=False,
+        radix_cache=None,
+        model=SimpleNamespace(
+            mem_manager=SimpleNamespace(operator=operator),
+            req_manager=SimpleNamespace(req_to_token_indexs=table),
+        ),
+        _alloc_req_kv_mem=alloc_req_kv_mem,
+    )
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=132)
+    module.backend = backend
+    module.init_sync_group = object()
+    module.need_sync_compute_stream = lambda: False
+    module.cpu_cache_client = SimpleNamespace()
+    context = SimpleNamespace(
+        req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
+        get_can_alloc_token_num=lambda: 200,
+    )
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=4,
+        hold_kv_len=4,
+        shm_req=SimpleNamespace(
+            input_len=256,
+            disk_prompt_cache_len=0,
+            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [7]),
+            token_hash_page_len_list=SimpleNamespace(get_all=lambda: [132]),
+        ),
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+    )
+    monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+
+    module.load_cpu_cache_to_reqs([req])
+
+    assert alloc_sizes == [128]
+    assert req.cur_kv_len == 132
+    assert req.hold_kv_len == 132
+    assert loaded_indexes == list(range(132))
+    assert table[0, :132].tolist() == list(range(132))

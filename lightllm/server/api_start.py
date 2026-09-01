@@ -92,6 +92,7 @@ def _launch_subprocesses(args: StartArgs):
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+        assert args.page_size == 1, "diverse mode only supports page_size == 1"
 
     # performance_mode 参数处理
     if args.performance_mode == "personal":
@@ -167,24 +168,13 @@ def _launch_subprocesses(args: StartArgs):
         raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
 
     if args.page_size > 1:
-        unsupported_options = {
-            "MTP": args.mtp_mode is not None,
-            "PD split mode": args.run_mode in ("prefill", "decode"),
-            "CPU KV cache": args.enable_cpu_cache,
-            "DP prompt-cache fetch": args.enable_dp_prompt_cache_fetch,
-            "DP prefill balance": args.enable_dp_prefill_balance,
-            "diverse mode": args.diverse_mode,
-            "hybrid linear attention": is_linear_att_mixed_model(args.model_dir),
-        }
-        enabled_unsupported = [name for name, enabled in unsupported_options.items() if enabled]
-        if enabled_unsupported:
+        # linear radix cache 的共享边界按 linear_att_hash_page_size 划分。只有该
+        # 边界同时落在模型 KV 页面边界上，hold_kv_len 才能保持统一的分页语义。
+        is_linear_att_model = is_linear_att_mixed_model(args.model_dir)
+        if is_linear_att_model and args.linear_att_hash_page_size % args.page_size != 0:
             raise ValueError(
-                f"--page_size > 1 does not yet support {', '.join(enabled_unsupported)}; "
-                "use --page_size 1 for this configuration"
+                "--linear_att_hash_page_size must be divisible by --page_size when paged KV cache is enabled"
             )
-        if args.llm_kv_type != "None":
-            raise ValueError("--page_size > 1 currently supports only the unquantized LLM KV cache")
-
     # mtp params check
     if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:
@@ -295,6 +285,10 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+    if args.enable_cpu_cache:
+        assert (
+            args.cpu_cache_token_page_size % args.page_size == 0
+        ), "--cpu_cache_token_page_size must be divisible by --page_size"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:

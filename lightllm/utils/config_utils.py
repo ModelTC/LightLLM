@@ -368,10 +368,12 @@ def get_dtype(model_path: str):
 @lru_cache(maxsize=None)
 def get_fixed_kv_len():
     start_args = get_env_start_args()
-    assert start_args.page_size == 1, "fixed KV cache only supports page_size == 1"
     model_cfg = get_config_json(start_args.model_dir)
     if "prompt_cache_token_ids" in model_cfg:
-        return len(model_cfg["prompt_cache_token_ids"])
+        fixed_kv_len = len(model_cfg["prompt_cache_token_ids"])
+        # 固定 KV 最终会插入 radix cache，只保留完整的模型 KV 页面；不足一页
+        # 的尾部在加载后立即释放，因此 router 也只扣除实际常驻的页面容量。
+        return fixed_kv_len // start_args.page_size * start_args.page_size
     else:
         return 0
 

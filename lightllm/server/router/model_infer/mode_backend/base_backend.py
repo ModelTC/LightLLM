@@ -643,9 +643,9 @@ class ModeBackend:
         return ready_reqs
 
     # 一些可以复用的通用功能函数
-    def _alloc_req_kv_mem(self, req_obj: InferReq, alloc_token_num: int):
+    def _alloc_req_kv_mem(self, req_obj: InferReq, alloc_token_num: int) -> Optional[torch.Tensor]:
         if alloc_token_num == 0:
-            return
+            return None
 
         assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
         if g_infer_context.radix_cache is not None:
@@ -658,7 +658,7 @@ class ModeBackend:
             req_obj.req_idx, old_hold_kv_len:new_hold_kv_len
         ] = mem_indexes
         req_obj.hold_kv_len = new_hold_kv_len
-        return
+        return mem_indexes
 
     def _get_classed_reqs(
         self,

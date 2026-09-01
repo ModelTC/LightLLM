@@ -206,7 +206,7 @@ class InferenceContext:
             # 只有小页可以有 tail_linear_att_small_page_buffer_id，然后进行小页插入。
             assert page_num % big_page_num != 0
             free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][req.linear_att_cache_len : req.cur_kv_len]
+                self.req_manager.req_to_token_indexs[req.req_idx][req.linear_att_cache_len : req.hold_kv_len]
             )
             req.cur_kv_len = req.linear_att_cache_len
             input_token_ids = req.get_input_token_ids()
@@ -233,7 +233,7 @@ class InferenceContext:
 
         if shared_kv_len < tail_big_page_token_num <= req.cur_kv_len:
             free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][tail_big_page_token_num : req.cur_kv_len]
+                self.req_manager.req_to_token_indexs[req.req_idx][tail_big_page_token_num : req.hold_kv_len]
             )
             req.cur_kv_len = tail_big_page_token_num
 
@@ -261,7 +261,7 @@ class InferenceContext:
             return
 
         if shared_kv_len <= req.cur_kv_len:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.hold_kv_len])
             # 该分支不会把 prefill 阶段累积的 big page id 插入 radix cache（典型为 pause/abort
             # 在 prefill 跨过 big page 边界后、到达末尾前触发），需在此显式释放，避免泄漏。
 
@@ -748,6 +748,7 @@ class InferReq:
                         radix_cache = g_infer_context.radix_cache
                         if g_infer_context.get_can_alloc_token_num() > need_tokens:
                             # 有充足的token 容量时
+                            assert need_tokens % self.args.page_size == 0
                             radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
                             tail_mems = radix_cache.mem_manager.alloc(need_size=need_tokens)
                             g_infer_context.req_manager.req_to_token_indexs[
@@ -799,6 +800,12 @@ class InferReq:
                                 )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
+
+        # linear radix cache 使用自己的 hash page；启动检查保证它是模型
+        # page_size 的整数倍，因此命中前缀和尾部重建后的持有长度均可直接
+        # 作为请求分页预留边界。
+        self.hold_kv_len = self.cur_kv_len
+        assert self.hold_kv_len % self.args.page_size == 0
 
         if self.cur_kv_len == 0:
             # 说明没有任何命中

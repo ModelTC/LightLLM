@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 class MultiLevelKvCacheModule(object):
     def __init__(self, backend):
         self.args = get_env_start_args()
+        assert self.args.cpu_cache_token_page_size % self.args.page_size == 0
         from .base_backend import ModeBackend
 
         self.backend: ModeBackend = backend
@@ -92,16 +93,18 @@ class MultiLevelKvCacheModule(object):
             need_token_num = match_tokens - req.cur_kv_len
             # 多匹配了一定数量的token同时请求长度大于一定的长度，才进行复制操作，不然操作效率不高，代价过高
             if need_token_num >= 128 and req.shm_req.input_len >= 256:
+                assert req.cur_kv_len % self.args.page_size == 0
+                assert match_tokens % self.args.page_size == 0
+                assert need_token_num % self.args.page_size == 0
+                assert req.hold_kv_len == req.cur_kv_len
                 if need_token_num <= idle_token_num:
-                    if self.backend.radix_cache is not None:
-                        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
-
                     # 计算需要加载的页面（只加载未匹配的部分）
                     ready_page_num = bisect.bisect_right(page_len_list, req.cur_kv_len)
                     assert ready_page_num <= len(page_list)
                     need_pages = page_list[ready_page_num:]  # 只取需要的页面
 
-                    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
+                    mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
+                    assert mem_indexes is not None
 
                     if self.need_sync_compute_stream():
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
@@ -132,9 +135,6 @@ class MultiLevelKvCacheModule(object):
 
                     # 更新 req 状态。
                     idle_token_num -= need_token_num
-                    g_infer_context.req_manager.req_to_token_indexs[
-                        req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
-                    ] = mem_indexes
                     req.cur_kv_len = req.cur_kv_len + need_token_num
 
                     mem_manager.operator.load_cpu_cache_to_gpu(

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
+from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
 from lightllm.server.router.model_infer.mode_backend import base_backend
 
@@ -49,13 +50,14 @@ def test_request_reuses_reserved_page_tail_before_allocating_next_page(monkeypat
     context, backend = _make_context(monkeypatch)
     req = _make_req(0)
 
-    backend._alloc_req_kv_mem(req, alloc_token_num=4)
+    mem_indexes = backend._alloc_req_kv_mem(req, alloc_token_num=4)
+    assert mem_indexes.tolist() == [0, 1, 2, 3]
     assert req.hold_kv_len == 4
     assert context.req_manager.mem_manager.alloc_sizes == [4]
     assert context.req_manager.req_to_token_indexs[0, :4].tolist() == [0, 1, 2, 3]
 
     req.cur_kv_len = 3
-    backend._alloc_req_kv_mem(req, alloc_token_num=0)
+    assert backend._alloc_req_kv_mem(req, alloc_token_num=0) is None
     assert context.req_manager.mem_manager.alloc_sizes == [4]
 
     req.cur_kv_len = 4
@@ -164,3 +166,26 @@ def test_page_size_one_frees_all_preallocated_indexes():
 
     assert free_token_indexes[0].tolist() == list(range(12))
     assert req.cur_kv_len == req.hold_kv_len == 0
+
+
+def test_linear_attention_frees_reserved_page_tail(monkeypatch):
+    infer_context = InferenceContext.__new__(InferenceContext)
+    infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    infer_context.radix_cache = SimpleNamespace()
+    infer_context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(16, dtype=torch.int32)[None, :])
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=5,
+        hold_kv_len=8,
+        linear_att_cache_len=0,
+        tail_linear_att_small_page_buffer_id=None,
+        linear_att_len_to_big_page_id={},
+        shared_kv_node=None,
+    )
+    free_token_indexes = []
+    monkeypatch.setattr(infer_batch.g_infer_context, "is_linear_att_mixed_model", True)
+    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: infer_context.args)
+
+    infer_context._linear_att_free_req(free_token_indexes, req)
+
+    assert free_token_indexes[0].tolist() == list(range(8))
