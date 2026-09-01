@@ -6,10 +6,10 @@ import setproctitle
 import torch.multiprocessing as mp
 import queue
 import pickle
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import PDChunckedTransTask
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
@@ -158,7 +158,9 @@ class _PrefillTransModule:
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == request_id:
+                if trans_task.request_id == request_id and trans_task.xfer_handle is None:
+                    # 已经提交给底层 transporter 的异步传输不能直接失败，
+                    # 否则 fail_loop 可能在传输静默前归还 source page，导致脏数据。
                     aborted_tasks.append(self.waiting_dict.pop(key))
 
         for trans_task in aborted_tasks:
@@ -171,8 +173,17 @@ class _PrefillTransModule:
         torch.cuda.set_device(self.device_id)
 
         while True:
+            obj: Union[PDChunckedTransTask, PDAbortReq] = self.task_in_queue.get()
+            if isinstance(obj, PDAbortReq):
+                # Infer 层已经终止该请求，将 abort 命令下传到 P 节点的
+                # KV 传输层，尽快结束尚在等待的传输任务。
+                self._abort(request_id=obj.request_id)
+                continue
+
+            assert isinstance(obj, PDChunckedTransTask), f"unsupported prefill transfer task type: {type(obj)}"
+
             page_index = self.page_index_queue.get()
-            trans_task: PDChunckedTransTask = self.task_in_queue.get()
+            trans_task = obj
             trans_task.src_page_index = page_index
 
             # 初次校验 time out
