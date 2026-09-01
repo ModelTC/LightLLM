@@ -69,11 +69,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--disable_pd_master_decode_capacity_limit",
-        action="store_true",
-        help="Disable PD master admission control based on the total capacity of registered decode nodes.",
-    )
-    parser.add_argument(
         "--pd_trans_mode",
         type=str,
         choices=["nccl", "nixl"],

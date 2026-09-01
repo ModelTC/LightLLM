@@ -150,6 +150,8 @@ Memory and Batch Processing Parameters
 .. option:: --running_max_req_size
 
     Maximum number of requests for simultaneous forward inference, default is ``1000``
+    On Decode nodes in PD disaggregation mode, this limit applies locally to each node;
+    PD Master does not aggregate the Decode-node values into a global admission limit.
 
 .. option:: --max_req_total_len
 

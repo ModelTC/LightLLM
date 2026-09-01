@@ -129,11 +129,6 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
-        if not self.args.disable_pd_master_decode_capacity_limit:
-            decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
-            if self.running_request_count >= decode_capacity:
-                raise ServerBusyError()
-
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
         if was_idle:
