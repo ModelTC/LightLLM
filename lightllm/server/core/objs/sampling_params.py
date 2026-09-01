@@ -23,6 +23,11 @@ MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 MAX_SEED = (1 << 63) - 1
 
 
+def get_xgrammar_tokenizer(tokenizer):
+    """Return a tokenizer's explicit xgrammar-compatible tokenizer, if any."""
+    return getattr(tokenizer, "xgrammar_tokenizer", tokenizer)
+
+
 class StopSequence(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -149,7 +154,7 @@ class GuidedGrammar(ctypes.Structure):
             if self.length > 0 and tokenizer is not None and constraint != "json":
                 import xgrammar as xgr
 
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+                tokenizer_info = xgr.TokenizerInfo.from_huggingface(get_xgrammar_tokenizer(tokenizer))
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_grammar(constraint)
         except Exception as e:
@@ -179,7 +184,7 @@ class GuidedJsonSchema(ctypes.Structure):
             if self.length > 0 and tokenizer is not None:
                 import xgrammar as xgr
 
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+                tokenizer_info = xgr.TokenizerInfo.from_huggingface(get_xgrammar_tokenizer(tokenizer))
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_json_schema(constraint)
         except Exception as e:

@@ -363,6 +363,10 @@ class DeepSeekV4Tokenizer:
     def __getattr__(self, name):
         return getattr(self.tokenizer, name)
 
+    @property
+    def xgrammar_tokenizer(self):
+        return self.tokenizer
+
     def get_added_vocab(self):
         if self._added_vocab is None:
             self._added_vocab = self.tokenizer.get_added_vocab()
