@@ -103,7 +103,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
         infer_state.mem_manager = self.mem_manager
-        infer_state.mem_index = model_input.mem_indexes
+        infer_state.mem_index = self._select_mem_indexes(model_input)
 
         hidden = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
         for layer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):

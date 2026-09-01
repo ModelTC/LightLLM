@@ -1,6 +1,7 @@
 from .chunked_prefill.impl import ChunkedPrefillQueue
 from .chunked_prefill.beam_impl import ChunkedBeamContinuesBatchQueue
-from .chunked_prefill.impl_for_pd import PDQueue
+from .chunked_prefill.impl_for_pd_prefill import PDPrefillQueue
+from .chunked_prefill.impl_for_pd_decode import PDDecodeQueue
 from .dp_base_queue import DpQueue
 
 
@@ -11,8 +12,10 @@ def _get_req_queue_class(args, router, dp_size_in_node: int):
         return ChunkedPrefillQueue
     if args.first_token_constraint_mode:
         return ChunkedPrefillQueue
-    if args.run_mode in ["prefill", "decode"]:
-        return PDQueue
+    if args.run_mode == "prefill":
+        return PDPrefillQueue
+    if args.run_mode == "decode":
+        return PDDecodeQueue
 
     if args.disable_chunked_prefill:
         # 虽然也使用chuncked prefill queue 但是由于 args.chunked_prefill_size = args.max_req_total_len

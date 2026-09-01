@@ -53,6 +53,7 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
 
     target_hiddens = torch.arange(6, dtype=torch.float32).view(2, 3)
     mem_indexes = torch.tensor([7, 11])
+    model._select_mem_indexes = lambda _: mem_indexes
     observed_states = []
 
     class PreInfer:
@@ -78,7 +79,6 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model_input = SimpleNamespace(
         batch_size=2,
         b_seq_len=torch.tensor([3, 5]),
-        mem_indexes=mem_indexes,
         mtp_draft_input_hiddens=target_hiddens,
     )
 

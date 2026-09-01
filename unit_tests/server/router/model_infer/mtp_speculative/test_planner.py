@@ -664,21 +664,12 @@ def test_engine_lets_planner_count_requests_with_a_previous_proposal():
     assert ready_plan.all_reqs_have_proposals
 
 
-def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypatch):
+def test_dynamic_prepare_delegates_row_compaction(monkeypatch):
     from lightllm.common.basemodel.triton_kernel import dynamic_mtp_utils
-    from lightllm.server.router.model_infer import infer_batch as infer_batch_module
     from lightllm.server.router.model_infer.mtp_speculative import (
         engine as engine_module,
     )
 
-    freed = []
-    monkeypatch.setattr(
-        infer_batch_module,
-        "g_infer_context",
-        SimpleNamespace(
-            req_manager=SimpleNamespace(mem_manager=SimpleNamespace(free=lambda indexes: freed.append(indexes.clone())))
-        ),
-    )
     selected_row_mask = torch.tensor([1, 0, 1, 0], dtype=torch.int32)
     monkeypatch.setattr(
         dynamic_mtp_utils,
@@ -702,8 +693,6 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
     )
     model_input = SimpleNamespace(
         batch_size=4,
-        mem_indexes=torch.tensor([20, 21, 22, 23], dtype=torch.int32),
-        mem_indexes_cpu=torch.tensor([10, 11, 12, 13], dtype=torch.int32),
     )
     plan = SpecDecodePlan(origin_batch_size=4, dynamic_batch_size=2, draft_step=1, pre_draft_step=1)
 
@@ -715,10 +704,6 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
 
     assert compacted_input is model_input
     assert selected_mask_cpu is async_mask
-    assert model_input.mem_indexes.tolist() == [20, 21]
-    assert model_input.mem_indexes_cpu.tolist() == [10, 11]
-    assert len(freed) == 1
-    assert freed[0].tolist() == [12, 13]
 
 
 def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():

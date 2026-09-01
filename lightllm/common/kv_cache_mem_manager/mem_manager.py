@@ -36,6 +36,12 @@ class MemoryManager:
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
+        # A physical KV page must never straddle the allocator boundary.  The
+        # unused remainder is intentionally dropped so every managed page has
+        # a stable ``mem_index // page_size`` id.
+        self.page_size = get_env_start_args().page_size
+        self.size = self.size // self.page_size * self.page_size
+
         self.allocator = KvCacheAllocator(self.size)
 
         self._init_buffers(
@@ -83,7 +89,9 @@ class MemoryManager:
         # 分配，内部实际也没有管理，这个token是预留来对一些特殊的运行模式，如多dp下，overlap microbatch
         # 等模式下 padding 一些请求，使推理过程可以正常运行采用的，其索引值为size，存储在HOLD_TOKEN_MEMINDEX
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
-        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = torch.empty(
+            (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=dtype, device="cuda"
+        )
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
@@ -175,17 +183,17 @@ class MemoryManager:
         """
         just for test code
         """
-        size = new_size
+        size = new_size // self.page_size * self.page_size
         dtype = self.dtype
         head_num = self.head_num
         head_dim = self.head_dim
         layer_num = self.layer_num
 
-        self.size = new_size
-        self.allocator.resize(new_size)
-        self.HOLD_TOKEN_MEMINDEX = self.size
+        self.size = size
+        self.allocator.resize(size)
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
+        self.HOLD_TOKEN_MEMINDEX = self.size
         return
 
     def get_index_kv_buffer(self, index):

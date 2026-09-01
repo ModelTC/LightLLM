@@ -90,20 +90,21 @@ class PDDecodeNode(ChunkedPrefillBackend):
                             f"(reason={req_obj.finish_status.get_finish_reason()}), kv transfer error"
                         )
 
-                # 提前释放有问题的 mem_index
+                # 提前释放有问题的 mem_index。cur_kv_len 只表示已经传输完成的
+                # 逻辑长度，hold_kv_len 还包含最后一个页面中尚未使用的预留槽位。
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
-                error_mem_len = req_obj.cur_kv_len - old_prefix_len
+                error_mem_len = req_obj.hold_kv_len - old_prefix_len
                 if error_mem_len > 0:
-                    req_obj.cur_kv_len -= error_mem_len
-
                     mem_indexes = (
                         self.model.req_manager.req_to_token_indexs[
-                            req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + error_mem_len)
+                            req_obj.req_idx, old_prefix_len : req_obj.hold_kv_len
                         ]
                         .detach()
                         .cpu()
                     )
                     self.model.mem_manager.free(mem_indexes)
+                    req_obj.cur_kv_len = old_prefix_len
+                    req_obj.hold_kv_len = old_prefix_len
                     if self.is_master_in_dp:
                         req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
@@ -118,47 +119,46 @@ class PDDecodeNode(ChunkedPrefillBackend):
         input_len = req_obj.shm_req.input_len
         # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
         if input_len - req_obj.cur_kv_len > 1:
-            page_size = self.args.pd_kv_page_size
+            trans_page_size = self.args.pd_kv_page_size
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
-            need_mem_size = input_len - req_obj.cur_kv_len
+            assert req_obj.hold_kv_len == req_obj.cur_kv_len
+            need_mem_size = req_obj._kv_cache_alloc_need(input_len)
 
-            if need_mem_size > 0:
-                if self.radix_cache is not None:
-                    self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
+            mem_indexes = self._alloc_req_kv_mem(req_obj, need_mem_size)
+            assert mem_indexes is not None
+            # 传输只覆盖真实 KV；最后一个模型页面中尚未使用的部分继续留在
+            # req_to_token_indexs 中，供后续 decode 直接切片使用。
+            mem_indexes = mem_indexes[: input_len - req_obj.cur_kv_len]
 
-                mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
-                self.model.req_manager.req_to_token_indexs[
-                    req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + need_mem_size)
-                ] = mem_indexes
+            while req_obj.pd_trans_kv_start_index < input_len:
+                cur_page_size = min(trans_page_size, input_len - req_obj.pd_trans_kv_start_index)
+                # 生成页面传输任务， 放入kv move manager 的处理队列中
+                start_index = req_obj.pd_trans_kv_start_index
+                end_index = req_obj.pd_trans_kv_start_index + cur_page_size
+                page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
+                self._create_pd_trans_task(
+                    req_obj=req_obj,
+                    mem_indexes=page_mem_indexes.tolist(),
+                    kv_start_index=start_index,
+                    kv_end_index=end_index,
+                    group=group,
+                )
+                # update
+                req_obj.pd_trans_kv_start_index += cur_page_size
 
-                while req_obj.pd_trans_kv_start_index < input_len:
-                    cur_page_size = min(page_size, input_len - req_obj.pd_trans_kv_start_index)
-                    # 生成页面传输任务， 放入kv move manager 的处理队列中
-                    start_index = req_obj.pd_trans_kv_start_index
-                    end_index = req_obj.pd_trans_kv_start_index + cur_page_size
-                    page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
-                    self._create_pd_trans_task(
-                        req_obj=req_obj,
-                        mem_indexes=page_mem_indexes.tolist(),
-                        kv_start_index=start_index,
-                        kv_end_index=end_index,
-                        group=group,
-                    )
-                    # update
-                    req_obj.pd_trans_kv_start_index += cur_page_size
+            req_obj.cur_kv_len += len(mem_indexes)
+            assert req_obj.cur_kv_len == input_len
 
-                req_obj.cur_kv_len += len(mem_indexes)
-
-                # 如果当前是linear att 混合模型，则需要创建一个linear att 状态的传输任务
-                if g_infer_context.is_linear_att_mixed_model:
-                    self._create_pd_trans_task(
-                        req_obj=req_obj,
-                        mem_indexes=[],
-                        kv_start_index=input_len,
-                        kv_end_index=input_len,
-                        group=group,
-                        page_kind="linear_att_state",
-                    )
+            # 如果当前是linear att 混合模型，则需要创建一个linear att 状态的传输任务
+            if g_infer_context.is_linear_att_mixed_model:
+                self._create_pd_trans_task(
+                    req_obj=req_obj,
+                    mem_indexes=[],
+                    kv_start_index=input_len,
+                    kv_end_index=input_len,
+                    group=group,
+                    page_kind="linear_att_state",
+                )
         else:
             assert req_obj.cur_kv_len == input_len - 1
 

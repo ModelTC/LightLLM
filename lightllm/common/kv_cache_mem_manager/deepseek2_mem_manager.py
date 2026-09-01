@@ -26,7 +26,7 @@ class Deepseek2MemoryManager(MemoryManager):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = torch.empty((layer_num, size + self.page_size, head_num, head_dim), dtype=dtype, device="cuda")
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         self.kv_move_buffer = torch.empty(

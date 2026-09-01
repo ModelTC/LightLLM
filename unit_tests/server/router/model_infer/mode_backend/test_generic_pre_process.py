@@ -10,7 +10,12 @@ def _patch_empty_input_context(monkeypatch):
         alloc=lambda size: torch.empty((size,), dtype=torch.int32),
     )
     infer_context = SimpleNamespace(
-        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1, mem_manager=mem_manager),
+        args=SimpleNamespace(page_size=1),
+        req_manager=SimpleNamespace(
+            HOLD_REQUEST_ID=-1,
+            mem_manager=mem_manager,
+            req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32),
+        ),
         radix_cache=None,
     )
     monkeypatch.setattr(generic_pre_process, "g_infer_context", infer_context)
@@ -26,6 +31,7 @@ def _make_prefill_req(req_idx: int, token_num: int):
     return SimpleNamespace(
         req_idx=req_idx,
         cur_kv_len=0,
+        hold_kv_len=token_num,
         multimodal_params={"images": [], "audios": []},
         get_chuncked_input_token_ids=lambda: input_token_ids,
         get_input_token_ids=lambda: input_token_ids,
@@ -37,6 +43,7 @@ def _make_decode_req(req_idx: int):
     return SimpleNamespace(
         req_idx=req_idx,
         cur_kv_len=3,
+        hold_kv_len=4,
         mtp_step=0,
         multimodal_params={"images": [], "audios": []},
         shared_kv_node=None,
@@ -53,7 +60,6 @@ def test_prepare_prefill_inputs_allows_empty_batch(monkeypatch):
     assert run_reqs == []
     assert model_input.batch_size == 0
     assert model_input.input_ids.shape == (0,)
-    assert model_input.mem_indexes_cpu.shape == (0,)
     assert model_input.b_req_idx.shape == (0,)
     assert model_input.b_prefill_start_loc.shape == (0,)
     assert model_input.b_prefill_has_output_cpu == []
@@ -69,7 +75,6 @@ def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
     assert run_reqs == []
     assert model_input.batch_size == 0
     assert model_input.input_ids is None
-    assert model_input.mem_indexes_cpu.shape == (0,)
     assert model_input.b_req_idx.shape == (0,)
     assert model_input.b_position_delta.shape == (0,)
     assert model_input.b_shared_seq_len.shape == (0,)
@@ -169,4 +174,3 @@ def test_overlap_decode_preserves_empty_microbatch(monkeypatch):
     assert run_reqs1 == []
     assert model_input1.batch_size == 0
     assert model_input1.b_req_idx.shape == (0,)
-    assert model_input1.mem_indexes_cpu.shape == (0,)

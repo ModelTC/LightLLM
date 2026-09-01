@@ -209,3 +209,12 @@ def test_running_request_helpers_are_atomic_and_refresh_timestamp_only_on_idle_t
             assert manager.run_reqs_count_mark.get_value() == 0
 
     asyncio.run(run())
+
+
+def test_real_supported_max_req_total_len_reserves_mtp_overlap_tokens():
+    manager = HttpServerManager.__new__(HttpServerManager)
+    manager.shm_max_total_token_num = _ValueMark(1000)
+    manager.max_req_total_len = 2000
+    manager.args = SimpleNamespace(mtp_step=2, page_size=4)
+
+    assert manager.get_real_supported_max_req_total_len() == 951

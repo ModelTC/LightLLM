@@ -619,13 +619,23 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     def get_real_supported_max_req_total_len(self):
         # 得到系统真正能支持的最大长度，同时收到启动参数中模型支持长度的限制，也收到token容量的限制。
-        return min(self.shm_max_total_token_num.get_value() - 36, self.max_req_total_len)
+        # MTP overlap 模式下，达到最大输出长度时，可能仍有部分 accepted token 已提交但停止状态尚未生效；
+        # 同时下一轮 overlap 还需要为 target verify 和 draft token 保留 KV 位置。因此按三倍
+        # (mtp_step + 1) 预留额外 token，避免请求逻辑长度贴近总容量时发生 KV 申请失败。
+        mtp_overlap_token_reserve = 3 * (self.args.mtp_step + 1)
+        # 调度器会把单请求的 KV 资源向上扩展到 page_size 的整数倍。额外预留一个页面，
+        # 可以在输入阶段截断物理容量不足的请求，避免请求进入等待队列后始终无法被调度。
+        return min(
+            self.shm_max_total_token_num.get_value() - 36 - mtp_overlap_token_reserve - self.args.page_size,
+            self.max_req_total_len,
+        )
 
     async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
         if not prompt_ids:
             raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
-        # 这里 -36 是保留一些不可预知的边界余量，防止系统出错
+        # -36 用于保留通用边界余量，MTP overlap 所需的额外 KV 窗口由
+        # get_real_supported_max_req_total_len 单独扣除。
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
         if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:

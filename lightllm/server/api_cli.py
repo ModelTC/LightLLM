@@ -445,6 +445,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 (currently triton only); when omitted, it defaults to auto""",
     )
     parser.add_argument(
+        "--page_size",
+        type=int,
+        default=1,
+        help="""KV cache page size in tokens. Values greater than 1 make each request reserve
+        page-aligned contiguous KV slots and make paged attention/cache reuse operate on full pages.""",
+    )
+    parser.add_argument(
         "--vit_att_backend",
         type=str,
         nargs="+",

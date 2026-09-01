@@ -257,5 +257,34 @@ def test_case10():
     assert tree.root_node.ref_counter == 1
 
 
+def test_page_aligned_insert_and_match():
+    tree = RadixCache("paged_radix_test", 100, 99, page_size=4)
+    values = torch.arange(100, 110, dtype=torch.int64)
+
+    prefix_len, _ = tree.insert(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), values)
+    assert prefix_len == 0
+    assert tree.get_tree_total_tokens_num() == 8
+
+    # A mismatch inside a page cannot produce a partial-page cache hit.
+    node, matched_len, matched_values = tree.match_prefix(torch.tensor([1, 2, 0, 4, 5, 6, 7, 8]))
+    assert node is None
+    assert matched_len == 0
+    assert matched_values is None
+
+    node, matched_len, matched_values = tree.match_prefix(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 11]))
+    assert node is not None
+    assert matched_len == 8
+    assert matched_values.tolist() == list(range(100, 108))
+
+    # The second sequence shares exactly one page and then branches by its
+    # complete second-page key.
+    prefix_len, _ = tree.insert(
+        torch.tensor([1, 2, 3, 4, 5, 6, 0, 8]),
+        torch.arange(200, 208, dtype=torch.int64),
+    )
+    assert prefix_len == 4
+    assert tree.get_tree_total_tokens_num() == 12
+
+
 if __name__ == "__main__":
     pytest.main()
