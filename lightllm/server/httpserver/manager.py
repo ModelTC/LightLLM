@@ -775,6 +775,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
+        all_finished_normally = True
 
         while True:
             try:
@@ -821,9 +822,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     # 如果有子请求完成，就更新计数
                     if finish_status.is_finished():
                         unfinished_count -= 1
+                        if finish_status.is_error_finished():
+                            all_finished_normally = False
 
                     if unfinished_count == 0:
-                        self.qps_recorder.mark_one_req_finish()
+                        if all_finished_normally:
+                            self.qps_recorder.mark_one_req_finish()
                         total_cost_time_ms = (time.time() - start_time) * 1000
                         mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
                         self.per_token_costs.add(mean_per_token_cost_time_ms)

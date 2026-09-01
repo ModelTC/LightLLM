@@ -65,6 +65,9 @@ class FinishStatus(ctypes.Structure):
     def is_finished_error(self):
         return self.status == self.FINISHED_ERROR
 
+    def is_error_finished(self):
+        return self.status in (self.FINISHED_ABORTED, self.FINISHED_ERROR)
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"

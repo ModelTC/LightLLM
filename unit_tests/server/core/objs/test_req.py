@@ -81,11 +81,21 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
 def test_finish_status(req):
     req.finish_status.set_status(req.finish_status.FINISHED_STOP)
     assert req.finish_status.is_finished()
+    assert not req.finish_status.is_error_finished()
     assert req.finish_status.get_finish_reason() == "stop"
+
+    req.finish_status.set_status(req.finish_status.FINISHED_LENGTH)
+    assert req.finish_status.is_finished()
+    assert not req.finish_status.is_error_finished()
+
+    req.finish_status.set_status(req.finish_status.FINISHED_ABORTED)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_error_finished()
 
     req.finish_status.set_status(req.finish_status.FINISHED_ERROR)
     assert req.finish_status.is_finished()
     assert req.finish_status.is_finished_error()
+    assert req.finish_status.is_error_finished()
     assert req.finish_status.get_finish_reason() == "error"
 
 
