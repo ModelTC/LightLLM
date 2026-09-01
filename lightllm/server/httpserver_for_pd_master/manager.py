@@ -672,6 +672,16 @@ class HttpServerManagerForPDMaster:
                             )
                         else:
                             await req_status.set_error(error_info)
+                    elif obj[0] == ObjType.PD_UPLOAD_SERVER_BUSY:
+                        _, group_req_id, error_info = obj
+                        logger.warning(
+                            f"received PD node server busy, group_req_id: {group_req_id}, reason: {error_info}"
+                        )
+                        req_status = self.req_id_to_out_inf.get(group_req_id)
+                        if req_status is None:
+                            logger.error(f"PD_UPLOAD_SERVER_BUSY fail find req status for group_req_id: {group_req_id}")
+                        else:
+                            await req_status.set_error(error_info, is_server_busy=True)
                     else:
                         logger.error(f"recevie error obj {obj}")
             except BaseException as e:
@@ -698,6 +708,7 @@ class ReqStatus:
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
         self.error_info: Optional[str] = None
+        self.is_server_busy = False
 
     async def wait_to_ready(self):
         try:
@@ -705,9 +716,10 @@ class ReqStatus:
         except asyncio.TimeoutError:
             pass
 
-    async def set_error(self, error_info: str):
+    async def set_error(self, error_info: str, is_server_busy: bool = False):
         async with self.lock:
             self.error_info = error_info
+            self.is_server_busy = is_server_busy
             # 请求可能正在等待 Prefill prompt ids、Decode KV 资源或输出 token，
             # 设置全部事件，让请求自己的执行循环立即醒来并抛出异常。
             self.event.set()
@@ -716,6 +728,8 @@ class ReqStatus:
 
     def raise_if_error(self):
         if self.error_info is not None:
+            if self.is_server_busy:
+                raise ServerBusyError(self.error_info)
             logger.error(
                 f"group_request_id: {self.req_id} detected PD node generate error, "
                 f"raise exception to end the request flow early: {self.error_info}"

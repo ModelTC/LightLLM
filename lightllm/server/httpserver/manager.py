@@ -36,9 +36,9 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_pd_node_shm_req_alloc_timeout_seconds, get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
-from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
+from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -117,6 +117,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
+        # 该开关只对 PD 分离模式的 Prefill/Decode 服务主节点生效。
+        # 多机 TP 的从节点不直接与 PD Master 通信，不能独立拒绝请求。
+        self.pd_node_request_limit_enabled: bool = (
+            self.args.enable_pd_node_self_request_limit and self.pd_mode.is_P_or_D() and not self.is_multinode_tp_slave
+        )
+        # 超时时间由环境变量 LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS 控制，默认为 20 秒。
+        self.pd_node_shm_req_alloc_timeout_seconds = get_pd_node_shm_req_alloc_timeout_seconds()
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -427,17 +434,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 running_request_registered = True
 
             # 申请资源并存储
-            alloced_req_indexes = []
-            while len(alloced_req_indexes) < sampling_params.n:
-                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                sleep_time = 0.1
-                while alloc_req_index is None:
-                    await asyncio.sleep(sleep_time)
-                    sleep_time *= 1.1
-                    sleep_time = min(1, sleep_time)
-
-                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                alloced_req_indexes.append(alloc_req_index)
+            alloced_req_indexes = await self._alloc_shm_req_indexes(sampling_params.n)
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
                 req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
@@ -542,6 +539,42 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     audio_tokens += audio.token_num
 
         return image_tokens, audio_tokens
+
+    async def _alloc_shm_req_indexes(self, req_num: int) -> List[int]:
+        """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。"""
+        alloced_req_indexes = []
+        alloc_deadline = (
+            time.monotonic() + self.pd_node_shm_req_alloc_timeout_seconds
+            if self.pd_node_request_limit_enabled
+            else None
+        )
+
+        try:
+            while len(alloced_req_indexes) < req_num:
+                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                sleep_time = 0.1
+                while alloc_req_index is None:
+                    if alloc_deadline is not None:
+                        remaining_time = alloc_deadline - time.monotonic()
+                        if remaining_time <= 0:
+                            logger.warning(
+                                f"PD {self.args.run_mode} node shm_req allocation timed out after "
+                                f"{self.pd_node_shm_req_alloc_timeout_seconds} seconds"
+                            )
+                            raise ServerBusyError(
+                                f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
+                                f"within {self.pd_node_shm_req_alloc_timeout_seconds} seconds"
+                            )
+                    await asyncio.sleep(sleep_time)
+                    sleep_time = min(1, sleep_time * 1.1)
+                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                alloced_req_indexes.append(alloc_req_index)
+            return alloced_req_indexes
+        except BaseException:
+            # 批量申请中途失败时，释放已申请的索引，避免 shm_req 资源泄漏。
+            for req_index in alloced_req_indexes:
+                await self.shm_req_manager.async_release_req_index(req_index)
+            raise
 
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")

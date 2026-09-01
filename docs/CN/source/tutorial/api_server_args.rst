@@ -87,6 +87,14 @@ PD 分离模式参数
     推理进度健康检查：当仍有在途请求，且整个 PD Master 连续 ``HEALTH_TIMEOUT`` 秒
     没有任何请求成功返回 token 时，接口将返回 HTTP 503。
 
+.. option:: --enable_pd_node_self_request_limit
+
+    在 PD 分离模式的 Prefill 和 Decode 节点上启用本地请求准入控制。启用后，如果节点在指定超时时间内
+    无法为请求分配本地 ``shm_req`` 对象，会主动拒绝该请求，并由 PD Master 向客户端返回
+    HTTP 429。超时时间通过环境变量 ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 设置，单位为秒，
+    默认值为 20。例如，设置 ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS=30`` 表示最长等待 30 秒。
+    该参数默认关闭，在 ``normal`` 和 ``pd_master`` 模式下不生效。
+
 .. option:: --config_server_host
 
     配置服务器模式下的主机地址

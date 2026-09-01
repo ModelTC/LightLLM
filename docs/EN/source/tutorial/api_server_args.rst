@@ -89,6 +89,15 @@ PD disaggregation Mode Parameters
     the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
     ``HEALTH_TIMEOUT`` consecutive seconds.
 
+.. option:: --enable_pd_node_self_request_limit
+
+    Enable local admission control on Prefill and Decode nodes in PD disaggregation mode. When enabled,
+    a node rejects a request through PD Master with HTTP 429 if it cannot allocate the request's local
+    ``shm_req`` object within the configured timeout. The timeout is controlled by the
+    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` environment variable and defaults to 20 seconds.
+    For example, set ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS=30`` to wait for 30 seconds.
+    The option is disabled by default and has no effect in ``normal`` or ``pd_master`` mode.
+
 .. option:: --config_server_host
 
     Host address in configuration server mode

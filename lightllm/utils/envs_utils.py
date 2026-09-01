@@ -312,5 +312,11 @@ def get_pd_split_max_new_tokens() -> int:
 
 
 @lru_cache(maxsize=None)
+def get_pd_node_shm_req_alloc_timeout_seconds() -> int:
+    """PD 节点申请 shm_req 对象的最长等待时间，单位为秒。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS", 20))
+
+
+@lru_cache(maxsize=None)
 def get_lightllm_url_pool_maxsize() -> int:
     return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))
