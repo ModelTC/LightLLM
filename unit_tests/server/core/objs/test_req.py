@@ -3,24 +3,31 @@ import easydict
 from types import SimpleNamespace
 from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
-from lightllm.utils.envs_utils import set_env_start_args
+from lightllm.utils import shm_utils
+from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_module_env():
-    set_env_start_args(
-        easydict.EasyDict(
-            {
-                "mtp_step": 0,
-                "llm_prefill_att_backend": ["None"],
-                "llm_decode_att_backend": ["None"],
-                "cpu_cache_token_page_size": 256,
-                "enable_cpu_cache": False,
-                "model_dir": "",
-                "page_size": 4,
-            }
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_req_service_0")
+        monkeypatch.setenv("LIGHTLLM_START_ARGS", "{}")
+        set_env_start_args(
+            easydict.EasyDict(
+                {
+                    "mtp_step": 0,
+                    "llm_prefill_att_backend": ["None"],
+                    "llm_decode_att_backend": ["None"],
+                    "cpu_cache_token_page_size": 256,
+                    "enable_cpu_cache": False,
+                    "model_dir": "",
+                    "page_size": 4,
+                }
+            )
         )
-    )
+        get_env_start_args.cache_clear()
+        yield
+        get_env_start_args.cache_clear()
 
 
 @pytest.fixture

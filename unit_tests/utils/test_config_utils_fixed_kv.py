@@ -19,8 +19,15 @@ def test_fixed_kv_len_supports_page_size_one(monkeypatch):
     assert config_utils.get_fixed_kv_len() == 3
 
 
-def test_fixed_kv_len_rejects_paged_kv(monkeypatch):
+def test_fixed_kv_len_uses_only_complete_pages(monkeypatch):
     monkeypatch.setattr(config_utils, "get_env_start_args", lambda: SimpleNamespace(page_size=2, model_dir="model"))
+    monkeypatch.setattr(config_utils, "get_config_json", lambda _: {"prompt_cache_token_ids": [1, 2, 3]})
 
-    with pytest.raises(AssertionError, match="fixed KV cache only supports page_size == 1"):
-        config_utils.get_fixed_kv_len()
+    assert config_utils.get_fixed_kv_len() == 2
+
+
+def test_no_fixed_kv_supports_paged_kv(monkeypatch):
+    monkeypatch.setattr(config_utils, "get_env_start_args", lambda: SimpleNamespace(page_size=4, model_dir="model"))
+    monkeypatch.setattr(config_utils, "get_config_json", lambda _: {})
+
+    assert config_utils.get_fixed_kv_len() == 0

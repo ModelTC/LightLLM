@@ -1,13 +1,16 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import (
     decode_impl as pd_decode_impl,
 )
 from lightllm.server.router.req_queue import _get_req_queue_class
-from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd import PDQueue
+from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd_decode import PDDecodeQueue
+from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd_prefill import PDPrefillQueue
 
 
 def _make_infer_req(cur_output_len: int, shm_output_len: int):
@@ -147,7 +150,11 @@ def test_pd_decode_capacity_limit_never_extends_original_length(monkeypatch):
     assert req.sampling_param.shm_param.max_new_tokens == 3
 
 
-def test_pd_nodes_use_pd_queue():
+@pytest.mark.parametrize(
+    "overrides",
+    [{}, {"diverse_mode": True}, {"output_constraint_mode": "outlines"}, {"first_token_constraint_mode": True}],
+)
+def test_pd_nodes_use_pd_queue(overrides):
     base_args = {
         "diverse_mode": False,
         "token_healing_mode": False,
@@ -156,16 +163,18 @@ def test_pd_nodes_use_pd_queue():
         "disable_chunked_prefill": False,
     }
 
+    base_args.update(overrides)
     prefill_args = SimpleNamespace(**base_args, run_mode="prefill")
     decode_args = SimpleNamespace(**base_args, run_mode="decode")
 
-    assert _get_req_queue_class(prefill_args, router=None, dp_size_in_node=1) is PDQueue
-    assert _get_req_queue_class(decode_args, router=None, dp_size_in_node=1) is PDQueue
+    assert _get_req_queue_class(prefill_args, router=None, dp_size_in_node=1) is PDPrefillQueue
+    assert _get_req_queue_class(decode_args, router=None, dp_size_in_node=1) is PDDecodeQueue
 
 
-def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length():
-    queue = PDQueue.__new__(PDQueue)
-    queue.args = SimpleNamespace(run_mode="decode")
+@pytest.mark.parametrize("page_size", [1, 16])
+def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length(page_size):
+    queue = PDDecodeQueue.__new__(PDDecodeQueue)
+    queue.args = SimpleNamespace(run_mode="decode", page_size=page_size)
     queue.dp_index = 0
     queue.max_total_tokens = 4096
     queue.running_max_req_size = 8
@@ -185,16 +194,25 @@ def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length():
     )
     batch = SimpleNamespace(reqs=[req])
 
-    assert queue._caclu_batch_estimated_peak_token_num(batch) == 138
-    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 138, 1)
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 138 + page_size
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 138 + page_size, 1)
 
     # 接近上下文上限的请求可能只剩很少输出额度，估算值不能超过请求自身的 max_new_tokens，
     # 否则本来能够运行的请求会因为 EMA 偏大而永久滞留在 Decode 等待队列。
     req.sample_params.max_new_tokens = 20
-    assert queue._caclu_batch_estimated_peak_token_num(batch) == 30
-    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 30, 1)
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 30 + page_size
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 30 + page_size, 1)
 
     req.sample_params.max_new_tokens = 1024
-    queue.args.run_mode = "prefill"
-    assert queue._caclu_batch_estimated_peak_token_num(batch) == 1034
-    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 1034, 1)
+    prefill_queue = PDPrefillQueue.__new__(PDPrefillQueue)
+    prefill_queue.args = SimpleNamespace(run_mode="prefill", page_size=page_size)
+    prefill_queue.dp_index = queue.dp_index
+    prefill_queue.max_total_tokens = queue.max_total_tokens
+    prefill_queue.running_max_req_size = queue.running_max_req_size
+    prefill_queue.router = queue.router
+    assert prefill_queue._caclu_batch_estimated_peak_token_num(batch) == 1034 + page_size
+    assert prefill_queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (
+        True,
+        1034 + page_size,
+        1,
+    )
