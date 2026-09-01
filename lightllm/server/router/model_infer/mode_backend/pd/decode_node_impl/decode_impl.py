@@ -119,6 +119,43 @@ class PDDecodeNode(ChunkedPrefillBackend):
             ans_list.append(req_obj)
         return ans_list
 
+    def _handle_decode_alloc_failure(self, req_obj: InferReq) -> bool:
+        """Send an actually running request through the overlap-safe pause path."""
+        if not self.support_overlap:
+            return super()._handle_decode_alloc_failure(req_obj)
+        if req_obj.cur_output_len <= req_obj.shm_req.shm_cur_output_len:
+            return False
+
+        req_obj.wait_pause = True
+        logger.info(
+            f"wait to yield running pd decode req_id={req_obj.req_id} "
+            f"at output_len={req_obj.cur_output_len} because token memory is insufficient"
+        )
+        return True
+
+    def _pause_reqs(self, pause_reqs: List[InferReq]):
+        """Finish PD Decode segments instead of preserving them for recovery."""
+        for req_obj in pause_reqs:
+            req_obj.wait_pause = False
+            if req_obj.finish_status.is_finished():
+                continue
+
+            req_obj.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
+            if self.is_master_in_dp:
+                shm_req = req_obj.shm_req
+                shm_req.shm_cur_output_len = req_obj.cur_output_len
+                shm_req.finish_token_index = shm_req.input_len + req_obj.cur_output_len - 1
+                shm_req.finish_status = req_obj.finish_status
+                shm_req.candetoken_out_len = req_obj.cur_output_len
+
+            logger.info(
+                f"yield pd decode req_id={req_obj.req_id} "
+                f"at output_len={req_obj.cur_output_len} because token memory is insufficient"
+            )
+
+        g_infer_context.filter_reqs(finished_reqs=pause_reqs)
+        return
+
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
         """
         decode node 生成所有的传输任务对象。

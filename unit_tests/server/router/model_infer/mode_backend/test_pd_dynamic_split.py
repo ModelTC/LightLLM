@@ -1,0 +1,127 @@
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from lightllm.server.core.objs import FinishStatus
+from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import (
+    decode_impl as pd_decode_impl,
+)
+from lightllm.server.router.req_queue import _get_req_queue_class
+from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd import (
+    PDDQueue,
+    PDPQueue,
+)
+
+
+def _make_infer_req(cur_output_len: int, shm_output_len: int):
+    return SimpleNamespace(
+        req_id=1,
+        cur_output_len=cur_output_len,
+        shm_req=SimpleNamespace(shm_cur_output_len=shm_output_len),
+        wait_pause=False,
+    )
+
+
+def test_pd_decode_capacity_yield_only_pauses_running_overlap_output():
+    backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
+    backend.support_overlap = True
+
+    running_req = _make_infer_req(cur_output_len=5, shm_output_len=4)
+    not_running_req = _make_infer_req(cur_output_len=4, shm_output_len=4)
+
+    assert backend._handle_decode_alloc_failure(running_req)
+    assert running_req.wait_pause
+
+    assert not backend._handle_decode_alloc_failure(not_running_req)
+    assert not not_running_req.wait_pause
+
+
+def test_pd_decode_capacity_yield_preserves_pause_without_overlap():
+    backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
+    backend.support_overlap = False
+    req = _make_infer_req(cur_output_len=5, shm_output_len=5)
+    req.wait_pause = False
+
+    assert backend._handle_decode_alloc_failure(req)
+    assert req.wait_pause
+
+
+def test_pd_decode_pause_strategy_finishes_at_committed_mtp_tail(monkeypatch):
+    backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
+    backend.is_master_in_dp = True
+    filter_reqs = MagicMock()
+    monkeypatch.setattr(
+        pd_decode_impl,
+        "g_infer_context",
+        SimpleNamespace(filter_reqs=filter_reqs),
+    )
+
+    shm_req = SimpleNamespace(
+        input_len=10,
+        shm_cur_output_len=3,
+        finish_token_index=-1,
+        finish_status=FinishStatus(),
+        candetoken_out_len=3,
+    )
+    req = SimpleNamespace(
+        req_id=1,
+        cur_output_len=3,
+        finish_status=FinishStatus(),
+        shm_req=shm_req,
+        wait_pause=True,
+    )
+
+    backend._pause_reqs([req])
+
+    assert not req.wait_pause
+    assert req.finish_status.is_finished_length()
+    assert shm_req.finish_token_index == 12
+    assert shm_req.finish_status.is_finished_length()
+    assert shm_req.candetoken_out_len == 3
+    filter_reqs.assert_called_once_with(finished_reqs=[req])
+
+
+def test_pd_queue_admission_always_uses_aggressive_tuple_estimate():
+    queue = PDDQueue.__new__(PDDQueue)
+    queue.dp_index = 0
+    queue.max_total_tokens = 100
+    queue.running_max_req_size = 8
+    queue.batch_max_tokens = 1
+    queue.cache_len_list = [(20, 10)]
+    queue.router = SimpleNamespace(
+        router_statics=SimpleNamespace(ema_req_out_len=128),
+        shared_token_load=SimpleNamespace(
+            set_estimated_peak_token_count=MagicMock(),
+            set_dynamic_max_load=MagicMock(),
+        ),
+    )
+
+    req = SimpleNamespace(
+        get_tuple_tokens=MagicMock(return_value=(20, 10)),
+        get_first_router_need_tokens=MagicMock(return_value=1024),
+    )
+    admitted, first_router_tokens = queue._can_add_new_req(req, queue.is_busy(), 0)
+
+    assert admitted
+    assert first_router_tokens == 1024
+    req.get_tuple_tokens.assert_called_once_with(False, 128)
+    queue.router.shared_token_load.set_estimated_peak_token_count.assert_called_once_with(
+        60, 0
+    )
+
+
+def test_aggressive_pd_queue_is_only_selected_for_decode_nodes():
+    base_args = {
+        "diverse_mode": False,
+        "token_healing_mode": False,
+        "output_constraint_mode": "none",
+        "first_token_constraint_mode": False,
+        "disable_chunked_prefill": False,
+    }
+
+    prefill_args = SimpleNamespace(**base_args, run_mode="prefill")
+    decode_args = SimpleNamespace(**base_args, run_mode="decode")
+
+    assert (
+        _get_req_queue_class(prefill_args, router=None, dp_size_in_node=1) is PDPQueue
+    )
+    assert _get_req_queue_class(decode_args, router=None, dp_size_in_node=1) is PDDQueue

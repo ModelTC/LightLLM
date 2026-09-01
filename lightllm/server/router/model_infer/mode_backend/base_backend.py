@@ -740,8 +740,7 @@ class ModeBackend:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
+                    if wait_pause_count < pause_max_req_num and self._handle_decode_alloc_failure(req_obj):
                         wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
@@ -784,7 +783,7 @@ class ModeBackend:
             true_finished_reqs = finished_reqs
 
         g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
-        g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
+        self._pause_reqs(wait_pause_reqs)
 
         if recover_paused:
             g_infer_context.recover_paused_reqs(
@@ -805,6 +804,20 @@ class ModeBackend:
                 decode_reqs = []
 
         return prefill_reqs, decode_reqs
+
+    def _handle_decode_alloc_failure(self, req_obj: InferReq) -> bool:
+        """Handle a decode request that cannot allocate its next token.
+
+        Returns whether this request consumed one slot of the per-iteration
+        shortage handling limit. Backends can customize the eventual pause
+        action through ``_pause_reqs``.
+        """
+        req_obj.wait_pause = True
+        return True
+
+    def _pause_reqs(self, pause_reqs: List[InferReq]):
+        g_infer_context.pause_reqs(pause_reqs, is_master_in_dp=self.is_master_in_dp)
+        return
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

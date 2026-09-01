@@ -23,7 +23,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
-from lightllm.utils.envs_utils import get_pd_high_priority_request_timeout_seconds, get_pd_split_max_new_tokens
+from lightllm.utils.envs_utils import get_pd_high_priority_request_timeout_seconds
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
 
@@ -215,13 +215,6 @@ class HttpServerManagerForPDMaster:
         start_time: float,
         origin_request_id: int,
     ):
-        # 先将请求根据max_new_tokens 参数进行分块操作，主要是 pd 分离场景中，
-        # 只能使用保守调度，但是如果用户都设置一个很大的 max_new_tokens 值，会
-        # 导致极大显存预留，照成系统的吞吐能力下降，所以我们将请求分割成几段进行
-        # 推理，只要保证分块合理，实际分段推理是极少发生的情况，系统吞吐就不会受
-        # 到影响。
-        max_new_tokens_list = self._split_max_new_tokens(max_new_tokens=origin_sampling_params.max_new_tokens)
-
         block_group_request_id = origin_request_id
         p_node = None
         d_node = None
@@ -237,17 +230,22 @@ class HttpServerManagerForPDMaster:
 
             history_gen_token_strs = []
             origin_prompt_cache_len = None
+            remaining_max_new_tokens = origin_sampling_params.max_new_tokens
+            segment_index = 0
 
-            for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
+            # Decode 节点容量不足时会将已运行请求以 length 结束。
+            # PD master 把这个内部 length 当作动态分段边界，用剩余 token
+            # 限额在同一组 P/D 节点上继续。
+            while remaining_max_new_tokens > 0:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
-                sampling_params.max_new_tokens = block_max_new_tokens
+                sampling_params.max_new_tokens = remaining_max_new_tokens
                 # 预计输入 cache 命中率高于 0.8 时，将首段也标记为 PD 高优先级请求，
                 # 使其优先进入 Router 调度队列，尽快复用已命中的 KV cache。第二段及后续
                 # 分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
-                sampling_params.pd_high_priority_request = iter_index > 0 or estimated_cache_hit_rate > 0.8
+                sampling_params.pd_high_priority_request = segment_index > 0 or estimated_cache_hit_rate > 0.8
                 # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
                 # 本地限流时使用该值，未开启限流时仍保持无限等待。
                 if sampling_params.pd_high_priority_request:
@@ -270,17 +268,23 @@ class HttpServerManagerForPDMaster:
                     multimodal_params,
                     request,
                 )
-                is_last_block = iter_index == len(max_new_tokens_list) - 1
                 prompt_tokens = sys.maxsize  # 因为分段的原因
-                async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                segment_output_tokens = 0
+                segment_finish_status = FinishStatus()
+                async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
                     # pd 分离模式下，返回的 metadata 可能序号信息可能存在不准确性。
                     assert sub_req_id == block_group_request_id
-                    if finish_status.is_finished_length() and not is_last_block:
-                        finish_status = FinishStatus()  # 转换为NoFinished
+                    segment_output_tokens = metadata["count_output_tokens"]
+
+                    segment_finish_status = raw_finish_status
+                    finish_status = raw_finish_status
+                    if raw_finish_status.is_finished_length() and segment_output_tokens < remaining_max_new_tokens:
+                        # Decode 节点因容量不足产生的内部分段，不暴露给用户。
+                        finish_status = FinishStatus()
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
-                    if iter_index == 0 and origin_prompt_cache_len is None:
+                    if origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
                         self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
@@ -298,7 +302,10 @@ class HttpServerManagerForPDMaster:
                     yield origin_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
-                if finish_status.is_finished():
+                if segment_finish_status.is_finished_length():
+                    remaining_max_new_tokens -= segment_output_tokens
+                    segment_index += 1
+                else:
                     break
 
         except (ClientDisconnected, BaseException) as e:
@@ -717,14 +724,6 @@ class HttpServerManagerForPDMaster:
             except BaseException as e:
                 logger.exception(str(e))
         return
-
-    def _split_max_new_tokens(self, max_new_tokens: int) -> List[int]:
-        block_max_new_tokens = get_pd_split_max_new_tokens()
-        ans_list = [block_max_new_tokens for _ in range(max_new_tokens // block_max_new_tokens)]
-        left_token = max_new_tokens - (max_new_tokens // block_max_new_tokens) * block_max_new_tokens
-        if left_token > 0:
-            ans_list.append(left_token)
-        return ans_list
 
 
 class ReqStatus:
