@@ -1,6 +1,7 @@
 import os
 import pytest
 import time
+import numpy as np
 from unittest.mock import MagicMock
 
 from easydict import EasyDict
@@ -79,6 +80,25 @@ def test_put_back_req_obj(shm_req_manager):
     assert not hasattr(req_obj, "shm_prompt_ids")
     assert not hasattr(req_obj, "shm_logprobs")
     shm_req_manager.release_req_index(index)
+
+
+def test_alloc_req_indexes_allocates_all_slots_together(shm_req_manager):
+    indexes = shm_req_manager.alloc_req_indexes(3)
+
+    assert indexes is not None
+    assert len(indexes) == 3
+    assert all(shm_req_manager.alloc_state_shm.arr[index] == 1 for index in indexes)
+
+    for index in indexes:
+        shm_req_manager.release_req_index(index)
+
+
+def test_alloc_req_indexes_rolls_back_when_full_batch_is_unavailable(shm_req_manager):
+    before = shm_req_manager.alloc_state_shm.arr.copy()
+    free_slots = int(np.sum(before == 0))
+
+    assert shm_req_manager.alloc_req_indexes(free_slots + 1) is None
+    np.testing.assert_array_equal(shm_req_manager.alloc_state_shm.arr, before)
 
 
 def test_alloc_req_index_no_available(shm_req_manager):

@@ -6,7 +6,9 @@ import pytest
 from easydict import EasyDict
 
 from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.server.httpserver.pd_loop import _build_pd_registration_info
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+from lightllm.server.pd_io_struct import PD_DECODE_ADMISSION_CAPABILITY_KEY, NodeRole
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
@@ -182,6 +184,72 @@ def test_pd_manager_checks_all_connected_node_health(monkeypatch):
 def test_pd_manager_without_connected_nodes_is_healthy():
     manager = PDManager(StartArgs())
     assert asyncio.run(manager.check_pd_nodes_health()) is True
+
+
+def test_pd_master_rejects_decode_node_without_authoritative_admission():
+    args = StartArgs()
+    manager = PDManager(args)
+
+    with pytest.raises(ValueError, match="upgrade Decode nodes before PD Masters"):
+        manager.register_pd(
+            {
+                "node_id": 2,
+                "client_ip_port": "10.0.0.2:8000",
+                "mode": "decode",
+                "start_args": {"max_req_total_len": args.max_req_total_len},
+            },
+            websocket=object(),
+        )
+
+    assert manager.decode_nodes == []
+
+
+def test_pd_master_accepts_decode_node_with_authoritative_admission():
+    args = StartArgs()
+    manager = PDManager(args)
+
+    manager.register_pd(
+        {
+            "node_id": 2,
+            "client_ip_port": "10.0.0.2:8000",
+            "mode": "decode",
+            "start_args": {"max_req_total_len": args.max_req_total_len, PD_DECODE_ADMISSION_CAPABILITY_KEY: True},
+        },
+        websocket=object(),
+    )
+
+    assert [node.client_ip_port for node in manager.decode_nodes] == ["10.0.0.2:8000"]
+
+
+def test_pd_master_allows_legacy_decode_node_only_when_admission_is_disabled():
+    args = StartArgs(disable_pd_node_decode_admission=True)
+    manager = PDManager(args)
+
+    manager.register_pd(
+        {
+            "node_id": 2,
+            "client_ip_port": "10.0.0.2:8000",
+            "mode": "decode",
+            "start_args": {"max_req_total_len": args.max_req_total_len},
+        },
+        websocket=object(),
+    )
+
+    assert [node.client_ip_port for node in manager.decode_nodes] == ["10.0.0.2:8000"]
+
+
+def test_decode_registration_advertises_authoritative_admission(monkeypatch):
+    from lightllm.server.httpserver import pd_loop
+
+    args = StartArgs(run_mode="decode", host="0.0.0.0")
+    manager = SimpleNamespace(args=args, host_ip="10.0.0.2", pd_mode=NodeRole.D, decode_admission_controller=object())
+    monkeypatch.setattr(pd_loop, "get_shm_port_args", lambda: SimpleNamespace(port=8001))
+
+    registration = _build_pd_registration_info(manager)
+
+    assert registration["start_args"][PD_DECODE_ADMISSION_CAPABILITY_KEY] is True
+    assert registration["start_args"]["host"] == "10.0.0.2"
+    assert args.host == "0.0.0.0"
 
 
 def test_prefill_registration_preserves_existing_inflight_prompt_chars():

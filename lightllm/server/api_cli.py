@@ -71,7 +71,30 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable_pd_master_decode_capacity_limit",
         action="store_true",
-        help="Disable PD master admission control based on the total capacity of registered decode nodes.",
+        help=(
+            "Deprecated alias for --disable_pd_node_decode_admission. Set it consistently on PD Masters and "
+            "Decode nodes when intentionally allowing Decode nodes without authoritative admission."
+        ),
+    )
+    parser.add_argument(
+        "--disable_pd_node_decode_admission",
+        action="store_true",
+        help="Disable the bounded request-slot admission queue on PD Decode nodes.",
+    )
+    parser.add_argument(
+        "--pd_node_decode_admission_queue_size",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of Decode request slots allowed to wait on a PD Decode node. "
+            "Defaults to --running_max_req_size."
+        ),
+    )
+    parser.add_argument(
+        "--pd_node_decode_admission_timeout",
+        type=float,
+        default=5.0,
+        help="Maximum seconds a request may wait in the PD Decode node admission queue. Default: 5.",
     )
     parser.add_argument(
         "--pd_trans_mode",

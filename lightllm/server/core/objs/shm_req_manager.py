@@ -82,16 +82,33 @@ class ShmReqManager:
     # alloc_req_index 和 release_req_index 是分配资源时使用的接口。
     # 只有管理请求申请和释放的首节点才能调用这个接口。
     def alloc_req_index(self):
+        indexes = self.alloc_req_indexes(1)
+        return None if indexes is None else indexes[0]
+
+    def alloc_req_indexes(self, req_num: int):
+        """Atomically allocate all requested indexes or leave the pool unchanged."""
+        if req_num < 1:
+            raise ValueError("req_num must be positive")
+
         with self.manager_lock:
-            idx = self.linked_req_manager.alloc()
-            if idx is not None:
+            indexes = []
+            for _ in range(req_num):
+                idx = self.linked_req_manager.alloc()
+                if idx is None:
+                    for allocated_idx in reversed(indexes):
+                        self.alloc_state_shm.arr[allocated_idx] = 0
+                        self.linked_req_manager.free(allocated_idx)
+                    return None
                 assert self.alloc_state_shm.arr[idx] == 0
                 self.alloc_state_shm.arr[idx] = 1
-            return idx
-        return None
+                indexes.append(idx)
+            return indexes
 
     async def async_alloc_req_index(self):
         return self.alloc_req_index()
+
+    async def async_alloc_req_indexes(self, req_num: int):
+        return self.alloc_req_indexes(req_num)
 
     def release_req_index(self, req_index_in_mem):
         assert req_index_in_mem < self.max_req_num

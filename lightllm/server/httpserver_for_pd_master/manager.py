@@ -12,7 +12,13 @@ from contextlib import aclosing
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInfo
+from ..pd_io_struct import (
+    PD_DECODE_ADMISSION_CAPABILITY_KEY,
+    PD_Client_Obj,
+    PDUpKVStatus,
+    ObjType,
+    PDDecodeNodeInfo,
+)
 from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
@@ -30,6 +36,60 @@ from .pd_selector import create_selector
 logger = init_logger(__name__)
 
 
+class _DecodeReservationStatus:
+    def __init__(self) -> None:
+        self.event = asyncio.Event()
+        self.error_info: Optional[str] = None
+
+    def raise_if_error(self) -> None:
+        if self.error_info is not None:
+            raise ServerBusyError(self.error_info)
+
+
+class _DecodeAdmissionGroup:
+    """Wait for every choice's Prefill before reserving Decode slots once."""
+
+    def __init__(
+        self,
+        manager: "HttpServerManagerForPDMaster",
+        d_node: PD_Client_Obj,
+        reservation_id: int,
+        expected_count: int,
+        request: Request,
+    ) -> None:
+        self.manager = manager
+        self.d_node = d_node
+        self.reservation_id = reservation_id
+        self.expected_count = expected_count
+        self.request = request
+        self._lock = asyncio.Lock()
+        self._ready = asyncio.Event()
+        self._request_ids: List[int] = []
+        self._error: Optional[BaseException] = None
+
+    async def wait(self, group_request_id: int) -> None:
+        is_last = False
+        async with self._lock:
+            if group_request_id in self._request_ids:
+                raise RuntimeError(f"duplicate Decode reservation request id {group_request_id}")
+            self._request_ids.append(group_request_id)
+            is_last = len(self._request_ids) == self.expected_count
+
+        if is_last:
+            try:
+                await self.manager.reserve_decode_slots(
+                    self.d_node, self.reservation_id, tuple(self._request_ids), self.request
+                )
+            except BaseException as error:
+                self._error = error
+            finally:
+                self._ready.set()
+
+        await self._ready.wait()
+        if self._error is not None:
+            raise self._error
+
+
 class HttpServerManagerForPDMaster:
     def __init__(
         self,
@@ -44,6 +104,7 @@ class HttpServerManagerForPDMaster:
         self.pd_manager = PDManager(args)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
+        self.decode_reservation_statuses: Dict[int, _DecodeReservationStatus] = {}
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
@@ -129,11 +190,6 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
-        if not self.args.disable_pd_master_decode_capacity_limit:
-            decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
-            if self.running_request_count >= decode_capacity:
-                raise ServerBusyError()
-
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
         if was_idle:
@@ -168,14 +224,33 @@ class HttpServerManagerForPDMaster:
         origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
         origin_group_request_id = self.id_gen.generate_id()
 
-        # Record one user request even when it is expanded into multiple independent
-        # n=1 requests below. The externally visible ids remain in the same request
-        # group so OpenAI streaming can derive choice_index from the sub request id.
+        # Record one user request even when it is expanded into independent n=1
+        # requests. The Decode reservation coordinator still accounts for n as
+        # one atomic unit after all Prefill stages are ready.
         await self._log_req_header(request, origin_group_request_id)
         self.metric_client.counter_inc("lightllm_request_count")
         self.metric_client.histogram_observe("lightllm_request_max_new_tokens", origin_sampling_params.max_new_tokens)
 
-        choice_count = origin_sampling_params.n
+        p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
+        if not p_node or not d_node:
+            logger.error(f"{origin_group_request_id}: No p_node or d_node found")
+            raise Exception(f"{origin_group_request_id}: No p_node or d_node found")
+
+        choice_count = max(1, int(origin_sampling_params.n or 1))
+        decode_reservation = None
+        args = getattr(self, "args", None)
+        decode_admission_disabled = args is not None and (
+            args.disable_pd_node_decode_admission or args.disable_pd_master_decode_capacity_limit
+        )
+        if choice_count > 1 and not decode_admission_disabled:
+            decode_reservation = _DecodeAdmissionGroup(
+                manager=self,
+                d_node=d_node,
+                reservation_id=origin_group_request_id,
+                expected_count=choice_count,
+                request=request,
+            )
+
         generators = []
         for choice_index in range(choice_count):
             choice_sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
@@ -189,6 +264,9 @@ class HttpServerManagerForPDMaster:
                     request,
                     start_time,
                     origin_group_request_id + choice_index,
+                    p_node=p_node,
+                    d_node=d_node,
+                    decode_reservation=decode_reservation,
                 )
             )
 
@@ -205,25 +283,27 @@ class HttpServerManagerForPDMaster:
         request: Request,
         start_time: float,
         origin_request_id: int,
+        p_node: PD_Client_Obj,
+        d_node: PD_Client_Obj,
+        decode_reservation: Optional["_DecodeAdmissionGroup"] = None,
     ):
         # 先将请求根据max_new_tokens 参数进行分块操作，主要是 pd 分离场景中，
         # 只能使用保守调度，但是如果用户都设置一个很大的 max_new_tokens 值，会
         # 导致极大显存预留，照成系统的吞吐能力下降，所以我们将请求分割成几段进行
         # 推理，只要保证分块合理，实际分段推理是极少发生的情况，系统吞吐就不会受
         # 到影响。
-        max_new_tokens_list = self._split_max_new_tokens(max_new_tokens=origin_sampling_params.max_new_tokens)
+        if decode_reservation is None:
+            max_new_tokens_list = self._split_max_new_tokens(max_new_tokens=origin_sampling_params.max_new_tokens)
+        else:
+            # Choices have independent continuation histories, so the existing
+            # segmented continuation protocol cannot safely splice an n-way
+            # request. Each choice remains one n=1 request.
+            max_new_tokens_list = [origin_sampling_params.max_new_tokens]
 
         block_group_request_id = origin_request_id
-        p_node = None
-        d_node = None
         pending_prefill_load_chars = None
 
         try:
-            p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
-            if not p_node or not d_node:
-                logger.error(f"{origin_request_id}: No p_node or d_node found")
-                raise Exception(f"{origin_request_id}: No p_node or d_node found")
-
             history_gen_token_strs = []
             origin_prompt_cache_len = None
 
@@ -248,11 +328,11 @@ class HttpServerManagerForPDMaster:
                     sampling_params,
                     multimodal_params,
                     request,
+                    decode_reservation=decode_reservation,
                 )
                 is_last_block = iter_index == len(max_new_tokens_list) - 1
                 prompt_tokens = sys.maxsize  # 因为分段的原因
                 async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                    # pd 分离模式下，返回的 metadata 可能序号信息可能存在不准确性。
                     assert sub_req_id == block_group_request_id
                     if finish_status.is_finished_length() and not is_last_block:
                         finish_status = FinishStatus()  # 转换为NoFinished
@@ -359,6 +439,24 @@ class HttpServerManagerForPDMaster:
             except asyncio.TimeoutError:
                 continue
 
+    async def reserve_decode_slots(
+        self, d_node: PD_Client_Obj, reservation_id: int, request_ids: Tuple[int, ...], request: Request
+    ) -> None:
+        status = _DecodeReservationStatus()
+        self.decode_reservation_statuses[reservation_id] = status
+        try:
+            await d_node.websocket.send_bytes(
+                pickle.dumps((ObjType.PD_RESERVE_DECODE_SLOTS, reservation_id, request_ids))
+            )
+            timeout = float(d_node.start_args.get("pd_node_decode_admission_timeout", 5)) + 5
+            await self._wait_for_event_or_disconnect(
+                status.event, request, timeout=timeout, group_request_id=reservation_id, stage="decode admission"
+            )
+            status.raise_if_error()
+        finally:
+            if self.decode_reservation_statuses.get(reservation_id) is status:
+                self.decode_reservation_statuses.pop(reservation_id, None)
+
     async def _log_req_header(self, request: Request, group_request_id: int):
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
@@ -378,6 +476,7 @@ class HttpServerManagerForPDMaster:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
+        decode_reservation: Optional["_DecodeAdmissionGroup"] = None,
     ):
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
@@ -407,6 +506,9 @@ class HttpServerManagerForPDMaster:
 
         prompt_ids = prefill_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
+
+        if decode_reservation is not None:
+            await decode_reservation.wait(group_request_id)
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(
@@ -515,6 +617,7 @@ class HttpServerManagerForPDMaster:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
+        decode_reservation: Optional["_DecodeAdmissionGroup"] = None,
     ):
         if sampling_params.disable_prompt_cache:
             assert False, "pd mode dont support set disable_prompt_cache to True"
@@ -529,7 +632,13 @@ class HttpServerManagerForPDMaster:
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
         async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
-            p_node, d_node, prompt, sampling_params, multimodal_params, request
+            p_node,
+            d_node,
+            prompt,
+            sampling_params,
+            multimodal_params,
+            request,
+            decode_reservation=decode_reservation,
         ):
             if await request.is_disconnected():
                 raise ClientDisconnected(
@@ -677,6 +786,28 @@ class HttpServerManagerForPDMaster:
                             )
                         else:
                             await req_status.set_error(error_info)
+                    elif obj[0] == ObjType.PD_UPLOAD_SERVER_BUSY:
+                        _, group_req_id, error_info = obj
+                        logger.warning(
+                            f"received PD node server busy, group_req_id: {group_req_id}, reason: {error_info}"
+                        )
+                        reservation_status = getattr(self, "decode_reservation_statuses", {}).get(group_req_id)
+                        if reservation_status is not None:
+                            reservation_status.error_info = error_info
+                            reservation_status.event.set()
+                            continue
+                        req_status = self.req_id_to_out_inf.get(group_req_id)
+                        if req_status is None:
+                            logger.error(f"PD_UPLOAD_SERVER_BUSY fail find req status for group_req_id: {group_req_id}")
+                        else:
+                            await req_status.set_error(error_info, is_server_busy=True)
+                    elif obj[0] == ObjType.PD_DECODE_SLOTS_RESERVED:
+                        _, reservation_id = obj
+                        reservation_status = getattr(self, "decode_reservation_statuses", {}).get(reservation_id)
+                        if reservation_status is None:
+                            logger.warning(f"received stale Decode reservation ack: {reservation_id}")
+                        else:
+                            reservation_status.event.set()
                     else:
                         logger.error(f"recevie error obj {obj}")
             except BaseException as e:
@@ -703,6 +834,7 @@ class ReqStatus:
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
         self.error_info: Optional[str] = None
+        self.is_server_busy = False
 
     async def wait_to_ready(self):
         try:
@@ -710,9 +842,10 @@ class ReqStatus:
         except asyncio.TimeoutError:
             pass
 
-    async def set_error(self, error_info: str):
+    async def set_error(self, error_info: str, is_server_busy: bool = False):
         async with self.lock:
             self.error_info = error_info
+            self.is_server_busy = is_server_busy
             # 请求可能正在等待 Prefill prompt ids、Decode KV 资源或输出 token，
             # 设置全部事件，让请求自己的执行循环立即醒来并抛出异常。
             self.event.set()
@@ -721,6 +854,8 @@ class ReqStatus:
 
     def raise_if_error(self):
         if self.error_info is not None:
+            if self.is_server_busy:
+                raise ServerBusyError(self.error_info)
             logger.error(
                 f"group_request_id: {self.req_id} detected PD node generate error, "
                 f"raise exception to end the request flow early: {self.error_info}"
@@ -813,7 +948,24 @@ class PDManager:
         return True
 
     def register_pd(self, pd_info_json, websocket):
-        pd_client = PD_Client_Obj(**pd_info_json)
+        # Ignore the short-lived top-level capacity fields during a rolling
+        # upgrade from the former Master-side admission implementation.
+        pd_info = dict(pd_info_json)
+        pd_info.pop("capacity_share", None)
+        pd_info.pop("capacity_epoch", None)
+        start_args = pd_info.get("start_args") or {}
+        admission_disabled = (
+            self.args.disable_pd_node_decode_admission or self.args.disable_pd_master_decode_capacity_limit
+        )
+        if (
+            pd_info.get("mode") == "decode"
+            and not admission_disabled
+            and start_args.get(PD_DECODE_ADMISSION_CAPABILITY_KEY) is not True
+        ):
+            raise ValueError(
+                "Decode node does not provide authoritative admission; upgrade Decode nodes before PD Masters"
+            )
+        pd_client = PD_Client_Obj(**pd_info)
         client_max_req_total_len = pd_client.start_args["max_req_total_len"]
         if client_max_req_total_len != self.args.max_req_total_len:
             logger.error(
@@ -853,7 +1005,10 @@ class PDManager:
         return
 
     def remove_pd(self, pd_info_json):
-        pd_client = PD_Client_Obj(**pd_info_json)
+        pd_info = dict(pd_info_json)
+        pd_info.pop("capacity_share", None)
+        pd_info.pop("capacity_epoch", None)
+        pd_client = PD_Client_Obj(**pd_info)
 
         self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
         self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]

@@ -121,6 +121,11 @@ def _launch_subprocesses(args: StartArgs):
         args.mem_fraction > 0 and args.mem_fraction < 1
     ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1."
 
+    if args.pd_node_decode_admission_queue_size is not None and args.pd_node_decode_admission_queue_size < 0:
+        raise ValueError("pd_node_decode_admission_queue_size must be non-negative")
+    if args.pd_node_decode_admission_timeout <= 0:
+        raise ValueError("pd_node_decode_admission_timeout must be positive")
+
     if args.graph_max_len_in_batch == 0:
         args.graph_max_len_in_batch = args.max_req_total_len
 

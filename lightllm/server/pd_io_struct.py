@@ -10,6 +10,8 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+PD_DECODE_ADMISSION_CAPABILITY_KEY = "__pd_decode_admission_v1"
+
 
 # 节点的行为
 class NodeRole(enum.Enum):
@@ -42,6 +44,9 @@ class ObjType(enum.Enum):
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
     PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
+    PD_UPLOAD_SERVER_BUSY = 8  # P/D 节点向 pd master 上报本地准入拒绝。
+    PD_RESERVE_DECODE_SLOTS = 9  # PD master 在 Decode 节点原子预留一组请求槽。
+    PD_DECODE_SLOTS_RESERVED = 10  # Decode 节点确认一组请求槽已预留。
 
 
 @dataclass
@@ -92,7 +97,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)

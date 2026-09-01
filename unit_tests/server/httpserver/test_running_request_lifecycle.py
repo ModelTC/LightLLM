@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from lightllm.server.core.objs import SamplingParams
+from lightllm.server.httpserver.decode_admission import DecodeAdmissionController
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
@@ -38,7 +39,9 @@ def _make_manager(mode: NodeRole):
     manager._register_running_request = AsyncMock()
     manager._unregister_running_request = AsyncMock()
     manager.metric_client = MagicMock()
-    manager.shm_req_manager = SimpleNamespace(async_alloc_req_index=AsyncMock(side_effect=RuntimeError("alloc failed")))
+    manager.shm_req_manager = SimpleNamespace(
+        async_alloc_req_indexes=AsyncMock(side_effect=RuntimeError("alloc failed"))
+    )
     return manager
 
 
@@ -183,6 +186,68 @@ def test_prefill_is_counted_after_decode_assignment_and_unregistered_on_followin
 
         manager._register_running_request.assert_awaited_once()
         manager._unregister_running_request.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_decode_admission_lease_lives_until_request_resources_are_recycled():
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.decode_admission_controller = DecodeAdmissionController(
+            capacity=1, max_queued_slots=1, timeout_seconds=1
+        )
+        manager.args = SimpleNamespace(chunked_prefill_size=None)
+        manager.tokenizer = object()
+        manager.enable_multimodal = False
+        manager.transfer_to_next_module_or_node = AsyncMock()
+        manager._count_multimodal_tokens = MagicMock(return_value=(0, 0))
+
+        req_obj = MagicMock(request_id=123, index_in_shm_mem=7)
+        manager.shm_req_manager = SimpleNamespace(
+            async_alloc_req_indexes=AsyncMock(return_value=[7]),
+            async_get_req_obj_by_index=AsyncMock(return_value=req_obj),
+            async_put_back_req_obj=AsyncMock(),
+            async_release_req_index=AsyncMock(),
+        )
+
+        async def wait_to_token_package(*_args, **_kwargs):
+            yield 123, "token", {}, MagicMock()
+
+        manager._wait_to_token_package = wait_to_token_package
+        generator = manager.generate(
+            prompt=[10, 11, 12],
+            sampling_params=_sampling_params(),
+            multimodal_params=_multimodal_params(),
+            request=None,
+        )
+
+        assert (await generator.__anext__())[1] == "token"
+        req_status = manager.req_id_to_out_inf[123]
+        assert manager.decode_admission_controller.active_slots == 1
+
+        await generator.aclose()
+        assert manager.decode_admission_controller.active_slots == 1
+
+        req_status.release_decode_admission()
+        assert manager.decode_admission_controller.active_slots == 0
+
+    asyncio.run(run())
+
+
+def test_multinode_tp_slave_does_not_register_as_independent_pd_node():
+    async def run():
+        manager = HttpServerManager.__new__(HttpServerManager)
+        manager.recycle_resource_loop = AsyncMock()
+        manager.loop_for_request = AsyncMock()
+        manager.is_multinode_tp_slave = True
+        manager.pd_mode = NodeRole.D
+        manager.zmq_recv_socket = SimpleNamespace(recv_pyobj=AsyncMock(side_effect=asyncio.CancelledError))
+
+        with patch("lightllm.server.httpserver.pd_loop.pd_handle_loop") as pd_handle_loop:
+            with pytest.raises(asyncio.CancelledError):
+                await manager.handle_loop()
+
+        pd_handle_loop.assert_not_called()
 
     asyncio.run(run())
 

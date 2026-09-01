@@ -34,6 +34,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
+from .decode_admission import DecodeAdmissionController, DecodeAdmissionLease, DecodeAdmissionLeaseHandle
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -117,6 +118,19 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
+        self.decode_admission_controller: Optional[DecodeAdmissionController] = None
+        decode_admission_disabled = (
+            args.disable_pd_node_decode_admission or args.disable_pd_master_decode_capacity_limit
+        )
+        if self.pd_mode.is_D() and not self.is_multinode_tp_slave and not decode_admission_disabled:
+            max_queued_slots = args.pd_node_decode_admission_queue_size
+            if max_queued_slots is None:
+                max_queued_slots = args.running_max_req_size
+            self.decode_admission_controller = DecodeAdmissionController(
+                capacity=args.running_max_req_size,
+                max_queued_slots=max_queued_slots,
+                timeout_seconds=args.pd_node_decode_admission_timeout,
+            )
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -322,6 +336,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
         pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
+        # Decode Master 可在所有 choice 完成 Prefill 后原子预留 n 个槽，
+        # 再通过该 handle 把每个 choice 的 lease 转交给本地请求生命周期。
+        decode_admission_lease_handle: Optional[DecodeAdmissionLeaseHandle] = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
@@ -338,6 +355,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
         )
 
         running_request_registered = False
+        decode_admission_lease: Optional[DecodeAdmissionLease] = None
+        if decode_admission_lease_handle is not None:
+            decode_admission_lease = decode_admission_lease_handle.take()
+        unmanaged_req_indexes = []
+        unmanaged_req_objs = []
         if not self.pd_mode.is_P():
             await self._register_running_request()
             running_request_registered = True
@@ -426,21 +448,26 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储
-            alloced_req_indexes = []
-            while len(alloced_req_indexes) < sampling_params.n:
-                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                sleep_time = 0.1
-                while alloc_req_index is None:
-                    await asyncio.sleep(sleep_time)
-                    sleep_time *= 1.1
-                    sleep_time = min(1, sleep_time)
+            # Decode admission happens immediately before the node reserves its
+            # local shm_req objects. All Masters therefore compete for the same
+            # authoritative pool, and an n-choice request reserves all n slots at once.
+            admission_controller = getattr(self, "decode_admission_controller", None)
+            if admission_controller is not None and decode_admission_lease is None:
+                decode_admission_lease = await admission_controller.acquire(sampling_params.n)
+                self.metric_client.histogram_observe(
+                    "lightllm_request_queue_duration_bucket",
+                    decode_admission_lease.waited_seconds,
+                )
 
-                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                alloced_req_indexes.append(alloc_req_index)
+            alloced_req_indexes = await self._alloc_req_indexes(
+                sampling_params.n,
+                expect_available=decode_admission_lease is not None,
+            )
+            unmanaged_req_indexes.extend(alloced_req_indexes)
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
                 req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
+                unmanaged_req_objs.append(req_obj)
                 req_obj.init(
                     group_request_id + i,
                     prompt_ids,
@@ -461,8 +488,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
             )
 
-            req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
+            req_status = ReqStatus(
+                group_request_id,
+                multimodal_params,
+                req_objs,
+                start_time,
+                decode_admission_lease=decode_admission_lease,
+            )
             self.req_id_to_out_inf[group_request_id] = req_status
+            decode_admission_lease = None
+            unmanaged_req_indexes.clear()
+            unmanaged_req_objs.clear()
             # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
             # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
             if self.rl_controller is not None:
@@ -517,6 +553,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
             if group_request_id not in self.req_id_to_out_inf:
+                for req_obj in reversed(unmanaged_req_objs):
+                    await self.shm_req_manager.async_put_back_req_obj(req_obj)
+                for req_index in reversed(unmanaged_req_indexes):
+                    await self.shm_req_manager.async_release_req_index(req_index)
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
@@ -527,7 +567,24 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self.rl_controller.unregister_generation_admission(group_request_id)
             if running_request_registered:
                 await self._unregister_running_request()
+            if decode_admission_lease is not None:
+                decode_admission_lease.release()
         return
+
+    async def _alloc_req_indexes(self, req_num: int, expect_available: bool) -> List[int]:
+        """Wait for one atomic batch unless Decode admission already reserved it."""
+        indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        if indexes is not None:
+            return indexes
+        if expect_available:
+            raise RuntimeError("Decode admission reserved slots that are unavailable in shm_req")
+
+        sleep_time = 0.1
+        while indexes is None:
+            await asyncio.sleep(sleep_time)
+            sleep_time = min(1, sleep_time * 1.1)
+            indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        return indexes
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
@@ -900,6 +957,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
+                req_status.release_decode_admission()
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:
@@ -925,7 +983,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
         if self.is_multinode_tp_slave:
             asyncio.create_task(self.loop_for_request())
 
-        if self.pd_mode.is_P_or_D():
+        # Multi-node TP rank 0 is the single HTTP/PD ingress and forwards each
+        # admitted request to its slave ranks. Slaves must not register as
+        # independent P/D nodes or they could bypass rank 0 admission.
+        if self.pd_mode.is_P_or_D() and not self.is_multinode_tp_slave:
             from lightllm.server.httpserver.pd_loop import pd_handle_loop
 
             asyncio.create_task(pd_handle_loop(self))
@@ -1032,7 +1093,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
 
 class ReqStatus:
-    def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time) -> None:
+    def __init__(
+        self,
+        group_request_id,
+        multimodal_params,
+        req_objs: List[Req],
+        start_time,
+        decode_admission_lease: Optional[DecodeAdmissionLease] = None,
+    ) -> None:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.group_req_objs = GroupReqObjs(
@@ -1042,6 +1110,13 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+        self.decode_admission_lease = decode_admission_lease
+
+    def release_decode_admission(self) -> None:
+        if self.decode_admission_lease is None:
+            return
+        self.decode_admission_lease.release()
+        self.decode_admission_lease = None
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:
