@@ -36,7 +36,11 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_pd_node_shm_req_alloc_timeout_seconds, get_unique_server_name
+from lightllm.utils.envs_utils import (
+    get_pd_node_router_wait_timeout_seconds,
+    get_pd_node_shm_req_alloc_timeout_seconds,
+    get_unique_server_name,
+)
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
 from rpyc.utils.classic import obtain
@@ -117,12 +121,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
-        # HTTP server 只负责在本地 shm_req 长时间不可用时快速返回繁忙，PD Master 负责 QPS 准入限流。
-        # 该开关控制 P/D 节点是否启用本地 shm_req 等待超时；多机 TP 从节点不独立拒绝请求。
+        # HTTP server 只负责在本地 shm_req 或 Router 等待过久时快速返回繁忙，PD Master 负责 QPS 准入限流。
+        # 该开关控制 P/D 节点是否启用这两类本地等待超时；多机 TP 从节点不独立拒绝请求。
         self.pd_node_request_limit_enabled: bool = (
             self.args.enable_pd_node_self_request_limit and self.pd_mode.is_P_or_D() and not self.is_multinode_tp_slave
         )
         self.pd_node_shm_req_alloc_timeout_seconds = get_pd_node_shm_req_alloc_timeout_seconds()
+        self.pd_node_router_wait_timeout_seconds = get_pd_node_router_wait_timeout_seconds()
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -775,6 +780,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
             except asyncio.TimeoutError:
                 pass
 
+            if (
+                self.pd_node_request_limit_enabled
+                and is_first_token
+                and req_status.has_timed_out_waiting_for_inference(self.pd_node_router_wait_timeout_seconds)
+            ):
+                raise ServerBusyError(
+                    f"PD {self.args.run_mode} node is busy: request did not enter inference "
+                    f"within {self.pd_node_router_wait_timeout_seconds} seconds"
+                )
+
             if request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise ClientDisconnected(
@@ -1081,6 +1096,22 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+
+    def has_timed_out_waiting_for_inference(self, timeout_seconds: float) -> bool:
+        """判断请求组是否已在 Router 中等待进入推理系统超时。"""
+        current_time = time.monotonic()
+        reqs = self.group_req_objs.shm_req_objs
+        # 组内任一请求已经进入新 batch，说明整个请求组已经开始执行，不能再按 Router 等待超时清理。
+        if any(req.infer_start_time > 0 for req in reqs):
+            return False
+        # 高优先级分段续跑请求必须保证可以继续执行，不因 Router 短暂拥塞被清理。
+        if any(req.sample_params.pd_high_priority_request for req in reqs):
+            return False
+
+        for req in reqs:
+            if req.router_arrival_time > 0 and current_time - req.router_arrival_time >= timeout_seconds:
+                return True
+        return False
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:

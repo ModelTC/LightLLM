@@ -314,6 +314,11 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
     async def _add_batch(self, batch: Batch):
         # 添加新请求
+        # 请求被 Router 调度为新 batch 并准备下发到推理系统时记录时间，HTTP server
+        # 以此判断请求是否在 Router 队列中等待过久；不需要推理进程额外写共享字段。
+        infer_start_time = time.monotonic()
+        for req in batch.reqs:
+            req.infer_start_time = infer_start_time
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.001)
@@ -416,10 +421,12 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
     def _add_req(self, group_req_indexes: GroupReqIndexes):
         req_group = []
+        router_arrival_time = time.monotonic()
         for req_index in group_req_indexes.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.multimodal_params = group_req_indexes.multimodal_params
             req.start_time = group_req_indexes.time_mark
+            req.router_arrival_time = router_arrival_time
             # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
             # 防止反复发送abort命令给推理进程
             req._router_aborted = False

@@ -98,9 +98,11 @@ PD disaggregation Mode Parameters
     the limit is ``int(QPS * average whole-request seconds) + 6``; six extra requests provide probing headroom so
     low traffic does not permanently trap the service at low concurrency. The PD Master measures complete PD
     requests, so ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` defaults to 60 seconds when unset.
-    Prefill/Decode nodes no longer perform QPS admission. Instead, their HTTP server reports ``Server is busy`` if
-    local ``shm_req`` allocation does not succeed within ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS``
-    (20 seconds by default); PD Master converts this to HTTP 429. The timeout is bypassed when local admission is
+    Prefill/Decode nodes no longer perform QPS admission. The local ``shm_req`` allocation timeout is controlled by
+    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` (20 seconds by default), while the timeout from Router entry
+    to inference entry is controlled by ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` (20 seconds by default).
+    A timeout reports ``Server is busy``; a request that has entered the Router but not inference is proactively
+    marked aborted, and PD Master converts this to HTTP 429. The timeout is bypassed when local admission is
     disabled and for PD high-priority segmented continuation requests, which continue waiting for resources. Disabled by default.
 
 .. option:: --config_server_host

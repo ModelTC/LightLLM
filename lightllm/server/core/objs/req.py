@@ -86,6 +86,10 @@ class Req(ctypes.Structure):
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
         ("recv_time", ctypes.c_double),  # 用于记录请求到达服务的时间，主要用于调试
+        # Router 收到请求和请求被调度为新 batch 的单调时钟时间戳，用于 HTTP server
+        # 判断请求是否在 Router 等待过久。时间戳写入共享内存，供不同进程读取。
+        ("router_arrival_time", ctypes.c_double),
+        ("infer_start_time", ctypes.c_double),
         ("request_id", ctypes.c_int64),  # 引用计数
         ("group_req_id", ctypes.c_int64),
         ("input_len", ctypes.c_int),
@@ -160,6 +164,8 @@ class Req(ctypes.Structure):
         self.index_in_shm_mem: int = self.index_in_shm_mem
         self.ref_count: int = self.ref_count
         self.recv_time: float = time.time()
+        self.router_arrival_time = 0.0
+        self.infer_start_time = 0.0
 
         self.request_id = request_id
         self.group_req_id = convert_sub_id_to_group_id(request_id)

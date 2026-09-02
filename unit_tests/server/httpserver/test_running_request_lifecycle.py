@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from lightllm.server.core.objs import SamplingParams
-from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 
@@ -33,6 +33,7 @@ def _make_manager(mode: NodeRole):
     manager.is_multinode_tp_slave = False
     manager.pd_node_request_limit_enabled = False
     manager.pd_node_shm_req_alloc_timeout_seconds = 20
+    manager.pd_node_router_wait_timeout_seconds = 20
     manager.alloc_req_id = MagicMock(return_value=123)
     manager.is_multinode_tp_master = False
     manager.rl_controller = None
@@ -216,6 +217,58 @@ def test_httpserver_returns_busy_when_shm_req_allocation_times_out():
         manager._unregister_running_request.assert_awaited_once()
 
     asyncio.run(run())
+
+
+def test_httpserver_returns_busy_while_first_token_request_waits_in_router():
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.pd_node_request_limit_enabled = True
+        req = SimpleNamespace(
+            request_id=123,
+            is_aborted=False,
+            router_arrival_time=0,
+            infer_start_time=0,
+            sample_params=SimpleNamespace(pd_high_priority_request=False),
+        )
+        req_status = ReqStatus(123, None, [req], 0)
+        req_status.event.set()
+        sampling_params = _sampling_params()
+
+        with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=21):
+            req.router_arrival_time = 1.0
+            output_generator = manager._wait_to_token_package(
+                start_time=0,
+                prompt_ids=[],
+                group_request_id=123,
+                sampling_params=sampling_params,
+                req_status=req_status,
+                request=None,
+            )
+            with pytest.raises(ServerBusyError, match="request did not enter inference"):
+                await anext(output_generator)
+
+    asyncio.run(run())
+
+
+def test_httpserver_keeps_started_and_high_priority_request_groups():
+    waiting_req = SimpleNamespace(
+        router_arrival_time=1.0,
+        infer_start_time=0.0,
+        sample_params=SimpleNamespace(pd_high_priority_request=False),
+    )
+    started_req = SimpleNamespace(
+        router_arrival_time=1.0,
+        infer_start_time=2.0,
+        sample_params=SimpleNamespace(pd_high_priority_request=False),
+    )
+    req_status = ReqStatus(123, None, [waiting_req, started_req], 0)
+
+    with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=30):
+        assert req_status.has_timed_out_waiting_for_inference(20) is False
+
+        started_req.infer_start_time = 0.0
+        waiting_req.sample_params.pd_high_priority_request = True
+        assert req_status.has_timed_out_waiting_for_inference(20) is False
 
 
 def test_pd_node_self_request_limit_releases_partially_allocated_shm_reqs():

@@ -73,7 +73,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Enable PD Master admission probing based on dynamically measured QPS; Prefill/Decode nodes "
-            "only enforce shm_req allocation timeout. Default: disabled."
+            "enforce both shm_req allocation timeout and Router scheduling wait timeout. Default: disabled."
         ),
     )
     parser.add_argument(

@@ -95,10 +95,12 @@ PD 分离模式参数
     ``running_max_req_size``，以便快速积累样本；之后使用 ``int(QPS * 平均整包时间秒数) + 6``，
     额外保留 6 个请求作为探测余量，避免低流量后无法恢复。PD Master 统计完整 PD 请求，
     ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` 未设置时默认使用 60 秒。
-    Prefill/Decode 节点不再执行 QPS 准入，但 HTTP server 在申请本地 ``shm_req`` 对象时，
-    如果超过 ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS``（默认 20 秒）仍未成功，
-    会上报 ``Server is busy``，由 PD Master 转换为 HTTP 429；未开启限流以及 PD 高优先级分段续跑请求
-    不受该超时限制，会持续等待资源。该参数默认关闭。
+    Prefill/Decode 节点不再执行 QPS 准入。HTTP server 申请本地 ``shm_req`` 对象的超时时间由
+    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 控制（默认 20 秒）；请求进入 Router 后等待
+    进入推理系统的超时时间由 ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` 控制（默认 20 秒）。
+    超时会导致 ``Server is busy``；其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，
+    由 PD Master 转换为 HTTP 429；
+    未开启限流以及 PD 高优先级分段续跑请求不受该超时限制，会持续等待资源。该参数默认关闭。
 
 .. option:: --config_server_host
 
