@@ -96,6 +96,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
             call("lightllm_request_count"),
             call("lightllm_request_success"),
         ]
+        manager.qps_recorder.mark_one_req_finish.assert_called_once_with()
         assert p_node.dispatched_prompt_chars == 0
         assert p_node.dispatched_req_num == 0
 
@@ -141,6 +142,45 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
         assert [result[0] for result in results] == [800]
         manager._merge_choice_generators.assert_called_once()
         assert len(manager._merge_choice_generators.call_args.args[0]) == 1
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@pytest.mark.parametrize(
+    "failed_finish_status",
+    [FinishStatus.FINISHED_ABORTED, FinishStatus.FINISHED_ERROR],
+)
+def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_finish_status):
+    async def run():
+        manager = _manager()
+        sampling_params = SamplingParams()
+        sampling_params.n = 1
+        sampling_params.best_of = 1
+        sampling_params.max_new_tokens = 4
+
+        multimodal_params = MagicMock()
+        multimodal_params.verify_and_preload = AsyncMock()
+        request = MagicMock()
+
+        async def generate_one(*_args, **_kwargs):
+            yield (
+                800,
+                "",
+                {"prompt_tokens": 2},
+                FinishStatus(failed_finish_status),
+            )
+
+        manager._generate_one = generate_one
+
+        with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
+            results = []
+            async for result in manager._generate("prompt", sampling_params, multimodal_params, request):
+                results.append(result)
+
+        assert len(results) == 1
+        assert results[0][3].get_status() == failed_finish_status
+        manager.metric_client.counter_inc.assert_called_once_with("lightllm_request_count")
+        manager.qps_recorder.mark_one_req_finish.assert_not_called()
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 

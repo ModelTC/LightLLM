@@ -201,10 +201,15 @@ class HttpServerManagerForPDMaster:
                 )
             )
 
+        request_finished_successfully = True
         async for result in self._merge_choice_generators(generators):
+            finish_status = result[3]
+            if finish_status.is_error_finished():
+                request_finished_successfully = False
             yield result
-        self.metric_client.counter_inc("lightllm_request_success")
-        self.qps_recorder.mark_one_req_finish()
+        if request_finished_successfully:
+            self.metric_client.counter_inc("lightllm_request_success")
+            self.qps_recorder.mark_one_req_finish()
         return
 
     async def _generate_one(
