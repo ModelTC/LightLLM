@@ -135,7 +135,9 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         if self.pd_master_request_limit_enabled:
-            max_allowed_request_count = self.qps_recorder.get_max_allowed_request_count()
+            # QPS 尚未形成稳定估算时，以当前所有 Decode 节点声明的并发容量之和作为准入上限。
+            decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
+            max_allowed_request_count = self.qps_recorder.get_max_allowed_request_count(decode_capacity)
             if self.running_request_count > max_allowed_request_count:
                 logger.warning(
                     f"PD Master rejects request before dispatch: running_request_count={self.running_request_count}, "

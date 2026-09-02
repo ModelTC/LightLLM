@@ -15,10 +15,8 @@ class QPSRecorder:
 
         self.args = args
         self.ema_alpha = float(ema_alpha)
-        # 保存最近 16 个请求的完成时间。16 个时间点之间包含 15 个完成间隔。
-        self._finished_timestamps: Deque[float] = deque(maxlen=16)
-        # 记录服务启动后已经完成的请求总数，用于判断冷启动阶段是否已收集足够样本。
-        self._finished_request_count = 0
+        # 保存最近 64 个请求的完成时间。64 个时间点之间包含 63 个完成间隔。
+        self._finished_timestamps: Deque[float] = deque(maxlen=64)
         self._qps = 0.0
         self._initialized = False
         self._last_qps_update_time: Optional[float] = None
@@ -29,7 +27,6 @@ class QPSRecorder:
         finished_time = time.monotonic()
         with self._lock:
             self._finished_timestamps.append(finished_time)
-            self._finished_request_count += 1
             self._update_qps()
 
     def get_qps(self) -> float:
@@ -41,13 +38,15 @@ class QPSRecorder:
                     self._update_qps()
             return self._qps
 
-    def get_max_allowed_request_count(self) -> int:
-        """根据冷启动样本数和动态 QPS 返回 PD Master 最大允许进入请求数。"""
+    def get_max_allowed_request_count(self, default_max_allowed_request_count: int) -> int:
+        """返回 PD Master 最大允许进入请求数。
+
+        QPS 尚未初始化或完成样本不足时，使用调用方传入的 Decode 节点总并发容量；
+        样本充足后使用动态 QPS 估算值。
+        """
         with self._lock:
-            finished_request_count = self._finished_request_count
-            qps_initialized = self._initialized
-        if finished_request_count < self.args.running_max_req_size or not qps_initialized:
-            return self.args.running_max_req_size
+            if not self._initialized:
+                return default_max_allowed_request_count
 
         # PD Master 统计完整 PD 请求，按统一的平均整包时长配置估算在途请求数。
         return int(self.get_qps() * get_pd_request_limit_max_allowed_request_count_seconds()) + 6

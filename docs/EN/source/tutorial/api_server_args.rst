@@ -93,8 +93,9 @@ PD disaggregation Mode Parameters
 
     Enable dynamic-QPS admission probing on the PD Master. The PD Master computes QPS from recently completed
     requests and limits the number of complete PD requests admitted concurrently; requests above the limit receive
-    HTTP 429 directly. During cold start, while completed requests are fewer than ``running_max_req_size`` or the
-    QPS window is not initialized, the base ``running_max_req_size`` is used to collect samples quickly. Afterwards,
+    HTTP 429 directly. During cold start, while the recent-completion window contains fewer than 64 requests or QPS
+    is not initialized, the sum of ``running_max_req_size`` across all Decode nodes is used as the concurrency limit
+    to collect samples quickly. Afterwards,
     the limit is ``int(QPS * average whole-request seconds) + 6``; six extra requests provide probing headroom so
     low traffic does not permanently trap the service at low concurrency. The PD Master measures complete PD
     requests, so ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` defaults to 60 seconds when unset.

@@ -26,6 +26,12 @@ def test_pd_master_qps_limit_rejects_before_dispatch():
     manager.running_request_count = 3
     manager.qps_recorder = MagicMock()
     manager.qps_recorder.get_max_allowed_request_count.return_value = 2
+    manager.pd_manager = SimpleNamespace(
+        decode_nodes=[
+            SimpleNamespace(start_args={"running_max_req_size": 2}),
+            SimpleNamespace(start_args={"running_max_req_size": 3}),
+        ]
+    )
 
     async def consume_generate():
         async for _ in manager.generate("prompt", None, None, None):
@@ -35,7 +41,7 @@ def test_pd_master_qps_limit_rejects_before_dispatch():
         asyncio.run(consume_generate())
 
     assert manager.running_request_count == 3
-    manager.qps_recorder.get_max_allowed_request_count.assert_called_once_with()
+    manager.qps_recorder.get_max_allowed_request_count.assert_called_once_with(5)
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):

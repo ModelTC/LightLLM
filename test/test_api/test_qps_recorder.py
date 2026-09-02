@@ -13,11 +13,11 @@ def _args(run_mode="decode", running_max_req_size=16):
     return SimpleNamespace(run_mode=run_mode, running_max_req_size=running_max_req_size)
 
 
-def test_qps_recorder_waits_for_sixteen_finished_requests():
+def test_qps_recorder_waits_for_sixty_four_finished_requests():
     recorder = QPSRecorder(_args())
 
-    with patch("lightllm.server.httpserver_for_pd_master.qps_recorder.time.monotonic", side_effect=range(15)):
-        for _ in range(15):
+    with patch("lightllm.server.httpserver_for_pd_master.qps_recorder.time.monotonic", side_effect=range(63)):
+        for _ in range(63):
             recorder.mark_one_req_finish()
 
     assert recorder.get_qps() == 0.0
@@ -28,14 +28,14 @@ def test_qps_recorder_calculates_qps_and_updates_ema():
 
     with patch(
         "lightllm.server.httpserver_for_pd_master.qps_recorder.time.monotonic",
-        side_effect=[*range(16), 15, 15, 15.5, 15.5, 15.5],
+        side_effect=[*range(64), 63, 63, 63.5, 63.5, 63.5],
     ):
-        for _ in range(16):
+        for _ in range(64):
             recorder.mark_one_req_finish()
         assert recorder.get_qps() == 1.0
 
         recorder.mark_one_req_finish()
-        window_qps = 15 / 14.5
+        window_qps = 63 / 62.5
         expected_qps = 0.25 * window_qps + 0.75 * 1.0
         assert recorder.get_qps() == pytest.approx(expected_qps)
 
@@ -45,12 +45,12 @@ def test_get_qps_updates_ema_after_thirty_seconds_without_new_request():
 
     with patch(
         "lightllm.server.httpserver_for_pd_master.qps_recorder.time.monotonic",
-        side_effect=[*range(16), 15, 45.1, 45.1, 46],
+        side_effect=[*range(64), 63, 93.1, 93.1, 94],
     ):
-        for _ in range(16):
+        for _ in range(64):
             recorder.mark_one_req_finish()
 
-        stale_window_qps = 15 / 45.1
+        stale_window_qps = 63 / 93.1
         expected_qps = 0.25 * stale_window_qps + 0.75 * 1.0
         assert recorder.get_qps() == pytest.approx(expected_qps)
         assert recorder.get_qps() == pytest.approx(expected_qps)
@@ -60,13 +60,13 @@ def test_max_allowed_request_count_uses_env(monkeypatch):
     monkeypatch.setenv("LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS", "12")
     get_pd_request_limit_max_allowed_request_count_seconds.cache_clear()
     recorder = QPSRecorder(_args(running_max_req_size=1))
-    with patch("lightllm.server.httpserver_for_pd_master.qps_recorder.time.monotonic", side_effect=range(17)):
-        for _ in range(16):
+    with patch("lightllm.server.httpserver_for_pd_master.qps_recorder.time.monotonic", side_effect=range(65)):
+        for _ in range(64):
             recorder.mark_one_req_finish()
 
     try:
         with patch.object(recorder, "get_qps", return_value=2.5):
-            assert recorder.get_max_allowed_request_count() == 36
+            assert recorder.get_max_allowed_request_count(1) == 36
     finally:
         get_pd_request_limit_max_allowed_request_count_seconds.cache_clear()
 
@@ -75,7 +75,7 @@ def test_max_allowed_request_count_uses_running_capacity_during_warmup():
     recorder = QPSRecorder(_args(run_mode="prefill", running_max_req_size=32))
 
     with patch.object(recorder, "get_qps") as get_qps:
-        assert recorder.get_max_allowed_request_count() == 32
+        assert recorder.get_max_allowed_request_count(48) == 48
         get_qps.assert_not_called()
 
 
@@ -84,7 +84,7 @@ def test_max_allowed_request_count_waits_until_qps_is_initialized():
     recorder.mark_one_req_finish()
 
     with patch.object(recorder, "get_qps") as get_qps:
-        assert recorder.get_max_allowed_request_count() == 1
+        assert recorder.get_max_allowed_request_count(8) == 8
         get_qps.assert_not_called()
 
 
@@ -92,13 +92,13 @@ def test_max_allowed_request_count_keeps_six_probe_requests_at_zero_qps():
     recorder = QPSRecorder(_args(run_mode="decode", running_max_req_size=1))
     with patch(
         "lightllm.server.httpserver_for_pd_master.qps_recorder.time.monotonic",
-        side_effect=range(17),
+        side_effect=range(65),
     ):
-        for _ in range(16):
+        for _ in range(64):
             recorder.mark_one_req_finish()
 
     with patch.object(recorder, "get_qps", return_value=0.0):
-        assert recorder.get_max_allowed_request_count() == 6
+        assert recorder.get_max_allowed_request_count(1) == 6
 
 
 def test_pd_request_limit_max_allowed_request_count_seconds_uses_unified_default(monkeypatch):
