@@ -183,7 +183,6 @@ def _launch_subprocesses(args: StartArgs):
         assert (
             args.eplb_num_redundant_experts_per_rank > 0
         ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
-        assert args.mtp_mode is None, "--enable_prefill_eplb does not support MTP modes"
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}

@@ -13,6 +13,9 @@ from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    disable_eplb_model_init,
+)
 from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManagerForMamba
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
@@ -363,7 +366,9 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
-            self.draft_models.append(draft_model_class(draft_model_kvargs))
+            with disable_eplb_model_init():
+                draft_model = draft_model_class(draft_model_kvargs)
+            self.draft_models.append(draft_model)
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return
