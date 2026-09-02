@@ -260,7 +260,7 @@ def test_pd_node_returns_busy_while_first_token_request_waits_in_router(mode):
                 request=None,
             )
             with pytest.raises(ServerBusyError, match="request did not enter inference"):
-                await anext(output_generator)
+                await output_generator.__anext__()
 
     asyncio.run(run())
 
@@ -269,7 +269,10 @@ def test_httpserver_keeps_started_and_high_priority_request_groups():
     waiting_req = SimpleNamespace(
         router_arrival_time=1.0,
         infer_start_time=0.0,
-        sample_params=SimpleNamespace(pd_high_priority_request=False),
+        sample_params=SimpleNamespace(
+            pd_high_priority_request=False,
+            pd_high_priority_request_time_out_seconds=60,
+        ),
     )
     started_req = SimpleNamespace(
         router_arrival_time=1.0,
