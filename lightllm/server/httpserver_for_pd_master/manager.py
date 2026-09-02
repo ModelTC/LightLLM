@@ -272,9 +272,9 @@ class HttpServerManagerForPDMaster:
                 segment_output_tokens = 0
                 segment_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
-                    # pd 分离模式下，返回的 metadata 可能序号信息可能存在不准确性。
+                    # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
-                    segment_output_tokens = metadata["count_output_tokens"]
+                    segment_output_tokens += 1
 
                     segment_finish_status = raw_finish_status
                     finish_status = raw_finish_status
@@ -302,10 +302,10 @@ class HttpServerManagerForPDMaster:
                     yield origin_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
-                if segment_finish_status.is_finished_length():
-                    remaining_max_new_tokens -= segment_output_tokens
-                    segment_index += 1
-                else:
+                remaining_max_new_tokens -= segment_output_tokens
+                segment_index += 1
+                # 非 length 状态表示请求已正常结束，无需继续生成下一段。
+                if not segment_finish_status.is_finished_length():
                     break
 
         except (ClientDisconnected, BaseException) as e:

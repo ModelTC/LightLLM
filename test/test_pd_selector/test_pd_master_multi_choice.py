@@ -355,6 +355,50 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
+def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
+    async def run():
+        manager = _manager()
+        manager.id_gen.generate_id.side_effect = [808, 816]
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        dispatched_max_new_tokens = []
+
+        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
+            dispatched_max_new_tokens.append(sampling_params.max_new_tokens)
+            token_count = 2 if len(dispatched_max_new_tokens) == 1 else 1
+            for token_index in range(token_count):
+                finish_status = (
+                    FinishStatus(FinishStatus.FINISHED_LENGTH) if token_index == token_count - 1 else FinishStatus()
+                )
+                yield (
+                    sampling_params.group_request_id,
+                    "x",
+                    {"prompt_tokens": 1, "count_output_tokens": 100},
+                    finish_status,
+                )
+
+        manager._wait_to_token_package = wait_to_token_package
+
+        sampling_params = SamplingParams()
+        sampling_params.max_new_tokens = 3
+        async for _ in manager._generate_one(
+            "prompt",
+            sampling_params,
+            MagicMock(),
+            MagicMock(),
+            0,
+            800,
+        ):
+            pass
+
+        assert dispatched_max_new_tokens == [3, 1]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
 @pytest.mark.parametrize(
     ("estimated_cache_hit_rate", "expected_high_priority"),
     [(0.8, False), (0.81, True)],
