@@ -40,16 +40,6 @@ def test_pd_decode_capacity_yield_only_limits_running_overlap_output():
     assert not not_running_req.wait_pause
 
 
-def test_pd_decode_capacity_yield_preserves_pause_without_overlap():
-    backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
-    backend.support_overlap = False
-    req = _make_infer_req(cur_output_len=5, shm_output_len=5)
-    req.wait_pause = False
-
-    assert backend._handle_decode_alloc_failure(req) == 1
-    assert req.wait_pause
-
-
 def test_pd_decode_capacity_limit_finishes_at_committed_mtp_tail():
     backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
     backend.support_overlap = True

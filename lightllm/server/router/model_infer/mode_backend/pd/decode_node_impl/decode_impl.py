@@ -121,8 +121,6 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
     def _handle_decode_alloc_failure(self, req_obj: InferReq) -> int:
         """End an actually running request on its last overlapped output token."""
-        if not self.support_overlap:
-            return super()._handle_decode_alloc_failure(req_obj)
         if req_obj.cur_output_len <= req_obj.shm_req.shm_cur_output_len:
             return 0
 
