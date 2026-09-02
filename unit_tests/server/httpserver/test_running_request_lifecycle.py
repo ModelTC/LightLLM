@@ -46,6 +46,10 @@ def _make_manager(mode: NodeRole):
     manager._register_running_request = AsyncMock()
     manager._unregister_running_request = AsyncMock()
     manager.metric_client = MagicMock()
+    manager._run_reqs_count_lock = asyncio.Lock()
+    manager.run_reqs_count_mark = _ValueMark()
+    manager.qps_recorder = MagicMock()
+    manager.qps_recorder.get_max_allowed_request_count.return_value = 2
     manager.shm_req_manager = SimpleNamespace(async_alloc_req_index=AsyncMock(side_effect=RuntimeError("alloc failed")))
     return manager
 
@@ -195,20 +199,20 @@ def test_prefill_is_counted_after_decode_assignment_and_unregistered_on_followin
     asyncio.run(run())
 
 
-def test_pd_node_self_request_limit_rejects_after_shm_req_allocation_timeout():
+def test_pd_node_self_request_limit_rejects_before_shm_req_allocation_when_concurrency_exceeds_limit():
     async def run():
         manager = _make_manager(NodeRole.D)
         manager.pd_node_request_limit_enabled = True
+        manager.run_reqs_count_mark.set_value(3)
         manager.shm_req_manager = SimpleNamespace(
-            async_alloc_req_index=AsyncMock(return_value=None),
+            async_alloc_req_index=AsyncMock(return_value=7),
             async_release_req_index=AsyncMock(),
         )
 
-        with patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[100, 120]):
-            with pytest.raises(ServerBusyError, match="unable to allocate a shm_req object within 20 seconds"):
-                await _drain_generate(manager, _sampling_params(), _multimodal_params())
+        with pytest.raises(ServerBusyError, match="PD decode node is busy"):
+            await _drain_generate(manager, _sampling_params(), _multimodal_params())
 
-        manager.shm_req_manager.async_alloc_req_index.assert_awaited_once()
+        manager.shm_req_manager.async_alloc_req_index.assert_not_awaited()
         manager.shm_req_manager.async_release_req_index.assert_not_awaited()
         manager._register_running_request.assert_awaited_once()
         manager._unregister_running_request.assert_awaited_once()
@@ -221,15 +225,14 @@ def test_pd_node_self_request_limit_releases_partially_allocated_shm_reqs():
         manager = _make_manager(NodeRole.D)
         manager.pd_node_request_limit_enabled = True
         manager.shm_req_manager = SimpleNamespace(
-            async_alloc_req_index=AsyncMock(side_effect=[7, None]),
+            async_alloc_req_index=AsyncMock(side_effect=[7, RuntimeError("alloc failed")]),
             async_release_req_index=AsyncMock(),
         )
         sampling_params = _sampling_params()
         sampling_params.n = 2
 
-        with patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[100, 120]):
-            with pytest.raises(ServerBusyError, match="unable to allocate a shm_req object within 20 seconds"):
-                await _drain_generate(manager, sampling_params, _multimodal_params())
+        with pytest.raises(RuntimeError, match="alloc failed"):
+            await _drain_generate(manager, sampling_params, _multimodal_params())
 
         manager.shm_req_manager.async_release_req_index.assert_awaited_once_with(7)
 

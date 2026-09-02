@@ -433,16 +433,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 分段续跑请求可以绕过本地进入并发限制，避免
-            # 已经成功完成首段的用户请求因为下一段暂时无法进入等待流程而被 429 中断。
-            if self.pd_node_request_limit_enabled and sampling_params.bypass_pd_node_request_limit:
+            # 申请资源并存储。PD 分段续跑请求作为高优先级请求，可以绕过本地进入并发限制，避免
+            # 已经成功完成首段的用户请求因为下一段暂时无法进入等待流程而被 429 中断；同时它会在 Router 队列中优先调度。
+            if self.pd_node_request_limit_enabled and sampling_params.pd_high_priority_request:
                 logger.info(
-                    f"PD {self.args.run_mode} node request {group_request_id} bypasses the local request "
+                    f"PD {self.args.run_mode} high-priority request {group_request_id} bypasses the local request "
                     f"concurrency limit and will wait for {sampling_params.n} shm_req object(s)"
                 )
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
-                bypass_pd_node_request_limit=sampling_params.bypass_pd_node_request_limit,
+                pd_high_priority_request=sampling_params.pd_high_priority_request,
             )
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
@@ -552,13 +552,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def _alloc_shm_req_indexes(
         self,
         req_num: int,
-        bypass_pd_node_request_limit: bool = False,
+        pd_high_priority_request: bool = False,
     ) -> List[int]:
         """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。"""
         alloced_req_indexes = []
 
         try:
-            if self.pd_node_request_limit_enabled and not bypass_pd_node_request_limit:
+            if self.pd_node_request_limit_enabled and not pd_high_priority_request:
                 current_request_count = self.run_reqs_count_mark.get_value()
                 # QPS 记录器累计完成的请求数未达到 running_max_req_size 时返回基础容量，
                 # 使服务冷启动后可以快速积累足够样本；达到后再根据完成 QPS 和节点平均

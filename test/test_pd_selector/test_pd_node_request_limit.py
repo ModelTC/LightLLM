@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.utils.error_utils import ServerBusyError
 
 
@@ -59,7 +60,7 @@ def test_pd_node_allows_request_when_running_concurrency_equals_limit():
     asyncio.run(run())
 
 
-def test_pd_split_continuation_bypasses_running_concurrency_limit():
+def test_pd_high_priority_split_continuation_bypasses_running_concurrency_limit():
     async def run():
         manager = _manager(running_request_count=2, max_allowed_request_count=1)
         manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, 7])
@@ -67,7 +68,7 @@ def test_pd_split_continuation_bypasses_running_concurrency_limit():
         with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()):
             indexes = await manager._alloc_shm_req_indexes(
                 1,
-                bypass_pd_node_request_limit=True,
+                pd_high_priority_request=True,
             )
 
         assert indexes == [7]
@@ -102,3 +103,18 @@ def test_shm_req_partial_allocations_are_released_on_failure():
         manager.shm_req_manager.async_release_req_index.assert_awaited_once_with(3)
 
     asyncio.run(run())
+
+
+def test_pd_high_priority_request_is_inserted_at_router_queue_head():
+    queue = BaseQueue.__new__(BaseQueue)
+    queue.dp_index = 0
+    normal_req = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=False))
+    high_req_1 = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
+    high_req_2 = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
+    queue.waiting_req_list = [normal_req]
+
+    queue.extend([high_req_1, high_req_2])
+
+    assert queue.waiting_req_list == [high_req_1, high_req_2, normal_req]
+    assert high_req_1.sample_params.suggested_dp_index == 0
+    assert high_req_2.sample_params.suggested_dp_index == 0

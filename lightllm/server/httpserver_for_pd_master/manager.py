@@ -229,9 +229,9 @@ class HttpServerManagerForPDMaster:
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = block_max_new_tokens
                 # 首段仍然遵守 P/D 节点的本地限流。第二段及后续分段说明该用户请求已经
-                # 成功执行过一段，为避免续跑请求因暂时申请不到 shm_req 而中途失败，
-                # 允许它们等待可用对象，不应用本地 shm_req 分配超时。
-                sampling_params.bypass_pd_node_request_limit = iter_index > 0
+                # 成功执行过一段，将其标记为 PD 高优先级请求，便于优先进入 Router 调度队列。
+                # 高优先级请求仍可等待可用 shm_req 对象，避免因临时资源紧张导致分段续跑失败。
+                sampling_params.pd_high_priority_request = iter_index > 0
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。

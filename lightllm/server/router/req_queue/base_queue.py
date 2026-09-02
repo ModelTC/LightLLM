@@ -83,7 +83,12 @@ class BaseQueue:
     def extend(self, req_group: List[Req]):
         for req in req_group:
             req.sample_params.suggested_dp_index = self.dp_index
-        self.waiting_req_list.extend(req_group)
+        # PD 分段续跑请求已经执行过前一段，应优先进入调度队列，避免被新请求长时间阻塞。
+        if req_group and req_group[0].sample_params.pd_high_priority_request:
+            # req_group 可能包含同一请求组的多个 Req，整体前置可以保持组内顺序。
+            self.waiting_req_list = req_group + self.waiting_req_list
+        else:
+            self.waiting_req_list.extend(req_group)
         return
 
     def get_wait_req_num(self):
