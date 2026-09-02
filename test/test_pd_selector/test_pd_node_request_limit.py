@@ -7,6 +7,7 @@ import pytest
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.router.req_queue.base_queue import BaseQueue
+from lightllm.server.router.req_queue.dp_base_queue import DpQueue
 from lightllm.utils.error_utils import ServerBusyError
 
 
@@ -153,16 +154,37 @@ def test_high_priority_router_wait_uses_master_timeout(
         assert req_status.has_timed_out_waiting_for_inference(local_timeout_seconds) is expected
 
 
-def test_pd_high_priority_request_is_inserted_at_router_queue_head():
+def test_pd_high_priority_request_is_inserted_before_first_normal_request():
     queue = BaseQueue.__new__(BaseQueue)
     queue.dp_index = 0
+    earlier_high_req = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
     normal_req = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=False))
     high_req_1 = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
     high_req_2 = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
-    queue.waiting_req_list = [normal_req]
+    queue.waiting_req_list = [earlier_high_req, normal_req]
 
     queue.extend([high_req_1, high_req_2])
 
-    assert queue.waiting_req_list == [high_req_1, high_req_2, normal_req]
+    assert queue.waiting_req_list == [earlier_high_req, high_req_1, high_req_2, normal_req]
     assert high_req_1.sample_params.suggested_dp_index == 0
     assert high_req_2.sample_params.suggested_dp_index == 0
+
+
+def test_pd_high_priority_request_group_keeps_fifo_order_while_waiting_for_dp_index():
+    queue = DpQueue.__new__(DpQueue)
+    queue.dp_size_in_node = 2
+    earlier_high_group = [SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))]
+    normal_group = [SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=False))]
+    new_high_group = [
+        SimpleNamespace(
+            sample_params=SimpleNamespace(
+                pd_high_priority_request=True,
+                suggested_dp_index=-1,
+            )
+        )
+    ]
+    queue.reqs_waiting_for_dp_index = [earlier_high_group, normal_group]
+
+    queue.extend(new_high_group)
+
+    assert queue.reqs_waiting_for_dp_index == [earlier_high_group, new_high_group, normal_group]
