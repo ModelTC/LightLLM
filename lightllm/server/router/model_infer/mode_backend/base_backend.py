@@ -783,7 +783,7 @@ class ModeBackend:
             true_finished_reqs = finished_reqs
 
         g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
-        self._pause_reqs(wait_pause_reqs)
+        g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
         if recover_paused:
             g_infer_context.recover_paused_reqs(
@@ -809,15 +809,10 @@ class ModeBackend:
         """Handle a decode request that cannot allocate its next token.
 
         Returns whether this request consumed one slot of the per-iteration
-        shortage handling limit. Backends can customize the eventual pause
-        action through ``_pause_reqs``.
+        shortage handling limit.
         """
         req_obj.wait_pause = True
         return True
-
-    def _pause_reqs(self, pause_reqs: List[InferReq]):
-        g_infer_context.pause_reqs(pause_reqs, is_master_in_dp=self.is_master_in_dp)
-        return
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

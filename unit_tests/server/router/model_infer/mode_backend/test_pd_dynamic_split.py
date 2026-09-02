@@ -17,11 +17,14 @@ def _make_infer_req(cur_output_len: int, shm_output_len: int):
         req_id=1,
         cur_output_len=cur_output_len,
         shm_req=SimpleNamespace(shm_cur_output_len=shm_output_len),
+        sampling_param=SimpleNamespace(
+            shm_param=SimpleNamespace(max_new_tokens=65535),
+        ),
         wait_pause=False,
     )
 
 
-def test_pd_decode_capacity_yield_only_pauses_running_overlap_output():
+def test_pd_decode_capacity_yield_only_limits_running_overlap_output():
     backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
     backend.support_overlap = True
 
@@ -29,9 +32,11 @@ def test_pd_decode_capacity_yield_only_pauses_running_overlap_output():
     not_running_req = _make_infer_req(cur_output_len=4, shm_output_len=4)
 
     assert backend._handle_decode_alloc_failure(running_req)
-    assert running_req.wait_pause
+    assert running_req.sampling_param.shm_param.max_new_tokens == 5
+    assert not running_req.wait_pause
 
     assert not backend._handle_decode_alloc_failure(not_running_req)
+    assert not_running_req.sampling_param.shm_param.max_new_tokens == 65535
     assert not not_running_req.wait_pause
 
 
@@ -45,39 +50,42 @@ def test_pd_decode_capacity_yield_preserves_pause_without_overlap():
     assert req.wait_pause
 
 
-def test_pd_decode_pause_strategy_finishes_at_committed_mtp_tail(monkeypatch):
+def test_pd_decode_capacity_limit_finishes_at_committed_mtp_tail():
     backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
-    backend.is_master_in_dp = True
-    filter_reqs = MagicMock()
-    monkeypatch.setattr(
-        pd_decode_impl,
-        "g_infer_context",
-        SimpleNamespace(filter_reqs=filter_reqs),
-    )
+    backend.support_overlap = True
+    req = _make_infer_req(cur_output_len=3, shm_output_len=1)
+    req.stop_sequences = []
+    req.shm_req.input_len = 10
+    req.shm_req.shm_prompt_ids = SimpleNamespace(arr=[0] * 13)
+    req.sampling_param.shm_param.ignore_eos = False
+    req.finish_status = FinishStatus()
+    req._stop_sequences_matched = MagicMock(return_value=False)
 
-    shm_req = SimpleNamespace(
-        input_len=10,
-        shm_cur_output_len=3,
-        finish_token_index=-1,
-        finish_status=FinishStatus(),
-        candetoken_out_len=3,
-    )
+    assert backend._handle_decode_alloc_failure(req)
+    assert req.sampling_param.shm_param.max_new_tokens == 3
+
+    pd_decode_impl.InferReq.update_finish_status(req, eos_ids=[], output_len=2)
+    assert not req.finish_status.is_finished()
+
+    pd_decode_impl.InferReq.update_finish_status(req, eos_ids=[], output_len=3)
+    assert req.finish_status.is_finished_length()
+
+
+def test_pd_decode_capacity_limit_never_extends_original_length():
+    backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
+    backend.support_overlap = True
     req = SimpleNamespace(
         req_id=1,
-        cur_output_len=3,
+        cur_output_len=5,
+        sampling_param=SimpleNamespace(
+            shm_param=SimpleNamespace(max_new_tokens=3),
+        ),
+        shm_req=SimpleNamespace(shm_cur_output_len=1),
         finish_status=FinishStatus(),
-        shm_req=shm_req,
-        wait_pause=True,
     )
 
-    backend._pause_reqs([req])
-
-    assert not req.wait_pause
-    assert req.finish_status.is_finished_length()
-    assert shm_req.finish_token_index == 12
-    assert shm_req.finish_status.is_finished_length()
-    assert shm_req.candetoken_out_len == 3
-    filter_reqs.assert_called_once_with(finished_reqs=[req])
+    assert backend._handle_decode_alloc_failure(req)
+    assert req.sampling_param.shm_param.max_new_tokens == 3
 
 
 def test_pd_queue_admission_always_uses_aggressive_tuple_estimate():
