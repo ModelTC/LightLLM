@@ -181,6 +181,68 @@ def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_fi
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
+def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
+    async def run():
+        manager = _manager()
+        manager.id_gen.generate_id.side_effect = [808, 816]
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        segment_index = 0
+
+        async def wait_to_token_package(_p_node, _d_node, _start_time, prompt, params, *_args):
+            nonlocal segment_index
+            segment_index += 1
+            if segment_index == 1:
+                assert prompt == "prompt"
+                assert params.max_new_tokens == 4
+                yield (
+                    808,
+                    "visible",
+                    {"prompt_tokens": 1, "id": 10, "logprob": -0.1, "logprobs": {"visible": -0.1}},
+                    FinishStatus(),
+                )
+                yield (
+                    808,
+                    "simulated-eos",
+                    {"prompt_tokens": 1, "id": 11, "logprob": 0.0, "logprobs": {"eos": 0.0}},
+                    FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+                )
+            else:
+                assert prompt == "promptvisible"
+                assert params.max_new_tokens == 3
+                yield (
+                    816,
+                    "continued",
+                    {"prompt_tokens": 2, "id": 12, "logprob": -0.2, "logprobs": {"continued": -0.2}},
+                    FinishStatus(FinishStatus.FINISHED_STOP),
+                )
+
+        manager._wait_to_token_package = wait_to_token_package
+        sampling_params = SamplingParams()
+        sampling_params.max_new_tokens = 4
+
+        results = []
+        async for result in manager._generate_one(
+            "prompt",
+            sampling_params,
+            MagicMock(),
+            MagicMock(),
+            0,
+            800,
+        ):
+            results.append(result)
+
+        assert segment_index == 2
+        assert [result[1] for result in results] == ["visible", "continued"]
+        assert all(result[3].status != FinishStatus.FINISHED_PD_DECODE_CAPACITY for result in results)
+        assert results[-1][3].status == FinishStatus.FINISHED_STOP
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
 def test_pd_master_multi_choice_failure_closes_other_generators():
     async def run():
         manager = _manager()
@@ -319,8 +381,19 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
                 sampling_params.group_request_id,
                 "x",
                 {"prompt_tokens": 1, "count_output_tokens": 1},
-                FinishStatus(FinishStatus.FINISHED_LENGTH),
+                (
+                    FinishStatus()
+                    if len(dispatched_max_new_tokens) == 1
+                    else FinishStatus(FinishStatus.FINISHED_LENGTH)
+                ),
             )
+            if len(dispatched_max_new_tokens) == 1:
+                yield (
+                    sampling_params.group_request_id,
+                    "simulated-eos",
+                    {"prompt_tokens": 1, "count_output_tokens": 1},
+                    FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+                )
 
         manager._wait_to_token_package = wait_to_token_package
 
@@ -368,16 +441,26 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
             dispatched_max_new_tokens.append(sampling_params.max_new_tokens)
-            token_count = 2 if len(dispatched_max_new_tokens) == 1 else 1
+            is_first_segment = len(dispatched_max_new_tokens) == 1
+            token_count = 2 if is_first_segment else 1
             for token_index in range(token_count):
                 finish_status = (
-                    FinishStatus(FinishStatus.FINISHED_LENGTH) if token_index == token_count - 1 else FinishStatus()
+                    FinishStatus(FinishStatus.FINISHED_LENGTH)
+                    if not is_first_segment and token_index == token_count - 1
+                    else FinishStatus()
                 )
                 yield (
                     sampling_params.group_request_id,
                     "x",
                     {"prompt_tokens": 1, "count_output_tokens": 100},
                     finish_status,
+                )
+            if is_first_segment:
+                yield (
+                    sampling_params.group_request_id,
+                    "simulated-eos",
+                    {"prompt_tokens": 1, "count_output_tokens": 100},
+                    FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
                 )
 
         manager._wait_to_token_package = wait_to_token_package

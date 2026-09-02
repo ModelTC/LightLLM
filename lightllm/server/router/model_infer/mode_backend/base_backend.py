@@ -743,6 +743,7 @@ class ModeBackend:
                             # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
                             # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
                             wait_pause_count += 1
+                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
                             if support_overlap:
                                 # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
                                 req_obj.filter_mark = True

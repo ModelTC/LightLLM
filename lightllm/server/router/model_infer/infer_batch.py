@@ -907,11 +907,20 @@ class InferReq:
         ``Req.mark_simulated_finished``（在已有输出末尾追加 EOS）。不回写本地
         ``cur_output_len`` / ``finish_status``（本 InferReq 即将释放）。
         """
-        # 本地已由 stop / eos / length 等正确结束，保留原 shm finish_status。
+        # 请求本身已由 stop / eos / length / error 等状态结束时，
+        # 请求自身的结束原因优先，不能被后续的容量不足标记覆盖。
         if self.finish_status.is_finished():
             return
+
+        # 仅在请求本身尚未结束时，才将 finished_by_pd_decode_capacity
+        # 转换为 PD 内部分段状态，补模拟结束 token 并交给 PD Master 续跑。
+        if getattr(self, "finished_by_pd_decode_capacity", False):
+            finish_status = FinishStatus.FINISHED_PD_DECODE_CAPACITY
+        else:
+            finish_status = FinishStatus.FINISHED_ABORTED
+
         self.shm_req.mark_simulated_finished(
-            FinishStatus.FINISHED_ABORTED,
+            finish_status,
             output_len=self.cur_output_len,
         )
         return

@@ -233,9 +233,8 @@ class HttpServerManagerForPDMaster:
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
 
-            # Decode 节点容量不足时会将已运行请求以 length 结束。
-            # PD master 把这个内部 length 当作动态分段边界，用剩余 token
-            # 限额在同一组 P/D 节点上继续。
+            # Decode 节点容量不足时会用专用状态结束当前分段。
+            # PD Master 吞掉该内部分段 marker，并用剩余 token 限额在同一组 P/D 节点上继续。
             while remaining_max_new_tokens > 0:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
@@ -269,18 +268,27 @@ class HttpServerManagerForPDMaster:
                     request,
                 )
                 prompt_tokens = sys.maxsize  # 因为分段的原因
-                segment_output_tokens = 0
                 segment_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
-                    segment_output_tokens += 1
+
+                    # 收到当前分段的任意输出，说明该请求已经完成 P 节点的 prefill 派发阶段。
+                    # 立即归还 selector 中记录的在途 prompt 字符数和请求数，并通过置空确保每段只更新一次。
+                    if pending_prefill_load_chars is not None:
+                        p_node.dispatched_prompt_chars = max(
+                            0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
+                        )
+                        p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
+                        pending_prefill_load_chars = None
 
                     segment_finish_status = raw_finish_status
-                    finish_status = raw_finish_status
-                    if raw_finish_status.is_finished_length() and segment_output_tokens < remaining_max_new_tokens:
-                        # Decode 节点因容量不足产生的内部分段，不暴露给用户。
-                        finish_status = FinishStatus()
+                    if raw_finish_status.is_finished_pd_decode_capacity():
+                        # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
+                        break
+
+                    # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
+                    remaining_max_new_tokens -= 1
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
@@ -288,24 +296,17 @@ class HttpServerManagerForPDMaster:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
                         self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
-                        if not finish_status.is_error_finished():
+                        if not raw_finish_status.is_error_finished():
                             # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
                             # 推理或已失败的请求被后续请求误判为可复用 cache。
                             self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
-                    if pending_prefill_load_chars is not None:
-                        p_node.dispatched_prompt_chars = max(
-                            0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
-                        )
-                        p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
-                        pending_prefill_load_chars = None
-                    yield origin_request_id, request_output, metadata, finish_status
+                    yield origin_request_id, request_output, metadata, raw_finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
-                remaining_max_new_tokens -= segment_output_tokens
                 segment_index += 1
-                # 非 length 状态表示请求已正常结束，无需继续生成下一段。
-                if not segment_finish_status.is_finished_length():
+                # 只有 PD Decode 容量不足产生的内部分段需要续跑；其他状态都结束整个请求。
+                if not segment_finish_status.is_finished_pd_decode_capacity():
                     break
 
         except (ClientDisconnected, BaseException) as e:

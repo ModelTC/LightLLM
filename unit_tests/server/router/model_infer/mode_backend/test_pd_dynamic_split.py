@@ -68,6 +68,8 @@ def test_pd_decode_capacity_shortage_is_delayed_for_overlap(monkeypatch):
     filter_reqs, logger = _classify_without_token_capacity(monkeypatch, req, support_overlap=True)
 
     assert req.filter_mark
+    assert req.finished_by_pd_decode_capacity
+    assert not req.finish_status.is_finished()
     assert req.sampling_param.shm_param.max_new_tokens == 65535
     assert not req.wait_pause
     filter_reqs.assert_called_once_with(finished_reqs=[])
@@ -85,6 +87,8 @@ def test_pd_decode_capacity_shortage_is_filtered_without_overlap(monkeypatch):
     filter_reqs, logger = _classify_without_token_capacity(monkeypatch, req, support_overlap=False)
 
     assert not req.filter_mark
+    assert req.finished_by_pd_decode_capacity
+    assert not req.finish_status.is_finished()
     assert req.sampling_param.shm_param.max_new_tokens == 65535
     assert not req.wait_pause
     filter_reqs.assert_called_once_with(finished_reqs=[req])
@@ -102,6 +106,37 @@ def test_pd_decode_capacity_shortage_only_handles_two_requests_per_iteration(mon
 
     assert [req.filter_mark for req in reqs] == [True, True, False]
     filter_reqs.assert_called_once_with(finished_reqs=[])
+
+
+def test_pd_decode_capacity_finish_status_is_written_to_shm():
+    shm_req = SimpleNamespace(mark_simulated_finished=MagicMock())
+    req = SimpleNamespace(
+        finish_status=FinishStatus(),
+        finished_by_pd_decode_capacity=True,
+        shm_req=shm_req,
+        cur_output_len=3,
+    )
+
+    pd_decode_impl.InferReq.mark_shm_aborted_finished(req)
+
+    shm_req.mark_simulated_finished.assert_called_once_with(
+        FinishStatus.FINISHED_PD_DECODE_CAPACITY,
+        output_len=3,
+    )
+
+
+def test_request_finish_status_takes_priority_over_pd_decode_capacity_marker():
+    shm_req = SimpleNamespace(mark_simulated_finished=MagicMock())
+    req = SimpleNamespace(
+        finish_status=FinishStatus(FinishStatus.FINISHED_STOP),
+        finished_by_pd_decode_capacity=True,
+        shm_req=shm_req,
+        cur_output_len=3,
+    )
+
+    pd_decode_impl.InferReq.mark_shm_aborted_finished(req)
+
+    shm_req.mark_simulated_finished.assert_not_called()
 
 
 def test_pd_decode_capacity_limit_never_extends_original_length(monkeypatch):
@@ -133,7 +168,14 @@ def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length():
     queue.args = SimpleNamespace(run_mode="decode")
     queue.dp_index = 0
     queue.max_total_tokens = 4096
-    queue.router = SimpleNamespace(router_statics=SimpleNamespace(ema_req_out_len=128))
+    queue.running_max_req_size = 8
+    queue.router = SimpleNamespace(
+        router_statics=SimpleNamespace(ema_req_out_len=128),
+        shared_token_load=SimpleNamespace(
+            set_estimated_peak_token_count=MagicMock(),
+            set_dynamic_max_load=MagicMock(),
+        ),
+    )
     queue.is_busy = MagicMock(return_value=False)
 
     req = SimpleNamespace(
@@ -144,6 +186,8 @@ def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length():
     batch = SimpleNamespace(reqs=[req])
 
     assert queue._caclu_batch_estimated_peak_token_num(batch) == 138
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 138, 1)
 
     queue.args.run_mode = "prefill"
     assert queue._caclu_batch_estimated_peak_token_num(batch) == 1034
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 1034, 1)

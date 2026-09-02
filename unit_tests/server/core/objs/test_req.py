@@ -98,6 +98,12 @@ def test_finish_status(req):
     assert req.finish_status.is_error_finished()
     assert req.finish_status.get_finish_reason() == "error"
 
+    req.finish_status.set_status(req.finish_status.FINISHED_PD_DECODE_CAPACITY)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_finished_pd_decode_capacity()
+    assert not req.finish_status.is_error_finished()
+    assert req.finish_status.get_finish_reason() == "length"
+
 
 if __name__ == "__main__":
     pytest.main()
