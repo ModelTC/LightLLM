@@ -1,7 +1,25 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 import torch
+
+
+_eplb_model_init_disabled: ContextVar[bool] = ContextVar("eplb_model_init_disabled", default=False)
+
+
+def is_eplb_model_init_disabled() -> bool:
+    return _eplb_model_init_disabled.get()
+
+
+@contextmanager
+def disable_eplb_model_init() -> Iterator[None]:
+    token = _eplb_model_init_disabled.set(True)
+    try:
+        yield
+    finally:
+        _eplb_model_init_disabled.reset(token)
 
 
 @dataclass
