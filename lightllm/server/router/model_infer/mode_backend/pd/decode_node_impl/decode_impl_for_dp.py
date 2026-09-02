@@ -27,9 +27,6 @@ class PDDPForDecodeNode(DPChunkedPrefillBackend):
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         return PDDecodeNode._filter_not_ready_reqs(self, req_ids=req_ids)
 
-    def _handle_decode_alloc_failure(self, req_obj: InferReq) -> int:
-        return PDDecodeNode._handle_decode_alloc_failure(self, req_obj=req_obj)
-
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
         return PDDecodeNode._decode_node_gen_trans_tasks(self, req_obj=req_obj)
 

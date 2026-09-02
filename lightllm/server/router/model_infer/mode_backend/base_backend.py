@@ -739,7 +739,21 @@ class ModeBackend:
                     can_alloc_token_num -= token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
-                        wait_pause_count += self._handle_decode_alloc_failure(req_obj)
+                        if self.args.run_mode == "decode":
+                            # overlap 已产生新 token 时，收紧当前分段的输出上限，让请求尽快结束。
+                            if req_obj.cur_output_len > req_obj.shm_req.shm_cur_output_len:
+                                sampling_params = req_obj.sampling_param.shm_param
+                                sampling_params.max_new_tokens = min(
+                                    sampling_params.max_new_tokens, req_obj.cur_output_len
+                                )
+                                wait_pause_count += 1
+                                self.logger.info(
+                                    f"yield running pd decode req_id={req_obj.req_id} "
+                                    f"at output_len={req_obj.cur_output_len} because token memory is insufficient"
+                                )
+                        else:
+                            req_obj.wait_pause = True
+                            wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -802,15 +816,6 @@ class ModeBackend:
                 decode_reqs = []
 
         return prefill_reqs, decode_reqs
-
-    def _handle_decode_alloc_failure(self, req_obj: InferReq) -> int:
-        """Handle a decode request that cannot allocate its next token.
-
-        Returns the number of slots consumed from the per-iteration shortage
-        handling limit.
-        """
-        req_obj.wait_pause = True
-        return 1
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

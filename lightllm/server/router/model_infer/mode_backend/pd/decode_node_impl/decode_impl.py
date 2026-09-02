@@ -119,19 +119,6 @@ class PDDecodeNode(ChunkedPrefillBackend):
             ans_list.append(req_obj)
         return ans_list
 
-    def _handle_decode_alloc_failure(self, req_obj: InferReq) -> int:
-        """End an actually running request on its last overlapped output token."""
-        if req_obj.cur_output_len <= req_obj.shm_req.shm_cur_output_len:
-            return 0
-
-        sampling_params = req_obj.sampling_param.shm_param
-        sampling_params.max_new_tokens = min(sampling_params.max_new_tokens, req_obj.cur_output_len)
-        logger.info(
-            f"yield running pd decode req_id={req_obj.req_id} "
-            f"at output_len={req_obj.cur_output_len} because token memory is insufficient"
-        )
-        return 1
-
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
         """
         decode node 生成所有的传输任务对象。
