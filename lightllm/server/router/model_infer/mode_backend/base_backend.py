@@ -694,12 +694,10 @@ class ModeBackend:
         prefill_reqs = []
         decode_reqs = []
 
-        # 一次性最多暂停请求的数量, 防止盲目暂停大量请求
-        # 因为部分请求释放占用的token容量后，就会使推理可以正常进行。
-        # 如果因为一次推理容量不足，就以当前token容量的判断暂停了大量
-        # 请求，其逻辑是不适合的。
-        pause_max_req_num = 2
-        wait_pause_count = 0
+        # 单轮最多处理少量因 token 容量不足而无法继续的请求。
+        # 普通 Decode 会暂停请求，PD Decode 会缩短当前分段；避免单轮过度处理。
+        resource_shortage_max_req_num = 2
+        resource_shortage_count = 0
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
@@ -740,8 +738,10 @@ class ModeBackend:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num and self._handle_decode_alloc_failure(req_obj):
-                        wait_pause_count += 1
+                    if resource_shortage_count < resource_shortage_max_req_num:
+                        handled = self._handle_decode_alloc_failure(req_obj)
+                        if handled:
+                            resource_shortage_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -757,9 +757,9 @@ class ModeBackend:
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
+                    if resource_shortage_count < resource_shortage_max_req_num:
                         req_obj.wait_pause = True
-                        wait_pause_count += 1
+                        resource_shortage_count += 1
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller
