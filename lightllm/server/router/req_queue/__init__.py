@@ -1,15 +1,11 @@
 from .chunked_prefill.impl import ChunkedPrefillQueue
 from .chunked_prefill.beam_impl import ChunkedBeamContinuesBatchQueue
-from .chunked_prefill.impl_for_pd import PDDQueue, PDPQueue
+from .chunked_prefill.impl_for_pd import PDPQueue
 from .dp_base_queue import DpQueue
 
 
 def _get_req_queue_class(args, router, dp_size_in_node: int):
-    # model_rpc 会优先为 PD 节点选择 PD backend，queue 也必须保持
-    # 同样的优先级，避免其他模式开关绕过 Decode 的激进调度。
-    if args.run_mode == "decode":
-        return PDDQueue
-    if args.run_mode == "prefill":
+    if args.run_mode in ["prefill", "decode"]:
         return PDPQueue
 
     if args.diverse_mode:

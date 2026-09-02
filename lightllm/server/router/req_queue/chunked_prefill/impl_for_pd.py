@@ -3,7 +3,6 @@ import numpy as np
 from typing import Tuple
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.server.router.req_queue.chunked_prefill.impl import ChunkedPrefillQueue
 
 
 class PDPQueue(BaseQueue):
@@ -39,7 +38,11 @@ class PDPQueue(BaseQueue):
                             req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                         )
                     else:
-                        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+                        if self.args.run_mode == "decode":
+                            estimated_output_len = self.router.router_statics.ema_req_out_len
+                        else:
+                            estimated_output_len = req.sample_params.max_new_tokens
+                        estimated_peak_token_num += req.input_len + estimated_output_len
 
         if decoding_req_list:
             decoding_req_list.sort(key=lambda x: -x[1])
@@ -94,11 +97,3 @@ class PDPQueue(BaseQueue):
         estimated_peak_token_num = self._caclu_batch_estimated_peak_token_num(current_batch)
 
         return (estimated_peak_token_num, estimated_peak_token_num / self.max_total_tokens)
-
-
-class PDDQueue(ChunkedPrefillQueue):
-    def is_busy(self):
-        return False
-
-    def _can_add_first_router_tokens(self, first_router_need_tokens: int) -> bool:
-        return True

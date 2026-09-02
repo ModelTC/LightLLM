@@ -6,10 +6,7 @@ from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import 
     decode_impl as pd_decode_impl,
 )
 from lightllm.server.router.req_queue import _get_req_queue_class
-from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd import (
-    PDDQueue,
-    PDPQueue,
-)
+from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd import PDPQueue
 
 
 def _make_infer_req(cur_output_len: int, shm_output_len: int):
@@ -78,36 +75,7 @@ def test_pd_decode_capacity_limit_never_extends_original_length():
     assert req.sampling_param.shm_param.max_new_tokens == 3
 
 
-def test_pd_queue_admission_always_uses_aggressive_tuple_estimate():
-    queue = PDDQueue.__new__(PDDQueue)
-    queue.dp_index = 0
-    queue.max_total_tokens = 100
-    queue.running_max_req_size = 8
-    queue.batch_max_tokens = 1
-    queue.cache_len_list = [(20, 10)]
-    queue.router = SimpleNamespace(
-        router_statics=SimpleNamespace(ema_req_out_len=128),
-        shared_token_load=SimpleNamespace(
-            set_estimated_peak_token_count=MagicMock(),
-            set_dynamic_max_load=MagicMock(),
-        ),
-    )
-
-    req = SimpleNamespace(
-        get_tuple_tokens=MagicMock(return_value=(20, 10)),
-        get_first_router_need_tokens=MagicMock(return_value=1024),
-    )
-    admitted, first_router_tokens = queue._can_add_new_req(req, queue.is_busy(), 0)
-
-    assert admitted
-    assert first_router_tokens == 1024
-    req.get_tuple_tokens.assert_called_once_with(False, 128)
-    queue.router.shared_token_load.set_estimated_peak_token_count.assert_called_once_with(
-        60, 0
-    )
-
-
-def test_aggressive_pd_queue_is_only_selected_for_decode_nodes():
+def test_pd_nodes_use_pd_queue():
     base_args = {
         "diverse_mode": False,
         "token_healing_mode": False,
@@ -119,7 +87,26 @@ def test_aggressive_pd_queue_is_only_selected_for_decode_nodes():
     prefill_args = SimpleNamespace(**base_args, run_mode="prefill")
     decode_args = SimpleNamespace(**base_args, run_mode="decode")
 
-    assert (
-        _get_req_queue_class(prefill_args, router=None, dp_size_in_node=1) is PDPQueue
+    assert _get_req_queue_class(prefill_args, router=None, dp_size_in_node=1) is PDPQueue
+    assert _get_req_queue_class(decode_args, router=None, dp_size_in_node=1) is PDPQueue
+
+
+def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length():
+    queue = PDPQueue.__new__(PDPQueue)
+    queue.args = SimpleNamespace(run_mode="decode")
+    queue.dp_index = 0
+    queue.max_total_tokens = 4096
+    queue.router = SimpleNamespace(router_statics=SimpleNamespace(ema_req_out_len=128))
+    queue.is_busy = MagicMock(return_value=False)
+
+    req = SimpleNamespace(
+        input_len=10,
+        sample_params=SimpleNamespace(suggested_dp_index=0, max_new_tokens=1024),
+        is_infer_decode=MagicMock(return_value=False),
     )
-    assert _get_req_queue_class(decode_args, router=None, dp_size_in_node=1) is PDDQueue
+    batch = SimpleNamespace(reqs=[req])
+
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 138
+
+    queue.args.run_mode = "prefill"
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 1034
