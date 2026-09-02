@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.core.objs import SamplingParams
+from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.router.req_queue.base_queue import BaseQueue
+from lightllm.utils.error_utils import ServerBusyError
 
 
 class FakeSharedInt:
@@ -30,6 +32,18 @@ def _manager() -> HttpServerManager:
     manager.shm_req_manager = MagicMock()
     manager.shm_req_manager.async_release_req_index = AsyncMock()
     return manager
+
+
+def test_pd_high_priority_timeout_is_internal_and_defaults_to_zero():
+    sampling_params = SamplingParams()
+    sampling_params.init(
+        None,
+        pd_high_priority_request=True,
+        pd_high_priority_request_time_out_seconds=99,
+    )
+
+    assert sampling_params.pd_high_priority_request is False
+    assert sampling_params.pd_high_priority_request_time_out_seconds == 0
 
 
 def test_shm_req_partial_allocations_are_released_on_failure():
@@ -70,6 +84,73 @@ def test_high_priority_shm_req_allocation_uses_shorter_backoff_even_with_local_l
         assert sleep.await_args_list[0].args[0] == pytest.approx(0.1 * 0.2)
 
     asyncio.run(run())
+
+
+def test_high_priority_shm_req_allocation_uses_master_timeout_with_local_limit():
+    async def run():
+        manager = _manager()
+        manager.pd_node_request_limit_enabled = True
+        manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=None)
+
+        with (
+            patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[100, 161]),
+            pytest.raises(ServerBusyError, match="within 60 seconds"),
+        ):
+            await manager._alloc_shm_req_indexes(
+                1,
+                pd_high_priority_request=True,
+                pd_high_priority_request_time_out_seconds=60,
+            )
+
+    asyncio.run(run())
+
+
+def test_high_priority_shm_req_allocation_does_not_shorten_local_timeout():
+    async def run():
+        manager = _manager()
+        manager.pd_node_request_limit_enabled = True
+        manager.pd_node_shm_req_alloc_timeout_seconds = 80
+        manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=None)
+
+        with (
+            patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[100, 181]),
+            pytest.raises(ServerBusyError, match="within 80 seconds"),
+        ):
+            await manager._alloc_shm_req_indexes(
+                1,
+                pd_high_priority_request=True,
+                pd_high_priority_request_time_out_seconds=60,
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("infer_start_time", "local_timeout_seconds", "high_priority_timeout_seconds", "expected"),
+    [(0, 20, 0, True), (0, 20, 60, True), (0, 80, 60, False), (1, 20, 60, False)],
+)
+def test_high_priority_router_wait_uses_master_timeout(
+    infer_start_time,
+    local_timeout_seconds,
+    high_priority_timeout_seconds,
+    expected,
+):
+    req_status = ReqStatus.__new__(ReqStatus)
+    req_status.group_req_objs = SimpleNamespace(
+        shm_req_objs=[
+            SimpleNamespace(
+                infer_start_time=infer_start_time,
+                router_arrival_time=100,
+                sample_params=SimpleNamespace(
+                    pd_high_priority_request=True,
+                    pd_high_priority_request_time_out_seconds=high_priority_timeout_seconds,
+                ),
+            )
+        ]
+    )
+
+    with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=161):
+        assert req_status.has_timed_out_waiting_for_inference(local_timeout_seconds) is expected
 
 
 def test_pd_high_priority_request_is_inserted_at_router_queue_head():

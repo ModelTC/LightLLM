@@ -18,6 +18,7 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
+    manager.pd_high_priority_request_time_out_seconds = 60
     return manager
 
 
@@ -383,6 +384,48 @@ def test_pd_master_promotes_request_with_high_estimated_cache_hit_rate(
             pass
 
         assert high_priority_request_flags == [expected_high_priority]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_sets_high_priority_timeout():
+    async def run():
+        manager = _manager()
+        manager.pd_high_priority_request_time_out_seconds = 90
+        manager._split_max_new_tokens = MagicMock(return_value=[1])
+        manager.id_gen.generate_id.return_value = 808
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        p_node = MagicMock(
+            dispatched_prompt_chars=0,
+            dispatched_req_num=0,
+        )
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.81))
+        captured_timeout_seconds = []
+
+        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
+            captured_timeout_seconds.append(sampling_params.pd_high_priority_request_time_out_seconds)
+            yield (
+                sampling_params.group_request_id,
+                "x",
+                {"prompt_tokens": 1},
+                FinishStatus(FinishStatus.FINISHED_STOP),
+            )
+
+        manager._wait_to_token_package = wait_to_token_package
+
+        async for _ in manager._generate_one(
+            "prompt",
+            SamplingParams(),
+            MagicMock(),
+            MagicMock(),
+            0,
+            800,
+        ):
+            pass
+
+        assert captured_timeout_seconds == [90]
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 

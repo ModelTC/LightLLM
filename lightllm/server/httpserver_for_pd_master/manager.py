@@ -23,7 +23,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
-from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
+from lightllm.utils.envs_utils import get_pd_high_priority_request_timeout_seconds, get_pd_split_max_new_tokens
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
 
@@ -48,6 +48,9 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
+        # 高优先级请求仍可比普通请求等待更久，但通过请求参数向开启本地限流的
+        # P/D 节点传递有限的等待时间，避免资源异常时永久占用请求链路。
+        self.pd_high_priority_request_time_out_seconds = get_pd_high_priority_request_timeout_seconds()
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -245,6 +248,12 @@ class HttpServerManagerForPDMaster:
                 # 使其优先进入 Router 调度队列，尽快复用已命中的 KV cache。第二段及后续
                 # 分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
                 sampling_params.pd_high_priority_request = iter_index > 0 or estimated_cache_hit_rate > 0.8
+                # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
+                # 本地限流时使用该值，未开启限流时仍保持无限等待。
+                if sampling_params.pd_high_priority_request:
+                    sampling_params.pd_high_priority_request_time_out_seconds = (
+                        self.pd_high_priority_request_time_out_seconds
+                    )
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。

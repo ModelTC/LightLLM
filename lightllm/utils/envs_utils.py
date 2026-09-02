@@ -324,5 +324,11 @@ def get_pd_node_router_wait_timeout_seconds() -> int:
 
 
 @lru_cache(maxsize=None)
+def get_pd_high_priority_request_timeout_seconds() -> int:
+    """PD Master 为高优先级请求设置的等待时间下限，单位为秒。"""
+    return int(os.getenv("LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS", 60))
+
+
+@lru_cache(maxsize=None)
 def get_lightllm_url_pool_maxsize() -> int:
     return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))

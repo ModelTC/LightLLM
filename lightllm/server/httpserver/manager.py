@@ -437,11 +437,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 分段续跑请求仍在 Router 队列中优先调度，同时绕过本地
-            # shm_req 等待超时，避免已经开始执行的请求因临时资源紧张而被中断。
+            # 申请资源并存储。PD 高优先级请求仍以更短的间隔抢占资源；开启本地限流时，
+            # 使用 PD Master 下发的较长超时时间，避免资源异常时一直等待。
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
                 pd_high_priority_request=sampling_params.pd_high_priority_request,
+                pd_high_priority_request_time_out_seconds=sampling_params.pd_high_priority_request_time_out_seconds,
             )
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
@@ -548,17 +549,27 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         return image_tokens, audio_tokens
 
-    async def _alloc_shm_req_indexes(self, req_num: int, pd_high_priority_request: bool = False) -> List[int]:
+    async def _alloc_shm_req_indexes(
+        self,
+        req_num: int,
+        pd_high_priority_request: bool = False,
+        pd_high_priority_request_time_out_seconds: int = 0,
+    ) -> List[int]:
         """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
 
-        未开启本地限流或请求为 PD 高优先级请求时无限等待；普通请求在限流开启时，
-        最多等待 ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 秒。
+        未开启本地限流时无限等待。开启限流后，普通请求使用节点的 shm_req 申请
+        超时时间；高优先级请求取本地超时与 PD Master 下发值中的较大值。
         """
         alloced_req_indexes = []
-        request_limit_applies = self.pd_node_request_limit_enabled and not pd_high_priority_request
-        alloc_deadline = (
-            time.monotonic() + self.pd_node_shm_req_alloc_timeout_seconds if request_limit_applies else None
-        )
+        alloc_timeout_seconds = None
+        if self.pd_node_request_limit_enabled:
+            alloc_timeout_seconds = self.pd_node_shm_req_alloc_timeout_seconds
+            if pd_high_priority_request:
+                alloc_timeout_seconds = max(
+                    alloc_timeout_seconds,
+                    pd_high_priority_request_time_out_seconds,
+                )
+        alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
 
         try:
             while len(alloced_req_indexes) < req_num:
@@ -570,11 +581,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
                         logger.warning(
                             f"{self.args.run_mode} node shm_req allocation timed out after "
-                            f"{self.pd_node_shm_req_alloc_timeout_seconds} seconds"
+                            f"{alloc_timeout_seconds} seconds"
                         )
                         raise ServerBusyError(
                             f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
-                            f"within {self.pd_node_shm_req_alloc_timeout_seconds} seconds"
+                            f"within {alloc_timeout_seconds} seconds"
                         )
                     await asyncio.sleep(sleep_time * sleep_time_factor)
                     sleep_time = min(1, sleep_time * 1.1)
@@ -1104,9 +1115,13 @@ class ReqStatus:
         # 组内任一请求已经进入新 batch，说明整个请求组已经开始执行，不能再按 Router 等待超时清理。
         if any(req.infer_start_time > 0 for req in reqs):
             return False
-        # 高优先级分段续跑请求必须保证可以继续执行，不因 Router 短暂拥塞被清理。
+        # 高优先级请求取本地 Router 超时与 PD Master 下发值中的较大值，既保证
+        # 它比普通请求拥有更充足的等待机会，也避免资源异常时永久滞留。
         if any(req.sample_params.pd_high_priority_request for req in reqs):
-            return False
+            timeout_seconds = max(
+                timeout_seconds,
+                reqs[0].sample_params.pd_high_priority_request_time_out_seconds,
+            )
 
         for req in reqs:
             if req.router_arrival_time > 0 and current_time - req.router_arrival_time >= timeout_seconds:
