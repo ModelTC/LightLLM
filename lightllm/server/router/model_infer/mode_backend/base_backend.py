@@ -694,8 +694,8 @@ class ModeBackend:
         prefill_reqs = []
         decode_reqs = []
 
-        # 单轮最多处理少量因 token 容量不足而无法继续的请求。
-        # 普通 Decode 会暂停请求，PD Decode 会缩短当前分段；避免单轮过度处理。
+        # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
+        # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
@@ -740,17 +740,19 @@ class ModeBackend:
                 else:
                     if wait_pause_count < pause_max_req_num:
                         if self.args.run_mode == "decode":
-                            # overlap 已产生新 token 时，收紧当前分段的输出上限，让请求尽快结束。
-                            if req_obj.cur_output_len > req_obj.shm_req.shm_cur_output_len:
-                                sampling_params = req_obj.sampling_param.shm_param
-                                sampling_params.max_new_tokens = min(
-                                    sampling_params.max_new_tokens, req_obj.cur_output_len
-                                )
-                                wait_pause_count += 1
-                                self.logger.info(
-                                    f"yield running pd decode req_id={req_obj.req_id} "
-                                    f"at output_len={req_obj.cur_output_len} because token memory is insufficient"
-                                )
+                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
+                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
+                            wait_pause_count += 1
+                            if support_overlap:
+                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
+                                req_obj.filter_mark = True
+                            else:
+                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
+                                finished_reqs.append(req_obj)
+                            self.logger.info(
+                                f"force early finish for PD decode req_id={req_obj.req_id} "
+                                f"because token capacity is insufficient"
+                            )
                         else:
                             req_obj.wait_pause = True
                             wait_pause_count += 1

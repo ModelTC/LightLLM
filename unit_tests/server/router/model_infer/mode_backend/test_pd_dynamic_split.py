@@ -18,6 +18,7 @@ def _make_infer_req(cur_output_len: int, shm_output_len: int):
         paused=False,
         infer_aborted=False,
         finish_status=FinishStatus(),
+        cpu_cache_task_status=SimpleNamespace(is_not_started=MagicMock(return_value=True)),
         cur_kv_len=10,
         cur_output_len=cur_output_len,
         shm_req=SimpleNamespace(shm_cur_output_len=shm_output_len),
@@ -29,18 +30,20 @@ def _make_infer_req(cur_output_len: int, shm_output_len: int):
     )
 
 
-def _classify_without_token_capacity(monkeypatch, req):
+def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
+    reqs = req if isinstance(req, list) else [req]
     backend = pd_decode_impl.PDDecodeNode.__new__(pd_decode_impl.PDDecodeNode)
     backend.args = SimpleNamespace(
         enable_cpu_cache=False,
         enable_prefill_decode_mixed=False,
         run_mode="decode",
     )
-    backend.support_overlap = True
+    backend.support_overlap = support_overlap
     backend.is_master_in_dp = True
-    backend.logger = MagicMock()
+    logger = MagicMock()
+    backend.logger = logger
     backend._timer_merge_radix_tree = MagicMock()
-    backend._filter_not_ready_reqs = MagicMock(return_value=[req])
+    backend._filter_not_ready_reqs = MagicMock(return_value=reqs)
     backend._reorder_pd_high_priority_reqs = MagicMock(side_effect=lambda reqs: reqs)
     backend._reorder_long_prefill_reqs = MagicMock(side_effect=lambda reqs: reqs)
 
@@ -51,43 +54,54 @@ def _classify_without_token_capacity(monkeypatch, req):
         "cache_placement_controller",
         SimpleNamespace(set_req_cache_way=MagicMock()),
     )
-    monkeypatch.setattr(infer_context, "filter_reqs", MagicMock())
+    filter_reqs = MagicMock()
+    monkeypatch.setattr(infer_context, "filter_reqs", filter_reqs)
     monkeypatch.setattr(infer_context, "pause_reqs", MagicMock())
 
-    backend._get_classed_reqs(req_ids=[req.req_id])
+    backend._get_classed_reqs(req_ids=[req.req_id for req in reqs])
+    return filter_reqs, logger
 
 
-def test_pd_decode_capacity_yield_only_limits_running_overlap_output(monkeypatch):
+def test_pd_decode_capacity_shortage_is_delayed_for_overlap(monkeypatch):
+    req = _make_infer_req(cur_output_len=5, shm_output_len=4)
 
-    running_req = _make_infer_req(cur_output_len=5, shm_output_len=4)
-    not_running_req = _make_infer_req(cur_output_len=4, shm_output_len=4)
+    filter_reqs, logger = _classify_without_token_capacity(monkeypatch, req, support_overlap=True)
 
-    _classify_without_token_capacity(monkeypatch, running_req)
-    assert running_req.sampling_param.shm_param.max_new_tokens == 5
-    assert not running_req.wait_pause
+    assert req.filter_mark
+    assert req.sampling_param.shm_param.max_new_tokens == 65535
+    assert not req.wait_pause
+    filter_reqs.assert_called_once_with(finished_reqs=[])
+    assert logger.info.call_args.args[0] == (
+        "force early finish for PD decode req_id=1 because token capacity is insufficient"
+    )
 
-    _classify_without_token_capacity(monkeypatch, not_running_req)
-    assert not_running_req.sampling_param.shm_param.max_new_tokens == 65535
-    assert not not_running_req.wait_pause
+    filter_reqs, _ = _classify_without_token_capacity(monkeypatch, req, support_overlap=True)
+    filter_reqs.assert_called_once_with(finished_reqs=[req])
 
 
-def test_pd_decode_capacity_limit_finishes_at_committed_mtp_tail(monkeypatch):
-    req = _make_infer_req(cur_output_len=3, shm_output_len=1)
-    req.stop_sequences = []
-    req.shm_req.input_len = 10
-    req.shm_req.shm_prompt_ids = SimpleNamespace(arr=[0] * 13)
-    req.sampling_param.shm_param.ignore_eos = False
-    req.finish_status = FinishStatus()
-    req._stop_sequences_matched = MagicMock(return_value=False)
+def test_pd_decode_capacity_shortage_is_filtered_without_overlap(monkeypatch):
+    req = _make_infer_req(cur_output_len=5, shm_output_len=4)
 
-    _classify_without_token_capacity(monkeypatch, req)
-    assert req.sampling_param.shm_param.max_new_tokens == 3
+    filter_reqs, logger = _classify_without_token_capacity(monkeypatch, req, support_overlap=False)
 
-    pd_decode_impl.InferReq.update_finish_status(req, eos_ids=[], output_len=2)
-    assert not req.finish_status.is_finished()
+    assert not req.filter_mark
+    assert req.sampling_param.shm_param.max_new_tokens == 65535
+    assert not req.wait_pause
+    filter_reqs.assert_called_once_with(finished_reqs=[req])
+    assert logger.info.call_args.args[0] == (
+        "force early finish for PD decode req_id=1 because token capacity is insufficient"
+    )
 
-    pd_decode_impl.InferReq.update_finish_status(req, eos_ids=[], output_len=3)
-    assert req.finish_status.is_finished_length()
+
+def test_pd_decode_capacity_shortage_only_handles_two_requests_per_iteration(monkeypatch):
+    reqs = [_make_infer_req(cur_output_len=5, shm_output_len=4) for _ in range(3)]
+    for req_id, req in enumerate(reqs, start=1):
+        req.req_id = req_id
+
+    filter_reqs, _ = _classify_without_token_capacity(monkeypatch, reqs, support_overlap=True)
+
+    assert [req.filter_mark for req in reqs] == [True, True, False]
+    filter_reqs.assert_called_once_with(finished_reqs=[])
 
 
 def test_pd_decode_capacity_limit_never_extends_original_length(monkeypatch):
