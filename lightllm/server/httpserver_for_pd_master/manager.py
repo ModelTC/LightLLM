@@ -23,7 +23,10 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
-from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
+from lightllm.utils.envs_utils import (
+    get_pd_master_request_limit_wait_timeout_seconds,
+    get_pd_split_max_new_tokens,
+)
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
 from .qps_recorder import QPSRecorder
@@ -50,8 +53,9 @@ class HttpServerManagerForPDMaster:
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
         # PD Master 统一统计完整请求的 QPS，并据此控制进入请求数；P/D 节点只负责
-        # shm_req 资源申请超时，避免各节点分别探测造成限流判断不一致。
+        # 本地 shm_req 资源申请及 Router 调度等待超时，避免各节点分别探测造成限流判断不一致。
         self.pd_master_request_limit_enabled = args.enable_pd_node_self_request_limit and args.run_mode == "pd_master"
+        self.pd_master_request_limit_wait_timeout_seconds = get_pd_master_request_limit_wait_timeout_seconds()
         self.qps_recorder = QPSRecorder(args)
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
@@ -127,6 +131,32 @@ class HttpServerManagerForPDMaster:
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         return self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
+    async def _wait_for_pd_master_request_slot(self) -> None:
+        """等待 PD Master 动态并发限制放行，超时后拒绝请求。"""
+        if not self.pd_master_request_limit_enabled:
+            return
+
+        wait_timeout_seconds = self.pd_master_request_limit_wait_timeout_seconds
+        deadline = time.monotonic() + wait_timeout_seconds
+        retry_interval_seconds = 2
+        while True:
+            # QPS 尚未形成稳定估算时，以当前所有 Decode 节点声明的并发容量之和作为准入上限。
+            decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
+            max_allowed_request_count = self.qps_recorder.get_max_allowed_request_count(decode_capacity)
+            if self.running_request_count < max_allowed_request_count:
+                return
+
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                logger.warning(
+                    f"PD Master rejects request after waiting {wait_timeout_seconds}s: "
+                    f"running_request_count={self.running_request_count}, "
+                    f"max_allowed_request_count={max_allowed_request_count}"
+                )
+                raise ServerBusyError("PD Master is busy")
+
+            await asyncio.sleep(min(retry_interval_seconds, remaining_time))
+
     async def generate(
         self,
         prompt: Union[str, List[int]],
@@ -134,16 +164,7 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
-        if self.pd_master_request_limit_enabled:
-            # QPS 尚未形成稳定估算时，以当前所有 Decode 节点声明的并发容量之和作为准入上限。
-            decode_capacity = sum(node.start_args["running_max_req_size"] for node in self.pd_manager.decode_nodes)
-            max_allowed_request_count = self.qps_recorder.get_max_allowed_request_count(decode_capacity)
-            if self.running_request_count > max_allowed_request_count:
-                logger.warning(
-                    f"PD Master rejects request before dispatch: running_request_count={self.running_request_count}, "
-                    f"max_allowed_request_count={max_allowed_request_count}"
-                )
-                raise ServerBusyError("PD Master is busy")
+        await self._wait_for_pd_master_request_slot()
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1

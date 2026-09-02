@@ -1,7 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from easydict import EasyDict
@@ -23,6 +23,7 @@ def test_pd_node_self_request_limit_cli_defaults_to_disabled_and_can_be_enabled(
 def test_pd_master_qps_limit_rejects_before_dispatch():
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.pd_master_request_limit_enabled = True
+    manager.pd_master_request_limit_wait_timeout_seconds = 0
     manager.running_request_count = 3
     manager.qps_recorder = MagicMock()
     manager.qps_recorder.get_max_allowed_request_count.return_value = 2
@@ -42,6 +43,27 @@ def test_pd_master_qps_limit_rejects_before_dispatch():
 
     assert manager.running_request_count == 3
     manager.qps_recorder.get_max_allowed_request_count.assert_called_once_with(5)
+
+
+def test_pd_master_qps_limit_retries_until_request_can_enter():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.pd_master_request_limit_enabled = True
+        manager.pd_master_request_limit_wait_timeout_seconds = 15
+        manager.running_request_count = 3
+        manager.qps_recorder = MagicMock()
+        manager.qps_recorder.get_max_allowed_request_count.side_effect = [3, 4]
+        manager.pd_manager = SimpleNamespace(decode_nodes=[SimpleNamespace(start_args={"running_max_req_size": 4})])
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            sleep = AsyncMock()
+            monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.asyncio.sleep", sleep)
+            await manager._wait_for_pd_master_request_slot()
+
+        sleep.assert_awaited_once_with(2)
+        assert manager.qps_recorder.get_max_allowed_request_count.call_count == 2
+
+    asyncio.run(run())
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):

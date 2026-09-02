@@ -339,5 +339,14 @@ def get_pd_request_limit_max_allowed_request_count_seconds() -> int:
 
 
 @lru_cache(maxsize=None)
+def get_pd_master_request_limit_wait_timeout_seconds() -> int:
+    """PD Master 请求超过动态并发上限后的最长等待时间，单位为秒。"""
+    seconds = int(os.getenv("LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS", 15))
+    if seconds < 0:
+        raise ValueError("LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS must be greater than or equal to 0")
+    return seconds
+
+
+@lru_cache(maxsize=None)
 def get_lightllm_url_pool_maxsize() -> int:
     return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))

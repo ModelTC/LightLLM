@@ -90,7 +90,9 @@ PD 分离模式参数
 .. option:: --enable_pd_node_self_request_limit
 
     在 PD Master 上启用基于动态 QPS 的请求准入探测。PD Master 根据最近完成请求计算 QPS，
-    并限制同时进入的完整 PD 请求数；超过上限时直接向客户端返回 HTTP 429。服务启动后，
+    并限制同时进入的完整 PD 请求数。超过上限时每 2 秒重新尝试一次，最长等待时间由
+    ``LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS`` 控制（默认 15 秒）；等待结束后仍然
+    无法进入时向客户端返回 HTTP 429。服务启动后，
     最近完成时间窗口尚未积累满 64 个请求，或 QPS 尚未初始化时，暂时使用所有 Decode 节点
     ``running_max_req_size`` 之和作为并发上限，以便快速积累样本；之后使用
     ``int(QPS * 平均整包时间秒数) + 6``，

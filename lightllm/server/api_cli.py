@@ -72,8 +72,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--enable_pd_node_self_request_limit",
         action="store_true",
         help=(
-            "Enable PD Master admission probing based on dynamically measured QPS; Prefill/Decode nodes "
-            "enforce both shm_req allocation timeout and Router scheduling wait timeout. Default: disabled."
+            "Enable PD Master admission probing based on dynamically measured QPS, with bounded admission retry; "
+            "Prefill/Decode nodes enforce both shm_req allocation timeout and Router scheduling wait timeout. "
+            "Default: disabled."
         ),
     )
     parser.add_argument(
