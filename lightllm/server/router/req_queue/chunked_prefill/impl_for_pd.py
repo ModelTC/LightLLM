@@ -5,7 +5,7 @@ from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 
 
-class PDPQueue(BaseQueue):
+class PDQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
 

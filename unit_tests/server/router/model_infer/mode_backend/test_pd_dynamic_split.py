@@ -7,7 +7,7 @@ from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import 
     decode_impl as pd_decode_impl,
 )
 from lightllm.server.router.req_queue import _get_req_queue_class
-from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd import PDPQueue
+from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd import PDQueue
 
 
 def _make_infer_req(cur_output_len: int, shm_output_len: int):
@@ -110,12 +110,12 @@ def test_pd_nodes_use_pd_queue():
     prefill_args = SimpleNamespace(**base_args, run_mode="prefill")
     decode_args = SimpleNamespace(**base_args, run_mode="decode")
 
-    assert _get_req_queue_class(prefill_args, router=None, dp_size_in_node=1) is PDPQueue
-    assert _get_req_queue_class(decode_args, router=None, dp_size_in_node=1) is PDPQueue
+    assert _get_req_queue_class(prefill_args, router=None, dp_size_in_node=1) is PDQueue
+    assert _get_req_queue_class(decode_args, router=None, dp_size_in_node=1) is PDQueue
 
 
 def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length():
-    queue = PDPQueue.__new__(PDPQueue)
+    queue = PDQueue.__new__(PDQueue)
     queue.args = SimpleNamespace(run_mode="decode")
     queue.dp_index = 0
     queue.max_total_tokens = 4096
