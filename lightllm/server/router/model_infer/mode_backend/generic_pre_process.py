@@ -3,6 +3,9 @@ import numpy as np
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import (
+    can_use_vocab_parallel_topk,
+)
 
 INT64_MAX = torch.iinfo(torch.int64).max
 
@@ -87,6 +90,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
         multimodal_params=batch_multimodal_params,
+        use_vocab_parallel_topk=can_use_vocab_parallel_topk(run_reqs),
     )
 
     return model_input, run_reqs
@@ -160,6 +164,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_shared_radix_node_id=b_shared_radix_node_id,
         is_prefill=False,
         multimodal_params=multimodal_params,
+        use_vocab_parallel_topk=can_use_vocab_parallel_topk(run_reqs),
     )
     return model_input, run_reqs
 
@@ -176,6 +181,9 @@ def overlap_prepare_decode_inputs(req_objs: List[InferReq]):
     model_input1, run_reqs1 = prepare_decode_inputs(
         req_objs=decode_reqs1,
     )
+    use_vocab_parallel_topk = can_use_vocab_parallel_topk(run_reqs0 + run_reqs1)
+    model_input0.use_vocab_parallel_topk = use_vocab_parallel_topk
+    model_input1.use_vocab_parallel_topk = use_vocab_parallel_topk
     return model_input0, run_reqs0, decode_reqs0, model_input1, run_reqs1, decode_reqs1
 
 
@@ -211,6 +219,9 @@ def overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
         req_objs=right_reqs,
         is_chuncked_mode=True,
     )
+    use_vocab_parallel_topk = can_use_vocab_parallel_topk(run_reqs0 + run_reqs1)
+    model_input0.use_vocab_parallel_topk = use_vocab_parallel_topk
+    model_input1.use_vocab_parallel_topk = use_vocab_parallel_topk
     return model_input0, run_reqs0, model_input1, run_reqs1
 
 

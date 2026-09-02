@@ -107,11 +107,13 @@ class ChunkedPrefillBackend(ModeBackend):
     ):
         # 第一阶段: 模型推理
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        if self.prefill_mask_func is not None:
+            model_input.use_vocab_parallel_topk = False
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
-                logits=model_output.logits,
+                model_output=model_output,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -152,10 +154,12 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        if self.decode_mask_func is not None:
+            model_input.use_vocab_parallel_topk = False
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
-                logits=model_output.logits,
+                model_output=model_output,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -191,6 +195,8 @@ class ChunkedPrefillBackend(ModeBackend):
         prefill_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        if self.prefill_mask_func is not None:
+            model_input.use_vocab_parallel_topk = False
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
@@ -200,7 +206,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs_cpu,
                 next_token_ranks_cpu,
             ) = self._sample_and_scatter_token(
-                logits=model_output.logits,
+                model_output=model_output,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -272,11 +278,11 @@ class ChunkedPrefillBackend(ModeBackend):
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
             next_token_ids, next_token_logprobs = sample(
-                model_output.logits,
+                model_output,
                 run_reqs,
                 self.eos_id,
             )
-            next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
+            next_token_ranks = self._get_next_token_ranks(model_output, next_token_ids)
 
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
             mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(

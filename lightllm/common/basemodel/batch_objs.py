@@ -55,6 +55,10 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # The router sets this only when a target-model batch can sample directly
+    # from sparse candidates. Draft models always enable the same output form.
+    use_vocab_parallel_topk: bool = False
+
     def to_cuda(self):
         self.check_input()
 
@@ -200,10 +204,49 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
+    # Sparse vocab-parallel outputs map every candidate column back to its
+    # global token id. None means logits are dense and column indexes are ids.
+    logits_token_ids: Optional[torch.Tensor] = None
+
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
+        if self.logits_token_ids is not None:
+            assert self.logits.ndim == 2
+            assert self.logits_token_ids.shape == self.logits.shape
+            assert self.logits_token_ids.dtype in (torch.int32, torch.int64)
+            assert self.logits_token_ids.device == self.logits.device
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
+        if self.logits_token_ids is not None:
+            self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
         self.mtp_collector.to_no_ref_tensor()
+
+    @property
+    def has_vocab_parallel_logits(self) -> bool:
+        return self.logits_token_ids is not None
+
+    def index_select_logits_rows(self, index: torch.Tensor) -> "ModelOutput":
+        """Select logit rows without dropping their vocabulary metadata."""
+
+        return ModelOutput(
+            logits=self.logits.index_select(0, index),
+            logits_token_ids=(
+                self.logits_token_ids.index_select(0, index) if self.logits_token_ids is not None else None
+            ),
+        )
+
+    @classmethod
+    def concat_logits_rows(cls, outputs: List["ModelOutput"]) -> "ModelOutput":
+        """Concatenate outputs that share the same dense or sparse layout."""
+
+        assert outputs
+        has_vocab_parallel_logits = outputs[0].has_vocab_parallel_logits
+        assert all(output.has_vocab_parallel_logits == has_vocab_parallel_logits for output in outputs)
+        return cls(
+            logits=torch.cat([output.logits for output in outputs], dim=0),
+            logits_token_ids=(
+                torch.cat([output.logits_token_ids for output in outputs], dim=0) if has_vocab_parallel_logits else None
+            ),
+        )

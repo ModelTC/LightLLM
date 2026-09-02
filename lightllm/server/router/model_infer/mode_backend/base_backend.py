@@ -385,12 +385,19 @@ class ModeBackend:
             )
         return next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
-    def _get_next_token_ranks(self, logits: torch.Tensor, next_token_ids: torch.Tensor) -> torch.Tensor:
+    def _get_next_token_ranks(self, model_output: ModelOutput, next_token_ids: torch.Tensor) -> torch.Tensor:
         """计算（或占位）每个 next token 在 vocab 上的 1-based rank（GPU tensor）。
 
         仅 ``--enable_rl`` 时做真实 rank；否则返回 GPU 常量 ``-1``，避免 O(batch * vocab) 比较。
         下游 async_copy 在同样条件下会忽略该返回值。
         """
+        if model_output.has_vocab_parallel_logits:
+            return g_pin_mem_manager.get_const_gpu_tensor(
+                key="next_token_ranks",
+                shape=next_token_ids.shape,
+                fill_value=1 if self.args.enable_rl else -1,
+                dtype=torch.int32,
+            )
         if not self.args.enable_rl:
             return g_pin_mem_manager.get_const_gpu_tensor(
                 key="next_token_ranks",
@@ -398,8 +405,8 @@ class ModeBackend:
                 fill_value=-1,
                 dtype=torch.int32,
             )
-        selected_logits = logits.gather(1, next_token_ids.long().view(-1, 1))
-        return (logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
+        selected_logits = model_output.logits.gather(1, next_token_ids.long().view(-1, 1))
+        return (model_output.logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
 
     def _capture_prompt_logprobs_if_needed(
         self,
@@ -696,7 +703,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -876,17 +882,24 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        return torch.argmax(logits, dim=-1)
+        candidate_indexes = torch.argmax(logits, dim=-1)
+        return self._map_logits_indexes_to_token_ids(model_output, candidate_indexes)
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         logits = model_output.logits
-        probs = torch.softmax(logits, dim=-1)
-        max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
-        return draft_next_token_ids_gpu, max_probs
+        max_probs, candidate_indexes = torch.max(torch.softmax(logits, dim=-1), dim=-1)
+        token_ids = self._map_logits_indexes_to_token_ids(model_output, candidate_indexes)
+        return token_ids, max_probs
+
+    @staticmethod
+    def _map_logits_indexes_to_token_ids(model_output: ModelOutput, candidate_indexes: torch.Tensor):
+        if not model_output.has_vocab_parallel_logits:
+            return candidate_indexes
+        return model_output.logits_token_ids.gather(1, candidate_indexes.long().view(-1, 1)).view(-1).long()
 
     def _sample_and_scatter_token(
         self,
-        logits: torch.Tensor,
+        model_output: ModelOutput,
         b_req_idx: torch.Tensor,
         b_mtp_index: torch.Tensor,
         run_reqs: List[InferReq],
@@ -894,13 +907,14 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
+        logits = model_output.logits
         if mask_func is not None:
+            assert not model_output.has_vocab_parallel_logits, "constrained sampling requires dense logits"
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
 
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
-        next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
+        next_token_ids, next_token_logprobs = sample(model_output, run_reqs, self.eos_id)
+        next_token_ranks = self._get_next_token_ranks(model_output, next_token_ids)
         b_has_out = None
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(

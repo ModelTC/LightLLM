@@ -9,6 +9,9 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_topk import (
+    is_vocab_parallel_topk_enabled,
+)
 from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
@@ -279,6 +282,7 @@ class CudaGraph:
                 b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                use_vocab_parallel_topk=is_vocab_parallel_topk_enabled(),
                 **model._gen_special_model_input(batch_size),
             )
             model_output: ModelOutput = model.forward(model_input)
@@ -340,6 +344,7 @@ class CudaGraph:
                     b_shared_radix_node_id=b_shared_radix_node_id,
                     b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                     multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                    use_vocab_parallel_topk=is_vocab_parallel_topk_enabled(),
                     **model._gen_special_model_input(batch_size),
                 )
                 decode_batches.append(micro_batch)

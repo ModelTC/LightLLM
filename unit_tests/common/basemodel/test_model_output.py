@@ -7,20 +7,36 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 
 
+def test_vocab_parallel_metadata_follows_row_operations():
+    output = ModelOutput(
+        logits=torch.tensor([[8.0, 1.0], [7.0, 2.0], [6.0, 3.0]]),
+        logits_token_ids=torch.tensor([[4, 14], [9, 19], [2, 12]]),
+    )
+
+    selected = output.index_select_logits_rows(torch.tensor([2, 0]))
+    combined = ModelOutput.concat_logits_rows([selected, output.index_select_logits_rows(torch.tensor([1]))])
+
+    torch.testing.assert_close(combined.logits, torch.tensor([[6.0, 3.0], [8.0, 1.0], [7.0, 2.0]]))
+    torch.testing.assert_close(combined.logits_token_ids, torch.tensor([[2, 12], [4, 14], [9, 19]]))
+
+
 def test_decode_unpad_slices_spec_output_with_logits():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(24).view(6, 4),
+        logits_token_ids=torch.arange(100, 124).view(6, 4),
         mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(18).view(6, 3)),
     )
 
     unpadded = model._create_unpad_decode_model_output(output, origin_batch_size=4)
 
     assert unpadded.logits.shape == (4, 4)
+    assert unpadded.logits_token_ids.shape == (4, 4)
     assert unpadded.mtp_collector.spec_hidden.shape == (4, 3)
     # Unpadding returns a shallow output copy and leaves the graph-owned
     # tensors on the original ModelOutput intact.
     assert output.logits.shape == (6, 4)
+    assert output.logits_token_ids.shape == (6, 4)
     assert output.mtp_collector.spec_hidden.shape == (6, 3)
 
 
@@ -28,6 +44,7 @@ def test_prefill_unpad_uses_token_rows_for_spec_hidden():
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = ModelOutput(
         logits=torch.arange(20).view(5, 4),
+        logits_token_ids=torch.arange(100, 120).view(5, 4),
         mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(24).view(8, 3)),
         prompt_logics=torch.arange(32).view(8, 4),
     )
@@ -39,6 +56,7 @@ def test_prefill_unpad_uses_token_rows_for_spec_hidden():
     )
 
     assert unpadded.logits.shape == (3, 4)
+    assert unpadded.logits_token_ids.shape == (3, 4)
     assert unpadded.mtp_collector.spec_hidden.shape == (6, 3)
     assert unpadded.prompt_logics.shape == (6, 4)
 
@@ -94,6 +112,48 @@ def _create_empty_decode_input():
     )
 
 
+def test_infer_state_enables_vocab_parallel_topk_for_draft_or_requested_target(monkeypatch):
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.infer_state_class = basemodel.InferStateInfo
+    model.hidden_collector_prototype = SimpleNamespace(new_instance=lambda: object())
+    model.is_token_healing = False
+    model.return_all_prompt_logics = False
+    model.is_mtp_draft_model = False
+    model.mem_manager = object()
+    model.req_manager = object()
+    model.decode_att_backend = SimpleNamespace(create_att_decode_state=lambda infer_state: None)
+    model.decode_att_backend1 = None
+    monkeypatch.setattr(basemodel.dist_group_manager, "get_group", lambda _: None)
+
+    model_input = _create_empty_decode_input()
+    infer_state = model._create_inferstate(model_input)
+    assert not infer_state.use_vocab_parallel_topk
+
+    model_input.use_vocab_parallel_topk = True
+    infer_state = model._create_inferstate(model_input)
+    assert infer_state.use_vocab_parallel_topk
+
+    model.is_mtp_draft_model = True
+    model_input.use_vocab_parallel_topk = False
+    infer_state = model._create_inferstate(model_input)
+    assert infer_state.use_vocab_parallel_topk
+
+
+def test_cuda_graph_contract_falls_back_for_dense_target_batch(monkeypatch):
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.is_mtp_draft_model = False
+    sparse_input = SimpleNamespace(use_vocab_parallel_topk=True)
+    dense_input = SimpleNamespace(use_vocab_parallel_topk=False)
+
+    monkeypatch.setattr(basemodel, "is_vocab_parallel_topk_enabled", lambda: True)
+    assert model._is_cuda_graph_output_compatible(sparse_input)
+    assert not model._is_cuda_graph_output_compatible(dense_input)
+    assert not model._is_cuda_graph_output_compatible(sparse_input, dense_input)
+
+    model.is_mtp_draft_model = True
+    assert model._is_cuda_graph_output_compatible(dense_input)
+
+
 @torch.no_grad()
 def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
     monkeypatch.setattr(basemodel, "copy_kv_index_to_req", lambda *args: None)
@@ -117,6 +177,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
     ) in execution_configs:
         model = TpPartBaseModel.__new__(TpPartBaseModel)
         model.args = SimpleNamespace(enable_tpsp_mix_mode=enable_tpsp_mix_mode)
+        model.is_mtp_draft_model = False
         model.tp_world_size_ = tp_world_size
         model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=99)
         model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())

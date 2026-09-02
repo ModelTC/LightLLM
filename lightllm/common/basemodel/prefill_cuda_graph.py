@@ -10,6 +10,9 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.post_process.vocab_parallel_topk import (
+    is_vocab_parallel_topk_enabled,
+)
 from .infer_struct import InferStateInfo
 from .cuda_graph import CudaGraph
 
@@ -220,6 +223,7 @@ class PrefillCudaGraph:
                 is_prefill=True,
                 b_prefill_has_output_cpu=[False],
                 multimodal_params=[{"images": [], "audios": []}],
+                use_vocab_parallel_topk=is_vocab_parallel_topk_enabled(),
                 **model._gen_special_model_input(token_num=total_token_num),
             )
             model_output: ModelOutput = model.forward(model_input)
@@ -281,6 +285,7 @@ class PrefillCudaGraph:
                     is_prefill=True,
                     b_prefill_has_output_cpu=[False],
                     multimodal_params=[{"images": [], "audios": []}],
+                    use_vocab_parallel_topk=is_vocab_parallel_topk_enabled(),
                     **model._gen_special_model_input(token_num=total_token_num),
                 )
 

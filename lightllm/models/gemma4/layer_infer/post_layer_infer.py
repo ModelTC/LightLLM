@@ -5,18 +5,16 @@ from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInf
 class Gemma4PostLayerInfer(LlamaPostLayerInfer):
     """
     Same final RMSNorm + tied lm_head path as Llama, with an extra tanh-based
-    logit softcap at the end: logits = softcap * tanh(logits / softcap).
+    transform before sampling: logits = softcap * tanh(logits / softcap).
     """
 
     def __init__(self, network_config):
         super().__init__(network_config)
         self.final_logit_softcapping = float(network_config.get("final_logit_softcapping"))
 
-    def token_forward(self, input_embdings, infer_state, layer_weight):
-        logits = super().token_forward(input_embdings, infer_state, layer_weight)
-        if self.final_logit_softcapping is not None and self.final_logit_softcapping > 0:
-            cap = self.final_logit_softcapping
-            logits = torch.tanh(logits / cap) * cap
-            if infer_state.prompt_logics is not None:
-                infer_state.prompt_logics = torch.tanh(infer_state.prompt_logics / cap) * cap
-        return logits
+    def _apply_logit_postprocessing(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.final_logit_softcapping is None or self.final_logit_softcapping <= 0:
+            return logits
+        cap = self.final_logit_softcapping
+        # The historical path materializes FP32 logits before applying softcap.
+        return torch.tanh(logits.float() / cap) * cap
