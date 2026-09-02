@@ -268,7 +268,7 @@ class HttpServerManagerForPDMaster:
                     request,
                 )
                 prompt_tokens = sys.maxsize  # 因为分段的原因
-                segment_finish_status = FinishStatus()
+                raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
@@ -282,7 +282,6 @@ class HttpServerManagerForPDMaster:
                         p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
                         pending_prefill_load_chars = None
 
-                    segment_finish_status = raw_finish_status
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
                         break
@@ -306,7 +305,7 @@ class HttpServerManagerForPDMaster:
                 await self.remove_req(group_request_id=block_group_request_id)
                 segment_index += 1
                 # 只有 PD Decode 容量不足产生的内部分段需要续跑；其他状态都结束整个请求。
-                if not segment_finish_status.is_finished_pd_decode_capacity():
+                if not raw_finish_status.is_finished_pd_decode_capacity():
                     break
 
         except (ClientDisconnected, BaseException) as e:
