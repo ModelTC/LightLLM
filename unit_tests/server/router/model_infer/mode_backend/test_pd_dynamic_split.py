@@ -31,11 +31,11 @@ def test_pd_decode_capacity_yield_only_limits_running_overlap_output():
     running_req = _make_infer_req(cur_output_len=5, shm_output_len=4)
     not_running_req = _make_infer_req(cur_output_len=4, shm_output_len=4)
 
-    assert backend._handle_decode_alloc_failure(running_req)
+    assert backend._handle_decode_alloc_failure(running_req) == 1
     assert running_req.sampling_param.shm_param.max_new_tokens == 5
     assert not running_req.wait_pause
 
-    assert not backend._handle_decode_alloc_failure(not_running_req)
+    assert backend._handle_decode_alloc_failure(not_running_req) == 0
     assert not_running_req.sampling_param.shm_param.max_new_tokens == 65535
     assert not not_running_req.wait_pause
 
@@ -46,7 +46,7 @@ def test_pd_decode_capacity_yield_preserves_pause_without_overlap():
     req = _make_infer_req(cur_output_len=5, shm_output_len=5)
     req.wait_pause = False
 
-    assert backend._handle_decode_alloc_failure(req)
+    assert backend._handle_decode_alloc_failure(req) == 1
     assert req.wait_pause
 
 
@@ -61,7 +61,7 @@ def test_pd_decode_capacity_limit_finishes_at_committed_mtp_tail():
     req.finish_status = FinishStatus()
     req._stop_sequences_matched = MagicMock(return_value=False)
 
-    assert backend._handle_decode_alloc_failure(req)
+    assert backend._handle_decode_alloc_failure(req) == 1
     assert req.sampling_param.shm_param.max_new_tokens == 3
 
     pd_decode_impl.InferReq.update_finish_status(req, eos_ids=[], output_len=2)
@@ -84,7 +84,7 @@ def test_pd_decode_capacity_limit_never_extends_original_length():
         finish_status=FinishStatus(),
     )
 
-    assert backend._handle_decode_alloc_failure(req)
+    assert backend._handle_decode_alloc_failure(req) == 1
     assert req.sampling_param.shm_param.max_new_tokens == 3
 
 

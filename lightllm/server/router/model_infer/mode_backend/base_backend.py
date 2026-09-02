@@ -739,9 +739,7 @@ class ModeBackend:
                     can_alloc_token_num -= token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
-                        handled = self._handle_decode_alloc_failure(req_obj)
-                        if handled:
-                            wait_pause_count += 1
+                        wait_pause_count += self._handle_decode_alloc_failure(req_obj)
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -805,14 +803,14 @@ class ModeBackend:
 
         return prefill_reqs, decode_reqs
 
-    def _handle_decode_alloc_failure(self, req_obj: InferReq) -> bool:
+    def _handle_decode_alloc_failure(self, req_obj: InferReq) -> int:
         """Handle a decode request that cannot allocate its next token.
 
-        Returns whether this request consumed one slot of the per-iteration
-        shortage handling limit.
+        Returns the number of slots consumed from the per-iteration shortage
+        handling limit.
         """
         req_obj.wait_pause = True
-        return True
+        return 1
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
