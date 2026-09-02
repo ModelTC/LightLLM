@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from easydict import EasyDict
@@ -8,6 +9,7 @@ from easydict import EasyDict
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+from lightllm.utils.error_utils import ServerBusyError
 
 
 def test_pd_node_self_request_limit_cli_defaults_to_disabled_and_can_be_enabled():
@@ -16,6 +18,24 @@ def test_pd_node_self_request_limit_cli_defaults_to_disabled_and_can_be_enabled(
     assert parser.parse_args([]).enable_pd_node_self_request_limit is False
     assert parser.parse_args(["--enable_pd_node_self_request_limit"]).enable_pd_node_self_request_limit is True
     assert StartArgs().enable_pd_node_self_request_limit is False
+
+
+def test_pd_master_qps_limit_rejects_before_dispatch():
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.pd_master_request_limit_enabled = True
+    manager.running_request_count = 3
+    manager.qps_recorder = MagicMock()
+    manager.qps_recorder.get_max_allowed_request_count.return_value = 2
+
+    async def consume_generate():
+        async for _ in manager.generate("prompt", None, None, None):
+            pass
+
+    with pytest.raises(ServerBusyError, match="PD Master is busy"):
+        asyncio.run(consume_generate())
+
+    assert manager.running_request_count == 3
+    manager.qps_recorder.get_max_allowed_request_count.assert_called_once_with()
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
@@ -278,6 +298,7 @@ def test_pd_master_restores_request_count_when_preload_fails():
 
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.running_request_count = 0
+    manager.pd_master_request_limit_enabled = False
 
     async def consume_generate():
         async for _ in manager.generate("prompt", None, FailingMultimodalParams(), None):
@@ -292,6 +313,7 @@ def test_pd_master_restores_request_count_when_preload_fails():
 def test_pd_master_request_count_covers_async_generator_lifecycle():
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.running_request_count = 0
+    manager.pd_master_request_limit_enabled = False
     inner_generator_closed = False
 
     async def fake_generate(prompt, sampling_params, multimodal_params, request):

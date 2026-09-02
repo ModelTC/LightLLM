@@ -72,8 +72,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--enable_pd_node_self_request_limit",
         action="store_true",
         help=(
-            "Allow Prefill and Decode nodes in PD mode to limit the total running request count "
-            "according to the dynamically measured QPS. Default: disabled."
+            "Enable PD Master admission probing based on dynamically measured QPS; Prefill/Decode nodes "
+            "only enforce shm_req allocation timeout. Default: disabled."
         ),
     )
     parser.add_argument(

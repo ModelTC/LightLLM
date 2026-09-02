@@ -91,25 +91,17 @@ PD disaggregation Mode Parameters
 
 .. option:: --enable_pd_node_self_request_limit
 
-    Enable local admission control on Prefill and Decode nodes in PD disaggregation mode. When enabled,
-    each node uses the dynamically measured QPS and its total running request count to decide whether a new request
-    may enter local ``shm_req`` allocation. Once the limit is exceeded, the node rejects new requests through PD Master with HTTP 429. Admitted requests
-    keep waiting for an available ``shm_req`` object without an allocation timeout. While the QPS recorder has completed
-    fewer than ``running_max_req_size`` requests since startup, that base capacity is returned
-    directly so the cold-start phase can quickly collect enough completion samples. Once the cumulative completed request
-    count reaches ``running_max_req_size`` and the first 16-request QPS window is available, the maximum admitted request
-    count becomes ``int(QPS * average whole-request seconds) + 6``. If
-    ``running_max_req_size`` is below 16, the base
-    capacity remains in effect until QPS initialization, preventing an uninitialized zero QPS from reducing the limit
-    prematurely. During steady state, six extra requests are admitted as probing headroom, preventing low traffic or a
-    long idle period from trapping the service at very low concurrency.
-    This duration represents the desired
-    average time range from node admission until the whole request finishes and converts completion QPS into a
-    reasonable in-flight request count. Prefill defaults to 20 seconds because it mainly handles input processing and
-    the first token; Decode defaults to 60 seconds because incremental token generation usually keeps the request active
-    longer. Set ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` to override both node defaults with one
-    explicit value.
-    The option is disabled by default and has no effect in ``normal`` or ``pd_master`` mode.
+    Enable dynamic-QPS admission probing on the PD Master. The PD Master computes QPS from recently completed
+    requests and limits the number of complete PD requests admitted concurrently; requests above the limit receive
+    HTTP 429 directly. During cold start, while completed requests are fewer than ``running_max_req_size`` or the
+    QPS window is not initialized, the base ``running_max_req_size`` is used to collect samples quickly. Afterwards,
+    the limit is ``int(QPS * average whole-request seconds) + 6``; six extra requests provide probing headroom so
+    low traffic does not permanently trap the service at low concurrency. The PD Master measures complete PD
+    requests, so ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` defaults to 60 seconds when unset.
+    Prefill/Decode nodes no longer perform QPS admission. Instead, their HTTP server reports ``Server is busy`` if
+    local ``shm_req`` allocation does not succeed within ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS``
+    (20 seconds by default); PD Master converts this to HTTP 429. The timeout is bypassed when local admission is
+    disabled and for PD high-priority segmented continuation requests, which continue waiting for resources. Disabled by default.
 
 .. option:: --config_server_host
 

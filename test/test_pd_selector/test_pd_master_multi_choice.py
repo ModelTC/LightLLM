@@ -16,6 +16,8 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.id_gen = MagicMock()
     manager.id_gen.generate_id.return_value = 800
     manager.metric_client = MagicMock()
+    manager.pd_master_request_limit_enabled = False
+    manager.qps_recorder = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
     return manager

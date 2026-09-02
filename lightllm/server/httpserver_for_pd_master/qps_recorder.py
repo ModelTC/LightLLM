@@ -3,13 +3,11 @@ from collections import deque
 from threading import Lock
 from typing import Deque, Optional
 
-from lightllm.utils.envs_utils import (
-    get_pd_request_limit_max_allowed_request_count_seconds,
-)
+from lightllm.utils.envs_utils import get_pd_request_limit_max_allowed_request_count_seconds
 
 
 class QPSRecorder:
-    """根据最近完成的请求计算系统动态 QPS。"""
+    """根据最近完成的请求计算 PD Master 的动态 QPS。"""
 
     def __init__(self, args, ema_alpha: float = 0.1):
         if not 0 < ema_alpha <= 1:
@@ -44,22 +42,15 @@ class QPSRecorder:
             return self._qps
 
     def get_max_allowed_request_count(self) -> int:
-        """根据冷启动样本数和动态 QPS 返回最大允许进入请求数。
-
-        服务启动后累计完成的请求数尚未达到 ``running_max_req_size`` 时，直接返回
-        节点的基础运行容量，使冷启动阶段能够快速接收请求并积累足够的 QPS 样本。
-        当 ``running_max_req_size`` 小于 16 时，还需要等待首个完整 QPS 窗口生成，
-        避免在 QPS 尚未初始化时过早切换到仅 6 个探测请求。满足两个条件后，才根据
-        完成 QPS 和平均整包时间估算允许进入的请求数，并额外放行 6 个请求作为
-        探测余量，避免系统在低 QPS 状态下恢复过慢。
-        """
+        """根据冷启动样本数和动态 QPS 返回 PD Master 最大允许进入请求数。"""
         with self._lock:
             finished_request_count = self._finished_request_count
             qps_initialized = self._initialized
         if finished_request_count < self.args.running_max_req_size or not qps_initialized:
             return self.args.running_max_req_size
 
-        return int(self.get_qps() * get_pd_request_limit_max_allowed_request_count_seconds(self.args.run_mode)) + 6
+        # PD Master 统计完整 PD 请求，按统一的平均整包时长配置估算在途请求数。
+        return int(self.get_qps() * get_pd_request_limit_max_allowed_request_count_seconds()) + 6
 
     def _update_qps(self) -> None:
         if len(self._finished_timestamps) < self._finished_timestamps.maxlen:

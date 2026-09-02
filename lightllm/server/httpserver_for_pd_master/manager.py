@@ -26,6 +26,7 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
+from .qps_recorder import QPSRecorder
 
 logger = init_logger(__name__)
 
@@ -48,6 +49,10 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
+        # PD Master 统一统计完整请求的 QPS，并据此控制进入请求数；P/D 节点只负责
+        # shm_req 资源申请超时，避免各节点分别探测造成限流判断不一致。
+        self.pd_master_request_limit_enabled = args.enable_pd_node_self_request_limit and args.run_mode == "pd_master"
+        self.qps_recorder = QPSRecorder(args)
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -129,6 +134,15 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
+        if self.pd_master_request_limit_enabled:
+            max_allowed_request_count = self.qps_recorder.get_max_allowed_request_count()
+            if self.running_request_count > max_allowed_request_count:
+                logger.warning(
+                    f"PD Master rejects request before dispatch: running_request_count={self.running_request_count}, "
+                    f"max_allowed_request_count={max_allowed_request_count}"
+                )
+                raise ServerBusyError("PD Master is busy")
+
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
         if was_idle:
@@ -190,6 +204,7 @@ class HttpServerManagerForPDMaster:
         async for result in self._merge_choice_generators(generators):
             yield result
         self.metric_client.counter_inc("lightllm_request_success")
+        self.qps_recorder.mark_one_req_finish()
         return
 
     async def _generate_one(

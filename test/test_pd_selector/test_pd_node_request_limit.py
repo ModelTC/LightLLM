@@ -6,7 +6,6 @@ import pytest
 
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.utils.error_utils import ServerBusyError
 
 
 class FakeSharedInt:
@@ -20,76 +19,17 @@ class FakeSharedInt:
         self.value = value
 
 
-def _manager(*, running_request_count: int = 0, max_allowed_request_count: int = 1) -> HttpServerManager:
+def _manager() -> HttpServerManager:
     manager = HttpServerManager.__new__(HttpServerManager)
     manager.args = SimpleNamespace(run_mode="decode", running_max_req_size=64)
-    manager.pd_node_request_limit_enabled = True
+    manager.pd_node_request_limit_enabled = False
     manager._run_reqs_count_lock = asyncio.Lock()
-    manager.run_reqs_count_mark = FakeSharedInt(running_request_count)
+    manager.run_reqs_count_mark = FakeSharedInt()
     manager.latest_success_infer_time_mark = FakeSharedInt()
-    manager.qps_recorder = MagicMock()
-    manager.qps_recorder.get_max_allowed_request_count.return_value = max_allowed_request_count
+    manager.pd_node_shm_req_alloc_timeout_seconds = 20
     manager.shm_req_manager = MagicMock()
     manager.shm_req_manager.async_release_req_index = AsyncMock()
     return manager
-
-
-def test_pd_node_rejects_request_when_running_concurrency_exceeds_limit():
-    async def run():
-        manager = _manager(running_request_count=2, max_allowed_request_count=1)
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=7)
-
-        with pytest.raises(ServerBusyError):
-            await manager._alloc_shm_req_indexes(1)
-
-        manager.shm_req_manager.async_alloc_req_index.assert_not_awaited()
-
-    asyncio.run(run())
-
-
-def test_pd_node_allows_request_when_running_concurrency_equals_limit():
-    async def run():
-        manager = _manager(running_request_count=1, max_allowed_request_count=1)
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=7)
-
-        indexes = await manager._alloc_shm_req_indexes(1)
-
-        assert indexes == [7]
-        manager.qps_recorder.get_max_allowed_request_count.assert_called_once_with()
-
-    asyncio.run(run())
-
-
-def test_pd_high_priority_split_continuation_bypasses_running_concurrency_limit():
-    async def run():
-        manager = _manager(running_request_count=2, max_allowed_request_count=1)
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, 7])
-
-        with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()):
-            indexes = await manager._alloc_shm_req_indexes(
-                1,
-                pd_high_priority_request=True,
-            )
-
-        assert indexes == [7]
-        manager.qps_recorder.get_max_allowed_request_count.assert_not_called()
-
-    asyncio.run(run())
-
-
-def test_admitted_request_waits_for_shm_req_without_timeout():
-    async def run():
-        manager = _manager()
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, None, 7])
-
-        with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
-            indexes = await manager._alloc_shm_req_indexes(1)
-
-        assert indexes == [7]
-        assert sleep.await_count == 2
-        manager.shm_req_manager.async_release_req_index.assert_not_awaited()
-
-    asyncio.run(run())
 
 
 def test_shm_req_partial_allocations_are_released_on_failure():
@@ -101,6 +41,33 @@ def test_shm_req_partial_allocations_are_released_on_failure():
             await manager._alloc_shm_req_indexes(2)
 
         manager.shm_req_manager.async_release_req_index.assert_awaited_once_with(3)
+
+    asyncio.run(run())
+
+
+def test_shm_req_allocation_waits_forever_when_local_limit_is_disabled():
+    async def run():
+        manager = _manager()
+        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, None, 3])
+
+        with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
+            assert await manager._alloc_shm_req_indexes(1) == [3]
+
+        assert sleep.await_count == 2
+
+    asyncio.run(run())
+
+
+def test_high_priority_shm_req_allocation_uses_shorter_backoff_even_with_local_limit():
+    async def run():
+        manager = _manager()
+        manager.pd_node_request_limit_enabled = True
+        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, 3])
+
+        with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
+            assert await manager._alloc_shm_req_indexes(1, pd_high_priority_request=True) == [3]
+
+        assert sleep.await_args_list[0].args[0] == pytest.approx(0.1 * 0.2)
 
     asyncio.run(run())
 

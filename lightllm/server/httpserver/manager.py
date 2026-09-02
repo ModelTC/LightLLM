@@ -34,10 +34,9 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
-from .qps_recorder import QPSRecorder
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_pd_node_shm_req_alloc_timeout_seconds, get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
 from rpyc.utils.classic import obtain
@@ -118,15 +117,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
-        # 该开关只对 PD 分离模式的 Prefill/Decode 服务主节点生效。
-        # 多机 TP 的从节点不直接与 PD Master 通信，不能独立拒绝请求。
+        # HTTP server 只负责在本地 shm_req 长时间不可用时快速返回繁忙，PD Master 负责 QPS 准入限流。
+        # 该开关控制 P/D 节点是否启用本地 shm_req 等待超时；多机 TP 从节点不独立拒绝请求。
         self.pd_node_request_limit_enabled: bool = (
             self.args.enable_pd_node_self_request_limit and self.pd_mode.is_P_or_D() and not self.is_multinode_tp_slave
         )
+        self.pd_node_shm_req_alloc_timeout_seconds = get_pd_node_shm_req_alloc_timeout_seconds()
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
-        self.qps_recorder = QPSRecorder(self.args)
         # 有的模型的vocab size 读取tokenizer和config.json中不一致
         self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
 
@@ -429,17 +428,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 #
                 # 这样会缩小 Prefill 节点自身健康检查的覆盖范围：prompt encode、资源上报及 Decode
                 # 资源等待阶段不再计入本地推理健康状态。资源分配异常应由 PD master 侧的运行请求计数、
-                # Decode 节点健康检查和本地准入控制负责监控，不能依赖 Prefill 推理计数判断。
+                # Decode 节点健康检查和本地 shm_req 等待超时负责监控，不能依赖 Prefill 推理计数判断。
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 分段续跑请求作为高优先级请求，可以绕过本地进入并发限制，避免
-            # 已经成功完成首段的用户请求因为下一段暂时无法进入等待流程而被 429 中断；同时它会在 Router 队列中优先调度。
-            if self.pd_node_request_limit_enabled and sampling_params.pd_high_priority_request:
-                logger.info(
-                    f"PD {self.args.run_mode} high-priority request {group_request_id} bypasses the local request "
-                    f"concurrency limit and will wait for {sampling_params.n} shm_req object(s)"
-                )
+            # 申请资源并存储。PD 分段续跑请求仍在 Router 队列中优先调度，同时绕过本地
+            # shm_req 等待超时，避免已经开始执行的请求因临时资源紧张而被中断。
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
                 pd_high_priority_request=sampling_params.pd_high_priority_request,
@@ -549,36 +543,35 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         return image_tokens, audio_tokens
 
-    async def _alloc_shm_req_indexes(
-        self,
-        req_num: int,
-        pd_high_priority_request: bool = False,
-    ) -> List[int]:
-        """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。"""
+    async def _alloc_shm_req_indexes(self, req_num: int, pd_high_priority_request: bool = False) -> List[int]:
+        """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
+
+        未开启本地限流或请求为 PD 高优先级请求时无限等待；普通请求在限流开启时，
+        最多等待 ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 秒。
+        """
         alloced_req_indexes = []
+        request_limit_applies = self.pd_node_request_limit_enabled and not pd_high_priority_request
+        alloc_deadline = (
+            time.monotonic() + self.pd_node_shm_req_alloc_timeout_seconds if request_limit_applies else None
+        )
 
         try:
-            if self.pd_node_request_limit_enabled and not pd_high_priority_request:
-                current_request_count = self.run_reqs_count_mark.get_value()
-                # QPS 记录器累计完成的请求数未达到 running_max_req_size 时返回基础容量，
-                # 使服务冷启动后可以快速积累足够样本；达到后再根据完成 QPS 和节点平均
-                # 整包处理时间估算准入上限，并额外保留 6 个请求的探测余量，避免系统在
-                # 低 QPS 状态下恢复过慢。Prefill 默认按 20 秒估算，Decode 默认按
-                # 60 秒估算，环境变量可以覆盖对应节点的默认时间。
-                max_allowed_request_count = self.qps_recorder.get_max_allowed_request_count()
-                if current_request_count > max_allowed_request_count:
-                    logger.warning(
-                        f"PD {self.args.run_mode} node rejects a request before shm_req allocation: "
-                        f"running_request_count={current_request_count}, "
-                        f"max_allowed_request_count={max_allowed_request_count}"
-                    )
-                    raise ServerBusyError(f"PD {self.args.run_mode} node is busy")
-
             while len(alloced_req_indexes) < req_num:
                 alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
+                sleep_time_factor = 0.2 if pd_high_priority_request else 1
                 sleep_time = 0.1
                 while alloc_req_index is None:
-                    await asyncio.sleep(sleep_time)
+                    if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
+                        logger.warning(
+                            f"{self.args.run_mode} node shm_req allocation timed out after "
+                            f"{self.pd_node_shm_req_alloc_timeout_seconds} seconds"
+                        )
+                        raise ServerBusyError(
+                            f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
+                            f"within {self.pd_node_shm_req_alloc_timeout_seconds} seconds"
+                        )
+                    await asyncio.sleep(sleep_time * sleep_time_factor)
                     sleep_time = min(1, sleep_time * 1.1)
                     alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
                 alloced_req_indexes.append(alloc_req_index)
@@ -775,7 +768,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
-        all_finished_normally = True
 
         while True:
             try:
@@ -822,12 +814,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     # 如果有子请求完成，就更新计数
                     if finish_status.is_finished():
                         unfinished_count -= 1
-                        if finish_status.is_error_finished():
-                            all_finished_normally = False
 
                     if unfinished_count == 0:
-                        if all_finished_normally:
-                            self.qps_recorder.mark_one_req_finish()
                         total_cost_time_ms = (time.time() - start_time) * 1000
                         mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
