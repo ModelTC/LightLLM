@@ -294,7 +294,8 @@ class SamplingParams(ctypes.Structure):
         ("stop_sequences", StopSequenceGroups),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
-        # 仅由 PD Master 为分段续跑请求设置，表示请求需以高优先级插入 Router 调度队列。
+        # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
+        # 以高优先级插入 Router 调度队列。
         ("pd_high_priority_request", ctypes.c_bool),
         ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         # in pd split mode, use to keep the id of pd master

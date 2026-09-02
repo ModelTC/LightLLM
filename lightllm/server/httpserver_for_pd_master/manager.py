@@ -119,7 +119,7 @@ class HttpServerManagerForPDMaster:
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
         return self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
     async def _wait_for_pd_master_request_slot(self) -> None:
@@ -225,7 +225,9 @@ class HttpServerManagerForPDMaster:
         pending_prefill_load_chars = None
 
         try:
-            p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
+            p_node, d_node, estimated_cache_hit_rate = await self.select_p_d_node(
+                prompt, origin_sampling_params, multimodal_params
+            )
             if not p_node or not d_node:
                 logger.error(f"{origin_request_id}: No p_node or d_node found")
                 raise Exception(f"{origin_request_id}: No p_node or d_node found")
@@ -239,10 +241,10 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = block_max_new_tokens
-                # 首段仍然遵守 P/D 节点的本地限流。第二段及后续分段说明该用户请求已经
-                # 成功执行过一段，将其标记为 PD 高优先级请求，便于优先进入 Router 调度队列。
-                # 高优先级请求仍可等待可用 shm_req 对象，避免因临时资源紧张导致分段续跑失败。
-                sampling_params.pd_high_priority_request = iter_index > 0
+                # 预计输入 cache 命中率高于 0.8 时，将首段也标记为 PD 高优先级请求，
+                # 使其优先进入 Router 调度队列，尽快复用已命中的 KV cache。第二段及后续
+                # 分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
+                sampling_params.pd_high_priority_request = iter_index > 0 or estimated_cache_hit_rate > 0.8
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
@@ -273,6 +275,10 @@ class HttpServerManagerForPDMaster:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
                         self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
+                        if not finish_status.is_error_finished():
+                            # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
+                            # 推理或已失败的请求被后续请求误判为可复用 cache。
+                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     if pending_prefill_load_chars is not None:
                         p_node.dispatched_prompt_chars = max(
@@ -909,6 +915,8 @@ class PDManager:
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
-        p_node, d_node = self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)
-        return p_node, d_node
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+        p_node, d_node, estimated_cache_hit_rate = self.selector.select_p_d_node(
+            prompt, sampling_params, multimodal_params
+        )
+        return p_node, d_node, estimated_cache_hit_rate

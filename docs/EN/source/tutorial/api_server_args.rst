@@ -97,7 +97,8 @@ PD disaggregation Mode Parameters
     to inference entry is controlled by ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` (20 seconds by default).
     A timeout reports ``Server is busy``; a request that has entered the Router but not inference is proactively
     marked aborted, and PD Master converts this to HTTP 429. The timeout is bypassed when local admission is
-    disabled and for PD high-priority segmented continuation requests, which continue waiting for resources. Disabled by default.
+    disabled and for PD high-priority requests (segmented continuation requests or requests whose estimated input
+    cache hit rate is above 0.8), which continue waiting for resources. Disabled by default.
 
 .. option:: --config_server_host
 
