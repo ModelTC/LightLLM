@@ -198,18 +198,32 @@ def test_prefill_is_counted_after_decode_assignment_and_unregistered_on_followin
     asyncio.run(run())
 
 
-def test_httpserver_returns_busy_when_shm_req_allocation_times_out():
+@pytest.mark.parametrize("mode", [NodeRole.P, NodeRole.D])
+def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
     async def run():
-        manager = _make_manager(NodeRole.D)
+        manager = _make_manager(mode)
         manager.pd_node_request_limit_enabled = True
         manager.shm_req_manager = SimpleNamespace(
             async_alloc_req_index=AsyncMock(return_value=None),
             async_release_req_index=AsyncMock(),
         )
 
+        websocket = AsyncMock() if mode == NodeRole.P else None
+        pd_event = None
+        if mode == NodeRole.P:
+            pd_event = asyncio.Event()
+            pd_event.decode_node_info = SimpleNamespace(ready_kv_len=1)
+            pd_event.set()
+
         with patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[0, 21]):
-            with pytest.raises(ServerBusyError, match="PD decode node is busy"):
-                await _drain_generate(manager, _sampling_params(), _multimodal_params())
+            with pytest.raises(ServerBusyError, match=f"PD {mode.value} node is busy"):
+                await _drain_generate(
+                    manager,
+                    _sampling_params(),
+                    _multimodal_params(),
+                    websocket,
+                    pd_event,
+                )
 
         manager.shm_req_manager.async_alloc_req_index.assert_awaited_once()
         manager.shm_req_manager.async_release_req_index.assert_not_awaited()
@@ -219,9 +233,10 @@ def test_httpserver_returns_busy_when_shm_req_allocation_times_out():
     asyncio.run(run())
 
 
-def test_httpserver_returns_busy_while_first_token_request_waits_in_router():
+@pytest.mark.parametrize("mode", [NodeRole.P, NodeRole.D])
+def test_pd_node_returns_busy_while_first_token_request_waits_in_router(mode):
     async def run():
-        manager = _make_manager(NodeRole.D)
+        manager = _make_manager(mode)
         manager.pd_node_request_limit_enabled = True
         req = SimpleNamespace(
             request_id=123,

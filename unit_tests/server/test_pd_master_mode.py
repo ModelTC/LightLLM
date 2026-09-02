@@ -24,7 +24,8 @@ def test_pd_master_qps_limit_rejects_before_dispatch():
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.pd_master_request_limit_enabled = True
     manager.pd_master_request_limit_wait_timeout_seconds = 0
-    manager.running_request_count = 3
+    # 当前在途数等于上限时也不能继续放行，避免实际并发突破准入上限。
+    manager.running_request_count = 2
     manager.qps_recorder = MagicMock()
     manager.qps_recorder.get_max_allowed_request_count.return_value = 2
     manager.pd_manager = SimpleNamespace(
@@ -41,7 +42,7 @@ def test_pd_master_qps_limit_rejects_before_dispatch():
     with pytest.raises(ServerBusyError, match="PD Master is busy"):
         asyncio.run(consume_generate())
 
-    assert manager.running_request_count == 3
+    assert manager.running_request_count == 2
     manager.qps_recorder.get_max_allowed_request_count.assert_called_once_with(5)
 
 
@@ -64,6 +65,43 @@ def test_pd_master_qps_limit_retries_until_request_can_enter():
         assert manager.qps_recorder.get_max_allowed_request_count.call_count == 2
 
     asyncio.run(run())
+
+
+def test_pd_master_qps_limit_retries_until_timeout_then_rejects():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.pd_master_request_limit_enabled = True
+        manager.pd_master_request_limit_wait_timeout_seconds = 3
+        manager.running_request_count = 4
+        manager.qps_recorder = MagicMock()
+        manager.qps_recorder.get_max_allowed_request_count.return_value = 4
+        manager.pd_manager = SimpleNamespace(decode_nodes=[SimpleNamespace(start_args={"running_max_req_size": 4})])
+
+        monotonic_values = iter([0, 0, 2, 3])
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            sleep = AsyncMock()
+            monkeypatch.setattr(
+                "lightllm.server.httpserver_for_pd_master.manager.time.monotonic",
+                lambda: next(monotonic_values),
+            )
+            monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.asyncio.sleep", sleep)
+            with pytest.raises(ServerBusyError, match="PD Master is busy"):
+                await manager._wait_for_pd_master_request_slot()
+
+        assert [call.args[0] for call in sleep.await_args_list] == [2, 1]
+        assert manager.qps_recorder.get_max_allowed_request_count.call_count == 3
+
+    asyncio.run(run())
+
+
+def test_pd_master_qps_limit_disabled_does_not_query_capacity():
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.pd_master_request_limit_enabled = False
+    manager.qps_recorder = MagicMock()
+
+    asyncio.run(manager._wait_for_pd_master_request_slot())
+
+    manager.qps_recorder.get_max_allowed_request_count.assert_not_called()
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
