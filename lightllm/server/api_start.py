@@ -84,10 +84,10 @@ def _launch_subprocesses(args: StartArgs):
 
     # 调度参数的自动设置, 人工设置则听人工的
     if args.router_token_ratio is None:
-        if args.run_mode in ["normal"]:
+        if args.run_mode in ["normal", "decode"]:
             args.router_token_ratio = 0.85
         else:
-            # pd 分离模式下，不开启高级调度
+            # PD 分离模式下，prefill 节点不开启高级调度
             args.router_token_ratio = 0.0
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
