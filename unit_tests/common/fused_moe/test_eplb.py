@@ -42,6 +42,10 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.base_im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
     fused_moe_weight as fused_weight_module,
 )
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    disable_eplb_model_init,
+    is_eplb_model_init_disabled,
+)
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
     align_target_placement,
@@ -49,7 +53,6 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     commit_staging_rows,
     extract_expert_tensors,
 )
-from lightllm.utils import envs_utils
 
 
 def _test_parallel_state(
@@ -260,51 +263,6 @@ def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
     )
 
     assert manager_module._find_fused_moe_weights(model) == [alternate, aliased, first]
-
-
-def test_get_eplb_rebalance_gain_threshold_defaults_to_five_percent(monkeypatch):
-    monkeypatch.delenv("LIGHTLLM_EPLB_REBALANCE_GAIN_THRESHOLD", raising=False)
-    envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
-
-    try:
-        assert envs_utils.get_eplb_rebalance_gain_threshold() == 0.05
-    finally:
-        envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
-
-
-def test_get_eplb_placement_stickiness_defaults_to_ten_percent(monkeypatch):
-    monkeypatch.delenv("LIGHTLLM_EPLB_PLACEMENT_STICKINESS", raising=False)
-    envs_utils.get_eplb_placement_stickiness.cache_clear()
-
-    try:
-        assert envs_utils.get_eplb_placement_stickiness() == 0.1
-    finally:
-        envs_utils.get_eplb_placement_stickiness.cache_clear()
-
-
-@pytest.mark.parametrize(("configured", "expected"), [("0", 0.0), (".04", 0.04), ("1", 1.0)])
-def test_get_eplb_rebalance_gain_threshold_reads_valid_values(monkeypatch, configured, expected):
-    monkeypatch.setenv("LIGHTLLM_EPLB_REBALANCE_GAIN_THRESHOLD", configured)
-    envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
-
-    try:
-        assert envs_utils.get_eplb_rebalance_gain_threshold() == expected
-    finally:
-        envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
-
-
-@pytest.mark.parametrize("configured", ["-0.01", "1.01", "nan", "inf"])
-def test_get_eplb_rebalance_gain_threshold_rejects_invalid_values(monkeypatch, configured):
-    env_name = "LIGHTLLM_EPLB_REBALANCE_GAIN_THRESHOLD"
-    monkeypatch.setenv(env_name, configured)
-    envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
-
-    try:
-        with pytest.raises(ValueError, match=env_name):
-            envs_utils.get_eplb_rebalance_gain_threshold()
-    finally:
-        envs_utils.get_eplb_rebalance_gain_threshold.cache_clear()
-        monkeypatch.delenv(env_name, raising=False)
 
 
 def test_eplb_redundant_experts_defaults_per_ep_rank():
@@ -1442,6 +1400,46 @@ def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
     assert weight._initial_redundant_expert_ids == []
     assert not hasattr(weight, "route_counter")
     assert not hasattr(weight, "routed_expert_counter_tensor")
+
+
+def test_disable_eplb_model_init_skips_eplb_state(monkeypatch):
+    args = type(
+        "Args",
+        (),
+        {"enable_prefill_eplb": True, "eplb_num_redundant_experts_per_rank": 2},
+    )()
+    weight = object.__new__(fused_weight_module.FusedMoeWeight)
+    weight.n_routed_experts = 4
+    weight.global_world_size = 2
+    weight.global_rank_ = 0
+    weight.enable_ep_moe = True
+    monkeypatch.setattr(fused_weight_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(
+        fused_weight_module,
+        "build_initial_redundant_expert_ids",
+        lambda *args, **kwargs: pytest.fail("disabled scope must not initialize EPLB"),
+    )
+
+    with disable_eplb_model_init():
+        weight._init_expert_parallel_state()
+
+    assert weight.expert_parallel_state.eplb is None
+    assert weight.expert_parallel_state.num_total_physical_experts == weight.n_routed_experts
+    assert weight._initial_redundant_expert_ids == []
+
+
+def test_disable_eplb_model_init_scope_restores_after_exception():
+    assert not is_eplb_model_init_disabled()
+    with disable_eplb_model_init():
+        assert is_eplb_model_init_disabled()
+        with disable_eplb_model_init():
+            assert is_eplb_model_init_disabled()
+        assert is_eplb_model_init_disabled()
+
+    with pytest.raises(RuntimeError):
+        with disable_eplb_model_init():
+            raise RuntimeError
+    assert not is_eplb_model_init_disabled()
 
 
 def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):

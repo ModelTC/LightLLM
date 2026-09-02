@@ -52,6 +52,9 @@ from lightllm.server.multi_level_kv_cache import (
 )
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    disable_eplb_model_init,
+)
 
 
 class ModeBackend:
@@ -355,7 +358,9 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
-            self.draft_models.append(draft_model_class(draft_model_kvargs))
+            with disable_eplb_model_init():
+                draft_model = draft_model_class(draft_model_kvargs)
+            self.draft_models.append(draft_model)
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return
