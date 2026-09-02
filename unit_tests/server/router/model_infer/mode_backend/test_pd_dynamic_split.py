@@ -188,6 +188,13 @@ def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length():
     assert queue._caclu_batch_estimated_peak_token_num(batch) == 138
     assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 138, 1)
 
+    # 接近上下文上限的请求可能只剩很少输出额度，估算值不能超过请求自身的 max_new_tokens，
+    # 否则本来能够运行的请求会因为 EMA 偏大而永久滞留在 Decode 等待队列。
+    req.sample_params.max_new_tokens = 20
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 30
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 30, 1)
+
+    req.sample_params.max_new_tokens = 1024
     queue.args.run_mode = "prefill"
     assert queue._caclu_batch_estimated_peak_token_num(batch) == 1034
     assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 1034, 1)
