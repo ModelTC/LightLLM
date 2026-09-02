@@ -166,8 +166,6 @@ PD 分离模式参数
 .. option:: --running_max_req_size
 
     同时进行前向推理的最大请求数量，默认为 ``1000``
-    在 PD 分离模式的 Decode 节点上，该限制仅在各节点本地生效；
-    PD Master 不会汇总各 Decode 节点的值作为全局请求准入上限。
 
 .. option:: --max_req_total_len
 
