@@ -12,6 +12,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
     EPLBState,
     ExpertParallelState,
+    is_eplb_model_init_disabled,
 )
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
@@ -93,7 +94,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self._initial_redundant_expert_ids = []
         self._initial_redundant_expert_idx_to_local_idx = {}
         eplb = None
-        if args.enable_prefill_eplb:
+        if args.enable_prefill_eplb and not is_eplb_model_init_disabled():
             num_redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
             all_initial_ids = build_initial_redundant_expert_ids(
                 self.n_routed_experts,
