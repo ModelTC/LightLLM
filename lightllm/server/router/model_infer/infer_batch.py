@@ -719,6 +719,11 @@ class InferReq:
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
         self.multimodal_params = self.multimodal_params.to_dict()
+        self.image_block_spans = [
+            (image["block_start_idx"], image["block_end_idx"])
+            for image in self.multimodal_params["images"]
+            if image["block_start_idx"] is not None
+        ]
         self.shared_kv_node: Union[TreeNode, LinearAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
@@ -740,6 +745,16 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
+            # DSV4 prompt cache may reclaim earlier SWA pages, so an image-internal hit must be recomputed.
+            if g_infer_context.is_deepseek_v4 and self.image_block_spans:
+                while True:
+                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
+                    for image_start, image_end in self.image_block_spans:
+                        if image_start < matched_len < image_end:
+                            key = key[:image_start]
+                            break
+                    else:
+                        break
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
                 self.shared_kv_node = share_node
@@ -922,10 +937,17 @@ class InferReq:
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
-    def get_chuncked_input_token_ids(self):
+    def _get_chunked_input_end(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
+        for image_start, image_end in self.image_block_spans:
+            if image_start < chunked_end < image_end:
+                chunked_end = image_start if chunked_start < image_start else image_end
+                break
+        return chunked_end
+
+    def get_chuncked_input_token_ids(self):
+        return self.shm_req.shm_prompt_ids.arr[0 : self._get_chunked_input_end()]
 
     def get_chuncked_input_token_ids_for_linear_att(self):
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
@@ -943,9 +965,7 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0:end]
 
     def get_chuncked_input_token_len(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        return chunked_end
+        return self._get_chunked_input_end()
 
     def get_chuncked_input_token_len_for_linear_att(self):
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
@@ -1066,9 +1086,13 @@ class InferReq:
         # C4/C128 accumulate across recovery chunks; only SWA is evicted chunk by chunk.
         req_manager: DeepseekV4ReqManager = g_infer_context.req_manager
         prompt_cache_page_size = req_manager.get_prompt_cache_page_size()
+        max_prefill_token_num = max(
+            self.args.chunked_prefill_size,
+            max((image_end - image_start for image_start, image_end in self.image_block_spans), default=0),
+        )
         peak_token_num = min(
             self.get_cur_total_len(),
-            self.args.chunked_prefill_size + int(req_manager.sliding_window) + 2 * prompt_cache_page_size,
+            max_prefill_token_num + int(req_manager.sliding_window) + 2 * prompt_cache_page_size,
         )
         swa_page_num = (peak_token_num + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
         return swa_page_num, c4_page_num, c128_slot_num

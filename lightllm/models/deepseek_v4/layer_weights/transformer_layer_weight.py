@@ -46,6 +46,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self.has_compressor = self.compress_ratio != 0
         self.has_indexer = self.compress_ratio == 4
         self.is_hash = self.layer_num_ < self.num_hash_layers
+        self.has_vision = cfg.get("vision_n_layers", 0) > 0
         assert self.n_heads % self.tp_world_size_ == 0
         assert self.o_groups % self.tp_world_size_ == 0
         self.prefix = f"layers.{self.layer_num_}"
@@ -212,6 +213,10 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         else:
             self.gate_bias_ = ParameterWeight(
                 weight_name=f"{p}.gate.bias", data_type=torch.float32, weight_shape=(self.n_routed_experts,)
+            )
+        if self.has_vision:
+            self.gate_bias_vl_ = ParameterWeight(
+                weight_name=f"{p}.gate.bias_vl", data_type=torch.float32, weight_shape=(self.n_routed_experts,)
             )
         # shared expert (dense, bf16 after de-quant): w1=gate, w3=up fused (row), w2=down (col).
         # Named gate_up_proj/down_proj so the inherited Llama `_ffn_tp` (fused gate_up matmul +

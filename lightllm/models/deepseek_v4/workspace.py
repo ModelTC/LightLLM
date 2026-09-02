@@ -7,13 +7,14 @@ class DeepseekV4Workspace:
         self.token_capacity = int(model.batch_max_tokens)
         self.sliding_window = int(model.config["sliding_window"])
         args = get_env_start_args()
-        self.swa_capacity = self.sliding_window
+        self.vision_swa_width = self.sliding_window + int(model.config.get("vision_max_n_token", 0))
+        self.swa_capacity = self.vision_swa_width
         if args.mtp_mode == "dspark":
             dspark_width = self.sliding_window + int(args.mtp_step)
             # FlashMLA sparse decode requires the physical top-k width to be block aligned.
             # 128 covers both supported padded Q-head configurations; swa_lengths keeps
             # the actual number of visible history + draft-block entries.
-            self.swa_capacity = ((dspark_width + 127) // 128) * 128
+            self.swa_capacity = max(self.swa_capacity, ((dspark_width + 127) // 128) * 128)
         self.index_topk = int(model.config["index_topk"])
         self.c128_cap = self.compress_cap(model.max_seq_length, 128)
         overlap = args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap

@@ -9,7 +9,6 @@ from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import D
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.utils.vllm_utils import vllm_ops
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
 from .compressor import fused_compress as fused_compress_op
 from .compressor import apply_ape
@@ -17,6 +16,7 @@ from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
 import deep_gemm
 from lightllm.models.deepseek_v4.triton_kernel.topk_transform import topk_transform_512
+from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 
 
 _C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
@@ -38,6 +38,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.hc_eps = network_config["hc_eps"]
         self.compress_ratio = network_config["compress_ratios"][layer_num]
         self.is_hash = layer_num < network_config["num_hash_layers"]
+        self.has_vision = network_config.get("vision_n_layers", 0) > 0
+        self.vocab_size = network_config["vocab_size"]
         self.is_last_layer = layer_num == network_config["n_layer"] - 1
         # complex64 rope table for this layer's variant (sliding / compressed); set by
         # DeepseekV4TpPartModel._init_to_get_rotary once the tables are built. The full compress
@@ -567,8 +569,10 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     ):
         M = logits.shape[0]
         bias = None
+        bias_vl = None
         input_tokens = None
         hash_indices_table = None
+        image_token_start = 0
         indices_dtype = torch.int64
         if self.is_hash:
             hash_indices_table = layer_weight.gate_tid2eid_.weight
@@ -576,20 +580,24 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             input_tokens = infer_state.input_ids.to(dtype=indices_dtype)
         else:
             bias = layer_weight.gate_bias_.weight
+        if self.has_vision and infer_state.is_prefill:
+            bias_vl = layer_weight.gate_bias_vl_.weight
+            image_token_start = self.vocab_size
+            if input_tokens is None:
+                input_tokens = infer_state.input_ids
 
         weights = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.float32, device=logits.device)
         indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=indices_dtype, device=logits.device)
-        token_expert_indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.int32, device=logits.device)
-        vllm_ops.topk_hash_softplus_sqrt(
+        topk_softplus_sqrt(
             weights,
             indices,
-            token_expert_indices,
             logits,
-            True,
             self.routed_scaling_factor,
             bias,
             input_tokens,
             hash_indices_table,
+            bias_vl,
+            image_token_start,
         )
         return weights, indices
 

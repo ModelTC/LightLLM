@@ -388,6 +388,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
             await self._log_req_header(request_headers, group_request_id)
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            for image in multimodal_params.images:
+                if image.block_start_idx is not None:
+                    block_token_num = image.block_end_idx - image.block_start_idx
+                    if block_token_num > self.args.batch_max_tokens:
+                        raise ValueError(
+                            f"image prefill block token count {block_token_num} exceeds "
+                            f"batch_max_tokens={self.args.batch_max_tokens}; increase --batch_max_tokens"
+                        )
             self._log_stage_timing(
                 group_request_id,
                 start_time,

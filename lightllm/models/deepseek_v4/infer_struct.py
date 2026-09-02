@@ -23,6 +23,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_sparse_req_idx = None
         self.dsv4_swa_indices = None
         self.dsv4_swa_lengths = None
+        self.dsv4_image_left = None
+        self.dsv4_image_right = None
         self.dsv4_c128_indices = None
         self.dsv4_c128_lengths = None
         self.dsv4_workspace = None
@@ -63,11 +65,35 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             self.dsv4_sparse_req_idx = self.b_req_idx
             self._dsv4_token_to_batch_idx = None
         # Sliding-window indices are layer-independent, so build them once into the model workspace.
-        from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import build_swa_index
+        from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import (
+            build_image_visibility,
+            build_swa_index,
+        )
 
         workspace = model.dsv4_workspace
         self.dsv4_workspace = workspace
-        self.dsv4_swa_indices, self.dsv4_swa_lengths = workspace.swa(self.microbatch_index, pos.numel())
+        has_vision = model.has_vision
+        swa_width = workspace.vision_swa_width if has_vision and self.is_prefill else workspace.sliding_window
+        self.dsv4_swa_indices, self.dsv4_swa_lengths = workspace.swa(
+            self.microbatch_index, pos.numel(), width=swa_width
+        )
+        if has_vision and self.is_prefill:
+            self.dsv4_image_left = torch.zeros_like(pos, dtype=torch.int32)
+            self.dsv4_image_right = torch.zeros_like(pos, dtype=torch.int32)
+            image_spans = []
+            for batch_id, params in enumerate(self.multimodal_params):
+                for image in params["images"]:
+                    # start_idx points at IMAGE_START; token_num also includes three canonical alignment slots.
+                    image_spans.append((batch_id, image["start_idx"], image["token_num"] - 3))
+            if image_spans:
+                build_image_visibility(
+                    image_spans=torch.tensor(image_spans, dtype=torch.int32).cuda(non_blocking=True),
+                    b_q_start_loc=self.b_q_start_loc,
+                    b_ready_cache_len=self.b_ready_cache_len,
+                    b_q_seq_len=self.b_q_seq_len,
+                    image_left=self.dsv4_image_left,
+                    image_right=self.dsv4_image_right,
+                )
         self.dsv4_swa_indices, self.dsv4_swa_lengths = build_swa_index(
             req_idx=self.dsv4_sparse_req_idx,
             positions=self.position_ids,
@@ -75,6 +101,9 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             full_to_swa_indexs=self.mem_manager.full_to_swa_indexs,
             swa_index=self.dsv4_swa_indices,
             swa_length=self.dsv4_swa_lengths,
+            window=workspace.sliding_window,
+            image_left=self.dsv4_image_left,
+            image_right=self.dsv4_image_right,
         )
         from lightllm.models.deepseek_v4.triton_kernel.build_compress_index_dsv4 import build_compress_index
 

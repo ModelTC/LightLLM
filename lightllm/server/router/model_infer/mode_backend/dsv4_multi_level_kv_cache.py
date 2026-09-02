@@ -243,6 +243,14 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
             session.closing = True
             self._try_release_dsv4_session(session)
 
+    @staticmethod
+    def _get_image_safe_load_end(req: InferReq, loaded_start: int, load_end: int, page_size: int) -> int:
+        """Move an image-internal CPU resume point before that image."""
+        for image_start, image_end in reversed(req.image_block_spans):
+            if image_start < load_end < image_end:
+                load_end = image_start // page_size * page_size
+        return load_end if load_end > loaded_start else 0
+
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
         is_master_in_dp = self.backend.is_master_in_dp
@@ -282,6 +290,7 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                         c4_capacity,
                         c128_capacity,
                     )
+                    loadable_end = self._get_image_safe_load_end(req, gpu_kv_len, loadable_end, layout.token_page_size)
                     if loadable_end != 0:
                         token_num = loadable_end - gpu_kv_len
                         full_need = token_num
@@ -304,6 +313,9 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                             int(mem_manager.swa_page_allocator.can_use_mem_size),
                             int(mem_manager.c4_page_allocator.can_use_mem_size) if mem_manager.n_c4 else 0,
                             int(mem_manager.c128_allocator.can_use_mem_size) if mem_manager.n_c128 else 0,
+                        )
+                        loadable_end = self._get_image_safe_load_end(
+                            req, gpu_kv_len, loadable_end, layout.token_page_size
                         )
                         if loadable_end != 0:
                             loaded_end = loadable_end

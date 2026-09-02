@@ -54,6 +54,7 @@ logger = init_logger(__name__)
 class DeepseekV4TpPartModel(LlamaTpPartModel):
     req_manager: DeepseekV4ReqManager
     mem_manager: DeepseekV4MemoryManager
+    has_vision = False
 
     pre_and_post_weight_class = DeepseekV4PreAndPostLayerWeight
     transformer_weight_class = DeepseekV4TransformerLayerWeight
@@ -346,6 +347,15 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return
 
 
+@ModelRegistry(
+    "deepseek_v4",
+    is_multimodal=True,
+    condition=lambda cfg: cfg.get("vision_n_layers", 0) > 0,
+)
+class DeepseekV4VisionTpPartModel(DeepseekV4TpPartModel):
+    has_vision = True
+
+
 class DeepSeekV4Tokenizer:
     """Tokenizer wrapper for DeepSeek-V4's Python prompt encoding."""
 
@@ -354,9 +364,12 @@ class DeepSeekV4Tokenizer:
     # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
     supports_thinking = True
 
-    def __init__(self, tokenizer, model_dir):
+    def __init__(self, tokenizer, model_dir, model_config=None):
         self.tokenizer = tokenizer
         self.model_dir = model_dir
+        self.model_config = {} if model_config is None else model_config
+        self.has_vision = self.model_config.get("vision_n_layers", 0) > 0
+        self.image_token_id = tokenizer.convert_tokens_to_ids("<｜deepseek_image｜>") if self.has_vision else None
         self._encoding_module = None
         self._added_vocab = None
 
@@ -371,6 +384,58 @@ class DeepSeekV4Tokenizer:
         if self._added_vocab is None:
             self._added_vocab = self.tokenizer.get_added_vocab()
         return self._added_vocab
+
+    def init_imageitem_extral_params(self, img, multi_params, sampling_params):
+        return
+
+    def get_image_token_length(self, img):
+        from lightllm.models.deepseek_v4.image_processor import get_image_grid
+
+        cfg = self.model_config
+        _, _, _, _, token_num = get_image_grid(
+            img.image_h,
+            img.image_w,
+            cfg["vision_patch_size"],
+            cfg["vision_downsample_ratio"],
+            cfg["vision_max_n_token"],
+            cfg["vision_min_pixels"],
+            cfg.get("vision_max_wh_ratio"),
+        )
+        return token_num
+
+    def encode(self, prompt, multimodal_params=None, **kwargs):
+        if isinstance(prompt, str):
+            origin_ids = self.tokenizer.encode(prompt, **kwargs)
+        elif isinstance(prompt, list):
+            origin_ids = prompt
+        else:
+            raise ValueError(f"Unsupported prompt type: {type(prompt)}")
+
+        images = [] if multimodal_params is None else multimodal_params.images
+        if not images:
+            return origin_ids
+
+        placeholder_count = sum(token_id == self.image_token_id for token_id in origin_ids)
+        if placeholder_count != len(images):
+            raise ValueError(f"invalid image placeholder count: {placeholder_count} vs {len(images)}")
+
+        input_ids = []
+        image_index = 0
+        for token_id in origin_ids:
+            if token_id != self.image_token_id:
+                input_ids.append(token_id)
+                continue
+
+            image = images[image_index]
+            cache_skip = len(input_ids) % 4
+            compress_pad = 3 - cache_skip
+            image.block_start_idx = len(input_ids)
+            image.start_idx = len(input_ids) + compress_pad
+            input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))
+            image.block_end_idx = len(input_ids)
+            image_index += 1
+
+        return input_ids
 
     def _get_encoding_module(self):
         if self._encoding_module is not None:
