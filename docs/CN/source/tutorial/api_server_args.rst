@@ -89,16 +89,8 @@ PD 分离模式参数
 
 .. option:: --enable_pd_node_self_request_limit
 
-    在 PD Master 上启用基于动态 QPS 的请求准入探测。PD Master 根据最近完成请求计算 QPS，
-    并限制同时进入的完整 PD 请求数。超过上限时每 2 秒重新尝试一次，最长等待时间由
-    ``LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS`` 控制（默认 15 秒）；等待结束后仍然
-    无法进入时向客户端返回 HTTP 429。服务启动后，
-    最近完成时间窗口尚未积累满 64 个请求，或 QPS 尚未初始化时，暂时使用所有 Decode 节点
-    ``running_max_req_size`` 之和作为并发上限，以便快速积累样本；之后使用
-    ``int(QPS * 平均整包时间秒数) + 6``，
-    额外保留 6 个请求作为探测余量，避免低流量后无法恢复。PD Master 统计完整 PD 请求，
-    ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` 未设置时默认使用 60 秒。
-    Prefill/Decode 节点不再执行 QPS 准入。HTTP server 申请本地 ``shm_req`` 对象的超时时间由
+    在 Prefill/Decode 节点上启用本地请求限流。PD Master 当前不执行请求准入限流。
+    HTTP server 申请本地 ``shm_req`` 对象的超时时间由
     ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 控制（默认 20 秒）；请求进入 Router 后等待
     进入推理系统的超时时间由 ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` 控制（默认 20 秒）。
     超时会导致 ``Server is busy``；其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，

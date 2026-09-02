@@ -16,8 +16,6 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.id_gen = MagicMock()
     manager.id_gen.generate_id.return_value = 800
     manager.metric_client = MagicMock()
-    manager.pd_master_request_limit_enabled = False
-    manager.qps_recorder = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
     return manager
@@ -96,7 +94,6 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
             call("lightllm_request_count"),
             call("lightllm_request_success"),
         ]
-        manager.qps_recorder.mark_one_req_finish.assert_called_once_with()
         assert p_node.dispatched_prompt_chars == 0
         assert p_node.dispatched_req_num == 0
 
@@ -180,7 +177,6 @@ def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_fi
         assert len(results) == 1
         assert results[0][3].get_status() == failed_finish_status
         manager.metric_client.counter_inc.assert_called_once_with("lightllm_request_count")
-        manager.qps_recorder.mark_one_req_finish.assert_not_called()
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 

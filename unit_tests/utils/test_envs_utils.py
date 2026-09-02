@@ -1,5 +1,4 @@
 from lightllm.utils.envs_utils import (
-    get_pd_master_request_limit_wait_timeout_seconds,
     get_pd_node_router_wait_timeout_seconds,
     get_pd_node_shm_req_alloc_timeout_seconds,
 )
@@ -39,21 +38,3 @@ def test_pd_node_router_wait_timeout_reads_environment_variable(monkeypatch):
     assert get_pd_node_router_wait_timeout_seconds() == 45
 
     get_pd_node_router_wait_timeout_seconds.cache_clear()
-
-
-def test_pd_master_request_limit_wait_timeout_defaults_to_15_seconds(monkeypatch):
-    monkeypatch.delenv("LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS", raising=False)
-    get_pd_master_request_limit_wait_timeout_seconds.cache_clear()
-
-    assert get_pd_master_request_limit_wait_timeout_seconds() == 15
-
-    get_pd_master_request_limit_wait_timeout_seconds.cache_clear()
-
-
-def test_pd_master_request_limit_wait_timeout_reads_environment_variable(monkeypatch):
-    monkeypatch.setenv("LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS", "21")
-    get_pd_master_request_limit_wait_timeout_seconds.cache_clear()
-
-    assert get_pd_master_request_limit_wait_timeout_seconds() == 21
-
-    get_pd_master_request_limit_wait_timeout_seconds.cache_clear()

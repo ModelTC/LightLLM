@@ -16,8 +16,6 @@ def _make_manager(monkeypatch):
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
     mgr.running_request_count = 0
-    mgr.pd_master_request_limit_enabled = False
-    mgr.qps_recorder = SimpleNamespace(mark_one_req_finish=lambda: None)
     counter = [0]
 
     def gen_id():

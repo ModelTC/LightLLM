@@ -324,29 +324,5 @@ def get_pd_node_router_wait_timeout_seconds() -> int:
 
 
 @lru_cache(maxsize=None)
-def get_pd_request_limit_max_allowed_request_count_seconds() -> int:
-    """获取根据 QPS 估算 PD Master 最大在途请求数时使用的平均整包时间。
-
-    该值与完成 QPS 相乘，用于估算在目标平均整包时间内可以容纳的完整 PD 请求数。
-    PD Master 统一统计完整请求，不再区分 Prefill 和 Decode，默认值为 60 秒。
-    """
-    seconds = int(os.getenv("LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS", 60))
-    if seconds < 0:
-        raise ValueError(
-            "LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS must be greater than or equal to 0"
-        )
-    return seconds
-
-
-@lru_cache(maxsize=None)
-def get_pd_master_request_limit_wait_timeout_seconds() -> int:
-    """PD Master 请求超过动态并发上限后的最长等待时间，单位为秒。"""
-    seconds = int(os.getenv("LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS", 15))
-    if seconds < 0:
-        raise ValueError("LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS must be greater than or equal to 0")
-    return seconds
-
-
-@lru_cache(maxsize=None)
 def get_lightllm_url_pool_maxsize() -> int:
     return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))

@@ -91,16 +91,8 @@ PD disaggregation Mode Parameters
 
 .. option:: --enable_pd_node_self_request_limit
 
-    Enable dynamic-QPS admission probing on the PD Master. The PD Master computes QPS from recently completed
-    requests and limits the number of complete PD requests admitted concurrently. Requests above the limit retry
-    every two seconds for up to ``LIGHTLLM_PD_MASTER_REQUEST_LIMIT_WAIT_TIMEOUT_SECONDS`` (15 seconds by default),
-    then receive HTTP 429 if admission is still unavailable. During cold start, while the recent-completion window contains fewer than 64 requests or QPS
-    is not initialized, the sum of ``running_max_req_size`` across all Decode nodes is used as the concurrency limit
-    to collect samples quickly. Afterwards,
-    the limit is ``int(QPS * average whole-request seconds) + 6``; six extra requests provide probing headroom so
-    low traffic does not permanently trap the service at low concurrency. The PD Master measures complete PD
-    requests, so ``LIGHTLLM_PD_REQUEST_LIMIT_MAX_ALLOWED_REQUEST_COUNT_SECONDS`` defaults to 60 seconds when unset.
-    Prefill/Decode nodes no longer perform QPS admission. The local ``shm_req`` allocation timeout is controlled by
+    Enable local request limiting on Prefill/Decode nodes. PD Master does not currently perform request admission
+    limiting. The local ``shm_req`` allocation timeout is controlled by
     ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` (20 seconds by default), while the timeout from Router entry
     to inference entry is controlled by ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` (20 seconds by default).
     A timeout reports ``Server is busy``; a request that has entered the Router but not inference is proactively
