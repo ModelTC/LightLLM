@@ -244,9 +244,29 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     return shm_addr
 
 
+def _load_gpu_runtime():
+    """Return (lib, symbol_prefix) for the host-memory-registration API.
+
+    CUDA and HIP agree on both the call signatures and the numeric flag values used
+    below, so only the library name and the symbol prefix differ.
+    """
+    if torch.version.hip is not None:
+        candidates = ["libamdhip64.so", "/opt/rocm/lib/libamdhip64.so"]
+        prefix = "hip"
+    else:
+        candidates = ["libcudart.so", "/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so"]
+        prefix = "cuda"
+    for cand in candidates:
+        try:
+            return ctypes.CDLL(cand), prefix
+        except OSError:
+            continue
+    raise OSError(f"cannot load GPU runtime, tried: {candidates}")
+
+
 @lru_cache(maxsize=None)
 def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle":
-    """Start async cudaHostRegister on the given [shm_ptr, shm_ptr+size) and return a handle."""
+    """Start async host-memory registration on [shm_ptr, shm_ptr+size) and return a handle."""
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     tasks: list[tuple[int, int]] = []
     offset = 0
@@ -258,28 +278,30 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
     handle = AsyncRegistrationHandle(total_tasks=len(tasks))
 
     def _worker():
-        cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
-        cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
-        cuda.cudaHostRegister.restype = ctypes.c_int
-        cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
-        cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
+        lib, prefix = _load_gpu_runtime()
+        host_register = getattr(lib, f"{prefix}HostRegister")
+        host_get_device_pointer = getattr(lib, f"{prefix}HostGetDevicePointer")
+        host_register.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+        host_register.restype = ctypes.c_int
+        host_get_device_pointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
+        host_get_device_pointer.restype = ctypes.c_int
 
-        cudaHostRegisterFlag = 3
+        host_register_flag = 3  # Portable | Mapped
 
         torch.cuda.set_device(get_current_device_id())
         # TODO 这个地方的分块注册是否具备合法性和合理性。
         for offset, seg_len in tasks:
             ptr = ctypes.c_void_p(shm_ptr + offset)
-            r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
+            r = host_register(ptr, ctypes.c_size_t(seg_len), host_register_flag)
             if r != 0:
-                raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
+                raise Exception(f"{prefix}HostRegister failed with error code {r}, prefer to use hugetlb")
             handle.task_count += 1
 
         device_ptr = ctypes.c_void_p()
         host_ptr = ctypes.c_void_p(shm_ptr)
-        res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+        res = host_get_device_pointer(ctypes.byref(device_ptr), host_ptr, 0)
         if res != 0:
-            raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+            raise Exception(f"{prefix}HostGetDevicePointer failed with error code {res}")
         assert host_ptr.value == device_ptr.value
         handle.tasks_finished.set()
 
