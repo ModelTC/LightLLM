@@ -1,6 +1,15 @@
+from types import SimpleNamespace
+
 import pytest
 
-from lightllm.utils import start_utils
+from lightllm.utils import auto_shm_cleanup, start_utils
+
+
+@pytest.fixture(autouse=True)
+def mock_auto_shm_cleanup(monkeypatch):
+    monkeypatch.setattr(auto_shm_cleanup.AutoShmCleanup, "_init_libc", lambda self: None)
+    monkeypatch.setattr(auto_shm_cleanup.atexit, "register", lambda *args, **kwargs: None)
+    monkeypatch.setattr(auto_shm_cleanup, "_auto_cleanup", None)
 
 
 class FakeHttpServerProcess:
@@ -29,6 +38,7 @@ class FakeProcess:
         self._name = name
         self.exitcode = exitcode
         self.wait_timeout = wait_timeout
+        self.kill_calls = 0
 
     def is_running(self):
         return self.running
@@ -44,11 +54,21 @@ class FakeProcess:
             raise start_utils.psutil.TimeoutExpired(timeout, pid=self.pid, name=self._name)
         return self.exitcode
 
+    def kill(self):
+        self.kill_calls += 1
+
 
 def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypatch):
     class FakePipeReader:
         def recv(self):
             return "init ok"
+
+        def close(self):
+            pass
+
+    class FakePipeWriter:
+        def close(self):
+            pass
 
     class FakeMpProcess:
         next_pid = 1000
@@ -63,7 +83,7 @@ def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypa
         def is_alive(self):
             return True
 
-    monkeypatch.setattr(start_utils.mp, "Pipe", lambda duplex: (FakePipeReader(), object()))
+    monkeypatch.setattr(start_utils.mp, "Pipe", lambda duplex: (FakePipeReader(), FakePipeWriter()))
     monkeypatch.setattr(start_utils.mp, "Process", FakeMpProcess)
     monkeypatch.setattr(
         start_utils.psutil,
@@ -85,7 +105,46 @@ def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypa
     }
 
 
-def test_register_process_tree_adds_recursive_descendants():
+def test_start_submodule_processes_cleans_up_after_recv_error(monkeypatch):
+    class FakePipeReader:
+        def recv(self):
+            raise EOFError
+
+        def close(self):
+            pass
+
+    class FakePipeWriter:
+        def close(self):
+            pass
+
+    class FakeMpProcess:
+        pid = 1000
+
+        def __init__(self, target, args):
+            pass
+
+        def start(self):
+            pass
+
+    managed_process = FakeProcess(pid=1000, name="process-1000")
+    process_manager = start_utils.SubmoduleManager()
+    cleanup_process_pids = []
+    monkeypatch.setattr(start_utils.mp, "Pipe", lambda duplex: (FakePipeReader(), FakePipeWriter()))
+    monkeypatch.setattr(start_utils.mp, "Process", FakeMpProcess)
+    monkeypatch.setattr(start_utils.psutil, "Process", lambda pid: managed_process)
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: cleanup_process_pids.extend(process.pid for process in process_manager.processes),
+    )
+
+    with pytest.raises(EOFError):
+        process_manager.start_submodule_processes(start_funcs=[lambda pipe_writer: None], start_args=[()])
+
+    assert cleanup_process_pids == [1000]
+
+
+def test_register_process_tree_adds_recursive_descendants(monkeypatch):
     descendants = [
         FakeProcess(pid=1001, name="lightllm::model_infer"),
         FakeProcess(pid=1002, name="lightllm::pd_manager"),
@@ -93,6 +152,7 @@ def test_register_process_tree_adds_recursive_descendants():
     ]
     router_process = FakeProcess(pid=1000, children=descendants)
     process_manager = start_utils.SubmoduleManager()
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
 
     process_manager.register_process_tree(router_process)
 
@@ -104,12 +164,13 @@ def test_register_process_tree_adds_recursive_descendants():
     }
 
 
-def test_register_process_tree_filters_short_lived_helper_processes():
+def test_register_process_tree_filters_short_lived_helper_processes(monkeypatch):
     model_process = FakeProcess(pid=1001, name="lightllm::model_infer")
     compile_worker = FakeProcess(pid=1002, name="python")
     pd_process = FakeProcess(pid=1003, name="lightllm::decode_trans")
     router_process = FakeProcess(pid=1000, children=[model_process, compile_worker, pd_process])
     process_manager = start_utils.SubmoduleManager()
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
 
     process_manager.register_process_tree(router_process)
 
@@ -145,7 +206,13 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
         "signal",
         lambda sig, handler: registered_handlers.__setitem__(sig, handler),
     )
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: terminate_calls.append(True),
+    )
+    exit_codes = []
+    monkeypatch.setattr(start_utils.os, "_exit", lambda code: exit_codes.append(code))
 
     process_manager.setup_signal_handlers(http_server_process)
 
@@ -154,13 +221,232 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
         start_utils.signal.SIGINT,
         start_utils.signal.SIGHUP,
     }
-    with pytest.raises(SystemExit) as exc_info:
-        registered_handlers[start_utils.signal.SIGTERM](start_utils.signal.SIGTERM, None)
+    registered_handlers[start_utils.signal.SIGTERM](start_utils.signal.SIGTERM, None)
 
-    assert exc_info.value.code == 0
     assert http_server_process.sent_signals == [start_utils.signal.SIGTERM]
     assert http_server_process.wait_timeouts == [60]
     assert terminate_calls == [True]
+    assert exit_codes == [0]
+
+
+@pytest.mark.parametrize(
+    "signal_to_send,repeated_signal,expected_exit_code",
+    [(start_utils.signal.SIGINT, False, 0), (start_utils.signal.SIGTERM, True, 1)],
+)
+def test_setup_signal_handlers_uses_http_process_set_after_handler_install(
+    monkeypatch, signal_to_send, repeated_signal, expected_exit_code
+):
+    process_manager = start_utils.SubmoduleManager()
+    http_server_process = FakeHttpServerProcess()
+    registered_handlers = {}
+    killed_processes = []
+    exit_codes = []
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: registered_handlers.__setitem__(sig, handler),
+    )
+    monkeypatch.setattr(start_utils, "kill_recursive", lambda process: killed_processes.append(process))
+    terminate_calls = []
+    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda **kwargs: terminate_calls.append(kwargs))
+    monkeypatch.setattr(start_utils.os, "_exit", lambda code: exit_codes.append(code))
+
+    process_manager.setup_signal_handlers()
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager._handling_signal = repeated_signal
+    registered_handlers[signal_to_send](signal_to_send, None)
+
+    assert killed_processes == [http_server_process]
+    assert terminate_calls == [
+        {"wait_timeout": 0 if repeated_signal else start_utils.PROCESS_SHUTDOWN_WAIT_TIMEOUT_SECONDS}
+    ]
+    assert exit_codes == [expected_exit_code]
+    if repeated_signal:
+        assert http_server_process.sent_signals == []
+        assert http_server_process.wait_timeouts == []
+
+
+def test_launcher_handler_remains_registered_after_shared_memory_registration(monkeypatch):
+    handlers = {}
+    exit_codes = []
+    manager = start_utils.SubmoduleManager()
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: handlers.__setitem__(sig, handler),
+    )
+    monkeypatch.setattr(manager, "terminate_all_processes", lambda **_: None)
+    monkeypatch.setattr(start_utils.os, "_exit", lambda code: exit_codes.append(code))
+
+    manager.setup_signal_handlers()
+    launcher_handler = handlers[start_utils.signal.SIGINT]
+    cleaner = auto_shm_cleanup.get_auto_cleanup()
+    monkeypatch.setattr(cleaner, "cleanup", lambda: None)
+    auto_shm_cleanup.register_posix_shm_for_cleanup("test")
+
+    assert handlers[start_utils.signal.SIGINT] is launcher_handler
+    launcher_handler(start_utils.signal.SIGINT, None)
+    assert exit_codes == [0]
+
+
+@pytest.mark.parametrize("failure", ["poll", "send", "wait", "timeout", "kill"])
+def test_http_shutdown_failure_still_cleans_processes_and_shared_memory(monkeypatch, failure):
+    class FailingHttp:
+        pid = 4321
+
+        def poll(self):
+            if failure == "poll":
+                raise PermissionError("poll denied")
+            return None
+
+        def send_signal(self, _sig):
+            if failure == "send":
+                raise PermissionError("send denied")
+
+        def wait(self, timeout=None):
+            if failure == "wait":
+                raise PermissionError("wait denied")
+            if failure == "timeout":
+                raise start_utils.subprocess.TimeoutExpired("http", timeout)
+
+    handlers = {}
+    terminate_calls = []
+    kill_calls = []
+    exit_codes = []
+    manager = start_utils.SubmoduleManager()
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: handlers.__setitem__(sig, handler),
+    )
+    monkeypatch.setattr(manager, "terminate_all_processes", lambda **kwargs: terminate_calls.append(kwargs))
+    monkeypatch.setattr(
+        start_utils,
+        "kill_recursive",
+        lambda process: (_ for _ in ()).throw(PermissionError("kill denied"))
+        if failure == "kill"
+        else kill_calls.append(process),
+    )
+    monkeypatch.setattr(start_utils.os, "_exit", lambda code: exit_codes.append(code))
+
+    manager.setup_signal_handlers(FailingHttp())
+    cleaner = auto_shm_cleanup.get_auto_cleanup()
+    shm_cleanup_calls = []
+    monkeypatch.setattr(cleaner, "cleanup", lambda: shm_cleanup_calls.append(True))
+    handlers[start_utils.signal.SIGTERM](start_utils.signal.SIGTERM, None)
+
+    assert terminate_calls == [{"wait_timeout": start_utils.PROCESS_SHUTDOWN_WAIT_TIMEOUT_SECONDS}]
+    assert shm_cleanup_calls == [True]
+    assert exit_codes == [0]
+    if failure == "timeout":
+        assert kill_calls == [manager.http_server_process]
+
+
+def test_signal_handler_exits_even_when_cleanup_raises(monkeypatch):
+    process_manager = start_utils.SubmoduleManager()
+    registered_handlers = {}
+    exit_codes = []
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: registered_handlers.__setitem__(sig, handler),
+    )
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: (_ for _ in ()).throw(RuntimeError()),
+    )
+    monkeypatch.setattr(start_utils.os, "_exit", lambda code: exit_codes.append(code))
+
+    process_manager.setup_signal_handlers()
+    cleaner = auto_shm_cleanup.get_auto_cleanup()
+    shm_cleanup_calls = []
+    monkeypatch.setattr(cleaner, "cleanup", lambda: shm_cleanup_calls.append(True))
+    registered_handlers[start_utils.signal.SIGINT](start_utils.signal.SIGINT, None)
+
+    assert exit_codes == [0]
+    assert shm_cleanup_calls == [True]
+
+
+def test_terminate_skips_zombie_even_when_is_running_is_true(monkeypatch):
+    zombie = FakeProcess(pid=1234, running=True)
+    process_manager = start_utils.SubmoduleManager()
+    process_manager.processes = [zombie]
+    wait_calls = []
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: False)
+    monkeypatch.setattr(start_utils.psutil, "Process", lambda pid: zombie)
+    monkeypatch.setattr(start_utils.psutil, "wait_procs", lambda *args, **kwargs: wait_calls.append((args, kwargs)))
+
+    process_manager.terminate_all_processes()
+
+    assert zombie.kill_calls == 0
+    assert wait_calls == []
+
+
+@pytest.mark.parametrize("wait_timeout", [0, start_utils.PROCESS_SHUTDOWN_WAIT_TIMEOUT_SECONDS])
+def test_terminate_wait_is_bounded_and_target_pids_are_deduplicated(monkeypatch, wait_timeout):
+    child = FakeProcess(pid=1002)
+    root = FakeProcess(pid=1001, children=[child])
+    duplicate_root = FakeProcess(pid=1001, children=[child])
+    process_by_pid = {1001: root, 1002: child}
+    process_manager = start_utils.SubmoduleManager()
+    process_manager.processes = [root, duplicate_root, child]
+    wait_calls = []
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
+    monkeypatch.setattr(start_utils.psutil, "Process", lambda pid: process_by_pid[pid])
+    monkeypatch.setattr(
+        start_utils.psutil,
+        "wait_procs",
+        lambda processes, timeout: (
+            [],
+            wait_calls.append((processes, timeout)) or list(processes),
+        ),
+    )
+
+    process_manager.terminate_all_processes(wait_timeout=wait_timeout)
+
+    assert child.kill_calls == 1
+    assert root.kill_calls == 1
+    if wait_timeout:
+        assert [process.pid for process in wait_calls[0][0]] == [1002, 1001]
+        assert wait_calls[0][1] == wait_timeout
+    else:
+        assert wait_calls == []
+
+
+def test_normal_start_installs_handlers_before_launching_submodules(monkeypatch):
+    from lightllm.server import api_start
+
+    calls = []
+
+    class FakeManager:
+        def setup_signal_handlers(self, http_server_process=None):
+            calls.append(("setup", http_server_process))
+
+        def supervise_processes(self, http_server_process):
+            calls.append(("supervise", http_server_process))
+
+    http_server_process = object()
+    monkeypatch.setattr(api_start, "process_manager", FakeManager())
+    monkeypatch.setattr(api_start, "_launch_subprocesses", lambda args: calls.append(("launch", None)))
+    monkeypatch.setattr(
+        api_start.subprocess, "Popen", lambda command: calls.append(("popen", command)) or http_server_process
+    )
+    monkeypatch.setattr(api_start, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
+    args = SimpleNamespace(
+        hypercorn_config=None,
+        httpserver_workers=1,
+        host="127.0.0.1",
+        model_dir="/model",
+        health_monitor=False,
+    )
+
+    api_start.normal_or_p_d_start(args)
+
+    assert calls[0] == ("setup", None)
+    assert calls[1] == ("launch", None)
+    assert calls[2][0] == "popen"
+    assert calls[3] == ("setup", http_server_process)
 
 
 def test_supervisor_fails_when_http_server_exits(monkeypatch):
@@ -168,7 +454,11 @@ def test_supervisor_fails_when_http_server_exits(monkeypatch):
     process_manager = start_utils.SubmoduleManager()
     terminate_calls = []
     kill_calls = []
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: terminate_calls.append(True),
+    )
     monkeypatch.setattr(start_utils, "kill_recursive", lambda process: kill_calls.append(process))
 
     with pytest.raises(RuntimeError, match="HTTP server exited unexpectedly with return code 0"):
@@ -186,7 +476,11 @@ def test_supervisor_fails_and_cleans_up_when_submodule_exits(monkeypatch):
     process_manager.process_names = {dead_process: dead_process.name()}
     terminate_calls = []
     kill_calls = []
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: terminate_calls.append(True),
+    )
     monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
     monkeypatch.setattr(start_utils, "kill_recursive", lambda process: kill_calls.append(process))
 
@@ -208,7 +502,11 @@ def test_supervisor_treats_zombie_submodule_as_dead(monkeypatch):
     process_manager.process_names = {zombie_process: zombie_process.name()}
     terminate_calls = []
     kill_calls = []
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: terminate_calls.append(True),
+    )
     monkeypatch.setattr(start_utils, "is_process_active", lambda pid: False)
     monkeypatch.setattr(start_utils, "kill_recursive", lambda process: kill_calls.append(process))
 
@@ -230,7 +528,11 @@ def test_supervisor_keeps_polling_while_all_processes_are_alive(monkeypatch):
     process_manager.process_names = {child_process: child_process.name()}
     terminate_calls = []
     sleep_calls = []
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: terminate_calls.append(True),
+    )
 
     def stop_after_first_poll(interval):
         sleep_calls.append(interval)
@@ -253,7 +555,11 @@ def test_supervisor_supports_submodule_only_processes(monkeypatch):
     process_manager.process_names = {dead_process: dead_process.name()}
     terminate_calls = []
     kill_calls = []
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        process_manager,
+        "terminate_all_processes",
+        lambda **_: terminate_calls.append(True),
+    )
     monkeypatch.setattr(start_utils, "is_process_active", lambda pid: False)
     monkeypatch.setattr(start_utils, "kill_recursive", lambda process: kill_calls.append(process))
 
