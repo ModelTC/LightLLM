@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 
 
 def _manager() -> HttpServerManagerForPDMaster:
@@ -19,6 +21,8 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
     manager.pd_high_priority_request_time_out_seconds = 60
+    manager.pd_cache_high_priority_max_age_seconds = 60
+    manager.disable_pd_cache_high_priority = False
     return manager
 
 
@@ -40,7 +44,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
         captured_params = []
         p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         manager.remove_req = AsyncMock()
 
         async def wait_to_token_package(
@@ -189,7 +193,7 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
         manager.abort = AsyncMock()
         p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         segment_index = 0
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, prompt, params, *_args):
@@ -316,7 +320,7 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
         manager.abort = AsyncMock()
         p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
 
         async def failing_wait_to_token_package(*_args, **_kwargs):
             raise RuntimeError("generation failed")
@@ -348,6 +352,7 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
 def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
     async def run():
         manager = _manager()
+        manager.disable_pd_cache_high_priority = True
         manager.id_gen.generate_id.side_effect = [808, 816]
         manager.remove_req = AsyncMock()
         manager.abort = AsyncMock()
@@ -358,7 +363,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
             dispatched_req_num=other_request_count,
         )
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         dispatched_nodes = []
         dispatched_d_nodes = []
         dispatched_prompts = []
@@ -436,7 +441,7 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
         manager.abort = AsyncMock()
         p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         dispatched_max_new_tokens = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
@@ -483,11 +488,25 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
 
 
 @pytest.mark.parametrize(
-    ("estimated_cache_hit_rate", "expected_high_priority"),
-    [(0.8, False), (0.81, True)],
+    (
+        "estimated_cache_hit_rate",
+        "cache_age_seconds",
+        "disable_pd_cache_high_priority",
+        "expected_high_priority",
+    ),
+    [
+        (0.8, 0.0, False, False),
+        (0.81, 0.0, False, True),
+        (0.81, 60.0, False, True),
+        (0.81, 60.1, False, False),
+        (0.81, None, False, False),
+        (0.81, 0.0, True, False),
+    ],
 )
-def test_pd_master_promotes_request_with_high_estimated_cache_hit_rate(
+def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
     estimated_cache_hit_rate,
+    cache_age_seconds,
+    disable_pd_cache_high_priority,
     expected_high_priority,
 ):
     async def run():
@@ -495,9 +514,21 @@ def test_pd_master_promotes_request_with_high_estimated_cache_hit_rate(
         manager.id_gen.generate_id.return_value = 808
         manager.remove_req = AsyncMock()
         manager.abort = AsyncMock()
+        manager.disable_pd_cache_high_priority = disable_pd_cache_high_priority
         p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, estimated_cache_hit_rate))
+        now = 100.0
+        cache_last_insert_time = None if cache_age_seconds is None else now - cache_age_seconds
+        manager.select_p_d_node = AsyncMock(
+            return_value=(
+                p_node,
+                d_node,
+                PDSelectionExtraInfo(
+                    estimated_cache_hit_rate=estimated_cache_hit_rate,
+                    cache_last_insert_time=cache_last_insert_time,
+                ),
+            )
+        )
         high_priority_request_flags = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
@@ -513,15 +544,19 @@ def test_pd_master_promotes_request_with_high_estimated_cache_hit_rate(
 
         sampling_params = SamplingParams()
         sampling_params.max_new_tokens = 1
-        async for _ in manager._generate_one(
-            "prompt",
-            sampling_params,
-            MagicMock(),
-            MagicMock(),
-            0,
-            800,
+        with patch(
+            "lightllm.server.httpserver_for_pd_master.manager.time.monotonic",
+            return_value=now,
         ):
-            pass
+            async for _ in manager._generate_one(
+                "prompt",
+                sampling_params,
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+            ):
+                pass
 
         assert high_priority_request_flags == [expected_high_priority]
 
@@ -540,7 +575,16 @@ def test_pd_master_sets_high_priority_timeout():
             dispatched_req_num=0,
         )
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.81))
+        manager.select_p_d_node = AsyncMock(
+            return_value=(
+                p_node,
+                d_node,
+                PDSelectionExtraInfo(
+                    estimated_cache_hit_rate=0.81,
+                    cache_last_insert_time=time.monotonic(),
+                ),
+            )
+        )
         captured_timeout_seconds = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
@@ -584,7 +628,7 @@ def test_pd_master_releases_prefill_load_when_stream_is_closed():
             dispatched_req_num=other_request_count,
         )
         d_node = MagicMock()
-        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, 0.0))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
 
         async def wait_to_token_package(*_args, **_kwargs):
             yield 808, "first", {"prompt_tokens": 1, "count_output_tokens": 1}, FinishStatus()

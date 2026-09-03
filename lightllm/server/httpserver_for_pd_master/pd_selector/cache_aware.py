@@ -25,6 +25,7 @@ from typing import List, Optional
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.log_utils import init_logger
 
+from .pd_selector import PDSelectionExtraInfo
 from .prompt_cache_tree import PromptCacheTree
 
 
@@ -147,12 +148,15 @@ class CacheAwarePolicy:
         selected_worker = self._select_worker_by_cache_and_load(workers, cache_worker, len(request_text))
         return selected_worker
 
-    def get_estimated_cache_hit_rate(self, selected_worker: PD_Client_Obj, request_text: str) -> float:
-        """查询最终选中节点的输入 cache 命中率估计。"""
+    def get_estimated_cache_info(self, selected_worker: PD_Client_Obj, request_text: str) -> PDSelectionExtraInfo:
+        """查询最终选中节点的输入 cache 命中率和最近插入时间。"""
         result = self.prompt_cache_tree.prefix_match(request_text)
         if result.prefill_node != selected_worker.client_ip_port or result.input_char_count == 0:
-            return 0.0
-        return result.matched_char_count / result.input_char_count
+            return PDSelectionExtraInfo()
+        return PDSelectionExtraInfo(
+            estimated_cache_hit_rate=result.matched_char_count / result.input_char_count,
+            cache_last_insert_time=result.last_insert_time,
+        )
 
     def insert_prompt_cache(self, request_text: str, selected_worker: PD_Client_Obj) -> None:
         """在请求成功进入推理后，记录 prompt 与实际执行的 Prefill 节点。"""

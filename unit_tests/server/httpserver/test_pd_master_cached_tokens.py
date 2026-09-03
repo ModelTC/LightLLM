@@ -6,6 +6,7 @@ import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 
 
 def _make_manager(monkeypatch):
@@ -17,6 +18,8 @@ def _make_manager(monkeypatch):
     mgr = object.__new__(HttpServerManagerForPDMaster)
     mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True)
     mgr.pd_high_priority_request_time_out_seconds = 60
+    mgr.pd_cache_high_priority_max_age_seconds = 60
+    mgr.disable_pd_cache_high_priority = False
     mgr.running_request_count = 0
     counter = [0]
 
@@ -37,7 +40,7 @@ def _make_manager(monkeypatch):
         )
     )
     p_node = SimpleNamespace(dispatched_prompt_chars=0, dispatched_req_num=0)
-    mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, 1, 0.0))
+    mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, 1, PDSelectionExtraInfo()))
     mgr.remove_req = lambda *a, **k: asyncio.sleep(0)
     return mgr
 

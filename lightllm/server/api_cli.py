@@ -85,6 +85,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--disable_pd_cache_high_priority",
+        action="store_true",
+        help=(
+            "Disable promoting first-segment PD Master requests with a fresh high cache-hit estimate. "
+            "Segmented continuation requests remain high priority. Default: disabled."
+        ),
+    )
+    parser.add_argument(
         "--pd_trans_mode",
         type=str,
         choices=["nccl", "nixl"],

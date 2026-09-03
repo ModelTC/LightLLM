@@ -18,6 +18,14 @@ def test_pd_node_self_request_limit_cli_defaults_to_disabled_and_can_be_enabled(
     assert StartArgs().enable_pd_node_self_request_limit is False
 
 
+def test_pd_cache_high_priority_cli_defaults_to_enabled_and_can_be_disabled():
+    parser = make_argument_parser()
+
+    assert parser.parse_args([]).disable_pd_cache_high_priority is False
+    assert parser.parse_args(["--disable_pd_cache_high_priority"]).disable_pd_cache_high_priority is True
+    assert StartArgs().disable_pd_cache_high_priority is False
+
+
 def test_pd_master_request_slot_is_reserved_noop():
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
 

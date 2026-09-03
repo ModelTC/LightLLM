@@ -23,9 +23,12 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
-from lightllm.utils.envs_utils import get_pd_high_priority_request_timeout_seconds
+from lightllm.utils.envs_utils import (
+    get_pd_cache_high_priority_max_age_seconds,
+    get_pd_high_priority_request_timeout_seconds,
+)
 from lightllm.utils.shm_port_args import get_shm_port_args
-from .pd_selector import create_selector
+from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
 
@@ -51,6 +54,8 @@ class HttpServerManagerForPDMaster:
         # 高优先级请求仍可比普通请求等待更久，但通过请求参数向开启本地限流的
         # P/D 节点传递有限的等待时间，避免资源异常时永久占用请求链路。
         self.pd_high_priority_request_time_out_seconds = get_pd_high_priority_request_timeout_seconds()
+        self.pd_cache_high_priority_max_age_seconds = get_pd_cache_high_priority_max_age_seconds()
+        self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -122,7 +127,7 @@ class HttpServerManagerForPDMaster:
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         return self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
     async def _wait_for_pd_master_request_slot(self) -> None:
@@ -221,12 +226,24 @@ class HttpServerManagerForPDMaster:
         pending_prefill_load_chars = None
 
         try:
-            p_node, d_node, estimated_cache_hit_rate = await self.select_p_d_node(
+            p_node, d_node, selection_extra_info = await self.select_p_d_node(
                 prompt, origin_sampling_params, multimodal_params
             )
             if not p_node or not d_node:
                 logger.error(f"{origin_request_id}: No p_node or d_node found")
                 raise Exception(f"{origin_request_id}: No p_node or d_node found")
+
+            cache_age_seconds = None
+            if selection_extra_info.cache_last_insert_time is not None:
+                cache_age_seconds = max(0.0, time.monotonic() - selection_extra_info.cache_last_insert_time)
+            # TODO: 后续应收集系统实际请求的 cache 命中信息及其随时间变化的规律，自动估算并动态调整
+            # pd_cache_high_priority_max_age_seconds，而不是继续使用环境变量配置的固定时间窗。
+            has_fresh_high_cache_hit = (
+                not self.disable_pd_cache_high_priority
+                and selection_extra_info.estimated_cache_hit_rate > 0.8
+                and cache_age_seconds is not None
+                and cache_age_seconds <= self.pd_cache_high_priority_max_age_seconds
+            )
 
             history_gen_token_strs = []
             origin_prompt_cache_len = None
@@ -244,10 +261,10 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
-                # 预计输入 cache 命中率高于 0.8 时，将首段也标记为 PD 高优先级请求，
-                # 使其优先进入 Router 调度队列，尽快复用已命中的 KV cache。第二段及后续
-                # 分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
-                sampling_params.pd_high_priority_request = segment_index > 0 or estimated_cache_hit_rate > 0.8
+                # 首段仅在预计输入 cache 命中率高于 0.8 且命中记录仍在有效时间窗内时
+                # 提升优先级，避免为可能已被 P 节点淘汰的陈旧 KV cache 插队。第二段及
+                # 后续分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
+                sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
                 # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
                 # 本地限流时使用该值，未开启限流时仍保持无限等待。
                 if sampling_params.pd_high_priority_request:
@@ -925,8 +942,5 @@ class PDManager:
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
-        p_node, d_node, estimated_cache_hit_rate = self.selector.select_p_d_node(
-            prompt, sampling_params, multimodal_params
-        )
-        return p_node, d_node, estimated_cache_hit_rate
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
+        return self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)

@@ -1,14 +1,22 @@
 import random
-from typing import Union, List, Tuple, Dict
+from dataclasses import dataclass
+from typing import Union, List, Tuple, Dict, Optional
+
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.log_utils import init_logger
 
-from .cache_aware import CacheAwarePolicy, CacheAwareConfig
-
 
 logger = init_logger(__name__)
+
+
+@dataclass(slots=True)
+class PDSelectionExtraInfo:
+    """PD 节点调度的附加返回信息。"""
+
+    estimated_cache_hit_rate: float = 0.0
+    cache_last_insert_time: Optional[float] = None
 
 
 class PDSelector:
@@ -23,7 +31,7 @@ class PDSelector:
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         raise NotImplementedError("Subclass must implement this method")
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
@@ -40,10 +48,10 @@ class RandomSelector(PDSelector):
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         p_node = random.choice(self.prefill_nodes)
         d_node = random.choice(self.decode_nodes)
-        return p_node, d_node, 0.0
+        return p_node, d_node, PDSelectionExtraInfo()
 
 
 class RoundRobinSelector(PDSelector):
@@ -56,14 +64,14 @@ class RoundRobinSelector(PDSelector):
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         self.prefill_node_index = self.prefill_node_index % len(self.prefill_nodes)
         self.decode_node_index = self.decode_node_index % len(self.decode_nodes)
         p_node = self.prefill_nodes[self.prefill_node_index]
         d_node = self.decode_nodes[self.decode_node_index]
         self.prefill_node_index += 1
         self.decode_node_index += 1
-        return p_node, d_node, 0.0
+        return p_node, d_node, PDSelectionExtraInfo()
 
 
 class AdaptiveLoadSelector(PDSelector):
@@ -71,11 +79,11 @@ class AdaptiveLoadSelector(PDSelector):
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         p_node = self._importance_sampling(self.prefill_nodes)
         d_node = self._importance_sampling(self.decode_nodes)
 
-        return p_node, d_node, 0.0
+        return p_node, d_node, PDSelectionExtraInfo()
 
     def _importance_sampling(self, nodes: List[PD_Client_Obj]):
         return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])[0]
@@ -85,25 +93,28 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
     """Cache-aware prefill 选点：按抽稀后的 prompt 前缀匹配 + 负载均衡。"""
 
     def __init__(self, pd_manager):
+        from .cache_aware import CacheAwareConfig, CacheAwarePolicy
+
         super().__init__(pd_manager)
         self.policy = CacheAwarePolicy(CacheAwareConfig())
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
-    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, float]:
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
         p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
         d_node = self._importance_sampling(self.decode_nodes)
         # 选点完成后再查询一次前缀树；只有 cache 实际属于最终选中的 P 节点
         # 时才返回命中率，避免负载均衡改派节点后误判为高命中。
-        estimated_cache_hit_rate = self.policy.get_estimated_cache_hit_rate(p_node, prompt)
+        selection_extra_info = self.policy.get_estimated_cache_info(p_node, prompt)
 
         logger.info(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
-            f"d_node={d_node.client_ip_port}"
+            f"d_node={d_node.client_ip_port}, "
+            f"cache_last_insert_time={selection_extra_info.cache_last_insert_time}"
         )
 
-        return p_node, d_node, estimated_cache_hit_rate
+        return p_node, d_node, selection_extra_info
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         self.policy.record_prompt_cache_hit_rate(cache_hit_rate)

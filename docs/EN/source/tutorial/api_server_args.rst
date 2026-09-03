@@ -103,11 +103,20 @@ PD disaggregation Mode Parameters
     to inference entry is controlled by ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` (20 seconds by default).
     A timeout reports ``Server is busy``; a request that has entered the Router but not inference is proactively
     marked aborted, and PD Master converts this to HTTP 429. Requests continue waiting when local admission is
-    disabled. For PD high-priority requests (segmented continuation requests or requests whose estimated input
-    cache hit rate is above 0.8), PD Master supplies a shared timeout floor through
+    disabled. For PD high-priority requests (segmented continuation requests, or requests whose estimated input
+    cache hit rate is above 0.8 and whose cache record is still fresh), PD Master supplies a shared timeout floor through
     ``pd_high_priority_request_time_out_seconds``. Each P/D node uses the greater of this value and its local
     ``shm_req`` or Router timeout; zero does not extend the local timeout. The value supplied by PD Master is controlled by
-    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` and defaults to 60 seconds. Disabled by default.
+    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` and defaults to 60 seconds. The maximum cache-record age
+    eligible for promotion is controlled by ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
+    16 seconds. Local request limiting is disabled by default.
+
+.. option:: --disable_pd_cache_high_priority
+
+    Disable PD Master from promoting first-segment requests whose estimated input cache hit rate is high and whose
+    cache record is still fresh. This does not affect segmented continuation requests after PD Decode capacity
+    exhaustion; continuation requests remain high priority. Disabled by default, so fresh high-cache-hit requests
+    are promoted unless this option is set.
 
 .. option:: --config_server_host
 
