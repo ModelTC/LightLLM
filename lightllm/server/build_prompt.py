@@ -106,13 +106,17 @@ async def build_prompt(request, tools) -> str:
 
 async def build_prompt_from_image_request(request: Union[ImageGenerationRequest, ImageEditRequest]) -> str:
     try:
-        user_content = []
-        if isinstance(request, ImageEditRequest):
-            [
-                user_content.append({"type": "image_url", "image_url": {"url": image.image_url[:100]}})
-                for image in request.images
+        images = request.images if isinstance(request, ImageEditRequest) else []
+        if images:
+            user_content = [
+                {"type": "image_url", "image_url": {"url": image.image_url[:100]}} for image in images
             ]
-        user_content.append({"type": "text", "text": request.prompt})
+            user_content.append({"type": "text", "text": request.prompt})
+        else:
+            # Text-only requests must pass a plain string: chat templates derived from Qwen call
+            # .startswith() on message.content, which fails on the list form with
+            # "'list object' has no attribute 'startswith'".
+            user_content = request.prompt
         kwargs = {"conversation": [{"role": "user", "content": user_content}]}
         # logger.info(f"kwargs: {kwargs}")
 
