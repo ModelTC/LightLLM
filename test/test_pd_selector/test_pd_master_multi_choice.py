@@ -22,6 +22,7 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.tokens = MagicMock(return_value=2)
     manager.pd_high_priority_request_time_out_seconds = 60
     manager.pd_cache_high_priority_max_age_seconds = 60
+    manager.pd_cache_high_priority_min_prompt_tokens = 4096
     manager.disable_pd_cache_high_priority = False
     return manager
 
@@ -125,7 +126,9 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
             child_request,
             start_time,
             origin_request_id,
+            input_token_num,
         ):
+            assert input_token_num == 2
             yield (
                 origin_request_id,
                 "choice-0",
@@ -236,6 +239,7 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
             MagicMock(),
             0,
             800,
+            0,
         ):
             results.append(result)
 
@@ -339,6 +343,7 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
                 MagicMock(),
                 0,
                 800,
+                0,
             ):
                 pass
 
@@ -412,6 +417,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
             MagicMock(),
             0,
             800,
+            0,
         ):
             results.append(result)
 
@@ -479,6 +485,7 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
             MagicMock(),
             0,
             800,
+            0,
         ):
             pass
 
@@ -492,21 +499,24 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
         "estimated_cache_hit_rate",
         "cache_age_seconds",
         "disable_pd_cache_high_priority",
+        "input_token_num",
         "expected_high_priority",
     ),
     [
-        (0.8, 0.0, False, False),
-        (0.81, 0.0, False, True),
-        (0.81, 60.0, False, True),
-        (0.81, 60.1, False, False),
-        (0.81, None, False, False),
-        (0.81, 0.0, True, False),
+        (0.8, 0.0, False, 4096, False),
+        (0.81, 0.0, False, 4095, False),
+        (0.81, 0.0, False, 4096, True),
+        (0.81, 60.0, False, 4096, True),
+        (0.81, 60.1, False, 4096, False),
+        (0.81, None, False, 4096, False),
+        (0.81, 0.0, True, 4096, False),
     ],
 )
 def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
     estimated_cache_hit_rate,
     cache_age_seconds,
     disable_pd_cache_high_priority,
+    input_token_num,
     expected_high_priority,
 ):
     async def run():
@@ -555,6 +565,7 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
                 MagicMock(),
                 0,
                 800,
+                input_token_num,
             ):
                 pass
 
@@ -607,6 +618,7 @@ def test_pd_master_sets_high_priority_timeout():
             MagicMock(),
             0,
             800,
+            8192,
         ):
             pass
 
@@ -644,6 +656,7 @@ def test_pd_master_releases_prefill_load_when_stream_is_closed():
             MagicMock(),
             0,
             800,
+            0,
         )
 
         assert (await generator.__anext__())[1] == "first"

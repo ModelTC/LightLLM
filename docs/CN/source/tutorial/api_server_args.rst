@@ -104,11 +104,13 @@ PD 分离模式参数
     ``pd_high_priority_request_time_out_seconds`` 下发一个统一的超时时间下限。P/D 节点分别取
     该值与本地 ``shm_req``、Router 超时的较大值；该字段为 0 时不延长本地超时。PD Master 下发值由
     ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` 控制，默认 60 秒。cache 命中记录允许提升优先级的
-    最大年龄由 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 16 秒。本地请求限流默认关闭。
+    最大年龄由 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 16 秒。cache 命中提权还要求输入
+    token 数达到 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` 配置的门槛（默认 4096），避免短请求仅因
+    cache 命中率高而提升优先级。本地请求限流默认关闭。
 
 .. option:: --disable_pd_cache_high_priority
 
-    禁止 PD Master 将预计输入 cache 命中率高且命中记录仍然新鲜的首段请求提升为高优先级。
+    禁止 PD Master 将输入足够长、预计输入 cache 命中率高且命中记录仍然新鲜的首段请求提升为高优先级。
     该参数不影响 PD Decode 容量不足后的分段续跑请求；续跑请求仍保持高优先级。默认不启用，
     即默认允许新鲜高 cache 命中请求提升优先级。
 

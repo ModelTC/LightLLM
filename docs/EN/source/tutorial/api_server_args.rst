@@ -109,13 +109,15 @@ PD disaggregation Mode Parameters
     ``shm_req`` or Router timeout; zero does not extend the local timeout. The value supplied by PD Master is controlled by
     ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` and defaults to 60 seconds. The maximum cache-record age
     eligible for promotion is controlled by ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
-    16 seconds. Local request limiting is disabled by default.
+    16 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
+    solely from a high cache-hit rate. Local request limiting is disabled by default.
 
 .. option:: --disable_pd_cache_high_priority
 
-    Disable PD Master from promoting first-segment requests whose estimated input cache hit rate is high and whose
-    cache record is still fresh. This does not affect segmented continuation requests after PD Decode capacity
-    exhaustion; continuation requests remain high priority. Disabled by default, so fresh high-cache-hit requests
+    Disable PD Master from promoting sufficiently long first-segment requests whose estimated input cache hit rate
+    is high and whose cache record is still fresh. This does not affect segmented continuation requests after PD
+    Decode capacity exhaustion; continuation requests remain high priority. Disabled by default, so eligible requests
     are promoted unless this option is set.
 
 .. option:: --config_server_host

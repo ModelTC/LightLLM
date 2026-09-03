@@ -331,5 +331,11 @@ def get_pd_cache_high_priority_max_age_seconds() -> int:
 
 
 @lru_cache(maxsize=None)
+def get_pd_cache_high_priority_min_prompt_tokens() -> int:
+    """cache 命中请求提升为 PD 高优先级时要求的最小 prompt token 数。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", 4096)))
+
+
+@lru_cache(maxsize=None)
 def get_lightllm_url_pool_maxsize() -> int:
     return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))

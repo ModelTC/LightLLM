@@ -25,6 +25,7 @@ from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
+    get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_high_priority_request_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -55,6 +56,7 @@ class HttpServerManagerForPDMaster:
         # P/D 节点传递有限的等待时间，避免资源异常时永久占用请求链路。
         self.pd_high_priority_request_time_out_seconds = get_pd_high_priority_request_timeout_seconds()
         self.pd_cache_high_priority_max_age_seconds = get_pd_cache_high_priority_max_age_seconds()
+        self.pd_cache_high_priority_min_prompt_tokens = get_pd_cache_high_priority_min_prompt_tokens()
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
@@ -198,6 +200,7 @@ class HttpServerManagerForPDMaster:
                     request,
                     start_time,
                     origin_group_request_id + choice_index,
+                    input_token_num,
                 )
             )
 
@@ -219,6 +222,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
         start_time: float,
         origin_request_id: int,
+        input_token_num: int,
     ):
         block_group_request_id = origin_request_id
         p_node = None
@@ -243,6 +247,7 @@ class HttpServerManagerForPDMaster:
                 and selection_extra_info.estimated_cache_hit_rate > 0.8
                 and cache_age_seconds is not None
                 and cache_age_seconds <= self.pd_cache_high_priority_max_age_seconds
+                and input_token_num >= self.pd_cache_high_priority_min_prompt_tokens
             )
 
             history_gen_token_strs = []
@@ -261,9 +266,10 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
-                # 首段仅在预计输入 cache 命中率高于 0.8 且命中记录仍在有效时间窗内时
-                # 提升优先级，避免为可能已被 P 节点淘汰的陈旧 KV cache 插队。第二段及
-                # 后续分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
+                # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
+                # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧
+                # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
+                # 紧张导致分段续跑失败。
                 sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
                 # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
                 # 本地限流时使用该值，未开启限流时仍保持无限等待。

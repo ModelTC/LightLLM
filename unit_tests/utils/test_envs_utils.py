@@ -1,5 +1,6 @@
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
+    get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_router_wait_timeout_seconds,
     get_pd_node_shm_req_alloc_timeout_seconds,
 )
@@ -21,6 +22,24 @@ def test_pd_cache_high_priority_max_age_reads_environment_variable(monkeypatch):
     assert get_pd_cache_high_priority_max_age_seconds() == 30
 
     get_pd_cache_high_priority_max_age_seconds.cache_clear()
+
+
+def test_pd_cache_high_priority_min_prompt_tokens_defaults_to_4096(monkeypatch):
+    monkeypatch.delenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", raising=False)
+    get_pd_cache_high_priority_min_prompt_tokens.cache_clear()
+
+    assert get_pd_cache_high_priority_min_prompt_tokens() == 4096
+
+    get_pd_cache_high_priority_min_prompt_tokens.cache_clear()
+
+
+def test_pd_cache_high_priority_min_prompt_tokens_reads_environment_variable(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", "2048")
+    get_pd_cache_high_priority_min_prompt_tokens.cache_clear()
+
+    assert get_pd_cache_high_priority_min_prompt_tokens() == 2048
+
+    get_pd_cache_high_priority_min_prompt_tokens.cache_clear()
 
 
 def test_pd_node_shm_req_alloc_timeout_defaults_to_20_seconds(monkeypatch):
