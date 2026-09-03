@@ -24,9 +24,17 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
 
         self.cache_manager = g_cache_manager
         assert HAS_DEEPGEMM, "deepgemm is not installed, you can't use quant api of it"
+        self.mega_moe_mma_type = None
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("Not implemented")
+
+    def finalize_moe_weight(self, moe_weight):
+        from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
+            prepare_mega_moe_weights,
+        )
+
+        prepare_mega_moe_weights(moe_weight.w13, moe_weight.w2, self)
 
     def apply(
         self,

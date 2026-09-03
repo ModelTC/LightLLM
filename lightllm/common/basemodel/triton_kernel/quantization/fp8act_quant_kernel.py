@@ -36,9 +36,18 @@ def _per_token_group_quant_fp8(
     xs_n,
     xs_stride_m,
     xs_stride_n,
+    topk_ids_ptr,
+    topk_weights_ptr,
+    topk_ids_out_ptr,
+    topk_weights_out_ptr,
+    num_topk,
+    topk_row_stride,
+    topk_out_row_stride,
     BLOCK: tl.constexpr,
+    TOPK_BLOCK: tl.constexpr,
     NEED_MASK: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
+    COPY_TOPK: tl.constexpr,
 ):
     g_id = tl.program_id(0)
     y_ptr += g_id * y_stride
@@ -68,6 +77,16 @@ def _per_token_group_quant_fp8(
     tl.store(y_q_ptr + cols, y_q, mask=mask)
     tl.store(y_s_ptr, y_s)
 
+    if COPY_TOPK:
+        topk_cols = tl.arange(0, TOPK_BLOCK)
+        topk_mask = (col_id == 0) & (topk_cols < num_topk)
+        topk_offsets = row_id * topk_row_stride + topk_cols
+        topk_out_offsets = row_id * topk_out_row_stride + topk_cols
+        topk_ids = tl.load(topk_ids_ptr + topk_offsets, mask=topk_mask)
+        topk_weights = tl.load(topk_weights_ptr + topk_offsets, mask=topk_mask)
+        tl.store(topk_ids_out_ptr + topk_out_offsets, topk_ids, mask=topk_mask)
+        tl.store(topk_weights_out_ptr + topk_out_offsets, topk_weights, mask=topk_mask)
+
 
 def lightllm_per_token_group_quant_fp8(
     x: torch.Tensor,
@@ -77,6 +96,10 @@ def lightllm_per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: torch.dtype = torch.float8_e4m3fn,
     use_ue8m0_scales: bool = False,
+    topk_ids: Optional[torch.Tensor] = None,
+    topk_weights: Optional[torch.Tensor] = None,
+    topk_ids_out: Optional[torch.Tensor] = None,
+    topk_weights_out: Optional[torch.Tensor] = None,
 ):
     """group-wise, per-token quantization on input tensor `x`.
     Args:
@@ -103,6 +126,16 @@ def lightllm_per_token_group_quant_fp8(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
+    copy_topk = topk_ids is not None
+    if copy_topk:
+        num_topk = topk_ids.shape[-1]
+        topk_block = triton.next_power_of_2(num_topk)
+        topk_row_stride = topk_ids.stride(0)
+        topk_out_row_stride = topk_ids_out.stride(0)
+    else:
+        topk_ids = topk_weights = topk_ids_out = topk_weights_out = x
+        topk_block = 1
+        num_topk = topk_row_stride = topk_out_row_stride = 0
     _per_token_group_quant_fp8[(M,)](
         x,
         x_q,
@@ -115,9 +148,18 @@ def lightllm_per_token_group_quant_fp8(
         xs_n=xs_n,
         xs_stride_m=xs_stride_m,
         xs_stride_n=xs_stride_n,
+        topk_ids_ptr=topk_ids,
+        topk_weights_ptr=topk_weights,
+        topk_ids_out_ptr=topk_ids_out,
+        topk_weights_out_ptr=topk_weights_out,
+        num_topk=num_topk,
+        topk_row_stride=topk_row_stride,
+        topk_out_row_stride=topk_out_row_stride,
         BLOCK=BLOCK,
+        TOPK_BLOCK=topk_block,
         NEED_MASK=BLOCK != group_size,
         USE_UE8M0_SCALE=use_ue8m0_scales,
+        COPY_TOPK=copy_topk,
         num_warps=num_warps,
         num_stages=num_stages,
     )
