@@ -458,7 +458,10 @@ def _hypercorn_config_args(args: StartArgs):
 
 
 def normal_or_p_d_start(args: StartArgs):
-    process_manager = _launch_subprocesses(args)
+    # Install this before _launch_subprocesses creates multiprocessing children.
+    # The later call after Hypercorn starts only updates its dynamic handle.
+    process_manager.setup_signal_handlers()
+    _launch_subprocesses(args)
 
     # 启动 Hypercorn
     command = [
@@ -479,6 +482,7 @@ def normal_or_p_d_start(args: StartArgs):
 
     # 启动子进程
     http_server_process = subprocess.Popen(command)
+    process_manager.setup_signal_handlers(http_server_process)
 
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_clear
@@ -489,11 +493,11 @@ def normal_or_p_d_start(args: StartArgs):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
-    process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
 
 
 def pd_master_start(args: StartArgs):
+    process_manager.setup_signal_handlers()
     _set_envs_and_config(args)
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
@@ -544,13 +548,13 @@ def pd_master_start(args: StartArgs):
     ]
 
     http_server_process = subprocess.Popen(command)
+    process_manager.setup_signal_handlers(http_server_process)
 
     if args.health_monitor:
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
-    process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
 
 
@@ -558,6 +562,7 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+    process_manager.setup_signal_handlers()
     _set_envs_and_config(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
@@ -607,6 +612,7 @@ def visual_only_start(args):
 
 
 def config_server_start(args):
+    process_manager.setup_signal_handlers()
     set_unique_server_name(args)
     if args.run_mode != "config_server":
         return
