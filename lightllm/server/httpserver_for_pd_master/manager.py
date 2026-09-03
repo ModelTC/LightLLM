@@ -232,6 +232,9 @@ class HttpServerManagerForPDMaster:
             origin_prompt_cache_len = None
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
+            # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
+            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的 block_prompt 长度。
+            prompt_tokens = sys.maxsize
 
             # Decode 节点容量不足时会用专用状态结束当前分段。
             # PD Master 吞掉该内部分段 marker，并用剩余 token 限额在同一组 P/D 节点上继续。
@@ -267,7 +270,6 @@ class HttpServerManagerForPDMaster:
                     multimodal_params,
                     request,
                 )
-                prompt_tokens = sys.maxsize  # 因为分段的原因
                 raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。

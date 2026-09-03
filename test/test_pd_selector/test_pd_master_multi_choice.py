@@ -380,12 +380,11 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
             yield (
                 sampling_params.group_request_id,
                 "x",
-                {"prompt_tokens": 1, "count_output_tokens": 1},
-                (
-                    FinishStatus()
-                    if len(dispatched_max_new_tokens) == 1
-                    else FinishStatus(FinishStatus.FINISHED_LENGTH)
-                ),
+                {
+                    "prompt_tokens": 1 if len(dispatched_max_new_tokens) == 1 else 2,
+                    "count_output_tokens": 1,
+                },
+                (FinishStatus() if len(dispatched_max_new_tokens) == 1 else FinishStatus(FinishStatus.FINISHED_LENGTH)),
             )
             if len(dispatched_max_new_tokens) == 1:
                 yield (
@@ -422,6 +421,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
         assert p_node.dispatched_prompt_chars == other_request_load
         assert p_node.dispatched_req_num == other_request_count
         assert len(results) == 2
+        assert [result[2]["prompt_tokens"] for result in results] == [1, 1]
         assert not results[0][3].is_finished()
         assert results[1][3].is_finished_length()
 
