@@ -247,6 +247,12 @@ class HttpServerManagerForPDMaster:
                 and selection_extra_info.estimated_cache_hit_rate > 0.8
                 and cache_age_seconds is not None
                 and cache_age_seconds <= self.pd_cache_high_priority_max_age_seconds
+                # TODO: 更细粒度的策略可由每个 P 节点维护待调度及尚未完成请求的 token_len 队列，
+                # 并向 PD Master 周期上报排队 token 总量、最长请求长度和最老请求等待时间等摘要。
+                # PD Master 可用 input_token_num * (1 - estimated_cache_hit_rate) 估算新请求剩余的
+                # Prefill 工作量；当目标 P 节点存在长请求时，允许剩余工作量很小的高 cache 命中短请求
+                # 提升优先级，以较低额外成本改善其 TTFT。该策略只重排尚未执行的请求，不尝试抢占
+                # 已在 GPU 上运行的请求，并应通过最大连续插队次数或最长等待时间防止长请求饥饿。
                 and input_token_num >= self.pd_cache_high_priority_min_prompt_tokens
             )
 
