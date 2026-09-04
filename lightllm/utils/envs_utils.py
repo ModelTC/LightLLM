@@ -327,7 +327,7 @@ def get_pd_node_busy_retry_timeout_seconds() -> int:
 @lru_cache(maxsize=None)
 def get_pd_cache_high_priority_max_age_seconds() -> int:
     """cache 命中请求提升为 PD 高优先级时允许的最大缓存年龄，单位为秒。"""
-    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 36)))
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 120)))
 
 
 @lru_cache(maxsize=None)
