@@ -309,7 +309,7 @@ def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
 @lru_cache(maxsize=None)
 def get_pd_node_resource_wait_timeout_seconds() -> int:
     """P/D 节点的资源等待超时，单位为秒；负数表示永久等待。"""
-    return int(os.getenv("LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS", 10))
+    return int(os.getenv("LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS", 20))
 
 
 @lru_cache(maxsize=None)
@@ -327,13 +327,13 @@ def get_pd_node_busy_retry_timeout_seconds() -> int:
 @lru_cache(maxsize=None)
 def get_pd_cache_high_priority_max_age_seconds() -> int:
     """cache 命中请求提升为 PD 高优先级时允许的最大缓存年龄，单位为秒。"""
-    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 120)))
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 180)))
 
 
 @lru_cache(maxsize=None)
 def get_pd_cache_high_priority_min_prompt_tokens() -> int:
     """cache 命中请求提升为 PD 高优先级时要求的最小 prompt token 数。"""
-    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", 4096)))
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", 2048)))
 
 
 @lru_cache(maxsize=None)
