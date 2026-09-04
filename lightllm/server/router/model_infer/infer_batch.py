@@ -1117,16 +1117,16 @@ class InferReq:
             if self.dsv4_has_c128 and cur_seq_len % 128 == 0:
                 c128_slot_num += 1
 
-        # EAGLE draft forwards after the first one consume newly appended draft-only rows.
-        # The DeepSeek-V4 MTP draft layer is compress_ratio=0, so these rows need only SWA.
-        for step in range(self.mtp_step + 1, self.mtp_step * 2):
-            cur_seq_len = seq_len + step
-            if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
-                swa_page_num += 1
-
-        # DSpark proposal allocates one private SWA scratch page per request.
         if self.args.mtp_mode == "dspark":
+            # DSpark proposal allocates one private SWA scratch page per request.
             swa_page_num += 1
+        else:
+            # EAGLE draft forwards after the first one consume newly appended draft-only rows.
+            # The DeepSeek-V4 MTP draft layer is compress_ratio=0, so these rows need only SWA.
+            for step in range(self.mtp_step + 1, self.mtp_step * 2):
+                cur_seq_len = seq_len + step
+                if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
+                    swa_page_num += 1
         return swa_page_num, c4_page_num, c128_slot_num
 
 
