@@ -1,3 +1,5 @@
+import builtins
+import io
 import threading
 import time
 from collections import deque
@@ -48,10 +50,11 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_paral
 )
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
+    _CudaBatchMemcpy,
+    _commit_staging_rows,
+    _extract_expert_tensors,
     align_target_placement,
     build_transfer_plan,
-    commit_staging_rows,
-    extract_expert_tensors,
 )
 
 
@@ -1536,6 +1539,14 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager._evaluation_result = None
     manager._evaluation_error = None
     manager._continuous_collection_end_step = None
+    prepare_calls = []
+    prepared_batches = object()
+
+    def prepare_transfer(layer_plans):
+        prepare_calls.append(layer_plans)
+        return prepared_batches
+
+    manager.transfer = SimpleNamespace(prepare_transfer=prepare_transfer)
     manager._collect_local_samples = lambda: torch.full((1, 3, 4), 100, dtype=torch.int64)
     planned_placement = torch.tensor(
         [
@@ -1572,6 +1583,8 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     metadata = manager._evaluation_result["metadata"]
     assert metadata[1] is None
     assert [layer_index for layer_index, _plan in manager._evaluation_result["layer_plans"]] == [0, 2]
+    assert prepare_calls == [manager._evaluation_result["layer_plans"]]
+    assert manager._evaluation_result["prepared_batches"] is prepared_batches
     for layer_index in (0, 2):
         item = metadata[layer_index]
         expected = build_logical_to_physical_map(
@@ -1582,6 +1595,57 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
         )
         assert torch.equal(item[0], expected[0])
         assert torch.equal(item[1], expected[1])
+
+
+def test_manager_preparation_error_is_saved_as_evaluation_error(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.weights = [
+        type(
+            "Weight",
+            (),
+            {
+                "expert_parallel_state": _test_parallel_state(
+                    eplb=True,
+                    route_counter=torch.zeros((1, 2), dtype=torch.int64),
+                    num_logical_experts=2,
+                    world_size=1,
+                )
+            },
+        )()
+    ]
+    manager._eplb_states = [manager.weights[0].expert_parallel_state.eplb]
+    manager.global_rank = 0
+    manager.world_size = 1
+    manager.node_world_size = 1
+    manager.step_interval = 20
+    manager.sampling_interval = 20
+    manager.num_logical_experts = 2
+    manager.current_placement = torch.tensor([[[0], [1]]], dtype=torch.int64)
+    manager.evaluation_group = object()
+    manager._evaluation_lock = threading.Lock()
+    manager._evaluation_result = None
+    manager._evaluation_error = None
+    manager._continuous_collection_end_step = None
+    manager._collect_local_samples = lambda: torch.ones((1, 1, 2), dtype=torch.int64)
+    manager._plan_and_broadcast = lambda _global_load: {
+        "kind": "planned",
+        "placement": torch.tensor([[[0], [1]]], dtype=torch.int64),
+        "improved": torch.tensor([True]),
+    }
+
+    def fail_prepare(_layer_plans):
+        raise RuntimeError("prepare failed")
+
+    manager.transfer = SimpleNamespace(prepare_transfer=fail_prepare)
+    monkeypatch.setattr(manager_module.dist, "all_reduce", lambda _tensor, **_kwargs: None)
+    monkeypatch.setattr(manager_module.torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(manager_module, "build_transfer_plan", lambda *_args, **_kwargs: [])
+
+    manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})())
+
+    assert manager._evaluation_result is None
+    assert isinstance(manager._evaluation_error, RuntimeError)
+    assert str(manager._evaluation_error) == "prepare failed"
 
 
 def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeypatch):
@@ -1941,7 +2005,7 @@ def test_extract_expert_tensors_includes_weight_scale_and_zero_point_in_order():
             self.weight_zero_point = torch.full((3, 1), offset + 2) if zero else None
 
     weight = type("Weight", (), {"w13": Pack(1), "w2": Pack(10, scale=False, zero=False)})()
-    tensors = extract_expert_tensors(weight)
+    tensors = _extract_expert_tensors(weight)
     assert [name for name, _ in tensors] == [
         "w13.weight",
         "w13.weight_scale",
@@ -1953,7 +2017,7 @@ def test_extract_expert_tensors_includes_weight_scale_and_zero_point_in_order():
 def test_commit_staging_rows_only_overwrites_redundant_rows():
     live = torch.arange(20).reshape(5, 4)
     staging = torch.full((2, 4), -1)
-    commit_staging_rows(
+    _commit_staging_rows(
         live,
         staging,
         num_experts_per_rank=3,
@@ -1968,7 +2032,7 @@ def test_commit_staging_rows_preserves_unchanged_destination_slots():
     staging = torch.tensor([[-1, -1, -1, -1], [-2, -2, -2, -2], [-3, -3, -3, -3], [-4, -4, -4, -4]])
     original = live.clone()
 
-    commit_staging_rows(
+    _commit_staging_rows(
         live,
         staging,
         num_experts_per_rank=3,
@@ -2010,7 +2074,7 @@ def test_commit_staging_rows_merges_contiguous_changed_slots():
         def narrow(self, _dim, start, length):
             return View(self.owner, start, length)
 
-    commit_staging_rows(
+    _commit_staging_rows(
         Tensor("live", 20),
         Tensor("staging", 4),
         num_experts_per_rank=10,
@@ -2291,11 +2355,12 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
     transfer.transfer_group = "transfer-group"
     copied = []
 
-    def copy_layer(layer, _plan, _staging):
-        copied.append(layer)
-        operations.append(("copy", layer))
+    def copy_batch(batch, _prepared_batch):
+        for layer, _plan, _buffer, _staging in batch:
+            copied.append(layer)
+            operations.append(("copy", layer))
 
-    transfer._copy_layer = copy_layer
+    transfer._copy_batch = copy_batch
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda device: None)
     monkeypatch.setattr(transfer_module.torch.cuda, "Event", Event)
     monkeypatch.setattr(transfer_module.torch.cuda, "current_stream", lambda: object())
@@ -2305,7 +2370,10 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
         lambda **kwargs: operations.append(("barrier", kwargs["group"])),
     )
 
-    transfer.start([(0, []), (1, []), (2, [])])
+    plans = [(0, []), (1, []), (2, [])]
+    prepared_batches = transfer.prepare_transfer(plans)
+    monkeypatch.setattr(transfer, "_make_batches", lambda _plans: pytest.fail("start must reuse prepared batches"))
+    transfer.start(plans, prepared_batches)
     deadline = time.monotonic() + 2
     while len(transfer.pending_layers()) < 2 and time.monotonic() < deadline:
         time.sleep(0.001)
@@ -2349,7 +2417,7 @@ def test_transfer_finalization_failure_stays_in_worker_and_success_finalizes_onc
         transfer._error = None
         transfer._thread = None
         transfer._needs_staging_reuse_barrier = False
-        transfer._copy_batch = lambda _batch: None
+        transfer._copy_batch = lambda _batch, _prepared_batch: None
         transfer._finish_transfer_generation = finalize
         return transfer
 
@@ -2672,15 +2740,21 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
     manager.sampling_interval = 320
     manager._continuous_collection_start_step = 0
     manager.global_rank = 1
-    manager.transfer = type("Transfer", (), {"start": lambda self, plans: setattr(self, "plans", plans)})()
+    manager.transfer = type(
+        "Transfer",
+        (),
+        {"start": lambda self, plans, prepared_batches: setattr(self, "started", (plans, prepared_batches))},
+    )()
     manager._reset_recorded_samples = lambda: None
 
+    prepared_batches = [object()]
     manager._start_rebalance(
         {
             "placement": torch.zeros((1, 1, 1), dtype=torch.int64),
             "improved": torch.tensor([True]),
             "metadata": [None],
             "layer_plans": [(0, object())],
+            "prepared_batches": prepared_batches,
             "before": {"max": 1.0, "p95": 1.0},
             "after": {"max": 1.0, "p95": 1.0},
             "model_imbalance_ratio": 1.0,
@@ -2693,6 +2767,18 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
     assert manager.sampling_interval == 20
     assert manager.in_flight
     assert manager._continuous_collection_start_step is None
+    assert len(manager.transfer.started[0]) == 1
+    assert manager.transfer.started[1] is prepared_batches
+
+
+def test_transfer_start_rejects_prepared_batches_with_wrong_batch_count():
+    transfer = object.__new__(transfer_module._EPLBTransferBase)
+    transfer._thread = None
+    transfer.staging_depth = 2
+    transfer.staging = [object(), object()]
+
+    with pytest.raises(ValueError, match="prepared batch count"):
+        transfer.start([(0, []), (1, []), (2, [])], prepared_batches=[object()])
 
 
 def test_first_rebalance_completion_switches_to_four_step_sparse_window(monkeypatch):
@@ -2780,6 +2866,245 @@ def test_nixl_descriptor_runs_merge_only_jointly_contiguous_source_and_destinati
     ]
 
 
+def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
+    class BatchMemcpy:
+        def __init__(self):
+            self.prepared = []
+            self.enqueued = []
+
+        def prepare(self, descriptors):
+            descriptor = tuple(descriptors)
+            self.prepared.append(descriptor)
+            return descriptor
+
+        def enqueue(self, descriptor, stream):
+            self.enqueued.append((descriptor, stream))
+
+    stream = SimpleNamespace(cuda_stream=123, synchronize=lambda: None)
+    batch_memcpy = BatchMemcpy()
+    transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer._push_stream = stream
+    transfer._batch_memcpy = batch_memcpy
+    transfer.global_rank = 0
+    transfer._same_node_ranks = {0, 1, 2}
+    transfer._live_row_layout = [
+        [
+            ("w13.weight", 1000, 32),
+            ("w13.weight_scale", 2000, 32),
+            ("w13.weight_zero_point", 3000, 32),
+        ]
+    ]
+    transfer._push_staging_row_layout = {
+        1: [[("w13.weight", 4000, 32), ("w13.weight_scale", 5000, 32), ("w13.weight_zero_point", 6000, 32)]],
+        2: [[("w13.weight", 7000, 32), ("w13.weight_scale", 8000, 32), ("w13.weight_zero_point", 9000, 32)]],
+    }
+    transfer._get_remote_read = lambda *_args: None
+    transfer._wait_xfers = lambda _xfers: None
+
+    run_a = [TransferStep(1, 3, 0, 5), TransferStep(1, 4, 0, 6)]
+    run_b = [TransferStep(2, 1, 0, 2)]
+    local_inbound = TransferStep(0, 0, 1, 0)
+    remote_inbound = TransferStep(0, 1, 3, 2)
+    staging = object()
+    batch = [(0, run_a + run_b + [local_inbound, remote_inbound], 0, staging)]
+    prepared = transfer._prepare_batch(batch)
+    monkeypatch.setattr(transfer, "_prepare_batch", lambda _batch: pytest.fail("hot path must not prepare descriptors"))
+    monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: pytest.fail("must not switch streams"))
+    transfer._copy_batch(batch, prepared)
+
+    expected = (
+        (1160, 4096, 64),
+        (2160, 5096, 64),
+        (3160, 6096, 64),
+        (1064, 7032, 32),
+        (2064, 8032, 32),
+        (3064, 9032, 32),
+    )
+    assert batch_memcpy.prepared == [expected]
+    assert batch_memcpy.enqueued == [(expected, 123)]
+    assert prepared.remote_entries == {3: [(0, [remote_inbound], staging)]}
+
+
+def test_nixl_prepare_transfer_batches_match_staging_depth():
+    transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer.staging_depth = 2
+    transfer.staging = ["staging-0", "staging-1"]
+    seen_batches = []
+
+    def prepare_batch(batch):
+        seen_batches.append(batch)
+        return f"prepared-{len(seen_batches)}"
+
+    transfer._prepare_batch = prepare_batch
+    layer_plans = [(3, "plan-3"), (4, "plan-4"), (5, "plan-5")]
+
+    prepared_batches = transfer.prepare_transfer(layer_plans)
+
+    assert prepared_batches == [
+        (seen_batches[0], "prepared-1"),
+        (seen_batches[1], "prepared-2"),
+    ]
+    assert [[(layer, buffer) for layer, _plan, buffer, _staging in batch] for batch in seen_batches] == [
+        [(3, 0), (4, 1)],
+        [(5, 0)],
+    ]
+
+
+def test_cuda_batch_memcpy_cuda13_abi_and_descriptor_layout():
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+            self.restype = None
+            self.argtypes = None
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    class Library:
+        def __init__(self):
+            def get_version(pointer):
+                ctypes.cast(pointer, ctypes.POINTER(ctypes.c_int))[0] = 13000
+                return 0
+
+            self.cudaRuntimeGetVersion = Function(get_version)
+            self.cudaMemcpyBatchAsync = Function(lambda *args: self.calls.append(args) or 0)
+            self.cudaGetErrorString = Function(lambda _result: b"fake cuda error")
+            self.calls = []
+
+    import ctypes
+
+    library = Library()
+    batch_memcpy = _CudaBatchMemcpy(library)
+    prepared = batch_memcpy.prepare(((101, 201, 64), (102, 202, 128)))
+    batch_memcpy.enqueue(prepared, 777)
+
+    assert len(library.cudaMemcpyBatchAsync.argtypes) == 8
+    assert library.calls[0][3] == 2
+    assert library.calls[0][6] == 1
+    assert library.calls[0][7].value == 777
+    assert [pointer for pointer in library.calls[0][0]] == [201, 202]
+    assert [pointer for pointer in library.calls[0][1]] == [101, 102]
+    assert list(library.calls[0][2]) == [64, 128]
+    attrs = library.calls[0][4]._obj
+    assert attrs.srcAccessOrder == 1
+    assert attrs.srcLocHint.type == attrs.srcLocHint.id == 0
+    assert attrs.dstLocHint.type == attrs.dstLocHint.id == 0
+    assert attrs.flags == 1
+
+
+def test_cuda_batch_memcpy_rejects_unsupported_runtime_and_invalid_descriptors():
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+            self.restype = None
+            self.argtypes = None
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    class OldRuntimeLibrary:
+        def __init__(self):
+            def get_version(pointer):
+                ctypes.cast(pointer, ctypes.POINTER(ctypes.c_int))[0] = 12080
+                return 0
+
+            self.cudaRuntimeGetVersion = Function(get_version)
+            self.cudaMemcpyBatchAsync = Function(lambda *_args: 0)
+            self.cudaGetErrorString = Function(lambda _result: b"fake cuda error")
+
+    import ctypes
+
+    with pytest.raises(RuntimeError, match="13.0"):
+        _CudaBatchMemcpy(OldRuntimeLibrary())
+
+    class FutureRuntimeLibrary:
+        def __init__(self):
+            def get_version(pointer):
+                ctypes.cast(pointer, ctypes.POINTER(ctypes.c_int))[0] = 14000
+                return 0
+
+            self.cudaRuntimeGetVersion = Function(get_version)
+            self.cudaMemcpyBatchAsync = Function(lambda *_args: 0)
+            self.cudaGetErrorString = Function(lambda _result: b"fake cuda error")
+
+    with pytest.raises(RuntimeError, match="13.x"):
+        _CudaBatchMemcpy(FutureRuntimeLibrary())
+
+    class MissingBatchSymbolLibrary:
+        def __init__(self):
+            def get_version(pointer):
+                ctypes.cast(pointer, ctypes.POINTER(ctypes.c_int))[0] = 13000
+                return 0
+
+            self.cudaRuntimeGetVersion = Function(get_version)
+            self.cudaGetErrorString = Function(lambda _result: b"fake cuda error")
+
+    with pytest.raises(RuntimeError, match="cudaMemcpyBatchAsync"):
+        _CudaBatchMemcpy(MissingBatchSymbolLibrary())
+    with pytest.raises(ValueError, match="at least one"):
+        _CudaBatchMemcpy.prepare(())
+    with pytest.raises(ValueError, match="positive"):
+        _CudaBatchMemcpy.prepare(((1, 2, 0),))
+
+
+def test_nixl_transfer_fails_fast_without_cuda13_batch_memcpy(monkeypatch):
+    failure = RuntimeError("missing cudaMemcpyBatchAsync")
+
+    def unavailable():
+        raise failure
+
+    monkeypatch.setattr(
+        transfer_module._EPLBTransferBase, "__init__", lambda self, *_args: setattr(self, "device", "mock")
+    )
+    monkeypatch.setattr(transfer_module.torch.cuda, "Stream", lambda device: ("stream", device))
+    monkeypatch.setattr(transfer_module, "_CudaBatchMemcpy", unavailable)
+    with pytest.raises(RuntimeError, match="missing cudaMemcpyBatchAsync") as exc_info:
+        transfer_module.NixlEPLBTransfer([object()], object(), 0, 1)
+    assert exc_info.value is failure
+
+
+@pytest.mark.parametrize(
+    ("maps", "open_raises", "expected"),
+    [
+        (
+            "7f /cuda-12/libcudart.so.12.8\n"
+            "7f /first/libcudart.so.13 (deleted)\n"
+            "7f /second/libcudart.so.13\n"
+            "7f /cuda-14/libcudart.so.14\n"
+            "7f /cuda-130/libcudart.so.130\n",
+            False,
+            "/first/libcudart.so.13",
+        ),
+        ("7f /cuda-12/libcudart.so.12\n7f /cuda-130/libcudart.so.130\n", False, None),
+        ("", True, None),
+    ],
+)
+def test_cuda_batch_memcpy_finds_first_loaded_cuda13_runtime(monkeypatch, maps, open_raises, expected):
+    def open_maps(_path):
+        if open_raises:
+            raise OSError("maps unavailable")
+        return io.StringIO(maps)
+
+    monkeypatch.setattr(builtins, "open", open_maps)
+    assert _CudaBatchMemcpy._find_loaded_cudart() == expected
+
+
+@pytest.mark.parametrize(("layers", "expected_depth"), [(1, 1), (8, 8), (9, 8), (43, 8)])
+def test_nixl_transfer_bounds_staging_depth(monkeypatch, layers, expected_depth):
+    def base_init(self, *_args):
+        self.device = "mock-device"
+
+    monkeypatch.setattr(transfer_module._EPLBTransferBase, "__init__", base_init)
+    monkeypatch.setattr(transfer_module.torch.cuda, "Stream", lambda device: ("stream", device))
+    monkeypatch.setattr(transfer_module, "_CudaBatchMemcpy", lambda: object())
+    monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_ipc_metadata", lambda self: None)
+    monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_push_layouts", lambda self: None)
+
+    transfer = transfer_module.NixlEPLBTransfer([object()] * layers, object(), 0, 1)
+
+    assert transfer.staging_depth == expected_depth
+
+
 def test_nixl_remote_read_cache_reuses_exact_batch_key_and_releases_on_shutdown():
     class Tensor:
         nbytes = 8
@@ -2853,7 +3178,7 @@ def test_nixl_remote_read_cache_reuses_exact_batch_key_and_releases_on_shutdown(
     assert agent.removed_agents == ["remote-1"]
 
 
-def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
+def test_nixl_remote_read_cache_is_bounded_to_the_current_transfer_generation(
     monkeypatch,
 ):
     class Tensor:
@@ -2904,8 +3229,6 @@ def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
     transfer._nixl_agent = agent
     transfer._xfer_cache = {}
     transfer._used_xfer_cache_keys = set()
-    transfer._push_descriptor_cache = {}
-    transfer._used_push_descriptor_cache_keys = set()
     transfer._remote_agents = {1: "remote-1"}
     transfer._remote_layouts = {1: [[("weight", 1000, 0, 8)]]}
     transfer._registered_descs = None
@@ -2932,53 +3255,38 @@ def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
     staging = [("weight", Tensor(200))]
     entries_a = [(0, [TransferStep(0, 0, 1, 0)], staging)]
     entries_b = [(0, [TransferStep(0, 1, 1, 0)], staging)]
-    source_a, destination_a = Tensor(300), Tensor(400)
-    source_b, destination_b = Tensor(500), Tensor(600)
-    copies_a = [(destination_a, source_a)]
-    copies_b = [(destination_b, source_b)]
-    key_a = ((source_a.data_ptr(), destination_a.data_ptr()),)
-    key_b = ((source_b.data_ptr(), destination_b.data_ptr()),)
-    stale_key = ((700, 800),)
-    transfer._push_descriptor_cache = {
-        key_a: (object(), object()),
-        stale_key: (object(), object()),
-    }
-    generation = [entries_a, copies_a]
+    generation = [entries_a]
 
-    def copy_batch(_batch):
+    def copy_batch(_batch, _prepared_batch):
         transfer._get_remote_read(1, generation[0])
-        transfer._cached_descriptor_tensors(generation[1])
 
     transfer._copy_batch = copy_batch
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
 
-    transfer.start([(0, [])])
+    prepared_batches = [([(0, [], 0, transfer.staging[0])], None)]
+    transfer.start([(0, [])], prepared_batches)
     transfer.finish()
     assert agent.made == 1
     assert agent.released_xfers == agent.released_dlists == 0
-    assert set(transfer._push_descriptor_cache) == {key_a}
     assert len(transfer._xfer_cache) == 1
 
     # The real manager releases each staging buffer through commit(). This
     # focused cache test has no commits, so model that hand-off before the
     # next generation reuses buffer zero.
     transfer._release[0].set()
-    transfer.start([(0, [])])
+    transfer.start([(0, [])], prepared_batches)
     transfer.finish()
     assert agent.made == 1
     assert agent.released_xfers == agent.released_dlists == 0
-    assert set(transfer._push_descriptor_cache) == {key_a}
     assert len(transfer._xfer_cache) == 1
 
-    transfer._push_descriptor_cache[key_b] = (object(), object())
-    generation[:] = [entries_b, copies_b]
+    generation[:] = [entries_b]
     transfer._release[0].set()
-    transfer.start([(0, [])])
+    transfer.start([(0, [])], prepared_batches)
     transfer.finish()
     assert agent.made == 2
     assert agent.released_xfers == 1
     assert agent.released_dlists == 2
-    assert set(transfer._push_descriptor_cache) == {key_b}
     assert len(transfer._xfer_cache) == 1
     transfer.shutdown()
 
@@ -3051,22 +3359,16 @@ def test_nixl_copy_batch_source_pushes_local_rows_and_keeps_remote_ucx_reads(
     class Stream:
         def __init__(self):
             self.synchronized = 0
+            self.cuda_stream = 123
 
         def synchronize(self):
             self.synchronized += 1
 
-    @contextmanager
-    def use_stream(_stream):
-        yield
-
     stream = Stream()
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
-    transfer.global_rank = 0
-    transfer.num_experts_per_rank = 2
-    transfer._same_node_ranks = {0, 1}
     transfer._push_stream = stream
-    remote_reads, pushed, waited_xfers = [], [], []
-    transfer._push_same_node = lambda dst_rank, entries: pushed.append((dst_rank, entries))
+    transfer._batch_memcpy = SimpleNamespace(enqueue=lambda descriptor, stream: enqueued.append((descriptor, stream)))
+    remote_reads, waited_xfers, enqueued = [], [], []
     transfer._get_remote_read = lambda src_rank, entries: remote_reads.append((src_rank, entries)) or (
         None,
         None,
@@ -3074,16 +3376,14 @@ def test_nixl_copy_batch_source_pushes_local_rows_and_keeps_remote_ucx_reads(
     )
     transfer._wait_xfers = waited_xfers.extend
 
-    monkeypatch.setattr(transfer_module.torch.cuda, "stream", use_stream)
-    staging = []
-    local_step = TransferStep(1, 0, 0, 0)
+    monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: pytest.fail("must not switch streams"))
+    prepared_push = transfer_module.NixlEPLBTransfer._PreparedBatch({}, "push")
+    transfer._copy_batch([], prepared_push)
+    assert enqueued == [("push", stream.cuda_stream)]
+
     remote_step = TransferStep(0, 1, 2, 0)
-
-    transfer._copy_batch([(0, [local_step], 0, staging)])
-    assert pushed == [(1, [(0, [local_step], 0)])]
-    assert remote_reads == []
-
-    transfer._copy_batch([(0, [remote_step], 0, staging)])
+    prepared_remote = transfer_module.NixlEPLBTransfer._PreparedBatch({2: [(0, [remote_step], [])]}, None)
+    transfer._copy_batch([], prepared_remote)
     assert [rank for rank, _ in remote_reads] == [2]
     assert waited_xfers == [(None, None, "xfer")]
 
@@ -3092,28 +3392,22 @@ def test_nixl_copy_batch_self_only_rank_pushes_and_synchronizes(monkeypatch):
     class Stream:
         def __init__(self):
             self.synchronized = 0
+            self.cuda_stream = 456
 
         def synchronize(self):
             self.synchronized += 1
 
-    @contextmanager
-    def use_stream(_stream):
-        yield
-
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
-    transfer.global_rank = 0
-    transfer.num_experts_per_rank = 2
-    transfer._same_node_ranks = {0}
     transfer._push_stream = Stream()
-    pushed = []
-    transfer._push_same_node = lambda dst_rank, entries: pushed.append((dst_rank, entries))
+    enqueued = []
+    transfer._batch_memcpy = SimpleNamespace(enqueue=lambda descriptor, stream: enqueued.append((descriptor, stream)))
     transfer._wait_xfers = lambda _xfers: None
-    monkeypatch.setattr(transfer_module.torch.cuda, "stream", use_stream)
+    monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: pytest.fail("must not switch streams"))
 
-    self_step = TransferStep(0, 0, 0, 0)
-    transfer._copy_batch([(0, [self_step], 0, [])])
+    prepared = transfer_module.NixlEPLBTransfer._PreparedBatch({}, "push")
+    transfer._copy_batch([], prepared)
 
-    assert pushed == [(0, [(0, [self_step], 0)])]
+    assert enqueued == [("push", transfer._push_stream.cuda_stream)]
     assert transfer._push_stream.synchronized == 1
 
 
