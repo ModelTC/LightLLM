@@ -2780,6 +2780,57 @@ def test_nixl_descriptor_runs_merge_only_jointly_contiguous_source_and_destinati
     ]
 
 
+def test_nixl_push_same_node_uses_nonblocking_copies_for_all_expert_tensors(monkeypatch):
+    active_streams = []
+    copies = []
+
+    @contextmanager
+    def use_stream(stream):
+        active_streams.append(stream)
+        yield
+        active_streams.pop()
+
+    class Rows:
+        def __init__(self, label):
+            self.label = label
+
+        def copy_(self, source, non_blocking):
+            copies.append((self.label, source.label, non_blocking, active_streams[:]))
+
+    class Tensor:
+        def __init__(self, label):
+            self.label = label
+
+        def narrow(self, _dim, start, length):
+            return Rows(f"{self.label}[{start}:{start + length}]")
+
+    stream = object()
+    transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer._push_stream = stream
+    transfer.live = [
+        [
+            ("w13.weight", Tensor("source.weight")),
+            ("w13.weight_scale", Tensor("source.scale")),
+            ("w13.weight_zero_point", Tensor("source.zero")),
+        ]
+    ]
+    transfer._push_staging = lambda _dst_rank, _buffer_index: [
+        ("w13.weight", Tensor("destination.weight")),
+        ("w13.weight_scale", Tensor("destination.scale")),
+        ("w13.weight_zero_point", Tensor("destination.zero")),
+    ]
+    monkeypatch.setattr(transfer_module.torch.cuda, "stream", use_stream)
+
+    run = [TransferStep(1, 3, 0, 5), TransferStep(1, 4, 0, 6)]
+    transfer._push_same_node(1, [(0, run, 0)])
+
+    assert copies == [
+        ("destination.weight[3:5]", "source.weight[5:7]", True, [stream]),
+        ("destination.scale[3:5]", "source.scale[5:7]", True, [stream]),
+        ("destination.zero[3:5]", "source.zero[5:7]", True, [stream]),
+    ]
+
+
 def test_nixl_remote_read_cache_reuses_exact_batch_key_and_releases_on_shutdown():
     class Tensor:
         nbytes = 8
@@ -2853,7 +2904,7 @@ def test_nixl_remote_read_cache_reuses_exact_batch_key_and_releases_on_shutdown(
     assert agent.removed_agents == ["remote-1"]
 
 
-def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
+def test_nixl_remote_read_cache_is_bounded_to_the_current_transfer_generation(
     monkeypatch,
 ):
     class Tensor:
@@ -2904,8 +2955,6 @@ def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
     transfer._nixl_agent = agent
     transfer._xfer_cache = {}
     transfer._used_xfer_cache_keys = set()
-    transfer._push_descriptor_cache = {}
-    transfer._used_push_descriptor_cache_keys = set()
     transfer._remote_agents = {1: "remote-1"}
     transfer._remote_layouts = {1: [[("weight", 1000, 0, 8)]]}
     transfer._registered_descs = None
@@ -2932,22 +2981,10 @@ def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
     staging = [("weight", Tensor(200))]
     entries_a = [(0, [TransferStep(0, 0, 1, 0)], staging)]
     entries_b = [(0, [TransferStep(0, 1, 1, 0)], staging)]
-    source_a, destination_a = Tensor(300), Tensor(400)
-    source_b, destination_b = Tensor(500), Tensor(600)
-    copies_a = [(destination_a, source_a)]
-    copies_b = [(destination_b, source_b)]
-    key_a = ((source_a.data_ptr(), destination_a.data_ptr()),)
-    key_b = ((source_b.data_ptr(), destination_b.data_ptr()),)
-    stale_key = ((700, 800),)
-    transfer._push_descriptor_cache = {
-        key_a: (object(), object()),
-        stale_key: (object(), object()),
-    }
-    generation = [entries_a, copies_a]
+    generation = [entries_a]
 
     def copy_batch(_batch):
         transfer._get_remote_read(1, generation[0])
-        transfer._cached_descriptor_tensors(generation[1])
 
     transfer._copy_batch = copy_batch
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
@@ -2956,7 +2993,6 @@ def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
     transfer.finish()
     assert agent.made == 1
     assert agent.released_xfers == agent.released_dlists == 0
-    assert set(transfer._push_descriptor_cache) == {key_a}
     assert len(transfer._xfer_cache) == 1
 
     # The real manager releases each staging buffer through commit(). This
@@ -2967,18 +3003,15 @@ def test_nixl_descriptor_caches_are_bounded_to_the_current_transfer_generation(
     transfer.finish()
     assert agent.made == 1
     assert agent.released_xfers == agent.released_dlists == 0
-    assert set(transfer._push_descriptor_cache) == {key_a}
     assert len(transfer._xfer_cache) == 1
 
-    transfer._push_descriptor_cache[key_b] = (object(), object())
-    generation[:] = [entries_b, copies_b]
+    generation[:] = [entries_b]
     transfer._release[0].set()
     transfer.start([(0, [])])
     transfer.finish()
     assert agent.made == 2
     assert agent.released_xfers == 1
     assert agent.released_dlists == 2
-    assert set(transfer._push_descriptor_cache) == {key_b}
     assert len(transfer._xfer_cache) == 1
     transfer.shutdown()
 

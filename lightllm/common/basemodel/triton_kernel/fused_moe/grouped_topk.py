@@ -4,8 +4,6 @@ import triton
 import triton.language as tl
 from triton.language.standard import _log2, sum, zeros_like
 
-from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_replica_index
-
 
 @triton.jit
 def _compare_and_swap(x, x_1, ids, flip, i: tl.core.constexpr, n_dims: tl.core.constexpr):
@@ -76,6 +74,14 @@ def _bitonic_merge(x, x_1, ids, stage: tl.core.constexpr, order: tl.core.constex
     for i in tl.core.static_range(stage):
         x, x_1, ids = _compare_and_swap(x, x_1, ids, flip, i + (n_dims - stage), n_dims)
     return x, x_1, ids
+
+
+@triton.jit
+def _eplb_replica_index(token_index, logical_id, replica_count):
+    """Choose a replica with independent phases for a token's top-k experts."""
+    token_hash = token_index.to(tl.uint32) * 2654435769
+    expert_hash = logical_id.to(tl.uint32) * 2246822519
+    return (token_hash + expert_hash) % replica_count.to(tl.uint32)
 
 
 @triton.jit
@@ -344,7 +350,7 @@ def grouped_topk_eplb_kernel(
             mask=topk_mask,
             other=1,
         )
-        replica_indices = eplb_replica_index(token_index, selected_logical_ids, replica_counts)
+        replica_indices = _eplb_replica_index(token_index, selected_logical_ids, replica_counts)
     selected_physical_ids = tl.load(
         logical_to_physical_ptr + selected_logical_ids * MAP_SLOTS + replica_indices,
         mask=topk_mask,
