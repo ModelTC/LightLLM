@@ -20,7 +20,7 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
-    manager.pd_high_priority_request_time_out_seconds = 60
+    manager.pd_node_resource_wait_timeout_seconds = -1
     manager.pd_cache_high_priority_max_age_seconds = 60
     manager.pd_cache_high_priority_min_prompt_tokens = 4096
     manager.disable_pd_cache_high_priority = False
@@ -574,10 +574,10 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-def test_pd_master_sets_high_priority_timeout():
+def test_pd_master_sets_resource_wait_timeout_independently_of_priority():
     async def run():
         manager = _manager()
-        manager.pd_high_priority_request_time_out_seconds = 90
+        manager.pd_node_resource_wait_timeout_seconds = 90
         manager.id_gen.generate_id.return_value = 808
         manager.remove_req = AsyncMock()
         manager.abort = AsyncMock()
@@ -590,16 +590,18 @@ def test_pd_master_sets_high_priority_timeout():
             return_value=(
                 p_node,
                 d_node,
-                PDSelectionExtraInfo(
-                    estimated_cache_hit_rate=0.81,
-                    cache_last_insert_time=time.monotonic(),
-                ),
+                PDSelectionExtraInfo(),
             )
         )
-        captured_timeout_seconds = []
+        captured_request_settings = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
-            captured_timeout_seconds.append(sampling_params.pd_high_priority_request_time_out_seconds)
+            captured_request_settings.append(
+                (
+                    sampling_params.pd_high_priority_request,
+                    sampling_params.pd_node_resource_wait_timeout_seconds,
+                )
+            )
             yield (
                 sampling_params.group_request_id,
                 "x",
@@ -622,7 +624,7 @@ def test_pd_master_sets_high_priority_timeout():
         ):
             pass
 
-        assert captured_timeout_seconds == [90]
+        assert captured_request_settings == [(False, 90)]
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 

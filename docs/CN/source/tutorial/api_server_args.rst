@@ -94,19 +94,27 @@ PD 分离模式参数
 
 .. option:: --enable_pd_node_self_request_limit
 
-    在 Prefill/Decode 节点上启用本地请求限流。PD Master 当前不执行请求准入限流。
-    HTTP server 申请本地 ``shm_req`` 对象的超时时间由
-    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 控制（默认 20 秒）；请求进入 Router 后等待
-    进入推理系统的超时时间由 ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` 控制（默认 20 秒）。
-    超时会导致 ``Server is busy``；其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，
-    由 PD Master 转换为 HTTP 429。未开启限流时请求会持续等待资源；PD 高优先级请求
-    （分段续跑请求，或预计输入 cache 命中率高于 0.8 且命中记录仍然新鲜的请求）由 PD Master 通过
-    ``pd_high_priority_request_time_out_seconds`` 下发一个统一的超时时间下限。P/D 节点分别取
-    该值与本地 ``shm_req``、Router 超时的较大值；该字段为 0 时不延长本地超时。PD Master 下发值由
-    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` 控制，默认 60 秒。cache 命中记录允许提升优先级的
-    最大年龄由 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 16 秒。cache 命中提权还要求输入
+    启用由 PD Master 统一管理的 P/D 节点资源等待限流。该参数只需要在 PD Master 启动时设置，
+    不需要在 Prefill/Decode 节点上设置。开启后，PD Master 通过
+    ``pd_node_resource_wait_timeout_seconds`` 为所有请求下发统一的资源等待上限；P/D 节点只负责按下发值
+    控制本地 ``shm_req`` 申请和 Router 等待进入推理系统，不读取本地限流开关或超时配置，也不根据请求
+    是否为高优先级改变超时。该值由 PD Master 上的
+    ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 10 秒；设置为 -1 表示永久等待。
+    设置为非负数时，超时会导致 ``Server is busy``；
+    其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，由 PD Master 转换为 HTTP 429。
+    未设置该启动参数时，PD Master 统一下发 -1，即所有 P/D 节点永久等待。
+    多机 TP 场景仅由 master 节点执行超时判断，slave 节点永久等待。cache 命中记录允许提升优先级的最大年龄由
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 16 秒。cache 命中提权还要求输入
     token 数达到 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` 配置的门槛（默认 4096），避免短请求仅因
-    cache 命中率高而提升优先级。本地请求限流默认关闭。
+    cache 命中率高而提升优先级。
+
+    启动示例：
+
+    .. code-block:: bash
+
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+            python -m lightllm.server.api_server --run_mode pd_master \
+            --enable_pd_node_self_request_limit ...
 
 .. option:: --disable_pd_cache_high_priority
 

@@ -97,21 +97,29 @@ PD disaggregation Mode Parameters
 
 .. option:: --enable_pd_node_self_request_limit
 
-    Enable local request limiting on Prefill/Decode nodes. PD Master does not currently perform request admission
-    limiting. The local ``shm_req`` allocation timeout is controlled by
-    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` (20 seconds by default), while the timeout from Router entry
-    to inference entry is controlled by ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` (20 seconds by default).
-    A timeout reports ``Server is busy``; a request that has entered the Router but not inference is proactively
-    marked aborted, and PD Master converts this to HTTP 429. Requests continue waiting when local admission is
-    disabled. For PD high-priority requests (segmented continuation requests, or requests whose estimated input
-    cache hit rate is above 0.8 and whose cache record is still fresh), PD Master supplies a shared timeout floor through
-    ``pd_high_priority_request_time_out_seconds``. Each P/D node uses the greater of this value and its local
-    ``shm_req`` or Router timeout; zero does not extend the local timeout. The value supplied by PD Master is controlled by
-    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` and defaults to 60 seconds. The maximum cache-record age
-    eligible for promotion is controlled by ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
+    Enable PD Master-managed resource wait limiting for P/D nodes. Set this option only when starting PD Master;
+    it is not needed on Prefill or Decode nodes. Once enabled, PD Master supplies
+    ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
+    ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
+    or timeout settings, and request priority does not alter the timeout. The value is
+    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
+    to -1 to wait indefinitely. When set to a non-negative value, a timeout reports ``Server is busy``; a request that has
+    entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
+    Without this startup option, PD Master sends -1 and all P/D nodes wait indefinitely.
+    In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
+    The maximum cache-record age eligible for promotion is controlled by
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
     16 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
-    solely from a high cache-hit rate. Local request limiting is disabled by default.
+    solely from a high cache-hit rate.
+
+    Startup example:
+
+    .. code-block:: bash
+
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+            python -m lightllm.server.api_server --run_mode pd_master \
+            --enable_pd_node_self_request_limit ...
 
 .. option:: --disable_pd_cache_high_priority
 

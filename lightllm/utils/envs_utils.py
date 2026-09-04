@@ -307,21 +307,9 @@ def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
 
 
 @lru_cache(maxsize=None)
-def get_pd_node_shm_req_alloc_timeout_seconds() -> int:
-    """PD 节点申请 ``shm_req`` 对象的最长等待时间，单位为秒。"""
-    return int(os.getenv("LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS", 20))
-
-
-@lru_cache(maxsize=None)
-def get_pd_node_router_wait_timeout_seconds() -> int:
-    """请求进入 Router 后等待进入推理系统的最长时间，单位为秒。"""
-    return int(os.getenv("LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS", 20))
-
-
-@lru_cache(maxsize=None)
-def get_pd_high_priority_request_timeout_seconds() -> int:
-    """PD Master 为高优先级请求设置的等待时间下限，单位为秒。"""
-    return int(os.getenv("LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS", 60))
+def get_pd_node_resource_wait_timeout_seconds() -> int:
+    """P/D 节点的资源等待超时，单位为秒；负数表示永久等待。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS", 10))
 
 
 @lru_cache(maxsize=None)

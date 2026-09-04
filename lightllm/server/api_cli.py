@@ -80,8 +80,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--enable_pd_node_self_request_limit",
         action="store_true",
         help=(
-            "Enable local request limiting on Prefill/Decode nodes by enforcing shm_req allocation and Router "
-            "scheduling wait timeouts. PD Master admission limiting is not currently enabled. Default: disabled."
+            "Enable PD Master-managed resource wait limiting for Prefill/Decode nodes. Configure this option only "
+            "on PD Master; it sends all timeout details to P/D nodes, which only enforce the received values. "
+            "Default: disabled."
         ),
     )
     parser.add_argument(

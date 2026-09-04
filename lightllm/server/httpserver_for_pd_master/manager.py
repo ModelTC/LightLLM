@@ -26,7 +26,7 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
-    get_pd_high_priority_request_timeout_seconds,
+    get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import PDSelectionExtraInfo, create_selector
@@ -52,9 +52,11 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
-        # 高优先级请求仍可比普通请求等待更久，但通过请求参数向开启本地限流的
-        # P/D 节点传递有限的等待时间，避免资源异常时永久占用请求链路。
-        self.pd_high_priority_request_time_out_seconds = get_pd_high_priority_request_timeout_seconds()
+        # 限流开关只在 PD Master 生效。开启后由 Master 统一下发资源等待上限；
+        # 未开启时下发 -1，P/D 节点不读取本地开关或超时配置，只执行收到的值。
+        self.pd_node_resource_wait_timeout_seconds = (
+            get_pd_node_resource_wait_timeout_seconds() if args.enable_pd_node_self_request_limit else -1
+        )
         self.pd_cache_high_priority_max_age_seconds = get_pd_cache_high_priority_max_age_seconds()
         self.pd_cache_high_priority_min_prompt_tokens = get_pd_cache_high_priority_min_prompt_tokens()
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
@@ -277,12 +279,9 @@ class HttpServerManagerForPDMaster:
                 # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
                 # 紧张导致分段续跑失败。
                 sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
-                # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
-                # 本地限流时使用该值，未开启限流时仍保持无限等待。
-                if sampling_params.pd_high_priority_request:
-                    sampling_params.pd_high_priority_request_time_out_seconds = (
-                        self.pd_high_priority_request_time_out_seconds
-                    )
+                # 资源等待超时与请求优先级相互独立；P/D 节点直接使用 PD Master
+                # 下发值，负数表示持续等待资源。
+                sampling_params.pd_node_resource_wait_timeout_seconds = self.pd_node_resource_wait_timeout_seconds
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
