@@ -556,6 +556,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         """
         alloced_req_indexes = []
         alloc_timeout_seconds = None
+        # 多机 TP 各 rank 必须保持请求执行一致；slave 若按本地计时独立超时退出，可能导致
+        # master/其他 rank 继续进入 collective 而发生状态不一致或阻塞，因此超时由 master 统一决策。
         if not self.is_multinode_tp_slave and pd_node_resource_wait_timeout_seconds >= 0:
             alloc_timeout_seconds = pd_node_resource_wait_timeout_seconds
         alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
