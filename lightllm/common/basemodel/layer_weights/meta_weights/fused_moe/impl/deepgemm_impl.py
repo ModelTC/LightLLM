@@ -20,6 +20,10 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ep_balance_counters = None
+
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -76,6 +80,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         output = fused_experts(
             hidden_states=input_tensor,
@@ -87,6 +93,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
+            clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
+            ep_balance_counters=self.ep_balance_counters,
         )
         return output
 
@@ -114,6 +123,18 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             scoring_func=scoring_func,
         )
 
+        return self.low_latency_dispatch_with_topk(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+    def low_latency_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
@@ -127,6 +148,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             return_recv_hook=True,
         )
         return recv_x, masked_m, topk_idx, topk_weights, handle, hook
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
+        return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
 
     def select_experts_and_quant_input(
         self,
@@ -181,8 +205,23 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             use_tma_aligned_col_major_sf=True,
         )
 
-        def hook():
-            event.current_stream_wait()
+        counters = self.ep_balance_counters
+        if counters is None:
+
+            def hook():
+                event.current_stream_wait()
+
+        else:
+            # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
+            route_load = topk_idx.numel()
+            compute_load = recv_x[0].shape[0]
+
+            def hook():
+                event.current_stream_wait()
+                counters.accumulate(
+                    route_load=route_load,
+                    compute_load=compute_load,
+                )
 
         return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
@@ -194,6 +233,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         masked_m: torch.Tensor,
         dtype: torch.dtype,
         expected_m: int,
+        clamp_limit: Optional[float] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -206,6 +246,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2_weight,
             w2_scale,
             expected_m=expected_m,
+            clamp_limit=clamp_limit,
         )
 
     def prefilled_group_gemm(
@@ -220,6 +261,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
         microbatch_index: int = 0,
+        clamp_limit: Optional[float] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -239,6 +281,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 block_size_k=self.quant_method.block_size,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
+                clamp_limit=clamp_limit,
             )
         else:
             gather_out = torch.empty(
@@ -254,7 +297,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 N = w13_weight.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=recv_x[0].device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, limit=clamp_limit)
                 _gemm_out_a, _silu_out = None, None
         del recv_x
         return gather_out

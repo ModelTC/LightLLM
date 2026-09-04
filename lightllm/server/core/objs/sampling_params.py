@@ -1,7 +1,7 @@
 import os
 import ctypes
 from typing import Optional, List, Tuple, Union
-from transformers import GenerationConfig
+from lightllm.utils.config_utils import get_generation_config_diff_dict
 from lightllm.server.req_id_generator import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
 from .pd_kv_trans_params import PDKVTransParamObj
@@ -21,6 +21,11 @@ JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 MAX_SEED = (1 << 63) - 1
+
+
+def get_xgrammar_tokenizer(tokenizer):
+    """Return a tokenizer's explicit xgrammar-compatible tokenizer, if any."""
+    return getattr(tokenizer, "xgrammar_tokenizer", tokenizer)
 
 
 class StopSequence(ctypes.Structure):
@@ -149,7 +154,7 @@ class GuidedGrammar(ctypes.Structure):
             if self.length > 0 and tokenizer is not None and constraint != "json":
                 import xgrammar as xgr
 
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+                tokenizer_info = xgr.TokenizerInfo.from_huggingface(get_xgrammar_tokenizer(tokenizer))
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_grammar(constraint)
         except Exception as e:
@@ -179,7 +184,7 @@ class GuidedJsonSchema(ctypes.Structure):
             if self.length > 0 and tokenizer is not None:
                 import xgrammar as xgr
 
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+                tokenizer_info = xgr.TokenizerInfo.from_huggingface(get_xgrammar_tokenizer(tokenizer))
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_json_schema(constraint)
         except Exception as e:
@@ -412,19 +417,16 @@ class SamplingParams(ctypes.Structure):
     @classmethod
     def load_generation_cfg(cls, weight_dir):
         try:
-            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-
-            def _cfg(key, default):
-                v = generation_cfg.get(key)
-                return v if v is not None else default
-
-            cls._do_sample = _cfg("do_sample", False)
-            cls._presence_penalty = _cfg("presence_penalty", 0.0)
-            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
-            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
-            cls._temperature = _cfg("temperature", 1.0)
-            cls._top_p = _cfg("top_p", 1.0)
-            cls._top_k = _cfg("top_k", -1)
+            generation_cfg = get_generation_config_diff_dict(weight_dir)
+            cls._do_sample = generation_cfg.get("do_sample", False)
+            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
+            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
+            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
+            if cls._repetition_penalty is None:
+                cls._repetition_penalty = 1.0
+            cls._temperature = generation_cfg.get("temperature", 1.0)
+            cls._top_p = generation_cfg.get("top_p", 1.0)
+            cls._top_k = generation_cfg.get("top_k", -1)
         except:
             pass
 

@@ -66,7 +66,12 @@ def test_stream_starts_response_after_first_chunk_by_default(monkeypatch):
     monkeypatch.setattr(
         api_stream_obj,
         "get_env_start_args",
-        lambda: SimpleNamespace(disable_delay_response_start=False),
+        lambda: SimpleNamespace(disable_delay_response_start=False, run_mode="normal"),
+    )
+    monkeypatch.setattr(
+        api_stream_obj,
+        "_record_pd_send_metrics",
+        lambda *_: pytest.fail("normal-mode streams must not emit PD-master metrics"),
     )
 
     async def run():
@@ -101,7 +106,7 @@ def test_disable_delay_response_start_sends_status_immediately(monkeypatch):
     monkeypatch.setattr(
         api_stream_obj,
         "get_env_start_args",
-        lambda: SimpleNamespace(disable_delay_response_start=True),
+        lambda: SimpleNamespace(disable_delay_response_start=True, run_mode="normal"),
     )
 
     async def run():
@@ -130,7 +135,7 @@ def test_stream_propagates_error_before_response_start(monkeypatch):
     monkeypatch.setattr(
         api_stream_obj,
         "get_env_start_args",
-        lambda: SimpleNamespace(disable_delay_response_start=False),
+        lambda: SimpleNamespace(disable_delay_response_start=False, run_mode="normal"),
     )
 
     async def run():
@@ -156,7 +161,7 @@ def test_delayed_stream_can_return_http_429(monkeypatch):
     monkeypatch.setattr(
         api_stream_obj,
         "get_env_start_args",
-        lambda: SimpleNamespace(disable_delay_response_start=False),
+        lambda: SimpleNamespace(disable_delay_response_start=False, run_mode="normal"),
     )
 
     app = FastAPI()
@@ -190,7 +195,7 @@ def test_delayed_stream_can_return_http_400_for_invalid_request(monkeypatch):
     monkeypatch.setattr(
         api_stream_obj,
         "get_env_start_args",
-        lambda: SimpleNamespace(disable_delay_response_start=False),
+        lambda: SimpleNamespace(disable_delay_response_start=False, run_mode="normal"),
     )
     app = FastAPI()
     app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)
@@ -222,7 +227,7 @@ def test_pd_master_anthropic_stream_preserves_error_envelope(monkeypatch):
     monkeypatch.setattr(
         api_stream_obj,
         "get_env_start_args",
-        lambda: SimpleNamespace(disable_delay_response_start=False),
+        lambda: SimpleNamespace(disable_delay_response_start=False, run_mode="normal"),
     )
 
     async def anthropic_messages_impl(_request):
@@ -323,7 +328,7 @@ def test_delayed_stream_returns_http_400_for_value_error_before_first_chunk(monk
     monkeypatch.setattr(
         api_stream_obj,
         "get_env_start_args",
-        lambda: SimpleNamespace(disable_delay_response_start=False),
+        lambda: SimpleNamespace(disable_delay_response_start=False, run_mode="normal"),
     )
     app = FastAPI()
     app.exception_handler(InvalidRequestError)(api_http.invalid_request_exception_handler)

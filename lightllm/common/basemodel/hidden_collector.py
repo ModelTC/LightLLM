@@ -206,6 +206,8 @@ class LayerHiddenCollector(HiddenCollector):
         layer_ids = draft_config.get("target_layer_ids")
         if layer_ids is None:
             layer_ids = draft_config.get("dflash_config", {}).get("target_layer_ids")
+        if layer_ids is None:
+            layer_ids = draft_config.get("dspark_target_layer_ids")
         assert layer_ids is not None, f"target_layer_ids is required in draft config: {draft_model_dirs[0]}"
 
         resolved_layer_ids = frozenset(int(layer_id) for layer_id in layer_ids)
@@ -217,6 +219,9 @@ class LayerHiddenCollector(HiddenCollector):
     def add(self, layer_index: int, hidden: torch.Tensor) -> None:
         if layer_index not in self.layer_ids:
             return
+        prepare_hidden = getattr(self.model, "prepare_mtp_layer_hidden", None)
+        if prepare_hidden is not None:
+            hidden = prepare_hidden(layer_index=layer_index, hidden=hidden)
         # Most LightLLM layers reuse their input buffer. Preserve intermediate
         # layers while allowing the final layer output to remain zero-copy.
         self.layer_hiddens.append(hidden if layer_index == self.layer_num - 1 else hidden.clone())

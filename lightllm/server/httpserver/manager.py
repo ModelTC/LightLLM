@@ -119,6 +119,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
+        # key 存在表示 PD 请求正在登记，value 表示登记期间是否已收到 ABORT。
+        self._pd_registration_abort_flags: Dict[int, bool] = {}
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
         self.max_req_total_len = args.max_req_total_len
@@ -328,6 +330,21 @@ class HttpServerManager(HttpRlManagerHelper, object):
             assert False, "dead code path"
         return group_request_id
 
+    def begin_pd_request_registration(self, group_req_id: int) -> None:
+        self._pd_registration_abort_flags[group_req_id] = False
+
+    def cancel_pd_request_registration(self, group_req_id: int) -> None:
+        """PD 请求在正式登记前结束时，清理对应的待处理 ABORT。"""
+        self._pd_registration_abort_flags.pop(group_req_id, None)
+
+    def _register_req_status(self, group_req_id: int, req_status: "ReqStatus") -> None:
+        """发布 PD 请求，并立即消费登记期间收到的 ABORT。"""
+        self.req_id_to_out_inf[group_req_id] = req_status
+        if self._pd_registration_abort_flags.pop(group_req_id, False):
+            for req in req_status.group_req_objs.shm_req_objs:
+                req.is_aborted = True
+            logger.warning(f"applied pending abort for group_request_id {group_req_id}")
+
     async def generate(
         self,
         prompt: Union[str, List[int]],
@@ -387,6 +404,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
             await self._log_req_header(request_headers, group_request_id)
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            for image in multimodal_params.images:
+                if image.block_start_idx is not None:
+                    block_token_num = image.block_end_idx - image.block_start_idx
+                    if block_token_num > self.args.batch_max_tokens:
+                        raise ValueError(
+                            f"image prefill block token count {block_token_num} exceeds "
+                            f"batch_max_tokens={self.args.batch_max_tokens}; increase --batch_max_tokens"
+                        )
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -394,7 +419,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             prompt_tokens = len(prompt_ids)
-            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+            self._check_and_repair_length(prompt_tokens, sampling_params)
             # 监控
             self.metric_client.counter_inc("lightllm_request_count")
             self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
@@ -415,11 +440,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await pd_upload_websocket.send(
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
                 )
-                try:
-                    await asyncio.wait_for(pd_event.wait(), timeout=180)
-                except asyncio.TimeoutError:
-                    logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
-                    raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
+                await pd_event.wait()
 
                 decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
                 sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
@@ -473,7 +494,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
-            self.req_id_to_out_inf[group_request_id] = req_status
+            self._register_req_status(group_request_id, req_status)
             # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
             # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
             if self.rl_controller is not None:
@@ -682,10 +703,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 得到系统真正能支持的最大长度，同时收到启动参数中模型支持长度的限制，也收到token容量的限制。
         return min(self.shm_max_total_token_num.get_value() - 36, self.max_req_total_len)
 
-    async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
-        if not prompt_ids:
+    def _check_and_repair_length(self, prompt_tokens: int, sampling_params: SamplingParams) -> None:
+        if prompt_tokens <= 0:
             raise InvalidRequestError("The input prompt must not be empty.")
-        prompt_tokens = len(prompt_ids)
         # 这里 -36 是保留一些不可预知的边界余量，防止系统出错
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
@@ -710,7 +730,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 )
 
         # last repaired
-        req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
+        req_total_len = prompt_tokens + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
             raise InvalidRequestError(
                 f"This model's maximum context length is {self.max_req_total_len} tokens. "
@@ -718,8 +738,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 f"contains {prompt_tokens} input tokens, for a total of {req_total_len} tokens. "
                 f"Please reduce the length of the input prompt or the number of requested output tokens."
             )
-
-        return prompt_ids
 
     async def transfer_to_next_module_or_node(
         self,
@@ -927,6 +945,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def abort(self, group_req_id: int) -> bool:
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
         if req_status is None:
+            if group_req_id in self._pd_registration_abort_flags:
+                self._pd_registration_abort_flags[group_req_id] = True
+                logger.warning(f"deferred abort for registering group_request_id {group_req_id}")
+                return True
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
             return False
 

@@ -7,7 +7,10 @@ from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
-from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+from lightllm.server.multi_level_kv_cache.cpu_cache_client import (
+    CpuKvCacheClient,
+    CpuPageAllocState,
+)
 from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
@@ -168,6 +171,10 @@ class MultiLevelKvCacheModule(object):
         true_finished_reqs = []
         cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
         for req in finished_reqs:
+            if CacheTier.CPU not in req.cache_tiers:
+                true_finished_reqs.append(req)
+                continue
+
             # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
             # 这个限制是为了兼容 diverse 模式下的请求处理, 只有主请求才 offload kv 到 cpu
             # cache 中
@@ -243,10 +250,11 @@ class MultiLevelKvCacheModule(object):
 
                 try:
                     self.cpu_cache_client.lock.acquire_sleep1ms()
-                    page_list, ready_list = self.cpu_cache_client.allocate_pages(
+                    page_list, alloc_states = self.cpu_cache_client.allocate_pages(
                         token_hash_list[:move_block_size],
                         disk_offload_enable=disk_offload_enable,
                     )
+                    ready_list = [state is CpuPageAllocState.READY_EXISTING for state in alloc_states]
                 finally:
                     self.cpu_cache_client.lock.release()
 

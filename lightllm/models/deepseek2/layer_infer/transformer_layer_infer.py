@@ -8,7 +8,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    use_sm100_mega_moe,
+    use_mega_moe,
 )
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
@@ -300,7 +300,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: Deepseek2InferStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
     ):
-        if not self.is_moe or use_sm100_mega_moe(layer_weight.experts.quant_method):
+        if not self.is_moe or use_mega_moe(layer_weight.experts.quant_method):
             return super().overlap_tpsp_token_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
@@ -426,7 +426,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: Deepseek2InferStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
     ):
-        if not self.is_moe or use_sm100_mega_moe(layer_weight.experts.quant_method):
+        if not self.is_moe or use_mega_moe(layer_weight.experts.quant_method):
             return super().overlap_tpsp_context_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
