@@ -36,11 +36,7 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import (
-    get_pd_node_router_wait_timeout_seconds,
-    get_pd_node_shm_req_alloc_timeout_seconds,
-    get_unique_server_name,
-)
+from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import (
     ClientDisconnected,
@@ -126,13 +122,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
-        # HTTP server 只负责在本地 shm_req 或 Router 等待过久时快速返回繁忙，PD Master 负责 QPS 准入限流。
-        # 该开关控制 P/D 节点是否启用这两类本地等待超时；多机 TP 从节点不独立拒绝请求。
-        self.pd_node_request_limit_enabled: bool = (
-            self.args.enable_pd_node_self_request_limit and self.pd_mode.is_P_or_D() and not self.is_multinode_tp_slave
-        )
-        self.pd_node_shm_req_alloc_timeout_seconds = get_pd_node_shm_req_alloc_timeout_seconds()
-        self.pd_node_router_wait_timeout_seconds = get_pd_node_router_wait_timeout_seconds()
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -442,12 +431,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 高优先级请求仍以更短的间隔抢占资源；开启本地限流时，
-            # 使用 PD Master 下发的较长超时时间，避免资源异常时一直等待。
+            # 申请资源并存储。PD 高优先级请求仍以更短的间隔重试；资源等待上限
+            # 完全由 PD Master 下发，与请求优先级无关。
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
                 pd_high_priority_request=sampling_params.pd_high_priority_request,
-                pd_high_priority_request_time_out_seconds=sampling_params.pd_high_priority_request_time_out_seconds,
+                pd_node_resource_wait_timeout_seconds=sampling_params.pd_node_resource_wait_timeout_seconds,
             )
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
@@ -558,22 +547,19 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self,
         req_num: int,
         pd_high_priority_request: bool = False,
-        pd_high_priority_request_time_out_seconds: int = 0,
+        pd_node_resource_wait_timeout_seconds: int = -1,
     ) -> List[int]:
         """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
 
-        未开启本地限流时无限等待。开启限流后，普通请求使用节点的 shm_req 申请
-        超时时间；高优先级请求取本地超时与 PD Master 下发值中的较大值。
+        PD Master 下发非负值时启用资源等待超时，负数表示无限等待。多机 TP slave
+        不独立限流，由 master 节点统一判断。请求优先级只影响重试间隔，不影响超时值。
         """
         alloced_req_indexes = []
         alloc_timeout_seconds = None
-        if self.pd_node_request_limit_enabled:
-            alloc_timeout_seconds = self.pd_node_shm_req_alloc_timeout_seconds
-            if pd_high_priority_request:
-                alloc_timeout_seconds = max(
-                    alloc_timeout_seconds,
-                    pd_high_priority_request_time_out_seconds,
-                )
+        # 多机 TP 各 rank 必须保持请求执行一致；slave 若按本地计时独立超时退出，可能导致
+        # master/其他 rank 继续进入 collective 而发生状态不一致或阻塞，因此超时由 master 统一决策。
+        if not self.is_multinode_tp_slave and pd_node_resource_wait_timeout_seconds >= 0:
+            alloc_timeout_seconds = pd_node_resource_wait_timeout_seconds
         alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
 
         try:
@@ -803,14 +789,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
             except asyncio.TimeoutError:
                 pass
 
-            if (
-                self.pd_node_request_limit_enabled
-                and is_first_token
-                and req_status.has_timed_out_waiting_for_inference(self.pd_node_router_wait_timeout_seconds)
-            ):
+            # 多机 TP slave 只跟随 master 执行，不能独立判定超时并中止请求。
+            if is_first_token and not self.is_multinode_tp_slave and req_status.has_timed_out_waiting_for_inference():
+                resource_wait_timeout_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
                 raise ServerBusyError(
                     f"PD {self.args.run_mode} node is busy: request did not enter inference "
-                    f"within {self.pd_node_router_wait_timeout_seconds} seconds"
+                    f"within {resource_wait_timeout_seconds} seconds"
                 )
 
             if request is not None and await request.is_disconnected():
@@ -1120,20 +1104,16 @@ class ReqStatus:
         )
         self.out_token_info_list = []
 
-    def has_timed_out_waiting_for_inference(self, timeout_seconds: float) -> bool:
-        """判断请求组是否已在 Router 中等待进入推理系统超时。"""
+    def has_timed_out_waiting_for_inference(self) -> bool:
+        """按 PD Master 下发的资源等待上限判断请求是否在 Router 中超时。"""
         current_time = time.monotonic()
         reqs = self.group_req_objs.shm_req_objs
         # 组内任一请求已经进入新 batch，说明整个请求组已经开始执行，不能再按 Router 等待超时清理。
         if any(req.infer_start_time > 0 for req in reqs):
             return False
-        # 高优先级请求取本地 Router 超时与 PD Master 下发值中的较大值，既保证
-        # 它比普通请求拥有更充足的等待机会，也避免资源异常时永久滞留。
-        if any(req.sample_params.pd_high_priority_request for req in reqs):
-            timeout_seconds = max(
-                timeout_seconds,
-                reqs[0].sample_params.pd_high_priority_request_time_out_seconds,
-            )
+        timeout_seconds = reqs[0].sample_params.pd_node_resource_wait_timeout_seconds
+        if timeout_seconds < 0:
+            return False
 
         for req in reqs:
             if req.router_arrival_time > 0 and current_time - req.router_arrival_time >= timeout_seconds:

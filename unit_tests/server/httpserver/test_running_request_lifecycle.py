@@ -8,7 +8,7 @@ import pytest
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
-from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
 
 
 class _ValueMark:
@@ -25,15 +25,11 @@ class _ValueMark:
 def _make_manager(mode: NodeRole):
     manager = HttpServerManager.__new__(HttpServerManager)
     manager.args = SimpleNamespace(
-        enable_pd_node_self_request_limit=False,
         run_mode=mode.value,
         running_max_req_size=2,
     )
     manager.pd_mode = mode
     manager.is_multinode_tp_slave = False
-    manager.pd_node_request_limit_enabled = False
-    manager.pd_node_shm_req_alloc_timeout_seconds = 20
-    manager.pd_node_router_wait_timeout_seconds = 20
     manager.alloc_req_id = MagicMock(return_value=123)
     manager.is_multinode_tp_master = False
     manager.rl_controller = None
@@ -58,11 +54,16 @@ def _sampling_params():
     sampling_params.group_request_id = 123
     sampling_params.n = 1
     sampling_params.max_new_tokens = 1
+    sampling_params.pd_node_resource_wait_timeout_seconds = 20
     return sampling_params
 
 
 def _multimodal_params():
     return SimpleNamespace(audios=[], images=[], verify_and_preload=AsyncMock())
+
+
+def _req_status(reqs):
+    return ReqStatus(123, None, reqs, 0)
 
 
 async def _drain_generate(manager, sampling_params, multimodal_params, websocket=None, pd_event=None):
@@ -202,7 +203,6 @@ def test_prefill_is_counted_after_decode_assignment_and_unregistered_on_followin
 def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
     async def run():
         manager = _make_manager(mode)
-        manager.pd_node_request_limit_enabled = True
         manager.shm_req_manager = SimpleNamespace(
             async_alloc_req_index=AsyncMock(return_value=None),
             async_release_req_index=AsyncMock(),
@@ -237,15 +237,17 @@ def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
 def test_pd_node_returns_busy_while_first_token_request_waits_in_router(mode):
     async def run():
         manager = _make_manager(mode)
-        manager.pd_node_request_limit_enabled = True
         req = SimpleNamespace(
             request_id=123,
             is_aborted=False,
             router_arrival_time=0,
             infer_start_time=0,
-            sample_params=SimpleNamespace(pd_high_priority_request=False),
+            sample_params=SimpleNamespace(
+                pd_high_priority_request=False,
+                pd_node_resource_wait_timeout_seconds=20,
+            ),
         )
-        req_status = ReqStatus(123, None, [req], 0)
+        req_status = _req_status([req])
         req_status.event.set()
         sampling_params = _sampling_params()
 
@@ -265,13 +267,43 @@ def test_pd_node_returns_busy_while_first_token_request_waits_in_router(mode):
     asyncio.run(run())
 
 
-def test_httpserver_keeps_started_and_high_priority_request_groups():
+def test_multinode_tp_slave_does_not_apply_router_wait_timeout():
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.is_multinode_tp_slave = True
+        req = SimpleNamespace(
+            router_arrival_time=1.0,
+            infer_start_time=0.0,
+            sample_params=SimpleNamespace(pd_node_resource_wait_timeout_seconds=0),
+        )
+        req_status = _req_status([req])
+        req_status.event.set()
+        request = SimpleNamespace(is_disconnected=AsyncMock(return_value=True))
+
+        with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=2):
+            # ReqStatus 只判断时间条件；是否允许 slave 执行超时策略由 manager 在调用处决定。
+            assert req_status.has_timed_out_waiting_for_inference() is True
+            output_generator = manager._wait_to_token_package(
+                start_time=0,
+                prompt_ids=[],
+                group_request_id=123,
+                sampling_params=_sampling_params(),
+                req_status=req_status,
+                request=request,
+            )
+            with pytest.raises(ClientDisconnected):
+                await output_generator.__anext__()
+
+    asyncio.run(run())
+
+
+def test_httpserver_keeps_started_requests_and_requests_with_remaining_master_timeout():
     waiting_req = SimpleNamespace(
         router_arrival_time=1.0,
         infer_start_time=0.0,
         sample_params=SimpleNamespace(
             pd_high_priority_request=False,
-            pd_high_priority_request_time_out_seconds=60,
+            pd_node_resource_wait_timeout_seconds=60,
         ),
     )
     started_req = SimpleNamespace(
@@ -279,14 +311,13 @@ def test_httpserver_keeps_started_and_high_priority_request_groups():
         infer_start_time=2.0,
         sample_params=SimpleNamespace(pd_high_priority_request=False),
     )
-    req_status = ReqStatus(123, None, [waiting_req, started_req], 0)
+    req_status = _req_status([waiting_req, started_req])
 
     with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=30):
-        assert req_status.has_timed_out_waiting_for_inference(20) is False
+        assert req_status.has_timed_out_waiting_for_inference() is False
 
         started_req.infer_start_time = 0.0
-        waiting_req.sample_params.pd_high_priority_request = True
-        assert req_status.has_timed_out_waiting_for_inference(20) is False
+        assert req_status.has_timed_out_waiting_for_inference() is False
 
 
 def test_pd_node_self_request_limit_releases_partially_allocated_shm_reqs():

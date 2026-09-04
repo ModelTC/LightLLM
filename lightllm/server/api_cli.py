@@ -77,19 +77,26 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--enable_pd_node_self_request_limit",
+        "--disable_pd_node_self_request_limit",
         action="store_true",
         help=(
-            "Enable local request limiting on Prefill/Decode nodes by enforcing shm_req allocation and Router "
-            "scheduling wait timeouts. PD Master admission limiting is not currently enabled. Default: disabled."
+            "Disable PD Master-managed resource wait limiting and retries for requests rejected as server busy. "
+            "Configure this option only on PD Master. By default, PD Master sends timeout details to P/D nodes, "
+            "which only enforce the received values, and retries busy requests."
         ),
     )
     parser.add_argument(
         "--disable_pd_cache_high_priority",
         action="store_true",
         help=(
-            "Disable promoting first-segment PD Master requests with a fresh high cache-hit estimate. "
-            "Segmented continuation requests remain high priority. Default: disabled."
+            "Disable PD Master's high-priority scheduling for first-segment requests with a fresh, high "
+            "cache-hit estimate. Keep this policy enabled when a Prefill node's combined GPU, CPU, and disk "
+            "cache is small relative to its workload: under high load, ordinary scheduling can evict reusable "
+            "cache entries before they are consumed and significantly reduce Prefill efficiency. The policy "
+            "lets eligible cache-hit requests run earlier, but may increase TTFT for ordinary requests. "
+            "Consider disabling it only when scheduling fairness or ordinary-request latency is more important, "
+            "or when cache capacity is sufficient and cache churn is low. Segmented continuation requests remain "
+            "high priority. Configure this option only on PD Master. The policy is enabled by default."
         ),
     )
     parser.add_argument(

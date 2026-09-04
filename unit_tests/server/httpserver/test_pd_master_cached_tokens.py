@@ -17,8 +17,12 @@ def _make_manager(monkeypatch):
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
     mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True)
-    mgr.pd_high_priority_request_time_out_seconds = 60
+    mgr.enable_pd_node_self_request_limit = True
+    mgr.pd_node_resource_wait_timeout_seconds = -1
+    mgr.pd_node_continuation_resource_wait_timeout_seconds = 60
+    mgr.pd_node_busy_retry_timeout_seconds = 120
     mgr.pd_cache_high_priority_max_age_seconds = 60
+    mgr.pd_cache_high_priority_min_prompt_tokens = 8192
     mgr.disable_pd_cache_high_priority = False
     mgr.running_request_count = 0
     counter = [0]

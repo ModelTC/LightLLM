@@ -10,6 +10,7 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
+from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 
 
 def _manager() -> HttpServerManagerForPDMaster:
@@ -20,8 +21,12 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
-    manager.pd_high_priority_request_time_out_seconds = 60
+    manager.enable_pd_node_self_request_limit = True
+    manager.pd_node_resource_wait_timeout_seconds = 10
+    manager.pd_node_continuation_resource_wait_timeout_seconds = 60
+    manager.pd_node_busy_retry_timeout_seconds = 120
     manager.pd_cache_high_priority_max_age_seconds = 60
+    manager.pd_cache_high_priority_min_prompt_tokens = 4096
     manager.disable_pd_cache_high_priority = False
     return manager
 
@@ -125,7 +130,9 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
             child_request,
             start_time,
             origin_request_id,
+            input_token_num,
         ):
+            assert input_token_num == 2
             yield (
                 origin_request_id,
                 "choice-0",
@@ -185,9 +192,21 @@ def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_fi
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
+@pytest.mark.parametrize(
+    ("initial_timeout", "continuation_timeout", "expected_timeouts"),
+    [
+        (10, 60, [10, 60]),
+        (90, 60, [90, 60]),
+        (-1, 60, [-1, 60]),
+    ],
+)
+def test_pd_master_hides_capacity_finish_token_and_continues_next_segment(
+    initial_timeout, continuation_timeout, expected_timeouts
+):
     async def run():
         manager = _manager()
+        manager.pd_node_resource_wait_timeout_seconds = initial_timeout
+        manager.pd_node_continuation_resource_wait_timeout_seconds = continuation_timeout
         manager.id_gen.generate_id.side_effect = [808, 816]
         manager.remove_req = AsyncMock()
         manager.abort = AsyncMock()
@@ -195,10 +214,12 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
         d_node = MagicMock()
         manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         segment_index = 0
+        resource_wait_timeouts = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, prompt, params, *_args):
             nonlocal segment_index
             segment_index += 1
+            resource_wait_timeouts.append(params.pd_node_resource_wait_timeout_seconds)
             if segment_index == 1:
                 assert prompt == "prompt"
                 assert params.max_new_tokens == 4
@@ -236,10 +257,12 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
             MagicMock(),
             0,
             800,
+            0,
         ):
             results.append(result)
 
         assert segment_index == 2
+        assert resource_wait_timeouts == expected_timeouts
         assert [result[1] for result in results] == ["visible", "continued"]
         assert all(result[3].status != FinishStatus.FINISHED_PD_DECODE_CAPACITY for result in results)
         assert results[-1][3].status == FinishStatus.FINISHED_STOP
@@ -339,6 +362,7 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
                 MagicMock(),
                 0,
                 800,
+                0,
             ):
                 pass
 
@@ -412,6 +436,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
             MagicMock(),
             0,
             800,
+            0,
         ):
             results.append(result)
 
@@ -479,6 +504,7 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
             MagicMock(),
             0,
             800,
+            0,
         ):
             pass
 
@@ -492,21 +518,24 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
         "estimated_cache_hit_rate",
         "cache_age_seconds",
         "disable_pd_cache_high_priority",
+        "input_token_num",
         "expected_high_priority",
     ),
     [
-        (0.8, 0.0, False, False),
-        (0.81, 0.0, False, True),
-        (0.81, 60.0, False, True),
-        (0.81, 60.1, False, False),
-        (0.81, None, False, False),
-        (0.81, 0.0, True, False),
+        (0.8, 0.0, False, 4096, False),
+        (0.81, 0.0, False, 4095, False),
+        (0.81, 0.0, False, 4096, True),
+        (0.81, 60.0, False, 4096, True),
+        (0.81, 60.1, False, 4096, False),
+        (0.81, None, False, 4096, False),
+        (0.81, 0.0, True, 4096, False),
     ],
 )
 def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
     estimated_cache_hit_rate,
     cache_age_seconds,
     disable_pd_cache_high_priority,
+    input_token_num,
     expected_high_priority,
 ):
     async def run():
@@ -555,6 +584,7 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
                 MagicMock(),
                 0,
                 800,
+                input_token_num,
             ):
                 pass
 
@@ -563,10 +593,12 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-def test_pd_master_sets_high_priority_timeout():
+@pytest.mark.parametrize(("enable_limit", "expected_timeout"), [(False, -1), (True, 90)])
+def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expected_timeout):
     async def run():
         manager = _manager()
-        manager.pd_high_priority_request_time_out_seconds = 90
+        manager.enable_pd_node_self_request_limit = enable_limit
+        manager.pd_node_resource_wait_timeout_seconds = 90
         manager.id_gen.generate_id.return_value = 808
         manager.remove_req = AsyncMock()
         manager.abort = AsyncMock()
@@ -579,16 +611,18 @@ def test_pd_master_sets_high_priority_timeout():
             return_value=(
                 p_node,
                 d_node,
-                PDSelectionExtraInfo(
-                    estimated_cache_hit_rate=0.81,
-                    cache_last_insert_time=time.monotonic(),
-                ),
+                PDSelectionExtraInfo(),
             )
         )
-        captured_timeout_seconds = []
+        captured_request_settings = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
-            captured_timeout_seconds.append(sampling_params.pd_high_priority_request_time_out_seconds)
+            captured_request_settings.append(
+                (
+                    sampling_params.pd_high_priority_request,
+                    sampling_params.pd_node_resource_wait_timeout_seconds,
+                )
+            )
             yield (
                 sampling_params.group_request_id,
                 "x",
@@ -599,6 +633,7 @@ def test_pd_master_sets_high_priority_timeout():
         manager._wait_to_token_package = wait_to_token_package
 
         sampling_params = SamplingParams()
+        sampling_params.pd_node_resource_wait_timeout_seconds = -1
         sampling_params.max_new_tokens = 1
         async for _ in manager._generate_one(
             "prompt",
@@ -607,10 +642,175 @@ def test_pd_master_sets_high_priority_timeout():
             MagicMock(),
             0,
             800,
+            8192,
         ):
             pass
 
-        assert captured_timeout_seconds == [90]
+        assert captured_request_settings == [(False, expected_timeout)]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_retries_generate_one_when_node_is_busy():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = True
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count == 1:
+                raise ServerBusyError("node is busy")
+            yield 800, "ok", {}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        manager._generate_one_attempt = generate_one_attempt
+        request = MagicMock()
+        request.is_disconnected = AsyncMock(return_value=False)
+        results = [
+            result
+            async for result in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                request,
+                0,
+                800,
+                0,
+            )
+        ]
+
+        assert attempt_count == 2
+        request.is_disconnected.assert_awaited_once()
+        assert [result[1] for result in results] == ["ok"]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_stops_busy_retry_when_client_disconnects():
+    async def run():
+        manager = _manager()
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            raise ServerBusyError("node is busy")
+            yield
+
+        manager._generate_one_attempt = generate_one_attempt
+        request = MagicMock()
+        request.is_disconnected = AsyncMock(side_effect=[False, True])
+
+        with pytest.raises(ClientDisconnected) as exc_info:
+            async for _ in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                request,
+                0,
+                800,
+                0,
+            ):
+                pass
+
+        assert attempt_count == 2
+        assert request.is_disconnected.await_count == 2
+        assert exc_info.value.group_request_id == 800
+        assert exc_info.value.reason == "_generate_one busy retry check network disconnected"
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_does_not_retry_busy_error_when_self_limit_is_disabled():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = False
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            raise ServerBusyError("node is busy")
+            yield
+
+        manager._generate_one_attempt = generate_one_attempt
+        with pytest.raises(ServerBusyError, match="node is busy"):
+            async for _ in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+                0,
+            ):
+                pass
+
+        assert attempt_count == 1
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_stops_busy_retry_when_probe_period_expires():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = True
+        manager.pd_node_busy_retry_timeout_seconds = 0
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            raise ServerBusyError("node is busy")
+            yield
+
+        manager._generate_one_attempt = generate_one_attempt
+        with pytest.raises(ServerBusyError, match="node is busy"):
+            async for _ in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+                0,
+            ):
+                pass
+
+        assert attempt_count == 1
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_does_not_retry_busy_error_after_streaming_output():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = True
+        attempt_count = 0
+        results = []
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            yield 800, "visible", {}, FinishStatus()
+            raise ServerBusyError("node is busy")
+
+        manager._generate_one_attempt = generate_one_attempt
+        with pytest.raises(ServerBusyError, match="node is busy"):
+            async for result in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+                0,
+            ):
+                results.append(result)
+
+        assert attempt_count == 1
+        assert [result[1] for result in results] == ["visible"]
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
@@ -644,6 +844,7 @@ def test_pd_master_releases_prefill_load_when_stream_is_closed():
             MagicMock(),
             0,
             800,
+            0,
         )
 
         assert (await generator.__anext__())[1] == "first"

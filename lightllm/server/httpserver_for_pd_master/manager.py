@@ -25,7 +25,10 @@ from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
-    get_pd_high_priority_request_timeout_seconds,
+    get_pd_cache_high_priority_min_prompt_tokens,
+    get_pd_node_busy_retry_timeout_seconds,
+    get_pd_node_continuation_resource_wait_timeout_seconds,
+    get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import PDSelectionExtraInfo, create_selector
@@ -51,10 +54,15 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
-        # 高优先级请求仍可比普通请求等待更久，但通过请求参数向开启本地限流的
-        # P/D 节点传递有限的等待时间，避免资源异常时永久占用请求链路。
-        self.pd_high_priority_request_time_out_seconds = get_pd_high_priority_request_timeout_seconds()
+        # 限流开关只在 PD Master 生效；P/D 节点不读取本地开关或超时配置，只执行 Master 下发的值。
+        self.enable_pd_node_self_request_limit = not args.disable_pd_node_self_request_limit
+        self.pd_node_resource_wait_timeout_seconds = get_pd_node_resource_wait_timeout_seconds()
+        self.pd_node_continuation_resource_wait_timeout_seconds = (
+            get_pd_node_continuation_resource_wait_timeout_seconds()
+        )
+        self.pd_node_busy_retry_timeout_seconds = get_pd_node_busy_retry_timeout_seconds()
         self.pd_cache_high_priority_max_age_seconds = get_pd_cache_high_priority_max_age_seconds()
+        self.pd_cache_high_priority_min_prompt_tokens = get_pd_cache_high_priority_min_prompt_tokens()
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
@@ -198,6 +206,7 @@ class HttpServerManagerForPDMaster:
                     request,
                     start_time,
                     origin_group_request_id + choice_index,
+                    input_token_num,
                 )
             )
 
@@ -219,7 +228,68 @@ class HttpServerManagerForPDMaster:
         request: Request,
         start_time: float,
         origin_request_id: int,
+        input_token_num: int,
     ):
+        """节点繁忙时重新选择 P/D 节点，并在配置的探测周期内重试。"""
+        retry_start_time = time.monotonic()
+        has_yielded_result = False
+
+        while True:
+            try:
+                generator = self._generate_one_attempt(
+                    prompt,
+                    origin_sampling_params,
+                    multimodal_params,
+                    request,
+                    start_time,
+                    origin_request_id,
+                    input_token_num,
+                )
+                async with aclosing(generator):
+                    async for result in generator:
+                        has_yielded_result = True
+                        yield result
+                return
+            except ServerBusyError:
+                # 关闭节点自限流时，不启用与该策略配套的 busy 重试，直接透传异常。
+                if not self.enable_pd_node_self_request_limit:
+                    raise
+
+                # 已向客户端输出 token 后不能从头生成，否则会产生重复内容。
+                elapsed_seconds = time.monotonic() - retry_start_time
+                if has_yielded_result or elapsed_seconds >= self.pd_node_busy_retry_timeout_seconds:
+                    raise
+
+                # 发起下一次尝试前检查客户端连接，避免为已断开的请求继续占用 P/D 节点资源。
+                if await request.is_disconnected():
+                    disconnect_reason = "_generate_one busy retry check network disconnected"
+                    logger.warning(f"group_request_id: {origin_request_id} {disconnect_reason}")
+                    raise ClientDisconnected(
+                        group_request_id=origin_request_id,
+                        reason=disconnect_reason,
+                    )
+                logger.warning(
+                    f"group_request_id: {origin_request_id} PD node is busy, retrying with another node; "
+                    f"elapsed: {elapsed_seconds:.3f}s, retry timeout: "
+                    f"{self.pd_node_busy_retry_timeout_seconds}s"
+                )
+
+    async def _generate_one_attempt(
+        self,
+        prompt: str,
+        origin_sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        start_time: float,
+        origin_request_id: int,
+        input_token_num: int,
+    ):
+        """执行一次完整的单 choice 生成尝试。
+
+        本函数负责选择 P/D 节点、执行所有分段生成，以及在结束或异常时清理请求和节点负载；
+        它不处理重试。若节点返回 ``ServerBusyError``，异常会在本次清理完成后交给
+        ``_generate_one``，由外层决定是否重新选择节点并发起下一次尝试。
+        """
         block_group_request_id = origin_request_id
         p_node = None
         d_node = None
@@ -243,6 +313,13 @@ class HttpServerManagerForPDMaster:
                 and selection_extra_info.estimated_cache_hit_rate > 0.8
                 and cache_age_seconds is not None
                 and cache_age_seconds <= self.pd_cache_high_priority_max_age_seconds
+                # TODO: 更细粒度的策略可由每个 P 节点维护待调度及尚未完成请求的 token_len 队列，
+                # 并向 PD Master 周期上报排队 token 总量、最长请求长度和最老请求等待时间等摘要。
+                # PD Master 可用 input_token_num * (1 - estimated_cache_hit_rate) 估算新请求剩余的
+                # Prefill 工作量；当目标 P 节点存在长请求时，允许剩余工作量很小的高 cache 命中短请求
+                # 提升优先级，以较低额外成本改善其 TTFT。该策略只重排尚未执行的请求，不尝试抢占
+                # 已在 GPU 上运行的请求，并应通过最大连续插队次数或最长等待时间防止长请求饥饿。
+                and input_token_num >= self.pd_cache_high_priority_min_prompt_tokens
             )
 
             history_gen_token_strs = []
@@ -261,16 +338,18 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
-                # 首段仅在预计输入 cache 命中率高于 0.8 且命中记录仍在有效时间窗内时
-                # 提升优先级，避免为可能已被 P 节点淘汰的陈旧 KV cache 插队。第二段及
-                # 后续分段仍统一使用高优先级，避免因临时资源紧张导致分段续跑失败。
+                # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
+                # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧
+                # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
+                # 紧张导致分段续跑失败。
                 sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
-                # 为高优先级请求下发较长的有限等待时间；P/D 节点仅在自身开启
-                # 本地限流时使用该值，未开启限流时仍保持无限等待。
-                if sampling_params.pd_high_priority_request:
-                    sampling_params.pd_high_priority_request_time_out_seconds = (
-                        self.pd_high_priority_request_time_out_seconds
-                    )
+                # 仅在 Master 开启限流时下发资源等待超时。续跑分段已经产生了部分结果，
+                # 使用独立配置的等待时间，提高请求最终完成的成功率。
+                if self.enable_pd_node_self_request_limit:
+                    resource_wait_timeout_seconds = self.pd_node_resource_wait_timeout_seconds
+                    if segment_index > 0:
+                        resource_wait_timeout_seconds = self.pd_node_continuation_resource_wait_timeout_seconds
+                    sampling_params.pd_node_resource_wait_timeout_seconds = resource_wait_timeout_seconds
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
