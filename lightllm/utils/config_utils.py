@@ -465,6 +465,32 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         return False
 
 
+@lru_cache(maxsize=None)
+def is_sliding_att_mixed_model(model_path: str) -> bool:
+    try:
+        config_json = get_config_json(model_path)
+        llm_config = config_json.get("text_config", config_json)
+        model_type = config_json.get("model_type") or llm_config.get("model_type")
+        layer_types = set(llm_config.get("layer_types", []))
+        # Keep the shared-request ABI opt-in aligned with models that actually
+        # instantiate ReqManagerForSlidingWindow. Other architectures may use
+        # the same layer-type strings while retaining token-granular KV.
+        return (
+            model_type in {"gemma4", "gemma4_text"}
+            and {
+                "full_attention",
+                "sliding_attention",
+            }.issubset(layer_types)
+        )
+    except Exception:
+        logger.info(f"model path: {model_path} does not have hybrid sliding-window attention")
+        return False
+
+
+def is_hybrid_att_mixed_model(model_path: str) -> bool:
+    return is_linear_att_mixed_model(model_path) or is_sliding_att_mixed_model(model_path)
+
+
 def get_model_type(model_path: str) -> Optional[str]:
     """Get model type from config.json"""
     try:

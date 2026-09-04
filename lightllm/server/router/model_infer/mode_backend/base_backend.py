@@ -15,8 +15,7 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
+from lightllm.common.req_manager import HybridAttentionReqManager, ReqManagerForMamba
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
@@ -152,19 +151,20 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
+        self.is_hybrid_att_mixed_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
 
-        if self.is_linear_att_mixed_model:
-            self.linear_att_cache_manager = LinearAttCacheManager(
-                size=self.args.linear_att_cache_size,
-                linear_config=self.model.req_manager.linear_config,
+        if self.is_hybrid_att_mixed_model:
+            self.hybrid_att_cache_manager = self.model.req_manager.create_state_cache_manager(
+                size=self.args.linear_att_cache_size
             )
         else:
-            self.linear_att_cache_manager = None
+            self.hybrid_att_cache_manager = None
+        self.linear_att_cache_manager = self.hybrid_att_cache_manager if self.is_linear_att_mixed_model else None
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
-            if self.is_linear_att_mixed_model:
+            if self.is_hybrid_att_mixed_model:
                 self.radix_cache = LinearAttPagedRadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
@@ -172,7 +172,7 @@ class ModeBackend:
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
-                    linear_att_small_page_buffers=self.linear_att_cache_manager,
+                    linear_att_small_page_buffers=self.hybrid_att_cache_manager,
                 )
             else:
                 self.radix_cache = RadixCache(

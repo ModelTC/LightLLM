@@ -16,12 +16,9 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
 class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     """
-    Gemma-4 decoder block. Per-layer heterogeneity (sliding vs full attention)
-    is handled by switching shape / RoPE table / sliding-window flag at init
-    time. The KV cache layout is uniform (sliding shape: num_kv_heads=16,
-    head_dim=256); full-attention layers pack their (4, 512) tensor into the
-    first 8 heads of the 16-head slot at cache-write time, then reshape on
-    read. See Gemma4TpPartModel._init_mem_manager for context.
+    Gemma-4 decoder block. Full-attention KV stays token granular, while
+    sliding-attention KV is written to request-window state plus per-forward
+    scratch storage.
     """
 
     def __init__(self, layer_num, network_config):
@@ -56,15 +53,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.tp_k_head_num_ = max(total_kv_heads // self.tp_world_size_, 1)
         self.tp_v_head_num_ = self.tp_k_head_num_
         self.tp_o_head_num_ = self.tp_q_head_num_
-
-        self.kv_cache_slot_dim_ = network_config["head_dim"]
-        sliding_total = network_config["num_key_value_heads"] * network_config["head_dim"]
-        full_total = num_global_kv * network_config["global_head_dim"]
-        per_token_k_width = max(sliding_total, full_total)
-        assert (
-            per_token_k_width % self.kv_cache_slot_dim_ == 0
-        ), f"per-token K width {per_token_k_width} not aligned to kv_cache_slot_dim {self.kv_cache_slot_dim_}"
-        self.kv_cache_slot_num_ = (per_token_k_width // self.kv_cache_slot_dim_) // self.tp_world_size_
 
         # Sliding window (None on full-attn layers)
         if self.is_sliding:
@@ -155,23 +143,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # kernel's division cancels out, yielding scores = Q @ K^T.
         q = q * math.sqrt(head_dim)
 
-        # Pack into the uniform KV-cache layout (N, 2*slot_num, slot_dim).
-        # K occupies slots [0, used_slots); V occupies
-        # [slot_num, slot_num + used_slots). If this layer's K/V width is
-        # smaller than the allocated cache slot width, pad with zeros.
-        cache_slot_num = self.kv_cache_slot_num_
-        cache_slot_dim = self.kv_cache_slot_dim_
-        N = k.shape[0]
-        k_packed = k.reshape(N, -1, cache_slot_dim)
-        v_packed = v.reshape(N, -1, cache_slot_dim)
-        used_cache_slots = k_packed.shape[1]
-        if used_cache_slots == cache_slot_num:
-            cache_kv = torch.cat([k_packed, v_packed], dim=1)
-        else:
-            cache_kv = self.alloc_tensor((N, 2 * cache_slot_num, cache_slot_dim), dtype=k.dtype)
-            cache_kv.zero_()
-            cache_kv[:, :used_cache_slots, :] = k_packed
-            cache_kv[:, cache_slot_num : cache_slot_num + used_cache_slots, :] = v_packed
+        cache_kv = torch.cat([k, v], dim=1)
 
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)
@@ -182,7 +154,21 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
         if self.is_kv_shared_ or cache_kv is None:
             return
-        return super()._post_cache_kv(cache_kv, infer_state, layer_weight)
+        if self.is_sliding:
+            from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+
+            layer_idx = infer_state.req_manager.sliding_config.get_sliding_layer_index(self.layer_num_)
+            destindex_copy_kv(
+                cache_kv,
+                infer_state.sliding_window_mem_index,
+                infer_state.req_manager.req_to_sliding_window[layer_idx],
+            )
+            return
+        infer_state.mem_manager.operator.copy_kv_to_mem_manager(
+            layer_index=infer_state.mem_manager.get_full_cache_layer_index(self.layer_num_),
+            mem_index=infer_state.mem_index,
+            kv=cache_kv,
+        )
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
@@ -195,23 +181,9 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_layer_kv(self, infer_state: InferStateInfo):
         # KV-shared layers read from the target layer's cache slot.
         layer_idx = self.kv_share_target_layer_ if self.is_kv_shared_ else self.layer_num_
-        _k_raw, _v_raw = infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
-        # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
-        # (not .reshape) so any non-contiguous layout from a future mem_manager
-        # backend fails loudly instead of silently copying — slice + view is
-        # O(1) on the standard MemoryManager layout (inner (kv_heads, head_dim)
-        # span is contiguous).
-        kv_heads = self.tp_k_head_num_
-        head_dim = self.head_dim_
-        cache_slot_dim = self.kv_cache_slot_dim_
-        used_cache_slots = kv_heads * head_dim // cache_slot_dim
-        if used_cache_slots == _k_raw.shape[1]:
-            # Layout already matches this layer's natural shape.
-            return _k_raw.view(-1, kv_heads, head_dim), _v_raw.view(-1, kv_heads, head_dim)
-        # Otherwise the K/V live in the first used_cache_slots; the rest is zero pad.
-        _k = _k_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
-        _v = _v_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
-        return _k, _v
+        if self.is_sliding:
+            return infer_state.req_manager.get_layer_kv(layer_idx)
+        return infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
 
     def _context_attention_kernel(
         self,
@@ -238,10 +210,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.b_seq_len,
                 infer_state.b_ready_cache_len,
                 infer_state.max_q_seq_len,
-                infer_state.req_manager.req_to_token_indexs,
+                infer_state.req_manager.req_to_sliding_window_indexs,
                 infer_state.b_image_token_end,
                 sliding_window=sw,
             )
+            if not self.is_kv_shared_:
+                infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
             return o_tensor.view(q.shape)
 
         # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
@@ -261,7 +235,16 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
-        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
+        o_tensor = att_state.decode_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            att_control=self._att_control(),
+            alloc_func=self.alloc_tensor,
+            req_to_token_indexs=(infer_state.req_manager.req_to_sliding_window_indexs if self.is_sliding else None),
+        )
+        if self.is_sliding and not self.is_kv_shared_:
+            infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
         return o_tensor.view(q.shape)
 
     # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------

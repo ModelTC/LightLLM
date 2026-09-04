@@ -21,6 +21,7 @@ class Gemma4InferStateInfo(InferStateInfo):
         # 则对应的 b_image_token_end 为 [0, 0, 4, 4, 0],
         # image token 可以看到自己当前这个token以及后面的 image token。
         self.b_image_token_end = None
+        self.sliding_window_mem_index = None
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
@@ -40,6 +41,9 @@ class Gemma4InferStateInfo(InferStateInfo):
         if self.is_prefill:
             self.max_seq_len = self.max_kv_seq_len
             self._build_b_image_token_end()
+        else:
+            self.b_q_start_loc = self.b1_cu_q_seq_len[:-1]
+        self.req_manager.prepare_sliding_window(self)
         return
 
     def _build_b_image_token_end(self):

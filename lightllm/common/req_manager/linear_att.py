@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Union
 
 import torch
 
@@ -7,14 +7,16 @@ from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
 from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
 from lightllm.utils.envs_utils import get_env_start_args
 
-from .base import ReqManager
+from .hybrid_att import HybridAttentionReqManager
 
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
 
-class ReqManagerForMamba(ReqManager):
+class ReqManagerForMamba(HybridAttentionReqManager):
+    is_linear_attention = True
+
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
@@ -47,6 +49,47 @@ class ReqManagerForMamba(ReqManager):
             shape=self.linear_config.get_ssm_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
+        )
+        return
+
+    def create_state_cache_manager(self, size: int):
+        return LinearAttCacheManager(size=size, linear_config=self.linear_config)
+
+    def init_hybrid_attention_state(self, req: "InferReq"):
+        return self.init_linear_att_state(req)
+
+    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
+        return self.copy_big_page_buffer_to_linear_att_state(big_page_buffer_idx=big_page_buffer_idx, req=req)
+
+    def restore_small_page_state(self, req: "InferReq", small_page_buffers):
+        return self.copy_small_page_buffer_to_linear_att_state(
+            req=req,
+            linear_att_small_page_buffers=small_page_buffers,
+        )
+
+    def copy_runtime_state_to_cache(
+        self,
+        req_indexes: Union[List[int], torch.Tensor],
+        buffer_indexes: list[int],
+        state_cache_manager: LinearAttCacheManager,
+    ):
+        assert len(req_indexes) == len(buffer_indexes)
+        if not any(buffer_idx != -1 for buffer_idx in buffer_indexes):
+            return
+
+        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+
+        if not isinstance(req_indexes, torch.Tensor):
+            req_indexes = torch.tensor(req_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+        buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+        copy_linear_att_state_to_kv_buffer(
+            b_req_idx=req_indexes,
+            big_page_buffer_ids=buffer_indexes,
+            gpu_conv_state=self.req_to_conv_state.buffer,
+            gpu_ssm_state=self.req_to_ssm_state.buffer,
+            cpu_kv_conv_state=state_cache_manager.conv_state_cache.buffer,
+            cpu_kv_ssm_state=state_cache_manager.ssm_state_cache.buffer,
+            mtp_step=self.mtp_step,
         )
         return
 

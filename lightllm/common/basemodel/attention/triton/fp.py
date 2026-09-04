@@ -114,6 +114,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         v: torch.Tensor,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
+        req_to_token_indexs=None,
     ):
         if att_control.use_alibi:
             assert att_control.use_sliding_window is False, "alibi + sliding_window not supported"
@@ -133,7 +134,12 @@ class TritonDecodeAttState(BaseDecodeAttState):
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
                 return self._normal_decode_gqa_flash_decoding_att(
-                    q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func
+                    q=q,
+                    k=k,
+                    v=v,
+                    att_control=att_control,
+                    alloc_func=alloc_func,
+                    req_to_token_indexs=req_to_token_indexs,
                 )
             else:
                 raise NotImplementedError("error")
@@ -195,6 +201,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         v: torch.Tensor,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
+        req_to_token_indexs=None,
     ):
         from ...triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding import (
             gqa_token_decode_attention_flash_decoding,
@@ -215,6 +222,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             out=out,
             alloc_tensor_func=alloc_func,
             sliding_window=sliding_window,
+            req_to_token_indexs=req_to_token_indexs,
         )
 
         return out

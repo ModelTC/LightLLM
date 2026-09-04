@@ -9,6 +9,7 @@ def gqa_token_decode_attention_flash_decoding(
     out=None,
     alloc_tensor_func=torch.empty,
     sliding_window=(-1, -1),
+    req_to_token_indexs=None,
 ):
     batch_size = infer_state.batch_size
     q_head_num, head_dim = q.shape[1], q.shape[2]
@@ -34,11 +35,14 @@ def gqa_token_decode_attention_flash_decoding(
     mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device="cuda")
     mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=torch.float32, device="cuda")
 
+    if req_to_token_indexs is None:
+        req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
+
     flash_decode_stage1(
         q=q.view(calcu_shape1),
         k=cache_k,
         v=cache_v,
-        Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
+        Req_to_tokens=req_to_token_indexs,
         B_req_idx=infer_state.b_req_idx,
         B_Seqlen=infer_state.b_seq_len,
         max_len_in_batch=infer_state.max_kv_seq_len,
