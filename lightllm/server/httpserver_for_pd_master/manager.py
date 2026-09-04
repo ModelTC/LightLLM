@@ -26,6 +26,7 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
+    get_pd_node_busy_retry_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -53,8 +54,9 @@ class HttpServerManagerForPDMaster:
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
         # 限流开关只在 PD Master 生效；P/D 节点不读取本地开关或超时配置，只执行 Master 下发的值。
-        self.enable_pd_node_self_request_limit = args.enable_pd_node_self_request_limit
+        self.enable_pd_node_self_request_limit = not args.disable_pd_node_self_request_limit
         self.pd_node_resource_wait_timeout_seconds = get_pd_node_resource_wait_timeout_seconds()
+        self.pd_node_busy_retry_timeout_seconds = get_pd_node_busy_retry_timeout_seconds()
         self.pd_cache_high_priority_max_age_seconds = get_pd_cache_high_priority_max_age_seconds()
         self.pd_cache_high_priority_min_prompt_tokens = get_pd_cache_high_priority_min_prompt_tokens()
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
@@ -224,6 +226,57 @@ class HttpServerManagerForPDMaster:
         origin_request_id: int,
         input_token_num: int,
     ):
+        """节点繁忙时重新选择 P/D 节点，并在配置的探测周期内重试。"""
+        retry_start_time = time.monotonic()
+        has_yielded_result = False
+
+        while True:
+            try:
+                generator = self._generate_one_attempt(
+                    prompt,
+                    origin_sampling_params,
+                    multimodal_params,
+                    request,
+                    start_time,
+                    origin_request_id,
+                    input_token_num,
+                )
+                async with aclosing(generator):
+                    async for result in generator:
+                        has_yielded_result = True
+                        yield result
+                return
+            except ServerBusyError:
+                # 关闭节点自限流时，不启用与该策略配套的 busy 重试，直接透传异常。
+                if not self.enable_pd_node_self_request_limit:
+                    raise
+
+                # 已向客户端输出 token 后不能从头生成，否则会产生重复内容。
+                elapsed_seconds = time.monotonic() - retry_start_time
+                if has_yielded_result or elapsed_seconds >= self.pd_node_busy_retry_timeout_seconds:
+                    raise
+                logger.warning(
+                    f"group_request_id: {origin_request_id} PD node is busy, retrying with another node; "
+                    f"elapsed: {elapsed_seconds:.3f}s, retry timeout: "
+                    f"{self.pd_node_busy_retry_timeout_seconds}s"
+                )
+
+    async def _generate_one_attempt(
+        self,
+        prompt: str,
+        origin_sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        start_time: float,
+        origin_request_id: int,
+        input_token_num: int,
+    ):
+        """执行一次完整的单 choice 生成尝试。
+
+        本函数负责选择 P/D 节点、执行所有分段生成，以及在结束或异常时清理请求和节点负载；
+        它不处理重试。若节点返回 ``ServerBusyError``，异常会在本次清理完成后交给
+        ``_generate_one``，由外层决定是否重新选择节点并发起下一次尝试。
+        """
         block_group_request_id = origin_request_id
         p_node = None
         d_node = None

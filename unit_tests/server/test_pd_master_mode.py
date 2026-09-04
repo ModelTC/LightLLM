@@ -10,12 +10,12 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 
 
-def test_pd_node_self_request_limit_cli_is_configured_on_pd_master():
+def test_pd_node_self_request_limit_cli_defaults_to_enabled_and_can_be_disabled():
     parser = make_argument_parser()
 
-    assert parser.parse_args([]).enable_pd_node_self_request_limit is False
-    assert parser.parse_args(["--enable_pd_node_self_request_limit"]).enable_pd_node_self_request_limit is True
-    assert StartArgs().enable_pd_node_self_request_limit is False
+    assert parser.parse_args([]).disable_pd_node_self_request_limit is False
+    assert parser.parse_args(["--disable_pd_node_self_request_limit"]).disable_pd_node_self_request_limit is True
+    assert StartArgs().disable_pd_node_self_request_limit is False
 
 
 def test_pd_cache_high_priority_cli_defaults_to_enabled_and_can_be_disabled():

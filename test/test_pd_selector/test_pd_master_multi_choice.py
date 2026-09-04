@@ -10,6 +10,7 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
+from lightllm.utils.error_utils import ServerBusyError
 
 
 def _manager() -> HttpServerManagerForPDMaster:
@@ -20,8 +21,9 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
-    manager.enable_pd_node_self_request_limit = False
+    manager.enable_pd_node_self_request_limit = True
     manager.pd_node_resource_wait_timeout_seconds = 10
+    manager.pd_node_busy_retry_timeout_seconds = 120
     manager.pd_cache_high_priority_max_age_seconds = 60
     manager.pd_cache_high_priority_min_prompt_tokens = 4096
     manager.disable_pd_cache_high_priority = False
@@ -629,6 +631,132 @@ def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expecte
             pass
 
         assert captured_request_settings == [(False, expected_timeout)]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_retries_generate_one_when_node_is_busy():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = True
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count == 1:
+                raise ServerBusyError("node is busy")
+            yield 800, "ok", {}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        manager._generate_one_attempt = generate_one_attempt
+        results = [
+            result
+            async for result in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+                0,
+            )
+        ]
+
+        assert attempt_count == 2
+        assert [result[1] for result in results] == ["ok"]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_does_not_retry_busy_error_when_self_limit_is_disabled():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = False
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            raise ServerBusyError("node is busy")
+            yield
+
+        manager._generate_one_attempt = generate_one_attempt
+        with pytest.raises(ServerBusyError, match="node is busy"):
+            async for _ in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+                0,
+            ):
+                pass
+
+        assert attempt_count == 1
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_stops_busy_retry_when_probe_period_expires():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = True
+        manager.pd_node_busy_retry_timeout_seconds = 0
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            raise ServerBusyError("node is busy")
+            yield
+
+        manager._generate_one_attempt = generate_one_attempt
+        with pytest.raises(ServerBusyError, match="node is busy"):
+            async for _ in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+                0,
+            ):
+                pass
+
+        assert attempt_count == 1
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_does_not_retry_busy_error_after_streaming_output():
+    async def run():
+        manager = _manager()
+        manager.enable_pd_node_self_request_limit = True
+        attempt_count = 0
+        results = []
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            yield 800, "visible", {}, FinishStatus()
+            raise ServerBusyError("node is busy")
+
+        manager._generate_one_attempt = generate_one_attempt
+        with pytest.raises(ServerBusyError, match="node is busy"):
+            async for result in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                MagicMock(),
+                0,
+                800,
+                0,
+            ):
+                results.append(result)
+
+        assert attempt_count == 1
+        assert [result[1] for result in results] == ["visible"]
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 

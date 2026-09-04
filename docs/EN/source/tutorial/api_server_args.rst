@@ -95,21 +95,27 @@ PD disaggregation Mode Parameters
     the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
     ``HEALTH_TIMEOUT`` consecutive seconds.
 
-.. option:: --enable_pd_node_self_request_limit
+.. option:: --disable_pd_node_self_request_limit
 
-    Enable PD Master-managed resource wait limiting for P/D nodes. Set this option only when starting PD Master;
-    it is not needed on Prefill or Decode nodes. Once enabled, PD Master supplies
+    P/D-node resource wait limiting is enabled by default and managed centrally by PD Master. Set this option only
+    when disabling the feature, and only when starting PD Master; it is not needed on Prefill or Decode nodes.
+    By default, PD Master supplies
     ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
     ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
     or timeout settings, and request priority does not alter the timeout. The value is
     controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
     to -1 to wait indefinitely. When set to a non-negative value, a timeout reports ``Server is busy``; a request that has
     entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
-    Without this startup option, PD Master sends -1 and all P/D nodes wait indefinitely.
+    While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
+    The maximum probing period is controlled by ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` and defaults to
+    120 seconds. Once response tokens have been streamed to the client, the request is not restarted because doing so
+    would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
+    resource wait timeout; all P/D nodes wait indefinitely, and a ``Server is busy`` raised for another reason is
+    returned immediately without retrying.
     In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
     The maximum cache-record age eligible for promotion is controlled by
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
-    16 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
+    36 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
     solely from a high cache-hit rate.
 
@@ -118,8 +124,8 @@ PD disaggregation Mode Parameters
     .. code-block:: bash
 
         LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
-            python -m lightllm.server.api_server --run_mode pd_master \
-            --enable_pd_node_self_request_limit ...
+            LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
+            python -m lightllm.server.api_server --run_mode pd_master ...
 
 .. option:: --disable_pd_cache_high_priority
 

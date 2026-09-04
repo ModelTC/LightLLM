@@ -77,12 +77,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--enable_pd_node_self_request_limit",
+        "--disable_pd_node_self_request_limit",
         action="store_true",
         help=(
-            "Enable PD Master-managed resource wait limiting for Prefill/Decode nodes. Configure this option only "
-            "on PD Master; it sends all timeout details to P/D nodes, which only enforce the received values. "
-            "Default: disabled."
+            "Disable PD Master-managed resource wait limiting and retries for requests rejected as server busy. "
+            "Configure this option only on PD Master. By default, PD Master sends timeout details to P/D nodes, "
+            "which only enforce the received values, and retries busy requests."
         ),
     )
     parser.add_argument(
