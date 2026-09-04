@@ -790,11 +790,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 pass
 
             # 多机 TP slave 只跟随 master 执行，不能独立判定超时并中止请求。
-            if (
-                is_first_token
-                and not self.is_multinode_tp_slave
-                and req_status.has_timed_out_waiting_for_inference()
-            ):
+            if is_first_token and not self.is_multinode_tp_slave and req_status.has_timed_out_waiting_for_inference():
                 resource_wait_timeout_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
                 raise ServerBusyError(
                     f"PD {self.args.run_mode} node is busy: request did not enter inference "
