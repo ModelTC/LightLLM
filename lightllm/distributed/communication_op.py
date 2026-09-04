@@ -30,7 +30,6 @@ from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
@@ -108,6 +107,7 @@ class CustomProcessGroup:
 class DistributeGroupManager:
     def __init__(self):
         self.groups = []
+        self.ep_balance_monitor_group = None
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
         self.ep_mega_moe_buffer = None
@@ -125,6 +125,14 @@ class DistributeGroupManager:
             if not args.disable_flashinfer_allreduce:
                 group.init_flashinfer_reduce()
             self.groups.append(group)
+        if (
+            getattr(args, "enable_ep_moe", False)
+            and not getattr(args, "disable_ep_balance_monitor", False)
+            and getattr(args, "run_mode", "normal") != "decode"
+            and not getattr(args, "enable_prefill_cudagraph", False)
+            and not is_sm100_gpu()
+        ):
+            self.ep_balance_monitor_group = dist.new_group(ranks=list(range(get_global_world_size())), backend="gloo")
         return
 
     def get_default_group(self) -> CustomProcessGroup:
@@ -193,7 +201,15 @@ class DistributeGroupManager:
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
+        total_redundant_experts = (
+            get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
+            if get_env_start_args().enable_prefill_eplb
+            else 0
+        )
+        self.ll_prefill_num_experts = n_routed_experts + total_redundant_experts
+        # EPLB's redundant rows are a prefill-only physical layout; decode
+        # always routes the logical expert space.
+        self.ll_decode_num_experts = n_routed_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -233,7 +249,10 @@ class DistributeGroupManager:
             # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
             # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
+                self.ll_decode_num_tokens,
+                self.ll_hidden,
+                global_world_size,
+                self.ll_decode_num_experts,
             )
             microbatch_count = len(self.groups)
             min_prefill_reuse_buffer_bytes = _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
@@ -254,7 +273,7 @@ class DistributeGroupManager:
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
                 low_latency_mode=True,
-                num_qps_per_rank=(self.ll_num_experts // global_world_size),
+                num_qps_per_rank=(self.ll_decode_num_experts // global_world_size),
             )
 
         if enable_mega_moe_buffer:
@@ -267,22 +286,26 @@ class DistributeGroupManager:
 
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
-                self.ll_num_experts,
+                self.ll_decode_num_experts,
                 self.ll_num_tokens,
                 num_experts_per_tok,
                 self.ll_hidden,
                 moe_intermediate_size,
             )
         logger.info(
-            "Initialize DeepEP MoE buffers: low_latency=%s, mega_moe=%s, expert_quant_method_names=%s",
+            "Initialize DeepEP MoE buffers: low_latency=%s, mega_moe=%s, "
+            "ll_prefill_num_experts=%s, ll_decode_num_experts=%s, expert_quant_method_names=%s",
             enable_low_latency_buffer,
             enable_mega_moe_buffer,
+            self.ll_prefill_num_experts,
+            self.ll_decode_num_experts,
             sorted(expert_quant_method_names),
         )
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
-        self._set_num_sms_for_deep_gemm(theoretical_sms)
+        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_prefill_num_experts, num_experts_per_tok)
+        low_latency_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_decode_num_experts, num_experts_per_tok)
+        self._set_num_sms_for_deep_gemm(theoretical_sms, low_latency_sms)
 
-    def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
+    def _set_num_sms_for_deep_gemm(self, deepep_sms: int, low_latency_sms: int):
         try:
             try:
                 from deep_gemm.jit_kernels.utils import set_num_sms
@@ -291,9 +314,12 @@ class DistributeGroupManager:
 
             device_sms = get_device_sm_count()
             deepep_sms = max(0, min(deepep_sms, max(device_sms - 2, 0)))
+            low_latency_sms = max(0, min(low_latency_sms, max(device_sms - 2, 0)))
             self.ep_num_sms = deepep_sms
             if self.ep_low_latency_buffer is not None:
-                deep_ep.Buffer.set_num_sms(deepep_sms - deepep_sms % 2)
+                # This setting controls the legacy low-latency buffer; keep
+                # its SM reservation based on decode's logical expert count.
+                deep_ep.Buffer.set_num_sms(low_latency_sms - low_latency_sms % 2)
             set_num_sms(max(device_sms - deepep_sms, 2))
         except BaseException as e:
             logger.warning(f"set num sms for deep_gemm failed: {e}")
@@ -335,7 +361,7 @@ class DistributeGroupManager:
         """
         if self.ep_low_latency_buffer is not None:
             self.ep_low_latency_buffer.clean_low_latency_buffer(
-                self.ll_decode_num_tokens, self.ll_hidden, self.ll_num_experts
+                self.ll_decode_num_tokens, self.ll_hidden, self.ll_decode_num_experts
             )
 
 
