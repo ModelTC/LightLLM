@@ -21,6 +21,9 @@ class BaseWeight(ABC):
     def verify_load(self) -> bool:
         pass
 
+    def finalize_load(self) -> None:
+        pass
+
 
 class BaseWeightTpl(BaseWeight):
     def __init__(self, tp_rank: int = None, tp_world_size: int = None, data_type: torch.dtype = None):
