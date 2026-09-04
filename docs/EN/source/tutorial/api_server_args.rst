@@ -138,6 +138,17 @@ PD disaggregation Mode Parameters
     Decode capacity exhaustion; continuation requests remain high priority. Disabled by default, so eligible requests
     are promoted unless this option is set.
 
+    Configure this option only on PD Master. When a Prefill node's combined GPU, CPU, and disk cache capacity is small
+    relative to its request working set, later requests can quickly evict reusable cache entries under high load.
+    Requests that could otherwise hit the cache must then repeat Prefill computation, which can significantly reduce
+    Prefill efficiency. In this situation, keep the default high-priority policy enabled so requests with a high
+    estimated cache hit rate can run earlier and reuse their cache entries before eviction.
+
+    This policy changes queue ordering and may increase time to first token (TTFT) for ordinary requests that do not
+    meet the cache-hit-rate, cache-age, or minimum-prompt-token thresholds. Consider setting
+    ``--disable_pd_cache_high_priority`` when Prefill cache capacity is sufficient and cache churn is low, or when
+    scheduling fairness and ordinary-request TTFT are more important than preserving cache-hit efficiency.
+
 .. option:: --config_server_host
 
     Host address in configuration server mode

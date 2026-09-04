@@ -89,8 +89,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--disable_pd_cache_high_priority",
         action="store_true",
         help=(
-            "Disable promoting first-segment PD Master requests with a fresh high cache-hit estimate. "
-            "Segmented continuation requests remain high priority. Default: disabled."
+            "Disable PD Master's high-priority scheduling for first-segment requests with a fresh, high "
+            "cache-hit estimate. Keep this policy enabled when a Prefill node's combined GPU, CPU, and disk "
+            "cache is small relative to its workload: under high load, ordinary scheduling can evict reusable "
+            "cache entries before they are consumed and significantly reduce Prefill efficiency. The policy "
+            "lets eligible cache-hit requests run earlier, but may increase TTFT for ordinary requests. "
+            "Consider disabling it only when scheduling fairness or ordinary-request latency is more important, "
+            "or when cache capacity is sufficient and cache churn is low. Segmented continuation requests remain "
+            "high priority. Configure this option only on PD Master. The policy is enabled by default."
         ),
     )
     parser.add_argument(

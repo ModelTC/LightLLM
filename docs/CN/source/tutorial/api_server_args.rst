@@ -129,6 +129,15 @@ PD 分离模式参数
     该参数不影响 PD Decode 容量不足后的分段续跑请求；续跑请求仍保持高优先级。默认不启用，
     即默认允许新鲜高 cache 命中请求提升优先级。
 
+    建议只在 PD Master 上配置该参数。当单个 P 节点的 GPU cache、CPU cache 和 disk cache 总容量相对于
+    请求工作集较小时，高负载下后到的请求容易快速淘汰已有 cache，使原本可以命中 cache 的请求退化为
+    重新执行 Prefill，进而显著降低 Prefill 效率。此时建议保留默认的高优先级策略，让预计 cache 命中率高的
+    请求提前进入推理，尽量在 cache 被淘汰前完成复用。
+
+    该策略会改变排队顺序，因此普通请求（未达到 cache 命中率、cache 年龄或最小 prompt token 数门槛的请求）
+    的首字延迟可能升高。如果 P 节点 cache 容量充足、系统负载较低，或者业务更重视调度公平性和普通请求的
+    首字延迟，可以设置 ``--disable_pd_cache_high_priority`` 关闭该策略。
+
 .. option:: --config_server_host
 
     配置服务器模式下的主机地址
