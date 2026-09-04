@@ -9,10 +9,6 @@ from typing import Dict, List, Sequence, Tuple
 import torch
 import torch.distributed as dist
 
-from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
-    eplb_push_copy,
-)
-
 
 @dataclass(frozen=True)
 class TransferStep:
@@ -292,8 +288,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         self._same_node_ranks = set()
         self._cross_node_ranks = set()
         self._push_stream = torch.cuda.Stream(device=self.device)
-        self._push_descriptor_cache = {}
-        self._used_push_descriptor_cache_keys = set()
         try:
             self._init_ipc_metadata()
             if self._cross_node_ranks:
@@ -330,11 +324,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         self._needs_staging_reuse_barrier = len(set(hostnames)) < len(hostnames)
         self._same_node_ranks = {rank for rank, hostname in enumerate(hostnames) if hostname == local_hostname}
         self._cross_node_ranks = set(range(self.world_size)) - self._same_node_ranks
-        for layer in self.live:
-            for name, tensor in layer:
-                if name.endswith(".weight") and tensor[0].nbytes % 16:
-                    raise RuntimeError(f"NIXL source-push requires 16-byte aligned weight rows: {name}")
-
         from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import (
             p2p_fix_rebuild_cuda_tensor,
             reduce_tensor,
@@ -460,23 +449,9 @@ class NixlEPLBTransfer(_EPLBTransferBase):
     def _push_staging(self, dst_rank: int, buffer_index: int):
         return self.staging[buffer_index] if dst_rank == self.global_rank else self._ipc_staging[dst_rank][buffer_index]
 
-    def _cached_descriptor_tensors(self, copies):
-        key = tuple((source.data_ptr(), destination.data_ptr()) for destination, source in copies)
-        cached = self._push_descriptor_cache.get(key)
-        if cached is None:
-            src_ptrs = torch.tensor([source.data_ptr() for _, source in copies], dtype=torch.int64, device=self.device)
-            dst_ptrs = torch.tensor(
-                [destination.data_ptr() for destination, _ in copies], dtype=torch.int64, device=self.device
-            )
-            cached = (src_ptrs, dst_ptrs)
-            self._push_descriptor_cache[key] = cached
-        self._used_push_descriptor_cache_keys.add(key)
-        return cached
-
     def _push_same_node(self, dst_rank: int, entries) -> None:
         staging_by_buffer = {buffer_index: self._push_staging(dst_rank, buffer_index) for _, _, buffer_index in entries}
-        weight_groups = defaultdict(list)
-        small_copies = []
+        copies = []
         for layer_index, run, buffer_index in entries:
             staging = staging_by_buffer[buffer_index]
             source_layer = self.live[layer_index]
@@ -487,17 +462,10 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                     raise RuntimeError("NIXL source-push staging tensor name mismatch")
                 source_rows = source_tensor.narrow(0, first.src_local_row, run_len)
                 destination_rows = staging_tensor.narrow(0, first.dst_slot, run_len)
-                if name.endswith(".weight"):
-                    if destination_rows.nbytes % 16:
-                        raise RuntimeError(f"NIXL source-push requires 16-byte aligned weight rows: {name}")
-                    weight_groups[destination_rows.nbytes].append((destination_rows, source_rows))
-                else:
-                    small_copies.append((destination_rows, source_rows))
+                copies.append((destination_rows, source_rows))
+        # Contiguous same-dtype rows use PyTorch's CUDA memcpy path, not an SM copy kernel.
         with torch.cuda.stream(self._push_stream):
-            for nbytes, copies in weight_groups.items():
-                src_ptrs, dst_ptrs = self._cached_descriptor_tensors(copies)
-                eplb_push_copy(src_ptrs, dst_ptrs, nbytes)
-            for destination_rows, source_rows in small_copies:
+            for destination_rows, source_rows in copies:
                 destination_rows.copy_(source_rows, non_blocking=True)
 
     def _get_remote_read(self, src_rank: int, entries):
@@ -590,7 +558,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
 
     def _start_transfer_generation(self) -> None:
         self._used_xfer_cache_keys.clear()
-        self._used_push_descriptor_cache_keys.clear()
 
     def _finish_transfer_generation(self) -> None:
         errors = []
@@ -605,8 +572,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                 errors.append(exc)
             else:
                 del self._xfer_cache[cache_key]
-        for cache_key in set(self._push_descriptor_cache) - self._used_push_descriptor_cache_keys:
-            del self._push_descriptor_cache[cache_key]
         if errors:
             raise RuntimeError("NIXL EPLB cache eviction failed") from errors[0]
 
@@ -614,7 +579,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         agent = self._nixl_agent
         errors = []
         getattr(self, "_used_xfer_cache_keys", set()).clear()
-        getattr(self, "_used_push_descriptor_cache_keys", set()).clear()
         if agent is not None:
             for cache_key, xfer in list(self._xfer_cache.items()):
                 try:
@@ -644,7 +608,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         self._registered_descs = None
         self._nixl_agent = None
         getattr(self, "_ipc_staging", {}).clear()
-        getattr(self, "_push_descriptor_cache", {}).clear()
         if errors:
             raise RuntimeError("NIXL EPLB shutdown failed") from errors[0]
 
