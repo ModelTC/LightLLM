@@ -35,6 +35,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
+        "--disable_delay_response_start",
+        action="store_true",
+        help=(
+            "Send streaming response status and headers immediately instead of waiting until the first "
+            "response chunk is ready."
+        ),
+    )
+    parser.add_argument(
         "--hypercorn_config",
         type=str,
         default=None,
@@ -69,9 +77,20 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--disable_pd_master_decode_capacity_limit",
+        "--enable_pd_node_self_request_limit",
         action="store_true",
-        help="Disable PD master admission control based on the total capacity of registered decode nodes.",
+        help=(
+            "Enable local request limiting on Prefill/Decode nodes by enforcing shm_req allocation and Router "
+            "scheduling wait timeouts. PD Master admission limiting is not currently enabled. Default: disabled."
+        ),
+    )
+    parser.add_argument(
+        "--disable_pd_cache_high_priority",
+        action="store_true",
+        help=(
+            "Disable promoting first-segment PD Master requests with a fresh high cache-hit estimate. "
+            "Segmented continuation requests remain high priority. Default: disabled."
+        ),
     )
     parser.add_argument(
         "--pd_trans_mode",
@@ -350,7 +369,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--short_prefill_token_threshold",
         type=int,
         default=None,
-        help="""Enable long/short prefill scheduling and set the maximum remaining tokens of a short request.
+        help="""Enable short prefill request priority scheduling.
         The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
@@ -835,6 +854,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="""The token page size of cpu cache. Defaults to 2048 for DeepSeek-V4 and 256 otherwise.""",
+    )
+    parser.add_argument(
+        "--cache_placement_strategy",
+        type=str,
+        choices=["adaptive", "legacy"],
+        default="adaptive",
+        help="""Cache placement strategy used when CPU cache is enabled.
+        adaptive: place requests between GPU and the lower-tier cache path based on recent input lengths and capacity;
+        Disk placement is offloaded through CPU cache, so CPU and Disk capacities are not additive.
+        legacy: retain GPU cache and also copy each request to every enabled lower cache level.""",
     )
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(

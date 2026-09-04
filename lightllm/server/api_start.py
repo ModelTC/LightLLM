@@ -54,6 +54,9 @@ def _launch_subprocesses(args: StartArgs):
         args.pd_kv_page_size = 2048 if model_type == "deepseek_v4" else 1024
     if args.enable_cpu_cache and model_type == "deepseek_v4" and args.llm_kv_type in (None, "None"):
         args.llm_kv_type = "fp8kv_dsa"
+    if args.enable_cpu_cache and model_type == "deepseek_v4" and args.cache_placement_strategy == "adaptive":
+        logger.warning("DeepSeek-V4 CPU cache does not support adaptive placement; using legacy placement")
+        args.cache_placement_strategy = "legacy"
 
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
@@ -99,10 +102,10 @@ def _launch_subprocesses(args: StartArgs):
 
     # 调度参数的自动设置, 人工设置则听人工的
     if args.router_token_ratio is None:
-        if args.run_mode in ["normal"]:
+        if args.run_mode in ["normal", "decode"]:
             args.router_token_ratio = 0.85
         else:
-            # pd 分离模式下，不开启高级调度
+            # PD 分离模式下，prefill 节点不开启高级调度
             args.router_token_ratio = 0.0
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:

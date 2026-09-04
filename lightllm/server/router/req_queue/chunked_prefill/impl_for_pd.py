@@ -11,7 +11,14 @@ class PDQueue(BaseQueue):
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
-        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+        if self.args.run_mode == "decode":
+            estimated_output_len = min(
+                self.router.router_statics.ema_req_out_len,
+                req.sample_params.max_new_tokens,
+            )
+        else:
+            estimated_output_len = req.sample_params.max_new_tokens
+        estimated_peak_token_num += req.input_len + estimated_output_len
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -38,7 +45,14 @@ class PDQueue(BaseQueue):
                             req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                         )
                     else:
-                        estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
+                        if self.args.run_mode == "decode":
+                            estimated_output_len = min(
+                                self.router.router_statics.ema_req_out_len,
+                                req.sample_params.max_new_tokens,
+                            )
+                        else:
+                            estimated_output_len = req.sample_params.max_new_tokens
+                        estimated_peak_token_num += req.input_len + estimated_output_len
 
         if decoding_req_list:
             decoding_req_list.sort(key=lambda x: -x[1])

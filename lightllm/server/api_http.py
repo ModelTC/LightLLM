@@ -46,7 +46,7 @@ from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -156,7 +156,7 @@ app.add_middleware(_AccessLogMiddleware)
 
 @app.exception_handler(ServerBusyError)
 async def server_busy_exception_handler(request: Request, exc: ServerBusyError) -> JSONResponse:
-    logger.warning(str(exc))
+    logger.warning("Server busy detail: %s", exc.message)
 
     # Streaming responses can raise during their first body iteration, after
     # the route handler has already returned. Preserve the Anthropic error
@@ -165,9 +165,20 @@ async def server_busy_exception_handler(request: Request, exc: ServerBusyError) 
         from .api_anthropic import _anthropic_error_response
 
         g_objs.metric_client.counter_inc("lightllm_request_failure")
-        return _anthropic_error_response(HTTPStatus(exc.status_code), str(exc))
+        return _anthropic_error_response(HTTPStatus(exc.status_code), SERVER_BUSY_MESSAGE)
 
     return create_server_busy_response(exc)
+
+
+@app.exception_handler(InvalidRequestError)
+async def invalid_request_exception_handler(request: Request, exc: InvalidRequestError) -> JSONResponse:
+    if request.url.path == "/v1/messages":
+        from .api_anthropic import _anthropic_error_response
+
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, str(exc))
+
+    return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 
 @app.get("/liveness")
@@ -293,7 +304,7 @@ async def generate(request: Request) -> Response:
     try:
         return await g_objs.g_generate_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
-        logger.warning(str(e))
+        logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -315,7 +326,7 @@ async def generate_stream(request: Request) -> Response:
     try:
         return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
-        logger.warning(str(e))
+        logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
@@ -337,7 +348,7 @@ async def get_score(request: Request) -> Response:
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
-        logger.warning(str(e))
+        logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
@@ -373,7 +384,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
-        logger.warning(str(e))
+        logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
@@ -393,7 +404,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
-        logger.warning(str(e))
+        logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ClientDisconnected as e:
         logger.warning(str(e))
@@ -412,9 +423,9 @@ async def anthropic_messages(raw_request: Request) -> Response:
     try:
         return await anthropic_messages_impl(raw_request)
     except ServerBusyError as e:
-        logger.warning(str(e))
+        logger.warning("Server busy detail: %s", e.message)
         g_objs.metric_client.counter_inc("lightllm_request_failure")
-        return _anthropic_error_response(HTTPStatus(e.status_code), str(e))
+        return _anthropic_error_response(HTTPStatus(e.status_code), SERVER_BUSY_MESSAGE)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -445,7 +456,7 @@ async def openai_responses(raw_request: Request) -> Response:
     try:
         return await responses_impl(raw_request)
     except ServerBusyError as e:
-        logger.warning(str(e))
+        logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))

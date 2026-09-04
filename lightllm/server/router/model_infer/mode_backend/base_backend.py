@@ -46,6 +46,7 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
+from lightllm.server.multi_level_kv_cache import create_cache_placement_controller
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from .dsv4_multi_level_kv_cache import Dsv4MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
@@ -201,12 +202,18 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
 
+        cache_placement_controller = create_cache_placement_controller(
+            args=self.args,
+            radix_cache=self.radix_cache,
+        )
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
+            cache_placement_controller=cache_placement_controller,
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
@@ -624,27 +631,34 @@ class ModeBackend:
             )
         return
 
+    def _reorder_pd_high_priority_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
+        """将 PD 分段续跑的高优先级请求前置，普通请求保持在其后。"""
+        # PD 分段续跑请求已经完成前一段推理，需要优先进入本轮调度；将请求拆分后再拼接，
+        # 保持各自原有顺序，并确保高优先级请求位于普通请求之前。
+        high_priority_reqs = [req for req in ready_reqs if req.shm_req.sample_params.pd_high_priority_request]
+        normal_reqs = [req for req in ready_reqs if not req.shm_req.sample_params.pd_high_priority_request]
+        return high_priority_reqs + normal_reqs
+
     def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
         """
-        保留第一个长请求的调度位置，其余请求优先调度剩余 prefill token 更少的请求。
+        提升一个短 prefill 请求的优先级。
         """
         short_token_threshold = self.args.short_prefill_token_threshold
         if short_token_threshold is None:
             return ready_reqs
 
         def remaining_prefill_tokens(req: InferReq) -> int:
-            # cur_kv_len 已包含 prefix match 和之前完成的 chunk。
             return max(0, req.shm_req.input_len - req.cur_kv_len)
 
         sorted_reqs = sorted(
             ready_reqs,
             key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
         )
-        for index, req in enumerate(sorted_reqs):
-            if remaining_prefill_tokens(req) > short_token_threshold:
-                sorted_reqs.insert(0, sorted_reqs.pop(index))
-                break
-        return sorted_reqs
+        if sorted_reqs and remaining_prefill_tokens(sorted_reqs[0]) <= short_token_threshold:
+            target_req = sorted_reqs[0]
+            ready_reqs.remove(target_req)
+            ready_reqs.insert(0, target_req)
+        return ready_reqs
 
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
@@ -689,6 +703,7 @@ class ModeBackend:
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
+        ready_reqs = self._reorder_pd_high_priority_reqs(ready_reqs)
         ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
 
         wait_pause_reqs = []
@@ -697,10 +712,8 @@ class ModeBackend:
         prefill_reqs = []
         decode_reqs = []
 
-        # 一次性最多暂停请求的数量, 防止盲目暂停大量请求
-        # 因为部分请求释放占用的token容量后，就会使推理可以正常进行。
-        # 如果因为一次推理容量不足，就以当前token容量的判断暂停了大量
-        # 请求，其逻辑是不适合的。
+        # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
+        # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
@@ -766,8 +779,24 @@ class ModeBackend:
                         can_alloc_dsv4_c128_slot_num -= c128_slot_num
                 else:
                     if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+                        if self.args.run_mode == "decode":
+                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
+                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
+                            wait_pause_count += 1
+                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
+                            if support_overlap:
+                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
+                                req_obj.filter_mark = True
+                            else:
+                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
+                                finished_reqs.append(req_obj)
+                            self.logger.info(
+                                f"force early finish for PD decode req_id={req_obj.req_id} "
+                                f"because token capacity is insufficient"
+                            )
+                        else:
+                            req_obj.wait_pause = True
+                            wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -802,8 +831,10 @@ class ModeBackend:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 
-        self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
-        # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
+        # 先由控制器确定请求需要写入的缓存层级。
+        cache_controller = g_infer_context.cache_placement_controller
+        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
+        cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
             true_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
                 finished_reqs=finished_reqs
@@ -838,12 +869,6 @@ class ModeBackend:
                 decode_reqs = []
 
         return prefill_reqs, decode_reqs
-
-    def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
-        """
-        给 PD 分离模式下，prefill node 使用的继承钩子函数，用于发起 kv 传输任务。
-        """
-        pass
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

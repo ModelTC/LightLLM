@@ -1,24 +1,22 @@
-"""Custom streaming response behavior for PD-master request admission.
+"""Custom streaming response behavior for errors raised before the first chunk.
 
 Starlette's ``StreamingResponse`` sends ``http.response.start`` before it
 starts iterating over the response body. This is normally desirable because
 the client receives the HTTP status and headers immediately. However, the
-generation body used by LightLLM is an async generator, so its code does not
-run when the ``StreamingResponse`` object is created. In PD-master mode, node
-selection and admission waiting happen only when that generator is iterated.
-Consequently, a ``ServerBusyError`` may be raised during the first iteration,
-after Starlette has already sent HTTP 200.
+generation body used by LightLLM is an async generator, so request validation
+and admission do not run until that generator is iterated. Consequently, an
+error may be raised during the first iteration, after Starlette has already
+sent HTTP 200.
 
 An HTTP status cannot be changed after ``http.response.start`` has been sent.
-This module therefore delays that event in PD-master mode until the body has
-produced its first chunk. If admission fails before then, no response has
-started and FastAPI's exception handler can still return HTTP 429. Once the
-first chunk exists, the request has passed this initial admission point and
-the response starts normally.
+This module therefore delays that event until the body has produced its first
+chunk. If request setup fails before then, no response has started and
+FastAPI's exception handler can still return the appropriate HTTP error. Once
+the first chunk exists, the response starts normally.
 
-Only PD-master mode uses the delayed behavior. Other modes retain Starlette's
-original implementation so clients and proxies receive headers immediately
-and keep their existing response-header timeout semantics.
+The ``--disable_delay_response_start`` startup option restores Starlette's
+original behavior for clients and proxies that require response status and
+headers immediately.
 """
 
 import time
@@ -57,7 +55,7 @@ def _record_pd_send_metrics(duration, body_size):
 
 
 class CustomStreamingResponse(StreamingResponse):
-    """Send the PD-master HTTP status only after the first body chunk is ready.
+    """Send the HTTP status only after the first body chunk is ready.
 
     The first chunk is sent directly after the response headers; it is not
     discarded or replayed through another iterator. Empty streams still send
@@ -70,19 +68,21 @@ class CustomStreamingResponse(StreamingResponse):
     """
 
     async def stream_response(self, send: Send) -> None:
-        # Preserve Starlette's immediate response-start behavior outside
-        # PD-master mode. Delaying every streaming response would make normal
-        # first-token latency count against response-header timeouts.
-        if get_env_start_args().run_mode != "pd_master":
+        start_args = get_env_start_args()
+        # Some clients and proxies require headers before first-token work is
+        # complete. Let deployments opt out of the delayed response start.
+        if start_args.disable_delay_response_start:
             await super().stream_response(send)
             return
+        record_pd_send_metrics = start_args.run_mode == "pd_master"
 
         async def send_chunk(chunk):
             if not isinstance(chunk, (bytes, memoryview)):
                 chunk = chunk.encode(self.charset)
             send_start = time.monotonic()
             await send({"type": "http.response.body", "body": chunk, "more_body": True})
-            _record_pd_send_metrics(time.monotonic() - send_start, len(chunk))
+            if record_pd_send_metrics:
+                _record_pd_send_metrics(time.monotonic() - send_start, len(chunk))
 
         async def send_response_start():
             # Read status and headers at send time. The first body iteration
@@ -96,8 +96,8 @@ class CustomStreamingResponse(StreamingResponse):
             )
 
         # Iterating here starts the otherwise-lazy generation pipeline. A
-        # ServerBusyError raised before the first yield escapes without an
-        # http.response.start event, allowing FastAPI to produce HTTP 429.
+        # An error raised before the first yield escapes without an
+        # http.response.start event, allowing FastAPI to handle it.
         async for first_chunk in self.body_iterator:
             await send_response_start()
             await send_chunk(first_chunk)

@@ -40,6 +40,11 @@ APIServer 参数详解
 
     HTTP 服务器工作进程数，默认为 ``1``
 
+.. option:: --disable_delay_response_start
+
+    立即发送流式响应的状态码和响应头，不再等待首个响应 chunk 就绪。默认情况下，LightLLM 会延迟发送
+    响应起始事件，使首个 chunk 产生前抛出的异常仍能返回正确的 HTTP 状态码。
+
 .. option:: --hypercorn_config
 
     Hypercorn TOML 配置文件路径，仅支持 TOML 格式。示例文件见 ``test/hypercorn_config.toml``。
@@ -86,6 +91,26 @@ PD 分离模式参数
     PD Master 的健康接口都会返回 HTTP 503。无论使用哪种拓扑模式，PD Master 都会同时执行与普通节点类似的
     推理进度健康检查：当仍有在途请求，且整个 PD Master 连续 ``HEALTH_TIMEOUT`` 秒
     没有任何请求成功返回 token 时，接口将返回 HTTP 503。
+
+.. option:: --enable_pd_node_self_request_limit
+
+    在 Prefill/Decode 节点上启用本地请求限流。PD Master 当前不执行请求准入限流。
+    HTTP server 申请本地 ``shm_req`` 对象的超时时间由
+    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` 控制（默认 20 秒）；请求进入 Router 后等待
+    进入推理系统的超时时间由 ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` 控制（默认 20 秒）。
+    超时会导致 ``Server is busy``；其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，
+    由 PD Master 转换为 HTTP 429。未开启限流时请求会持续等待资源；PD 高优先级请求
+    （分段续跑请求，或预计输入 cache 命中率高于 0.8 且命中记录仍然新鲜的请求）由 PD Master 通过
+    ``pd_high_priority_request_time_out_seconds`` 下发一个统一的超时时间下限。P/D 节点分别取
+    该值与本地 ``shm_req``、Router 超时的较大值；该字段为 0 时不延长本地超时。PD Master 下发值由
+    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` 控制，默认 60 秒。cache 命中记录允许提升优先级的
+    最大年龄由 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 16 秒。本地请求限流默认关闭。
+
+.. option:: --disable_pd_cache_high_priority
+
+    禁止 PD Master 将预计输入 cache 命中率高且命中记录仍然新鲜的首段请求提升为高优先级。
+    该参数不影响 PD Decode 容量不足后的分段续跑请求；续跑请求仍保持高优先级。默认不启用，
+    即默认允许新鲜高 cache 命中请求提升优先级。
 
 .. option:: --config_server_host
 

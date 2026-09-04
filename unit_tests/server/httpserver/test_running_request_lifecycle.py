@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from lightllm.server.core.objs import SamplingParams
-from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
-from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
+from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 
 
 class _ValueMark:
@@ -24,7 +24,16 @@ class _ValueMark:
 
 def _make_manager(mode: NodeRole):
     manager = HttpServerManager.__new__(HttpServerManager)
+    manager.args = SimpleNamespace(
+        enable_pd_node_self_request_limit=False,
+        run_mode=mode.value,
+        running_max_req_size=2,
+    )
     manager.pd_mode = mode
+    manager.is_multinode_tp_slave = False
+    manager.pd_node_request_limit_enabled = False
+    manager.pd_node_shm_req_alloc_timeout_seconds = 20
+    manager.pd_node_router_wait_timeout_seconds = 20
     manager.alloc_req_id = MagicMock(return_value=123)
     manager.is_multinode_tp_master = False
     manager.rl_controller = None
@@ -32,12 +41,14 @@ def _make_manager(mode: NodeRole):
     manager._log_stage_timing = MagicMock()
     manager._log_req_header = AsyncMock()
     manager._encode = AsyncMock(return_value=[10, 11, 12])
-    manager._check_and_repair_length = AsyncMock(side_effect=lambda prompt_ids, _params: prompt_ids)
+    manager._check_and_repair_length = MagicMock()
     manager._release_multimodal_resources = AsyncMock()
     manager.abort = AsyncMock()
     manager._register_running_request = AsyncMock()
     manager._unregister_running_request = AsyncMock()
     manager.metric_client = MagicMock()
+    manager._run_reqs_count_lock = asyncio.Lock()
+    manager.run_reqs_count_mark = _ValueMark()
     manager.shm_req_manager = SimpleNamespace(async_alloc_req_index=AsyncMock(side_effect=RuntimeError("alloc failed")))
     return manager
 
@@ -183,6 +194,115 @@ def test_prefill_is_counted_after_decode_assignment_and_unregistered_on_followin
 
         manager._register_running_request.assert_awaited_once()
         manager._unregister_running_request.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", [NodeRole.P, NodeRole.D])
+def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
+    async def run():
+        manager = _make_manager(mode)
+        manager.pd_node_request_limit_enabled = True
+        manager.shm_req_manager = SimpleNamespace(
+            async_alloc_req_index=AsyncMock(return_value=None),
+            async_release_req_index=AsyncMock(),
+        )
+
+        websocket = AsyncMock() if mode == NodeRole.P else None
+        pd_event = None
+        if mode == NodeRole.P:
+            pd_event = asyncio.Event()
+            pd_event.decode_node_info = SimpleNamespace(ready_kv_len=1)
+            pd_event.set()
+
+        with patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[0, 21]):
+            with pytest.raises(ServerBusyError, match=f"PD {mode.value} node is busy"):
+                await _drain_generate(
+                    manager,
+                    _sampling_params(),
+                    _multimodal_params(),
+                    websocket,
+                    pd_event,
+                )
+
+        manager.shm_req_manager.async_alloc_req_index.assert_awaited_once()
+        manager.shm_req_manager.async_release_req_index.assert_not_awaited()
+        manager._register_running_request.assert_awaited_once()
+        manager._unregister_running_request.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", [NodeRole.P, NodeRole.D])
+def test_pd_node_returns_busy_while_first_token_request_waits_in_router(mode):
+    async def run():
+        manager = _make_manager(mode)
+        manager.pd_node_request_limit_enabled = True
+        req = SimpleNamespace(
+            request_id=123,
+            is_aborted=False,
+            router_arrival_time=0,
+            infer_start_time=0,
+            sample_params=SimpleNamespace(pd_high_priority_request=False),
+        )
+        req_status = ReqStatus(123, None, [req], 0)
+        req_status.event.set()
+        sampling_params = _sampling_params()
+
+        with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=21):
+            req.router_arrival_time = 1.0
+            output_generator = manager._wait_to_token_package(
+                start_time=0,
+                prompt_ids=[],
+                group_request_id=123,
+                sampling_params=sampling_params,
+                req_status=req_status,
+                request=None,
+            )
+            with pytest.raises(ServerBusyError, match="request did not enter inference"):
+                await output_generator.__anext__()
+
+    asyncio.run(run())
+
+
+def test_httpserver_keeps_started_and_high_priority_request_groups():
+    waiting_req = SimpleNamespace(
+        router_arrival_time=1.0,
+        infer_start_time=0.0,
+        sample_params=SimpleNamespace(
+            pd_high_priority_request=False,
+            pd_high_priority_request_time_out_seconds=60,
+        ),
+    )
+    started_req = SimpleNamespace(
+        router_arrival_time=1.0,
+        infer_start_time=2.0,
+        sample_params=SimpleNamespace(pd_high_priority_request=False),
+    )
+    req_status = ReqStatus(123, None, [waiting_req, started_req], 0)
+
+    with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=30):
+        assert req_status.has_timed_out_waiting_for_inference(20) is False
+
+        started_req.infer_start_time = 0.0
+        waiting_req.sample_params.pd_high_priority_request = True
+        assert req_status.has_timed_out_waiting_for_inference(20) is False
+
+
+def test_pd_node_self_request_limit_releases_partially_allocated_shm_reqs():
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.shm_req_manager = SimpleNamespace(
+            async_alloc_req_index=AsyncMock(side_effect=[7, RuntimeError("alloc failed")]),
+            async_release_req_index=AsyncMock(),
+        )
+        sampling_params = _sampling_params()
+        sampling_params.n = 2
+
+        with pytest.raises(RuntimeError, match="alloc failed"):
+            await _drain_generate(manager, sampling_params, _multimodal_params())
+
+        manager.shm_req_manager.async_release_req_index.assert_awaited_once_with(7)
 
     asyncio.run(run())
 

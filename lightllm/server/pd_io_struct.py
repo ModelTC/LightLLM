@@ -43,6 +43,7 @@ class ObjType(enum.Enum):
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
     TOKEN_PACKS_COMPACT = 7  # 不含 logprobs 等可选字段的紧凑 token 包。
     PD_UPLOAD_GENERATE_ERROR = 8  # P/D 节点向 pd master 上报本地请求生成异常。
+    PD_UPLOAD_SERVER_BUSY = 9  # P/D 节点向 pd master 上报本地服务繁忙。
 
 
 PD_COMPACT_TOKEN_INFO_LEN = 12

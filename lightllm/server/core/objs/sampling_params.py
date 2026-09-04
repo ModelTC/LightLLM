@@ -299,6 +299,12 @@ class SamplingParams(ctypes.Structure):
         ("stop_sequences", StopSequenceGroups),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
+        # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
+        # 以高优先级插入 Router 调度队列。
+        ("pd_high_priority_request", ctypes.c_bool),
+        # PD 高优先级请求在开启本地限流的 P/D 节点上的等待时间下限。节点分别取
+        # 该值与本地超时的较大值，用于 shm_req 申请和 Router 等待进入推理系统。
+        ("pd_high_priority_request_time_out_seconds", ctypes.c_int),
         ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         # in pd split mode, use to keep the id of pd master
         ("pd_master_node_id", NodeUUId),
@@ -342,6 +348,9 @@ class SamplingParams(ctypes.Structure):
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
+        # 这两个字段是 PD Master 的内部调度信息，不能由外部请求参数开启或修改。
+        self.pd_high_priority_request = False
+        self.pd_high_priority_request_time_out_seconds = 0
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
@@ -505,6 +514,8 @@ class SamplingParams(ctypes.Structure):
             "allowed_token_ids": self.allowed_token_ids.to_list(),
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
+            "pd_high_priority_request": self.pd_high_priority_request,
+            "pd_high_priority_request_time_out_seconds": self.pd_high_priority_request_time_out_seconds,
             "skip_special_tokens": self.skip_special_tokens,
             "add_special_tokens": self.add_special_tokens,
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,

@@ -275,6 +275,12 @@ def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
 
 
+def get_cache_placement_gpu_capacity_ratio() -> float:
+    ratio = float(os.getenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", 0.8))
+    assert 0 < ratio <= 1
+    return ratio
+
+
 @lru_cache(maxsize=None)
 def get_dsv4_cpu_cache_max_pages_per_task() -> int:
     return int(os.getenv("LIGHTLLM_DSV4_CPU_CACHE_MAX_PAGES_PER_TASK", 4))
@@ -369,8 +375,27 @@ def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
 
 
 @lru_cache(maxsize=None)
-def get_pd_split_max_new_tokens() -> int:
-    return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))
+def get_pd_node_shm_req_alloc_timeout_seconds() -> int:
+    """PD 节点申请 ``shm_req`` 对象的最长等待时间，单位为秒。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS", 20))
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_router_wait_timeout_seconds() -> int:
+    """请求进入 Router 后等待进入推理系统的最长时间，单位为秒。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS", 20))
+
+
+@lru_cache(maxsize=None)
+def get_pd_high_priority_request_timeout_seconds() -> int:
+    """PD Master 为高优先级请求设置的等待时间下限，单位为秒。"""
+    return int(os.getenv("LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS", 60))
+
+
+@lru_cache(maxsize=None)
+def get_pd_cache_high_priority_max_age_seconds() -> int:
+    """cache 命中请求提升为 PD 高优先级时允许的最大缓存年龄，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 16)))
 
 
 @lru_cache(maxsize=None)

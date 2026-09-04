@@ -5,8 +5,31 @@ from types import SimpleNamespace
 import pytest
 from easydict import EasyDict
 
+from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+
+
+def test_pd_node_self_request_limit_cli_defaults_to_disabled_and_can_be_enabled():
+    parser = make_argument_parser()
+
+    assert parser.parse_args([]).enable_pd_node_self_request_limit is False
+    assert parser.parse_args(["--enable_pd_node_self_request_limit"]).enable_pd_node_self_request_limit is True
+    assert StartArgs().enable_pd_node_self_request_limit is False
+
+
+def test_pd_cache_high_priority_cli_defaults_to_enabled_and_can_be_disabled():
+    parser = make_argument_parser()
+
+    assert parser.parse_args([]).disable_pd_cache_high_priority is False
+    assert parser.parse_args(["--disable_pd_cache_high_priority"]).disable_pd_cache_high_priority is True
+    assert StartArgs().disable_pd_cache_high_priority is False
+
+
+def test_pd_master_request_slot_is_reserved_noop():
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+
+    asyncio.run(manager._wait_for_pd_master_request_slot())
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):

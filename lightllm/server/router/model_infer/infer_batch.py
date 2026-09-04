@@ -23,6 +23,7 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ class InferenceContext:
     infer_req_ids = None
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
+    cache_placement_controller: Optional[CachePlacementController] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -53,6 +55,7 @@ class InferenceContext:
         radix_cache: Union[LinearAttPagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
+        cache_placement_controller: Optional[CachePlacementController] = None,
     ):
         self.args = get_env_start_args()
         self.backend: ModeBackend = backend
@@ -60,6 +63,7 @@ class InferenceContext:
         self.req_sampling_manager = self.req_manager.req_sampling_params_manager
         self.radix_cache = radix_cache
         self.shm_req_manager = shm_req_manager
+        self.cache_placement_controller = cache_placement_controller
 
         self.requests_mapping = {}
         self.infer_req_ids = []
@@ -132,6 +136,8 @@ class InferenceContext:
                 # 槽位随 full 槽经 mem_manager.free 级联回收。pause 路径不释放 req_idx，
                 # 这里只复位出窗水位线；恢复从 0 重算，c128 request ring 会在读取前覆写。
                 self.req_manager.init_compress_state(req.req_idx)
+        elif CacheTier.GPU not in req.cache_tiers:
+            self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
         else:
             if not self.is_linear_att_mixed_model:
                 if self.is_deepseek_v4:
@@ -143,6 +149,30 @@ class InferenceContext:
                 assert len(req.linear_att_len_to_big_page_id) == 0
         req.cur_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
+        return
+
+    def _free_req_mem_without_radix_insert(self, free_token_index: List, req: "InferReq"):
+        shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+
+        if self.is_linear_att_mixed_model:
+            # 释放请求尾部尚未移交给 radix cache 的 linear attention 小页状态。
+            if req.tail_linear_att_small_page_buffer_id is not None:
+                self.radix_cache.linear_att_small_page_buffers.free_state_cache(
+                    [req.tail_linear_att_small_page_buffer_id]
+                )
+                req.tail_linear_att_small_page_buffer_id = None
+            # 释放请求执行期间申请、但不再插入 radix cache 的大页状态。
+            if req.linear_att_len_to_big_page_id:
+                self.radix_cache.linear_att_big_page_buffers.free_state_cache(
+                    list(req.linear_att_len_to_big_page_id.values())
+                )
+                req.linear_att_len_to_big_page_id.clear()
+
+        # 解除请求对已命中 GPU radix cache 前缀节点的引用。
+        if req.shared_kv_node is not None:
+            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            req.shared_kv_node = None
         return
 
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
@@ -663,6 +693,12 @@ class InferReq:
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+        # 元组记录请求完成后的缓存放置路径，其内容和顺序由缓存放置控制器保证合法。
+        # 初始值为 GPU，可直接兼容 pause 等尚未经过控制器分配的提前释放路径。
+        # 自适应策略在分界点建立前使用兼容放置，之后选择 GPU 或低层缓存路径；
+        # Disk 需要 CPU 中转，因此表示为 (CPU, Disk)。
+        # 兼容策略可以同时包含 GPU、CPU 和 Disk 多层。
+        self.cache_tiers: Tuple[CacheTier, ...] = (CacheTier.GPU,)
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
@@ -1006,11 +1042,20 @@ class InferReq:
         ``Req.mark_simulated_finished``（在已有输出末尾追加 EOS）。不回写本地
         ``cur_output_len`` / ``finish_status``（本 InferReq 即将释放）。
         """
-        # 本地已由 stop / eos / length 等正确结束，保留原 shm finish_status。
+        # 请求本身已由 stop / eos / length / error 等状态结束时，
+        # 请求自身的结束原因优先，不能被后续的容量不足标记覆盖。
         if self.finish_status.is_finished():
             return
+
+        # 仅在请求本身尚未结束时，才将 finished_by_pd_decode_capacity
+        # 转换为 PD 内部分段状态，补模拟结束 token 并交给 PD Master 续跑。
+        if getattr(self, "finished_by_pd_decode_capacity", False):
+            finish_status = FinishStatus.FINISHED_PD_DECODE_CAPACITY
+        else:
+            finish_status = FinishStatus.FINISHED_ABORTED
+
         self.shm_req.mark_simulated_finished(
-            FinishStatus.FINISHED_ABORTED,
+            finish_status,
             output_len=self.cur_output_len,
         )
         return

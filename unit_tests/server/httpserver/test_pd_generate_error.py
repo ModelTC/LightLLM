@@ -13,10 +13,15 @@ from lightllm.server.httpserver_for_pd_master.manager import (
     ReqStatus,
 )
 from lightllm.server.pd_io_struct import ObjType
-from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
+from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 
 
-class _FailingManager:
+class _PDManagerStub:
+    def cancel_pd_request_registration(self, _group_request_id):
+        pass
+
+
+class _FailingManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -24,7 +29,7 @@ class _FailingManager:
         yield
 
 
-class _CancelledManager:
+class _CancelledManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -32,14 +37,14 @@ class _CancelledManager:
         yield
 
 
-class _SuccessfulManager:
+class _SuccessfulManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
-        yield 123, "token", {}, FinishStatus(FinishStatus.FINISHED_STOP)
+        yield 123, "token", {"count_output_tokens": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
 
 
-class _StopPrefillManager:
+class _StopPrefillManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -51,11 +56,19 @@ class _FatalGenerateError(BaseException):
     pass
 
 
-class _FatalManager:
+class _FatalManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="decode")
 
     async def generate(self, **_kwargs):
         raise _FatalGenerateError("fatal generate failure")
+        yield
+
+
+class _BusyManager(_PDManagerStub):
+    args = SimpleNamespace(run_mode="decode")
+
+    async def generate(self, **_kwargs):
+        raise ServerBusyError("decode node could not allocate a shm_req object within 20 seconds")
         yield
 
 
@@ -81,6 +94,33 @@ def test_pd_node_reports_generate_error_to_master():
             ObjType.PD_UPLOAD_GENERATE_ERROR,
             123,
             "RuntimeError: prefill failed",
+        )
+
+    asyncio.run(run())
+
+
+def test_pd_node_reports_local_request_rejection_to_master():
+    async def run():
+        sampling_params = SamplingParams()
+        sampling_params.group_request_id = 123
+        websocket = AsyncMock()
+
+        await _pd_process_generate(
+            manager=_BusyManager(),
+            prompt="prompt",
+            sampling_params=sampling_params,
+            multimodal_params=MagicMock(),
+            forwarding_queue=MagicMock(),
+            pd_upload_websocket=websocket,
+            pd_event=asyncio.Event(),
+        )
+
+        websocket.send.assert_awaited_once()
+        obj = pickle.loads(websocket.send.await_args.args[0])
+        assert obj == (
+            ObjType.PD_UPLOAD_SERVER_BUSY,
+            123,
+            "decode node could not allocate a shm_req object within 20 seconds",
         )
 
     asyncio.run(run())
@@ -210,6 +250,7 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
+        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
         p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
@@ -235,6 +276,42 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
                 RuntimeError,
                 match="PD node generate failed: RuntimeError: prefill failed",
             ):
+                req_status.raise_if_error()
+        finally:
+            handle_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await handle_task
+
+    asyncio.run(run())
+
+
+def test_pd_master_request_rejection_becomes_server_busy_error():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(config_server_host=None)
+        manager.pd_manager = MagicMock()
+        manager.timer_log = AsyncMock()
+        manager.metric_client = MagicMock()
+        manager.infos_queues = None
+
+        req_status = ReqStatus(123, MagicMock(), MagicMock())
+        manager.req_id_to_out_inf = {123: req_status}
+
+        handle_task = asyncio.create_task(manager.handle_loop())
+        try:
+            while manager.infos_queues is None:
+                await asyncio.sleep(0)
+            await manager.put_to_handle_queue(
+                (
+                    ObjType.PD_UPLOAD_SERVER_BUSY,
+                    123,
+                    "prefill node could not allocate a shm_req object within 20 seconds",
+                )
+            )
+            await asyncio.wait_for(req_status.event.wait(), timeout=1)
+
+            assert req_status.is_server_busy is True
+            with pytest.raises(ServerBusyError, match="prefill node could not allocate a shm_req object"):
                 req_status.raise_if_error()
         finally:
             handle_task.cancel()

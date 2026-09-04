@@ -5,15 +5,15 @@ from .dp_base_queue import DpQueue
 
 
 def _get_req_queue_class(args, router, dp_size_in_node: int):
+    if args.run_mode in ["prefill", "decode"]:
+        return PDQueue
+
     if args.diverse_mode:
         return ChunkedBeamContinuesBatchQueue
     if args.output_constraint_mode != "none":
         return ChunkedPrefillQueue
     if args.first_token_constraint_mode:
         return ChunkedPrefillQueue
-    if args.run_mode in ["prefill", "decode"]:
-        return PDQueue
-
     if args.disable_chunked_prefill:
         # 虽然也使用chuncked prefill queue 但是由于 args.chunked_prefill_size = args.max_req_total_len
         # 所以调度的实际行为类似过去的 continues batch 调度，所以将两种调度的实现统一为一种实现，减少代码重复。

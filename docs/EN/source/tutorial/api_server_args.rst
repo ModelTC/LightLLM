@@ -40,6 +40,12 @@ Basic Configuration Parameters
 
     HTTP server worker process count, default is ``1``
 
+.. option:: --disable_delay_response_start
+
+    Send the status and headers of a streaming response immediately instead of waiting until the first response
+    chunk is ready. By default, LightLLM delays the response start so errors raised before the first chunk can still
+    be returned with the appropriate HTTP status code.
+
 .. option:: --hypercorn_config
 
     Path to a Hypercorn TOML configuration file. Only TOML configuration files are supported.
@@ -88,6 +94,29 @@ PD disaggregation Mode Parameters
     PD Master also applies the regular inference-progress health check: while requests remain in flight,
     the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
     ``HEALTH_TIMEOUT`` consecutive seconds.
+
+.. option:: --enable_pd_node_self_request_limit
+
+    Enable local request limiting on Prefill/Decode nodes. PD Master does not currently perform request admission
+    limiting. The local ``shm_req`` allocation timeout is controlled by
+    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` (20 seconds by default), while the timeout from Router entry
+    to inference entry is controlled by ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` (20 seconds by default).
+    A timeout reports ``Server is busy``; a request that has entered the Router but not inference is proactively
+    marked aborted, and PD Master converts this to HTTP 429. Requests continue waiting when local admission is
+    disabled. For PD high-priority requests (segmented continuation requests, or requests whose estimated input
+    cache hit rate is above 0.8 and whose cache record is still fresh), PD Master supplies a shared timeout floor through
+    ``pd_high_priority_request_time_out_seconds``. Each P/D node uses the greater of this value and its local
+    ``shm_req`` or Router timeout; zero does not extend the local timeout. The value supplied by PD Master is controlled by
+    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` and defaults to 60 seconds. The maximum cache-record age
+    eligible for promotion is controlled by ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
+    16 seconds. Local request limiting is disabled by default.
+
+.. option:: --disable_pd_cache_high_priority
+
+    Disable PD Master from promoting first-segment requests whose estimated input cache hit rate is high and whose
+    cache record is still fresh. This does not affect segmented continuation requests after PD Decode capacity
+    exhaustion; continuation requests remain high priority. Disabled by default, so fresh high-cache-hit requests
+    are promoted unless this option is set.
 
 .. option:: --config_server_host
 

@@ -7,7 +7,7 @@ PD Master 的 cache-aware prefill 选点策略。
   负载均衡，避免热点。
 
 实现要点：
-  - 用前缀树（见 PromptCacheTree）记录「历史 prompt -> 处理它的 worker」；
+  - 用前缀树（见 PromptCacheTree）记录「成功进入推理的 prompt -> 处理它的 worker」；
   - 树中的 prefill_node 对应 worker.client_ip_port；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
   - 根据推理侧返回的平均 prompt cache 命中率，动态调整 cache 亲和与负载均衡的权重；
@@ -25,6 +25,7 @@ from typing import List, Optional
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.log_utils import init_logger
 
+from .pd_selector import PDSelectionExtraInfo
 from .prompt_cache_tree import PromptCacheTree
 
 
@@ -96,7 +97,7 @@ class CacheAwarePolicy:
     维护 prompt 前缀树，并据此为请求选择 prefill worker。
 
     树生命周期：
-      - 选中 worker 后会把当前 prompt 插入该 worker 对应的 prefill_node；
+      - 请求成功进入推理后，把当前 prompt 插入实际 worker 对应的 prefill_node；
       - insert 时若超 max_node_count 会 lazy 触发 LRU 驱逐。
     """
 
@@ -131,7 +132,6 @@ class CacheAwarePolicy:
           4) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 得到 cache 命中节点；
           5) cache 命中节点负载未严重高于最空闲节点 -> 选择 cache 命中节点；
           6) 未命中或负载严重失衡 -> 选择最空闲节点；
-          7) 将当前 prompt 与最终选中的节点写入前缀树。
         """
         if not workers:
             return None
@@ -141,15 +141,26 @@ class CacheAwarePolicy:
         # ---- 1. 空闲优先：避免有可用 GPU 闲置 ----
         idle_worker = self._select_idle_worker(workers, request_text)
         if idle_worker is not None:
-            self.prompt_cache_tree.insert(request_text, idle_worker.client_ip_port)
             return idle_worker
 
         # ---- 2. 所有节点都忙时，在 cache 亲和与负载均衡之间权衡 ----
         cache_worker = self._get_cache_worker(workers, request_text)
         selected_worker = self._select_worker_by_cache_and_load(workers, cache_worker, len(request_text))
-
-        self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
         return selected_worker
+
+    def get_estimated_cache_info(self, selected_worker: PD_Client_Obj, request_text: str) -> PDSelectionExtraInfo:
+        """查询最终选中节点的输入 cache 命中率和最近插入时间。"""
+        result = self.prompt_cache_tree.prefix_match(request_text)
+        if result.prefill_node != selected_worker.client_ip_port or result.input_char_count == 0:
+            return PDSelectionExtraInfo()
+        return PDSelectionExtraInfo(
+            estimated_cache_hit_rate=result.matched_char_count / result.input_char_count,
+            cache_last_insert_time=result.last_insert_time,
+        )
+
+    def insert_prompt_cache(self, request_text: str, selected_worker: PD_Client_Obj) -> None:
+        """在请求成功进入推理后，记录 prompt 与实际执行的 Prefill 节点。"""
+        self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         """记录推理侧上报的真实 cache 命中率，并更新动态负载阈值。"""

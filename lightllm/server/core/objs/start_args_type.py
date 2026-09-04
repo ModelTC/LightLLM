@@ -14,6 +14,7 @@ class StartArgs:
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
     httpserver_workers: int = field(default=1)
+    disable_delay_response_start: bool = field(default=False)
     hypercorn_config: Optional[str] = field(default=None)
     zmq_mode: str = field(
         default="ipc:///tmp/",
@@ -22,7 +23,8 @@ class StartArgs:
     pd_master_ip: str = field(default="0.0.0.0")
     pd_master_port: int = field(default=1212)
     pd_master_mode: str = field(default="elastic")
-    disable_pd_master_decode_capacity_limit: bool = field(default=False)
+    enable_pd_node_self_request_limit: bool = field(default=False)
+    disable_pd_cache_high_priority: bool = field(default=False)
     pd_trans_mode: str = field(default="nccl", metadata={"choices": ["nccl", "nixl"]})
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
@@ -209,6 +211,7 @@ class StartArgs:
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
     cpu_cache_token_page_size: Optional[int] = field(default=None)
+    cache_placement_strategy: str = field(default="adaptive", metadata={"choices": ["adaptive", "legacy"]})
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
     disk_cache_dir: Optional[str] = field(default=None)
