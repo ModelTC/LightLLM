@@ -1,5 +1,6 @@
-import re
+import math
 import os
+import re
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -8,9 +9,12 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .allocator import KvCacheAllocator
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
-from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
+from lightllm.utils.dist_utils import (
+    get_current_device_id,
+    get_current_rank_in_node,
+    get_node_world_size,
+)
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
-from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.device_utils import kv_trans_use_p2p
@@ -58,6 +62,26 @@ class MemoryManager:
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
+    def get_paged_kv_move_buffer_shape(self, page_num, page_size):
+        num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
+        return (
+            page_num,
+            page_size,
+            self.layer_num,
+            2 * num_kv_head,
+            self.head_dim,
+        )
+
+    def get_pd_kv_move_buffer_size(self):
+        args = get_env_start_args()
+        if args.run_mode not in ["prefill", "decode"]:
+            return 0
+        shape = self.get_paged_kv_move_buffer_shape(
+            page_num=args.pd_kv_page_num,
+            page_size=args.pd_kv_page_size,
+        )
+        return math.prod(shape) * torch._utils._element_size(self.dtype)
+
     def profile_size(self, mem_fraction):
         if self.size is not None:
             return
@@ -66,13 +90,16 @@ class MemoryManager:
         world_size = dist.get_world_size()
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
-        self.size = int(available_memory * 1024 ** 3 / cell_size)
+        pd_kv_move_buffer_size = self.get_pd_kv_move_buffer_size()
+        available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
+        self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
             dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
             self.size = tensor.item()
         logger.info(
             f"{str(available_memory)} GB space is available after load the model weight\n"
+            f"{str(pd_kv_move_buffer_size / 1024 ** 2)} MB is reserved for PD KV transfer buffer\n"
             f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
             f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
         )
@@ -86,9 +113,8 @@ class MemoryManager:
         self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         self.kv_move_buffer = torch.empty(
-            (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
+            self.get_paged_kv_move_buffer_shape(page_num, page_size), dtype=self.dtype, device="cuda"
         )
         self._buffer_mem_indexes_tensors = [
             torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
