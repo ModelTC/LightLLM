@@ -16,6 +16,8 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
         self.position_sin_h = None
         self.position_cos_w = None
         self.position_sin_w = None
+        self.b_image_token_end = None
+        self.position_ids = None
 
     def init_some_extra_state(self, model: LlamaTpPartModel):
         LlamaInferStateInfo.init_some_extra_state(self, model)

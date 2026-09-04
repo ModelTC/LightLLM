@@ -26,9 +26,7 @@ import math
 import pytest
 import torch
 
-from lightllm.models.neo_chat_moe.triton_kernel.context_attention_fwd_neo import (
-    context_attention_fwd_neo,
-)
+from lightllm.common.basemodel.triton_kernel.att.prefill_att.context_attention_fwd_neo import context_attention_fwd_neo
 
 
 def torch_reference_context_attention_neo(

@@ -41,7 +41,7 @@ except ImportError:
     triton_testing = None
 
 try:
-    from lightllm.models.neo_chat_moe.triton_kernel.context_attention_fwd_neo import (
+    from lightllm.common.basemodel.triton_kernel.att.prefill_att.context_attention_fwd_neo import (
         context_attention_fwd_neo,
     )
 except ImportError:
