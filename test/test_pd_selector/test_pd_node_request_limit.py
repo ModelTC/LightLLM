@@ -142,7 +142,6 @@ def test_router_wait_uses_master_timeout_independently_of_priority(
     expected,
 ):
     req_status = ReqStatus.__new__(ReqStatus)
-    req_status.is_multinode_tp_slave = False
     req_status.group_req_objs = SimpleNamespace(
         shm_req_objs=[
             SimpleNamespace(

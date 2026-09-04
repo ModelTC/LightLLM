@@ -62,10 +62,8 @@ def _multimodal_params():
     return SimpleNamespace(audios=[], images=[], verify_and_preload=AsyncMock())
 
 
-def _req_status(reqs, *, dp=1, nnodes=1, node_rank=0):
-    start_args = SimpleNamespace(dp=dp, nnodes=nnodes, node_rank=node_rank)
-    with patch("lightllm.server.httpserver.manager.get_env_start_args", return_value=start_args):
-        return ReqStatus(123, None, reqs, 0)
+def _req_status(reqs):
+    return ReqStatus(123, None, reqs, 0)
 
 
 async def _drain_generate(manager, sampling_params, multimodal_params, websocket=None, pd_event=None):
@@ -278,12 +276,13 @@ def test_multinode_tp_slave_does_not_apply_router_wait_timeout():
             infer_start_time=0.0,
             sample_params=SimpleNamespace(pd_node_resource_wait_timeout_seconds=0),
         )
-        req_status = _req_status([req], nnodes=2, node_rank=1)
+        req_status = _req_status([req])
         req_status.event.set()
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=True))
 
         with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=2):
-            assert req_status.has_timed_out_waiting_for_inference() is False
+            # ReqStatus 只判断时间条件；是否允许 slave 执行超时策略由 manager 在调用处决定。
+            assert req_status.has_timed_out_waiting_for_inference() is True
             output_generator = manager._wait_to_token_package(
                 start_time=0,
                 prompt_ids=[],

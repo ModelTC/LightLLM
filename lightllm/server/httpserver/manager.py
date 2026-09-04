@@ -36,7 +36,7 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
+from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import (
     ClientDisconnected,
@@ -789,7 +789,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
             except asyncio.TimeoutError:
                 pass
 
-            if is_first_token and req_status.has_timed_out_waiting_for_inference():
+            # 多机 TP slave 只跟随 master 执行，不能独立判定超时并中止请求。
+            if (
+                is_first_token
+                and not self.is_multinode_tp_slave
+                and req_status.has_timed_out_waiting_for_inference()
+            ):
                 resource_wait_timeout_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
                 raise ServerBusyError(
                     f"PD {self.args.run_mode} node is busy: request did not enter inference "
@@ -1095,8 +1100,6 @@ class ReqStatus:
     def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time) -> None:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
-        args = get_env_start_args()
-        self.is_multinode_tp_slave = args.dp == 1 and args.nnodes > 1 and args.node_rank > 0
         self.group_req_objs = GroupReqObjs(
             group_req_id=group_request_id,
             multimodal_params=multimodal_params,
@@ -1107,9 +1110,6 @@ class ReqStatus:
 
     def has_timed_out_waiting_for_inference(self) -> bool:
         """按 PD Master 下发的资源等待上限判断请求是否在 Router 中超时。"""
-        # 多机 TP slave 只跟随 master 执行，不能独立判定超时并中止请求。
-        if self.is_multinode_tp_slave:
-            return False
         current_time = time.monotonic()
         reqs = self.group_req_objs.shm_req_objs
         # 组内任一请求已经进入新 batch，说明整个请求组已经开始执行，不能再按 Router 等待超时清理。
