@@ -313,6 +313,12 @@ def get_pd_node_resource_wait_timeout_seconds() -> int:
 
 
 @lru_cache(maxsize=None)
+def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
+    """P/D 节点处理续跑分段时的资源等待超时，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", 60)))
+
+
+@lru_cache(maxsize=None)
 def get_pd_node_busy_retry_timeout_seconds() -> int:
     """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒。"""
     return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 120)))

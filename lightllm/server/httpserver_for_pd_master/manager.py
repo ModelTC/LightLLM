@@ -27,6 +27,7 @@ from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
+    get_pd_node_continuation_resource_wait_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -56,6 +57,9 @@ class HttpServerManagerForPDMaster:
         # 限流开关只在 PD Master 生效；P/D 节点不读取本地开关或超时配置，只执行 Master 下发的值。
         self.enable_pd_node_self_request_limit = not args.disable_pd_node_self_request_limit
         self.pd_node_resource_wait_timeout_seconds = get_pd_node_resource_wait_timeout_seconds()
+        self.pd_node_continuation_resource_wait_timeout_seconds = (
+            get_pd_node_continuation_resource_wait_timeout_seconds()
+        )
         self.pd_node_busy_retry_timeout_seconds = get_pd_node_busy_retry_timeout_seconds()
         self.pd_cache_high_priority_max_age_seconds = get_pd_cache_high_priority_max_age_seconds()
         self.pd_cache_high_priority_min_prompt_tokens = get_pd_cache_high_priority_min_prompt_tokens()
@@ -330,10 +334,13 @@ class HttpServerManagerForPDMaster:
                 # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
                 # 紧张导致分段续跑失败。
                 sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
-                # 资源等待超时与请求优先级相互独立；仅在 Master 开启限流时下发配置值，
-                # 否则保留 SamplingParams 的默认值（负数表示持续等待资源）。
+                # 仅在 Master 开启限流时下发资源等待超时。续跑分段已经产生了部分结果，
+                # 使用独立配置的等待时间，提高请求最终完成的成功率。
                 if self.enable_pd_node_self_request_limit:
-                    sampling_params.pd_node_resource_wait_timeout_seconds = self.pd_node_resource_wait_timeout_seconds
+                    resource_wait_timeout_seconds = self.pd_node_resource_wait_timeout_seconds
+                    if segment_index > 0:
+                        resource_wait_timeout_seconds = self.pd_node_continuation_resource_wait_timeout_seconds
+                    sampling_params.pd_node_resource_wait_timeout_seconds = resource_wait_timeout_seconds
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。

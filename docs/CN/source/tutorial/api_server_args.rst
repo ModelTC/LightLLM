@@ -97,9 +97,12 @@ PD 分离模式参数
     P/D 节点资源等待限流默认启用，并由 PD Master 统一管理。该参数只在需要关闭此功能时设置，且只需添加到
     PD Master 的启动参数中，不需要在 Prefill/Decode 节点上设置。默认情况下，PD Master 通过
     ``pd_node_resource_wait_timeout_seconds`` 为所有请求下发统一的资源等待上限；P/D 节点只负责按下发值
-    控制本地 ``shm_req`` 申请和 Router 等待进入推理系统，不读取本地限流开关或超时配置，也不根据请求
-    是否为高优先级改变超时。该值由 PD Master 上的
+    控制本地 ``shm_req`` 申请和 Router 等待进入推理系统，不读取本地限流开关或超时配置。首段的等待上限由
+    PD Master 上的
     ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 10 秒；设置为 -1 表示永久等待。
+    ``segment_index > 0`` 的续跑分段使用独立的等待上限，该值由
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 60 秒，以提高已产生部分结果的
+    请求最终完成的成功率。
     设置为非负数时，超时会导致 ``Server is busy``；
     其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，由 PD Master 转换为 HTTP 429。
     本功能启用时，PD Master 收到 ``Server is busy`` 会重新选择 P/D 节点并重试；最长探测周期由
@@ -116,6 +119,7 @@ PD 分离模式参数
     .. code-block:: bash
 
         LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
             LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
             python -m lightllm.server.api_server --run_mode pd_master ...
 

@@ -19,6 +19,7 @@ def _make_manager(monkeypatch):
     mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True)
     mgr.enable_pd_node_self_request_limit = True
     mgr.pd_node_resource_wait_timeout_seconds = -1
+    mgr.pd_node_continuation_resource_wait_timeout_seconds = 60
     mgr.pd_node_busy_retry_timeout_seconds = 120
     mgr.pd_cache_high_priority_max_age_seconds = 60
     mgr.pd_cache_high_priority_min_prompt_tokens = 8192

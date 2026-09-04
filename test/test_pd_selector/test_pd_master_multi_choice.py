@@ -23,6 +23,7 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.tokens = MagicMock(return_value=2)
     manager.enable_pd_node_self_request_limit = True
     manager.pd_node_resource_wait_timeout_seconds = 10
+    manager.pd_node_continuation_resource_wait_timeout_seconds = 60
     manager.pd_node_busy_retry_timeout_seconds = 120
     manager.pd_cache_high_priority_max_age_seconds = 60
     manager.pd_cache_high_priority_min_prompt_tokens = 4096
@@ -191,9 +192,21 @@ def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_fi
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
+@pytest.mark.parametrize(
+    ("initial_timeout", "continuation_timeout", "expected_timeouts"),
+    [
+        (10, 60, [10, 60]),
+        (90, 60, [90, 60]),
+        (-1, 60, [-1, 60]),
+    ],
+)
+def test_pd_master_hides_capacity_finish_token_and_continues_next_segment(
+    initial_timeout, continuation_timeout, expected_timeouts
+):
     async def run():
         manager = _manager()
+        manager.pd_node_resource_wait_timeout_seconds = initial_timeout
+        manager.pd_node_continuation_resource_wait_timeout_seconds = continuation_timeout
         manager.id_gen.generate_id.side_effect = [808, 816]
         manager.remove_req = AsyncMock()
         manager.abort = AsyncMock()
@@ -201,10 +214,12 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
         d_node = MagicMock()
         manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         segment_index = 0
+        resource_wait_timeouts = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, prompt, params, *_args):
             nonlocal segment_index
             segment_index += 1
+            resource_wait_timeouts.append(params.pd_node_resource_wait_timeout_seconds)
             if segment_index == 1:
                 assert prompt == "prompt"
                 assert params.max_new_tokens == 4
@@ -247,6 +262,7 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment():
             results.append(result)
 
         assert segment_index == 2
+        assert resource_wait_timeouts == expected_timeouts
         assert [result[1] for result in results] == ["visible", "continued"]
         assert all(result[3].status != FinishStatus.FINISHED_PD_DECODE_CAPACITY for result in results)
         assert results[-1][3].status == FinishStatus.FINISHED_STOP

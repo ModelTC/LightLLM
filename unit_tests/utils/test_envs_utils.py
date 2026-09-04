@@ -2,6 +2,7 @@ from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
+    get_pd_node_continuation_resource_wait_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
 )
 
@@ -58,6 +59,24 @@ def test_pd_node_resource_wait_timeout_reads_environment_variable(monkeypatch):
     assert get_pd_node_resource_wait_timeout_seconds() == 30
 
     get_pd_node_resource_wait_timeout_seconds.cache_clear()
+
+
+def test_pd_node_continuation_resource_wait_timeout_defaults_to_60_seconds(monkeypatch):
+    monkeypatch.delenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", raising=False)
+    get_pd_node_continuation_resource_wait_timeout_seconds.cache_clear()
+
+    assert get_pd_node_continuation_resource_wait_timeout_seconds() == 60
+
+    get_pd_node_continuation_resource_wait_timeout_seconds.cache_clear()
+
+
+def test_pd_node_continuation_resource_wait_timeout_reads_environment_variable(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", "90")
+    get_pd_node_continuation_resource_wait_timeout_seconds.cache_clear()
+
+    assert get_pd_node_continuation_resource_wait_timeout_seconds() == 90
+
+    get_pd_node_continuation_resource_wait_timeout_seconds.cache_clear()
 
 
 def test_pd_node_busy_retry_timeout_defaults_to_120_seconds(monkeypatch):

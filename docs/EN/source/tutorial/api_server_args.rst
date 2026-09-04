@@ -102,9 +102,12 @@ PD disaggregation Mode Parameters
     By default, PD Master supplies
     ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
     ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
-    or timeout settings, and request priority does not alter the timeout. The value is
+    or timeout settings. The first segment's timeout is
     controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
-    to -1 to wait indefinitely. When set to a non-negative value, a timeout reports ``Server is busy``; a request that has
+    to -1 to wait indefinitely. Continuation segments with ``segment_index > 0`` use a separate timeout controlled by
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 60 seconds, improving the chance
+    that requests which have already produced partial results complete successfully. When set to a non-negative value,
+    a timeout reports ``Server is busy``; a request that has
     entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
     While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
     The maximum probing period is controlled by ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` and defaults to
@@ -124,6 +127,7 @@ PD disaggregation Mode Parameters
     .. code-block:: bash
 
         LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
             LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
             python -m lightllm.server.api_server --run_mode pd_master ...
 
