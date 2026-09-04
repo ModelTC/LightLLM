@@ -3,7 +3,9 @@ import json
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager import HybridSlidingMemoryManager
+from lightllm.common.req_manager import ReqManagerForSlidingWindow
+from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
@@ -12,7 +14,7 @@ from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerI
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma4PreAndPostLayerWeight
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -65,6 +67,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         return
 
     def _verify_params(self):
+        args = get_env_start_args()
         assert self.load_way == "HF", "Gemma-4 only supports HF format."
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
@@ -80,30 +83,49 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             f"num_kv_shared_layers={kv_shared} out of range for "
             f"num_hidden_layers={self.config['num_hidden_layers']}"
         )
+        assert args.mtp_step == 0, "Gemma-4 hybrid sliding-window cache does not support MTP yet"
+        assert not args.enable_cpu_cache, "Gemma-4 hybrid sliding-window cache does not support CPU cache"
+        assert not args.disable_chunked_prefill, "Gemma-4 hybrid sliding-window cache requires chunked prefill"
+        assert args.run_mode == "normal", "Gemma-4 hybrid sliding-window cache does not support PD mode yet"
+        assert args.llm_kv_type == "None", "Gemma-4 hybrid sliding-window cache does not support quantized KV yet"
         return
 
-    def _init_mem_manager(self):
-        # Uniform per-layer KV cache layout. The per-layer cache slot must fit
-        # whichever layer type has the largest per-token K/V width: sliding
-        # (num_key_value_heads * head_dim) or full
-        # (num_global_kv * global_head_dim). Keep cache_slot_dim = head_dim
-        # and pick cache_slot_num = max-width / head_dim. For 31B this
-        # collapses to num_key_value_heads; for E4B the full-attn shape wins
-        # (2*512 > 2*256), so it uses 4 storage slots of 256 dims.
-        # Gemma4TransformerLayerInfer.__init__ computes the same value and
-        # uses it to pack/unpack K/V at write/read time.
-        head_dim = self.config["head_dim"]
+    def _get_sliding_cache_config(self):
+        if hasattr(self, "sliding_cache_config"):
+            return self.sliding_cache_config
         num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
-        sliding_total = self.config["num_key_value_heads"] * self.config["head_dim"]
-        full_total = num_global_kv * self.config["global_head_dim"]
-        per_token_k_width = max(sliding_total, full_total)
-        head_num_per_rank = (per_token_k_width // head_dim) // self.tp_world_size_
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
+        self.sliding_cache_config = SlidingWindowCacheConfig(
+            layer_types=self.config["layer_types"],
+            num_kv_shared_layers=self.config.get("num_kv_shared_layers") or 0,
+            sliding_window=self.config["sliding_window"],
+            sliding_head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
+            sliding_head_dim=self.config["head_dim"],
+            full_head_num=num_global_kv // self.tp_world_size_,
+            full_head_dim=self.config["global_head_dim"],
             dtype=self.data_type,
-            head_num=head_num_per_rank,
-            head_dim=head_dim,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
+        )
+        return self.sliding_cache_config
+
+    def _init_req_manager(self):
+        args = get_env_start_args()
+        create_max_seq_len = max(int(self.batch_max_tokens or 0), int(self.max_seq_length or 0))
+        scratch_token_num = max(
+            int(self.batch_max_tokens or 0),
+            int(self.graph_max_batch_size or 0),
+            int(args.prefill_cudagraph_max_handle_token or 0) if args.enable_prefill_cudagraph else 0,
+        )
+        self.req_manager = ReqManagerForSlidingWindow(
+            max_request_num=self.max_req_num,
+            max_sequence_length=create_max_seq_len,
+            mem_manager=None,
+            sliding_config=self._get_sliding_cache_config(),
+            scratch_token_num=scratch_token_num,
+        )
+
+    def _init_mem_manager(self):
+        self.mem_manager = HybridSlidingMemoryManager(
+            size=self.max_total_token_num,
+            sliding_config=self._get_sliding_cache_config(),
             mem_fraction=self.mem_fraction,
         )
         return

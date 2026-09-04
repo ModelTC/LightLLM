@@ -8,7 +8,7 @@ import pickle
 from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
-from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
+from lightllm.common.req_manager import HybridAttentionReqManager, ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -46,6 +46,7 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_linear_att_mixed_model: bool = False  # 标记模型是否是full att 混合 linear att 的混合模型。
+    is_hybrid_att_mixed_model: bool = False
 
     def register(
         self,
@@ -70,6 +71,7 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_linear_att_mixed_model = isinstance(self.req_manager, ReqManagerForMamba)
+        self.is_hybrid_att_mixed_model = isinstance(self.req_manager, HybridAttentionReqManager)
 
         return
 
@@ -133,7 +135,7 @@ class InferenceContext:
         elif CacheTier.GPU not in req.cache_tiers:
             self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
         else:
-            if not self.is_linear_att_mixed_model:
+            if not self.is_hybrid_att_mixed_model:
                 self._full_att_free_req(free_token_index=free_token_index, req=req)
             else:
                 self._linear_att_free_req(free_token_index=free_token_index, req=req)
@@ -146,7 +148,7 @@ class InferenceContext:
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
 
-        if self.is_linear_att_mixed_model:
+        if self.is_hybrid_att_mixed_model:
             # 释放请求尾部尚未移交给 radix cache 的 linear attention 小页状态。
             if req.tail_linear_att_small_page_buffer_id is not None:
                 self.radix_cache.linear_att_small_page_buffers.free_state_cache(
@@ -182,7 +184,7 @@ class InferenceContext:
         return
 
     def _linear_att_free_req(self, free_token_index: List, req: "InferReq"):
-        assert g_infer_context.is_linear_att_mixed_model is True
+        assert g_infer_context.is_hybrid_att_mixed_model is True
         args = get_env_start_args()
         hash_page_size = args.linear_att_hash_page_size
         big_page_num = args.linear_att_page_block_num
@@ -375,7 +377,7 @@ class InferenceContext:
                 if prefill_need_token_num > can_alloc_token_num:
                     break
 
-                if g_infer_context.is_linear_att_mixed_model:
+                if g_infer_context.is_hybrid_att_mixed_model:
                     req._linear_match_radix_cache()
                 else:
                     req._match_radix_cache()
@@ -396,14 +398,12 @@ class InferenceContext:
             )
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
-    def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
-        """
-        该函数用于在线性混合模型prefill后,如果存在大页匹配的情况下，将线性层状态复制到
-        """
-        if not self.is_linear_att_mixed_model:
+    def copy_hybrid_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
+        """Snapshot request-level attention state at big/small-page boundaries."""
+        if not self.is_hybrid_att_mixed_model or self.radix_cache is None:
             return
 
-        # 大页对应的 linear att 的拷贝
+        # Request-state snapshot at a big-page boundary.
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_buffer_ids = []
         for req in reqs:
@@ -418,27 +418,15 @@ class InferenceContext:
                 big_page_buffer_ids.append(-1)
 
         assert len(b_req_idx) == len(big_page_buffer_ids)
-        if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
-            big_page_buffer_ids = torch.tensor(
-                big_page_buffer_ids, dtype=torch.int32, requires_grad=False, device="cpu"
-            )
-            big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
+        self.req_manager.copy_runtime_state_to_cache(
+            req_indexes=b_req_idx,
+            buffer_indexes=big_page_buffer_ids,
+            state_cache_manager=self.radix_cache.linear_att_big_page_buffers,
+        )
 
-            from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+        assert not self.args.disable_chunked_prefill, "chunked prefill must be enabled for hybrid attention models"
 
-            copy_linear_att_state_to_kv_buffer(
-                b_req_idx=b_req_idx,
-                big_page_buffer_ids=big_page_buffer_ids,
-                gpu_conv_state=self.req_manager.req_to_conv_state.buffer,
-                gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
-                cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
-                cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
-                mtp_step=self.args.mtp_step,
-            )
-
-        assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
-
-        # tail small page 的linear att 状态的存储
+        # Request-state snapshot at the final small-page boundary.
         for req in reqs:
             # 判断本次prefill 完以后 kv 的长度是否到达linear att 块存储的临界点。
             if req.get_chuncked_input_token_len() == req.linear_att_cache_len:
@@ -449,22 +437,16 @@ class InferenceContext:
                         self.radix_cache.linear_att_small_page_buffers.alloc_one_state_cache()
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
-                        conv_src_idx = req.req_idx
-                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1)
-                        conv_cache_width = self.req_manager.linear_config.get_conv_state_shape()[-1]
-                        gpu_conv_state = self.req_manager.req_to_conv_state.buffer[
-                            :, conv_src_idx, ..., :conv_cache_width
-                        ]
-                        gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, ssm_src_idx, ...]
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id
-
-                        dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_small_page_buffers.get_state_cache(
-                            buffer_idx=dst_buffer_idx
+                        self.req_manager.copy_runtime_state_to_cache(
+                            req_indexes=[req.req_idx],
+                            buffer_indexes=[dst_buffer_idx],
+                            state_cache_manager=self.radix_cache.linear_att_small_page_buffers,
                         )
-                        # TODO 对于非连续对象调用 copy_ 效率并不高
-                        dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
-                        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
         return
+
+    # Compatibility for out-of-tree backends while the hybrid name becomes canonical.
+    copy_linear_att_state_to_cache_buffer = copy_hybrid_att_state_to_cache_buffer
 
 
 g_infer_context = InferenceContext()
@@ -611,7 +593,7 @@ class InferReq:
         else:
             self.decode_need_token_num = self._normal_decode_need_token_num
 
-        if g_infer_context.is_linear_att_mixed_model:
+        if g_infer_context.is_hybrid_att_mixed_model:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_linear_att
             self.get_chuncked_input_token_ids = self.get_chuncked_input_token_ids_for_linear_att
 
@@ -623,7 +605,7 @@ class InferReq:
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:
-            if g_infer_context.is_linear_att_mixed_model:
+            if g_infer_context.is_hybrid_att_mixed_model:
                 self._linear_match_radix_cache()
             else:
                 self._match_radix_cache()
@@ -653,7 +635,7 @@ class InferReq:
         self.finish_status = FinishStatus()
 
         # 申请线性att混合模型使用的缓存资源
-        if g_infer_context.is_linear_att_mixed_model:
+        if g_infer_context.is_hybrid_att_mixed_model:
             linear_block_num = self.shm_req.linear_att_token_hash_list.size
             self.linear_att_cache_len = linear_block_num * self.args.linear_att_hash_page_size
             self.linear_att_len_to_big_page_id = SortedDict()
@@ -662,7 +644,7 @@ class InferReq:
 
     def _match_radix_cache(self):
         assert (
-            g_infer_context.is_linear_att_mixed_model is False
+            g_infer_context.is_hybrid_att_mixed_model is False
         ), "current _match_radix_cache does not support linear att hybrid model, to do..."
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         if enable_prompt_cache and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
@@ -683,7 +665,7 @@ class InferReq:
 
     def _linear_match_radix_cache(self):
         assert (
-            g_infer_context.is_linear_att_mixed_model is True
+            g_infer_context.is_hybrid_att_mixed_model is True
         ), "current _linear_match_radix_cache only support linear att hybrid model, to do..."
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         linear_hash_list = self.shm_req.linear_att_token_hash_list.get_all()
@@ -715,7 +697,7 @@ class InferReq:
                     self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                     assert self.tail_linear_att_small_page_buffer_id is None
                     # 恢复linear att 状态
-                    g_infer_context.req_manager.copy_big_page_buffer_to_linear_att_state(
+                    g_infer_context.req_manager.restore_big_page_state(
                         big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
                     )
                 else:
@@ -730,9 +712,9 @@ class InferReq:
                         self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         assert self.tail_linear_att_small_page_buffer_id is None
                         # 恢复linear att 状态
-                        g_infer_context.req_manager.copy_small_page_buffer_to_linear_att_state(
+                        g_infer_context.req_manager.restore_small_page_state(
                             req=self,
-                            linear_att_small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
+                            small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
                         )
                     else:
                         # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
@@ -763,9 +745,9 @@ class InferReq:
                             )
 
                             self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
-                            g_infer_context.req_manager.copy_small_page_buffer_to_linear_att_state(
+                            g_infer_context.req_manager.restore_small_page_state(
                                 req=self,
-                                linear_att_small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
+                                small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
                             )
                             self.shared_kv_node = None
 
@@ -789,7 +771,7 @@ class InferReq:
                                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                                 assert self.tail_linear_att_small_page_buffer_id is None
                                 # 恢复linear att 状态
-                                g_infer_context.req_manager.copy_big_page_buffer_to_linear_att_state(
+                                g_infer_context.req_manager.restore_big_page_state(
                                     big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
                                 )
 
@@ -797,7 +779,7 @@ class InferReq:
 
         if self.cur_kv_len == 0:
             # 说明没有任何命中
-            g_infer_context.req_manager.init_linear_att_state(req=self)
+            g_infer_context.req_manager.init_hybrid_attention_state(req=self)
         return
 
     def is_master_req(self):

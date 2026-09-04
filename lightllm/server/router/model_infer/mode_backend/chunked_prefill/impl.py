@@ -119,7 +119,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 mask_func=self.prefill_mask_func,
             )
-            g_infer_context.copy_linear_att_state_to_cache_buffer(
+            g_infer_context.copy_hybrid_att_state_to_cache_buffer(
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
@@ -215,7 +215,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 target_model_output=model_output,
                 target_next_token_ids=next_token_ids,
             )
-            g_infer_context.copy_linear_att_state_to_cache_buffer(
+            g_infer_context.copy_hybrid_att_state_to_cache_buffer(
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
