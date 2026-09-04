@@ -8,6 +8,24 @@ from lightllm.utils.envs_utils import _get_mtp_draft_backbone_layer_num
 from lightllm.utils.config_utils import get_deepseek_v4_compress_rates
 
 
+def test_dspark_decode_admission_reserves_one_swa_scratch_page():
+    from lightllm.server.router.model_infer.infer_batch import InferReq
+
+    req = InferReq.__new__(InferReq)
+    req.args = SimpleNamespace(mtp_mode="eagle")
+    req.mtp_step = 1
+    req.dsv4_swa_page_size = 128
+    req.dsv4_c4_page_size = 64
+    req.dsv4_has_c128 = True
+    req.get_cur_total_len = lambda: 10
+
+    normal_need = req.get_dsv4_decode_need_page_and_slot_num()
+    req.args.mtp_mode = "dspark"
+    dspark_need = req.get_dsv4_decode_need_page_and_slot_num()
+
+    assert dspark_need == (normal_need[0] + 1, normal_need[1], normal_need[2])
+
+
 @pytest.mark.parametrize("mtp_step", [1, 4, 5])
 def test_deepseek_v4_dspark_runtime_width_follows_mtp_step(monkeypatch, mtp_step):
     from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
