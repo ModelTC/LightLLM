@@ -7,6 +7,7 @@ import pytest
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 from lightllm.utils.error_utils import ClientDisconnected
 
 
@@ -57,14 +58,21 @@ def test_pd_master_client_disconnect_aborts_nodes_and_releases_load(monkeypatch)
         classmethod(lambda cls, other: copy.copy(other)),
     )
     manager = object.__new__(HttpServerManagerForPDMaster)
-    manager._split_max_new_tokens = lambda max_new_tokens: [max_new_tokens]
+    manager.pd_high_priority_request_time_out_seconds = 60
+    manager.pd_cache_high_priority_max_age_seconds = 60
+    manager.disable_pd_cache_high_priority = False
     manager.id_gen = SimpleNamespace(generate_id=lambda: 9001)
-    manager.pd_manager = SimpleNamespace(selector=SimpleNamespace(record_prompt_cache_hit_rate=lambda _rate: None))
+    manager.pd_manager = SimpleNamespace(
+        selector=SimpleNamespace(
+            record_prompt_cache_hit_rate=lambda _rate: None,
+            insert_prompt_cache=lambda _prompt, _p_node: None,
+        )
+    )
     p_node = SimpleNamespace(dispatched_prompt_chars=0, dispatched_req_num=0)
     d_node = SimpleNamespace()
 
     async def select_nodes(*_args):
-        return p_node, d_node
+        return p_node, d_node, PDSelectionExtraInfo()
 
     manager.select_p_d_node = select_nodes
     aborts = []
