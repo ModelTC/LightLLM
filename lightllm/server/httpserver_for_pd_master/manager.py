@@ -259,6 +259,15 @@ class HttpServerManagerForPDMaster:
                 elapsed_seconds = time.monotonic() - retry_start_time
                 if has_yielded_result or elapsed_seconds >= self.pd_node_busy_retry_timeout_seconds:
                     raise
+
+                # 发起下一次尝试前检查客户端连接，避免为已断开的请求继续占用 P/D 节点资源。
+                if await request.is_disconnected():
+                    disconnect_reason = "_generate_one busy retry check network disconnected"
+                    logger.warning(f"group_request_id: {origin_request_id} {disconnect_reason}")
+                    raise ClientDisconnected(
+                        group_request_id=origin_request_id,
+                        reason=disconnect_reason,
+                    )
                 logger.warning(
                     f"group_request_id: {origin_request_id} PD node is busy, retrying with another node; "
                     f"elapsed: {elapsed_seconds:.3f}s, retry timeout: "

@@ -10,7 +10,7 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
-from lightllm.utils.error_utils import ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 
 
 def _manager() -> HttpServerManagerForPDMaster:
@@ -665,13 +665,15 @@ def test_pd_master_retries_generate_one_when_node_is_busy():
             yield 800, "ok", {}, FinishStatus(FinishStatus.FINISHED_STOP)
 
         manager._generate_one_attempt = generate_one_attempt
+        request = MagicMock()
+        request.is_disconnected = AsyncMock(return_value=False)
         results = [
             result
             async for result in manager._generate_one(
                 "prompt",
                 SamplingParams(),
                 MagicMock(),
-                MagicMock(),
+                request,
                 0,
                 800,
                 0,
@@ -679,7 +681,43 @@ def test_pd_master_retries_generate_one_when_node_is_busy():
         ]
 
         assert attempt_count == 2
+        request.is_disconnected.assert_awaited_once()
         assert [result[1] for result in results] == ["ok"]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_pd_master_stops_busy_retry_when_client_disconnects():
+    async def run():
+        manager = _manager()
+        attempt_count = 0
+
+        async def generate_one_attempt(*_args):
+            nonlocal attempt_count
+            attempt_count += 1
+            raise ServerBusyError("node is busy")
+            yield
+
+        manager._generate_one_attempt = generate_one_attempt
+        request = MagicMock()
+        request.is_disconnected = AsyncMock(side_effect=[False, True])
+
+        with pytest.raises(ClientDisconnected) as exc_info:
+            async for _ in manager._generate_one(
+                "prompt",
+                SamplingParams(),
+                MagicMock(),
+                request,
+                0,
+                800,
+                0,
+            ):
+                pass
+
+        assert attempt_count == 2
+        assert request.is_disconnected.await_count == 2
+        assert exc_info.value.group_request_id == 800
+        assert exc_info.value.reason == "_generate_one busy retry check network disconnected"
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
