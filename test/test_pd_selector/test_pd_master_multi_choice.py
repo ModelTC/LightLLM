@@ -20,7 +20,8 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
     manager.tokens = MagicMock(return_value=2)
-    manager.pd_node_resource_wait_timeout_seconds = -1
+    manager.enable_pd_node_self_request_limit = False
+    manager.pd_node_resource_wait_timeout_seconds = 10
     manager.pd_cache_high_priority_max_age_seconds = 60
     manager.pd_cache_high_priority_min_prompt_tokens = 4096
     manager.disable_pd_cache_high_priority = False
@@ -574,9 +575,11 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-def test_pd_master_sets_resource_wait_timeout_independently_of_priority():
+@pytest.mark.parametrize(("enable_limit", "expected_timeout"), [(False, -1), (True, 90)])
+def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expected_timeout):
     async def run():
         manager = _manager()
+        manager.enable_pd_node_self_request_limit = enable_limit
         manager.pd_node_resource_wait_timeout_seconds = 90
         manager.id_gen.generate_id.return_value = 808
         manager.remove_req = AsyncMock()
@@ -612,6 +615,7 @@ def test_pd_master_sets_resource_wait_timeout_independently_of_priority():
         manager._wait_to_token_package = wait_to_token_package
 
         sampling_params = SamplingParams()
+        sampling_params.pd_node_resource_wait_timeout_seconds = -1
         sampling_params.max_new_tokens = 1
         async for _ in manager._generate_one(
             "prompt",
@@ -624,7 +628,7 @@ def test_pd_master_sets_resource_wait_timeout_independently_of_priority():
         ):
             pass
 
-        assert captured_request_settings == [(False, 90)]
+        assert captured_request_settings == [(False, expected_timeout)]
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
