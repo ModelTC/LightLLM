@@ -1,17 +1,15 @@
 """Asynchronous expert-row migration for EPLB."""
+import ctypes
 import os
+import re
 import socket
 import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
-
-from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import (
-    eplb_push_copy,
-)
 
 
 @dataclass(frozen=True)
@@ -20,40 +18,6 @@ class TransferStep:
     dst_slot: int
     src_rank: int
     src_local_row: int
-
-
-def extract_expert_tensors(weight) -> List[Tuple[str, torch.Tensor]]:
-    result = []
-    for pack_name in ("w13", "w2"):
-        pack = getattr(weight, pack_name)
-        for value_name in ("weight", "weight_scale", "weight_zero_point"):
-            tensor = getattr(pack, value_name, None)
-            if tensor is not None:
-                assert tensor.ndim >= 1 and tensor.is_contiguous(), f"{pack_name}.{value_name} must be contiguous"
-                result.append((f"{pack_name}.{value_name}", tensor))
-    return result
-
-
-def commit_staging_rows(
-    live: torch.Tensor,
-    staging: torch.Tensor,
-    num_experts_per_rank: int,
-    changed_dst_slots: Sequence[int],
-) -> None:
-    slots = sorted(set(changed_dst_slots))
-    if not slots:
-        return
-    run_start = previous = slots[0]
-    for dst_slot in (*slots[1:], None):
-        if dst_slot is not None and dst_slot == previous + 1:
-            previous = dst_slot
-            continue
-        run_length = previous - run_start + 1
-        live.narrow(0, num_experts_per_rank + run_start, run_length).copy_(
-            staging.narrow(0, run_start, run_length), non_blocking=True
-        )
-        if dst_slot is not None:
-            run_start = previous = dst_slot
 
 
 def align_target_placement(current: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -142,7 +106,7 @@ class _EPLBTransferBase:
         self.world_size = world_size
         self.num_experts_per_rank = weights[0].expert_parallel_state.num_primary_experts_per_rank
         self.device = weights[0].w13.weight.device
-        self.live = [extract_expert_tensors(weight) for weight in weights]
+        self.live = [_extract_expert_tensors(weight) for weight in weights]
         self._validate_live_layout(weights)
         num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
         self.staging = [
@@ -181,12 +145,22 @@ class _EPLBTransferBase:
                 state.num_redundant_experts_per_rank == num_redundant_slots_per_rank
             ), "EPLB redundant slot count must match"
 
-    def _copy_layer(self, layer_index: int, plan: Sequence[TransferStep], staging) -> None:
+    def _copy_batch(self, batch, prepared_batch) -> None:
         raise NotImplementedError
 
-    def _copy_batch(self, batch) -> None:
-        for layer_index, plan, _, staging in batch:
-            self._copy_layer(layer_index, plan, staging)
+    def _make_batches(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
+        return [
+            [
+                (layer_index, plan, buffer_index, self.staging[buffer_index])
+                for buffer_index, (layer_index, plan) in enumerate(
+                    layer_plans[batch_start : batch_start + self.staging_depth]
+                )
+            ]
+            for batch_start in range(0, len(layer_plans), self.staging_depth)
+        ]
+
+    def prepare_transfer(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
+        return [(batch, None) for batch in self._make_batches(layer_plans)]
 
     def _start_transfer_generation(self) -> None:
         """Prepare backend state after the in-flight worker check succeeds."""
@@ -194,9 +168,15 @@ class _EPLBTransferBase:
     def _finish_transfer_generation(self) -> None:
         """Release backend state only after the migration worker has joined."""
 
-    def start(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]) -> None:
+    def start(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]], prepared_batches=None) -> None:
         if self._thread is not None and self._thread.is_alive():
             raise RuntimeError("EPLB transfer is already in flight")
+        if prepared_batches is None:
+            prepared_batches = self.prepare_transfer(layer_plans)
+        expected_batch_count = (len(layer_plans) + self.staging_depth - 1) // self.staging_depth
+        if len(prepared_batches) != expected_batch_count:
+            raise ValueError("EPLB prepared batch count does not match layer-plan batches")
+        # 预构造批次与描述符一起传入，避免推理线程重建。
         self._start_transfer_generation()
         self._error = None
         with self._pending_lock:
@@ -207,11 +187,9 @@ class _EPLBTransferBase:
                 torch.cuda.set_device(self.device)
                 if not layer_plans:
                     self._finish_transfer_generation()
-                for batch_start in range(0, len(layer_plans), self.staging_depth):
-                    batch = []
-                    for plan_index in range(batch_start, min(batch_start + self.staging_depth, len(layer_plans))):
-                        layer_index, plan = layer_plans[plan_index]
-                        buffer_index = plan_index % self.staging_depth
+                for batch_index, (batch, prepared_batch) in enumerate(prepared_batches):
+                    batch_start = batch_index * self.staging_depth
+                    for layer_index, plan, buffer_index, _ in batch:
                         release = self._release[buffer_index]
                         # A buffer cannot be reused until its prior committed rows are no longer read by CUDA.
                         release.wait()
@@ -221,12 +199,11 @@ class _EPLBTransferBase:
                         self._changed_dst_slots[buffer_index] = tuple(
                             step.dst_slot for step in plan if step.dst_rank == self.global_rank
                         )
-                        batch.append((layer_index, plan, buffer_index, self.staging[buffer_index]))
                     if batch_start > 0 and self._needs_staging_reuse_barrier:
                         # All destinations must finish consuming the prior IPC staging generation
                         # before a source can reuse the peer buffer for this batch.
                         dist.barrier(group=self.transfer_group)
-                    self._copy_batch(batch)
+                    self._copy_batch(batch, prepared_batch)
                     if batch_start + self.staging_depth >= len(layer_plans):
                         self._finish_transfer_generation()
                     with self._pending_lock:
@@ -250,7 +227,7 @@ class _EPLBTransferBase:
             self._pending.popleft()
             changed_dst_slots = self._changed_dst_slots[buffer_index]
         for (_, live), (_, staging) in zip(self.live[layer_index], self.staging[buffer_index]):
-            commit_staging_rows(
+            _commit_staging_rows(
                 live,
                 staging,
                 self.num_experts_per_rank,
@@ -277,10 +254,16 @@ class NixlEPLBTransfer(_EPLBTransferBase):
     """GPU-direct UCX/NIXL EPLB transfer. Initialization errors are fatal."""
 
     backend = "nixl"
-    staging_depth = 8
     _DEFAULT_UCX_TLS = "self,sm,cuda_ipc,cuda_copy,rc_x"
 
+    @dataclass
+    class _PreparedBatch:
+        remote_entries: Dict[int, list]
+        push_batch: "_PreparedCudaMemcpyBatch | None"
+
     def __init__(self, weights, transfer_group, global_rank, world_size):
+        # Reuse at most eight layer buffers to bound EPLB staging memory.
+        self.staging_depth = min(8, len(weights))
         super().__init__(weights, transfer_group, global_rank, world_size)
         self._nixl_agent = None
         self._registered_descs = None
@@ -292,10 +275,10 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         self._same_node_ranks = set()
         self._cross_node_ranks = set()
         self._push_stream = torch.cuda.Stream(device=self.device)
-        self._push_descriptor_cache = {}
-        self._used_push_descriptor_cache_keys = set()
+        self._batch_memcpy = _CudaBatchMemcpy()
         try:
             self._init_ipc_metadata()
+            self._init_push_layouts()
             if self._cross_node_ranks:
                 os.environ.setdefault("UCX_TLS", self._DEFAULT_UCX_TLS)
                 try:
@@ -330,11 +313,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         self._needs_staging_reuse_barrier = len(set(hostnames)) < len(hostnames)
         self._same_node_ranks = {rank for rank, hostname in enumerate(hostnames) if hostname == local_hostname}
         self._cross_node_ranks = set(range(self.world_size)) - self._same_node_ranks
-        for layer in self.live:
-            for name, tensor in layer:
-                if name.endswith(".weight") and tensor[0].nbytes % 16:
-                    raise RuntimeError(f"NIXL source-push requires 16-byte aligned weight rows: {name}")
-
         from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import (
             p2p_fix_rebuild_cuda_tensor,
             reduce_tensor,
@@ -457,48 +435,58 @@ class NixlEPLBTransfer(_EPLBTransferBase):
             ),
         )
 
-    def _push_staging(self, dst_rank: int, buffer_index: int):
-        return self.staging[buffer_index] if dst_rank == self.global_rank else self._ipc_staging[dst_rank][buffer_index]
+    def _init_push_layouts(self) -> None:
+        self._live_row_layout = [
+            [(name, tensor.data_ptr(), tensor[0].nbytes) for name, tensor in layer] for layer in self.live
+        ]
+        reference = [(name, row_nbytes) for name, _, row_nbytes in self._live_row_layout[0]]
+        self._push_staging_row_layout = {}
+        for dst_rank in self._same_node_ranks:
+            layouts = []
+            for buffer_index in range(self.staging_depth):
+                staging = (
+                    self.staging[buffer_index]
+                    if dst_rank == self.global_rank
+                    else self._ipc_staging[dst_rank][buffer_index]
+                )
+                layout = [(name, tensor.data_ptr(), tensor[0].nbytes) for name, tensor in staging]
+                if [(name, row_nbytes) for name, _, row_nbytes in layout] != reference:
+                    raise RuntimeError("NIXL source-push staging row layout mismatch")
+                layouts.append(layout)
+            self._push_staging_row_layout[dst_rank] = layouts
 
-    def _cached_descriptor_tensors(self, copies):
-        key = tuple((source.data_ptr(), destination.data_ptr()) for destination, source in copies)
-        cached = self._push_descriptor_cache.get(key)
-        if cached is None:
-            src_ptrs = torch.tensor([source.data_ptr() for _, source in copies], dtype=torch.int64, device=self.device)
-            dst_ptrs = torch.tensor(
-                [destination.data_ptr() for destination, _ in copies], dtype=torch.int64, device=self.device
-            )
-            cached = (src_ptrs, dst_ptrs)
-            self._push_descriptor_cache[key] = cached
-        self._used_push_descriptor_cache_keys.add(key)
-        return cached
+    def _prepare_batch(self, batch):
+        remote_entries = defaultdict(list)
+        push_descriptors = []
+        for layer_index, plan, buffer_index, staging in batch:
+            steps_by_source = defaultdict(list)
+            by_destination = defaultdict(list)
+            for step in plan:
+                if step.dst_rank == self.global_rank and step.src_rank not in self._same_node_ranks:
+                    steps_by_source[step.src_rank].append(step)
+                if step.src_rank == self.global_rank and step.dst_rank in self._same_node_ranks:
+                    by_destination[step.dst_rank].append(step)
+            for src_rank, steps in steps_by_source.items():
+                remote_entries[src_rank].extend((layer_index, run, staging) for run in self._contiguous_runs(steps))
+            source_layout = self._live_row_layout[layer_index]
+            for dst_rank, steps in by_destination.items():
+                destination_layout = self._push_staging_row_layout[dst_rank][buffer_index]
+                for run in self._contiguous_runs(steps):
+                    first = run[0]
+                    run_len = len(run)
+                    for (_, source_ptr, row_nbytes), (_, destination_ptr, _) in zip(source_layout, destination_layout):
+                        push_descriptors.append(
+                            (
+                                source_ptr + first.src_local_row * row_nbytes,
+                                destination_ptr + first.dst_slot * row_nbytes,
+                                run_len * row_nbytes,
+                            )
+                        )
+        push_batch = self._batch_memcpy.prepare(push_descriptors) if push_descriptors else None
+        return self._PreparedBatch(dict(remote_entries), push_batch)
 
-    def _push_same_node(self, dst_rank: int, entries) -> None:
-        staging_by_buffer = {buffer_index: self._push_staging(dst_rank, buffer_index) for _, _, buffer_index in entries}
-        weight_groups = defaultdict(list)
-        small_copies = []
-        for layer_index, run, buffer_index in entries:
-            staging = staging_by_buffer[buffer_index]
-            source_layer = self.live[layer_index]
-            first = run[0]
-            run_len = len(run)
-            for (name, source_tensor), (staging_name, staging_tensor) in zip(source_layer, staging):
-                if name != staging_name:
-                    raise RuntimeError("NIXL source-push staging tensor name mismatch")
-                source_rows = source_tensor.narrow(0, first.src_local_row, run_len)
-                destination_rows = staging_tensor.narrow(0, first.dst_slot, run_len)
-                if name.endswith(".weight"):
-                    if destination_rows.nbytes % 16:
-                        raise RuntimeError(f"NIXL source-push requires 16-byte aligned weight rows: {name}")
-                    weight_groups[destination_rows.nbytes].append((destination_rows, source_rows))
-                else:
-                    small_copies.append((destination_rows, source_rows))
-        with torch.cuda.stream(self._push_stream):
-            for nbytes, copies in weight_groups.items():
-                src_ptrs, dst_ptrs = self._cached_descriptor_tensors(copies)
-                eplb_push_copy(src_ptrs, dst_ptrs, nbytes)
-            for destination_rows, source_rows in small_copies:
-                destination_rows.copy_(source_rows, non_blocking=True)
+    def prepare_transfer(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
+        return [(batch, self._prepare_batch(batch)) for batch in self._make_batches(layer_plans)]
 
     def _get_remote_read(self, src_rank: int, entries):
         cache_key = self._remote_read_cache_key(src_rank, entries)
@@ -557,31 +545,12 @@ class NixlEPLBTransfer(_EPLBTransferBase):
             self._release_xfers([(local_dlist, remote_dlist, xfer)])
             raise
 
-    def _copy_batch(self, batch) -> None:
-        remote_entries = defaultdict(list)
-        push_entries = defaultdict(list)
-        for layer_index, plan, _, staging in batch:
-            steps_by_source = defaultdict(list)
-            for step in plan:
-                if step.dst_rank == self.global_rank:
-                    steps_by_source[step.src_rank].append(step)
-            for src_rank, steps in steps_by_source.items():
-                entries = [(layer_index, run, staging) for run in self._contiguous_runs(steps)]
-                if src_rank not in self._same_node_ranks:
-                    remote_entries[src_rank].extend(entries)
-        # Source rank owns node-local copies.  All ranks build the same batch,
-        # so buffer_index is the receiver's staging depth index on every peer.
-        for layer_index, plan, buffer_index, _ in batch:
-            by_destination = defaultdict(list)
-            for step in plan:
-                if step.src_rank == self.global_rank and step.dst_rank in self._same_node_ranks:
-                    by_destination[step.dst_rank].append(step)
-            for dst_rank, steps in by_destination.items():
-                push_entries[dst_rank].extend((layer_index, run, buffer_index) for run in self._contiguous_runs(steps))
-        for dst_rank, entries in push_entries.items():
-            self._push_same_node(dst_rank, entries)
-
-        xfers = [self._get_remote_read(src_rank, entries) for src_rank, entries in remote_entries.items()]
+    def _copy_batch(self, batch, prepared_batch) -> None:
+        if prepared_batch.push_batch is not None:
+            self._batch_memcpy.enqueue(prepared_batch.push_batch, self._push_stream.cuda_stream)
+        xfers = [
+            self._get_remote_read(src_rank, entries) for src_rank, entries in prepared_batch.remote_entries.items()
+        ]
         self._wait_xfers(xfers)
         self._push_stream.synchronize()
         # Before a rank publishes this batch it has completed its outgoing source-pushes and
@@ -590,7 +559,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
 
     def _start_transfer_generation(self) -> None:
         self._used_xfer_cache_keys.clear()
-        self._used_push_descriptor_cache_keys.clear()
 
     def _finish_transfer_generation(self) -> None:
         errors = []
@@ -605,8 +573,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                 errors.append(exc)
             else:
                 del self._xfer_cache[cache_key]
-        for cache_key in set(self._push_descriptor_cache) - self._used_push_descriptor_cache_keys:
-            del self._push_descriptor_cache[cache_key]
         if errors:
             raise RuntimeError("NIXL EPLB cache eviction failed") from errors[0]
 
@@ -614,7 +580,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         agent = self._nixl_agent
         errors = []
         getattr(self, "_used_xfer_cache_keys", set()).clear()
-        getattr(self, "_used_push_descriptor_cache_keys", set()).clear()
         if agent is not None:
             for cache_key, xfer in list(self._xfer_cache.items()):
                 try:
@@ -644,7 +609,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         self._registered_descs = None
         self._nixl_agent = None
         getattr(self, "_ipc_staging", {}).clear()
-        getattr(self, "_push_descriptor_cache", {}).clear()
         if errors:
             raise RuntimeError("NIXL EPLB shutdown failed") from errors[0]
 
@@ -653,3 +617,169 @@ class NixlEPLBTransfer(_EPLBTransferBase):
             self.shutdown()
         except Exception:
             pass
+
+
+def _extract_expert_tensors(weight) -> List[Tuple[str, torch.Tensor]]:
+    result = []
+    for pack_name in ("w13", "w2"):
+        pack = getattr(weight, pack_name)
+        for value_name in ("weight", "weight_scale", "weight_zero_point"):
+            tensor = getattr(pack, value_name, None)
+            if tensor is not None:
+                assert tensor.ndim >= 1 and tensor.is_contiguous(), f"{pack_name}.{value_name} must be contiguous"
+                result.append((f"{pack_name}.{value_name}", tensor))
+    return result
+
+
+def _commit_staging_rows(
+    live: torch.Tensor,
+    staging: torch.Tensor,
+    num_experts_per_rank: int,
+    changed_dst_slots: Sequence[int],
+) -> None:
+    slots = sorted(set(changed_dst_slots))
+    if not slots:
+        return
+    run_start = previous = slots[0]
+    for dst_slot in (*slots[1:], None):
+        if dst_slot is not None and dst_slot == previous + 1:
+            previous = dst_slot
+            continue
+        run_length = previous - run_start + 1
+        live.narrow(0, num_experts_per_rank + run_start, run_length).copy_(
+            staging.narrow(0, run_start, run_length), non_blocking=True
+        )
+        if dst_slot is not None:
+            run_start = previous = dst_slot
+
+
+class _CudaMemLocation(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("id", ctypes.c_int)]
+
+
+class _CudaMemcpyAttributes(ctypes.Structure):
+    _fields_ = [
+        ("srcAccessOrder", ctypes.c_int),
+        ("srcLocHint", _CudaMemLocation),
+        ("dstLocHint", _CudaMemLocation),
+        ("flags", ctypes.c_uint),
+    ]
+
+
+@dataclass
+class _PreparedCudaMemcpyBatch:
+    """Host-side arrays retained for one cudaMemcpyBatchAsync submission."""
+
+    dsts: object
+    srcs: object
+    sizes: object
+    attrs: _CudaMemcpyAttributes
+    attrs_idxs: object
+    count: int
+
+
+class _CudaBatchMemcpy:
+    """CUDA 13.x ``cudaMemcpyBatchAsync`` binding for EPLB source-push."""
+
+    _SRC_ACCESS_ORDER_STREAM = 1
+    _PREFER_OVERLAP_WITH_COMPUTE = 1
+    _CUDA_13_0 = 13000
+    _CUDA_14_0 = 14000
+
+    def __init__(self, library=None):
+        if library is None:
+            path = self._find_loaded_cudart()
+            if path is None:
+                raise RuntimeError(
+                    "NIXL same-node source-push requires CUDA Runtime 13.x cudaMemcpyBatchAsync; "
+                    "libcudart.so.13 is not loaded"
+                )
+            try:
+                library = ctypes.CDLL(path)
+            except OSError as exc:
+                raise RuntimeError(f"cannot load libcudart: {exc}") from exc
+
+        try:
+            runtime_get_version = library.cudaRuntimeGetVersion
+            self._batch_async = library.cudaMemcpyBatchAsync
+            self._get_error_string = library.cudaGetErrorString
+        except AttributeError as exc:
+            raise RuntimeError("cudaMemcpyBatchAsync is unavailable") from exc
+
+        runtime_get_version.restype = ctypes.c_int
+        runtime_get_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        self._get_error_string.restype = ctypes.c_char_p
+        self._get_error_string.argtypes = [ctypes.c_int]
+        runtime_version = ctypes.c_int()
+        result = runtime_get_version(ctypes.byref(runtime_version))
+        if result != 0:
+            raise RuntimeError(f"cudaRuntimeGetVersion failed with CUDA error {result}")
+        if not self._CUDA_13_0 <= runtime_version.value < self._CUDA_14_0:
+            raise RuntimeError(
+                f"cudaMemcpyBatchAsync requires CUDA Runtime 13.x (13.0 ABI), found {runtime_version.value}"
+            )
+
+        pointer_array = ctypes.POINTER(ctypes.c_void_p)
+        self._batch_async.restype = ctypes.c_int
+        self._batch_async.argtypes = [
+            pointer_array,
+            pointer_array,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_size_t,
+            ctypes.POINTER(_CudaMemcpyAttributes),
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+        ]
+
+    @staticmethod
+    def prepare(copies: Iterable[Tuple[int, int, int]]) -> _PreparedCudaMemcpyBatch:
+        copies = tuple(copies)
+        if not copies:
+            raise ValueError("cudaMemcpyBatchAsync requires at least one copy")
+        for src, dst, size in copies:
+            if not src or not dst or size <= 0:
+                raise ValueError("cudaMemcpyBatchAsync requires non-null pointers and positive sizes")
+        count = len(copies)
+        dsts = (ctypes.c_void_p * count)(*(dst for _, dst, _ in copies))
+        srcs = (ctypes.c_void_p * count)(*(src for src, _, _ in copies))
+        sizes = (ctypes.c_size_t * count)(*(size for _, _, size in copies))
+        attrs = _CudaMemcpyAttributes()
+        attrs.srcAccessOrder = _CudaBatchMemcpy._SRC_ACCESS_ORDER_STREAM
+        attrs.flags = _CudaBatchMemcpy._PREFER_OVERLAP_WITH_COMPUTE
+        attrs_idxs = (ctypes.c_size_t * 1)(0)
+        return _PreparedCudaMemcpyBatch(dsts, srcs, sizes, attrs, attrs_idxs, count)
+
+    def enqueue(self, prepared: _PreparedCudaMemcpyBatch, stream: int) -> None:
+        result = self._batch_async(
+            prepared.dsts,
+            prepared.srcs,
+            prepared.sizes,
+            prepared.count,
+            ctypes.byref(prepared.attrs),
+            prepared.attrs_idxs,
+            1,
+            ctypes.c_void_p(stream),
+        )
+        if result != 0:
+            message = self._get_error_string(result)
+            error = message.decode("utf-8") if message else f"CUDA error {result}"
+            raise RuntimeError(f"cudaMemcpyBatchAsync failed: {error}")
+
+    @staticmethod
+    def _find_loaded_cudart() -> Optional[str]:
+        """Return a mapped CUDA 13 runtime without loading CUDA as a side effect."""
+        try:
+            with open("/proc/self/maps") as maps:
+                for line in maps:
+                    if "libcudart" not in line:
+                        continue
+                    path_start = line.find("/")
+                    if path_start < 0:
+                        continue
+                    path = line[path_start:].strip().removesuffix(" (deleted)")
+                    if re.search(r"libcudart[^/]*\.so\.13(?:\D|$)", path):
+                        return path
+        except OSError:
+            pass
+        return None
