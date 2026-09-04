@@ -1,12 +1,10 @@
 import os
-import tempfile
 import time
 import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import torch
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from .cpu_cache_client import CpuKvCacheClient
 
@@ -37,7 +35,7 @@ class DiskCacheWorker:
         self,
         disk_cache_storage_size: float,
         cpu_cache_client: CpuKvCacheClient,
-        disk_cache_dir: Optional[str] = None,
+        cache_dir: str,
     ):
         self.cpu_cache_client = cpu_cache_client
         self._pages_all_idle = False
@@ -50,10 +48,6 @@ class DiskCacheWorker:
         # 读写同时进行时，分配8线程用来写，16线程用来读
         max_concurrent_write_tasks = 8
 
-        if disk_cache_dir:
-            cache_dir = os.path.join(disk_cache_dir, f"lightllm_disk_cache_{get_unique_server_name()}")
-        else:
-            cache_dir = os.path.join(tempfile.gettempdir(), f"lightllm_disk_cache_{get_unique_server_name()}")
         os.makedirs(cache_dir, exist_ok=True)
         cache_file = os.path.join(cache_dir, "cache_file")
 

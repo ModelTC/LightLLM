@@ -1,5 +1,6 @@
 import multiprocessing as mp
 import os
+import tempfile
 import uuid
 import subprocess
 import math
@@ -412,6 +413,12 @@ def _launch_subprocesses(args: StartArgs):
             ],
         )
 
+    instance_disk_cache_dir = None
+    if args.enable_cpu_cache and args.enable_disk_cache:
+        cache_base_dir = args.disk_cache_dir or tempfile.gettempdir()
+        instance_disk_cache_dir = os.path.join(cache_base_dir, f"lightllm_disk_cache_{get_unique_server_name()}")
+    process_manager.register_disk_cache_dir(instance_disk_cache_dir)
+
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
 
@@ -419,7 +426,7 @@ def _launch_subprocesses(args: StartArgs):
             start_funcs=[
                 start_multi_level_kv_cache_manager,
             ],
-            start_args=[(args,)],
+            start_args=[(args, instance_disk_cache_dir)],
         )
 
     process_manager.start_submodule_processes(

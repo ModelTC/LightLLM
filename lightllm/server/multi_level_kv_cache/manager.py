@@ -27,6 +27,7 @@ class MultiLevelKVCacheManager:
     def __init__(
         self,
         args: StartArgs,
+        instance_disk_cache_dir,
     ):
         self.args: StartArgs = args
         ports = get_shm_port_args()
@@ -59,7 +60,7 @@ class MultiLevelKVCacheManager:
             self.disk_cache_worker = DiskCacheWorker(
                 disk_cache_storage_size=self.args.disk_cache_storage_size,
                 cpu_cache_client=self.cpu_cache_client,
-                disk_cache_dir=self.args.disk_cache_dir,
+                cache_dir=instance_disk_cache_dir,
             )
             self.disk_cache_thread = threading.Thread(target=self.disk_cache_worker.run, daemon=True)
             self.disk_cache_thread.start()
@@ -262,7 +263,7 @@ class MultiLevelKVCacheManager:
         return
 
 
-def start_multi_level_kv_cache_manager(args, pipe_writer):
+def start_multi_level_kv_cache_manager(args, instance_disk_cache_dir, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::multi_level_kv_cache")
@@ -271,6 +272,7 @@ def start_multi_level_kv_cache_manager(args, pipe_writer):
     try:
         manager = MultiLevelKVCacheManager(
             args=args,
+            instance_disk_cache_dir=instance_disk_cache_dir,
         )
     except Exception as e:
         logger.exception(f"start multi_level_kv_cache_manager has exception {str(e)}")
