@@ -1123,6 +1123,10 @@ class InferReq:
             cur_seq_len = seq_len + step
             if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
                 swa_page_num += 1
+
+        # DSpark proposal allocates one private SWA scratch page per request.
+        if self.args.mtp_mode == "dspark":
+            swa_page_num += 1
         return swa_page_num, c4_page_num, c128_slot_num
 
 
