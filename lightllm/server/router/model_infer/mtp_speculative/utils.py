@@ -34,6 +34,26 @@ def alloc_mem_indexes(token_count: int) -> torch.Tensor:
     return g_infer_context.req_manager.mem_manager.alloc(token_count)
 
 
+def update_mtp_state_after_verify(
+    backend: ModeBackend,
+    b_req_idx: torch.Tensor,
+    b_req_mtp_start_loc: torch.Tensor,
+    b_mtp_index: torch.Tensor,
+    accepted_index: torch.Tensor,
+) -> None:
+    """Select recurrent-state slots using the result of token or rejection verification."""
+
+    if backend.is_linear_att_mixed_model:
+        linear_att_mtp_state_index_update(
+            req_to_mtp_state_index=backend.model.req_manager.req_to_mtp_state_index,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            accepted_index=accepted_index,
+            verify_width=backend.max_draft_step + 1,
+        )
+
+
 def verify_mtp_tokens(
     backend: ModeBackend,
     next_token_ids: torch.Tensor,
@@ -49,15 +69,13 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    if backend.is_linear_att_mixed_model:
-        linear_att_mtp_state_index_update(
-            req_to_mtp_state_index=backend.model.req_manager.req_to_mtp_state_index,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            b_req_idx=b_req_idx,
-            b_mtp_index=b_mtp_index,
-            accepted_index=accepted_index,
-            verify_width=backend.max_draft_step + 1,
-        )
+    update_mtp_state_after_verify(
+        backend=backend,
+        b_req_idx=b_req_idx,
+        b_req_mtp_start_loc=b_req_mtp_start_loc,
+        b_mtp_index=b_mtp_index,
+        accepted_index=accepted_index,
+    )
     return accept_lengths, accepted_index
 
 
@@ -135,5 +153,6 @@ __all__ = [
     "free_mem_indexes",
     "record_request_mtp_metrics",
     "scatter_mtp_next_tokens",
+    "update_mtp_state_after_verify",
     "verify_mtp_tokens",
 ]

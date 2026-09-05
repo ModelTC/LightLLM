@@ -276,6 +276,8 @@ def get_added_mtp_kv_layer_num() -> int:
         return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
     if mtp_mode == "dflash":
         return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash2":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
 
     raise ValueError(f"unsupported mtp_mode: {mtp_mode}")
 

@@ -8,7 +8,7 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
+def _prepare_sampling_probs(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int]):
     (
         b_req_idx,
         b_temperatures,
@@ -77,6 +77,64 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
 
     logits.div_(b_temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
+
+    return (
+        probs,
+        b_top_ps,
+        b_top_ks,
+        is_all_greedy,
+        skip_top_k,
+        skip_top_p,
+        exist_req_use_random_seed,
+    )
+
+
+def build_sampling_probs(
+    logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return normalized sampling probabilities and pre-filter logprob probabilities.
+
+    Reuses sample()'s in-place logits processing and the Triton sampling path's
+    top-k/top-p filtering, without drawing a token. This generic distribution
+    builder is currently used by DFlash2 rejection sampling; it contains no
+    draft-specific acceptance rules. Ordinary sampling keeps its fast paths.
+    """
+
+    (
+        probs,
+        b_top_ps,
+        b_top_ks,
+        is_all_greedy,
+        skip_top_k,
+        skip_top_p,
+        _,
+    ) = _prepare_sampling_probs(logits, reqs, eos_id)
+
+    if is_all_greedy:
+        token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        filtered_probs = torch.zeros_like(probs)
+        filtered_probs.scatter_(1, token_ids, 1.0)
+    elif skip_top_k and skip_top_p:
+        filtered_probs = probs
+    else:
+        sorted_probs, sorted_indices = _top_p_top_k(probs, b_top_ps, b_top_ks)
+        filtered_probs = torch.zeros_like(probs)
+        filtered_probs.scatter_(1, sorted_indices, sorted_probs)
+        filtered_probs.div_(filtered_probs.sum(dim=-1, keepdim=True).clamp_min_(1e-20))
+
+    return filtered_probs, probs
+
+
+def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
+    (
+        probs,
+        b_top_ps,
+        b_top_ks,
+        is_all_greedy,
+        skip_top_k,
+        skip_top_p,
+        exist_req_use_random_seed,
+    ) = _prepare_sampling_probs(logits, reqs, eos_id)
 
     if is_all_greedy:
         batch_next_token_ids = torch.argmax(logits, -1)

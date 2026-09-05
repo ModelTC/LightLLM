@@ -777,12 +777,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle3",
             "dspark",
             "dflash",
+            "dflash2",
             None,
         ],
         default=None,
         help="""Speculative decoding mode.
         *_with_att and *_no_att select attention or non-attention draft models;
-        eagle3 uses autoregressive EAGLE-3 drafting; dflash uses block-diffusion drafting;
+        eagle3 uses autoregressive EAGLE-3 drafting; dflash and dflash2 use block-diffusion drafting;
         dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(
@@ -798,12 +799,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="""Number of additional draft tokens per request.
-        For DSpark and DFlash this value is derived from the draft checkpoint block_size.""",
+        For DSpark, DFlash, and DFlash2 this value is derived from the draft checkpoint block_size.""",
     )
     parser.add_argument(
         "--mtp_dynamic_verify",
         action="store_true",
-        help="""Enable dynamic speculative scheduling.""",
+        help="""Enable dynamic speculative scheduling. Temporarily ignored for DFlash2, which uses fixed-width verification.""",
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",

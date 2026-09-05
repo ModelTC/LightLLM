@@ -91,6 +91,8 @@ class HiddenCollector(ABC):
         self,
         draft_token_ids: Optional[torch.Tensor],
         confidence_logits: Optional[torch.Tensor],
+        draft_candidate_ids: Optional[torch.Tensor] = None,
+        draft_candidate_probs: Optional[torch.Tensor] = None,
     ) -> None:
         """Collect optional token/confidence outputs produced by an MTP head.
 
@@ -133,6 +135,8 @@ class MtpHeadOutputCollector(NoopHiddenCollector):
 
     def __init__(self) -> None:
         self.draft_token_ids: Optional[torch.Tensor] = None
+        self.draft_candidate_ids: Optional[torch.Tensor] = None
+        self.draft_candidate_probs: Optional[torch.Tensor] = None
         self.confidence_logits: Optional[torch.Tensor] = None
 
     def new_instance(self) -> HiddenCollector:
@@ -142,16 +146,24 @@ class MtpHeadOutputCollector(NoopHiddenCollector):
         self,
         draft_token_ids: Optional[torch.Tensor],
         confidence_logits: Optional[torch.Tensor],
+        draft_candidate_ids: Optional[torch.Tensor] = None,
+        draft_candidate_probs: Optional[torch.Tensor] = None,
     ) -> None:
         self.draft_token_ids = draft_token_ids
+        self.draft_candidate_ids = draft_candidate_ids
+        self.draft_candidate_probs = draft_candidate_probs
         self.confidence_logits = confidence_logits
 
     def finish_output(self, infer_state) -> ModelMtpOutputCollector:
         output = ModelMtpOutputCollector(
             draft_token_ids=self.draft_token_ids,
+            draft_candidate_ids=self.draft_candidate_ids,
+            draft_candidate_probs=self.draft_candidate_probs,
             confidence_logits=self.confidence_logits,
         )
         self.draft_token_ids = None
+        self.draft_candidate_ids = None
+        self.draft_candidate_probs = None
         self.confidence_logits = None
         return output
 
