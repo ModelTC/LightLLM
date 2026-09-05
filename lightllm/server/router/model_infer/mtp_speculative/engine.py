@@ -15,17 +15,14 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
 class SpecEngine:
-    """Owns MTP planning and draft proposal generation.
-
-    Target verification, request metrics, stream synchronization, and resource
-    cleanup are stateless operations exposed by ``mtp_speculative.utils``.
-    """
+    """Owns MTP planning, proposal generation, and target verification."""
 
     def __init__(
         self,
@@ -34,6 +31,16 @@ class SpecEngine:
         enable_dynmaic_mtp: bool,
     ) -> None:
         self.backend = backend
+        self._verify = mtp_utils.sample_and_verify
+        self._save_extra_proposal_state = None
+        if spec_mode == "dflash2":
+            from lightllm.server.router.model_infer.mtp_speculative.dflash2 import (
+                sample_and_verify_dflash2_tokens,
+                save_dflash2_proposal_state,
+            )
+
+            self._verify = sample_and_verify_dflash2_tokens
+            self._save_extra_proposal_state = save_dflash2_proposal_state
         self.proposer: BaseSpecProposer = build_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,
@@ -130,6 +137,56 @@ class SpecEngine:
             draft_step=draft_step,
             accept_len=accept_len,
         )
+
+    # Target sampling and verification.
+
+    def sample_and_verify(
+        self,
+        logits: torch.Tensor,
+        run_reqs: List,
+        b_req_idx: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
+        b_mtp_index: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        next_token_ids, next_token_logprobs, accept_lengths, accepted_index = self._verify(
+            backend=self.backend,
+            logits=logits,
+            run_reqs=run_reqs,
+            b_req_idx=b_req_idx,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+        )
+        mtp_utils.update_mtp_state_after_verify(
+            backend=self.backend,
+            b_req_idx=b_req_idx,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_mtp_index=b_mtp_index,
+            accepted_index=accepted_index,
+        )
+        return next_token_ids, next_token_logprobs, accept_lengths, accepted_index
+
+    def prepare_next_verification_state(
+        self,
+        proposal: SpecProposal,
+        target_next_token_ids: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        mtp_accept_len: torch.Tensor,
+    ) -> None:
+        mtp_utils.scatter_mtp_next_tokens(
+            backend=self.backend,
+            proposal=proposal,
+            target_next_token_ids=target_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            mtp_accept_len=mtp_accept_len,
+        )
+        if self._save_extra_proposal_state is not None:
+            self._save_extra_proposal_state(
+                backend=self.backend,
+                proposal=proposal,
+                b_req_idx=b_req_idx,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
 
     # Planner runtime statistics.
 

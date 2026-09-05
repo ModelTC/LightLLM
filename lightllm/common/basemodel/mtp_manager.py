@@ -16,7 +16,7 @@ class MtpManager:
     _instance: ClassVar[Optional["MtpManager"]] = None
     _CHAINED_DRAFT_MODES = ("vanilla_with_att", "vanilla_no_att")
     _RECURRENT_DRAFT_MODES = ("eagle_with_att", "eagle_no_att", "eagle3")
-    _BLOCK_DRAFT_MODES = ("dspark", "dflash")
+    _BLOCK_DRAFT_MODES = ("dspark", "dflash", "dflash2")
 
     @classmethod
     def get_instance(cls) -> "MtpManager":
@@ -51,6 +51,10 @@ class MtpManager:
 
         # Block draft models decode mtp_step rows per logical request.
         if spec_mode in self._BLOCK_DRAFT_MODES:
+            if spec_mode == "dflash2":
+                # DFlash2's physical block is [anchor, MASK...], while mtp_step
+                # counts only the proposal rows following the anchor.
+                return self.args.mtp_step + 1
             return self.args.mtp_step
 
         return 1
@@ -83,7 +87,7 @@ class MtpManager:
         if spec_mode is None:
             collector_type = NoopHiddenCollector
         elif model.is_mtp_draft_model:
-            if spec_mode == "dspark":
+            if spec_mode in ("dspark", "dflash2"):
                 collector_type = MtpHeadOutputCollector
             elif spec_mode in self._BLOCK_DRAFT_MODES:
                 collector_type = NoopHiddenCollector

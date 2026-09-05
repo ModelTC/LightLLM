@@ -170,9 +170,15 @@ def _launch_subprocesses(args: StartArgs):
                 "eagle3",
                 "dspark",
                 "dflash",
+                "dflash2",
             ), f"--mtp_draft_model_dir is required for {args.mtp_mode} mode"
             args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
         assert args.mtp_step > 0
+        # TODO: DFlash2 dynamic verify 在 H200/Qwen3.8-27B 上未见稳定吞吐收益，暂保留固定宽度验证。
+        # 后续降低动态调度/验证开销，并重新验证性能与正确性后再评估支持。
+        if args.mtp_mode == "dflash2" and args.mtp_dynamic_verify:
+            logger.warning("DFlash2 currently uses fixed-width verification; disabling --mtp_dynamic_verify.")
+            args.mtp_dynamic_verify = False
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0

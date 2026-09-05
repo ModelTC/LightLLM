@@ -25,11 +25,14 @@ class ReqSamplingParamsManager:
     def __init__(self, max_request_num):
         # mode ["cpu_counter", "pin_mem_counter", "gpu_counter"]
         self.penalty_counter_mode = get_env_start_args().penalty_counter_mode
+        self.mtp_mode = get_env_start_args().mtp_mode
         self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
         self.mtp_verify_width = get_env_start_args().mtp_step + 1
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
+        self.req_to_temperature = torch.ones(max_request_num + 1, dtype=torch.float32, device="cuda")
+        self.req_to_top_k = torch.ones(max_request_num + 1, dtype=torch.int32, device="cuda")
         self.req_to_next_token_ids = torch.zeros(
             (max_request_num + 1, self.mtp_verify_width),
             dtype=torch.int64,
@@ -40,6 +43,8 @@ class ReqSamplingParamsManager:
             if get_env_start_args().mtp_dynamic_verify
             else None
         )
+        if self.mtp_mode == "dflash2":
+            self._init_dflash2_buffers(max_request_num)
 
         self.req_to_exponential_decay_length_penalty = torch.zeros(
             max_request_num + 1, dtype=torch.float32, device="cuda"
@@ -54,6 +59,14 @@ class ReqSamplingParamsManager:
                 (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cpu", pin_memory=True
             )
 
+    # DFlash2 的候选 token 和分布 q 需按请求跨轮保存，放在这里复用已有 token 状态的生命周期，
+    # 保证在 KV 容量估算前分配显存、请求槽复用时清零，并预留 HOLD_REQUEST_ID 槽位。
+    def _init_dflash2_buffers(self, max_request_num: int) -> None:
+        # 当前 DFlash2 固定使用 16 个候选；Qwen3DFlash2Model._verify_params 校验配置值与此一致。
+        shape = (max_request_num + 1, self.mtp_verify_width - 1, 16)
+        self.req_to_dflash2_candidate_ids = torch.zeros(shape, dtype=torch.int64, device="cuda")
+        self.req_to_dflash2_q_probs = torch.zeros(shape, dtype=torch.float32, device="cuda")
+
     def init_req_sampling_params(self, req: "InferReq"):
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
@@ -63,6 +76,12 @@ class ReqSamplingParamsManager:
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
         self.req_to_frequency_penalty[req.req_idx].fill_(shm_param.frequency_penalty)
         self.req_to_repetition_penalty[req.req_idx].fill_(shm_param.repetition_penalty)
+        self.req_to_temperature[req.req_idx].fill_(shm_param.temperature)
+        self.req_to_top_k[req.req_idx].fill_(shm_param.top_k)
+        if self.mtp_mode == "dflash2":
+            self.req_to_dflash2_candidate_ids[req.req_idx].zero_()
+            self.req_to_dflash2_q_probs[req.req_idx].zero_()
+
         exponential_decay_length_penalty = shm_param.exponential_decay_length_penalty.to_tuple()
         self.req_to_exponential_decay_length_penalty[req.req_idx].fill_(exponential_decay_length_penalty[1])
         # 提前标记当前请求是否需要统计输出token的计数，因为这个统计可能会导致一些特定场景下后处理效率的下降

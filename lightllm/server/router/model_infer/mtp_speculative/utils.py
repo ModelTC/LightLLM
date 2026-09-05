@@ -33,6 +33,46 @@ def alloc_mem_indexes(token_count: int) -> torch.Tensor:
     return g_infer_context.req_manager.mem_manager.alloc(token_count)
 
 
+def update_mtp_state_after_verify(
+    backend: ModeBackend,
+    b_req_idx: torch.Tensor,
+    b_req_mtp_start_loc: torch.Tensor,
+    b_mtp_index: torch.Tensor,
+    accepted_index: torch.Tensor,
+) -> None:
+    """Select recurrent-state slots using the result of token or rejection verification."""
+
+    if backend.is_hybrid_att_model:
+        backend.model.req_manager.update_mtp_state(
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            accepted_index=accepted_index,
+            verify_width=backend.max_draft_step + 1,
+        )
+
+
+def sample_and_verify(
+    backend: ModeBackend,
+    logits: torch.Tensor,
+    run_reqs: List[InferReq],
+    b_req_idx: torch.Tensor,
+    b_req_mtp_start_loc: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample target tokens and verify equality; the caller owns state updates."""
+
+    from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+
+    next_token_ids, next_token_logprobs = sample(logits, run_reqs, backend.eos_id)
+    accept_lengths, accepted_index = mtp_verify(
+        req_to_next_token_ids=backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+        b_req_mtp_start_loc=b_req_mtp_start_loc,
+        new_next_token_ids=next_token_ids,
+        b_req_idx=b_req_idx,
+    )
+    return next_token_ids, next_token_logprobs, accept_lengths, accepted_index
+
+
 def verify_mtp_tokens(
     backend: ModeBackend,
     next_token_ids: torch.Tensor,
@@ -48,14 +88,13 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    if backend.is_hybrid_att_model:
-        backend.model.req_manager.update_mtp_state(
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            b_req_idx=b_req_idx,
-            b_mtp_index=b_mtp_index,
-            accepted_index=accepted_index,
-            verify_width=backend.max_draft_step + 1,
-        )
+    update_mtp_state_after_verify(
+        backend=backend,
+        b_req_idx=b_req_idx,
+        b_req_mtp_start_loc=b_req_mtp_start_loc,
+        b_mtp_index=b_mtp_index,
+        accepted_index=accepted_index,
+    )
     return accept_lengths, accepted_index
 
 
@@ -132,6 +171,8 @@ __all__ = [
     "alloc_mem_indexes",
     "free_mem_indexes",
     "record_request_mtp_metrics",
+    "sample_and_verify",
     "scatter_mtp_next_tokens",
+    "update_mtp_state_after_verify",
     "verify_mtp_tokens",
 ]

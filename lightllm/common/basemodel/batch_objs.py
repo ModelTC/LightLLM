@@ -147,6 +147,11 @@ class ModelMtpOutputCollector:
     # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
     draft_token_ids: Optional[torch.Tensor] = None
 
+    # DFlash2 selector 每个 proposal 位置的 top-k candidate id 与完整条件分布 q。
+    # 两者形状均为 [request_count, draft_step, selector_top_k]。
+    draft_candidate_ids: Optional[torch.Tensor] = None
+    draft_candidate_probs: Optional[torch.Tensor] = None
+
     # DSpark confidence head 输出的原始置信度 logits，形状通常为
     # [request_count, block_size]，供动态 MTP verify 计算各 draft 位置的调度分数。
     # - 仅 DSpark checkpoint 启用 confidence head 时返回；动态 verify 模式要求该字段存在。
@@ -159,6 +164,10 @@ class ModelMtpOutputCollector:
             self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)
         if self.draft_token_ids is not None:
             self.draft_token_ids = tensor_to_no_ref_tensor(self.draft_token_ids)
+        if self.draft_candidate_ids is not None:
+            self.draft_candidate_ids = tensor_to_no_ref_tensor(self.draft_candidate_ids)
+        if self.draft_candidate_probs is not None:
+            self.draft_candidate_probs = tensor_to_no_ref_tensor(self.draft_candidate_probs)
         if self.confidence_logits is not None:
             self.confidence_logits = tensor_to_no_ref_tensor(self.confidence_logits)
 
@@ -166,8 +175,22 @@ class ModelMtpOutputCollector:
         collector = copy.copy(self)
         if collector.spec_hidden is not None:
             collector.spec_hidden = collector.spec_hidden[:origin_batch_size]
+
+        def unpad_head_rows(value: torch.Tensor) -> torch.Tensor:
+            row_count = value.shape[0]
+            if row_count == padded_batch_size:
+                return value[:origin_batch_size]
+            assert row_count > 0 and padded_batch_size % row_count == 0
+            physical_rows_per_output = padded_batch_size // row_count
+            assert origin_batch_size % physical_rows_per_output == 0
+            return value[: origin_batch_size // physical_rows_per_output]
+
         if collector.draft_token_ids is not None:
-            collector.draft_token_ids = collector.draft_token_ids[:origin_batch_size]
+            collector.draft_token_ids = unpad_head_rows(collector.draft_token_ids)
+        if collector.draft_candidate_ids is not None:
+            collector.draft_candidate_ids = unpad_head_rows(collector.draft_candidate_ids)
+        if collector.draft_candidate_probs is not None:
+            collector.draft_candidate_probs = unpad_head_rows(collector.draft_candidate_probs)
         if collector.confidence_logits is not None:
             confidence_row_count = collector.confidence_logits.shape[0]
             assert confidence_row_count > 0 and padded_batch_size % confidence_row_count == 0

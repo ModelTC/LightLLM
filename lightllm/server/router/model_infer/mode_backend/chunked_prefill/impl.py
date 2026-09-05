@@ -9,7 +9,6 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
 )
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
@@ -271,21 +270,15 @@ class ChunkedPrefillBackend(ModeBackend):
                 async_selected_row_mask_cpu.wait()
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
-            next_token_ids, next_token_logprobs = sample(
-                model_output.logits,
-                run_reqs,
-                self.eos_id,
-            )
-            next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
-
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
-            mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
-                backend=self,
-                next_token_ids=next_token_ids,
+            (next_token_ids, next_token_logprobs, mtp_accept_len, accepted_index,) = spec_engine.sample_and_verify(
+                logits=model_output.logits,
+                run_reqs=run_reqs,
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_mtp_index=model_input.b_mtp_index,
             )
+            next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
                 gpu_tensor=accepted_index,
@@ -312,8 +305,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
             )
-            mtp_utils.scatter_mtp_next_tokens(
-                backend=self,
+            spec_engine.prepare_next_verification_state(
                 proposal=proposal,
                 target_next_token_ids=next_token_ids,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
