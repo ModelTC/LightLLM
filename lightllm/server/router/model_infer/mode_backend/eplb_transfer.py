@@ -294,7 +294,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
     """GPU-direct UCX/NIXL EPLB transfer. Initialization errors are fatal."""
 
     backend = "nixl"
-    staging_depth = 8
     _DEFAULT_UCX_TLS = "self,sm,cuda_ipc,cuda_copy,rc_x"
 
     @dataclass
@@ -303,6 +302,8 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         push_batch: PreparedCudaMemcpyBatch | None
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
+        # Reuse at most eight layer buffers to bound EPLB staging memory.
+        self.staging_depth = min(8, len(weights))
         super().__init__(weights, transfer_group, global_rank, world_size)
         self._nixl_agent = None
         self._registered_descs = None

@@ -3062,6 +3062,22 @@ def test_nixl_transfer_fails_fast_without_cuda13_batch_memcpy(monkeypatch):
         transfer_module.NixlEPLBTransfer._require_batch_memcpy()
 
 
+@pytest.mark.parametrize(("layers", "expected_depth"), [(1, 1), (8, 8), (9, 8), (43, 8)])
+def test_nixl_transfer_bounds_staging_depth(monkeypatch, layers, expected_depth):
+    def base_init(self, *_args):
+        self.device = "mock-device"
+
+    monkeypatch.setattr(transfer_module._EPLBTransferBase, "__init__", base_init)
+    monkeypatch.setattr(transfer_module.torch.cuda, "Stream", lambda device: ("stream", device))
+    monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_require_batch_memcpy", staticmethod(lambda: object()))
+    monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_ipc_metadata", lambda self: None)
+    monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_push_layouts", lambda self: None)
+
+    transfer = transfer_module.NixlEPLBTransfer([object()] * layers, object(), 0, 1)
+
+    assert transfer.staging_depth == expected_depth
+
+
 def test_nixl_remote_read_cache_reuses_exact_batch_key_and_releases_on_shutdown():
     class Tensor:
         nbytes = 8

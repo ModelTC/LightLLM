@@ -1,4 +1,4 @@
-"""Two-GPU NIXL EPLB correctness and 512 MiB micro-performance test."""
+"""NIXL EPLB correctness tests and a two-GPU 512 MiB micro-performance test."""
 import os
 import random
 import socket
@@ -12,6 +12,7 @@ import torch.multiprocessing as mp
 
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
+    align_target_placement,
     build_transfer_plan,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
@@ -225,3 +226,219 @@ def test_eplb_transfer_two_gpu_correctness_and_microperf():
         f"NIXL={nixl_gbps:.2f} GB/s NIXL _copy_batch={nixl_copy_batch_gbps:.2f} GB/s"
     )
     assert nixl_gbps > 0
+
+
+def _depth_value(expert, layer_index, offset):
+    return expert // 32 * 100 + layer_index * 5 + expert % 32 + offset
+
+
+class _DepthWeight:
+    def __init__(self, rank, layer_index, initial_placement):
+        self.n_routed_experts = 256
+        self.expert_parallel_state = ExpertParallelState(
+            num_logical_experts=256,
+            world_size=8,
+            eplb=EPLBState(
+                num_redundant_experts_per_rank=4,
+                initial_redundant_expert_ids_by_rank=initial_placement.clone(),
+                logical_to_physical_map=torch.zeros((256, 8), dtype=torch.int32, device="cuda"),
+                logical_replica_count=torch.ones(256, dtype=torch.int32, device="cuda"),
+                route_counter=torch.zeros((1, 256), dtype=torch.int64, device="cuda"),
+            ),
+        )
+        logical_ids = list(range(rank * 32, (rank + 1) * 32)) + initial_placement[rank].tolist()
+        self.w13 = self._pack(logical_ids, layer_index, 0)
+        self.w2 = self._pack(logical_ids, layer_index, 2)
+
+    @staticmethod
+    def _pack(logical_ids, layer_index, offset):
+        weight = torch.empty((36, 64), dtype=torch.float16, device="cuda")
+        scale = torch.empty((36, 1), dtype=torch.float32, device="cuda")
+        for row, expert in enumerate(logical_ids):
+            value = _depth_value(expert, layer_index, offset)
+            weight[row].fill_(value)
+            scale[row].fill_(value + 0.25)
+        return _Pack(weight, scale)
+
+
+def _depth_target(layer_index):
+    return torch.tensor([[((dst + layer_index + slot + 1) % 8) * 32 + slot for slot in range(4)] for dst in range(8)])
+
+
+def _wait_all_pending(transfer, group, expected_count):
+    deadline = time.monotonic() + 30
+    while True:
+        pending = transfer.pending_layers()
+        ready_count = torch.tensor([len(pending)], dtype=torch.int32)
+        dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=group)
+        if int(ready_count.item()) == expected_count:
+            return pending
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"expected {expected_count} pending layers, got {pending}")
+        time.sleep(0.001)
+
+
+def _clone_depth_live(weights):
+    return [
+        [tensor.detach().clone() for _, tensor in transfer_tensors]
+        for transfer_tensors in [
+            [
+                ("w13.weight", weight.w13.weight),
+                ("w13.scale", weight.w13.weight_scale),
+                ("w2.weight", weight.w2.weight),
+                ("w2.scale", weight.w2.weight_scale),
+            ]
+            for weight in weights
+        ]
+    ]
+
+
+def _assert_depth_snapshot(weights, snapshot, layer_indices=None, primary_only=False):
+    if layer_indices is None:
+        layer_indices = range(len(weights))
+    for layer_index in layer_indices:
+        live_tensors = (
+            weights[layer_index].w13.weight,
+            weights[layer_index].w13.weight_scale,
+            weights[layer_index].w2.weight,
+            weights[layer_index].w2.weight_scale,
+        )
+        for live, expected in zip(live_tensors, snapshot[layer_index]):
+            if primary_only:
+                live = live[:32]
+                expected = expected[:32]
+            torch.testing.assert_close(live, expected)
+
+
+def _assert_depth_staging(rank, layer_plans, target_placements, pending, transfer):
+    for buffer_index, ((layer_index, plan), pending_item) in enumerate(zip(layer_plans, pending)):
+        assert pending_item == (layer_index, buffer_index)
+        expected = {step.dst_slot: step for step in plan if step.dst_rank == rank}
+        for dst_slot, step in expected.items():
+            expert = int(target_placements[layer_index][rank, dst_slot])
+            base = _depth_value(expert, layer_index, 0)
+            staging = transfer.staging[buffer_index]
+            assert torch.all(staging[0][1][dst_slot] == base)
+            assert torch.all(staging[1][1][dst_slot] == base + 0.25)
+            assert torch.all(staging[2][1][dst_slot] == base + 2)
+            assert torch.all(staging[3][1][dst_slot] == base + 2.25)
+
+
+def _assert_depth_live(weights, rank, layer_plans, target_placements):
+    for layer_index, plan in layer_plans:
+        for step in plan:
+            if step.dst_rank != rank:
+                continue
+            expert = int(target_placements[layer_index][rank, step.dst_slot])
+            base = _depth_value(expert, layer_index, 0)
+            assert torch.all(weights[layer_index].w13.weight[32 + step.dst_slot] == base)
+            assert torch.all(weights[layer_index].w13.weight_scale[32 + step.dst_slot] == base + 0.25)
+            assert torch.all(weights[layer_index].w2.weight[32 + step.dst_slot] == base + 2)
+            assert torch.all(weights[layer_index].w2.weight_scale[32 + step.dst_slot] == base + 2.25)
+
+
+def _assert_peer_coverage(layer_plans, require_redundant_source=False):
+    steps = [step for _, plan in layer_plans for step in plan]
+    assert {step.dst_rank for step in steps} == set(range(8))
+    assert {step.src_rank for step in steps} == set(range(8))
+    for source_rank in range(8):
+        assert len({step.dst_rank for step in steps if step.src_rank == source_rank}) > 1
+    if require_redundant_source:
+        assert any(step.src_local_row >= 32 for step in steps)
+
+
+def _depth_worker(rank, port):
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("gloo", rank=rank, world_size=8)
+    control_group = dist.new_group(list(range(8)), backend="gloo")
+    transfer_group = dist.new_group(list(range(8)), backend="gloo")
+    initial_placement = build_initial_redundant_expert_ids(256, 8, 4)
+    weights = [_DepthWeight(rank, layer_index, initial_placement) for layer_index in range(9)]
+    transfer = NixlEPLBTransfer(weights, transfer_group, rank, world_size=8)
+    assert transfer.staging_depth == 8
+    staging_bytes = sum(tensor.nbytes for staging in transfer.staging for _, tensor in staging)
+    one_layer_staging_bytes = sum(tensor[:4].nbytes for _, tensor in transfer.live[0])
+    assert staging_bytes == 8 * one_layer_staging_bytes
+    current = initial_placement
+    first_order = [8, 0, 5, 1, 7, 3, 6, 2, 4]
+    first_targets = {
+        layer_index: align_target_placement(current, _depth_target(layer_index)) for layer_index in range(9)
+    }
+    first_plans = [
+        (layer_index, build_transfer_plan(current, first_targets[layer_index], 256, 8, 8))
+        for layer_index in first_order
+    ]
+    _assert_peer_coverage(first_plans)
+    first_snapshot = _clone_depth_live(weights)
+    transfer.start(first_plans, transfer.prepare_transfer(first_plans))
+    committed = 0
+    pending = _wait_all_pending(transfer, control_group, 8)
+    _assert_depth_staging(rank, first_plans[:8], first_targets, pending, transfer)
+    _assert_depth_snapshot(weights, first_snapshot)
+    dist.barrier(group=control_group)
+    if rank == 0:
+        time.sleep(0.1)
+    for layer_index, buffer_index in pending:
+        _assert_depth_snapshot(weights, first_snapshot, [layer for layer, _ in first_plans[committed:]])
+        transfer.commit(layer_index, buffer_index)
+        committed += 1
+    pending = _wait_all_pending(transfer, control_group, 1)
+    _assert_depth_staging(rank, first_plans[8:], first_targets, pending, transfer)
+    _assert_depth_snapshot(weights, first_snapshot, [first_plans[8][0]])
+    dist.barrier(group=control_group)
+    if rank == 0:
+        time.sleep(0.1)
+    for layer_index, buffer_index in pending:
+        _assert_depth_snapshot(weights, first_snapshot, [layer for layer, _ in first_plans[committed:]])
+        transfer.commit(layer_index, buffer_index)
+        committed += 1
+    transfer.finish()
+    torch.cuda.synchronize()
+    dist.barrier(group=control_group)
+    _assert_depth_live(weights, rank, first_plans, first_targets)
+
+    second_order = [7, 2, 4]
+    second_targets = {
+        layer_index: align_target_placement(
+            first_targets[layer_index],
+            torch.tensor([[((dst + layer_index + slot + 3) % 8) * 32 + slot for slot in range(4)] for dst in range(8)]),
+        )
+        for layer_index in second_order
+    }
+    second_plans = [
+        (
+            layer_index,
+            build_transfer_plan(first_targets[layer_index], second_targets[layer_index], 256, 8, 8),
+        )
+        for layer_index in second_order
+    ]
+    _assert_peer_coverage(second_plans, require_redundant_source=True)
+    second_snapshot = _clone_depth_live(weights)
+    transfer.start(second_plans, transfer.prepare_transfer(second_plans))
+    pending = _wait_all_pending(transfer, control_group, len(second_plans))
+    _assert_depth_staging(rank, second_plans, second_targets, pending, transfer)
+    _assert_depth_snapshot(weights, second_snapshot)
+    dist.barrier(group=control_group)
+    if rank == 0:
+        time.sleep(0.1)
+    for layer_index, buffer_index in pending:
+        transfer.commit(layer_index, buffer_index)
+    transfer.finish()
+    torch.cuda.synchronize()
+    dist.barrier(group=control_group)
+    _assert_depth_live(weights, rank, second_plans, second_targets)
+    _assert_depth_snapshot(weights, second_snapshot, set(range(9)) - set(second_order))
+    _assert_depth_snapshot(weights, second_snapshot, primary_only=True)
+    transfer.shutdown()
+    dist.barrier(group=control_group)
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 8,
+    reason="requires eight CUDA GPUs",
+)
+def test_eplb_transfer_eight_gpu_bounded_staging_reuse():
+    mp.spawn(_depth_worker, args=(_free_port(),), nprocs=8, join=True)
