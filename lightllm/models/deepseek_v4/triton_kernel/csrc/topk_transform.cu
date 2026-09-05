@@ -237,14 +237,17 @@ struct TopKParams {
 template <bool UsePDL>
 __global__ void topk_transform_kernel(const __grid_constant__ TopKParams params) {
   const uint32_t work_id = blockIdx.x;
+
+  // PDL may start this grid before its producer finishes, so wait before the
+  // first global load from seq_lens.
+  pdl_wait_primary<UsePDL>();
+
   const uint32_t seq_len = params.seq_lens[work_id];
   const auto score_ptr = params.scores + work_id * params.score_stride;
   const auto page_ptr = params.page_table + work_id * params.page_table_stride;
   const auto indices_ptr = params.page_indices + work_id * kTopK;
   const auto raw_indices_ptr = params.raw_indices != nullptr ? params.raw_indices + work_id * kTopK : nullptr;
   const uint32_t page_bits = params.page_bits;
-
-  pdl_wait_primary<UsePDL>();
 
   if (seq_len <= kTopK) {
     naive_transform(page_ptr, indices_ptr, raw_indices_ptr, seq_len, page_bits);
