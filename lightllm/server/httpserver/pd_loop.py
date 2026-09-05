@@ -234,6 +234,7 @@ async def _pd_process_generate(
     pd_upload_websocket: ClientConnection,
     pd_event: asyncio.Event,
 ):
+    return_output_logprobs = getattr(sampling_params, "return_output_logprobs", True)
     try:
         async for sub_req_id, request_output, metadata, finish_status in manager.generate(
             prompt=prompt,
@@ -244,6 +245,9 @@ async def _pd_process_generate(
             pd_event=pd_event,
         ):
             metadata["node_mode"] = manager.args.run_mode
+            if not return_output_logprobs:
+                for key in ("id", "logprob", "cumlogprob", "special", "logprobs"):
+                    metadata.pop(key, None)
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
