@@ -382,6 +382,7 @@ class EPLBManager:
                         )
                 result["metadata"] = metadata
                 result["layer_plans"] = layer_plans
+                result["prepared_batches"] = self.transfer.prepare_transfer(layer_plans)
             with self._evaluation_lock:
                 self._evaluation_result = result
         except BaseException as exc:
@@ -497,7 +498,7 @@ class EPLBManager:
         self.in_flight_layers = [layer_index for layer_index, _ in layer_plans]
         self.in_flight = True
         self.in_flight_started_at = time.time()
-        self.transfer.start(layer_plans)
+        self.transfer.start(layer_plans, result["prepared_batches"])
         if self.global_rank == 0:
             actual_changed_slot_count = sum(len(plan) for _, plan in layer_plans)
             cross_node_transfer_count = sum(

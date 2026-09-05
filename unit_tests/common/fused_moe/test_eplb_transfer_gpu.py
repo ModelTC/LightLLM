@@ -134,13 +134,15 @@ def _benchmark_nixl_copy_batch(transfer, control_group, layer_plans, payload):
         (layer_index, plan, buffer_index, transfer.staging[buffer_index])
         for buffer_index, (layer_index, plan) in enumerate(layer_plans)
     ]
+    # Measure the precompiled hot path only; planning and descriptor construction are off the timer.
+    prepared_batch = transfer._prepare_batch(batch)
     for _ in range(3):
-        transfer._copy_batch(batch)
+        transfer._copy_batch(batch, prepared_batch)
     dist.barrier(group=control_group)
     samples = []
     for _ in range(20):
         started = time.perf_counter()
-        transfer._copy_batch(batch)
+        transfer._copy_batch(batch, prepared_batch)
         samples.append(payload / (time.perf_counter() - started) / 1e9)
     torch.cuda.synchronize()
     median = statistics.median(samples)
