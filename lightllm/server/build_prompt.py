@@ -141,6 +141,9 @@ async def build_prompt(request, tools) -> str:
     if request.role_settings:
         kwargs["role_setting"] = request.role_settings
 
+    if request.reasoning_effort is not None:
+        kwargs["reasoning_effort"] = request.reasoning_effort
+
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
 

@@ -25,6 +25,7 @@ def _rotary_kernel(
     HEAD_K,  # N_CTX 代表要计算的上下文长度
     rot_dim,
     head_dim,
+    NEED_DIM_MASK: tl.constexpr,
     BLOCK_HEAD: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -53,6 +54,9 @@ def _rotary_kernel(
     )
 
     off_dimcos_sin = cur_seq_range[:, None, None] * stride_cosbs + dim_range0[None, None, :] * stride_cosd
+    cos_sin_mask = cur_seq_range[:, None, None] < max_total_len
+    if NEED_DIM_MASK:
+        cos_sin_mask = cos_sin_mask & (dim_range0[None, None, :] < rot_dim)
 
     q0 = tl.load(
         Q + off_q0,
@@ -69,8 +73,16 @@ def _rotary_kernel(
         other=0.0,
     )
 
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+    cos = tl.load(
+        Cos + off_dimcos_sin,
+        mask=cos_sin_mask,
+        other=0.0,
+    )
+    sin = tl.load(
+        Sin + off_dimcos_sin,
+        mask=cos_sin_mask,
+        other=0.0,
+    )
 
     out0 = q0 * cos - q1 * sin
     out1 = q0 * sin + q1 * cos
@@ -117,8 +129,16 @@ def _rotary_kernel(
         & (dim_range1[None, None, :] < head_dim),
         other=0.0,
     )
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+    cos = tl.load(
+        Cos + off_dimcos_sin,
+        mask=cos_sin_mask,
+        other=0.0,
+    )
+    sin = tl.load(
+        Sin + off_dimcos_sin,
+        mask=cos_sin_mask,
+        other=0.0,
+    )
 
     out_k0 = k0 * cos - k1 * sin
     out_k1 = k0 * sin + k1 * cos
@@ -177,6 +197,7 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0):
         head_num_k,
         rot_dim,
         head_dim,
+        NEED_DIM_MASK=BLOCK_DMODEL != rot_dim,
         BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=BLOCK_DMODEL,

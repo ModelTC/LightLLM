@@ -4,7 +4,7 @@ import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Union, Callable
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import PDChunckedTransTask
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..trans_process_obj import KVTransProcess
@@ -58,12 +58,21 @@ class PrefillKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task: PDChunckedTransTask = self.info_queue.get()
+            task: Union[PDChunckedTransTask, PDAbortReq] = self.info_queue.get()
 
-            device_id = task.src_device_id
+            if isinstance(task, PDChunckedTransTask):
+                device_id = task.src_device_id
+            elif isinstance(task, PDAbortReq):
+                # P 节点的 abort 命令需要与普通传输任务一样，路由到该请求
+                # 所在设备的 KV 传输进程中处理。
+                device_id = task.device_id
+            else:
+                raise TypeError(f"unsupported prefill kv move task type: {type(task)}")
+
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task)
-                logger.info(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
+                if isinstance(task, PDChunckedTransTask):
+                    logger.info(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
             except BaseException as e:
                 logger.exception(str(e))

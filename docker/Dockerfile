@@ -9,6 +9,7 @@ ARG FLASH_MLA_REF=47c35a7
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
 ARG DEEPEP_REF=60d44037a702f651a6e18bd4aea65ed8409051c2
 ARG DEEPEP_NCCL_VERSION=2.30.4
+ARG FLASHQLA_VERSION=0.1.2
 ARG TARGETPLATFORM
 ARG ENABLE_DEEPEP=1
 ARG ENABLE_NIXL=1
@@ -57,6 +58,7 @@ RUN pip install --no-cache-dir \
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
     -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130
+RUN PIP_NO_INDEX=0 pip install --no-cache-dir "flash-qla==${FLASHQLA_VERSION}" -i https://pypi.org/simple
 RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cuda/targets/x86_64-linux/include${CPATH:+:${CPATH}} && \
     git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
     cd /root/FlashMLA && \

@@ -51,7 +51,7 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
             b_q_seq_len=self.infer_state.b_q_seq_len,
             b_req_idx=self.infer_state.b_req_idx,
             req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
-            q_token_num=self.infer_state.total_token_num - self.infer_state.prefix_total_token_num,
+            q_token_num=self.infer_state.input_ids.shape[0],
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )

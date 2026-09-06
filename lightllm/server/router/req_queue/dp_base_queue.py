@@ -60,7 +60,16 @@ class DpQueue:
         suggested_dp_index = req_group[0].sample_params.suggested_dp_index
         if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
             # 同一个组的，要分配在同一个 dp 上
-            self.reqs_waiting_for_dp_index.append(req_group)
+            if req_group[0].sample_params.pd_high_priority_request:
+                # 高优先级请求组插在第一个普通请求组之前，同时保持高优先级组之间的 FIFO 顺序。
+                first_normal_group_index = len(self.reqs_waiting_for_dp_index)
+                for index, waiting_group in enumerate(self.reqs_waiting_for_dp_index):
+                    if not waiting_group[0].sample_params.pd_high_priority_request:
+                        first_normal_group_index = index
+                        break
+                self.reqs_waiting_for_dp_index.insert(first_normal_group_index, req_group)
+            else:
+                self.reqs_waiting_for_dp_index.append(req_group)
         else:
             self.inner_queues[suggested_dp_index].extend(req_group)
         return

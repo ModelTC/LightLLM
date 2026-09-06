@@ -1,6 +1,6 @@
 import pytest
 import easydict
-from lightllm.server.core.objs.req import Req, TokenHealingReq, ChunkedPrefillReq, SamplingParams
+from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 from lightllm.utils.envs_utils import set_env_start_args
 
@@ -37,6 +37,18 @@ def test_create_prompt_ids_shm_array(req):
     assert hasattr(req, "shm_prompt_ids")
 
 
+def test_detach_shm_arrays(req):
+    prompt_ids = req.shm_prompt_ids
+    logprobs = req.shm_logprobs
+
+    req.detach_shm_arrays()
+
+    assert prompt_ids.shm is None
+    assert logprobs.shm is None
+    assert not hasattr(req, "shm_prompt_ids")
+    assert not hasattr(req, "shm_logprobs")
+
+
 def test_get_used_tokens(req):
     req.shm_cur_kv_len = 5
     assert req.get_used_tokens() == 5
@@ -59,12 +71,6 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     ]
 
 
-def test_token_healing_req_post_init():
-    token_healing_req = TokenHealingReq()
-    token_healing_req.init(1, [1, 2, 3, 4], {"max_new_tokens": 1}, None)
-    assert token_healing_req.sample_params.max_new_tokens == 9
-
-
 # def test_chunked_req_get_tuple_tokens():
 #     chunked_req = ChunkedPrefillReq()
 #     chunked_req.init(1, [1, 2, 3], {"max_new_tokens": 1}, None, chunked_prefill_size=256)
@@ -75,12 +81,28 @@ def test_token_healing_req_post_init():
 def test_finish_status(req):
     req.finish_status.set_status(req.finish_status.FINISHED_STOP)
     assert req.finish_status.is_finished()
+    assert not req.finish_status.is_error_finished()
     assert req.finish_status.get_finish_reason() == "stop"
+
+    req.finish_status.set_status(req.finish_status.FINISHED_LENGTH)
+    assert req.finish_status.is_finished()
+    assert not req.finish_status.is_error_finished()
+
+    req.finish_status.set_status(req.finish_status.FINISHED_ABORTED)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_error_finished()
 
     req.finish_status.set_status(req.finish_status.FINISHED_ERROR)
     assert req.finish_status.is_finished()
     assert req.finish_status.is_finished_error()
+    assert req.finish_status.is_error_finished()
     assert req.finish_status.get_finish_reason() == "error"
+
+    req.finish_status.set_status(req.finish_status.FINISHED_PD_DECODE_CAPACITY)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_finished_pd_decode_capacity()
+    assert not req.finish_status.is_error_finished()
+    assert req.finish_status.get_finish_reason() == "length"
 
 
 if __name__ == "__main__":

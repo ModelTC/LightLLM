@@ -149,13 +149,19 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
             "max_req_num": self.args.running_max_req_size,
-            "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
+            # MTP length stopping is asynchronous, so up to mtp_step accepted
+            # positions may already be committed when FINISHED_LENGTH is observed.
+            # The overlapped iteration then needs mtp_step positions for target
+            # verification and another mtp_step for the DSpark/DFlash draft block.
+            # Thus the page table needs 3 * mtp_step positions of MTP headroom.
+            # Keep eight additional positions as a safety margin for future overlap
+            # changes while preserving the historical +8 for non-MTP runs.
+            "max_seq_length": self.args.max_req_total_len + 3 * self.args.mtp_step + 8,
             "nccl_host": self.args.nccl_host,
             "nccl_port": get_shm_port_args().nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
             "disable_chunked_prefill": self.args.disable_chunked_prefill,
             "chunked_prefill_size": self.args.chunked_prefill_size,
-            "is_token_healing": self.args.token_healing_mode,
             "use_reward_model": self.args.use_reward_model,
             "disable_dynamic_prompt_cache": self.args.disable_dynamic_prompt_cache,
             "data_type": self.args.data_type,
@@ -308,6 +314,11 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
     async def _add_batch(self, batch: Batch):
         # 添加新请求
+        # 请求被 Router 调度为新 batch 并准备下发到推理系统时记录时间，HTTP server
+        # 以此判断请求是否在 Router 队列中等待过久；不需要推理进程额外写共享字段。
+        infer_start_time = time.monotonic()
+        for req in batch.reqs:
+            req.infer_start_time = infer_start_time
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.001)
@@ -410,10 +421,12 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
     def _add_req(self, group_req_indexes: GroupReqIndexes):
         req_group = []
+        router_arrival_time = time.monotonic()
         for req_index in group_req_indexes.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.multimodal_params = group_req_indexes.multimodal_params
             req.start_time = group_req_indexes.time_mark
+            req.router_arrival_time = router_arrival_time
             # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
             # 防止反复发送abort命令给推理进程
             req._router_aborted = False

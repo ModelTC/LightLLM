@@ -6,16 +6,16 @@ import setproctitle
 import torch.multiprocessing as mp
 import queue
 import pickle
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import PDChunckedTransTask
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 
 
 logger = init_logger(__name__)
@@ -41,6 +41,7 @@ def _init_env(
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
 ):
+    install_fatal_thread_excepthook()
     start_parent_check_thread()
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -157,7 +158,9 @@ class _PrefillTransModule:
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == request_id:
+                if trans_task.request_id == request_id and trans_task.xfer_handle is None:
+                    # 已经提交给底层 transporter 的异步传输不能直接失败，
+                    # 否则 fail_loop 可能在传输静默前归还 source page，导致脏数据。
                     aborted_tasks.append(self.waiting_dict.pop(key))
 
         for trans_task in aborted_tasks:
@@ -170,8 +173,17 @@ class _PrefillTransModule:
         torch.cuda.set_device(self.device_id)
 
         while True:
+            obj: Union[PDChunckedTransTask, PDAbortReq] = self.task_in_queue.get()
+            if isinstance(obj, PDAbortReq):
+                # Infer 层已经终止该请求，将 abort 命令下传到 P 节点的
+                # KV 传输层，尽快结束尚在等待的传输任务。
+                self._abort(request_id=obj.request_id)
+                continue
+
+            assert isinstance(obj, PDChunckedTransTask), f"unsupported prefill transfer task type: {type(obj)}"
+
             page_index = self.page_index_queue.get()
-            trans_task: PDChunckedTransTask = self.task_in_queue.get()
+            trans_task = obj
             trans_task.src_page_index = page_index
 
             # 初次校验 time out
@@ -331,48 +343,76 @@ class _PrefillTransModule:
                 time.sleep(0.001)
                 continue
 
-            with self.waiting_dict_lock:
-                tasks = list(self.waiting_dict.values())
-                for trans_task in tasks:
-                    if trans_task.xfer_handle is None:
-                        continue
+            self._update_task_status_once()
+            time.sleep(0.001)
 
-                    # 传输任务状态检查
+    def _update_task_status_once(self):
+        with self.waiting_dict_lock:
+            tasks = list(self.waiting_dict.values())
+            for trans_task in tasks:
+                if trans_task.xfer_handle is None:
+                    continue
+
+                # A native NIXL error must fail this task without terminating the
+                # status thread and stranding every transfer queued behind it.
+                try:
                     ret = self.transporter.check_task_status(trans_task=trans_task)
-                    if ret == "DONE":
-                        trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
-                        if self.transporter.capture_telemetry:
-                            telem = self.transporter.nixl_agent.get_xfer_telemetry(trans_task.xfer_handle)
+                except BaseException as e:
+                    failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
+                    if failed_task is not None:
+                        logger.exception(f"check transfer status failed: {failed_task.to_str()}")
+                        failed_task.error_info = f"check transfer status failed: {str(e)}"
+                        self.failed_queue.put(failed_task)
+                    continue
+
+                if ret == "DONE":
+                    completed_task = self.waiting_dict.pop(trans_task.get_key(), None)
+                    if completed_task is None:
+                        continue
+                    if self.transporter.capture_telemetry:
+                        try:
+                            telem = self.transporter.nixl_agent.get_xfer_telemetry(completed_task.xfer_handle)
                             total_us = telem.xferDuration
                             post_us = telem.postDuration
                             backend_us = telem.xferDuration - telem.postDuration
-                            nixl_backend = self.transporter.nixl_agent.query_xfer_backend(trans_task.xfer_handle)
+                            nixl_backend = self.transporter.nixl_agent.query_xfer_backend(completed_task.xfer_handle)
                             logger.info(
-                                f"write trans task request_id={trans_task.request_id} "
-                                f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "
-                                f"src_page={trans_task.src_page_index} dst_page={trans_task.dst_page_index} "
+                                f"write trans task request_id={completed_task.request_id} "
+                                f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
+                                f"src_page={completed_task.src_page_index} "
+                                f"dst_page={completed_task.dst_page_index} "
                                 f"xfer time: {total_us:.3f} us, "
                                 f"post time: {post_us:.3f} us, backend time: {backend_us:.3f} us, "
                                 f"nixl_backend: {nixl_backend}, total_bytes: {telem.totalBytes}"
                             )
-                        self.transporter.send_write_done_task_to_decode_node(trans_task)
-                        logger.info(
-                            f"send WRITE done nixl notify "
-                            f"request_id={trans_task.request_id} "
-                            f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "
-                            f"src_page={trans_task.src_page_index} dst_page={trans_task.dst_page_index}"
-                        )
-                        self.success_queue.put(trans_task)
-                    elif ret == "ERR":
-                        trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
-                        trans_task.error_info = "xfer error"
-                        self.failed_queue.put(trans_task)
-                    elif trans_task.time_out():
-                        trans_task = self.waiting_dict.pop(trans_task.get_key(), None)
-                        trans_task.error_info = "time out in update_task_status_loop"
-                        self.failed_queue.put(trans_task)
+                        except BaseException:
+                            logger.exception(f"get transfer telemetry failed: {completed_task.to_str()}")
 
-            time.sleep(0.001)
+                    try:
+                        self.transporter.send_write_done_task_to_decode_node(completed_task)
+                    except BaseException as e:
+                        logger.exception(f"send WRITE done nixl notify failed: {completed_task.to_str()}")
+                        completed_task.error_info = f"send WRITE done nixl notify failed: {str(e)}"
+                        self.failed_queue.put(completed_task)
+                        continue
+
+                    logger.info(
+                        f"send WRITE done nixl notify "
+                        f"request_id={completed_task.request_id} "
+                        f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
+                        f"src_page={completed_task.src_page_index} dst_page={completed_task.dst_page_index}"
+                    )
+                    self.success_queue.put(completed_task)
+                elif ret == "ERR":
+                    failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
+                    if failed_task is not None:
+                        failed_task.error_info = "xfer error"
+                        self.failed_queue.put(failed_task)
+                elif trans_task.time_out():
+                    failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
+                    if failed_task is not None:
+                        failed_task.error_info = "time out in update_task_status_loop"
+                        self.failed_queue.put(failed_task)
 
     @log_exception
     def success_loop(self):

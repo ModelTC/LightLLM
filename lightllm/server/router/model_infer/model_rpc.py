@@ -17,7 +17,6 @@ from lightllm.server.router.model_infer.mode_backend import (
     FirstTokenConstraintBackend,
     OutlinesConstraintBackend,
     RewardModelBackend,
-    TokenHealingBackend,
     XgrammarBackend,
     DPChunkedPrefillBackend,
     DiversehBackend,
@@ -60,7 +59,6 @@ class ModelRpcServer(rpyc.Service):
         self.world_size = kvargs["world_size"]
         use_reward_model = self.args.use_reward_model
         diverse_mode = self.args.diverse_mode
-        is_token_healing = self.args.token_healing_mode
         is_first_token_constraint_mode = self.args.first_token_constraint_mode
 
         is_outlines_constraint_mode = self.args.output_constraint_mode == "outlines"
@@ -87,8 +85,6 @@ class ModelRpcServer(rpyc.Service):
             self.backend = RewardModelBackend()
         elif diverse_mode:
             self.backend = DiversehBackend()
-        elif is_token_healing:
-            self.backend = TokenHealingBackend()
         elif is_outlines_constraint_mode:
             self.backend = OutlinesConstraintBackend()
         elif is_xgrammar_constraint_mode:

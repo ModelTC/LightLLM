@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterator, List, Tuple, Dict, Optional, Type
 
+from lightllm.utils.config_utils import get_token_id
+
 
 @dataclass
 class Event:
@@ -926,6 +928,7 @@ class ReasoningParser:
         if not model_type:
             raise ValueError("Model type must be specified")
 
+        requested_force_reasoning = force_reasoning
         detector_class = self.DetectorMap.get(model_type.lower())
         if not detector_class:
             raise ValueError(f"Unsupported model type: {model_type}")
@@ -943,6 +946,20 @@ class ReasoningParser:
             kwargs["force_reasoning"] = force_reasoning
 
         self.detector = detector_class(**kwargs)
+        self.reasoning_tokens = 0
+        reasoning_enabled = self.detector._in_reasoning or requested_force_reasoning is True
+        self._counting_reasoning = reasoning_enabled and model_type.lower() != "minimax-append-think"
+        self._think_end_token_id = get_token_id(self.detector.think_end_token)
+
+    def update_reasoning_token_count(self, token_id: int) -> None:
+        """Count one generated token until the reasoning closing delimiter."""
+        if not self._counting_reasoning:
+            return
+
+        if token_id == self._think_end_token_id:
+            self._counting_reasoning = False
+        else:
+            self.reasoning_tokens += 1
 
     def parse_non_stream(self, full_text: str) -> Tuple[Optional[str], Optional[str]]:
         """Non-streaming call: one-time parsing"""

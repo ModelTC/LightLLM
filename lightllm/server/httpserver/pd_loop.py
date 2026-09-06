@@ -20,7 +20,7 @@ from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
-from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
+from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
@@ -84,12 +84,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     while True:
         forwarding_tokens_task = None
         heartbeat_task = None
+        generation_tasks: Dict[int, asyncio.Task] = {}
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
                 uri,
                 max_size=get_lightllm_websocket_max_message_size(),
                 max_queue=(2048 * 1024, 2048 * 1023),  # 关键修改
+                # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
+                ping_interval=None,
             ) as websocket:
 
                 sock = websocket.transport.get_extra_info("socket")
@@ -122,7 +125,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
-                        asyncio.create_task(
+                        generation_task = asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
                                 prompt=prompt,
@@ -133,9 +136,19 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 pd_event=pd_event,
                             )
                         )
+                        generation_tasks[group_req_id] = generation_task
+
+                        def remove_generation_task(task: asyncio.Task, request_id: int = group_req_id):
+                            if generation_tasks.get(request_id) is task:
+                                generation_tasks.pop(request_id, None)
+
+                        generation_task.add_done_callback(remove_generation_task)
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
+                        generation_task = generation_tasks.get(group_req_id)
+                        if generation_task is not None and not generation_task.done():
+                            generation_task.cancel()
                         if not (await manager.abort(group_req_id)):
 
                             async def delayed_abort_task(group_req_id, retry_count):
@@ -167,6 +180,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.exception(str(e))
         finally:
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
+            child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
@@ -233,8 +247,27 @@ async def _pd_process_generate(
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
+    except ServerBusyError as e:
+        group_request_id = sampling_params.group_request_id
+        logger.warning(f"pd node rejected request {group_request_id}: {e.message}")
+        try:
+            await pd_upload_websocket.send(pickle.dumps((ObjType.PD_UPLOAD_SERVER_BUSY, group_request_id, e.message)))
+        except Exception:
+            logger.exception(f"report pd node request rejection failed, group_request_id: {group_request_id}")
+    except asyncio.CancelledError:
+        # PD master 主动 abort 或连接断开清理任务时会走取消路径，不需要反向重复上报。
+        pass
     except BaseException as e:
-        logger.error(str(e))
+        group_request_id = sampling_params.group_request_id
+        logger.exception(f"pd node generate request {group_request_id} failed: {str(e)}")
+        try:
+            # 本地生成在任意阶段失败后，及时通知 PD master 终止对应请求，避免 master
+            # 只能依赖 prefill/decode 阶段的超时才能发现异常。
+            await pd_upload_websocket.send(
+                pickle.dumps((ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, f"{type(e).__name__}: {str(e)}"))
+            )
+        except Exception:
+            logger.exception(f"report pd node generate error failed, group_request_id: {group_request_id}")
 
 
 # 转发token的task

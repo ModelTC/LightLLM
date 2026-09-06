@@ -30,7 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -51,6 +51,7 @@ from .api_models import (
     ToolCall,
     UsageInfo,
     PromptTokensDetails,
+    CompletionTokensDetails,
     ChatMessage,
     ChatCompletionResponseChoice,
     ChatCompletionResponse,
@@ -69,18 +70,32 @@ async def _safe_stream_wrapper(stream_generator):
         async for item in stream_generator:
             first_chunk_sent = True
             yield item
-    except ValueError as e:
-        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
-        yield f"data: {error_data}\n\n"
-    except ServerBusyError as e:
+    except InvalidRequestError as e:
         if not first_chunk_sent:
             raise
-        logger.error("Generation interrupted after the stream started: %s", e.message)
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except ValueError as e:
+        if not first_chunk_sent:
+            # Request setup is lazy for streaming responses, so validation
+            # errors raised here bypass the endpoint's normal ValueError
+            # handler. Convert them to the dedicated request-error type so
+            # the application-level handler returns HTTP 400.
+            raise InvalidRequestError(str(e)) from e
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except ServerBusyError as e:
+        logger.debug("Server busy detail: %s", e.message)
+        if not first_chunk_sent:
+            raise
         error_data = json.dumps(
-            {"error": {"message": e.message, "type": "server_error", "code": "stream_error"}},
+            {"error": {"message": SERVER_BUSY_MESSAGE, "type": "server_error", "code": "stream_error"}},
             ensure_ascii=False,
         )
         yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
     except ClientDisconnected as e:
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
@@ -169,19 +184,21 @@ def _process_reasoning_stream(
     index: int,
     delta: str,
     reasoning_parser_dict: Dict[int, ReasoningParser],
-    content: Dict[str, Any],
+    metadata: Dict[str, Any],
     request: ChatCompletionRequest,
 ) -> tuple[Optional[str], str]:
-    """Process reasoning content in streaming response"""
+    """Process reasoning content and update its token usage."""
     if index not in reasoning_parser_dict:
-        request_enable_reasoning = _is_force_thinking_mode(request)
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
-            request_enable_reasoning,
+            _is_force_thinking_mode(request),
         )
-    reasoning_parser = reasoning_parser_dict[index]
-    return reasoning_parser.parse_stream_chunk(delta)
+    parser = reasoning_parser_dict[index]
+    token_id = metadata.get("id")
+    if token_id is not None:
+        parser.update_reasoning_token_count(int(token_id))
+    return parser.parse_stream_chunk(delta)
 
 
 def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest):
@@ -217,20 +234,8 @@ def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
     return [arguments]
 
 
-async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    from .api_http import g_objs
-
-    if request.logit_bias is not None:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The logit_bias parameter is not currently supported",
-        )
-
-    if request.function_call != "none":
-        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
-
-    created_time = int(time.time())
-
+def _build_multimodal_params(request: ChatCompletionRequest) -> MultimodalParams:
+    """Build LightLLM multimodal inputs from chat content parts."""
     multimodal_params_dict = {"images": [], "audios": []}
     for message in request.messages:
         if isinstance(message.content, list):
@@ -275,6 +280,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     else:
                         raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
 
+    return MultimodalParams(**multimodal_params_dict)
+
+
+def _select_chat_template_tools(request: ChatCompletionRequest) -> Optional[List[dict]]:
+    """Select the tool schemas exposed to the model's chat template."""
     tools = None
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False
@@ -293,6 +303,24 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         else:
             tools = [item.function.model_dump(exclude_none=True) for item in request.tools]
 
+    return tools
+
+
+async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
+    from .api_http import g_objs
+
+    if request.logit_bias is not None:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logit_bias parameter is not currently supported",
+        )
+
+    if request.function_call != "none":
+        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
+
+    created_time = int(time.time())
+    multimodal_params = _build_multimodal_params(request)
+    tools = _select_chat_template_tools(request)
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
         "do_sample": request.do_sample,
@@ -340,26 +368,39 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
     sampling_params.verify()
-    multimodal_params = MultimodalParams(**multimodal_params_dict)
-
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
 
     # Non-streaming case
     if not request.stream:
+        reasoning_parser = get_env_start_args().reasoning_parser
+        request_enable_reasoning = _is_force_thinking_mode(request) if reasoning_parser else False
         final_output_dict = collections.defaultdict(list)
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
         prompt_tokens_dict = {}
         prompt_cache_len_dict = {}
         completion_tokens = 0
+        reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             from .req_id_generator import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             count_output_tokens_dict[sub_req_id] += 1
             final_output_dict[sub_req_id].append(request_output)
+            if reasoning_parser:
+                parser = reasoning_parser_dict.get(sub_req_id)
+                if parser is None:
+                    parser = ReasoningParser(
+                        reasoning_parser,
+                        stream_reasoning=False,
+                        force_reasoning=request_enable_reasoning,
+                    )
+                    reasoning_parser_dict[sub_req_id] = parser
+                token_id = metadata.get("id")
+                if token_id is not None:
+                    parser.update_reasoning_token_count(int(token_id))
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
@@ -369,12 +410,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         prompt_tokens = prompt_tokens_dict[sub_ids[0]]
         completion_tokens = sum(count_output_tokens_dict[sub_req_id] for sub_req_id in sub_ids)
         cached_tokens = prompt_cache_len_dict.get(sub_ids[0], 0)
-        usage = UsageInfo(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
-        )
+        reasoning_tokens = sum(reasoning_parser_dict[sub_req_id].reasoning_tokens for sub_req_id in sub_ids)
 
         for i in range(request.n):
             sub_req_id = sub_ids[i]
@@ -383,15 +419,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             # Handle reasoning content
             reasoning_text = None
-            reasoning_parser = get_env_start_args().reasoning_parser
             if reasoning_parser:
-                request_enable_reasoning = _is_force_thinking_mode(request)
                 try:
-                    parser = ReasoningParser(
-                        model_type=reasoning_parser,
-                        stream_reasoning=False,
-                        force_reasoning=request_enable_reasoning,
-                    )
+                    parser = reasoning_parser_dict[sub_req_id]
                     reasoning_text, text = parser.parse_non_stream(text)
                 except Exception as e:
                     logger.error(f"Reasoning parsing error: {e}")
@@ -445,6 +475,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 finish_reason=finish_reason,
             )
             choices.append(choice)
+        completion_tokens_details = None
+        if reasoning_parser:
+            completion_tokens_details = CompletionTokensDetails(reasoning_tokens=reasoning_tokens)
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+            completion_tokens_details=completion_tokens_details,
+        )
         resp = ChatCompletionResponse(
             id=group_request_id, created=created_time, model=request.model, choices=choices, usage=usage
         )
@@ -502,7 +542,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # Handle reasoning content
             if get_env_start_args().reasoning_parser:
                 reasoning_text, delta = _process_reasoning_stream(
-                    choice_index, delta, reasoning_parser_dict, request_output, request
+                    choice_index, delta, reasoning_parser_dict, metadata, request
                 )
                 if reasoning_text:
                     if request.separate_reasoning:
@@ -738,11 +778,17 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 )
                 yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls)}\n\n"
 
+        reasoning_parser = get_env_start_args().reasoning_parser
+        completion_tokens_details = None
+        if reasoning_parser:
+            reasoning_tokens = sum(parser.reasoning_tokens for parser in reasoning_parser_dict.values())
+            completion_tokens_details = CompletionTokensDetails(reasoning_tokens=reasoning_tokens)
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
             prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+            completion_tokens_details=completion_tokens_details,
         )
         usage_chunk = ChatCompletionStreamResponse(
             id=chat_completion_id,

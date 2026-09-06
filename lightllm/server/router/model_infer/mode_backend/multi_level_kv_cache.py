@@ -6,6 +6,7 @@ import bisect
 from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
+from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
@@ -217,6 +218,8 @@ class MultiLevelKvCacheModule(object):
     def _start_kv_cache_offload_task(
         self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
     ) -> Optional["TransTask"]:
+        assert CacheTier.CPU in req.cache_tiers
+        disk_offload_enable = CacheTier.DISK in req.cache_tiers
         with torch.cuda.stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
@@ -242,7 +245,7 @@ class MultiLevelKvCacheModule(object):
                     self.cpu_cache_client.lock.acquire_sleep1ms()
                     page_list, ready_list = self.cpu_cache_client.allocate_pages(
                         token_hash_list[:move_block_size],
-                        disk_offload_enable=self.args.enable_disk_cache,
+                        disk_offload_enable=disk_offload_enable,
                     )
                 finally:
                     self.cpu_cache_client.lock.release()
@@ -347,11 +350,11 @@ class MultiLevelKvCacheModule(object):
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
                 # 分组update，避免不同请求的page交叉，导致disk cache hash不一致
-                for pages, move_token_num in zip(page_array_list, move_token_nums):
+                for task, pages, move_token_num in zip(trans_ok_tasks, page_array_list, move_token_nums):
                     self.cpu_cache_client.update_pages_status_to_ready(
                         page_list=pages,
                         deref=True,
-                        disk_offload_enable=self.args.enable_disk_cache,
+                        disk_offload_enable=CacheTier.DISK in task.req_obj.cache_tiers,
                         token_num_in_page_list=move_token_num,
                     )
                 self.cpu_cache_client.lock.release()

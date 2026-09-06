@@ -1,6 +1,7 @@
 from typing import List
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight import (
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )
@@ -8,6 +9,10 @@ from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.basemodel import load_hf_weights
 
 
+@DraftModelRegistry(
+    model_type="glm4_moe_lite",
+    spec_modes=("vanilla_with_att", "eagle_with_att"),
+)
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
 
     # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).

@@ -43,4 +43,16 @@ from lightllm.models.gpt_oss.model import GptOssTpPartModel
 from lightllm.models.qwen3_omni_moe_thinker.model import Qwen3OmniMOETpPartModel
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
 from lightllm.models.qwen3_5_moe.model import Qwen3_5MOETpPartModel
+from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
+from lightllm.models.mistral_mtp.model import MistralMTPModel
+from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
+from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
+from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
+from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
+from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
+from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
+from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
+from .draft_registry import get_draft_model_class
 from .registry import get_model, get_model_class

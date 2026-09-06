@@ -27,6 +27,8 @@ class FinishStatus(ctypes.Structure):
     - ``NO_FINISH``: 未结束
     - ``FINISHED_STOP``: 正常停止（EOS / stop 序列等），finish_reason=``stop``
     - ``FINISHED_LENGTH``: 达到 max_new_tokens 等长度上限，finish_reason=``length``
+    - ``FINISHED_PD_DECODE_CAPACITY``: PD Decode 因 token 容量不足提前结束当前分段。
+      该状态仅用于 PD 内部分段续跑，不应直接暴露给 API 用户。
     - ``FINISHED_ABORTED``: 客户端/调度主动 abort，finish_reason=``abort``
     - ``FINISHED_ERROR``: 服务端内部错误导致无法继续生成，finish_reason=``error``。
       典型场景：PD 分离 decode 节点 KV 传输失败。与 abort 区分：非用户取消，
@@ -39,6 +41,9 @@ class FinishStatus(ctypes.Structure):
     NO_FINISH = 0
     FINISHED_STOP = 1
     FINISHED_LENGTH = 2
+    # PD Decode 因 token 容量不足时，用此状态结束当前 segment。PD Master 会吞掉
+    # 模拟结束 token，并携带剩余 max_new_tokens 继续下一个 segment。值 5 用于保持旧状态编号兼容。
+    FINISHED_PD_DECODE_CAPACITY = 5
     FINISHED_ABORTED = 3
     # 内部错误结束（如 PD KV 传输失败）；见类文档。
     FINISHED_ERROR = 4
@@ -47,14 +52,14 @@ class FinishStatus(ctypes.Structure):
         self.status = init_state
 
     def set_status(self, new_status):
-        assert 0 <= new_status <= 4
+        assert 0 <= new_status <= self.FINISHED_PD_DECODE_CAPACITY
         self.status = new_status
 
     def get_status(self):
         return self.status
 
     def is_finished(self):
-        return self.FINISHED_STOP <= self.status <= self.FINISHED_ERROR
+        return self.FINISHED_STOP <= self.status <= self.FINISHED_PD_DECODE_CAPACITY
 
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
@@ -65,6 +70,12 @@ class FinishStatus(ctypes.Structure):
     def is_finished_error(self):
         return self.status == self.FINISHED_ERROR
 
+    def is_finished_pd_decode_capacity(self):
+        return self.status == self.FINISHED_PD_DECODE_CAPACITY
+
+    def is_error_finished(self):
+        return self.status in (self.FINISHED_ABORTED, self.FINISHED_ERROR)
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
@@ -74,22 +85,10 @@ class FinishStatus(ctypes.Structure):
             return "abort"
         elif self.status == self.FINISHED_ERROR:
             return "error"
+        elif self.status == self.FINISHED_PD_DECODE_CAPACITY:
+            # 该内部状态正常会被 PD Master 吞掉；泄漏时按 length 降级处理。
+            return "length"
         return None
-
-
-class PrefixTokenIdsStruct(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [("size", ctypes.c_int), ("data", ctypes.c_int64 * 10)]
-
-    def __init__(self):
-        self.size = 0
-
-    def set_token_ids(self, ids: List[int]):
-        self.size = len(ids)
-        self.data[: len(ids)] = ids
-
-    def get_token_ids(self):
-        return list(self.data[: self.size])
 
 
 class Req(ctypes.Structure):
@@ -98,6 +97,10 @@ class Req(ctypes.Structure):
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
         ("recv_time", ctypes.c_double),  # 用于记录请求到达服务的时间，主要用于调试
+        # Router 收到请求和请求被调度为新 batch 的单调时钟时间戳，用于 HTTP server
+        # 判断请求是否在 Router 等待过久。时间戳写入共享内存，供不同进程读取。
+        ("router_arrival_time", ctypes.c_double),
+        ("infer_start_time", ctypes.c_double),
         ("request_id", ctypes.c_int64),  # 引用计数
         ("group_req_id", ctypes.c_int64),
         ("input_len", ctypes.c_int),
@@ -122,7 +125,6 @@ class Req(ctypes.Structure):
         ("out_tokens_queue", CircularQueue),
         ("sample_params", SamplingParams),
         ("chunked_prefill_size", ctypes.c_int),  # 只有chunked prefill模式才使用的参数
-        ("prefix_token_ids", PrefixTokenIdsStruct),  # 只有 token_headling 模式使用的参数
         # can_released_mark的作用是：
         # 只有整个流程中的最后一个处理模块，一般是 detokenization 进程，标记这个参数为True后，主管理进程才能真
         # 的释放请求对像。
@@ -133,6 +135,8 @@ class Req(ctypes.Structure):
         ("cumlogprob", ctypes.c_float),
         # mtp draft model 多输出命中接受的token数量
         ("mtp_accepted_token_num", ctypes.c_int),
+        ("mtp_verify_token_num", ctypes.c_int),
+        ("mtp_verify_step_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
         # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
@@ -171,6 +175,8 @@ class Req(ctypes.Structure):
         self.index_in_shm_mem: int = self.index_in_shm_mem
         self.ref_count: int = self.ref_count
         self.recv_time: float = time.time()
+        self.router_arrival_time = 0.0
+        self.infer_start_time = 0.0
 
         self.request_id = request_id
         self.group_req_id = convert_sub_id_to_group_id(request_id)
@@ -193,8 +199,6 @@ class Req(ctypes.Structure):
         else:
             self.sample_params = SamplingParams()
             self.sample_params.init(tokenizer=tokenizer, **sample_param)
-        self.prefix_token_ids = PrefixTokenIdsStruct()
-
         self.out_tokens_queue = CircularQueue()
         self.input_len = len(prompt_ids)
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
@@ -203,6 +207,8 @@ class Req(ctypes.Structure):
         self.chunked_prefill_size = chunked_prefill_size
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
+        self.mtp_verify_token_num = 0
+        self.mtp_verify_step_num = 0
         self._mtp_step = get_env_start_args().mtp_step
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
@@ -311,6 +317,14 @@ class Req(ctypes.Structure):
         )
         self.shm_logprobs.link_shm()
         return
+
+    def detach_shm_arrays(self):
+        """Detach process-local request-scoped SHM handles before slot reuse."""
+        for attr_name in ("shm_prompt_ids", "shm_logprobs"):
+            shm_array = getattr(self, attr_name, None)
+            if shm_array is not None:
+                shm_array.detach_shm()
+                delattr(self, attr_name)
 
     async def merge_final_token_metadata(
         self,
@@ -521,26 +535,3 @@ class ChunkedPrefillReq(Req):
     def get_first_router_need_tokens(self):
 
         return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
-
-
-class TokenHealingReq(ChunkedPrefillReq):
-    _pack_ = 4
-
-    def post_init(
-        self,
-    ):
-        for prefix_token_num in range(2, -1, -1):
-            if self.input_len > prefix_token_num:
-                self.input_len -= prefix_token_num
-                self.prefix_token_ids.set_token_ids(
-                    self.shm_prompt_ids.arr[self.input_len : (self.input_len + prefix_token_num)]
-                )
-                break
-
-        # 因为原始的输出token数量，会被中间的前缀补全占用decode次数，
-        # 所以默认多添加一些decode步数, token healing mode 下，由于
-        # 估计的生成token数据对应的生存周期可能会不准确,所以为了缓解调
-        # 度带来的显存估计问题，对于生成token的长度 + 6来缓解可能的估计
-        # 错误问题。
-        self.sample_params.max_new_tokens = self.sample_params.max_new_tokens + self.prefix_token_ids.size + 6
-        return

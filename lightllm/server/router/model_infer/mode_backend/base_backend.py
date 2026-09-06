@@ -1,4 +1,5 @@
 import os
+
 import numpy as np
 import torch
 import time
@@ -8,7 +9,7 @@ from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
-from lightllm.models import get_model
+from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -19,7 +20,6 @@ from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -43,13 +43,13 @@ from lightllm.distributed.communication_op import (
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
-from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
+from lightllm.server.multi_level_kv_cache import (
+    CacheTier,
+    create_cache_placement_controller,
+)
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
@@ -71,6 +71,7 @@ class ModeBackend:
 
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
+        self.spec_engine = None
 
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
@@ -134,7 +135,6 @@ class ModeBackend:
             "load_way": self.load_way,
             "max_req_num": kvargs.get("max_req_num", 1000),
             "max_seq_length": kvargs.get("max_seq_length", 1024 * 5),
-            "is_token_healing": kvargs.get("is_token_healing", False),
             "return_all_prompt_logics": self.args.enable_prompt_logprobs,
             "disable_chunked_prefill": self.disable_chunked_prefill,
             "data_type": kvargs.get("data_type", "float16"),
@@ -188,12 +188,18 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
 
+        cache_placement_controller = create_cache_placement_controller(
+            args=self.args,
+            radix_cache=self.radix_cache,
+        )
+
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
+            cache_placement_controller=cache_placement_controller,
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
@@ -245,9 +251,9 @@ class ModeBackend:
         # 只会在 pd pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
-        # 开启 mtp 模式，需要完成mtp model的初始化
-        if self.args.mtp_mode:
-            self.init_mtp_draft_model(kvargs)
+        if self.args.mtp_mode is not None:
+            self.init_mtp_draft_model(model_kvargs)
+            self.init_spec_engine()
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
@@ -301,32 +307,30 @@ class ModeBackend:
         raise NotImplementedError()
 
     def init_mtp_draft_model(self, main_kvargs: dict):
-        self.mtp_step = self.args.mtp_step
+        self.max_draft_step = self.args.mtp_step
         self.draft_models = []
+        spec_mode = self.args.mtp_mode
+        is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att")
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
-            num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
-            num_mtp_modules = 1
-        else:
-            assert False, f"error mtp mode {self.args.mtp_mode}"
+        draft_model_count = self.max_draft_step if is_chained_draft else 1
+        draft_model_dirs = self.args.mtp_draft_model_dir
+        assert draft_model_dirs is not None
+        assert len(draft_model_dirs) >= draft_model_count
 
-        for i in range(num_mtp_modules):
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
-            model_type = mtp_model_cfg.get("model_type", "")
-            mtp_model_kvargs = {
-                "weight_dir": self.args.mtp_draft_model_dir[i],
+        for i in range(draft_model_count):
+            draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
+            draft_model_kvargs = {
+                "weight_dir": draft_model_dirs[i],
                 "max_total_token_num": self.model.mem_manager.size,
                 "load_way": main_kvargs["load_way"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
                 "max_seq_length": main_kvargs.get("max_seq_length", 1024 * 5),
-                "is_token_healing": False,
                 "return_all_prompt_logics": False,
                 "disable_chunked_prefill": self.disable_chunked_prefill,
                 "data_type": main_kvargs.get("data_type", "float16"),
-                "graph_max_batch_size": main_kvargs.get("graph_max_batch_size", 16),
+                "graph_max_batch_size": main_kvargs["graph_max_batch_size"],
                 "graph_max_len_in_batch": main_kvargs.get("graph_max_len_in_batch", 8196),
                 "disable_cudagraph": main_kvargs.get("disable_cudagraph", False),
                 "mem_fraction": main_kvargs["mem_fraction"],
@@ -339,33 +343,13 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            model_type = mtp_model_cfg.get("model_type", "")
-            if model_type == "deepseek_v3":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-            elif model_type == "qwen3_moe":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-            elif model_type == "mistral":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif model_type == "glm4_moe_lite":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
-            elif model_type in ("qwen3_5", "qwen3_5_text"):
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+            draft_model_class = get_draft_model_class(
+                model_cfg=draft_model_cfg,
+                spec_mode=spec_mode,
+            )
+            self.draft_models.append(draft_model_class(draft_model_kvargs))
 
-                self.draft_models.append(Qwen3_5MTPModel(mtp_model_kvargs))
-            elif model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
-
-                self.draft_models.append(Qwen3_5MoeMTPModel(mtp_model_kvargs))
-            else:
-                raise ValueError(f"Unsupported MTP model type: {model_type}")
-
-            self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
+            self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return
 
     def _async_copy_next_token_infos_to_pin_mem(
@@ -632,6 +616,35 @@ class ModeBackend:
             )
         return
 
+    def _reorder_pd_high_priority_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
+        """将 PD 分段续跑的高优先级请求前置，普通请求保持在其后。"""
+        # PD 分段续跑请求已经完成前一段推理，需要优先进入本轮调度；将请求拆分后再拼接，
+        # 保持各自原有顺序，并确保高优先级请求位于普通请求之前。
+        high_priority_reqs = [req for req in ready_reqs if req.shm_req.sample_params.pd_high_priority_request]
+        normal_reqs = [req for req in ready_reqs if not req.shm_req.sample_params.pd_high_priority_request]
+        return high_priority_reqs + normal_reqs
+
+    def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
+        """
+        提升一个短 prefill 请求的优先级。
+        """
+        short_token_threshold = self.args.short_prefill_token_threshold
+        if short_token_threshold is None:
+            return ready_reqs
+
+        def remaining_prefill_tokens(req: InferReq) -> int:
+            return max(0, req.shm_req.input_len - req.cur_kv_len)
+
+        sorted_reqs = sorted(
+            ready_reqs,
+            key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
+        )
+        if sorted_reqs and remaining_prefill_tokens(sorted_reqs[0]) <= short_token_threshold:
+            target_req = sorted_reqs[0]
+            ready_reqs.remove(target_req)
+            ready_reqs.insert(0, target_req)
+        return ready_reqs
+
     # 一些可以复用的通用功能函数
     def _get_classed_reqs(
         self,
@@ -672,6 +685,8 @@ class ModeBackend:
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
+        ready_reqs = self._reorder_pd_high_priority_reqs(ready_reqs)
+        ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
 
         wait_pause_reqs = []
         paused_reqs = []
@@ -679,10 +694,8 @@ class ModeBackend:
         prefill_reqs = []
         decode_reqs = []
 
-        # 一次性最多暂停请求的数量, 防止盲目暂停大量请求
-        # 因为部分请求释放占用的token容量后，就会使推理可以正常进行。
-        # 如果因为一次推理容量不足，就以当前token容量的判断暂停了大量
-        # 请求，其逻辑是不适合的。
+        # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
+        # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
@@ -726,8 +739,24 @@ class ModeBackend:
                     can_alloc_token_num -= token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+                        if self.args.run_mode == "decode":
+                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
+                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
+                            wait_pause_count += 1
+                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
+                            if support_overlap:
+                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
+                                req_obj.filter_mark = True
+                            else:
+                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
+                                finished_reqs.append(req_obj)
+                            self.logger.info(
+                                f"force early finish for PD decode req_id={req_obj.req_id} "
+                                f"because token capacity is insufficient"
+                            )
+                        else:
+                            req_obj.wait_pause = True
+                            wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -747,12 +776,24 @@ class ModeBackend:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 
-        self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
-        # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
+        # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
+        cache_controller = g_infer_context.cache_placement_controller
+        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
+        cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
-            true_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
-                finished_reqs=finished_reqs
+            offload_reqs = [
+                req for req in finished_reqs if CacheTier.CPU in req.cache_tiers or CacheTier.DISK in req.cache_tiers
+            ]
+            offload_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
+                finished_reqs=offload_reqs
             )
+            offload_finished_req_ids = {req.req_id for req in offload_finished_reqs}
+            true_finished_reqs = [
+                req
+                for req in finished_reqs
+                if (CacheTier.CPU not in req.cache_tiers and CacheTier.DISK not in req.cache_tiers)
+                or req.req_id in offload_finished_req_ids
+            ]
         else:
             true_finished_reqs = finished_reqs
 
@@ -778,12 +819,6 @@ class ModeBackend:
                 decode_reqs = []
 
         return prefill_reqs, decode_reqs
-
-    def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
-        """
-        给 PD 分离模式下，prefill node 使用的继承钩子函数，用于发起 kv 传输任务。
-        """
-        pass
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
@@ -817,9 +852,9 @@ class ModeBackend:
     def _post_handle(
         self,
         run_reqs: List[InferReq],
-        next_token_ids: List[int],
-        next_token_logprobs: List[float],
-        next_token_ranks: List[int],
+        next_token_ids: torch.Tensor,
+        next_token_logprobs: torch.Tensor,
+        next_token_ranks: torch.Tensor,
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
@@ -828,6 +863,10 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
+        next_token_ids = next_token_ids.tolist()
+        next_token_logprobs = next_token_logprobs.tolist()
+        next_token_ranks = next_token_ranks.tolist()
+
         for req_obj, next_token_id, next_token_logprob, next_token_rank, pack in zip(
             run_reqs, next_token_ids, next_token_logprobs, next_token_ranks, run_reqs_update_packs
         ):
@@ -858,31 +897,15 @@ class ModeBackend:
     def _trans_req_ids_to_req_objs(self, req_ids: List[int]) -> List[InferReq]:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
-    def _verify_mtp_v2(
-        self, new_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b_req_mtp_start_loc: torch.Tensor
-    ):
-        mtp_accept_len, accepted_index = mtp_verify(
-            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            new_next_token_ids=new_next_token_ids,
-            b_req_idx=b_req_idx,
-        )
-        return mtp_accept_len, accepted_index
-
-    def _update_mtp_accept_ratio(
-        self,
-        decode_reqs: List[InferReq],
-        mtp_accept_len_cpu: torch.Tensor,
-    ):
-        if self.is_master_in_dp:
-            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
-                req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
-        return
-
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
-        return draft_next_token_ids_gpu
+        return torch.argmax(logits, dim=-1)
+
+    def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        logits = model_output.logits
+        probs = torch.softmax(logits, dim=-1)
+        max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
+        return draft_next_token_ids_gpu, max_probs
 
     def _sample_and_scatter_token(
         self,

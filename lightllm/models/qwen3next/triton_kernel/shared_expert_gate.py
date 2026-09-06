@@ -19,12 +19,16 @@ def _sigmoid_mul_kernel(
     offs = tl.arange(0, BLOCK_N)
     mask = offs < N
     x_ptrs = x + row * stride_x_m + offs * stride_x_n
-    x_vals = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
+    x_vals = tl.load(x_ptrs, mask=mask, other=0.0)
     if GATE_N == 1:
         gate_vals = tl.load(gate + row * stride_g_m).to(tl.float32)
     else:
         gate_vals = tl.load(gate + row * stride_g_m + offs * stride_g_n, mask=mask, other=0.0).to(tl.float32)
-    gate_vals = tl.sigmoid(gate_vals)
+    # Match the official Qwen3.5 implementation, ``output * torch.sigmoid(gate)``:
+    # materialize the sigmoid result in the gate dtype before multiplication.
+    gate_vals = tl.sigmoid(gate_vals).to(gate.dtype.element_ty)
+    # Qwen3.5 uses BF16, so keep both rounded operands in BF16 for the direct
+    # multiply.
     tl.store(x_ptrs, (x_vals * gate_vals).to(x.dtype.element_ty), mask=mask)
 
 

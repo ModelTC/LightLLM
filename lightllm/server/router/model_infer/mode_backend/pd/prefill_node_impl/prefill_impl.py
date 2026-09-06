@@ -2,7 +2,7 @@ import torch.multiprocessing as mp
 import random
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.pd_io_struct import PDChunckedTransTask
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -32,6 +32,19 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         ans_list: List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+
+            # P 节点的推理请求收到 abort 后，主动通知 KV 传输层停止该请求
+            # 尚未完成的传输任务，避免只能等待 D 节点上报错误或传输超时。
+            pd_abort_req_send_count = getattr(req_obj, "pd_abort_req_send_count", 0)
+            if (
+                self.is_master_in_dp
+                and req_obj.infer_aborted
+                and req_obj.pd_task_num != 0
+                and pd_abort_req_send_count < 6
+            ):
+                self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
+                req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
+
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
             if prefill_finished:
                 # 等待所有传输任务都已经完成。

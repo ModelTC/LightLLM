@@ -1,10 +1,15 @@
 from typing import List
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.deepseek_mtp.layer_weights.pre_and_post_layer_weight import Deepseek3MTPPreAndPostLayerWeight
 from lightllm.common.basemodel import TpPartBaseModel
 
 
+@DraftModelRegistry(
+    model_type="deepseek_v3",
+    spec_modes=("vanilla_with_att", "eagle_with_att"),
+)
 class Deepseek3MTPModel(Deepseek2TpPartModel):
 
     # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).

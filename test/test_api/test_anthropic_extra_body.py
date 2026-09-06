@@ -17,7 +17,12 @@ import ujson as json
 pytest.importorskip("litellm")
 
 import lightllm.server.api_anthropic as api_anthropic
-from lightllm.server.api_anthropic import _anthropic_to_chat_request, _openai_sse_to_anthropic_events
+from lightllm.server.api_anthropic import (
+    _anthropic_to_chat_request,
+    _fallback_openai_to_anthropic,
+    _openai_sse_to_anthropic_events,
+)
+from lightllm.server.api_models import ChatCompletionRequest
 
 
 def _base_body():
@@ -123,6 +128,39 @@ def test_extra_body_chat_template_kwargs_forwarded():
     assert "extra_body" not in chat_dict
 
 
+def test_native_thinking_parameter_is_forwarded():
+    body = _base_body()
+    body["thinking"] = {"type": "enabled", "budget_tokens": 128}
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["chat_template_kwargs"]["enable_thinking"] is True
+    assert chat_dict["separate_reasoning"] is True
+    assert "thinking" not in chat_dict
+
+
+def test_replayed_thinking_is_preserved_through_request_validation():
+    body = _tool_result_body("file contents")
+    body["messages"][1]["content"].insert(
+        0,
+        {
+            "type": "thinking",
+            "thinking": "I should read the requested file.",
+            "signature": "client-signature",
+        },
+    )
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+    assistant_dict = chat_dict["messages"][1]
+    assert "thinking_blocks" not in assistant_dict
+    assert assistant_dict["reasoning_content"] == "I should read the requested file."
+
+    request = ChatCompletionRequest(**chat_dict)
+    validated_assistant = request.messages[1].model_dump(exclude_none=True)
+    assert validated_assistant["reasoning_content"] == "I should read the requested file."
+    assert validated_assistant["tool_calls"]
+
+
 def test_extra_body_multiple_fields_forwarded():
     body = _base_body()
     body["extra_body"] = {
@@ -155,6 +193,62 @@ def test_missing_extra_body_is_noop():
     chat_dict, _ = _anthropic_to_chat_request(body)
     assert "extra_body" not in chat_dict
     assert "chat_template_kwargs" not in chat_dict
+
+
+def test_fallback_response_exposes_reasoning_as_thinking_block():
+    response = _fallback_openai_to_anthropic(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "reasoning": "First inspect the input.",
+                        "content": "The answer is 42.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+        "test-model",
+    )
+
+    assert response["content"] == [
+        {
+            "type": "thinking",
+            "thinking": "First inspect the input.",
+            "signature": api_anthropic._SYNTHETIC_THINKING_SIGNATURE,
+        },
+        {"type": "text", "text": "The answer is 42."},
+    ]
+
+
+def test_litellm_response_translation_preserves_reasoning_field():
+    from types import SimpleNamespace
+
+    response = SimpleNamespace(
+        model_dump=lambda exclude_none=True: {
+            "id": "chatcmpl-test",
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "reasoning": "First inspect the input.",
+                        "content": "The answer is 42.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+    )
+
+    result = api_anthropic._chat_response_to_anthropic(response, {}, "test-model")
+
+    assert result["content"][0]["type"] == "thinking"
+    assert result["content"][0]["thinking"] == "First inspect the input."
+    assert result["content"][0]["signature"] == api_anthropic._SYNTHETIC_THINKING_SIGNATURE
+    assert result["content"][1] == {"type": "text", "text": "The answer is 42."}
 
 
 def test_non_dict_extra_body_is_ignored():
@@ -739,6 +833,44 @@ def test_interleaved_tool_calls_do_not_emit_against_closed_block():
             ), f"delta for index {data['index']} but open block is {currently_open}"
             index_of_delta.append(data["index"])
     assert index_of_delta, "no deltas observed"
+
+
+def test_streaming_reasoning_uses_anthropic_thinking_events():
+    async def chunks():
+        yield _chunk({"reasoning_content": "First "})
+        yield _chunk({"reasoning_content": "think."})
+        yield _chunk({"content": "42"}, finish_reason="stop")
+        yield _chunk({}, usage={"prompt_tokens": 3, "completion_tokens": 4})
+
+    async def run():
+        return [event.decode("utf-8") async for event in _openai_sse_to_anthropic_events(chunks(), "m", "msg_x")]
+
+    events = []
+    for raw in asyncio.run(run()):
+        lines = raw.strip().split("\n")
+        events.append((lines[0].split(": ", 1)[1], json.loads(lines[1].split(": ", 1)[1])))
+
+    assert [event_type for event_type, _ in events] == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    assert events[1][1]["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
+    assert events[2][1]["delta"] == {"type": "thinking_delta", "thinking": "First "}
+    assert events[3][1]["delta"] == {"type": "thinking_delta", "thinking": "think."}
+    assert events[4][1]["delta"] == {
+        "type": "signature_delta",
+        "signature": api_anthropic._SYNTHETIC_THINKING_SIGNATURE,
+    }
+    assert events[7][1]["delta"] == {"type": "text_delta", "text": "42"}
 
 
 def test_chat_response_translation_failure_returns_valid_json():

@@ -69,8 +69,8 @@ Qwen3.5-397B-A17B（8×H200）
 - ``--tp 8``: 8 卡张量并行（397B 参数模型必需）
 - ``--max_req_total_len 262144``: 最大请求总长度，与模型原生 262K 上下文匹配
 - ``--chunked_prefill_size 8192``: 预填充处理的分块大小，降低峰值显存占用
-- ``--llm_prefill_att_backend fa3``: 预填充阶段使用 FlashAttention3（推荐 H200）
-- ``--llm_decode_att_backend flashinfer``: 解码阶段使用 FlashInfer
+- ``--llm_prefill_att_backend fa3``: 全注意力预填充使用 FlashAttention3，线性注意力预填充后端自动选择
+- ``--llm_decode_att_backend flashinfer``: 全注意力解码使用 FlashInfer，线性注意力解码后端自动选择
 - ``--graph_max_batch_size 128``: CUDA graph 最大批处理大小（显存不足时可减小）
 - ``--reasoning_parser qwen3``: 启用 Qwen3 推理解析器，支持思考模式
 

@@ -21,12 +21,13 @@ class DiversehBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
 
-        if get_env_start_args().mtp_mode:
-            # 当前只有 mistral mtp 可以使用 diverse mode 的 mtp 功能。
-            self.prefill = self.beam_prefill
-            assert get_env_start_args().mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-        else:
-            self.prefill = self.beam_prefill
+        self.prefill = self.beam_prefill
+        spec_mode = get_env_start_args().mtp_mode
+        if spec_mode is not None:
+            assert spec_mode in [
+                "vanilla_no_att",
+                "eagle_no_att",
+            ]
 
         self.classed_req_strict_prefill = True
 

@@ -269,11 +269,12 @@ def _usage_to_responses(usage: Dict[str, Any]) -> Dict[str, Any]:
     input_tokens = int(usage.get("prompt_tokens", 0))
     output_tokens = int(usage.get("completion_tokens", 0))
     cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0)
+    reasoning = int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0)
     return {
         "input_tokens": input_tokens,
         "input_tokens_details": {"cached_tokens": cached},
         "output_tokens": output_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": reasoning},
         "total_tokens": input_tokens + output_tokens,
     }
 

@@ -7,10 +7,12 @@ PD Master 的 cache-aware prefill 选点策略。
   负载均衡，避免热点。
 
 实现要点：
-  - 用前缀树（见 PromptCacheTree）记录「历史 prompt -> 处理它的 worker」；
+  - 用前缀树（见 PromptCacheTree）记录「成功进入推理的 prompt -> 处理它的 worker」；
   - 树中的 prefill_node 对应 worker.client_ip_port；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
-  - 用 worker.dispatched_prompt_chars（当前尚未产出首 token 的 prompt 字符数）做负载均衡。
+  - 根据推理侧返回的平均 prompt cache 命中率，动态调整 cache 亲和与负载均衡的权重；
+  - 优先使用 dispatched_req_num 为 0 的空闲节点，避免 GPU 闲置；
+  - 所有节点都忙时，用 worker.dispatched_prompt_chars 做负载均衡。
 
 选点流程见 CacheAwarePolicy.select_worker。
 """
@@ -23,6 +25,7 @@ from typing import List, Optional
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.log_utils import init_logger
 
+from .pd_selector import PDSelectionExtraInfo
 from .prompt_cache_tree import PromptCacheTree
 
 
@@ -36,7 +39,14 @@ class CacheAwareConfig:
     # 前缀匹配成功率阈值：matched_char_count / input_char_count 超过该值才路由到命中节点。
     cache_threshold: float = 0.5
     # cache 命中节点的在途量超过最空闲节点该倍数时，优先选择最空闲节点。
-    balance_rel_threshold: float = 1.8
+    balance_rel_threshold: float = 1.5
+    # 动态调整 balance_rel_threshold 时允许的上下限。
+    min_balance_rel_threshold: float = 1.0
+    max_balance_rel_threshold: float = 2.0
+    # 每轮用于统计平均 prompt cache 命中率的请求数。
+    cache_hit_rate_window_size: int = 1000
+    # 相邻统计周期命中率变化时，负载均衡阈值的调整步长。
+    balance_rel_threshold_step: float = 0.05
     # 前缀树允许的最大节点数（不含 root）。
     max_node_count: int = 1_000_000
     # 每次 LRU 驱逐的叶节点数量。
@@ -47,12 +57,47 @@ class CacheAwareConfig:
     recursion_limit: int = 4000
 
 
+class BalanceRelThresholdController:
+    """根据最近请求的 prompt cache 命中率动态调整负载均衡阈值。"""
+
+    def __init__(self) -> None:
+        self._cache_hit_rates = []
+        self._last_average_cache_hit_rate = None
+
+    def append(self, cache_hit_rate: float) -> None:
+        """追加一次真实 prompt cache 命中率。"""
+        cache_hit_rate = min(max(cache_hit_rate, 0.0), 1.0)
+        self._cache_hit_rates.append(cache_hit_rate)
+
+    def update_config(self, config: CacheAwareConfig) -> None:
+        """每收集一个统计窗口，根据命中率趋势调整负载均衡阈值。"""
+        if len(self._cache_hit_rates) < config.cache_hit_rate_window_size:
+            return
+
+        average_cache_hit_rate = (
+            sum(self._cache_hit_rates[-config.cache_hit_rate_window_size :]) / config.cache_hit_rate_window_size
+        )
+        self._cache_hit_rates.clear()
+
+        if self._last_average_cache_hit_rate is not None:
+            if average_cache_hit_rate > self._last_average_cache_hit_rate:
+                config.balance_rel_threshold += config.balance_rel_threshold_step
+            elif average_cache_hit_rate < self._last_average_cache_hit_rate:
+                config.balance_rel_threshold -= config.balance_rel_threshold_step
+            config.balance_rel_threshold = min(
+                max(config.balance_rel_threshold, config.min_balance_rel_threshold),
+                config.max_balance_rel_threshold,
+            )
+
+        self._last_average_cache_hit_rate = average_cache_hit_rate
+
+
 class CacheAwarePolicy:
     """
     维护 prompt 前缀树，并据此为请求选择 prefill worker。
 
     树生命周期：
-      - 选中 worker 后会把当前 prompt 插入该 worker 对应的 prefill_node；
+      - 请求成功进入推理后，把当前 prompt 插入实际 worker 对应的 prefill_node；
       - insert 时若超 max_node_count 会 lazy 触发 LRU 驱逐。
     """
 
@@ -65,6 +110,7 @@ class CacheAwarePolicy:
             evict_node_batch=self.config.evict_node_batch,
             recursion_limit=self.config.recursion_limit,
         )
+        self.balance_rel_threshold_controller = BalanceRelThresholdController()
 
     def select_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
         """
@@ -79,19 +125,50 @@ class CacheAwarePolicy:
 
         决策顺序：
           1) workers 为空 -> 返回 None；
-          2) 对 request_text 做前缀匹配，计算
+          2) 存在 dispatched_req_num 为 0 的空闲节点 -> 强制从空闲节点中选择；
+             多个节点空闲时优先选择 cache 命中节点；
+          3) 对 request_text 做前缀匹配，计算
              match_rate = matched_char_count / input_char_count；
-          3) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 得到 cache 命中节点；
-          4) cache 命中节点负载未严重高于最空闲节点 -> 选择 cache 命中节点；
-          5) 未命中或负载严重失衡 -> 选择最空闲节点；
-          6) 将当前 prompt 与最终选中的节点写入前缀树。
+          4) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 得到 cache 命中节点；
+          5) cache 命中节点负载未严重高于最空闲节点 -> 选择 cache 命中节点；
+          6) 未命中或负载严重失衡 -> 选择最空闲节点；
         """
         if not workers:
             return None
         if len(request_text) <= 1:
             raise ValueError(f"request_text length must be > 1, got {len(request_text)}")
 
-        # ---- 1. 前缀匹配：估计当前请求与历史请求的 cache 复用潜力 ----
+        # ---- 1. 空闲优先：避免有可用 GPU 闲置 ----
+        idle_worker = self._select_idle_worker(workers, request_text)
+        if idle_worker is not None:
+            return idle_worker
+
+        # ---- 2. 所有节点都忙时，在 cache 亲和与负载均衡之间权衡 ----
+        cache_worker = self._get_cache_worker(workers, request_text)
+        selected_worker = self._select_worker_by_cache_and_load(workers, cache_worker, len(request_text))
+        return selected_worker
+
+    def get_estimated_cache_info(self, selected_worker: PD_Client_Obj, request_text: str) -> PDSelectionExtraInfo:
+        """查询最终选中节点的输入 cache 命中率和最近插入时间。"""
+        result = self.prompt_cache_tree.prefix_match(request_text)
+        if result.prefill_node != selected_worker.client_ip_port or result.input_char_count == 0:
+            return PDSelectionExtraInfo()
+        return PDSelectionExtraInfo(
+            estimated_cache_hit_rate=result.matched_char_count / result.input_char_count,
+            cache_last_insert_time=result.last_insert_time,
+        )
+
+    def insert_prompt_cache(self, request_text: str, selected_worker: PD_Client_Obj) -> None:
+        """在请求成功进入推理后，记录 prompt 与实际执行的 Prefill 节点。"""
+        self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
+
+    def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
+        """记录推理侧上报的真实 cache 命中率，并更新动态负载阈值。"""
+        self.balance_rel_threshold_controller.append(cache_hit_rate)
+        self.balance_rel_threshold_controller.update_config(self.config)
+
+    def _get_cache_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
+        """在指定候选节点中返回达到匹配阈值的 cache 节点。"""
         result = self.prompt_cache_tree.prefix_match(request_text)
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
@@ -102,16 +179,41 @@ class CacheAwarePolicy:
             f"prefill_node={result.prefill_node}"
         )
 
-        cache_worker: Optional[PD_Client_Obj] = None
-        if match_rate > self.config.cache_threshold and result.prefill_node is not None:
-            for worker in workers:
-                if worker.client_ip_port == result.prefill_node:
-                    cache_worker = worker
-                    break
+        if match_rate <= self.config.cache_threshold or result.prefill_node is None:
+            return None
 
-        # ---- 2. 负载配平：cache 节点过载时选择当前在途量最少的节点 ----
+        for worker in workers:
+            if worker.client_ip_port == result.prefill_node:
+                return worker
+        return None
+
+    def _select_idle_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
+        """优先选择空闲节点；多个空闲节点之间优先复用 cache。"""
+        idle_workers = [worker for worker in workers if worker.dispatched_req_num == 0]
+        if not idle_workers:
+            return None
+
+        cache_worker = self._get_cache_worker(idle_workers, request_text) if len(idle_workers) > 1 else None
+        selected_worker = cache_worker or min(
+            idle_workers,
+            key=lambda worker: (worker.dispatched_prompt_chars, worker.client_ip_port),
+        )
+        logger.info(
+            f"CacheAwarePolicy: select idle worker, idle_worker_num={len(idle_workers)}, "
+            f"cache_worker={cache_worker.client_ip_port if cache_worker else None}, "
+            f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
+            f"selected_worker={selected_worker.client_ip_port}"
+        )
+        return selected_worker
+
+    def _select_worker_by_cache_and_load(
+        self,
+        workers: List[PD_Client_Obj],
+        cache_worker: Optional[PD_Client_Obj],
+        request_load: int,
+    ) -> PD_Client_Obj:
+        """所有节点都忙时，在 cache 亲和与 prompt 负载之间选择节点。"""
         least_loaded_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
-        request_load = len(request_text)
         least_projected_load = least_loaded_worker.dispatched_prompt_chars + request_load
         cache_projected_load = None
         cache_worker_is_overloaded = False
@@ -135,6 +237,4 @@ class CacheAwarePolicy:
             f"cache_worker_is_overloaded={cache_worker_is_overloaded}, "
             f"selected_worker={selected_worker.client_ip_port}"
         )
-
-        self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
         return selected_worker

@@ -3,7 +3,7 @@ from typing import Optional
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_spec import causal_conv1d_update
+from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import causal_conv1d_update
 
 
 def causal_conv1d_ref(
@@ -661,9 +661,9 @@ def test_multi_step_decode_sliding_window(width, num_steps):
 
 @pytest.mark.parametrize("width", [2, 3, 4])
 @pytest.mark.parametrize("mtp_step", [1, 2, 3])
-def test_spec_decode_multi_token_per_step(width, mtp_step):
+def test_mtp_decode_multi_token_per_step(width, mtp_step):
     """
-    Spec-decode: each step processes (mtp_step+1) tokens. After each step,
+    MTP decode: each step processes (mtp_step+1) tokens. After each step,
     some tokens are accepted (num_accepted_tokens varies). The conv_state
     sliding window must correctly preserve history across steps.
     """
@@ -683,7 +683,7 @@ def test_spec_decode_multi_token_per_step(width, mtp_step):
     idxs = torch.zeros(batch, device=device, dtype=torch.int32)
     qsl = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
 
-    # Phase 1: one-step spec decode triton
+    # Phase 1: one-step MTP decode triton
     x_full = torch.randn(seqlen, dim, device=device, dtype=torch.float32)
     out_triton = causal_conv1d_update(
         x_full.clone().half(),
@@ -715,11 +715,11 @@ def test_spec_decode_multi_token_per_step(width, mtp_step):
 
     rtol, atol = 1e-2, 1e-2
     assert torch.allclose(out_triton, ref_out, rtol=rtol, atol=atol), (
-        f"Spec-decode mismatch: width={width}, mtp_step={mtp_step}\n"
+        f"MTP decode mismatch: width={width}, mtp_step={mtp_step}\n"
         f"max diff={torch.abs(out_triton - ref_out).max().item():.6f}"
     )
 
-    # Phase 2: multi-step spec decode with varying acceptance
+    # Phase 2: multi-step MTP decode with varying acceptance
     conv_state_step = conv_state.clone().half()
 
     for step in range(num_steps):
@@ -758,7 +758,7 @@ def test_spec_decode_multi_token_per_step(width, mtp_step):
         ).float()
 
         assert torch.allclose(step_out, ref_step, rtol=rtol, atol=atol), (
-            f"Multi-step spec step={step} mismatch: width={width}, mtp_step={mtp_step}\n"
+            f"Multi-step MTP step={step} mismatch: width={width}, mtp_step={mtp_step}\n"
             f"max diff={torch.abs(step_out - ref_step).max().item():.6f}"
         )
 

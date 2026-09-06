@@ -40,6 +40,12 @@ Basic Configuration Parameters
 
     HTTP server worker process count, default is ``1``
 
+.. option:: --disable_delay_response_start
+
+    Send the status and headers of a streaming response immediately instead of waiting until the first response
+    chunk is ready. By default, LightLLM delays the response start so errors raised before the first chunk can still
+    be returned with the appropriate HTTP status code.
+
 .. option:: --hypercorn_config
 
     Path to a Hypercorn TOML configuration file. Only TOML configuration files are supported.
@@ -88,6 +94,60 @@ PD disaggregation Mode Parameters
     PD Master also applies the regular inference-progress health check: while requests remain in flight,
     the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
     ``HEALTH_TIMEOUT`` consecutive seconds.
+
+.. option:: --disable_pd_node_self_request_limit
+
+    P/D-node resource wait limiting is enabled by default and managed centrally by PD Master. Set this option only
+    when disabling the feature, and only when starting PD Master; it is not needed on Prefill or Decode nodes.
+    By default, PD Master supplies
+    ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
+    ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
+    or timeout settings. The first segment's timeout is
+    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
+    to -1 to wait indefinitely. Continuation segments with ``segment_index > 0`` use a separate timeout controlled by
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 60 seconds, improving the chance
+    that requests which have already produced partial results complete successfully. When set to a non-negative value,
+    a timeout reports ``Server is busy``; a request that has
+    entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
+    While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
+    The maximum probing period is controlled by ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` and defaults to
+    120 seconds. Once response tokens have been streamed to the client, the request is not restarted because doing so
+    would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
+    resource wait timeout; all P/D nodes wait indefinitely, and a ``Server is busy`` raised for another reason is
+    returned immediately without retrying.
+    In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
+    The maximum cache-record age eligible for promotion is controlled by
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
+    36 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
+    solely from a high cache-hit rate.
+
+    Startup example:
+
+    .. code-block:: bash
+
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
+            LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
+            python -m lightllm.server.api_server --run_mode pd_master ...
+
+.. option:: --disable_pd_cache_high_priority
+
+    Disable PD Master from promoting sufficiently long first-segment requests whose estimated input cache hit rate
+    is high and whose cache record is still fresh. This does not affect segmented continuation requests after PD
+    Decode capacity exhaustion; continuation requests remain high priority. Disabled by default, so eligible requests
+    are promoted unless this option is set.
+
+    Configure this option only on PD Master. When a Prefill node's combined GPU, CPU, and disk cache capacity is small
+    relative to its request working set, later requests can quickly evict reusable cache entries under high load.
+    Requests that could otherwise hit the cache must then repeat Prefill computation, which can significantly reduce
+    Prefill efficiency. In this situation, keep the default high-priority policy enabled so requests with a high
+    estimated cache hit rate can run earlier and reuse their cache entries before eviction.
+
+    This policy changes queue ordering and may increase time to first token (TTFT) for ordinary requests that do not
+    meet the cache-hit-rate, cache-age, or minimum-prompt-token thresholds. Consider setting
+    ``--disable_pd_cache_high_priority`` when Prefill cache capacity is sufficient and cache churn is low, or when
+    scheduling fairness and ordinary-request TTFT are more important than preserving cache-hit efficiency.
 
 .. option:: --config_server_host
 
@@ -268,8 +328,6 @@ Scheduling Parameters
 Output Constraint Parameters
 ----------------------------
 
-.. option:: --token_healing_mode
-
 .. option:: --output_constraint_mode
 
     Set the output constraint backend, optional values:
@@ -382,21 +440,44 @@ Performance Optimization Parameters
 
 .. option:: --llm_prefill_att_backend
 
-    Set the attention backend for the prefill phase. Available options:
+    Set the attention backend for the prefill phase. For hybrid linear-attention models such as Qwen3.5,
+    the first value selects the full-attention backend and the optional second value selects the
+    linear-attention backend. If the second value is omitted, it defaults to ``auto``.
+
+    Full-attention options:
 
     * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
     * ``fa3``: Use Flash-Attention 3 backend
     * ``flashinfer``: Use FlashInfer backend
     * ``triton``: Use Triton backend
+
+    Linear-attention options for Qwen3.5:
+
+    * ``auto``: Automatically select the best backend (default), with priority flashqla > triton
+    * ``flashqla``: Use FlashQLA backend
+    * ``triton``: Use Triton backend
+
+    Example: ``--llm_prefill_att_backend fa3 flashqla``.
 
 .. option:: --llm_decode_att_backend
 
-    Set the attention backend for the decode phase. Available options:
+    Set the attention backend for the decode phase. For hybrid linear-attention models such as Qwen3.5,
+    the first value selects the full-attention backend and the optional second value selects the
+    linear-attention backend. If the second value is omitted, it defaults to ``auto``.
+
+    Full-attention options:
 
     * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
     * ``fa3``: Use Flash-Attention 3 backend
     * ``flashinfer``: Use FlashInfer backend
     * ``triton``: Use Triton backend
+
+    Linear-attention options for Qwen3.5:
+
+    * ``auto``: Automatically select the best backend (default; currently selects triton)
+    * ``triton``: Use Triton backend
+
+    Example: ``--llm_decode_att_backend flashinfer triton``.
 
 .. option:: --llm_kv_type
 

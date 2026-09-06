@@ -175,6 +175,21 @@ Response Format
     // Answer chunk
     {"choices": [{"delta": {"content": "Answer fragment"}}]}
 
+When ``--reasoning_parser`` is enabled, Chat Completions usage reports the
+number of generated reasoning tokens (excluding reasoning delimiters):
+
+.. code-block:: json
+
+    {
+        "usage": {
+            "completion_tokens": 128,
+            "completion_tokens_details": {"reasoning_tokens": 96}
+        }
+    }
+
+The Responses API exposes the same count as
+``usage.output_tokens_details.reasoning_tokens``.
+
 Advanced Features
 -----------------
 
@@ -266,6 +281,12 @@ Configuration
 
 **stream_reasoning** (bool, default: False)
   Whether to stream reasoning content in real-time
+
+**reasoning_effort** (string, optional)
+  Accepted reasoning level: ``none``, ``minimal``, ``low``, ``medium``, ``high``, ``xhigh``, or ``max``.
+  Support for non-``none`` levels depends on the model's chat template.
+  ``none`` automatically disables thinking for compatible chat templates. Explicit
+  ``thinking`` or ``enable_thinking`` values in ``chat_template_kwargs`` take priority.
 
 **chat_template_kwargs** (object)
   - ``enable_thinking``: Enable reasoning (Qwen3, GLM45)

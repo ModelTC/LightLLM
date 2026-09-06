@@ -2,6 +2,7 @@ import dataclasses
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
+from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
 
 class TritonAttBackend(BaseAttBackend):
@@ -93,8 +94,15 @@ class TritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class TritonDecodeAttState(BaseDecodeAttState):
+    b_mark_mtp_shared_group: torch.Tensor = None
+
     def init_state(self):
-        pass
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+        if draft_step > 0:
+            self.b_mark_mtp_shared_group = build_mtp_shared_group_markers(
+                self.infer_state.b_req_idx,
+                hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+            )
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -112,9 +120,15 @@ class TritonDecodeAttState(BaseDecodeAttState):
             assert att_control.tp_alibi is not None
             return self._alibi_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
+            draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
-            if q_head_num == k_head_num:
+
+            if draft_step > 0:
+                assert q_head_num >= k_head_num, "speculative decode requires q_head_num >= k_head_num"
+                return self._spec_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
+            elif q_head_num == k_head_num:
                 assert att_control.use_sliding_window is False, "sliding_window not supported in non-gqa attention yet"
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
@@ -201,6 +215,30 @@ class TritonDecodeAttState(BaseDecodeAttState):
             out=out,
             alloc_tensor_func=alloc_func,
             sliding_window=sliding_window,
+        )
+
+        return out
+
+    def _spec_decode_gqa_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        alloc_func=torch.empty,
+    ):
+        from ...triton_kernel.att.decode_att.gqa.mtp_diverse import (
+            token_decode_attention_mtp_diverse_single_token,
+        )
+
+        out = token_decode_attention_mtp_diverse_single_token(
+            q=q,
+            k=k,
+            v=v,
+            Req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
+            B_req_idx=self.infer_state.b_req_idx,
+            b_seq_len=self.infer_state.b_seq_len,
+            b_mark_shared_group=self.b_mark_mtp_shared_group,
+            alloc_tensor_func=alloc_func,
         )
 
         return out

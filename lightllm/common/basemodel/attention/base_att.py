@@ -1,7 +1,12 @@
+import threading
+
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
+
+from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -10,32 +15,64 @@ if TYPE_CHECKING:
 
 class BaseAttBackend:
     """
-    用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等，
-    这个是单列模式, 每种backend只有一个实例
+    用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等。
+    每个 model 复用一个 backend 实例。
     """
 
     _instances = {}
+    _workspace_buffers = {}
+    _workspace_buffer_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
         """
-        重写__new__方法实现单例模式
+        Main 和 speculative draft model 可能使用不同的 CUDA graph 上限
+        和缓存布局，不能只按 backend class 共享实例。
         """
-        # 检查是否已经有该类的实例
-        if cls not in cls._instances:
-            # 创建新实例并存储
+        model = kwargs.get("model", args[0] if args else None)
+        instance_key = (cls, model)
+        if instance_key not in cls._instances:
             instance = super().__new__(cls)
-            cls._instances[cls] = instance
-        # 返回已有的实例
-        return cls._instances[cls]
+            cls._instances[instance_key] = instance
+        return cls._instances[instance_key]
 
     def __init__(self, model: "TpPartBaseModel"):
         self.model = model
+
+    @staticmethod
+    def get_gpu_workspace_buffer(key_name: str, workspace_size: int, dtype: torch.dtype = torch.int8) -> torch.Tensor:
+        """Return a process-local workspace shared by key name and CUDA device."""
+        if not key_name:
+            raise ValueError("workspace key_name must not be empty")
+        if workspace_size <= 0:
+            raise ValueError(f"workspace_size must be positive, got {workspace_size}")
+
+        device_id = get_current_device_id()
+        buffer_key = (device_id, key_name, workspace_size, dtype)
+        with BaseAttBackend._workspace_buffer_lock:
+            workspace_buffer = BaseAttBackend._workspace_buffers.get(buffer_key)
+            if workspace_buffer is None:
+                workspace_buffer = torch.empty(workspace_size, dtype=dtype, device=device_id)
+                BaseAttBackend._workspace_buffers[buffer_key] = workspace_buffer
+            return workspace_buffer
 
     def create_att_prefill_state(self) -> "BasePrefillAttState":
         raise NotImplementedError("not impl")
 
     def create_att_decode_state(self) -> "BaseDecodeAttState":
         raise NotImplementedError("not impl")
+
+    def uses_dynamic_spec_verify_layout(self) -> bool:
+        args = get_env_start_args()
+        draft_step = self.model.mtp_manager.get_decode_draft_step(self.model.is_mtp_draft_model)
+        is_main_model = not self.model.is_mtp_draft_model
+        has_decode_draft_step = draft_step > 0
+        dynamic_verify_enabled = args.mtp_dynamic_verify
+        return is_main_model and has_decode_draft_step and dynamic_verify_enabled
+
+    def uses_causal_attention(self) -> bool:
+        args = get_env_start_args()
+        is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash")
+        return not is_parallel_block_draft
 
     def _find_layer_index(
         self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]

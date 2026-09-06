@@ -3,7 +3,7 @@ import numpy as np
 from lightllm.utils.envs_utils import get_unique_server_name
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
-from .req import Req, ChunkedPrefillReq, TokenHealingReq
+from .req import Req, ChunkedPrefillReq
 from .shm_array import ShmArray
 from .atomic_array_lock import AtomicShmArrayLock, AtomicLockItem
 from .atomic_lock import AtomicShmLock
@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 class ShmReqManager:
     def __init__(self):
-        self.req_class: Req.__class__ = self.get_req_class_type()
+        self.req_class: Req.__class__ = ChunkedPrefillReq
         class_size = ctypes.sizeof(self.req_class)
         self.max_req_num = self.get_max_req_num()
         self.req_shm_byte_size = class_size * self.max_req_num
@@ -28,13 +28,6 @@ class ShmReqManager:
         self.init_manager_lock()
         self.init_alloc_state_shm()
         return
-
-    def get_req_class_type(self):
-        args: StartArgs = get_env_start_args()
-        if args.token_healing_mode:
-            return TokenHealingReq
-
-        return ChunkedPrefillReq
 
     def get_max_req_num(self):
         args: StartArgs = get_env_start_args()
@@ -136,6 +129,8 @@ class ShmReqManager:
         req_index_in_mem = req.index_in_shm_mem
         assert req_index_in_mem < self.max_req_num
         assert self.proc_private_get_state[req_index_in_mem] == 1
+        req.detach_shm_arrays()
+
         with self.get_req_lock_by_index(req_index_in_mem):
             req.ref_count = req.ref_count - 1
         self.proc_private_get_state[req_index_in_mem] = 0

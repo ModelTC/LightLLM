@@ -63,7 +63,9 @@ Known limitations
 
 - Prompt caching (``cache_control``) is accepted but ignored; ``cache_*``
   fields in ``usage`` are always zero.
-- Extended thinking (``thinking`` parameter) is not supported.
+- Extended thinking (``thinking: {"type": "enabled"}``) is supported and
+  returned as Anthropic ``thinking`` content blocks. The requested thinking
+  budget is currently not enforced separately from ``max_tokens``.
 - The Batch API (``/v1/messages/batches``) and Files API are not implemented.
 - Model name is accepted but ignored; LightLLM always serves the model
   loaded via ``--model_dir`` and echoes the requested name back in the response.

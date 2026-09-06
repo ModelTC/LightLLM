@@ -10,6 +10,9 @@ from .utils import should_init_decode_wrapper
 
 
 class MlaFlashInferAttBackend(BaseAttBackend):
+    workspace_buffer_key = "flashinfer_mla"
+    workspace_buffer_size = 256 * 1024 * 1024
+
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
@@ -21,7 +24,6 @@ class MlaFlashInferAttBackend(BaseAttBackend):
         self.v_head_dim = model.v_head_dim
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
-        self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=get_current_device_id())
         self.max_seq_length = model.max_seq_length
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         self.kv_indices_buffer = [
@@ -64,7 +66,11 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
         kv_starts = self.infer_state.b1_cu_kv_seq_len.int()
         if self.prefill_wrapper is None:
             self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-                self.backend.workspace_buffer, "NHD"
+                self.backend.get_gpu_workspace_buffer(
+                    key_name=self.backend.workspace_buffer_key,
+                    workspace_size=self.backend.workspace_buffer_size,
+                ),
+                "NHD",
             )
         self.prefill_wrapper.plan(
             qo_indptr=q_starts,
@@ -159,7 +165,10 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         assert self.decode_wrapper is None
 
         self.decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
-            self.backend.workspace_buffer,
+            self.backend.get_gpu_workspace_buffer(
+                key_name=self.backend.workspace_buffer_key,
+                workspace_size=self.backend.workspace_buffer_size,
+            ),
             use_cuda_graph=True,
             qo_indptr=self.q_indptr,
             kv_indices=self.kv_indices,

@@ -35,6 +35,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
+        "--disable_delay_response_start",
+        action="store_true",
+        help=(
+            "Send streaming response status and headers immediately instead of waiting until the first "
+            "response chunk is ready."
+        ),
+    )
+    parser.add_argument(
         "--hypercorn_config",
         type=str,
         default=None,
@@ -66,6 +74,29 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help=(
             "PD master topology mode: elastic allows the number of Prefill and Decode nodes to change "
             "dynamically; use <P>p<D>d for a fixed topology, for example 2p4d. Default: elastic."
+        ),
+    )
+    parser.add_argument(
+        "--disable_pd_node_self_request_limit",
+        action="store_true",
+        help=(
+            "Disable PD Master-managed resource wait limiting and retries for requests rejected as server busy. "
+            "Configure this option only on PD Master. By default, PD Master sends timeout details to P/D nodes, "
+            "which only enforce the received values, and retries busy requests."
+        ),
+    )
+    parser.add_argument(
+        "--disable_pd_cache_high_priority",
+        action="store_true",
+        help=(
+            "Disable PD Master's high-priority scheduling for first-segment requests with a fresh, high "
+            "cache-hit estimate. Keep this policy enabled when a Prefill node's combined GPU, CPU, and disk "
+            "cache is small relative to its workload: under high load, ordinary scheduling can evict reusable "
+            "cache entries before they are consumed and significantly reduce Prefill efficiency. The policy "
+            "lets eligible cache-hit requests run earlier, but may increase TTFT for ordinary requests. "
+            "Consider disabling it only when scheduling fairness or ordinary-request latency is more important, "
+            "or when cache capacity is sufficient and cache churn is low. Segmented continuation requests remain "
+            "high priority. Configure this option only on PD Master. The policy is enabled by default."
         ),
     )
     parser.add_argument(
@@ -339,8 +370,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
+    parser.add_argument(
+        "--short_prefill_token_threshold",
+        type=int,
+        default=None,
+        help="""Enable short prefill request priority scheduling.
+        The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
+    )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
-    parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
 
     parser.add_argument(
         "--output_constraint_mode",
@@ -412,11 +449,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer"],
+        choices=["auto", "triton", "fa3", "flashinfer", "flashqla"],
         default=["auto"],
         help="""prefill attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
-                (priority: fa3 > flashinfer > triton)""",
+                (priority: fa3 > flashinfer > triton)
+                for hybrid linear-attention models, the second value selects the linear-attention backend
+                (priority: flashqla > triton); when omitted, it defaults to auto""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
@@ -427,7 +466,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
                 (priority when mtp_step > 0: fa3 > flashinfer > triton;
-                otherwise: flashinfer > fa3 > triton)""",
+                otherwise: flashinfer > fa3 > triton)
+                for hybrid linear-attention models, the second value selects the linear-attention backend
+                (currently triton only); when omitted, it defaults to auto""",
     )
     parser.add_argument(
         "--vit_att_backend",
@@ -733,31 +774,36 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
+            "eagle3",
+            "dspark",
+            "dflash",
             None,
         ],
         default=None,
-        help="""Supported MTP modes.
-        None: Disables MTP.
-        *_with_att: Uses the MTP model with an attention mechanism to predict the next draft token.
-        *_no_att: Uses the MTP model without an attention module to predict the next draft token.""",
+        help="""Speculative decoding mode.
+        *_with_att and *_no_att select attention or non-attention draft models;
+        eagle3 uses autoregressive EAGLE-3 drafting; dflash uses block-diffusion drafting;
+        dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(
         "--mtp_draft_model_dir",
         type=str,
         nargs="+",
         default=None,
-        help="""Path to the draft model for the MTP multi-prediction feature,
-        used for loading the MTP multi-output token model.""",
+        help="""Path to the speculative draft model. The legacy option name is
+        retained for command-line compatibility.""",
     )
     parser.add_argument(
         "--mtp_step",
         type=int,
         default=0,
-        help="""Specifies the number of additional tokens to predict using the draft model.
-        Currently, this feature supports only the DeepSeekV3 model.
-        Increasing this value allows for more predictions,
-        but ensure that the model is compatible with the specified step count.
-        currently, deepseekv3 model only support 1 step""",
+        help="""Number of additional draft tokens per request.
+        For DSpark and DFlash this value is derived from the draft checkpoint block_size.""",
+    )
+    parser.add_argument(
+        "--mtp_dynamic_verify",
+        action="store_true",
+        help="""Enable dynamic speculative scheduling.""",
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",
@@ -805,6 +851,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=256,
         help="""The token page size of cpu cache""",
+    )
+    parser.add_argument(
+        "--cache_placement_strategy",
+        type=str,
+        choices=["adaptive", "legacy"],
+        default="adaptive",
+        help="""Cache placement strategy used when CPU cache is enabled.
+        adaptive: place requests between GPU and the lower-tier cache path based on recent input lengths and capacity;
+        Disk placement is offloaded through CPU cache, so CPU and Disk capacities are not additive.
+        legacy: retain GPU cache and also copy each request to every enabled lower cache level.""",
     )
     parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(

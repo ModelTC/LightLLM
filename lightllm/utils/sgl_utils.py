@@ -122,7 +122,7 @@ def flash_attn_with_kvcache_autotune(
     )
 
 
-def fa3_decode_autotune(model, cuda_graph_batch_sizes):
+def fa3_decode_autotune(model, cuda_graph_batch_sizes, batch_multiplier: int):
     # 是否开启自动调优
     if get_triton_autotune_level() not in [
         AutotuneLevel.ADAPTIVE_AUTOTUNE,
@@ -141,12 +141,9 @@ def fa3_decode_autotune(model, cuda_graph_batch_sizes):
         v_cache = v.view(v.shape[0], 1, v.shape[1], v.shape[2])
         q_head_num = int(model.config["num_attention_heads"]) // model.tp_world_size_
         head_dim = int(k.shape[-1])
-        mtp_size = model.args.mtp_step + 1
-
         for batch_size in cuda_graph_batch_sizes[::-1]:
-            att_batch_size = batch_size // mtp_size
-            if att_batch_size <= 0:
-                continue
+            assert batch_size % batch_multiplier == 0
+            att_batch_size = batch_size // batch_multiplier
             # 因为完整的kv空间可能无法装下所有token，所以在tuning的时候，所有token都使用相同的kv空间。
             # 保证tuning的时候不会出现大的问题。
             kv_range = torch.arange(att_batch_size * max_kv_len, dtype=torch.int32, device=k.device) % max_kv_len
@@ -154,13 +151,13 @@ def fa3_decode_autotune(model, cuda_graph_batch_sizes):
             v[kv_range].zero_()
 
             q = torch.zeros(
-                (att_batch_size * mtp_size, q_head_num, head_dim),
+                (batch_size, q_head_num, head_dim),
                 dtype=model.data_type,
                 device=k.device,
             )
             page_table = kv_range.view(att_batch_size, max_kv_len)
             cache_seqlens = torch.full((att_batch_size,), max_kv_len, dtype=torch.int32, device=k.device)
-            cu_seqlens_q = torch.arange(att_batch_size + 1, dtype=torch.int32, device=k.device) * mtp_size
+            cu_seqlens_q = torch.arange(att_batch_size + 1, dtype=torch.int32, device=k.device) * batch_multiplier
             cu_seqlens_k = torch.arange(att_batch_size + 1, dtype=torch.int32, device=k.device) * max_kv_len
             softmax_scale = 1.0 / (head_dim ** 0.5)
 
@@ -172,7 +169,7 @@ def fa3_decode_autotune(model, cuda_graph_batch_sizes):
                 cache_seqlens=cache_seqlens,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k_new=cu_seqlens_k,
-                max_seqlen_q=mtp_size,
+                max_seqlen_q=batch_multiplier,
                 softmax_scale=softmax_scale,
                 causal=True,
                 window_size=(-1, -1),

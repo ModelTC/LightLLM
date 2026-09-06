@@ -4,7 +4,7 @@
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
 #
 # Extracted from fused_recurrent.py — directly launches the triton kernel
-# without a torch.autograd.Function wrapper.  Used by the MTP spec-decode
+# without a torch.autograd.Function wrapper. Used by the MTP decode
 # verify path of the GDN (Gated DeltaNet) layer in Qwen3Next.
 #
 # Upstream source: flash-linear-attention / fused-recurrent gated delta rule.

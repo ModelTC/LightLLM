@@ -7,12 +7,28 @@ import os
 import time
 from typing import Optional
 
-_FORMAT = "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s"
+_FORMAT = "%(levelname)s %(asctime)s %(node_role)s[%(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 _LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "debug")
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL.upper(), 0)
 _LOG_DIR = os.environ.get("LIGHTLLM_LOG_DIR", None)
+_LOG_NODE_ROLE = os.environ.get("LIGHTLLM_LOG_NODE_ROLE", "")
+
+_PD_NODE_ROLE_MARKERS = {
+    "prefill": "P",
+    "decode": "D",
+}
+
+
+def set_log_node_role(run_mode: str):
+    """Add a P/D marker to logs and propagate it to child processes."""
+    global _LOG_NODE_ROLE
+    _LOG_NODE_ROLE = _PD_NODE_ROLE_MARKERS.get(run_mode, "")
+    if _LOG_NODE_ROLE:
+        os.environ["LIGHTLLM_LOG_NODE_ROLE"] = _LOG_NODE_ROLE
+    else:
+        os.environ.pop("LIGHTLLM_LOG_NODE_ROLE", None)
 
 
 class NewLineFormatter(logging.Formatter):
@@ -22,6 +38,7 @@ class NewLineFormatter(logging.Formatter):
         logging.Formatter.__init__(self, fmt, datefmt)
 
     def format(self, record):
+        record.node_role = f"[{_LOG_NODE_ROLE}] " if _LOG_NODE_ROLE else ""
         msg = logging.Formatter.format(self, record)
         if record.message != "":
             parts = msg.split(record.message)

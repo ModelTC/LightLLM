@@ -1,7 +1,17 @@
 import torch
 import threading
 import collections
+from dataclasses import dataclass
 from typing import List, Dict, Union, Sequence
+
+
+@dataclass
+class AsyncPinnedCpuTensor:
+    tensor: torch.Tensor
+    ready_event: torch.cuda.Event
+
+    def wait(self) -> None:
+        self.ready_event.synchronize()
 
 
 class PinMemTensorManager:
@@ -48,6 +58,16 @@ class PinMemTensorManager:
         pin_mem = self.alloc_pin_tensor(key, size=size, dtype=gpu_tensor.dtype)
         pin_mem.copy_(gpu_tensor.view(-1), non_blocking=True)
         return pin_mem.view(gpu_tensor.shape)
+
+    def async_copy_from_gpu_tensor_with_event(
+        self,
+        key: str,
+        gpu_tensor: torch.Tensor,
+    ) -> AsyncPinnedCpuTensor:
+        cpu_tensor = self.async_copy_from_gpu_tensor(key=key, gpu_tensor=gpu_tensor)
+        ready_event = torch.cuda.Event()
+        ready_event.record()
+        return AsyncPinnedCpuTensor(tensor=cpu_tensor, ready_event=ready_event)
 
     def get_const_cpu_tensor(
         self,

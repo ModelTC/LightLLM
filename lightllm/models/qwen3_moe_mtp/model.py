@@ -1,5 +1,6 @@
 from typing import List
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_moe_mtp.layer_weights.pre_and_post_layer_weight import Qwen3MOEMTPPreAndPostLayerWeight
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.qwen3_moe_mtp.layer_infer.transformer_layer_infer import Qwen3MOEMTPTransformerLayerInfer
@@ -7,6 +8,10 @@ from lightllm.models.qwen3_moe_mtp.layer_weights.transformer_layer_weight import
 from lightllm.common.basemodel import TpPartBaseModel
 
 
+@DraftModelRegistry(
+    model_type="qwen3_moe",
+    spec_modes=("vanilla_no_att", "eagle_no_att"),
+)
 class Qwen3MOEMTPModel(Qwen3MOEModel):
 
     # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).

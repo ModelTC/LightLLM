@@ -41,6 +41,8 @@ class ObjType(enum.Enum):
     PD_UPLOAD_PREFILL_PROMPT_IDS = 4  # prefill 节点上报生成的 prompt ids 信息。
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
+    PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
+    PD_UPLOAD_SERVER_BUSY = 8  # P/D 节点向 pd master 上报本地服务繁忙。
 
 
 @dataclass
@@ -58,6 +60,8 @@ class PD_Client_Obj:
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
     # cache-aware 选点用：当前派发到该节点且尚未产出首 token 的 prompt 字符数。
     dispatched_prompt_chars: int = 0
+    # 当前派发到该节点且尚未产出首 token 的请求数。
+    dispatched_req_num: int = 0
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:

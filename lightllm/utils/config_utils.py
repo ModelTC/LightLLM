@@ -319,6 +319,12 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
     return
 
 
+def get_token_id(token: str) -> int:
+    from lightllm.server.build_prompt import tokenizer
+
+    return int(tokenizer.convert_tokens_to_ids(token))
+
+
 def get_model_architectures(model_path: str):
     try:
         config_json = get_config_json(model_path)

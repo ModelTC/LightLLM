@@ -1,10 +1,7 @@
 import collections
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
-
 from dataclasses import dataclass
-from typing import Type, Dict, Optional, Callable, List, Union, TypeVar
+from typing import Callable, Dict, List, Optional, Type, TypeVar, Union
+
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

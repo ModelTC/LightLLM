@@ -38,7 +38,11 @@ class ChunkedPrefillQueue(BaseQueue):
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 
         new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
-        ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
+        # 长短请求模式由 Infer 控制单轮 prefill token 上限。
+        ok_prefill = (
+            self.args.short_prefill_token_threshold is not None
+            or new_batch_first_router_need_tokens <= self.batch_max_tokens
+        )
 
         if ok_token_num and ok_req_num and ok_prefill:
             self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)

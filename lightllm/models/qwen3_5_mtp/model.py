@@ -2,12 +2,17 @@ from typing import List
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
 from lightllm.models.qwen3_5_mtp.layer_weights.pre_and_post_layer_weight import Qwen3_5MTPPreAndPostLayerWeight
 from lightllm.models.qwen3_5_mtp.layer_weights.transformer_layer_weight import Qwen3_5MTPTransformerLayerWeight
 from lightllm.models.qwen3_5_mtp.layer_infer.pre_layer_infer import Qwen3_5MTPPreLayerInfer
 
 
+@DraftModelRegistry(
+    model_type=("qwen3_5", "qwen3_5_text"),
+    spec_modes=("vanilla_with_att", "eagle_with_att"),
+)
 class Qwen3_5MTPModel(Qwen3_5TpPartModel):
     pre_and_post_weight_class = Qwen3_5MTPPreAndPostLayerWeight
     pre_layer_infer_class = Qwen3_5MTPPreLayerInfer

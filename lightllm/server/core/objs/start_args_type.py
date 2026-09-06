@@ -14,6 +14,7 @@ class StartArgs:
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
     httpserver_workers: int = field(default=1)
+    disable_delay_response_start: bool = field(default=False)
     hypercorn_config: Optional[str] = field(default=None)
     zmq_mode: str = field(
         default="ipc:///tmp/",
@@ -22,6 +23,8 @@ class StartArgs:
     pd_master_ip: str = field(default="0.0.0.0")
     pd_master_port: int = field(default=1212)
     pd_master_mode: str = field(default="elastic")
+    disable_pd_node_self_request_limit: bool = field(default=False)
+    disable_pd_cache_high_priority: bool = field(default=False)
     pd_trans_mode: str = field(default="nccl", metadata={"choices": ["nccl", "nixl"]})
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
@@ -98,8 +101,8 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
+    short_prefill_token_threshold: Optional[int] = field(default=None)
     diverse_mode: bool = field(default=False)
-    token_healing_mode: bool = field(default=False)
     output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
@@ -159,7 +162,8 @@ class StartArgs:
     vit_quant_cfg: Optional[str] = field(default=None)
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     llm_prefill_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default_factory=lambda: ["auto"],
+        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla"]},
     )
     llm_decode_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
@@ -187,12 +191,16 @@ class StartArgs:
                 "eagle_with_att",
                 "vanilla_no_att",
                 "eagle_no_att",
+                "eagle3",
+                "dspark",
+                "dflash",
                 None,
             ]
         },
     )
-    mtp_draft_model_dir: Optional[str] = field(default=None)
+    mtp_draft_model_dir: Optional[List[str]] = field(default=None)
     mtp_step: int = field(default=0)
+    mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)
@@ -200,6 +208,7 @@ class StartArgs:
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
     cpu_cache_token_page_size: int = field(default=256)
+    cache_placement_strategy: str = field(default="adaptive", metadata={"choices": ["adaptive", "legacy"]})
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
     disk_cache_dir: Optional[str] = field(default=None)

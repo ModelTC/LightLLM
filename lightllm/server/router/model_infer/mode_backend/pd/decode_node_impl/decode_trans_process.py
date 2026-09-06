@@ -21,7 +21,7 @@ from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 
 logger = init_logger(__name__)
 
@@ -47,6 +47,7 @@ def _init_env(
     task_out_queue: mp.Queue,
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
+    install_fatal_thread_excepthook()
     start_parent_check_thread()
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -270,8 +271,10 @@ class _DecodeTransModule:
                                 local_trans_task = self.waiting_dict.pop(notify_obj.get_key(), None)
                                 if local_trans_task is not None:
                                     local_trans_task.error_info = notify_obj.error_info
-                                    # 软性的调整超时时间，防止一些特殊情况，过快的释放task
-                                    # 占用的page 页面，导致多p 复写引起脏内容的问题。
+                                    # TODO: 这里设置 12 秒超时后会立即将任务放入 failed_queue，
+                                    # fail_loop 会直接归还任务占用的 page，因此该超时时间实际不会再被检查。
+                                    # 如果底层异步传输尚未结束，page 可能被新任务提前复用，导致脏数据。
+                                    # 后续需要在确认传输已经静默（DONE/ERR）后再回收 page。
                                     local_trans_task.transfer_time_out_secs = 12
                                     self.failed_queue.put(local_trans_task)
 

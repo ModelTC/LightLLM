@@ -65,8 +65,17 @@ class PDDecodeNode(ChunkedPrefillBackend):
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
-            if self.is_master_in_dp and req_obj.infer_aborted and req_obj.pd_task_num != 0:
+            # D 节点的请求未结束时会反复进入该过滤逻辑，最多发送 6 次
+            # PDAbortReq，既提高 abort 消息被传输层处理的概率，也避免持续重复发送。
+            pd_abort_req_send_count = getattr(req_obj, "pd_abort_req_send_count", 0)
+            if (
+                self.is_master_in_dp
+                and req_obj.infer_aborted
+                and req_obj.pd_task_num != 0
+                and pd_abort_req_send_count < 6
+            ):
                 self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
+                req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
 
             if req_obj.pd_task_num != (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                 continue

@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict
+from typing import List
 from lightllm.server.core.objs import Req
 from lightllm.utils.log_utils import init_logger
 
@@ -30,18 +30,9 @@ class DecodeReq:
 
         self.req = req
         self.input_len = self.req.input_len
-        self.prefix_str = ""
         self.stop_strs: List[str] = self.req.sample_params.stop_sequences.to_strings()
         # to_strings()已经做了倒序排列，第一个元素就是最长字符串
         self.stop_str_max_len = len(self.stop_strs[0]) if self.stop_strs else 0
-
-    def init_token_healing_prefix_str(self, token_id_to_token: Dict[int, str], tokenizer):
-        tokens = [token_id_to_token[token_id] for token_id in self.req.prefix_token_ids.get_token_ids()]
-        if tokens:
-            self.prefix_str = tokenizer.convert_tokens_to_string(tokens)
-        else:
-            self.prefix_str = ""
-        return
 
     def stop_sequences_str_match(self) -> bool:
         stop_strs = self.stop_strs

@@ -218,8 +218,23 @@ def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
 
 
 @lru_cache(maxsize=None)
+def enable_triton_mtp_kernel() -> bool:
+    """
+    启用 Triton MTP 解码专用 kernel
+    通过启动参数 --mtp_step > 0 和 --llm_decode_att_backend=triton 控制
+    """
+    return (get_env_start_args().mtp_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
+
+
+@lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
+
+
+def get_cache_placement_gpu_capacity_ratio() -> float:
+    ratio = float(os.getenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", 0.8))
+    assert 0 < ratio <= 1
+    return ratio
 
 
 @lru_cache(maxsize=None)
@@ -242,19 +257,83 @@ def enable_cpu_cache_numa_interleave() -> bool:
 
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
-    # mtp 模式下需要在mem manger上扩展draft model使用的layer
-    added_mtp_layer_num = 0
-    if get_env_start_args().mtp_mode == "eagle_with_att":
-        added_mtp_layer_num += 1
-    elif get_env_start_args().mtp_mode == "vanilla_with_att":
-        added_mtp_layer_num += get_env_start_args().mtp_step
+    args = get_env_start_args()
+    mtp_mode = args.mtp_mode
 
-    return added_mtp_layer_num
+    if mtp_mode is None:
+        return 0
+    if mtp_mode == "vanilla_no_att":
+        return 0
+    if mtp_mode == "eagle_no_att":
+        return 0
+    if mtp_mode == "vanilla_with_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_with_att":
+        return 1
+    if mtp_mode == "eagle3":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dspark":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+
+    raise ValueError(f"unsupported mtp_mode: {mtp_mode}")
 
 
 @lru_cache(maxsize=None)
-def get_pd_split_max_new_tokens() -> int:
-    return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))
+def get_mtp_weight_layer_num() -> int:
+    args = get_env_start_args()
+    mtp_mode = args.mtp_mode
+
+    if mtp_mode is None:
+        return 0
+    if mtp_mode == "vanilla_no_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_no_att":
+        return 1
+    return get_added_mtp_kv_layer_num()
+
+
+def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
+    with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
+        draft_config = json.load(json_file)
+    # Use the effective draft backbone config when the checkpoint stores it nested.
+    draft_config.update(draft_config.get("dflash_config", {}))
+    # A draft model may contain multiple attention layers; each layer needs a
+    # separate KV-cache slot after the target model's layers.
+    layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
+    assert layer_num is not None, f"missing num_hidden_layers or n_layer in draft config: {draft_model_dir}"
+    return int(layer_num)
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_resource_wait_timeout_seconds() -> int:
+    """P/D 节点的资源等待超时，单位为秒；负数表示永久等待。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS", 20))
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
+    """P/D 节点处理续跑分段时的资源等待超时，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", 60)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_busy_retry_timeout_seconds() -> int:
+    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 120)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_cache_high_priority_max_age_seconds() -> int:
+    """cache 命中请求提升为 PD 高优先级时允许的最大缓存年龄，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 180)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_cache_high_priority_min_prompt_tokens() -> int:
+    """cache 命中请求提升为 PD 高优先级时要求的最小 prompt token 数。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", 2048)))
 
 
 @lru_cache(maxsize=None)
