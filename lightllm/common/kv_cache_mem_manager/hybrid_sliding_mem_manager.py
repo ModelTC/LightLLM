@@ -48,8 +48,8 @@ class HybridSlidingMemoryManager(MemoryManager):
         self.linear_att_big_page_buffers = None
 
     def write_to_shm(self, req_manager):
-        # Host-side checkpoints are local to the inference process. Excluding
-        # them also preserves their pinned allocation during serialization.
+        # Page checkpoints are process-local GPU runtime state and must not be
+        # serialized into the shared-memory view of the memory manager.
         big_page_buffers = self.hybrid_att_big_page_buffers
         legacy_big_page_buffers = self.linear_att_big_page_buffers
         self.hybrid_att_big_page_buffers = None

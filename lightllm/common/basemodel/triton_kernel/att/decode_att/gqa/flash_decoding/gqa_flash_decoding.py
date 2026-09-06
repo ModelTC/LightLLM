@@ -38,7 +38,7 @@ def gqa_token_decode_attention_flash_decoding(
         q=q.view(calcu_shape1),
         k=cache_k,
         v=cache_v,
-        Req_to_tokens=infer_state.req_manager.get_decode_kv_indexs(use_sliding_window=sliding_window != (-1, -1)),
+        Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
         B_req_idx=infer_state.b_req_idx,
         B_Seqlen=infer_state.b_seq_len,
         max_len_in_batch=infer_state.max_kv_seq_len,

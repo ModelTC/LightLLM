@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class SlidingWindowStateCacheManager:
-    """Pinned host storage for request-level sliding-window checkpoints."""
+    """GPU storage for request-level sliding-window checkpoints."""
 
     def __init__(self, size: int, sliding_config: "SlidingWindowCacheConfig", keep_num: int = 0):
         self.size = size
@@ -28,8 +28,7 @@ class SlidingWindowStateCacheManager:
         self.state_cache = torch.empty(
             (size, *sliding_config.get_state_shape()),
             dtype=sliding_config.dtype,
-            device="cpu",
-            pin_memory=True,
+            device="cuda",
         )
         self.clear_to_init_state()
 
@@ -157,11 +156,6 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
         layer_buffer = self.req_to_sliding_window[local_layer]
         head_num = self.sliding_config.sliding_head_num
         return layer_buffer[:, :head_num], layer_buffer[:, head_num:]
-
-    def get_decode_kv_indexs(self, use_sliding_window: bool = False):
-        if use_sliding_window:
-            return self.req_to_sliding_window_indexs
-        return super().get_decode_kv_indexs(use_sliding_window=use_sliding_window)
 
     def commit_layer_state(self, layer_index: int, infer_state):
         local_layer = self.sliding_config.get_sliding_layer_index(layer_index)
