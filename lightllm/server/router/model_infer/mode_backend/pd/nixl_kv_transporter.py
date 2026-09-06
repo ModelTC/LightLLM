@@ -41,9 +41,8 @@ class NixlKVTransporter:
         self.nixl_agent = NixlWrapper(self.agent_name, conf)
         self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
         self.remote_agents: Dict[str, PDAgentMetadata] = {}
-        # remote_agents is read and mutated from several worker threads (recv, dispatch,
-        # accept_peer, request/ready page loops, ...), so every access needs to go through
-        # this lock to avoid concurrent add/remove races on the same peer (see GH-1470).
+        # Serialize complete peer add/remove operations, including native NIXL
+        # calls and descriptor cleanup, across worker threads (see GH-1470).
         self._remote_agents_lock = threading.Lock()
         return
 
@@ -108,17 +107,17 @@ class NixlKVTransporter:
     def remove_remote_agent(self, peer_name: str):
         with self._remote_agents_lock:
             remote_agent: PDAgentMetadata = self.remote_agents.pop(peer_name, None)
-        if remote_agent is not None:
-            try:
-                assert remote_agent.agent_name == peer_name
-                self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
-                if remote_agent.page_xfer_handles is not None:
-                    self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
-            except BaseException as e:
-                logger.error(f"remove remote agent {peer_name} failed")
-                logger.exception(str(e))
-        else:
-            logger.warning(f"try to remove remote agent, but peer name {peer_name} agent did not exist")
+            if remote_agent is not None:
+                try:
+                    assert remote_agent.agent_name == peer_name
+                    self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
+                    if remote_agent.page_xfer_handles is not None:
+                        self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
+                except BaseException as e:
+                    logger.error(f"remove remote agent {peer_name} failed")
+                    logger.exception(str(e))
+            else:
+                logger.warning(f"try to remove remote agent, but peer name {peer_name} agent did not exist")
 
     def send_write_done_task_to_decode_node(self, trans_task: PDChunckedTransTask):
         decode_agent_name = trans_task.decode_agent_name
