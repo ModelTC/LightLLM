@@ -20,29 +20,6 @@ JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 
 
-def store_int_token_ids(dst, ids: List[int], max_length: int, name: str) -> int:
-    """Validate a caller-supplied list of token ids and copy it into a fixed-size ctypes ``c_int`` array.
-
-    The type check runs against the input ``ids`` (not the zero-filled destination buffer), so a non-int
-    entry fails fast with a clear message instead of surfacing an opaque ctypes ``TypeError`` at the
-    assignment below.
-
-    Args:
-        dst: destination ctypes array, declared as ``c_int * max_length``.
-        ids: caller-supplied token ids; every element must be an ``int``.
-        max_length: capacity of ``dst``.
-        name: field name used in the error messages.
-
-    Returns:
-        The number of ids written, i.e. ``len(ids)``.
-    """
-    size = len(ids)
-    assert size <= max_length, f"Too many {name}: {size} > {max_length}."
-    assert all(isinstance(e, int) for e in ids), f"all {name} must be int."
-    dst[:size] = ids[:]
-    return size
-
-
 class StopSequence(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -53,7 +30,7 @@ class StopSequence(ctypes.Structure):
     ]
 
     def initialize(self, sequence: List[int], sequence_str: Optional[str] = None):
-        self.size = store_int_token_ids(self.sequence, sequence, STOP_SEQUENCE_MAX_LENGTH, "stop token ids")
+        self.size = _check_and_store_int_token_ids(self.sequence, sequence, STOP_SEQUENCE_MAX_LENGTH, "stop token ids")
 
         if sequence_str is not None:
             sequence_str_bytes = sequence_str.encode("utf-8")
@@ -217,7 +194,7 @@ class AllowedTokenIds(ctypes.Structure):
     ]
 
     def initialize(self, ids: List[int]):
-        self.size = store_int_token_ids(self.ids, ids, ALLOWED_TOKEN_IDS_MAX_LENGTH, "allowed token ids")
+        self.size = _check_and_store_int_token_ids(self.ids, ids, ALLOWED_TOKEN_IDS_MAX_LENGTH, "allowed token ids")
 
     def to_list(self):
         return list(self.ids[: self.size])
@@ -231,7 +208,7 @@ class InvalidTokenIds(ctypes.Structure):
     ]
 
     def initialize(self, ids: List[int]):
-        self.size = store_int_token_ids(self.ids, ids, INVALID_TOKEN_IDS_MAX_LENGTH, "invalid token ids")
+        self.size = _check_and_store_int_token_ids(self.ids, ids, INVALID_TOKEN_IDS_MAX_LENGTH, "invalid token ids")
         return
 
     def to_list(self):
@@ -507,3 +484,26 @@ class SamplingParams(ctypes.Structure):
         ret["group_request_id"] = self.group_request_id
         ret["suggested_dp_index"] = self.suggested_dp_index
         return ret
+
+
+def _check_and_store_int_token_ids(dst, ids: List[int], max_length: int, name: str) -> int:
+    """Validate a caller-supplied list of token ids and copy it into a fixed-size ctypes ``c_int`` array.
+
+    The type check runs against the input ``ids`` (not the zero-filled destination buffer), so a non-int
+    entry fails fast with a clear message instead of surfacing an opaque ctypes ``TypeError`` at the
+    assignment below.
+
+    Args:
+        dst: destination ctypes array, declared as ``c_int * max_length``.
+        ids: caller-supplied token ids; every element must be an ``int``.
+        max_length: capacity of ``dst``.
+        name: field name used in the error messages.
+
+    Returns:
+        The number of ids written, i.e. ``len(ids)``.
+    """
+    size = len(ids)
+    assert size <= max_length, f"Too many {name}: {size} > {max_length}."
+    assert all(isinstance(e, int) for e in ids), f"all {name} must be int."
+    dst[:size] = ids[:]
+    return size

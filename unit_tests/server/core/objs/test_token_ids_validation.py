@@ -3,7 +3,7 @@ from lightllm.server.core.objs.sampling_params import (
     StopSequence,
     AllowedTokenIds,
     InvalidTokenIds,
-    store_int_token_ids,
+    _check_and_store_int_token_ids,
     STOP_SEQUENCE_MAX_LENGTH,
     ALLOWED_TOKEN_IDS_MAX_LENGTH,
     INVALID_TOKEN_IDS_MAX_LENGTH,
@@ -58,21 +58,21 @@ def test_stop_sequence_rejects_non_int():
         seq.initialize([1, "2"])
 
 
-def test_store_int_token_ids_returns_size_and_writes_buffer():
+def test_check_and_store_int_token_ids_returns_size_and_writes_buffer():
     import ctypes
 
     buf = (ctypes.c_int * 8)()
-    size = store_int_token_ids(buf, [7, 8, 9], 8, "test ids")
+    size = _check_and_store_int_token_ids(buf, [7, 8, 9], 8, "test ids")
     assert size == 3
     assert list(buf[:size]) == [7, 8, 9]
 
 
-def test_store_int_token_ids_rejects_overflow():
+def test_check_and_store_int_token_ids_rejects_overflow():
     import ctypes
 
     buf = (ctypes.c_int * 2)()
     with pytest.raises(AssertionError):
-        store_int_token_ids(buf, [1, 2, 3], 2, "test ids")
+        _check_and_store_int_token_ids(buf, [1, 2, 3], 2, "test ids")
 
 
 if __name__ == "__main__":
