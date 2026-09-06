@@ -176,7 +176,8 @@ class GuidedJsonSchema(ctypes.Structure):
 
     def initialize(self, constraint: str, tokenizer):
         constraint_bytes = constraint.encode("utf-8")
-        assert len(constraint_bytes) < JSON_SCHEMA_MAX_LENGTH, "Guided json schema is too long."
+        if len(constraint_bytes) >= JSON_SCHEMA_MAX_LENGTH:
+            raise ValueError("Guided json schema is too long.")
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
