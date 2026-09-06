@@ -2,7 +2,7 @@ from .base import ReqManager
 from .hybrid_att import HybridAttentionReqManager
 from .linear_att import ReqManagerForMamba
 from .req_sampling_params import ReqSamplingParamsManager
-from .sliding_window import ReqManagerForSlidingWindow, SlidingWindowStateCacheManager
+from .sliding_window import ReqManagerForSlidingWindow
 
 __all__ = [
     "ReqManager",
@@ -10,5 +10,4 @@ __all__ = [
     "ReqManagerForMamba",
     "ReqManagerForSlidingWindow",
     "ReqSamplingParamsManager",
-    "SlidingWindowStateCacheManager",
 ]

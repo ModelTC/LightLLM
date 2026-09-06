@@ -398,7 +398,7 @@ class InferenceContext:
             )
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
-    def copy_hybrid_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
+    def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
         if not self.is_hybrid_att_mixed_model or self.radix_cache is None:
             return
@@ -418,11 +418,12 @@ class InferenceContext:
                 big_page_buffer_ids.append(-1)
 
         assert len(b_req_idx) == len(big_page_buffer_ids)
-        self.req_manager.copy_runtime_state_to_cache(
-            req_indexes=b_req_idx,
-            buffer_indexes=big_page_buffer_ids,
-            state_cache_manager=self.radix_cache.linear_att_big_page_buffers,
-        )
+        if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
+            self.req_manager.save_big_page_states(
+                b_req_idx=b_req_idx,
+                req_indexes=[req.req_idx for req in reqs],
+                buffer_indexes=big_page_buffer_ids,
+            )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill must be enabled for hybrid attention models"
 
@@ -438,15 +439,12 @@ class InferenceContext:
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id
-                        self.req_manager.copy_runtime_state_to_cache(
-                            req_indexes=[req.req_idx],
-                            buffer_indexes=[dst_buffer_idx],
-                            state_cache_manager=self.radix_cache.linear_att_small_page_buffers,
+                        self.req_manager.save_small_page_state(
+                            req_idx=req.req_idx,
+                            buffer_idx=dst_buffer_idx,
+                            small_page_buffers=self.radix_cache.linear_att_small_page_buffers,
                         )
         return
-
-    # Compatibility for out-of-tree backends while the hybrid name becomes canonical.
-    copy_linear_att_state_to_cache_buffer = copy_hybrid_att_state_to_cache_buffer
 
 
 g_infer_context = InferenceContext()

@@ -6,6 +6,7 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
+from lightllm.models.gemma4.kv_layout import get_kv_cache_layout
 from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import (
     context_attention_fwd_gemma4_mm,
 )
@@ -69,20 +70,13 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # HF: config.num_kv_shared_layers (may be missing or null on non-E
         # checkpoints — treat as 0).
-        kv_shared_count = network_config.get("num_kv_shared_layers") or 0
-        total_layers = network_config["num_hidden_layers"]
-        self.is_kv_shared_ = kv_shared_count > 0 and layer_num >= total_layers - kv_shared_count
-        self.kv_share_target_layer_ = None
-        if self.is_kv_shared_:
-            cutoff = total_layers - kv_shared_count
-            for j in range(cutoff - 1, -1, -1):
-                if network_config["layer_types"][j] == layer_type:
-                    self.kv_share_target_layer_ = j
-                    break
-            assert self.kv_share_target_layer_ is not None, (
-                f"layer {layer_num} ({layer_type}) is KV-shared but no earlier non-shared "
-                f"layer of the same type found below cutoff={cutoff}"
-            )
+        _, kv_owners, last_reader = get_kv_cache_layout(network_config)
+        kv_owner = kv_owners[layer_num]
+        self.is_kv_shared_ = kv_owner != layer_num
+        self.kv_share_target_layer_ = kv_owner if self.is_kv_shared_ else None
+        # A chunk must not overwrite the history ring until every shared-KV
+        # consumer has read it. This also keeps graph capture/replay layer-local.
+        self.commit_sliding_state_ = self.is_sliding and last_reader[kv_owner] == layer_num
 
         # Always 1.0: NoPE dims for full-attn layers are zero-padded into
         # cos/sin (cos=1, sin=0 → identity), so the kernel walks the whole
@@ -214,7 +208,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.b_image_token_end,
                 sliding_window=sw,
             )
-            if not self.is_kv_shared_:
+            if self.commit_sliding_state_:
                 infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
             return o_tensor.view(q.shape)
 
@@ -236,7 +230,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
         o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
-        if self.is_sliding and not self.is_kv_shared_:
+        if self.commit_sliding_state_:
             infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
         return o_tensor.view(q.shape)
 

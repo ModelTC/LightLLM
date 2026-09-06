@@ -9,6 +9,7 @@ from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfi
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
+from lightllm.models.gemma4.kv_layout import get_kv_cache_layout
 from lightllm.models.gemma4.layer_infer.pre_layer_infer import Gemma4PreLayerInfer
 from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerInfer
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
@@ -88,15 +89,18 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         assert not args.disable_chunked_prefill, "Gemma-4 hybrid sliding-window cache requires chunked prefill"
         assert args.run_mode == "normal", "Gemma-4 hybrid sliding-window cache does not support PD mode yet"
         assert args.llm_kv_type == "None", "Gemma-4 hybrid sliding-window cache does not support quantized KV yet"
+        assert not args.enable_dp_prompt_cache_fetch, "Gemma-4 sliding-window state does not support DP cache fetch yet"
+        assert not args.diverse_mode, "Gemma-4 sliding-window state does not support diverse mode yet"
         return
 
     def _get_sliding_cache_config(self):
         if hasattr(self, "sliding_cache_config"):
             return self.sliding_cache_config
         num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
+        layer_maps, _, _ = get_kv_cache_layout(self.config)
         self.sliding_cache_config = SlidingWindowCacheConfig(
-            layer_types=self.config["layer_types"],
-            num_kv_shared_layers=self.config.get("num_kv_shared_layers") or 0,
+            sliding_layer_to_cache_index=layer_maps["sliding_attention"],
+            full_layer_to_cache_index=layer_maps["full_attention"],
             sliding_window=self.config["sliding_window"],
             sliding_head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
             sliding_head_dim=self.config["head_dim"],

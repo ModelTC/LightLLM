@@ -1,5 +1,4 @@
-import collections
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
@@ -7,6 +6,7 @@ from lightllm.common.basemodel.triton_kernel.sliding_window_state import (
     commit_sliding_window_state,
     prepare_sliding_window_indexes,
 )
+from lightllm.common.sliding_window_cache_manager import SlidingWindowStateCacheManager
 
 from .hybrid_att import HybridAttentionReqManager
 
@@ -15,49 +15,6 @@ if TYPE_CHECKING:
     from lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager import HybridSlidingMemoryManager
     from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig
     from lightllm.server.router.model_infer.infer_batch import InferReq
-
-
-class SlidingWindowStateCacheManager:
-    """GPU storage for request-level sliding-window checkpoints."""
-
-    def __init__(self, size: int, sliding_config: "SlidingWindowCacheConfig", keep_num: int = 0):
-        self.size = size
-        self.keep_num = keep_num
-        self.sliding_config = sliding_config
-        assert 0 <= keep_num <= size
-        self.state_cache = torch.empty(
-            (size, *sliding_config.get_state_shape()),
-            dtype=sliding_config.dtype,
-            device="cuda",
-        )
-        self.clear_to_init_state()
-
-    def get_state_cache(self, buffer_idx: int):
-        return self.state_cache[buffer_idx]
-
-    def alloc_one_state_cache(self) -> Optional[int]:
-        return None if not self.free_list else self.free_list.popleft()
-
-    def alloc_state_cache(self, need_size: int) -> Optional[List[int]]:
-        if need_size > len(self.free_list):
-            return None
-        return [self.free_list.popleft() for _ in range(need_size)]
-
-    def free_state_cache(self, free_indexes: List[int]):
-        alloc_upper_bound = self.size - self.keep_num
-        assert all(0 <= idx < alloc_upper_bound for idx in free_indexes)
-        self.free_list.extend(free_indexes)
-        assert len(self.free_list) <= alloc_upper_bound
-
-    def get_free_cache_num(self):
-        return len(self.free_list)
-
-    def get_used_cache_num(self):
-        return self.size - len(self.free_list)
-
-    def clear_to_init_state(self):
-        self.state_cache.zero_()
-        self.free_list = collections.deque(range(self.size - self.keep_num))
 
 
 class ReqManagerForSlidingWindow(HybridAttentionReqManager):
@@ -94,14 +51,15 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
         )
 
     def create_state_cache_manager(self, size: int):
-        return SlidingWindowStateCacheManager(size=size, sliding_config=self.sliding_config)
+        # Allocated with full KV and big pages, within the same GPU budget.
+        return self.mem_manager.sliding_small_page_buffers
 
     def init_hybrid_attention_state(self, req: "InferReq"):
         start = req.req_idx * self.sliding_window
         self.req_to_sliding_window[:, start : start + self.sliding_window].zero_()
 
     def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
-        self._restore_state(req.req_idx, self.mem_manager.hybrid_att_big_page_buffers, big_page_buffer_idx)
+        self._restore_state(req.req_idx, self.mem_manager.linear_att_big_page_buffers, big_page_buffer_idx)
 
     def restore_small_page_state(self, req: "InferReq", small_page_buffers):
         self._restore_state(req.req_idx, small_page_buffers, req.shared_kv_node.small_page_buffer_idx)
@@ -113,23 +71,19 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
             non_blocking=True,
         )
 
-    def copy_runtime_state_to_cache(
-        self,
-        req_indexes: Union[List[int], torch.Tensor],
-        buffer_indexes: List[int],
-        state_cache_manager: SlidingWindowStateCacheManager,
-    ):
+    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
         assert len(req_indexes) == len(buffer_indexes)
-        if isinstance(req_indexes, torch.Tensor):
-            req_indexes = req_indexes.tolist()
         for req_idx, buffer_idx in zip(req_indexes, buffer_indexes):
             if buffer_idx == -1:
                 continue
-            start = req_idx * self.sliding_window
-            state_cache_manager.get_state_cache(buffer_idx).copy_(
-                self.req_to_sliding_window[:, start : start + self.sliding_window],
-                non_blocking=True,
-            )
+            self.save_small_page_state(req_idx, buffer_idx, self.mem_manager.linear_att_big_page_buffers)
+
+    def save_small_page_state(self, req_idx: int, buffer_idx: int, small_page_buffers: SlidingWindowStateCacheManager):
+        start = req_idx * self.sliding_window
+        small_page_buffers.get_state_cache(buffer_idx).copy_(
+            self.req_to_sliding_window[:, start : start + self.sliding_window],
+            non_blocking=True,
+        )
 
     def prepare_sliding_window(self, infer_state):
         q_token_num = infer_state.input_ids.shape[0]

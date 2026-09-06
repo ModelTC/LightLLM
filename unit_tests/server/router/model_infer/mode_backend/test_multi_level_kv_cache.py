@@ -131,11 +131,13 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     assert len(module.cpu_cache_handle_queue) == 2
 
 
-def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
+@pytest.mark.parametrize("is_linear", [True, False])
+def test_non_gpu_hybrid_cache_tiers_release_pending_state_pages(is_linear):
     freed_small_pages = []
     freed_big_pages = []
     context = InferenceContext()
-    context.is_linear_att_mixed_model = True
+    context.is_linear_att_mixed_model = is_linear
+    context.is_hybrid_att_mixed_model = True
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
     context.radix_cache = SimpleNamespace(
         linear_att_small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
@@ -157,3 +159,15 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     assert freed_big_pages == [8, 9]
     assert req.tail_linear_att_small_page_buffer_id is None
     assert req.linear_att_len_to_big_page_id == {}
+
+
+def test_hybrid_snapshot_outside_page_boundaries_does_not_touch_runtime():
+    context = InferenceContext()
+    context.is_hybrid_att_mixed_model = True
+    context.args = SimpleNamespace(
+        linear_att_hash_page_size=32, linear_att_page_block_num=8, disable_chunked_prefill=False
+    )
+    context.radix_cache = SimpleNamespace()
+    context.req_manager = None  # Any attempted snapshot would fail.
+    reqs = [SimpleNamespace(req_idx=0, get_chuncked_input_token_len=lambda: 17, linear_att_cache_len=32)]
+    context.copy_linear_att_state_to_cache_buffer(b_req_idx=[0], reqs=reqs)

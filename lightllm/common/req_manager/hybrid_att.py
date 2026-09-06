@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List, Union
+from typing import TYPE_CHECKING, List
 
 import torch
 
@@ -18,11 +18,9 @@ class HybridAttentionReqManager(ReqManager, ABC):
     this interface and may have a different physical granularity.
     """
 
-    is_linear_attention = False
-
     @abstractmethod
     def create_state_cache_manager(self, size: int):
-        """Create checkpoint storage used by request-state page boundaries."""
+        """Return checkpoint storage used by request-state page boundaries."""
 
     @abstractmethod
     def init_hybrid_attention_state(self, req: "InferReq"):
@@ -37,10 +35,9 @@ class HybridAttentionReqManager(ReqManager, ABC):
         """Restore runtime state from a small-page checkpoint."""
 
     @abstractmethod
-    def copy_runtime_state_to_cache(
-        self,
-        req_indexes: Union[List[int], torch.Tensor],
-        buffer_indexes: List[int],
-        state_cache_manager,
-    ):
-        """Copy selected request runtime states into host-side page buffers."""
+    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
+        """Save selected checkpoints; CPU request IDs avoid device-to-host synchronization."""
+
+    @abstractmethod
+    def save_small_page_state(self, req_idx: int, buffer_idx: int, small_page_buffers):
+        """Save a request's final small-page checkpoint in the layout's storage."""

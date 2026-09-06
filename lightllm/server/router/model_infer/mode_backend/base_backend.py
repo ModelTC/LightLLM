@@ -154,12 +154,11 @@ class ModeBackend:
         self.is_hybrid_att_mixed_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
 
         if self.is_hybrid_att_mixed_model:
-            self.hybrid_att_cache_manager = self.model.req_manager.create_state_cache_manager(
+            self.linear_att_cache_manager = self.model.req_manager.create_state_cache_manager(
                 size=self.args.linear_att_cache_size
             )
         else:
-            self.hybrid_att_cache_manager = None
-        self.linear_att_cache_manager = self.hybrid_att_cache_manager if self.is_linear_att_mixed_model else None
+            self.linear_att_cache_manager = None
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
@@ -172,7 +171,7 @@ class ModeBackend:
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
-                    linear_att_small_page_buffers=self.hybrid_att_cache_manager,
+                    linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
             else:
                 self.radix_cache = RadixCache(

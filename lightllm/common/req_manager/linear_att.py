@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Union
+from typing import TYPE_CHECKING, List
 
 import torch
 
@@ -15,8 +15,6 @@ if TYPE_CHECKING:
 
 
 class ReqManagerForMamba(HybridAttentionReqManager):
-    is_linear_attention = True
-
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
@@ -67,23 +65,17 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             linear_att_small_page_buffers=small_page_buffers,
         )
 
-    def copy_runtime_state_to_cache(
-        self,
-        req_indexes: Union[List[int], torch.Tensor],
-        buffer_indexes: list[int],
-        state_cache_manager: LinearAttCacheManager,
-    ):
-        assert len(req_indexes) == len(buffer_indexes)
+    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
+        assert len(b_req_idx) == len(buffer_indexes)
         if not any(buffer_idx != -1 for buffer_idx in buffer_indexes):
             return
 
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
-        if not isinstance(req_indexes, torch.Tensor):
-            req_indexes = torch.tensor(req_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
         buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+        state_cache_manager = self.mem_manager.linear_att_big_page_buffers
         copy_linear_att_state_to_kv_buffer(
-            b_req_idx=req_indexes,
+            b_req_idx=b_req_idx,
             big_page_buffer_ids=buffer_indexes,
             gpu_conv_state=self.req_to_conv_state.buffer,
             gpu_ssm_state=self.req_to_ssm_state.buffer,
@@ -92,6 +84,15 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             mtp_step=self.mtp_step,
         )
         return
+
+    def save_small_page_state(self, req_idx: int, buffer_idx: int, small_page_buffers: LinearAttCacheManager):
+        # Preserve main's small-page copies, including the MTP conv-state crop.
+        conv_cache_width = self.linear_config.get_conv_state_shape()[-1]
+        gpu_conv_state = self.req_to_conv_state.buffer[:, req_idx, ..., :conv_cache_width]
+        gpu_ssm_state = self.req_to_ssm_state.buffer[:, req_idx * (self.mtp_step + 1), ...]
+        dst_conv_state, dst_ssm_state = small_page_buffers.get_state_cache(buffer_idx=buffer_idx)
+        dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
+        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
 
     def init_linear_att_state(self, req: "InferReq"):
         conv_index = req.req_idx
