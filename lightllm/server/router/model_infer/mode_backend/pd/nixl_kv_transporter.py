@@ -108,13 +108,17 @@ class NixlKVTransporter:
         with self._remote_agents_lock:
             remote_agent: PDAgentMetadata = self.remote_agents.pop(peer_name, None)
             if remote_agent is not None:
+                start_time = time.monotonic()
                 try:
                     assert remote_agent.agent_name == peer_name
                     self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
                     if remote_agent.page_xfer_handles is not None:
                         self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
+                    logger.info(f"Removed remote agent {peer_name}, cost time: {time.monotonic() - start_time:.6f} s")
                 except BaseException as e:
-                    logger.error(f"remove remote agent {peer_name} failed")
+                    logger.error(
+                        f"remove remote agent {peer_name} failed, cost time: {time.monotonic() - start_time:.6f} s"
+                    )
                     logger.exception(str(e))
             else:
                 logger.warning(f"try to remove remote agent, but peer name {peer_name} agent did not exist")
