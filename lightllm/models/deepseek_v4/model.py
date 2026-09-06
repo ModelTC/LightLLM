@@ -135,11 +135,12 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             head_dim=self.config["head_dim"],
             dtype=self.data_type,
         )
-        self.dsv4_workspace.init_flashmla_prefill_full_out(
-            q_head_num=padded_q_head_num,
-            head_dim_v=self.config["head_dim"],
-            dtype=self.data_type,
-        )
+        if padded_q_head_num != real_q_head_num:
+            self.dsv4_workspace.init_flashmla_prefill_full_out(
+                q_head_num=padded_q_head_num,
+                head_dim_v=self.config["head_dim"],
+                dtype=self.data_type,
+            )
         for layer_infer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
             if padded_q_head_num == real_q_head_num:

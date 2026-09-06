@@ -123,17 +123,22 @@ class _PrefillAttState(BasePrefillAttState):
                 dtype=q.dtype,
                 device=q.device,
             )
-        full_out = self.infer_state.dsv4_workspace.flashmla_prefill_full_out[: q.shape[0]]
-        out.copy_(
-            self.backend._flashmla_att(
-                q,
-                k,
-                self.infer_state.mem_manager,
-                nsa_dict,
-                self._get_sched_meta(nsa_dict["compress_ratio"]),
-                flashmla_out=full_out,
-            )
+        needs_padding = self.backend.real_q_head_num != self.backend.padded_q_head_num
+        full_out = (
+            self.infer_state.dsv4_workspace.flashmla_prefill_full_out[: q.shape[0]]
+            if needs_padding
+            else out.unsqueeze(1)
         )
+        att_out = self.backend._flashmla_att(
+            q,
+            k,
+            self.infer_state.mem_manager,
+            nsa_dict,
+            self._get_sched_meta(nsa_dict["compress_ratio"]),
+            flashmla_out=full_out,
+        )
+        if needs_padding:
+            out.copy_(att_out)
         return out
 
 
