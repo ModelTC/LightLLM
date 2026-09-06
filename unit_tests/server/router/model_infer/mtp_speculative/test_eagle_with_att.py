@@ -160,6 +160,7 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
         )
 
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         draft_models=[SimpleNamespace(forward=forward)],
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].long(),
         _gen_argmax_token_ids_and_prob=lambda output: (

@@ -16,7 +16,12 @@ from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 
 
-class _FailingManager:
+class _PDManagerStub:
+    def cancel_pd_request_registration(self, _group_request_id):
+        pass
+
+
+class _FailingManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -24,7 +29,7 @@ class _FailingManager:
         yield
 
 
-class _CancelledManager:
+class _CancelledManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -32,14 +37,14 @@ class _CancelledManager:
         yield
 
 
-class _SuccessfulManager:
+class _SuccessfulManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
-        yield 123, "token", {}, FinishStatus(FinishStatus.FINISHED_STOP)
+        yield 123, "token", {"count_output_tokens": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
 
 
-class _StopPrefillManager:
+class _StopPrefillManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -51,7 +56,7 @@ class _FatalGenerateError(BaseException):
     pass
 
 
-class _FatalManager:
+class _FatalManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="decode")
 
     async def generate(self, **_kwargs):
@@ -59,7 +64,7 @@ class _FatalManager:
         yield
 
 
-class _BusyManager:
+class _BusyManager(_PDManagerStub):
     args = SimpleNamespace(run_mode="decode")
 
     async def generate(self, **_kwargs):
@@ -245,6 +250,7 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
+        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
         p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
@@ -285,6 +291,7 @@ def test_pd_master_request_rejection_becomes_server_busy_error():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
+        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
         req_status = ReqStatus(123, MagicMock(), MagicMock())

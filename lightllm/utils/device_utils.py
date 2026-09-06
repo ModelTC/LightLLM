@@ -46,6 +46,11 @@ def is_sm100_gpu():
 
 
 @lru_cache(maxsize=None)
+def is_sm90_gpu():
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9
+
+
+@lru_cache(maxsize=None)
 def get_device_sm_regs_num():
     import triton
     from triton.runtime import driver

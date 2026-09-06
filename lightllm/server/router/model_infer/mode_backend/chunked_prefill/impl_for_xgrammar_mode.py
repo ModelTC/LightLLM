@@ -4,6 +4,7 @@ from typing import List
 from .impl import ChunkedPrefillBackend
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs.sampling_params import get_xgrammar_tokenizer
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
@@ -26,7 +27,7 @@ class XgrammarBackend(ChunkedPrefillBackend):
             self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
         )
 
-        self.tokenizer_info = xgr.TokenizerInfo.from_huggingface(self.tokenizer)
+        self.tokenizer_info = xgr.TokenizerInfo.from_huggingface(get_xgrammar_tokenizer(self.tokenizer))
         self.xgrammar_compiler = xgr.GrammarCompiler(self.tokenizer_info, max_threads=8)
         self.xgrammar_token_bitmask = xgr.allocate_token_bitmask(1, self.tokenizer_info.vocab_size)
 

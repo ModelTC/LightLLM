@@ -15,6 +15,7 @@ def setup_module_env():
                 "llm_decode_att_backend": ["None"],
                 "cpu_cache_token_page_size": 256,
                 "enable_cpu_cache": False,
+                "enable_ep_moe": False,
                 "model_dir": "",
             }
         )

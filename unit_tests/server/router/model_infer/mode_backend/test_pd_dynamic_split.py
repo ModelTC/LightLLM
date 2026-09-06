@@ -40,6 +40,7 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
     )
     backend.support_overlap = support_overlap
     backend.is_master_in_dp = True
+    backend.is_deepseek_v4 = False
     logger = MagicMock()
     backend.logger = logger
     backend._timer_merge_radix_tree = MagicMock()

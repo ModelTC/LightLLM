@@ -91,6 +91,8 @@ class Qwen3NextMemManager(MemoryManager):
         dp_index: int,
         mem_managers,
         dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -101,6 +103,8 @@ class Qwen3NextMemManager(MemoryManager):
                 dp_index=dp_index,
                 mem_managers=mem_managers,
                 dp_world_size=dp_world_size,
+                start_kv_index=start_kv_index,
+                request_kv_len=request_kv_len,
                 page_kind=page_kind,
                 req_idx=req_idx,
             )
@@ -109,7 +113,8 @@ class Qwen3NextMemManager(MemoryManager):
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.write_req_to_page(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
-        return
+        page = self.kv_move_buffer[page_index]
+        return page.numel() * page.element_size()
 
     def read_page_kv_move_buffer_to_mem(
         self,
@@ -118,6 +123,8 @@ class Qwen3NextMemManager(MemoryManager):
         dp_index: int,
         mem_managers,
         dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -128,6 +135,8 @@ class Qwen3NextMemManager(MemoryManager):
                 dp_index=dp_index,
                 mem_managers=mem_managers,
                 dp_world_size=dp_world_size,
+                start_kv_index=start_kv_index,
+                request_kv_len=request_kv_len,
                 page_kind=page_kind,
                 req_idx=req_idx,
             )

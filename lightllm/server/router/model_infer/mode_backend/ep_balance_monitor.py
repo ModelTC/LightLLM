@@ -31,7 +31,11 @@ GFLOP = 1_000_000_000
 
 
 def should_enable_ep_balance_monitor(args) -> bool:
-    if args.enable_prefill_cudagraph or is_sm100_gpu():
+    if (
+        args.enable_prefill_cudagraph
+        or is_sm100_gpu()
+        or getattr(dist_group_manager, "ep_mega_moe_buffer", None) is not None
+    ):
         return False
     return args.enable_ep_moe and not args.disable_ep_balance_monitor and args.run_mode != "decode"
 
