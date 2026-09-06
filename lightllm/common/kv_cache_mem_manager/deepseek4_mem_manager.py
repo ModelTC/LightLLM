@@ -981,8 +981,10 @@ class DeepseekV4MemoryManager(MemoryManager):
         valid_slots = slots[valid]
         if valid_slots.numel() == 0:
             return
-        allocator.free(valid_slots)
         mapping[full_slots[valid]] = -1
+        # The allocator's blocking D2H copy must also finish invalidating the
+        # old mapping before another stream can reuse the returned slots.
+        allocator.free(valid_slots)
         return
 
     def alloc_c4_pages(self, need_pages: int) -> torch.Tensor:
