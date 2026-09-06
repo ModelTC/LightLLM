@@ -55,11 +55,7 @@ class _IncrementalReasoningSanitizer:
         if not isinstance(value, str) or not value:
             return ""
         self._buffer += value
-        marker_positions = [
-            position
-            for marker in ("<", "{")
-            if (position := self._buffer.find(marker)) >= 0
-        ]
+        marker_positions = [position for marker in ("<", "{") if (position := self._buffer.find(marker)) >= 0]
         raw_line_marker = RAW_FUNCTION_CALL_LINE_PATTERN.search(self._buffer)
         if raw_line_marker is not None:
             marker_positions.append(raw_line_marker.start())
@@ -70,8 +66,7 @@ class _IncrementalReasoningSanitizer:
             line = self._buffer[line_start:]
             normalized_line = line.lstrip().lower()
             could_be_control_prefix = bool(normalized_line) and any(
-                prefix.startswith(normalized_line)
-                for prefix in self._LINE_CONTROL_PREFIXES
+                prefix.startswith(normalized_line) for prefix in self._LINE_CONTROL_PREFIXES
             )
             safe_end = line_start if could_be_control_prefix else len(self._buffer)
         # Outer whitespace is removed by sanitize_reasoning at the end of a
@@ -130,12 +125,8 @@ async def _consume_main_model_stream(
         async for payload in _iter_openai_sse_payloads(body_iterator):
             if "error" in payload and not payload.get("choices"):
                 error = payload.get("error") or {}
-                message = (
-                    error.get("message") if isinstance(error, dict) else str(error)
-                )
-                raise VisualChatProxyError(
-                    f"Main model stream failed: {message or 'unknown error'}"
-                )
+                message = error.get("message") if isinstance(error, dict) else str(error)
+                raise VisualChatProxyError(f"Main model stream failed: {message or 'unknown error'}")
             if payload.get("id") is not None:
                 response_id = str(payload["id"])
             if isinstance(payload.get("created"), int):
@@ -152,6 +143,11 @@ async def _consume_main_model_stream(
             choice = choices[0]
             if not isinstance(choice, dict):
                 continue
+            choice_finish_reason = choice.get("finish_reason")
+            if choice_finish_reason in ("error", "abort"):
+                raise VisualChatProxyError(f"Main model stream failed: finish_reason={choice_finish_reason}")
+            if choice_finish_reason is not None:
+                finish_reason = choice_finish_reason
             delta = choice.get("delta") or {}
             if not isinstance(delta, dict):
                 continue
@@ -160,20 +156,12 @@ async def _consume_main_model_stream(
                 raw_reasoning = delta.get("reasoning_content")
             if isinstance(raw_reasoning, str) and raw_reasoning:
                 reasoning_parts.append(raw_reasoning)
-                await emit_reasoning(
-                    raw_reasoning
-                    if preserve_model_text
-                    else sanitizer.feed(raw_reasoning)
-                )
+                await emit_reasoning(raw_reasoning if preserve_model_text else sanitizer.feed(raw_reasoning))
             content = delta.get("content")
             if isinstance(content, str):
                 content_parts.append(content)
                 if stream_content:
-                    clean_content = (
-                        content
-                        if preserve_model_text
-                        else content_sanitizer.feed(content)
-                    )
+                    clean_content = content if preserve_model_text else content_sanitizer.feed(content)
                     if clean_content:
                         await callback("content", clean_content, False)
             for raw_call in delta.get("tool_calls") or []:
@@ -197,8 +185,6 @@ async def _consume_main_model_stream(
                     arguments = function.get("arguments")
                     if isinstance(arguments, str):
                         state["arguments"].append(arguments)
-            if choice.get("finish_reason") is not None:
-                finish_reason = choice["finish_reason"]
     finally:
         close = getattr(body_iterator, "aclose", None)
         if close is not None:
@@ -214,9 +200,7 @@ async def _consume_main_model_stream(
     for index in sorted(tool_states):
         state = tool_states[index]
         if not state["name"]:
-            raise VisualChatProxyError(
-                "Main model stream returned a tool call without a function name"
-            )
+            raise VisualChatProxyError("Main model stream returned a tool call without a function name")
         tool_calls.append(
             {
                 "id": state["id"] or f"call_{uuid.uuid4().hex[:24]}",
@@ -235,9 +219,7 @@ async def _consume_main_model_stream(
         "content": "".join(content_parts),
     }
     raw_reasoning = "".join(reasoning_parts)
-    reasoning = (
-        raw_reasoning if preserve_model_text else sanitize_reasoning(raw_reasoning)
-    )
+    reasoning = raw_reasoning if preserve_model_text else sanitize_reasoning(raw_reasoning)
     if reasoning:
         message_data["reasoning"] = reasoning
     if tool_calls:
