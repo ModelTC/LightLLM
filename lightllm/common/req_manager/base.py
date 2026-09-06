@@ -70,6 +70,10 @@ class ReqManager:
     def alloc(self):
         return self.req_list.alloc()
 
+    def get_decode_kv_indexs(self, use_sliding_window: bool = False):
+        """Return the physical KV index table used by decode attention."""
+        return self.req_to_token_indexs
+
     def free(self, free_req_indexes: List[int], free_token_index):
         for req_index in free_req_indexes:
             self.req_list.free(req_index)

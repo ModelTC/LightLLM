@@ -235,14 +235,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
-        o_tensor = att_state.decode_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=self._att_control(),
-            alloc_func=self.alloc_tensor,
-            req_to_token_indexs=(infer_state.req_manager.req_to_sliding_window_indexs if self.is_sliding else None),
-        )
+        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
         if self.is_sliding and not self.is_kv_shared_:
             infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
         return o_tensor.view(q.shape)
