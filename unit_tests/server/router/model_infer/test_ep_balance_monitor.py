@@ -286,6 +286,7 @@ def test_group_manager_creates_monitor_gloo_group_only_when_enabled(monkeypatch,
             pass
 
     args = SimpleNamespace(
+        dp=1,
         enable_ep_moe=True,
         disable_ep_balance_monitor=disable_monitor,
         run_mode="normal",

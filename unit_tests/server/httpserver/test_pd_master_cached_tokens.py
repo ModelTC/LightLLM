@@ -12,7 +12,7 @@ from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtr
 def _make_manager(monkeypatch):
     monkeypatch.setattr(
         "lightllm.server.httpserver.manager.HttpServerManager._check_and_repair_length",
-        classmethod(lambda cls, *a, **k: asyncio.sleep(0)),
+        lambda self, *a, **k: None,
     )
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)

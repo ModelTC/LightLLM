@@ -1,4 +1,5 @@
 """Multimodal parameters for text generation."""
+
 import asyncio
 import os
 import librosa
@@ -127,6 +128,9 @@ class ImageItem:
         # the start index of the image in the input_ids
         # used for mrope position id calculation
         self.start_idx = None
+        # optional half-open input range that must be processed in one prefill step
+        self.block_start_idx = None
+        self.block_end_idx = None
         self.grid_thwd = None
         self.image_w = 0
         self.image_h = 0
@@ -217,6 +221,8 @@ class ImageItem:
         ret["token_num"] = self.token_num
         ret["grid_thwd"] = self.grid_thwd
         ret["start_idx"] = self.start_idx
+        ret["block_start_idx"] = self.block_start_idx
+        ret["block_end_idx"] = self.block_end_idx
         ret["md5"] = self.md5
         return ret
 

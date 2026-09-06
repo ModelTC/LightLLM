@@ -63,6 +63,9 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         target_next_token_ids1: torch.Tensor,
         accept_len1: torch.Tensor,
         draft_step: int,
+        accept_len_cpu0: torch.Tensor | None = None,
+        accept_len_cpu1: torch.Tensor | None = None,
+        accept_len_ready_event: torch.cuda.Event | None = None,
     ) -> EagleSpecProposal:
         """提交两个 target verify microbatch 的 draft KV，并生成下一轮 proposal。"""
 
@@ -111,6 +114,7 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         ):
             model_input.input_ids = token_ids
             model_input.mtp_draft_input_hiddens = model_output.mtp_collector.spec_hidden
+            model_input.mtp_decode_slot_prepare_indices = ()
 
         proposal_token_ids = target_next_token_ids0.new_empty((req_num, draft_step))
         schedule_scores = (
@@ -170,6 +174,21 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
                 schedule_scores=schedule_scores,
             )
 
+        accepted_tail_rows_cpu_by_batch = None
+        if self.backend.is_deepseek_v4 and req_num > 0:
+            # One shared verify event covers both CPU views of the existing accept-length D2H.
+            accept_len_ready_event.synchronize()
+            accepted_tail_rows_cpu_by_batch = []
+            for model_input, batch_accept_len_cpu in zip(
+                model_inputs,
+                (accept_len_cpu0, accept_len_cpu1),
+            ):
+                req_start_rows_cpu = torch.nonzero(
+                    model_input.b_mtp_index_cpu == 0,
+                    as_tuple=False,
+                ).flatten()
+                accepted_tail_rows_cpu_by_batch.append(req_start_rows_cpu + batch_accept_len_cpu - 1)
+
         for batch_index, model_input in enumerate(model_inputs):
             model_input.is_prefill = False
             model_input.batch_size = req_num_by_batch[batch_index]
@@ -181,6 +200,17 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
             )
             model_input.b_shared_seq_len = draft_shared_seq_lens_by_batch[batch_index]
             model_input.b_shared_radix_node_id = draft_shared_radix_node_ids_by_batch[batch_index]
+            model_input.mem_indexes_cpu = None
+            model_input.mtp_decode_slot_prepare_indices = None
+            if self.backend.is_deepseek_v4 and req_num > 0:
+                accepted_tail_rows_cpu = accepted_tail_rows_cpu_by_batch[batch_index]
+                model_input.b_req_idx_cpu = model_input.b_req_idx_cpu.index_select(0, accepted_tail_rows_cpu)
+                model_input.b_mtp_index_cpu = torch.zeros(
+                    (req_num_by_batch[batch_index],),
+                    dtype=model_input.b_mtp_index_cpu.dtype,
+                    device="cpu",
+                )
+                model_input.b_seq_len_cpu = model_input.b_seq_len_cpu.index_select(0, accepted_tail_rows_cpu) + 1
             if len(model_input.multimodal_params) != model_input.batch_size:
                 empty_multimodal_params = {"images": [], "audios": []}
                 model_input.multimodal_params = [empty_multimodal_params] * model_input.batch_size
@@ -191,12 +221,15 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         for step in range(1, draft_step):
             mem_start = (step - 1) * req_num
             step_mem_indexes = extra_mem_indexes[mem_start : mem_start + req_num]
+            step_mem_indexes_cpu = extra_mem_indexes_cpu[mem_start : mem_start + req_num]
             mem_offset = 0
             for batch_index, model_input in enumerate(model_inputs):
                 batch_req_num = req_num_by_batch[batch_index]
                 model_input.input_ids = draft_token_ids_by_batch[batch_index]
                 model_input.mtp_draft_input_hiddens = draft_hiddens_by_batch[batch_index]
                 model_input.mem_indexes = step_mem_indexes[mem_offset : mem_offset + batch_req_num]
+                if self.backend.is_deepseek_v4:
+                    model_input.mem_indexes_cpu = step_mem_indexes_cpu[mem_offset : mem_offset + batch_req_num]
                 model_input.max_kv_seq_len = max_kv_seq_lens_by_batch[batch_index] + step
                 model_input.total_token_num = model_input.batch_size * model_input.max_kv_seq_len
                 mem_offset += batch_req_num
@@ -211,6 +244,8 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
                 draft_token_ids_by_batch[batch_index] = draft_token_ids
                 draft_hiddens_by_batch[batch_index] = draft_output.mtp_collector.spec_hidden
                 draft_seq_lens_by_batch[batch_index].add_(1)
+                if self.backend.is_deepseek_v4 and req_num > 0:
+                    model_inputs[batch_index].b_seq_len_cpu.add_(1)
 
                 batch_req_num = req_num_by_batch[batch_index]
                 proposal_row_start = proposal_row_offsets[batch_index]

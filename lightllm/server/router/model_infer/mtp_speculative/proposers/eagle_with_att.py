@@ -47,6 +47,8 @@ class EagleWithAttProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
+        accept_len_cpu: torch.Tensor | None = None,
+        accept_len_ready_event: torch.cuda.Event | None = None,
     ) -> EagleSpecProposal:
         """提交验证结果对应的 draft KV，并递归生成下一轮 EAGLE proposal。
 
@@ -77,6 +79,7 @@ class EagleWithAttProposer(BaseSpecProposer):
         verify_draft_input = copy.copy(target_model_input)
         verify_draft_input.input_ids = target_next_token_ids
         verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+        verify_draft_input.mtp_decode_slot_prepare_indices = ()
         extend_output = draft_model.forward(verify_draft_input)
 
         # 只在 req_num 行 logits 上进行 argmax，避免为未接受的 verify 行执行
@@ -137,13 +140,33 @@ class EagleWithAttProposer(BaseSpecProposer):
         draft_input.b_shared_seq_len = selected_rows.b_shared_seq_len
         draft_input.b_shared_radix_node_id = selected_rows.b_shared_radix_node_id
         draft_input.mem_indexes_cpu = None
+        draft_input.mtp_decode_slot_prepare_indices = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(req_num)]
+
+        if self.backend.is_deepseek_v4 and req_num > 0:
+            # DSV4's SWA allocator is host-owned. Reuse the accept-length D2H
+            # already issued for post-processing, then keep both mirrors in step.
+            accept_len_ready_event.synchronize()
+            req_start_rows_cpu = torch.nonzero(
+                target_model_input.b_mtp_index_cpu == 0,
+                as_tuple=False,
+            ).flatten()
+            accepted_tail_rows_cpu = req_start_rows_cpu + accept_len_cpu - 1
+            draft_input.b_req_idx_cpu = target_model_input.b_req_idx_cpu.index_select(0, accepted_tail_rows_cpu)
+            draft_input.b_mtp_index_cpu = torch.zeros(
+                (req_num,),
+                dtype=target_model_input.b_mtp_index_cpu.dtype,
+                device="cpu",
+            )
+            draft_input.b_seq_len_cpu = target_model_input.b_seq_len_cpu.index_select(0, accepted_tail_rows_cpu) + 1
 
         for step in range(1, draft_step):
             mem_start = (step - 1) * req_num
             draft_input.input_ids = draft_token_ids
             draft_input.mtp_draft_input_hiddens = draft_hidden
             draft_input.mem_indexes = extra_mem_indexes[mem_start : mem_start + req_num]
+            if self.backend.is_deepseek_v4:
+                draft_input.mem_indexes_cpu = extra_mem_indexes_cpu[mem_start : mem_start + req_num]
             draft_input.max_kv_seq_len = max_kv_seq_len + step
             draft_input.total_token_num = req_num * draft_input.max_kv_seq_len
             draft_output = draft_model.forward(draft_input)
@@ -156,6 +179,8 @@ class EagleWithAttProposer(BaseSpecProposer):
                 draft_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids_by_step.append(draft_token_ids.unsqueeze(1))
             draft_seq_lens.add_(1)
+            if self.backend.is_deepseek_v4 and req_num > 0:
+                draft_input.b_seq_len_cpu.add_(1)
 
         proposal_token_ids = torch.cat(proposal_token_ids_by_step, dim=1)
         schedule_scores = torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None

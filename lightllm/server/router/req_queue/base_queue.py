@@ -25,7 +25,9 @@ class BaseQueue:
         self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
         assert args.batch_max_tokens is not None
         self.batch_max_tokens = args.batch_max_tokens
-        self.running_max_req_size = args.running_max_req_size  # Maximum number of concurrent requests
+        if args.per_dp_running_max_req_size is None:
+            raise RuntimeError("per_dp_running_max_req_size is not initialized")
+        self.running_max_req_size = args.per_dp_running_max_req_size
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
 

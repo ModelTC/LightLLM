@@ -19,10 +19,39 @@ original behavior for clients and proxies that require response status and
 headers immediately.
 """
 
+import time
+
 from fastapi.responses import StreamingResponse
 from starlette.types import Send
 
 from lightllm.utils.envs_utils import get_env_start_args
+
+
+_pd_send_next_metric_time = 0.0
+_pd_send_max_duration = 0.0
+_pd_send_max_bytes = 0
+
+
+def _record_pd_send_metrics(duration, body_size):
+    global _pd_send_next_metric_time
+    global _pd_send_max_duration
+    global _pd_send_max_bytes
+
+    _pd_send_max_duration = max(_pd_send_max_duration, duration)
+    _pd_send_max_bytes = max(_pd_send_max_bytes, body_size)
+    now = time.monotonic()
+    if now < _pd_send_next_metric_time:
+        return
+
+    from lightllm.server.api_http import g_objs
+
+    g_objs.httpserver_manager.metric_client.histogram_observe(
+        "lightllm_pd_master_http_send_duration", _pd_send_max_duration
+    )
+    g_objs.httpserver_manager.metric_client.gauge_set("lightllm_pd_master_http_send_bytes", _pd_send_max_bytes)
+    _pd_send_max_duration = 0.0
+    _pd_send_max_bytes = 0
+    _pd_send_next_metric_time = now + 1.0
 
 
 class CustomStreamingResponse(StreamingResponse):
@@ -39,16 +68,21 @@ class CustomStreamingResponse(StreamingResponse):
     """
 
     async def stream_response(self, send: Send) -> None:
+        start_args = get_env_start_args()
         # Some clients and proxies require headers before first-token work is
         # complete. Let deployments opt out of the delayed response start.
-        if get_env_start_args().disable_delay_response_start:
+        if start_args.disable_delay_response_start:
             await super().stream_response(send)
             return
+        record_pd_send_metrics = start_args.run_mode == "pd_master"
 
         async def send_chunk(chunk):
             if not isinstance(chunk, (bytes, memoryview)):
                 chunk = chunk.encode(self.charset)
+            send_start = time.monotonic()
             await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            if record_pd_send_metrics:
+                _record_pd_send_metrics(time.monotonic() - send_start, len(chunk))
 
         async def send_response_start():
             # Read status and headers at send time. The first body iteration

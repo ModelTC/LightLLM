@@ -122,11 +122,9 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
         )
         for index, (length, req_cache_tiers) in enumerate(zip((100, 200, 300), cache_tiers))
     ]
-    offload_reqs = [req for req in reqs if CacheTier.CPU in req.cache_tiers or CacheTier.DISK in req.cache_tiers]
+    true_finished_reqs = module.offload_finished_reqs_to_cpu_cache(reqs)
 
-    true_finished_reqs = module.offload_finished_reqs_to_cpu_cache(offload_reqs)
-
-    assert true_finished_reqs == []
+    assert true_finished_reqs == [reqs[0]]
     assert offload_calls == [(1, False), (2, True)]
     assert len(module.cpu_cache_handle_queue) == 2
 

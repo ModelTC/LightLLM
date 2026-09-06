@@ -164,8 +164,8 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Only truncation='disabled' is supported")
 
     effort = (body.get("reasoning") or {}).get("effort")
-    if effort is not None:
-        raise ValueError("reasoning.effort is not supported")
+    if effort is not None and effort not in ("low", "medium", "high"):
+        raise ValueError("reasoning.effort must be one of: low, medium, high")
 
     messages: List[Dict[str, Any]] = []
     if body.get("instructions"):
@@ -215,6 +215,9 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
             chat["tool_choice"] = {"type": "function", "function": {"name": tool_choice.get("name")}}
         else:
             chat["tool_choice"] = tool_choice
+
+    if effort is not None:
+        chat["reasoning_effort"] = effort
 
     response_format = _text_format_to_response_format(body)
     if response_format:

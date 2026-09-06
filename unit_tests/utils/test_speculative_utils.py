@@ -315,6 +315,7 @@ def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
+            "enable_ep_moe": False,
             "mtp_mode": "dflash",
             "mtp_step": 7,
             "mtp_dynamic_verify": False,
@@ -340,6 +341,7 @@ def test_qwen35_dflash_added_kv_layers_come_from_nested_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
+            "enable_ep_moe": False,
             "mtp_mode": "dflash",
             "mtp_step": 7,
             "mtp_dynamic_verify": False,
@@ -358,6 +360,7 @@ def test_dspark_added_kv_layers_come_from_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
+            "enable_ep_moe": False,
             "mtp_mode": "dspark",
             "mtp_step": 7,
             "mtp_dynamic_verify": True,
@@ -376,6 +379,7 @@ def test_eagle3_added_kv_layers_come_from_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
+            "enable_ep_moe": False,
             "mtp_mode": "eagle3",
             "mtp_step": 7,
             "mtp_dynamic_verify": False,
