@@ -141,6 +141,7 @@ class _DecodeTransModule:
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
+        self.request_last_progress_time: Dict[int, float] = {}
         self.request_page_task_queue = queue.Queue()
         self.ready_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
@@ -214,12 +215,17 @@ class _DecodeTransModule:
             trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
             with self.waiting_dict_lock:
+                has_waiting_task = False
                 for task in trans_task_group.task_list:
                     if task.need_transfer_page():
                         self.waiting_dict[task.get_key()] = task
+                        has_waiting_task = True
                     else:
                         task.start_trans_time = time.time()
                         self.success_queue.put((None, None, task))
+                if has_waiting_task:
+                    request_id = trans_task_group.task_list[0].request_id
+                    self.request_last_progress_time[request_id] = time.time()
 
             # up status
             task = trans_task_group.task_list[0]
@@ -242,6 +248,19 @@ class _DecodeTransModule:
             )
 
             self.up_status_in_queue.put(up_status)
+
+    def _pop_waiting_task_for_notify(self, notify_task: PDChunckedTransTask):
+        with self.waiting_dict_lock:
+            local_trans_task = self.waiting_dict.pop(notify_task.get_key(), None)
+            if local_trans_task is None:
+                return None
+
+            # Decode creates every page task before prefill starts producing pages.
+            # A matched notify is forward progress for the request, so future pages
+            # use an idle timeout instead of their original creation time.
+            self.request_last_progress_time[local_trans_task.request_id] = time.time()
+
+            return local_trans_task
 
     @log_exception
     def accept_peer_task_loop(
@@ -291,8 +310,7 @@ class _DecodeTransModule:
                         # 到了请求页面的阶段
                         remote_trans_task = notify_obj
                         if remote_trans_task.write_stage == "request":
-                            with self.waiting_dict_lock:
-                                local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
+                            local_trans_task = self._pop_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
@@ -322,8 +340,7 @@ class _DecodeTransModule:
 
                         # prefill 写完数据到了 done 阶段
                         if remote_trans_task.write_stage == "done":
-                            with self.waiting_dict_lock:
-                                local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
+                            local_trans_task = self._pop_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
@@ -352,9 +369,21 @@ class _DecodeTransModule:
     def _check_tasks_time_out(self):
         with self.waiting_dict_lock:
             timeout_tasks = []
+            pending_request_ids = set()
+            now = time.time()
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.time_out():
+                if trans_task.start_trans_time is None:
+                    request_last_progress = self.request_last_progress_time[trans_task.request_id]
+                    is_timeout = now - request_last_progress > trans_task.time_out_secs
+                else:
+                    is_timeout = trans_task.time_out()
+                if is_timeout:
                     timeout_tasks.append(self.waiting_dict.pop(key))
+                elif trans_task.start_trans_time is None:
+                    pending_request_ids.add(trans_task.request_id)
+            for request_id in list(self.request_last_progress_time):
+                if request_id not in pending_request_ids:
+                    self.request_last_progress_time.pop(request_id)
 
         for trans_task in timeout_tasks:
             trans_task.error_info = "time out in accept_peer_task_loop"
