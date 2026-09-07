@@ -4,7 +4,13 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
-from .operator import LinearAttMemOperator
+from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManager
+from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
+from .operator import (
+    FP8StaticPerHeadQuantMemOperator,
+    FP8StaticPerTensorQuantMemOperator,
+    LinearAttMemOperator,
+)
 from typing import Tuple, Any, List
 
 logger = init_logger(__name__)
@@ -137,6 +143,26 @@ class Qwen3NextMemManager(MemoryManager):
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.read_page_to_req(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         return
+
+
+class _FP8StaticPerHeadQuantLinearAttMemOperator(LinearAttMemOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
+        FP8StaticPerHeadQuantMemOperator.copy_kv_to_mem_manager(self, full_att_layer_index, mem_index, kv)
+
+
+class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
+        FP8StaticPerTensorQuantMemOperator.copy_kv_to_mem_manager(self, full_att_layer_index, mem_index, kv)
+
+
+class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerHeadQuantMemManager):
+    operator_class = _FP8StaticPerHeadQuantLinearAttMemOperator
+
+
+class FP8StaticPerTensorQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerTensorQuantMemManager):
+    operator_class = _FP8StaticPerTensorQuantLinearAttMemOperator
 
 
 class Qwen3NextLinearAttPageHelper:
