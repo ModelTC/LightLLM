@@ -42,7 +42,7 @@ from lightllm.utils.envs_utils import (
     set_model_init_status,
     enable_full_att_decode_tune,
 )
-from lightllm.common.triton_utils.autotuner import Autotuner
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.infer_utils import post_empty_cache
 from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
@@ -1155,7 +1155,7 @@ class TpPartBaseModel:
     @torch.no_grad()
     @post_empty_cache
     def _autotune_warmup(self):
-        Autotuner.start_autotune_warmup()
+        Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
         torch.distributed.barrier()
 
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]

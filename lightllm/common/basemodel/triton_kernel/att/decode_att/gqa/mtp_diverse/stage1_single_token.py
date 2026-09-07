@@ -16,7 +16,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType
 from lightllm.utils.device_utils import is_hopper
 
 
@@ -175,6 +175,7 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
 
 @autotune(
     kernel_name="_fwd_kernel_mtp_diverse_stage1_single_token:v2",
+    kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
@@ -291,7 +292,7 @@ if __name__ == "__main__":
 
     gqa_group_size = q_head_num // k_head_num
 
-    Autotuner.start_autotune_warmup()
+    Autotuner.start_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
     # autotuing kernel
     for batch_size in batch_sizes:
         for length in decode_lengths:

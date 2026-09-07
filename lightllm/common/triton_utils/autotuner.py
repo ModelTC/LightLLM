@@ -6,12 +6,14 @@ import torch
 import torch.distributed as dist
 import random
 import collections
+from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from tqdm import tqdm
 from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
-from typing import Callable, List
+from typing import Callable, List, Optional
 from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
@@ -30,6 +32,12 @@ class AutotuneLevel:
     CLOSE_AUTOTUNE = 3
 
 
+class AutotuneKernelType(str, Enum):
+    GENERAL = "general"
+    # Includes full-attention and linear-attention decode kernels.
+    DECODE_ATTENTION = "decode_attention"
+
+
 def autotune(
     kernel_name: str,
     configs_gen_func: Callable[[], List],
@@ -37,6 +45,7 @@ def autotune(
     run_key_func: Callable,
     run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
     mutates_args: List[str] = [],
+    kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
 ):
     """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
 
@@ -56,6 +65,8 @@ def autotune(
             Defaults to ``abs(int(run_key) - int(config_key))``.
         mutates_args (List[str], optional): Names of arguments that can be mutated by the kernel.
             During benchmarking, defensive clones are made to avoid side effects. Defaults to ``[]``.
+        kernel_type (AutotuneKernelType, optional): Only a matching warmup phase benchmarks this kernel.
+            Other phases still execute it using cached configurations or its default configuration.
 
     Returns:
         Callable: A callable object that wraps the original function and performs autotuning
@@ -71,27 +82,46 @@ def autotune(
             run_key_func=run_key_func,
             run_key_distance_func=run_key_distance_func,
             mutates_args=mutates_args,
+            kernel_type=kernel_type,
         )
 
     return decorator
 
 
 class Autotuner:
-    _autotune_warmup: bool = False
+    _autotune_warmup_kernel_type: Optional[AutotuneKernelType] = None
 
     @staticmethod
-    def start_autotune_warmup():
-        Autotuner._autotune_warmup = True
+    def start_autotune_warmup(kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL):
+        """Select the kernel category to tune; all distributed ranks must select the same phase."""
+        Autotuner._autotune_warmup_kernel_type = AutotuneKernelType(kernel_type)
         return
 
     @staticmethod
     def end_autotune_warmup():
-        Autotuner._autotune_warmup = False
+        Autotuner._autotune_warmup_kernel_type = None
         return
 
     @staticmethod
-    def is_autotune_warmup():
-        return Autotuner._autotune_warmup
+    def is_autotune_warmup() -> bool:
+        """Report whether any warmup phase is active."""
+        return Autotuner._autotune_warmup_kernel_type is not None
+
+    @staticmethod
+    def is_kernel_autotune_warmup(kernel_type: AutotuneKernelType) -> bool:
+        """Report whether this kernel category is selected for warmup."""
+        return Autotuner._autotune_warmup_kernel_type == AutotuneKernelType(kernel_type)
+
+    @staticmethod
+    @contextmanager
+    def autotune_warmup(kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL):
+        """Restore the previous warmup phase on exit, including nested scopes and exceptions."""
+        previous_type = Autotuner._autotune_warmup_kernel_type
+        Autotuner.start_autotune_warmup(kernel_type)
+        try:
+            yield
+        finally:
+            Autotuner._autotune_warmup_kernel_type = previous_type
 
     def __init__(
         self,
@@ -102,10 +132,12 @@ class Autotuner:
         run_key_func: Callable,
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
+        kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
     ):
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
+        self.kernel_type = AutotuneKernelType(kernel_type)
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -165,10 +197,10 @@ class Autotuner:
                 )
             self.cached_configs[static_key] = {}
 
-        if (
-            autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
-            and Autotuner.is_autotune_warmup()
-        ):
+        if Autotuner.is_kernel_autotune_warmup(self.kernel_type) and autotune_level in [
+            AutotuneLevel.ADAPTIVE_AUTOTUNE,
+            AutotuneLevel.FORCE_AUTOTUNE,
+        ]:
             need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
                 run_key not in self.cached_configs.get(static_key, {})
             )
@@ -352,6 +384,9 @@ class Autotuner:
                 self.cached_configs[_static_key] = {}
             for _run_key, _config in _t_dict.items():
                 self.cached_configs[_static_key][_run_key] = _config
+            # 配置更新后，清除该 static_key 下缓存的旧匹配结果，避免继续使用旧配置，使新调优配置生效。
+            # 新配置也可能改变其他 run_key 的最近邻选择，因此需要清除整个 static_key 的匹配缓存。
+            self.fast_match_configs.pop(_static_key, None)
 
         # save configs to file
         if rank_id == 0:

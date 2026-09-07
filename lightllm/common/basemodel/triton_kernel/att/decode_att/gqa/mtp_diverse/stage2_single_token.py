@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType
 
 
 def get_test_configs():
@@ -109,6 +109,7 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
 
 @autotune(
     kernel_name="_fwd_kernel_mtp_diverse_stage2_single_token:v2",
+    kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
@@ -172,7 +173,7 @@ if __name__ == "__main__":
     batch_sizes = [1, 8, 16, 32, 64, 128]
     q_head_num = 64 // tp_world_size
 
-    Autotuner.start_autotune_warmup()
+    Autotuner.start_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
     # autotuing kernel
     for batch_size in batch_sizes:
         for block_n in [16, 32, 64, 128]:

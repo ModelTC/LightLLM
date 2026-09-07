@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType
 
 
 @triton.jit
@@ -174,6 +174,7 @@ def get_run_key(q, max_len_in_batch):
 
 @autotune(
     kernel_name="_fwd_kernel_flash_decode_normal_stage1:v3",
+    kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
@@ -293,7 +294,7 @@ if __name__ == "__main__":
 
     q_head_num = gqa_group_size
 
-    Autotuner.start_autotune_warmup()
+    Autotuner.start_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
     # autotuing kernel
     for batch_size in batch_sizes:
         for length in decode_lengths:

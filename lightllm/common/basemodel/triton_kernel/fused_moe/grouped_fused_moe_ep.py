@@ -23,7 +23,7 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
 )
-from lightllm.common.triton_utils.autotuner import Autotuner
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
@@ -320,7 +320,7 @@ def fused_experts_impl(
             # A rank may receive no tokens during autotune warmup. Run one dummy token through
             # silu_and_mul_fwd so the empty rank matches the first kernel call made by non-empty ranks.
             # This branch does not synchronize additional calls caused by different positive chunk counts.
-            if Autotuner.is_autotune_warmup():
+            if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL):
                 N = w1.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
                 _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
@@ -519,7 +519,7 @@ def chunked_expanded_moe_forward(
     # 中的分布式通信要求各 rank 进入 autotuning 的次数一致，否则容易发生通信错位。
     # 所以只允许第一个 chunk 保持 autotuning；从第二个 chunk 开始临时关闭，循环结束
     # 后再恢复进入函数时的 warmup 状态。零 token rank 的首次调用由外层特殊分支补齐。
-    is_autotune_warmup = Autotuner.is_autotune_warmup()
+    is_autotune_warmup = Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
     try:
         for chunk_index, chunk_start in enumerate(range(0, all_tokens, max_chunk_rows)):
             if is_autotune_warmup and chunk_index == 1:
@@ -574,7 +574,7 @@ def chunked_expanded_moe_forward(
             workspace_manager.free(gemm_out_b)
     finally:
         if is_autotune_warmup:
-            Autotuner.start_autotune_warmup()
+            Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
 
     ep_compact_metadata(recv_src_metadata)
     return gather_out

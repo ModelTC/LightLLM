@@ -1,6 +1,6 @@
 import torch
 
-from lightllm.common.triton_utils.autotuner import AutotuneLevel, Autotuner, autotune
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner, autotune
 from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.utils.log_utils import init_logger
 
@@ -74,6 +74,7 @@ def _flash_attn_kvcache_run_key(q, page_table, max_seqlen_q):
 
 @autotune(
     kernel_name="sgl_fa3_kvcache_ns:v1",
+    kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=_flash_attn_kvcache_num_splits_configs,
     static_key_func=_flash_attn_kvcache_static_key,
     run_key_func=_flash_attn_kvcache_run_key,
@@ -130,8 +131,7 @@ def fa3_decode_autotune(model, cuda_graph_batch_sizes, batch_multiplier: int):
     ]:
         return
 
-    Autotuner.start_autotune_warmup()
-    try:
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         max_kv_len = int(model.graph_max_len_in_batch)
         if max_kv_len <= 0:
             return
@@ -179,6 +179,4 @@ def fa3_decode_autotune(model, cuda_graph_batch_sizes, batch_multiplier: int):
                 return_softmax_lse=False,
                 sinks=None,
             )
-    finally:
-        Autotuner.end_autotune_warmup()
     return
