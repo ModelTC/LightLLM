@@ -13,6 +13,6 @@ def get_dp_balancer(args, dp_size_in_node: int, inner_queues: List[BaseQueue]):
     elif args.dp_balancer == "cache_aware":
         if args.disable_dynamic_prompt_cache:
             raise ValueError("cache_aware DP balancing requires dynamic prompt cache")
-        return DpCacheAwareBalancer(dp_size_in_node, inner_queues)
+        return DpCacheAwareBalancer(dp_size_in_node, inner_queues, run_mode=args.run_mode)
     else:
         raise ValueError(f"Invalid dp balancer: {args.dp_balancer}")

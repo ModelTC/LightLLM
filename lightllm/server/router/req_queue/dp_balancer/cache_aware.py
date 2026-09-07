@@ -2,7 +2,7 @@
 
 The router owns this heuristic index. It records dispatch history rather than querying
 the infer processes' radix trees, so stale entries can only affect placement, not KV
-cache correctness.
+cache correctness. Prefill load uses remaining prompt tokens; other modes count requests.
 """
 
 from __future__ import annotations
@@ -99,9 +99,11 @@ class DpCacheAwareBalancer(DpBalancer):
         self,
         dp_size_in_node: int,
         inner_queues: List[BaseQueue],
+        run_mode: str,
         config: Optional[DpCacheAwareConfig] = None,
     ) -> None:
         super().__init__(dp_size_in_node, inner_queues)
+        self.run_mode = run_mode
         self.config = config or DpCacheAwareConfig()
         self.prefix_cache = TokenPrefixCache(
             block_size=self.config.block_size,
@@ -113,16 +115,26 @@ class DpCacheAwareBalancer(DpBalancer):
         if not reqs_waiting_for_dp_index:
             return
 
-        current_load_per_dp = [0 for _ in range(self.dp_size_in_node)]
-        if current_batch is not None:
-            current_load_per_dp = current_batch.get_all_dp_req_num()
-        total_load_per_dp = [
-            current_load_per_dp[dp_index] + len(self.inner_queues[dp_index].waiting_req_list)
-            for dp_index in range(self.dp_size_in_node)
-        ]
+        if self.run_mode == "prefill":
+            # Queued requests have not matched real KV yet; dispatch history is only a routing hint.
+            total_load_per_dp = [sum(req.input_len for req in queue.waiting_req_list) for queue in self.inner_queues]
+            if current_batch is not None:
+                for req in current_batch.reqs:
+                    total_load_per_dp[req.sample_params.suggested_dp_index] += max(
+                        0, req.input_len - req.shm_cur_kv_len
+                    )
+        else:
+            current_load_per_dp = [0 for _ in range(self.dp_size_in_node)]
+            if current_batch is not None:
+                current_load_per_dp = current_batch.get_all_dp_req_num()
+            total_load_per_dp = [
+                current_load_per_dp[dp_index] + len(self.inner_queues[dp_index].waiting_req_list)
+                for dp_index in range(self.dp_size_in_node)
+            ]
 
         for req_group in reqs_waiting_for_dp_index:
             first_req = req_group[0]
+            group_load = sum(req.input_len for req in req_group) if self.run_mode == "prefill" else len(req_group)
             linked_prompt_ids = False
             if not hasattr(first_req, "shm_prompt_ids"):
                 first_req.link_prompt_ids_shm_array()
@@ -157,7 +169,6 @@ class DpCacheAwareBalancer(DpBalancer):
                 if cache_dp_index is None:
                     selected_dp_index = least_loaded_dp_index
                 else:
-                    group_load = len(req_group)
                     cache_projected_load = total_load_per_dp[cache_dp_index] + group_load
                     least_projected_load = total_load_per_dp[least_loaded_dp_index] + group_load
                     if cache_projected_load > least_projected_load * self.config.balance_rel_threshold:
@@ -168,7 +179,7 @@ class DpCacheAwareBalancer(DpBalancer):
             for req in req_group:
                 req.sample_params.suggested_dp_index = selected_dp_index
             self.inner_queues[selected_dp_index].extend(req_group)
-            total_load_per_dp[selected_dp_index] += len(req_group)
+            total_load_per_dp[selected_dp_index] += group_load
             insert_start_index = 0
             if cache_dp_index == selected_dp_index:
                 insert_start_index = (matched_token_count + self.config.block_size - 1) // self.config.block_size
