@@ -92,7 +92,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        g_infer_context.req_manager.copy_big_page_buffer_to_linear_att_state(
+        g_infer_context.req_manager.restore_big_page_state(
             big_page_buffer_idx=big_page_buffer_ids_cpu[-1],
             req=req,
         )

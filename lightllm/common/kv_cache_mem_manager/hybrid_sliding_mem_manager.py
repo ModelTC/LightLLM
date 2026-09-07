@@ -35,63 +35,55 @@ class HybridSlidingMemoryManager(MemoryManager):
             mem_fraction=mem_fraction,
         )
 
-    def _big_page_num(self, token_num):
-        return max(1, triton.cdiv(token_num, self.big_page_token_num)) if self.enable_prompt_cache else 0
-
-    def _cache_nbytes(self, token_num):
-        # Runtime windows already exist when profiling. Reserve BOTH GPU page
-        # pools here, plus the full-KV hold token, final partial big page, and
-        # separate CPU-cache load/offload staging states when enabled.
-        return (token_num + 1) * self.get_cell_size() + (
-            self.small_page_num + self._big_page_num(token_num) + self.cpu_cache_temp_page_num
-        ) * self.sliding_config.get_state_nbytes()
-
-    def _profile_token_num(self, available_bytes):
-        if self._cache_nbytes(1) > available_bytes:
-            raise ValueError(
-                "Insufficient GPU memory for sliding-window checkpoints and full KV: "
-                f"{available_bytes / 1024 ** 3:.2f} GiB available, "
-                f"{self.small_page_num} small pages at "
-                f"{self.sliding_config.get_state_nbytes() / 1024 ** 2:.2f} MiB/page. "
-                "Reduce --linear_att_cache_size or --running_max_req_size."
-            )
-        low, high = 1, available_bytes // self.get_cell_size()
-        while low < high:
-            mid = (low + high + 1) // 2
-            if self._cache_nbytes(mid) <= available_bytes:
-                low = mid
-            else:
-                high = mid - 1
-        return low
-
     def profile_size(self, mem_fraction):
         torch.cuda.empty_cache()
         world_size = dist.get_world_size()
         available_memory = get_available_gpu_memory(world_size)
         if self.size is None:
             available_memory -= get_total_gpu_memory() * (1 - mem_fraction)
-            self.size = self._profile_token_num(int(available_memory * 1024 ** 3))
+        available_bytes = int(available_memory * 1024 ** 3)
+        cell_size = self.get_cell_size()
+        state_bytes = self.sliding_config.get_state_nbytes()
+        # Runtime windows already exist. Reserve the hold token, small pages
+        # and CPU-transfer slots before sizing full KV and big checkpoints.
+        fixed_bytes = cell_size + (self.small_page_num + self.cpu_cache_temp_page_num) * state_bytes
+        big_page_state_bytes = state_bytes if self.enable_prompt_cache else 0
+        if self.size is None:
+            if available_bytes < fixed_bytes + cell_size + big_page_state_bytes:
+                raise ValueError(
+                    "Insufficient GPU memory for sliding-window checkpoints and full KV; "
+                    "reduce --linear_att_cache_size or --running_max_req_size."
+                )
+            # Each complete page costs B full-KV tokens plus one checkpoint.
+            # A partial page also needs one checkpoint before it can hold tokens.
+            page_bytes = self.big_page_token_num * cell_size + big_page_state_bytes
+            page_num, tail_bytes = divmod(available_bytes - fixed_bytes, page_bytes)
+            self.size = page_num * self.big_page_token_num + max(0, (tail_bytes - big_page_state_bytes) // cell_size)
             if world_size > 1:
                 size_tensor = torch.tensor(self.size, dtype=torch.int64, device="cuda")
                 dist.all_reduce(size_tensor, op=dist.ReduceOp.MIN)
                 self.size = size_tensor.item()
-        elif self._cache_nbytes(self.size) > int(available_memory * 1024 ** 3):
+
+        big_page_num = triton.cdiv(self.size, self.big_page_token_num) if self.enable_prompt_cache else 0
+        cache_bytes = fixed_bytes + self.size * cell_size + big_page_num * state_bytes
+        if cache_bytes > available_bytes:
             raise ValueError(
                 "Requested full KV and sliding-window checkpoints exceed available GPU memory; "
                 "reduce --max_total_token_num, --linear_att_cache_size or --running_max_req_size."
             )
         logger.info(
             f"Sliding-window cache budget: {self.size} full-KV tokens, "
-            f"{self._big_page_num(self.size)} big pages, {self.small_page_num} small pages, "
+            f"{big_page_num} big pages, {self.small_page_num} small pages, "
             f"{self.cpu_cache_temp_page_num} CPU-cache staging states, "
-            f"{self._cache_nbytes(self.size) / 1024 ** 3:.2f} GiB (runtime windows already allocated)"
+            f"{cache_bytes / 1024 ** 3:.2f} GiB (runtime windows already allocated)"
         )
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
+        big_page_num = triton.cdiv(size, self.big_page_token_num) if self.enable_prompt_cache else 0
         # Keep the existing radix-cache contract; no second alias is needed.
         self.linear_att_big_page_buffers = SlidingWindowStateCacheManager(
-            size=self._big_page_num(size) + self.cpu_cache_temp_page_num,
+            size=big_page_num + self.cpu_cache_temp_page_num,
             sliding_config=self.sliding_config,
             keep_num=self.cpu_cache_temp_page_num,
         )
@@ -105,9 +97,6 @@ class HybridSlidingMemoryManager(MemoryManager):
 
     def get_att_input_params(self, layer_index: int):
         return super().get_att_input_params(self.sliding_config.get_full_layer_index(layer_index))
-
-    def get_full_cache_layer_index(self, layer_index: int):
-        return self.sliding_config.get_full_layer_index(layer_index)
 
     def _free_buffers(self):
         super()._free_buffers()

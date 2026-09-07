@@ -10,6 +10,10 @@ from .normal import NormalMemOperator
 class HybridSlidingMemOperator(NormalMemOperator):
     """Full-KV operations and CPU transfers of hybrid sliding checkpoints."""
 
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        layer_index = self.mem_manager.sliding_config.get_full_layer_index(layer_index)
+        return super().copy_kv_to_mem_manager(layer_index, mem_index, kv)
+
     def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req):
         from lightllm.common.basemodel.triton_kernel.sliding_window_cpu_cache_copy import (
             copy_cpu_cache_to_kv_buffer,

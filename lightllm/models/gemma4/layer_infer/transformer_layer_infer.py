@@ -158,11 +158,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.req_manager.req_to_sliding_window[layer_idx],
             )
             return
-        infer_state.mem_manager.operator.copy_kv_to_mem_manager(
-            layer_index=infer_state.mem_manager.get_full_cache_layer_index(self.layer_num_),
-            mem_index=infer_state.mem_index,
-            kv=cache_kv,
-        )
+        super()._post_cache_kv(cache_kv, infer_state, layer_weight)
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 

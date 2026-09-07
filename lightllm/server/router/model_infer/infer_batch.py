@@ -742,7 +742,7 @@ class InferReq:
                                 destination_indexes=tail_mems,
                             )
 
-                            self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
+                            self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
                             g_infer_context.req_manager.restore_small_page_state(
                                 req=self,
                                 small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,

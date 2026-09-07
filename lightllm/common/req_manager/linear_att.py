@@ -53,18 +53,6 @@ class ReqManagerForMamba(HybridAttentionReqManager):
     def create_state_cache_manager(self, size: int):
         return LinearAttCacheManager(size=size, linear_config=self.linear_config)
 
-    def init_hybrid_attention_state(self, req: "InferReq"):
-        return self.init_linear_att_state(req)
-
-    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
-        return self.copy_big_page_buffer_to_linear_att_state(big_page_buffer_idx=big_page_buffer_idx, req=req)
-
-    def restore_small_page_state(self, req: "InferReq", small_page_buffers):
-        return self.copy_small_page_buffer_to_linear_att_state(
-            req=req,
-            linear_att_small_page_buffers=small_page_buffers,
-        )
-
     def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
         assert len(b_req_idx) == len(buffer_indexes)
         if not any(buffer_idx != -1 for buffer_idx in buffer_indexes):
@@ -94,7 +82,7 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
         dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
 
-    def init_linear_att_state(self, req: "InferReq"):
+    def init_hybrid_attention_state(self, req: "InferReq"):
         conv_index = req.req_idx
         ssm_start = req.req_idx * (self.mtp_step + 1)
         self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
@@ -114,7 +102,7 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
 
-    def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
+    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
         big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
 
         conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
@@ -127,12 +115,8 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             self.req_to_mtp_state_index[req.req_idx] = 0
         return
 
-    def copy_small_page_buffer_to_linear_att_state(
-        self, req: "InferReq", linear_att_small_page_buffers: LinearAttCacheManager
-    ):
-        conv_state, ssm_state = linear_att_small_page_buffers.get_state_cache(
-            buffer_idx=req.shared_kv_node.small_page_buffer_idx
-        )
+    def restore_small_page_state(self, req: "InferReq", small_page_buffers: LinearAttCacheManager):
+        conv_state, ssm_state = small_page_buffers.get_state_cache(buffer_idx=req.shared_kv_node.small_page_buffer_idx)
         conv_dest = req.req_idx
         ssm_dest = req.req_idx * (self.mtp_step + 1)
         conv_cache_width = conv_state.shape[-1]

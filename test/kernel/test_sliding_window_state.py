@@ -8,12 +8,31 @@ from lightllm.common.basemodel.triton_kernel.sliding_window_state import (
     prepare_sliding_window_indexes,
 )
 from lightllm.common.req_manager.sliding_window import ReqManagerForSlidingWindow
+from lightllm.common.kv_cache_mem_manager.operator.hybrid_sliding import HybridSlidingMemOperator
 from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig, SlidingWindowStateCacheManager
 from lightllm.models.gemma4.kv_layout import get_kv_cache_layout
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import context_attention_fwd_gemma4_mm
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
+
+@pytest.mark.parametrize("layer_index,is_shared", [(5, False), (11, False), (17, True)])
+def test_full_kv_write_maps_logical_layer_once_and_skips_shared_readers(layer_index, is_shared):
+    config = SlidingWindowCacheConfig({0: 0}, {5: 0, 11: 1, 17: 1}, 32, 1, 64, 1, 64, torch.bfloat16)
+    mem_manager = SimpleNamespace(
+        sliding_config=config, kv_buffer=torch.zeros((2, 8, 2, 64), dtype=torch.bfloat16, device="cuda")
+    )
+    mem_manager.operator = HybridSlidingMemOperator(mem_manager)
+    layer = object.__new__(Gemma4TransformerLayerInfer)
+    layer.layer_num_, layer.is_sliding, layer.is_kv_shared_ = layer_index, False, is_shared
+    indexes = torch.tensor([1, 3], dtype=torch.int32, device="cuda")
+    kv = torch.randn((2, 2, 64), dtype=torch.bfloat16, device="cuda")
+    layer._post_cache_kv(kv, SimpleNamespace(mem_manager=mem_manager, mem_index=indexes), None)
+    expected = torch.zeros_like(mem_manager.kv_buffer)
+    if not is_shared:
+        expected[config.get_full_layer_index(layer_index), indexes] = kv
+    torch.testing.assert_close(mem_manager.kv_buffer, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("history_len", [0, 511, 512, 513, 1024])

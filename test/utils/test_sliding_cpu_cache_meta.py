@@ -8,6 +8,24 @@ from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfi
 from lightllm.models.gemma4.kv_layout import build_sliding_cache_config
 
 
+@pytest.mark.parametrize(
+    "model_config,expected",
+    [
+        ({"model_type": "gemma4"}, True),
+        ({"model_type": "gemma4_text"}, True),
+        ({"text_config": {"model_type": "gemma4_text"}}, True),
+        ({"model_type": "gemma4", "layer_types": ["full_attention"]}, True),
+        ({"model_type": "gemma3", "layer_types": ["sliding_attention", "full_attention"]}, False),
+        ({"model_type": "qwen3_5"}, False),
+    ],
+)
+def test_sliding_cache_architecture_is_selected_by_model_type(monkeypatch, model_config, expected):
+    import lightllm.utils.config_utils as config_utils
+
+    monkeypatch.setattr(config_utils, "get_config_json", lambda _: model_config)
+    assert config_utils.is_sliding_att_mixed_model.__wrapped__("test-model") is expected
+
+
 def _gemma_config(shared):
     layer_num = 42 if shared else 60
     return {

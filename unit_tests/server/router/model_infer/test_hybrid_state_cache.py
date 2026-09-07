@@ -3,9 +3,77 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.req_manager.linear_att import ReqManagerForMamba
 from lightllm.common.req_manager.sliding_window import ReqManagerForSlidingWindow
 from lightllm.common.sliding_window_cache_manager import SlidingWindowStateCacheManager
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
+
+
+def _cpu_linear_req_manager(mtp_step):
+    manager = object.__new__(ReqManagerForMamba)
+    manager.mtp_step = mtp_step
+    manager.req_to_conv_state = SimpleNamespace(
+        buffer=torch.arange(2 * 3 * 3 * (4 + mtp_step), dtype=torch.float32).reshape(2, 3, 3, 4 + mtp_step)
+    )
+    manager.req_to_ssm_state = SimpleNamespace(
+        buffer=torch.arange(2 * 3 * (mtp_step + 1) * 5, dtype=torch.float32).reshape(2, 3 * (mtp_step + 1), 5)
+    )
+    manager.req_to_mtp_state_index = torch.full((3,), mtp_step, dtype=torch.int32) if mtp_step else None
+    return manager
+
+
+@pytest.mark.parametrize("mtp_step", [0, 2])
+def test_linear_init_clears_entire_request_state_and_resets_mtp_index(mtp_step):
+    manager = _cpu_linear_req_manager(mtp_step)
+    req = SimpleNamespace(req_idx=1)
+    conv = manager.req_to_conv_state.buffer
+    ssm = manager.req_to_ssm_state.buffer
+    ssm_start = req.req_idx * (mtp_step + 1)
+    conv[:, req.req_idx] = float("nan")
+    ssm[:, ssm_start : ssm_start + mtp_step + 1] = float("nan")
+    expected_conv, expected_ssm = conv.clone(), ssm.clone()
+    expected_conv[:, req.req_idx].zero_()
+    expected_ssm[:, ssm_start : ssm_start + mtp_step + 1].zero_()
+
+    manager.init_hybrid_attention_state(req=req)
+
+    torch.testing.assert_close(conv, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(ssm, expected_ssm, atol=0, rtol=0)
+    if mtp_step:
+        torch.testing.assert_close(
+            manager.req_to_mtp_state_index, torch.tensor([mtp_step, 0, mtp_step], dtype=torch.int32)
+        )
+    else:
+        assert manager.req_to_mtp_state_index is None
+
+
+@pytest.mark.parametrize("mtp_step", [0, 2])
+@pytest.mark.parametrize("page_kind", ["big", "small"])
+def test_linear_restore_preserves_mtp_conv_tail_and_noncanonical_ssm_rows(mtp_step, page_kind):
+    manager = _cpu_linear_req_manager(mtp_step)
+    req = SimpleNamespace(req_idx=1, shared_kv_node=SimpleNamespace(small_page_buffer_idx=2))
+    conv_pages = torch.arange(3 * 2 * 3 * 4, dtype=torch.float32).reshape(3, 2, 3, 4) + 1000
+    ssm_pages = torch.arange(3 * 2 * 5, dtype=torch.float32).reshape(3, 2, 5) + 2000
+    pages = SimpleNamespace(get_state_cache=lambda buffer_idx: (conv_pages[buffer_idx], ssm_pages[buffer_idx]))
+    manager.mem_manager = SimpleNamespace(linear_att_big_page_buffers=pages)
+    expected_conv = manager.req_to_conv_state.buffer.clone()
+    expected_ssm = manager.req_to_ssm_state.buffer.clone()
+    expected_conv[:, req.req_idx, ..., :4] = conv_pages[2]
+    expected_ssm[:, req.req_idx * (mtp_step + 1)] = ssm_pages[2]
+
+    if page_kind == "big":
+        manager.restore_big_page_state(big_page_buffer_idx=2, req=req)
+    else:
+        manager.restore_small_page_state(req=req, small_page_buffers=pages)
+
+    torch.testing.assert_close(manager.req_to_conv_state.buffer, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(manager.req_to_ssm_state.buffer, expected_ssm, atol=0, rtol=0)
+    if mtp_step:
+        torch.testing.assert_close(
+            manager.req_to_mtp_state_index, torch.tensor([mtp_step, 0, mtp_step], dtype=torch.int32)
+        )
+    else:
+        assert manager.req_to_mtp_state_index is None
 
 
 @pytest.mark.parametrize("is_hybrid,radix_cache", [(False, object()), (True, None)])

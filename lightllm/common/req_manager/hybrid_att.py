@@ -11,11 +11,13 @@ if TYPE_CHECKING:
 
 
 class HybridAttentionReqManager(ReqManager, ABC):
-    """Request manager contract for token/full + request-state attention models.
+    """混合 attention 的请求运行态与大小页 checkpoint 管理接口。
 
-    The token index table remains the virtual, token-granular address space used
-    by prefix-cache matching.  The non-full attention state is managed through
-    this interface and may have a different physical granularity.
+    大小页沿同一虚拟 token 索引空间匹配前缀，full attention KV 保持 token 粒度存储。
+    linear/sliding-window 状态在大页边界及请求可缓存尾部的小页边界保存 checkpoint，
+    缓存命中后，再将相应 checkpoint 恢复到请求运行态。
+
+    公共缓存流程负责大小页分配、边界、匹配与淘汰；各实现负责状态存储和保存/恢复。
     """
 
     @abstractmethod
