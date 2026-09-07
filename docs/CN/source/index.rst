@@ -65,7 +65,6 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
 
    GLM-4.7-Flash 部署 <cookbook/glm4_deployment>
    Qwen3.5 部署 <cookbook/qwen35_deployment>
-   Gemma4 hybrid 缓存参数 <cookbook/gemma4_hybrid_cache>
 
 .. toctree::
    :maxdepth: 1
