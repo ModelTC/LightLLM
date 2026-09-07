@@ -84,6 +84,12 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             f"num_kv_shared_layers={kv_shared} out of range for "
             f"num_hidden_layers={self.config['num_hidden_layers']}"
         )
+        if kv_shared:
+            # Shared layers retain the owner's scratch KV across layers. Two
+            # interleaved microbatches would overwrite the same scratch slots.
+            assert not (
+                args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
+            ), "Gemma-4 shared sliding-window KV does not support microbatch overlap yet"
         assert args.mtp_step == 0, "Gemma-4 hybrid sliding-window cache does not support MTP yet"
         assert not args.enable_cpu_cache, "Gemma-4 hybrid sliding-window cache does not support CPU cache"
         assert not args.disable_chunked_prefill, "Gemma-4 hybrid sliding-window cache requires chunked prefill"

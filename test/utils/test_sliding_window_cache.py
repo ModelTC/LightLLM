@@ -128,3 +128,39 @@ def test_unsupported_sliding_state_transfer_modes_fail_before_loading_weights(mo
     monkeypatch.setattr(gemma_model, "get_env_start_args", lambda: args)
     with pytest.raises(AssertionError, match="does not support"):
         model._verify_params()
+
+
+@pytest.mark.parametrize("shared_layers", [0, 18])
+@pytest.mark.parametrize(
+    "overlap_mode", [None, "enable_prefill_microbatch_overlap", "enable_decode_microbatch_overlap"]
+)
+def test_shared_kv_rejects_interleaved_microbatches(monkeypatch, shared_layers, overlap_mode):
+    import lightllm.models.gemma4.model as gemma_model
+
+    model = object.__new__(gemma_model.Gemma4TpPartModel)
+    model.load_way, model.tp_world_size_ = "HF", 2
+    model.config = {
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "num_hidden_layers": 42,
+        "num_kv_shared_layers": shared_layers,
+    }
+    args = SimpleNamespace(
+        mtp_step=0,
+        enable_cpu_cache=False,
+        disable_chunked_prefill=False,
+        run_mode="normal",
+        llm_kv_type="None",
+        enable_dp_prompt_cache_fetch=False,
+        diverse_mode=False,
+        enable_prefill_microbatch_overlap=False,
+        enable_decode_microbatch_overlap=False,
+    )
+    if overlap_mode is not None:
+        setattr(args, overlap_mode, True)
+    monkeypatch.setattr(gemma_model, "get_env_start_args", lambda: args)
+    if shared_layers and overlap_mode is not None:
+        with pytest.raises(AssertionError, match="shared sliding-window KV does not support microbatch overlap"):
+            model._verify_params()
+    else:
+        model._verify_params()

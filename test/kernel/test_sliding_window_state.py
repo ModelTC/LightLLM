@@ -127,13 +127,19 @@ def test_empty_snapshot_does_not_read_gpu_request_ids():
     manager.save_big_page_states(object(), [0, 1], [-1, -1])
 
 
-def test_batched_window_commit_with_hold_request_and_cuda_graph_replay():
-    window, scratch_start, head_dim = 32, 4 * 32, 64
-    req_ids, lengths, q_lengths = [2, 0, 3], [86, 5, 100], [6, 5, 32]
-    starts = [0, 6, 11]
+@pytest.mark.parametrize(
+    "window,q_lengths",
+    [(32, [6, 5, 32]), (512, [4096, 1, 513]), (512, [1, 8192, 511]), (1024, [8192, 4096, 1])],
+)
+def test_batched_window_commit_with_hold_request_and_cuda_graph_replay(window, q_lengths):
+    scratch_start, head_dim = 4 * window, 64
+    req_ids = [2, 0, 3]
+    lengths = [q_lengths[0] + 2 * window + 3, q_lengths[1], q_lengths[2] + window - 1]
+    replay_lengths = [length + window + 7 for length in lengths]
+    starts = [0, q_lengths[0], q_lengths[0] + q_lengths[1]]
     int_tensor = lambda values: torch.tensor(values, device="cuda", dtype=torch.int32)
     b_req, b_seq, b_q, b_start = map(int_tensor, [req_ids, lengths, q_lengths, starts])
-    mapping = torch.full((4, 128), -1, device="cuda", dtype=torch.int32)
+    mapping = torch.full((4, max(replay_lengths)), -1, device="cuda", dtype=torch.int32)
     runtime = torch.zeros((scratch_start + sum(q_lengths), 2, head_dim), device="cuda", dtype=torch.bfloat16)
     runtime[scratch_start:] = torch.randn_like(runtime[scratch_start:])
 
@@ -149,13 +155,35 @@ def test_batched_window_commit_with_hold_request_and_cuda_graph_replay():
     # Replay with changed GPU state, including a padded/hold request ID.
     runtime[:scratch_start].zero_()
     runtime[scratch_start:].mul_(2)
+    b_seq.copy_(int_tensor(replay_lengths))
     graph.replay()
-    for req, seq, q_len, start in zip(req_ids, lengths, q_lengths, starts):
+    for req, seq, q_len, start in zip(req_ids, replay_lengths, q_lengths, starts):
+        tail_start = max(q_len - window, 0)
+        positions = torch.arange(seq - q_len + tail_start, seq, device="cuda")
+        expected_ring = torch.zeros_like(runtime[req * window : (req + 1) * window])
+        expected_ring[positions % window] = runtime[scratch_start + start + tail_start : scratch_start + start + q_len]
+        torch.testing.assert_close(runtime[req * window : (req + 1) * window], expected_ring, atol=0, rtol=0)
         positions = torch.arange(seq - q_len, seq, device="cuda")
-        expected = runtime[scratch_start + start : scratch_start + start + q_len]
-        torch.testing.assert_close(runtime[req * window + positions % window], expected, atol=0, rtol=0)
         torch.testing.assert_close(
             mapping[req, positions],
             torch.arange(scratch_start + start, scratch_start + start + q_len, device="cuda", dtype=torch.int32),
         )
     assert torch.count_nonzero(runtime[window : 2 * window]).item() == 0
+
+
+@pytest.mark.parametrize("max_q_seq_len", [1, 511, 512, 513, 4096, 8192])
+def test_commit_grid_is_bounded_by_window(monkeypatch, max_q_seq_len):
+    import lightllm.common.basemodel.triton_kernel.sliding_window_state as state_kernel
+
+    grids = []
+
+    class RecordingKernel:
+        def __getitem__(self, grid):
+            grids.append(grid)
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(state_kernel, "_commit_sliding_window_state", RecordingKernel())
+    layer_buffer = SimpleNamespace(shape=(8192, 2, 64), stride=lambda: (128, 64, 1))
+    req_ids = SimpleNamespace(shape=(3,))
+    state_kernel.commit_sliding_window_state(layer_buffer, req_ids, None, None, None, 512, 2048, max_q_seq_len)
+    assert grids == [(3, min(max_q_seq_len, 512), 2)]
