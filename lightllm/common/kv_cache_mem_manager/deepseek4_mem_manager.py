@@ -7,7 +7,7 @@ from .mem_manager import MemoryManager
 from .operator import DeepseekV4MemOperator
 from .allocator import KvCacheAllocator
 from lightllm.utils.dist_utils import get_current_rank_in_node
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -501,6 +501,18 @@ class DeepseekV4MemoryManager(MemoryManager):
     def get_fixed_memory_size(self):
         state_rows = (self.max_request_num + 1) * self.c128_state_ring + 1
         return self.n_c128 * state_rows * (2 * self.head_dim) * torch._utils._element_size(torch.float32)
+
+    def get_pd_kv_move_buffer_size(self):
+        args = get_env_start_args()
+        if args.run_mode not in ["prefill", "decode"]:
+            return 0
+        layout = DeepseekV4PDCacheLayout.from_compress_rates(
+            self.compress_rates,
+            token_page_size=args.pd_kv_page_size,
+            head_dim=self.head_dim,
+            indexer_head_dim=self.indexer_head_dim,
+        )
+        return args.pd_kv_page_num * layout.page_nbytes
 
     # ------------------------------------------------------------------ buffers
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
