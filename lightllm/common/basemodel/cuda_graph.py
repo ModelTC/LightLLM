@@ -9,6 +9,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
@@ -117,7 +118,9 @@ class CudaGraph:
             # 记录原始存在的变量
             pure_para_set = set(vars(infer_state).keys())
             torch.cuda.synchronize()
-            decode_func(copy.copy(infer_state))
+            # 在正式捕获前调优 decode attention，退出作用域后再捕获选定的配置。
+            with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+                decode_func(copy.copy(infer_state))
             torch.cuda.synchronize()
             for param_name in set(vars(infer_state).keys()):
                 if param_name not in pure_para_set:
@@ -149,7 +152,8 @@ class CudaGraph:
             pure_para_set = set(vars(infer_state).keys())
             pure_para_set1 = set(vars(infer_state1).keys())
             torch.cuda.synchronize()
-            decode_func(copy.copy(infer_state), copy.copy(infer_state1))
+            with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+                decode_func(copy.copy(infer_state), copy.copy(infer_state1))
             torch.cuda.synchronize()
             for para_name in set(vars(infer_state).keys()):
                 if para_name not in pure_para_set:
