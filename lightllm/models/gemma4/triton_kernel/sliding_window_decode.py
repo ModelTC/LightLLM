@@ -1,4 +1,4 @@
-"""Gemma sliding decode over a request ring and the current token's scratch KV."""
+"""Gemma sliding decode over each request's canonical KV ring."""
 
 import torch
 import triton
@@ -16,7 +16,6 @@ def _sliding_window_decode_stage1(
     V,
     BReqIdx,
     BSeqLen,
-    BQStartLoc,
     MidO,
     MidLogSumExp,
     sm_scale,
@@ -38,7 +37,6 @@ def _sliding_window_decode_stage1(
     stride_ls,
     gqa_group_size,
     WINDOW: tl.constexpr,
-    SCRATCH_START: tl.constexpr,
     Q_HEAD_NUM: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -57,8 +55,6 @@ def _sliding_window_decode_stage1(
         return
 
     req_idx = tl.load(BReqIdx + batch_idx).to(tl.int64)
-    q_start = tl.load(BQStartLoc + batch_idx).to(tl.int64)
-    scratch_token = tl.full((), SCRATCH_START, tl.int64) + q_start
     head_offsets = tl.arange(0, Q_HEAD_NUM)
     q_heads = kv_head * gqa_group_size + head_offsets
     q_heads = tl.where(head_offsets < gqa_group_size, q_heads, kv_head * gqa_group_size)
@@ -77,7 +73,7 @@ def _sliding_window_decode_stage1(
             positions = tile * BLOCK_N + offs_n
             mask = positions < block_end
             token_pos = kv_start + positions
-            k_loc = tl.where(token_pos < seq_len - 1, req_idx * WINDOW + token_pos % WINDOW, scratch_token)
+            k_loc = req_idx * WINDOW + token_pos % WINDOW
             k = tl.load(
                 K + k_loc[None, :] * stride_kt + kv_head * stride_kh + offs_d[:, None] * stride_kd,
                 mask=mask[None, :],
@@ -115,19 +111,17 @@ def sliding_window_decode_attention(
     v,
     b_req_idx,
     b_seq_len,
-    b_q_start_loc,
     sliding_window: int,
-    scratch_start: int,
     out=None,
     alloc_tensor_func=torch.empty,
 ):
-    """Decode one token per request without a token-to-sliding-KV index table."""
+    """Decode one token per request after its current KV has been written to the ring."""
     batch_size, q_head_num, head_dim = q.shape
     assert k.shape == v.shape and k.shape[-1] == head_dim
     assert head_dim in {16, 32, 64, 128, 256, 512}
     assert q_head_num % k.shape[1] == 0
-    assert b_req_idx.shape == b_seq_len.shape == b_q_start_loc.shape == (batch_size,)
-    assert sliding_window > 0 and scratch_start >= sliding_window
+    assert b_req_idx.shape == b_seq_len.shape == (batch_size,)
+    assert sliding_window > 0
     assert q.dtype == k.dtype == v.dtype
 
     # Keep the common GQA wrapper's launch and reduction schedule unchanged.
@@ -143,7 +137,6 @@ def sliding_window_decode_attention(
         v,
         b_req_idx,
         b_seq_len,
-        b_q_start_loc,
         mid_o,
         mid_logsumexp,
         1.0 / (head_dim ** 0.5),
@@ -154,7 +147,6 @@ def sliding_window_decode_attention(
         *mid_logsumexp.stride(),
         group_size,
         WINDOW=sliding_window,
-        SCRATCH_START=scratch_start,
         Q_HEAD_NUM=max(16, triton.next_power_of_2(group_size)),
         BLOCK_SEQ=block_seq,
         BLOCK_DMODEL=head_dim,

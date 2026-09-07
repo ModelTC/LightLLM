@@ -18,8 +18,7 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     """
     Gemma-4 decoder block. Full-attention KV stays token granular, while
-    sliding-attention KV is written to request-window state plus per-forward
-    scratch storage.
+    sliding attention reads one runtime KV pool with an adjustable window.
     """
 
     def __init__(self, layer_num, network_config):
@@ -70,13 +69,13 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # HF: config.num_kv_shared_layers (may be missing or null on non-E
         # checkpoints — treat as 0).
-        _, kv_owners, last_reader = get_kv_cache_layout(network_config)
+        _, kv_owners = get_kv_cache_layout(network_config)
         kv_owner = kv_owners[layer_num]
         self.is_kv_shared_ = kv_owner != layer_num
         self.kv_share_target_layer_ = kv_owner if self.is_kv_shared_ else None
-        # A chunk must not overwrite the history ring until every shared-KV
-        # consumer has read it. This also keeps graph capture/replay layer-local.
-        self.commit_sliding_state_ = self.is_sliding and last_reader[kv_owner] == layer_num
+        self.finish_sliding_prefill_ = self.is_sliding and not any(
+            kind == "sliding_attention" for kind in network_config["layer_types"][layer_num + 1 :]
+        )
 
         # Always 1.0: NoPE dims for full-attn layers are zero-padded into
         # cos/sin (cos=1, sin=0 → identity), so the kernel walks the whole
@@ -112,7 +111,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 q = infer_state._all_to_all_unbalance_get(data=q)
             return q, None
 
-        # ---- non-shared: full K/V path ----
+        # ---- non-shared: project the owner's K/V ----
         k = layer_weight.k_proj.mm(input).view(-1, kv_heads, head_dim)
         if self.k_eq_v:
             # Full-attn k_eq_v variant (e.g. 31B): K weights serve as V.
@@ -203,10 +202,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 None,
                 infer_state.b_image_token_end,
                 sliding_window=sw,
-                scratch_start=infer_state.req_manager.scratch_start,
+                runtime_token_start=infer_state.sliding_window_runtime_start,
             )
-            if self.commit_sliding_state_:
-                infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
+            # The final sliding reader compacts all physical windows together.
+            # Graph shape probing must not mutate state; replay uses fresh metadata.
+            if self.finish_sliding_prefill_ and not torch.cuda.is_current_stream_capturing():
+                infer_state.req_manager.finish_prefill(infer_state)
             return o_tensor.view(q.shape)
 
         # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
@@ -234,9 +235,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 v=_v,
                 b_req_idx=infer_state.b_req_idx,
                 b_seq_len=infer_state.b_seq_len,
-                b_q_start_loc=infer_state.b_q_start_loc,
                 sliding_window=self.sliding_window_,
-                scratch_start=infer_state.req_manager.scratch_start,
                 out=out,
                 alloc_tensor_func=self.alloc_tensor,
             )
@@ -244,8 +243,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             o_tensor = infer_state.decode_att_state1.decode_att(
                 q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
             )
-        if self.commit_sliding_state_:
-            infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
         return o_tensor.view(q.shape)
 
     # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------

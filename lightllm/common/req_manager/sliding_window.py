@@ -2,7 +2,10 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
-from lightllm.common.basemodel.triton_kernel.sliding_window_state import commit_sliding_window_state
+from lightllm.common.basemodel.triton_kernel.sliding_window_state import (
+    get_sliding_window_mem_indexes,
+    move_sliding_window,
+)
 from lightllm.common.sliding_window_cache_manager import SlidingWindowStateCacheManager
 
 from .hybrid_att import HybridAttentionReqManager
@@ -23,26 +26,30 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
         max_sequence_length: int,
         mem_manager: Optional["HybridSlidingMemoryManager"],
         sliding_config: "SlidingWindowCacheConfig",
-        scratch_token_num: int,
+        max_prefill_token_num: int,
+        prefill_microbatch_num: int = 1,
     ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.sliding_config = sliding_config
         self.sliding_window = sliding_config.sliding_window
-        self.scratch_token_num = scratch_token_num
-        self.scratch_start = (max_request_num + 1) * self.sliding_window
-        # Attention reads history and current-chunk KV from one buffer. The
-        # request state is a view of its ring region, not a second allocation.
+        self.max_prefill_token_num = max_prefill_token_num
+        self.runtime_token_start = (max_request_num + 1) * self.sliding_window
+        # One KV pool. Prefill expands each active window to history + chunk;
+        # decode uses its compact request window. Both attention paths read this pool.
+        self.prefill_capacity = (
+            max_prefill_token_num + min(max_request_num + 1, max_prefill_token_num) * self.sliding_window
+        )
         self.sliding_kv_buffer = torch.zeros(
             (
                 sliding_config.sliding_layer_num,
-                self.scratch_start + scratch_token_num,
+                self.runtime_token_start + prefill_microbatch_num * self.prefill_capacity,
                 2 * sliding_config.sliding_head_num,
                 sliding_config.sliding_head_dim,
             ),
             dtype=sliding_config.dtype,
             device="cuda",
         )
-        self.req_to_sliding_window = self.sliding_kv_buffer[:, : self.scratch_start].view(
+        self.req_to_sliding_window = self.sliding_kv_buffer[:, : self.runtime_token_start].view(
             sliding_config.sliding_layer_num,
             max_request_num + 1,
             self.sliding_window,
@@ -83,30 +90,48 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
         )
 
     def prepare_sliding_window(self, infer_state):
-        q_token_num = infer_state.input_ids.shape[0]
-        assert q_token_num <= self.scratch_token_num
-        infer_state.sliding_window_mem_index = torch.arange(
-            self.scratch_start,
-            self.scratch_start + q_token_num,
-            dtype=torch.int64,
-            device="cuda",
+        token_num = infer_state.input_ids.shape[0]
+        infer_state.sliding_window_runtime_start = (
+            self.runtime_token_start + infer_state.microbatch_index * self.prefill_capacity
+        )
+        if infer_state.is_prefill:
+            assert token_num <= self.max_prefill_token_num
+            move_sliding_window(
+                self.sliding_kv_buffer,
+                infer_state.b_req_idx,
+                infer_state.b_seq_len,
+                infer_state.b_ready_cache_len,
+                infer_state.b_q_start_loc,
+                self.sliding_window,
+                infer_state.sliding_window_runtime_start,
+            )
+        infer_state.sliding_window_mem_index = get_sliding_window_mem_indexes(
+            infer_state.b_req_idx,
+            infer_state.b_seq_len,
+            infer_state.b_q_seq_len,
+            infer_state.b_q_start_loc,
+            self.sliding_window,
+            infer_state.sliding_window_runtime_start,
+            token_num,
+            infer_state.max_q_seq_len,
+            infer_state.is_prefill,
+        )
+
+    def finish_prefill(self, infer_state):
+        # Compact all physical layers together, after every shared reader.
+        move_sliding_window(
+            self.sliding_kv_buffer,
+            infer_state.b_req_idx,
+            infer_state.b_seq_len,
+            infer_state.b_ready_cache_len,
+            infer_state.b_q_start_loc,
+            self.sliding_window,
+            infer_state.sliding_window_runtime_start,
+            compact=True,
         )
 
     def get_layer_kv(self, layer_index: int):
         local_layer = self.sliding_config.get_sliding_layer_index(layer_index)
-        layer_buffer = self.sliding_kv_buffer[local_layer]
         head_num = self.sliding_config.sliding_head_num
+        layer_buffer = self.sliding_kv_buffer[local_layer]
         return layer_buffer[:, :head_num], layer_buffer[:, head_num:]
-
-    def commit_layer_state(self, layer_index: int, infer_state):
-        local_layer = self.sliding_config.get_sliding_layer_index(layer_index)
-        commit_sliding_window_state(
-            layer_buffer=self.sliding_kv_buffer[local_layer],
-            b_req_idx=infer_state.b_req_idx,
-            b_seq_len=infer_state.b_seq_len,
-            b_q_seq_len=infer_state.b_q_seq_len,
-            b_q_start_loc=infer_state.b_q_start_loc,
-            sliding_window=self.sliding_window,
-            scratch_start=self.scratch_start,
-            max_q_seq_len=infer_state.max_q_seq_len,
-        )

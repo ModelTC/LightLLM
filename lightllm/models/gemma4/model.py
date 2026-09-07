@@ -84,8 +84,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             f"num_hidden_layers={self.config['num_hidden_layers']}"
         )
         if kv_shared:
-            # Shared layers retain the owner's scratch KV across layers. Two
-            # interleaved microbatches would overwrite the same scratch slots.
+            # Shared-KV microbatch overlap needs separate lifecycle validation.
             assert not (
                 args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
             ), "Gemma-4 shared sliding-window KV does not support microbatch overlap yet"
@@ -108,17 +107,21 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _init_req_manager(self):
         args = get_env_start_args()
         create_max_seq_len = max(int(self.batch_max_tokens or 0), int(self.max_seq_length or 0))
-        scratch_token_num = max(
+        max_prefill_token_num = max(
             int(self.batch_max_tokens or 0),
-            int(self.graph_max_batch_size or 0),
             int(args.prefill_cudagraph_max_handle_token or 0) if args.enable_prefill_cudagraph else 0,
         )
+        if args.enable_tpsp_mix_mode:
+            max_prefill_token_num = (
+                (max(1, max_prefill_token_num) + self.tp_world_size_ - 1) // self.tp_world_size_ * self.tp_world_size_
+            )
         self.req_manager = ReqManagerForSlidingWindow(
             max_request_num=self.max_req_num,
             max_sequence_length=create_max_seq_len,
             mem_manager=None,
             sliding_config=self._get_sliding_cache_config(),
-            scratch_token_num=scratch_token_num,
+            max_prefill_token_num=max_prefill_token_num,
+            prefill_microbatch_num=2 if args.enable_prefill_microbatch_overlap else 1,
         )
 
     def _init_mem_manager(self):
@@ -136,10 +139,8 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         # once per infer_state on a single shape — both unworkable for the
         # heterogeneous layout. Both layer kinds go through triton.
         #
-        # Primary backend = sliding layers. Sliding prefill bypasses the
-        # backend and calls gemma4_mm directly (SWA + image bidi in one
-        # pass); the prefill_att_state created here is unused but the
-        # framework requires prefill_att_backend to be non-None.
+        # Sliding layers read their runtime KV pool through model-local kernels.
+        # The framework still requires primary attention states.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
 
