@@ -421,6 +421,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
+        memory_reservations=None,
     ):
         assert head_num == 1, "DeepSeek-V4 是 MLA(MQA)，dense latent 的 head_num 必须为 1"
         assert head_dim == self.mla_head_dim, f"DeepSeek-V4 packed KV 期望 head_dim={self.mla_head_dim}"
@@ -459,7 +460,16 @@ class DeepseekV4MemoryManager(MemoryManager):
                 self.layer_to_c128_idx[lid] = c128
                 c128 += 1
 
-        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            dtype,
+            head_num,
+            head_dim,
+            layer_num,
+            always_copy,
+            mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
     # ------------------------------------------------------------------ sizing
     def _planned_swa_size(self, full_size: int) -> int:
@@ -478,19 +488,127 @@ class DeepseekV4MemoryManager(MemoryManager):
         return
 
     def get_cell_size(self):
-        kv_bytes = self.mla_bytes_per_token
-        indexer_bytes = self.indexer_bytes_per_token
+        # Physical asymptotic cost for diagnostics and the binary-search upper
+        # bound. get_profiled_size still makes the final choice from exact bytes.
+        kv_bytes = (
+            _aligned_gpu_page_nbytes(
+                DSV4_SWA_PAGE_SIZE,
+                DSV4_MLA_DATA_BYTES_PER_TOKEN,
+                self.mla_scale_bytes,
+                DSV4_MLA_PAGE_ALIGN_BYTES,
+            )
+            / DSV4_SWA_PAGE_SIZE
+        )
+        c4_kv_bytes = (
+            _aligned_gpu_page_nbytes(
+                DSV4_C4_PAGE_SIZE,
+                DSV4_MLA_DATA_BYTES_PER_TOKEN,
+                self.mla_scale_bytes,
+                DSV4_MLA_PAGE_ALIGN_BYTES,
+            )
+            / DSV4_C4_PAGE_SIZE
+        )
+        indexer_bytes = (
+            _aligned_gpu_page_nbytes(DSV4_C4_PAGE_SIZE, self.indexer_head_dim, DSV4_INDEXER_SCALE_BYTES)
+            / DSV4_C4_PAGE_SIZE
+        )
+        c128_kv_bytes = (
+            _aligned_gpu_page_nbytes(
+                DSV4_C128_PAGE_SIZE,
+                DSV4_MLA_DATA_BYTES_PER_TOKEN,
+                self.mla_scale_bytes,
+                DSV4_MLA_PAGE_ALIGN_BYTES,
+            )
+            / DSV4_C128_PAGE_SIZE
+        )
         state_dtype_bytes = torch._utils._element_size(torch.float32)
         c4_state_width = 4 * self.head_dim + 4 * self.indexer_head_dim
         c4_state_bytes = self.c4_state_ring / DSV4_SWA_PAGE_SIZE * c4_state_width * state_dtype_bytes * self.n_c4
         swa_slot = kv_bytes * self.layer_num + c4_state_bytes
-        compressed = (kv_bytes + indexer_bytes) * self.n_c4 / 4 + kv_bytes * self.n_c128 / 128
+        compressed = (c4_kv_bytes + indexer_bytes) * self.n_c4 / 4 + c128_kv_bytes * self.n_c128 / 128
 
-        return swa_slot * self.swa_full_tokens_ratio + compressed
+        maps = 4 * (1 + int(self.n_c4 > 0) + int(self.n_c128 > 0))
+        live = 4 / DSV4_SWA_PAGE_SIZE * self.swa_full_tokens_ratio
+        if self.n_c4:
+            live += 4 / (4 * DSV4_C4_PAGE_SIZE)
+        return swa_slot * self.swa_full_tokens_ratio + compressed + maps + live
 
     def get_fixed_memory_size(self):
         state_rows = (self.max_request_num + 1) * self.c128_state_ring + 1
         return self.n_c128 * state_rows * (2 * self.head_dim) * torch._utils._element_size(torch.float32)
+
+    @staticmethod
+    def _pool_nbytes(size, page_size, layer_num, data_bytes, scale_bytes, align_bytes=1):
+        pages = _ceil_div(size + 1, page_size)
+        page_bytes = _aligned_gpu_page_nbytes(page_size, data_bytes, scale_bytes, align_bytes)
+        return layer_num * pages * page_bytes
+
+    def get_kv_memory_size(self, size):
+        """Exact GPU payload of _init_buffers for a proposed full-token capacity."""
+        size = int(size)
+        swa_size = self._planned_swa_size(size)
+        total = self._pool_nbytes(
+            swa_size,
+            DSV4_SWA_PAGE_SIZE,
+            self.layer_num,
+            DSV4_MLA_DATA_BYTES_PER_TOKEN,
+            self.mla_scale_bytes,
+            DSV4_MLA_PAGE_ALIGN_BYTES,
+        )
+        # swa page liveness and full->swa mapping
+        total += _ceil_div(swa_size + 1, DSV4_SWA_PAGE_SIZE) * 4 + (size + 1) * 4
+        if self.n_c4:
+            c4_size = _ceil_div(size, 4)
+            total += self._pool_nbytes(
+                c4_size,
+                DSV4_C4_PAGE_SIZE,
+                self.n_c4,
+                DSV4_MLA_DATA_BYTES_PER_TOKEN,
+                self.mla_scale_bytes,
+                DSV4_MLA_PAGE_ALIGN_BYTES,
+            )
+            total += self._pool_nbytes(
+                c4_size,
+                DSV4_C4_PAGE_SIZE,
+                self.n_c4,
+                self.indexer_head_dim,
+                DSV4_INDEXER_SCALE_BYTES,
+            )
+            total += _ceil_div(c4_size + 1, DSV4_C4_PAGE_SIZE) * 4 + (size + 1) * 4
+            rows = self._paged_state_rows(_ceil_div(swa_size, DSV4_SWA_PAGE_SIZE), self.c4_state_ring, 4)
+            total += self.n_c4 * rows * (4 * self.head_dim + 4 * self.indexer_head_dim) * 4
+        if self.n_c128:
+            c128_size = _ceil_div(size, 128)
+            total += self._pool_nbytes(
+                c128_size,
+                DSV4_C128_PAGE_SIZE,
+                self.n_c128,
+                DSV4_MLA_DATA_BYTES_PER_TOKEN,
+                self.mla_scale_bytes,
+                DSV4_MLA_PAGE_ALIGN_BYTES,
+            )
+            total += (size + 1) * 4
+            total += self.get_fixed_memory_size()
+        return total
+
+    def get_profiled_size(self, available_memory_bytes):
+        # available_memory_bytes has already deducted reservations.  Compare
+        # only variable payload here because fixed bytes were deducted by base.
+        budget = int(available_memory_bytes) + self.get_fixed_memory_size()
+        if self.get_kv_memory_size(0) > budget:
+            raise RuntimeError(
+                f"DeepSeek-V4 KV fixed payload exceeds profile budget: {self.get_kv_memory_size(0)} > {budget}"
+            )
+        low, high = 0, max(1, int(available_memory_bytes / max(self.get_cell_size(), 1)) * 2)
+        while self.get_kv_memory_size(high) <= budget:
+            high *= 2
+        while low + 1 < high:
+            mid = (low + high) // 2
+            if self.get_kv_memory_size(mid) <= budget:
+                low = mid
+            else:
+                high = mid
+        return low
 
     # ------------------------------------------------------------------ buffers
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):

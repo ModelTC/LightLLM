@@ -74,6 +74,14 @@ def profile_mtp_weight_memory(model):
     weight_memory_before = torch.cuda.memory_allocated()
     yield
     target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
+    # Draft construction can opt out of portions of the target's weight layout
+    # which it never instantiates (for example EPLB redundant rows).
+    excluded_weight_bytes = int(getattr(model, "get_mtp_profile_weight_exclusion", lambda: 0)())
+    if not 0 <= excluded_weight_bytes <= target_weight_bytes:
+        raise ValueError(
+            f"invalid MTP profile exclusion {excluded_weight_bytes}; measured target weights={target_weight_bytes}"
+        )
+    target_weight_bytes -= excluded_weight_bytes
     model.mem_fraction = get_mtp_adjusted_mem_fraction(
         mem_fraction=model.mem_fraction,
         target_weight_bytes=target_weight_bytes,

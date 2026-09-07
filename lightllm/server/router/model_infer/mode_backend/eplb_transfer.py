@@ -11,6 +11,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import torch
 import torch.distributed as dist
 
+from lightllm.common.eplb_utils import EPLB_MAX_STAGING_DEPTH, extract_eplb_expert_tensors
+
 
 @dataclass(frozen=True)
 class TransferStep:
@@ -106,7 +108,7 @@ class _EPLBTransferBase:
         self.world_size = world_size
         self.num_experts_per_rank = weights[0].expert_parallel_state.num_primary_experts_per_rank
         self.device = weights[0].w13.weight.device
-        self.live = [_extract_expert_tensors(weight) for weight in weights]
+        self.live = [extract_eplb_expert_tensors(weight) for weight in weights]
         self._validate_live_layout(weights)
         num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
         self.staging = [
@@ -263,7 +265,7 @@ class NixlEPLBTransfer(_EPLBTransferBase):
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
         # Reuse at most eight layer buffers to bound EPLB staging memory.
-        self.staging_depth = min(8, len(weights))
+        self.staging_depth = min(EPLB_MAX_STAGING_DEPTH, len(weights))
         super().__init__(weights, transfer_group, global_rank, world_size)
         self._nixl_agent = None
         self._registered_descs = None
@@ -617,18 +619,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
             self.shutdown()
         except Exception:
             pass
-
-
-def _extract_expert_tensors(weight) -> List[Tuple[str, torch.Tensor]]:
-    result = []
-    for pack_name in ("w13", "w2"):
-        pack = getattr(weight, pack_name)
-        for value_name in ("weight", "weight_scale", "weight_zero_point"):
-            tensor = getattr(pack, value_name, None)
-            if tensor is not None:
-                assert tensor.ndim >= 1 and tensor.is_contiguous(), f"{pack_name}.{value_name} must be contiguous"
-                result.append((f"{pack_name}.{value_name}", tensor))
-    return result
 
 
 def _commit_staging_rows(

@@ -48,11 +48,11 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_paral
     disable_eplb_model_init,
     is_eplb_model_init_disabled,
 )
+from lightllm.common.eplb_utils import extract_eplb_expert_tensors
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
     _CudaBatchMemcpy,
     _commit_staging_rows,
-    _extract_expert_tensors,
     align_target_placement,
     build_transfer_plan,
 )
@@ -2015,7 +2015,7 @@ def test_extract_expert_tensors_includes_weight_scale_and_zero_point_in_order():
             self.weight_zero_point = torch.full((3, 1), offset + 2) if zero else None
 
     weight = type("Weight", (), {"w13": Pack(1), "w2": Pack(10, scale=False, zero=False)})()
-    tensors = _extract_expert_tensors(weight)
+    tensors = extract_eplb_expert_tensors(weight)
     assert [name for name, _ in tensors] == [
         "w13.weight",
         "w13.weight_scale",
