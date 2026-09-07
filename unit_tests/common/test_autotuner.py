@@ -260,6 +260,56 @@ def test_explicit_config_bypasses_tuning(tmp_path, monkeypatch):
     assert not cache_file.exists()
 
 
+@pytest.mark.parametrize("keyword_input", [False, True])
+def test_rebuild_inputs_only_for_benchmarking(tmp_path, monkeypatch, keyword_input):
+    rebuilds = []
+    executions = []
+    benchmarks = []
+    original = torch.zeros(2)
+
+    def rebuild(state, size, run_config=None):
+        rebuilds.append(state)
+        return (torch.ones(size),), {"size": size}
+
+    @autotune(
+        kernel_name="rebuild_inputs",
+        kernel_type=AutotuneKernelType.DECODE_ATTENTION,
+        configs_gen_func=lambda: [{"block": 1}, {"block": 2}],
+        static_key_func=lambda state: {"input_size": state.numel()},
+        run_key_func=lambda size: size,
+        rebuild_input_func=rebuild,
+    )
+    def kernel(state, size, run_config=None):
+        executions.append(state)
+        return state
+
+    def bench(state, size, run_config):
+        benchmarks.append(state)
+        torch.testing.assert_close(state, torch.ones(8))
+        assert size == 8
+        return 1.0 / run_config["block"]
+
+    kernel._cache_dir = str(tmp_path)
+    monkeypatch.setattr(kernel, "_bench", bench)
+    args, kwargs = ((), {"state": original, "size": 8}) if keyword_input else ((original, 8), {})
+
+    assert kernel(*args, **kwargs) is original
+    with Autotuner.autotune_warmup():
+        assert kernel(*args, **kwargs) is original
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+        assert kernel(*args, **kwargs, run_config={"block": 3}) is original
+        assert not rebuilds
+        assert kernel(*args, **kwargs) is original
+        assert kernel(*args, **kwargs) is original  # Exact cache hit only warms historical configs.
+
+    assert kernel(*args, **kwargs) is original
+    assert len(rebuilds) == 1 and rebuilds[0] is original
+    assert len(benchmarks) == 2 and benchmarks[0] is benchmarks[1]
+    assert all(state is original for state in executions)
+    assert kernel.cached_configs == {frozendict({"input_size": 2}): {"8": {"block": 2}}}
+    torch.testing.assert_close(original, torch.zeros(2))
+
+
 def test_default_api_and_nested_phase_restore_after_exception():
     assert not Autotuner.is_autotune_warmup()
     assert not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)

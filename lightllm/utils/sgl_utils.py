@@ -1,7 +1,6 @@
 import torch
 
-from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner, autotune
-from lightllm.utils.envs_utils import get_triton_autotune_level
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -72,12 +71,43 @@ def _flash_attn_kvcache_run_key(q, page_table, max_seqlen_q):
     return batch_size * 10_000_000_000_000 + max_q_len * 10_000_000 + max_kv_len
 
 
+def _flash_attn_kvcache_rebuild_inputs(
+    q,
+    k_cache,
+    v_cache,
+    cache_seqlens=None,
+    page_table=None,
+    cu_seqlens_q=None,
+    cu_seqlens_k_new=None,
+    max_seqlen_q=None,
+    *args,
+    **kwargs,
+):
+    # Graph 初始化的占位 KV 长度通常只有 2，调优时按页表容量构造实际需要计算的长度。
+    batch_size, max_pages = page_table.shape
+    kv_len = max_pages * k_cache.shape[1]
+    num_pages = min(k_cache.shape[0], v_cache.shape[0])
+    if num_pages == 0:
+        raise ValueError("FA3 autotuning requires a non-empty KV cache")
+
+    # 复用已有 KV 存储，只重建页表；容量不足时循环使用合法物理页，不修改原始页表和 KV。
+    page_table = torch.arange(batch_size * max_pages, dtype=page_table.dtype, device=page_table.device)
+    page_table = page_table.remainder_(num_pages).view(batch_size, max_pages)
+    cache_seqlens = torch.full((batch_size,), kv_len, dtype=torch.int32, device=k_cache.device)
+    if cu_seqlens_k_new is not None:
+        cu_seqlens_k_new = torch.arange(batch_size + 1, dtype=torch.int32, device=k_cache.device) * kv_len
+
+    # 保留原始 Q 和 query 分段，兼容普通 decode、MTP 及不同长度的 query 分组。
+    return (q, k_cache, v_cache, cache_seqlens, page_table, cu_seqlens_q, cu_seqlens_k_new, max_seqlen_q, *args), kwargs
+
+
 @autotune(
-    kernel_name="sgl_fa3_kvcache_ns:v1",
+    kernel_name="sgl_fa3_kvcache_ns:v2",
     kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=_flash_attn_kvcache_num_splits_configs,
     static_key_func=_flash_attn_kvcache_static_key,
     run_key_func=_flash_attn_kvcache_run_key,
+    rebuild_input_func=_flash_attn_kvcache_rebuild_inputs,
 )
 @torch.no_grad()
 def flash_attn_with_kvcache_autotune(
@@ -121,62 +151,3 @@ def flash_attn_with_kvcache_autotune(
         v_descale=v_descale,
         **kwargs,
     )
-
-
-def fa3_decode_autotune(model, cuda_graph_batch_sizes, batch_multiplier: int):
-    # 是否开启自动调优
-    if get_triton_autotune_level() not in [
-        AutotuneLevel.ADAPTIVE_AUTOTUNE,
-        AutotuneLevel.FORCE_AUTOTUNE,
-    ]:
-        return
-
-    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
-        max_kv_len = int(model.graph_max_len_in_batch)
-        if max_kv_len <= 0:
-            return
-
-        k, v = model.mem_manager.get_att_input_params(layer_index=0)
-        k_cache = k.view(k.shape[0], 1, k.shape[1], k.shape[2])
-        v_cache = v.view(v.shape[0], 1, v.shape[1], v.shape[2])
-        q_head_num = int(model.config["num_attention_heads"]) // model.tp_world_size_
-        head_dim = int(k.shape[-1])
-        for batch_size in cuda_graph_batch_sizes[::-1]:
-            assert batch_size % batch_multiplier == 0
-            att_batch_size = batch_size // batch_multiplier
-            # 因为完整的kv空间可能无法装下所有token，所以在tuning的时候，所有token都使用相同的kv空间。
-            # 保证tuning的时候不会出现大的问题。
-            kv_range = torch.arange(att_batch_size * max_kv_len, dtype=torch.int32, device=k.device) % max_kv_len
-            k[kv_range].zero_()
-            v[kv_range].zero_()
-
-            q = torch.zeros(
-                (batch_size, q_head_num, head_dim),
-                dtype=model.data_type,
-                device=k.device,
-            )
-            page_table = kv_range.view(att_batch_size, max_kv_len)
-            cache_seqlens = torch.full((att_batch_size,), max_kv_len, dtype=torch.int32, device=k.device)
-            cu_seqlens_q = torch.arange(att_batch_size + 1, dtype=torch.int32, device=k.device) * batch_multiplier
-            cu_seqlens_k = torch.arange(att_batch_size + 1, dtype=torch.int32, device=k.device) * max_kv_len
-            softmax_scale = 1.0 / (head_dim ** 0.5)
-
-            flash_attn_with_kvcache_autotune(
-                q=q,
-                k_cache=k_cache,
-                v_cache=v_cache,
-                page_table=page_table,
-                cache_seqlens=cache_seqlens,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k_new=cu_seqlens_k,
-                max_seqlen_q=batch_multiplier,
-                softmax_scale=softmax_scale,
-                causal=True,
-                window_size=(-1, -1),
-                softcap=0.0,
-                k_descale=None,
-                v_descale=None,
-                return_softmax_lse=False,
-                sinks=None,
-            )
-    return

@@ -46,6 +46,7 @@ def autotune(
     run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
     mutates_args: List[str] = [],
     kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
+    rebuild_input_func: Optional[Callable] = None,
 ):
     """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
 
@@ -67,6 +68,11 @@ def autotune(
             During benchmarking, defensive clones are made to avoid side effects. Defaults to ``[]``.
         kernel_type (AutotuneKernelType, optional): Only a matching warmup phase benchmarks this kernel.
             Other phases still execute it using cached configurations or its default configuration.
+        rebuild_input_func (Callable, optional): 调优输入重建回调，主要供 decode attention 算子使用。
+            CUDA Graph 初始化时，输入的真实请求长度通常很短，无法代表实际 decode 场景的计算量，
+            因此需要算子通过此回调自行重建输入，例如填入目标 KV 长度并构造对应的合法页表。
+            每次实际调优搜索前调用一次，接收算子的原始参数，返回用于计时的 ``(args, kwargs)``。
+            回调不应修改原始输入；缓存键、历史配置预热及最终执行仍使用原始参数。
 
     Returns:
         Callable: A callable object that wraps the original function and performs autotuning
@@ -83,6 +89,7 @@ def autotune(
             run_key_distance_func=run_key_distance_func,
             mutates_args=mutates_args,
             kernel_type=kernel_type,
+            rebuild_input_func=rebuild_input_func,
         )
 
     return decorator
@@ -133,11 +140,13 @@ class Autotuner:
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
         kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
+        rebuild_input_func: Optional[Callable] = None,
     ):
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
+        self.rebuild_input_func = rebuild_input_func
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -335,6 +344,10 @@ class Autotuner:
                 )
         else:
             rank_tuning_configs = self.configs_gen_func()
+
+        # 仅为本次调优重建输入，构造开销不计入计时，最终执行仍使用调用方的原始输入。
+        if self.rebuild_input_func is not None:
+            args, kwargs = self.rebuild_input_func(*args, **kwargs)
 
         best_config = None
         best_time = float("inf")

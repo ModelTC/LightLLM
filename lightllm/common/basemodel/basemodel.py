@@ -38,10 +38,7 @@ from lightllm.common.basemodel.hidden_collector import (
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import (
-    set_model_init_status,
-    enable_full_att_decode_tune,
-)
+from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.infer_utils import post_empty_cache
 from lightllm.utils.torch_memory_saver_utils import (
@@ -140,7 +137,6 @@ class TpPartBaseModel:
 
         self._init_hidden_collector()
         self._autotune_warmup()
-        self._full_att_decode_autotune()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
@@ -307,60 +303,6 @@ class TpPartBaseModel:
                 self.prefill_graph.warmup_overlap(self)
             else:
                 self.prefill_graph.warmup(self)
-
-    @final
-    @torch.no_grad()
-    @post_empty_cache
-    def _full_att_decode_autotune(self):
-        """
-        Warm up / autotune FA3 full-attention decode ``num_splits`` before CUDA Graph capture.
-
-        Runs only when all of the following hold:
-          - CUDA Graph is enabled (``disable_cudagraph`` is False)
-          - this is the main model (MTP draft models are skipped)
-          - ``ENABLE_FULL_ATT_DECODE_TUNE`` is set to 1/ON/TRUE (default off)
-          - decode attention backend is ``Fa3AttBackend``
-
-        Candidate batch sizes follow the same schedule as CUDA Graph capture.
-        Actual benchmarking is delegated to ``fa3_decode_autotune`` in ``sgl_utils``.
-        """
-        if self.disable_cudagraph:
-            return
-        # Only tune on the main model; MTP draft models skip this path.
-        if self.is_mtp_draft_model:
-            return
-
-        # Opt-in switch for FA3 full-attention decode num_splits tuning.
-        # Set ENABLE_FULL_ATT_DECODE_TUNE=1/ON/TRUE to enable; default is off.
-        if not enable_full_att_decode_tune():
-            return
-
-        # Only Fa3AttBackend decode path needs this num_splits warmup.
-        decode_backends = [
-            self.decode_att_backend,
-            self.decode_att_backend1,
-        ]
-        if not any(
-            backend is not None and backend.__class__.__name__ == "Fa3AttBackend" for backend in decode_backends
-        ):
-            return
-
-        from lightllm.utils.sgl_utils import fa3_decode_autotune
-
-        decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
-        cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
-        cuda_graph_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
-            batch_step_size_before_split=cuda_graph_grow_step_size,
-            split_batch_size=self.args.graph_split_batch_size * decode_batch_multiplier,
-            batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
-            max_batch_size=self.graph_max_batch_size,
-            tp_world_size=self.tp_world_size_,
-        )
-        cuda_graph_batch_sizes = [
-            batch_size for batch_size in cuda_graph_batch_sizes if batch_size % decode_batch_multiplier == 0
-        ]
-        fa3_decode_autotune(self, cuda_graph_batch_sizes, batch_multiplier=decode_batch_multiplier)
-        return
 
     def _init_custom(self):
         pass
