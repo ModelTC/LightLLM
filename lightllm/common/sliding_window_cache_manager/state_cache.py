@@ -9,9 +9,10 @@ from .config import SlidingWindowCacheConfig
 class SlidingWindowStateCacheManager:
     """GPU storage for immutable request-level sliding-window checkpoints."""
 
-    def __init__(self, size: int, sliding_config: SlidingWindowCacheConfig):
+    def __init__(self, size: int, sliding_config: SlidingWindowCacheConfig, keep_num: int = 0):
         self.size = size
-        assert size >= 0
+        self.keep_num = keep_num
+        assert 0 <= keep_num <= size
         self.state_cache = torch.empty(
             (size, *sliding_config.get_state_shape()), dtype=sliding_config.dtype, device="cuda"
         )
@@ -29,9 +30,10 @@ class SlidingWindowStateCacheManager:
         return [self.free_list.popleft() for _ in range(need_size)]
 
     def free_state_cache(self, free_indexes: List[int]):
-        assert all(0 <= idx < self.size for idx in free_indexes)
+        alloc_size = self.size - self.keep_num
+        assert all(0 <= idx < alloc_size for idx in free_indexes)
         self.free_list.extend(free_indexes)
-        assert len(self.free_list) <= self.size
+        assert len(self.free_list) <= alloc_size
 
     def get_free_cache_num(self):
         return len(self.free_list)
@@ -41,4 +43,4 @@ class SlidingWindowStateCacheManager:
 
     def clear_to_init_state(self):
         self.state_cache.zero_()
-        self.free_list = collections.deque(range(self.size))
+        self.free_list = collections.deque(range(self.size - self.keep_num))

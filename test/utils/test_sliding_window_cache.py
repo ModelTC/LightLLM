@@ -24,7 +24,7 @@ def test_gemma_physical_owners_and_last_readers(layer_num, shared, sliding_num, 
         assert owners[41] == 23 and last_readers[23] == 41
 
 
-def _memory_manager(big_page_tokens=2048, small_pages=8, enabled=True):
+def _memory_manager(big_page_tokens=2048, small_pages=8, enabled=True, cpu_cache=False):
     manager = object.__new__(HybridSlidingMemoryManager)
     manager.head_num, manager.head_dim, manager.layer_num, manager.dtype = 1, 512, 10, torch.bfloat16
     manager.sliding_config = SlidingWindowCacheConfig(
@@ -35,6 +35,7 @@ def _memory_manager(big_page_tokens=2048, small_pages=8, enabled=True):
         small_pages,
         enabled,
     )
+    manager.cpu_cache_temp_page_num = 2 if cpu_cache else 0
     return manager
 
 
@@ -60,12 +61,42 @@ def test_disabled_prompt_cache_does_not_reserve_pages():
     assert manager._cache_nbytes(4096) == 4097 * manager.get_cell_size()
 
 
+def test_cpu_cache_reserves_two_additional_window_checkpoints():
+    gpu_only = _memory_manager()
+    cpu_cache = _memory_manager(cpu_cache=True)
+    assert cpu_cache._cache_nbytes(4096) == (
+        gpu_only._cache_nbytes(4096) + 2 * cpu_cache.sliding_config.get_state_nbytes()
+    )
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+def test_page_pools_follow_active_prompt_cache_flag(monkeypatch, disabled):
+    import lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager as memory_module
+
+    args = SimpleNamespace(
+        use_dynamic_prompt_cache=False,
+        disable_dynamic_prompt_cache=disabled,
+        enable_cpu_cache=False,
+        linear_att_cache_size=3,
+        linear_att_hash_page_size=32,
+        linear_att_page_block_num=8,
+    )
+    monkeypatch.setattr(memory_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(memory_module.MemoryManager, "__init__", lambda self, **kwargs: None)
+    config = SlidingWindowCacheConfig({0: 0}, {1: 0}, 32, 1, 64, 1, 64, torch.bfloat16)
+    manager = HybridSlidingMemoryManager(size=256, sliding_config=config)
+    assert manager.enable_prompt_cache is not disabled
+    assert manager.small_page_num == (0 if disabled else 3)
+    assert manager._big_page_num(256) == (0 if disabled else 1)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_profiled_gpu_pools_match_reserved_bytes_and_are_reused(monkeypatch):
+@pytest.mark.parametrize("cpu_cache", [False, True])
+def test_profiled_gpu_pools_match_reserved_bytes_and_are_reused(monkeypatch, cpu_cache):
     import lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager as memory_module
     from lightllm.common.req_manager.sliding_window import ReqManagerForSlidingWindow
 
-    manager = _memory_manager(big_page_tokens=32, small_pages=2)
+    manager = _memory_manager(big_page_tokens=32, small_pages=2, cpu_cache=cpu_cache)
     manager.head_num, manager.head_dim, manager.layer_num = 1, 64, 1
     manager.sliding_config = SlidingWindowCacheConfig({0: 0}, {1: 0}, 32, 1, 64, 1, 64, torch.bfloat16)
     manager.size = None

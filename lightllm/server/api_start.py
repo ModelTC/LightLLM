@@ -19,7 +19,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.config_utils import (
     has_audio_module,
     has_vision_module,
-    is_linear_att_mixed_model,
+    is_hybrid_att_mixed_model,
     auto_set_max_req_total_len,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
@@ -258,7 +258,7 @@ def _launch_subprocesses(args: StartArgs):
 
     # linear att cache 参数自动设置
     if args.linear_att_cache_size is None:
-        # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
+        # 混合 attention 模型使用请求级状态缓存，保留原有 linear_att 参数名。
         default_cache_size = args.running_max_req_size * 2
         dp_size_in_node = max(1, args.dp // args.nnodes)
         per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
@@ -270,9 +270,9 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
+    if args.enable_cpu_cache and is_hybrid_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid attention model")
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:

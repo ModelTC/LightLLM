@@ -37,9 +37,10 @@ def test_snapshot_outside_cacheable_boundaries_does_not_allocate_or_copy(chunk_e
     assert req.tail_linear_att_small_page_buffer_id is None
 
 
-def _cpu_state_cache(size):
+def _cpu_state_cache(size, keep_num=0):
     pages = object.__new__(SlidingWindowStateCacheManager)
     pages.size = size
+    pages.keep_num = keep_num
     pages.state_cache = torch.empty((size, 2, 4, 2, 4), dtype=torch.float32)
     pages.clear_to_init_state()
     return pages
@@ -78,3 +79,17 @@ def test_sliding_state_pool_exhaustion_and_released_slot_reuse():
     pages.free_state_cache([0, 1])
     assert pages.get_free_cache_num() == 2
     assert pages.get_used_cache_num() == 0
+
+
+def test_sliding_state_pool_preserves_cpu_transfer_slots():
+    pages = _cpu_state_cache(5, keep_num=2)
+    assert pages.alloc_state_cache(3) == [0, 1, 2]
+    assert pages.alloc_one_state_cache() is None
+    for reserved_id in [3, 4]:
+        with pytest.raises(AssertionError):
+            pages.free_state_cache([reserved_id])
+    pages.free_state_cache([0, 1, 2])
+    assert pages.get_free_cache_num() == 3
+    pages.clear_to_init_state()
+    assert pages.alloc_state_cache(3) == [0, 1, 2]
+    assert pages.alloc_one_state_cache() is None

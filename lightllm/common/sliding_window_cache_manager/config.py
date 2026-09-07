@@ -45,3 +45,25 @@ class SlidingWindowCacheConfig:
         for dim in self.get_state_shape():
             elements *= dim
         return elements * self.dtype.itemsize
+
+    def get_cpu_cache_full_att_bytes(self, big_page_token_num: int, tp_world_size: int):
+        assert big_page_token_num > 0 and tp_world_size > 0
+        return (
+            big_page_token_num
+            * self.full_layer_num
+            * 2
+            * self.full_head_num
+            * self.full_head_dim
+            * self.dtype.itemsize
+            * tp_world_size
+        )
+
+    def get_cpu_cache_state_bytes(self, tp_world_size: int):
+        assert tp_world_size > 0
+        return self.get_state_nbytes() * tp_world_size
+
+    def get_cpu_cache_big_page_bytes(self, big_page_token_num: int, tp_world_size: int):
+        # One CPU page contains all TP shards: full KV, window state, padding.
+        payload_bytes = self.get_cpu_cache_full_att_bytes(big_page_token_num, tp_world_size)
+        payload_bytes += self.get_cpu_cache_state_bytes(tp_world_size)
+        return (payload_bytes + 15) // 16 * 16

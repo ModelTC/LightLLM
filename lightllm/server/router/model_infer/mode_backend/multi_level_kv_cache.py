@@ -8,7 +8,6 @@ from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
@@ -176,7 +175,7 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
-            if g_infer_context.is_linear_att_mixed_model:
+            if g_infer_context.is_hybrid_att_mixed_model:
                 offload_limit_size = self.args.linear_att_hash_page_size
             else:
                 offload_limit_size = self.args.cpu_cache_token_page_size
@@ -309,7 +308,7 @@ class MultiLevelKvCacheModule(object):
         return trans_task
 
     def _handle_linear_att_last_page(self, req: InferReq, move_block_size: int, page_len_list: List[int]) -> int:
-        if not g_infer_context.is_linear_att_mixed_model:
+        if not g_infer_context.is_hybrid_att_mixed_model:
             return move_block_size
 
         if move_block_size == 0:

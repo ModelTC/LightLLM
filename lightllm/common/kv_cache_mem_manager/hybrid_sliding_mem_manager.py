@@ -21,8 +21,9 @@ class HybridSlidingMemoryManager(MemoryManager):
     def __init__(self, size, sliding_config, always_copy=False, mem_fraction=0.9):
         self.sliding_config = sliding_config
         args = get_env_start_args()
-        self.enable_prompt_cache = args.use_dynamic_prompt_cache
+        self.enable_prompt_cache = not args.disable_dynamic_prompt_cache
         self.small_page_num = args.linear_att_cache_size if self.enable_prompt_cache else 0
+        self.cpu_cache_temp_page_num = 2 if args.enable_cpu_cache else 0
         self.big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         super().__init__(
             size=size,
@@ -39,9 +40,10 @@ class HybridSlidingMemoryManager(MemoryManager):
 
     def _cache_nbytes(self, token_num):
         # Runtime windows already exist when profiling. Reserve BOTH GPU page
-        # pools here, plus the full-KV hold token and the final partial big page.
+        # pools here, plus the full-KV hold token, final partial big page, and
+        # separate CPU-cache load/offload staging states when enabled.
         return (token_num + 1) * self.get_cell_size() + (
-            self.small_page_num + self._big_page_num(token_num)
+            self.small_page_num + self._big_page_num(token_num) + self.cpu_cache_temp_page_num
         ) * self.sliding_config.get_state_nbytes()
 
     def _profile_token_num(self, available_bytes):
@@ -81,6 +83,7 @@ class HybridSlidingMemoryManager(MemoryManager):
         logger.info(
             f"Sliding-window cache budget: {self.size} full-KV tokens, "
             f"{self._big_page_num(self.size)} big pages, {self.small_page_num} small pages, "
+            f"{self.cpu_cache_temp_page_num} CPU-cache staging states, "
             f"{self._cache_nbytes(self.size) / 1024 ** 3:.2f} GiB (runtime windows already allocated)"
         )
 
@@ -88,9 +91,13 @@ class HybridSlidingMemoryManager(MemoryManager):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
         # Keep the existing radix-cache contract; no second alias is needed.
         self.linear_att_big_page_buffers = SlidingWindowStateCacheManager(
-            size=self._big_page_num(size),
+            size=self._big_page_num(size) + self.cpu_cache_temp_page_num,
             sliding_config=self.sliding_config,
+            keep_num=self.cpu_cache_temp_page_num,
         )
+        if self.cpu_cache_temp_page_num:
+            self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
+            self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 1
         self.sliding_small_page_buffers = SlidingWindowStateCacheManager(
             size=self.small_page_num,
             sliding_config=self.sliding_config,

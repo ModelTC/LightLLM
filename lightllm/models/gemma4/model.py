@@ -5,11 +5,10 @@ from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
 from lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager import HybridSlidingMemoryManager
 from lightllm.common.req_manager import ReqManagerForSlidingWindow
-from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
-from lightllm.models.gemma4.kv_layout import get_kv_cache_layout
+from lightllm.models.gemma4.kv_layout import build_sliding_cache_config
 from lightllm.models.gemma4.layer_infer.pre_layer_infer import Gemma4PreLayerInfer
 from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerInfer
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
@@ -91,7 +90,8 @@ class Gemma4TpPartModel(LlamaTpPartModel):
                 args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
             ), "Gemma-4 shared sliding-window KV does not support microbatch overlap yet"
         assert args.mtp_step == 0, "Gemma-4 hybrid sliding-window cache does not support MTP yet"
-        assert not args.enable_cpu_cache, "Gemma-4 hybrid sliding-window cache does not support CPU cache"
+        if args.enable_cpu_cache:
+            assert not args.disable_dynamic_prompt_cache, "Gemma-4 CPU cache requires GPU prefix cache"
         assert not args.disable_chunked_prefill, "Gemma-4 hybrid sliding-window cache requires chunked prefill"
         assert args.run_mode == "normal", "Gemma-4 hybrid sliding-window cache does not support PD mode yet"
         assert args.llm_kv_type == "None", "Gemma-4 hybrid sliding-window cache does not support quantized KV yet"
@@ -102,18 +102,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _get_sliding_cache_config(self):
         if hasattr(self, "sliding_cache_config"):
             return self.sliding_cache_config
-        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
-        layer_maps, _, _ = get_kv_cache_layout(self.config)
-        self.sliding_cache_config = SlidingWindowCacheConfig(
-            sliding_layer_to_cache_index=layer_maps["sliding_attention"],
-            full_layer_to_cache_index=layer_maps["full_attention"],
-            sliding_window=self.config["sliding_window"],
-            sliding_head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            sliding_head_dim=self.config["head_dim"],
-            full_head_num=num_global_kv // self.tp_world_size_,
-            full_head_dim=self.config["global_head_dim"],
-            dtype=self.data_type,
-        )
+        self.sliding_cache_config = build_sliding_cache_config(self.config, self.tp_world_size_, self.data_type)
         return self.sliding_cache_config
 
     def _init_req_manager(self):

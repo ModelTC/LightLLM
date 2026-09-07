@@ -98,7 +98,7 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
         return SimpleNamespace(req=req)
 
     module._start_kv_cache_offload_task = start_offload
-    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_linear_att_mixed_model", False)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_hybrid_att_mixed_model", False)
     monkeypatch.setattr(
         multi_level_kv_cache_impl.g_infer_context,
         "get_cpu_kv_cache_stream",
