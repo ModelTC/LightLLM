@@ -51,7 +51,7 @@ def test_cpu_load_prepends_partial_gpu_page_and_restores_absolute_checkpoint(
     mem_manager.operator = operator_module.HybridSlidingMemOperator(mem_manager)
     req_manager = object.__new__(ReqManagerForSlidingWindow)
     req_manager.mem_manager, req_manager.sliding_window = mem_manager, 4
-    req_manager.req_to_sliding_window = torch.full((1, 8, 2, 4), -1.0)
+    req_manager.req_to_sliding_window = torch.full((1, 2, 4, 2, 4), -1.0)
     req_manager.req_to_token_indexs = torch.full((2, 1024), -1, dtype=torch.int32)
     req_manager.req_to_token_indexs[1, :gpu_prefix] = torch.arange(10000, 10000 + gpu_prefix, dtype=torch.int32)
     original_mapping = req_manager.req_to_token_indexs.clone()
@@ -116,8 +116,8 @@ def test_cpu_load_prepends_partial_gpu_page_and_restores_absolute_checkpoint(
     torch.testing.assert_close(req_manager.req_to_token_indexs[1, :gpu_prefix], original_mapping[1, :gpu_prefix])
     torch.testing.assert_close(req_manager.req_to_token_indexs[1, gpu_prefix:cpu_prefix], new_indexes)
     assert torch.all(req_manager.req_to_token_indexs[1, cpu_prefix:] == -1)
-    assert torch.all(req_manager.req_to_sliding_window[:, :4] == -1)
-    assert torch.all(req_manager.req_to_sliding_window[:, 4:8] == 12)
+    assert torch.all(req_manager.req_to_sliding_window[:, 0] == -1)
+    assert torch.all(req_manager.req_to_sliding_window[:, 1] == 12)
     assert req.shm_req.cpu_prompt_cache_len == need_tokens
     assert req.shm_req.shm_cur_kv_len == cpu_prefix
     # Dereference all matched pages, including the page already covered by

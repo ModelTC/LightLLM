@@ -59,12 +59,14 @@ def _fwd_kernel(
     stride_req_to_tokens_s,
     kv_group_num,
     b_prompt_cache_len,
+    scratch_start,
     H: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
     SLIDING_WINDOW_LEFT: tl.constexpr,
+    USE_RING_CACHE: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -126,11 +128,23 @@ def _fwd_kernel(
         k_pos = kv_start_index + start_n + offs_n  # [N]
         k_valid = k_pos < block_end_loc
 
-        kv_loc = tl.load(
-            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * k_pos,
-            mask=k_valid,
-            other=0,
-        ).to(tl.int64)
+        if USE_RING_CACHE:
+            history_loc = cur_batch_req_idx.to(tl.int64) * (SLIDING_WINDOW_LEFT + 1) + k_pos.to(tl.int64) % (
+                SLIDING_WINDOW_LEFT + 1
+            )
+            current_loc = (
+                tl.cast(scratch_start, tl.int64)
+                + cur_batch_in_all_start_index.to(tl.int64)
+                + k_pos.to(tl.int64)
+                - prompt_cache_len.to(tl.int64)
+            )
+            kv_loc = tl.where(k_pos < prompt_cache_len, history_loc, current_loc)
+        else:
+            kv_loc = tl.load(
+                Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * k_pos,
+                mask=k_valid,
+                other=0,
+            ).to(tl.int64)
 
         off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
         k = tl.load(K + off_k, mask=k_valid[None, :], other=0.0)
@@ -188,6 +202,7 @@ def context_attention_fwd_gemma4_mm(
     req_to_token_indexs,
     b_image_token_end,
     sliding_window=(-1, -1),
+    scratch_start=None,
 ):
     """Prefill attention with image bidirectional masking on sliding layers.
 
@@ -198,6 +213,8 @@ def context_attention_fwd_gemma4_mm(
             position (in the flattened new-token layout), value is the image
             span's end index (in absolute request position) if the token is
             inside an image span, else 0.
+        scratch_start: When set, use request rings plus current-token scratch
+            for sliding KV; ``req_to_token_indexs`` is unused and may be None.
     """
     BLOCK_M = 128 if not is_tesla() else 64
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -225,6 +242,10 @@ def context_attention_fwd_gemma4_mm(
         assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
         sliding_window_left = int(sliding_window[0])
 
+    use_ring_cache = scratch_start is not None
+    if use_ring_cache:
+        assert use_sliding_window and sliding_window_left >= 0, "ring KV requires a finite sliding window"
+
     _fwd_kernel[grid](
         q,
         k,
@@ -248,16 +269,18 @@ def context_attention_fwd_gemma4_mm(
         o.stride(0),
         o.stride(1),
         o.stride(2),
-        req_to_token_indexs.stride(0),
-        req_to_token_indexs.stride(1),
+        0 if use_ring_cache else req_to_token_indexs.stride(0),
+        0 if use_ring_cache else req_to_token_indexs.stride(1),
         kv_group_num=kv_group_num,
         b_prompt_cache_len=b_prompt_cache_len,
+        scratch_start=scratch_start if use_ring_cache else 0,
         H=head,
         BLOCK_DMODEL=Lk,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
         SLIDING_WINDOW_LEFT=sliding_window_left,
+        USE_RING_CACHE=use_ring_cache,
         num_warps=num_warps,
         num_stages=num_stages,
     )

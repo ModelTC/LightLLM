@@ -41,7 +41,7 @@ def sliding_operator(monkeypatch):
     req_manager = object.__new__(ReqManagerForSlidingWindow)
     req_manager.mem_manager = manager
     req_manager.sliding_window = 4
-    req_manager.req_to_sliding_window = torch.full((1, 8, 2, 4), -1.0)
+    req_manager.req_to_sliding_window = torch.full((1, 2, 4, 2, 4), -1.0)
     small_pages = _cpu_pages(2)
     small_pages.get_state_cache(0).fill_(17)
     radix = SimpleNamespace(
@@ -89,12 +89,12 @@ def test_load_restores_last_checkpoint_without_owning_tail_staging_slot(
     if has_tail:
         assert captures[0]["big_page_buffer_ids"][-1].item() == 4
     torch.testing.assert_close(
-        req_manager.req_to_sliding_window[:, 4:8],
+        req_manager.req_to_sliding_window[:, 1],
         torch.full((1, 4, 2, 4), 10.0 + cached_tokens // 8 + page_num - 1),
         atol=0,
         rtol=0,
     )
-    assert torch.all(req_manager.req_to_sliding_window[:, :4] == -1)
+    assert torch.all(req_manager.req_to_sliding_window[:, 0] == -1)
 
 
 @pytest.mark.parametrize("token_num", [16, 22])
@@ -182,7 +182,7 @@ def test_real_cpu_transfers_reuse_separate_load_and_offload_slots_across_streams
     )
     req_manager = object.__new__(ReqManagerForSlidingWindow)
     req_manager.mem_manager, req_manager.sliding_window = manager, window
-    req_manager.req_to_sliding_window = torch.zeros((1, request_num * window, 2, 8), dtype=config.dtype, device="cuda")
+    req_manager.req_to_sliding_window = torch.zeros((1, request_num, window, 2, 8), dtype=config.dtype, device="cuda")
     monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
     monkeypatch.setattr(
         g_infer_context,
@@ -241,7 +241,7 @@ def test_real_cpu_transfers_reuse_separate_load_and_offload_slots_across_streams
             rtol=0,
         )
         torch.testing.assert_close(
-            req_manager.req_to_sliding_window[:, req_idx * window : (req_idx + 1) * window],
+            req_manager.req_to_sliding_window[:, req_idx],
             torch.full(config.get_state_shape(), 200 + req_idx, dtype=config.dtype, device="cuda"),
             atol=0,
             rtol=0,

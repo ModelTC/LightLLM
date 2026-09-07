@@ -64,12 +64,14 @@ def test_cpu_window_checkpoint_resumes_attention_exactly(window, history_len, q_
     manager.sliding_config, manager.sliding_window = config, window
     manager.scratch_token_num, manager.scratch_start = q_len, 3 * window
     manager.mem_manager = SimpleNamespace(linear_att_big_page_buffers=pages)
-    manager.req_to_sliding_window = torch.zeros(
+    manager.sliding_kv_buffer = torch.zeros(
         (2, manager.scratch_start + q_len, 2, head_dim), device="cuda", dtype=torch.bfloat16
     )
-    manager.req_to_sliding_window_indexs = torch.full((3, seq_len), -1, device="cuda", dtype=torch.int32)
+    manager.req_to_sliding_window = manager.sliding_kv_buffer[:, : manager.scratch_start].view(
+        2, 3, window, 2, head_dim
+    )
     manager.restore_big_page_state(len(endpoints) - 1, SimpleNamespace(req_idx=req_idx))
-    manager.req_to_sliding_window[:, manager.scratch_start :] = reference[:, history_len:]
+    manager.sliding_kv_buffer[:, manager.scratch_start :] = reference[:, history_len:]
     state = SimpleNamespace(
         input_ids=int_tensor([0] * q_len),
         b_req_idx=int_tensor([req_idx]),
@@ -85,9 +87,9 @@ def test_cpu_window_checkpoint_resumes_attention_exactly(window, history_len, q_
     for layer_index in [0, 2, 3]:
         physical_layer = config.get_sliding_layer_index(layer_index)
         actual, expected = torch.empty_like(q), torch.empty_like(q)
-        for kv, indexes, output in [
-            (manager.req_to_sliding_window[physical_layer], manager.req_to_sliding_window_indexs, actual),
-            (reference[physical_layer], reference_indexes, expected),
+        for kv, indexes, output, scratch in [
+            (manager.sliding_kv_buffer[physical_layer], None, actual, manager.scratch_start),
+            (reference[physical_layer], reference_indexes, expected, None),
         ]:
             context_attention_fwd_gemma4_mm(
                 q,
@@ -102,5 +104,6 @@ def test_cpu_window_checkpoint_resumes_attention_exactly(window, history_len, q_
                 indexes,
                 image_end,
                 sliding_window=(window - 1, 0),
+                scratch_start=scratch,
             )
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)

@@ -119,8 +119,8 @@ def test_sliding_big_snapshot_skips_invalid_requests_and_copies_only_selected_pa
     manager = object.__new__(ReqManagerForSlidingWindow)
     manager.sliding_window = 4
     manager.mem_manager = SimpleNamespace(linear_att_big_page_buffers=pages)
-    manager.req_to_sliding_window = torch.arange(2 * 12 * 2 * 4, dtype=torch.float32).reshape(2, 12, 2, 4)
-    expected = manager.req_to_sliding_window[:, 4:8].clone()
+    manager.req_to_sliding_window = torch.arange(2 * 12 * 2 * 4, dtype=torch.float32).reshape(2, 3, 4, 2, 4)
+    expected = manager.req_to_sliding_window[:, 1].clone()
 
     # Skipped request IDs are deliberately out of range; GPU request IDs must not be read.
     manager.save_big_page_states(b_req_idx=object(), req_indexes=[999, 1, 888], buffer_indexes=[-1, 2, -1])

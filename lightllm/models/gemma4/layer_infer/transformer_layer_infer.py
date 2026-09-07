@@ -155,7 +155,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             destindex_copy_kv(
                 cache_kv,
                 infer_state.sliding_window_mem_index,
-                infer_state.req_manager.req_to_sliding_window[layer_idx],
+                infer_state.req_manager.sliding_kv_buffer[layer_idx],
             )
             return
         super()._post_cache_kv(cache_kv, infer_state, layer_weight)
@@ -200,9 +200,10 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.b_seq_len,
                 infer_state.b_ready_cache_len,
                 infer_state.max_q_seq_len,
-                infer_state.req_manager.req_to_sliding_window_indexs,
+                None,
                 infer_state.b_image_token_end,
                 sliding_window=sw,
+                scratch_start=infer_state.req_manager.scratch_start,
             )
             if self.commit_sliding_state_:
                 infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
@@ -224,8 +225,25 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
-        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
+        if self.is_sliding:
+            from lightllm.models.gemma4.triton_kernel.sliding_window_decode import sliding_window_decode_attention
+
+            o_tensor = sliding_window_decode_attention(
+                q=_q,
+                k=_k,
+                v=_v,
+                b_req_idx=infer_state.b_req_idx,
+                b_seq_len=infer_state.b_seq_len,
+                b_q_start_loc=infer_state.b_q_start_loc,
+                sliding_window=self.sliding_window_,
+                scratch_start=infer_state.req_manager.scratch_start,
+                out=out,
+                alloc_tensor_func=self.alloc_tensor,
+            )
+        else:
+            o_tensor = infer_state.decode_att_state1.decode_att(
+                q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
+            )
         if self.commit_sliding_state_:
             infer_state.req_manager.commit_layer_state(self.layer_num_, infer_state)
         return o_tensor.view(q.shape)

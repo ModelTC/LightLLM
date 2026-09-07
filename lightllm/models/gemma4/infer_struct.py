@@ -1,5 +1,3 @@
-import copy
-
 import torch
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b_image_token_end
@@ -47,20 +45,6 @@ class Gemma4InferStateInfo(InferStateInfo):
             self.b_q_start_loc = self.b1_cu_q_seq_len[:-1]
         self.req_manager.prepare_sliding_window(self)
         return
-
-    def init_att_state(self):
-        if not self.is_prefill:
-            # Keep the common attention path unchanged: its decode kernels read
-            # req_to_token_indexs from infer_state.req_manager.  The sliding
-            # state receives a shallow model-side view whose table addresses
-            # the request-window KV buffer; the full-attention state continues
-            # to use this infer state and the virtual token table.
-            sliding_infer_state = copy.copy(self)
-            sliding_req_manager = copy.copy(self.req_manager)
-            sliding_req_manager.req_to_token_indexs = self.req_manager.req_to_sliding_window_indexs
-            sliding_infer_state.req_manager = sliding_req_manager
-            self.decode_att_state.infer_state = sliding_infer_state
-        return super().init_att_state()
 
     def _build_b_image_token_end(self):
         device = self.position_ids.device
