@@ -271,12 +271,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
-            (
-                next_token_ids,
-                next_token_logprobs,
-                mtp_accept_len,
-                accepted_index,
-            ) = spec_engine.sample_and_verify(
+            (next_token_ids, next_token_logprobs, mtp_accept_len, accepted_index,) = spec_engine.sample_and_verify(
                 logits=model_output.logits,
                 run_reqs=run_reqs,
                 b_req_idx=model_input.b_req_idx,
