@@ -123,10 +123,13 @@ class LinearAttCacheConfig:
         n_layer = llm_config["num_hidden_layers"]
 
         tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+        full_att_dtype = (
+            torch.uint8 if args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else get_torch_dtype(args.data_type)
+        )
         return LinearAttCacheConfig(
             tp_world_size=tp_world_size,
             full_att_all_num_kv_heads=llm_config["num_key_value_heads"],
-            full_att_dtype=get_torch_dtype(args.data_type),
+            full_att_dtype=full_att_dtype,
             full_att_num_kv_heads=max(1, llm_config["num_key_value_heads"] // tp_world_size),
             full_att_head_dim=llm_config["head_dim"],
             global_linear_k_heads=llm_config["linear_num_key_heads"],

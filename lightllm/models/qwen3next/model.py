@@ -15,6 +15,8 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
     ExportCalibrationQwen3NextMemManager,
+    FP8StaticPerHeadQuantQwen3NextMemManager,
+    FP8StaticPerTensorQuantQwen3NextMemManager,
     Qwen3NextMemManager,
 )
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -63,10 +65,11 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         start_args: StartArgs = get_env_start_args()
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
         draft_full_att_kv_layer_num = get_added_mtp_kv_layer_num()
+        full_att_dtype = torch.uint8 if start_args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else self.data_type
         self.linear_config = LinearAttCacheConfig(
             tp_world_size=self.tp_world_size_,
             full_att_all_num_kv_heads=self.config["num_key_value_heads"],
-            full_att_dtype=self.data_type,
+            full_att_dtype=full_att_dtype,
             full_att_num_kv_heads=self.num_kv_heads,
             full_att_head_dim=self.config["head_dim"],
             global_linear_k_heads=self.config["linear_num_key_heads"],
@@ -85,9 +88,16 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             draft_full_att_kv_layer_num=draft_full_att_kv_layer_num,
         )
 
-        mem_manager_class = (
-            ExportCalibrationQwen3NextMemManager if start_args.export_fp8kv_calibration else Qwen3NextMemManager
-        )
+        if start_args.export_fp8kv_calibration:
+            mem_manager_class = ExportCalibrationQwen3NextMemManager
+        elif start_args.llm_kv_type == "None":
+            mem_manager_class = Qwen3NextMemManager
+        elif start_args.llm_kv_type == "fp8kv_sph":
+            mem_manager_class = FP8StaticPerHeadQuantQwen3NextMemManager
+        elif start_args.llm_kv_type == "fp8kv_spt":
+            mem_manager_class = FP8StaticPerTensorQuantQwen3NextMemManager
+        else:
+            raise ValueError(f"Qwen3Next does not support llm_kv_type={start_args.llm_kv_type}")
         self.mem_manager = mem_manager_class(
             size=self.max_total_token_num,
             dtype=self.data_type,

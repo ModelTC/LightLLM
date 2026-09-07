@@ -5,7 +5,13 @@ from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .export_calibration_mem_manager import ExportCalibrationMemoryManager
-from .operator import LinearAttMemOperator
+from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManager
+from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
+from .operator import (
+    FP8StaticPerHeadQuantMemOperator,
+    FP8StaticPerTensorQuantMemOperator,
+    LinearAttMemOperator,
+)
 from typing import Tuple, Any, List
 
 logger = init_logger(__name__)
@@ -16,6 +22,18 @@ class _ExportCalibrationLinearAttMemOperator(LinearAttMemOperator):
         super().copy_kv_to_mem_manager(layer_index, mem_index, kv)
         full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         self.mem_manager.update_calibration_data(kv, full_att_layer_index)
+
+
+class _FP8StaticPerHeadQuantLinearAttMemOperator(LinearAttMemOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
+        FP8StaticPerHeadQuantMemOperator.copy_kv_to_mem_manager(self, full_att_layer_index, mem_index, kv)
+
+
+class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
+        FP8StaticPerTensorQuantMemOperator.copy_kv_to_mem_manager(self, full_att_layer_index, mem_index, kv)
 
 
 class Qwen3NextMemManager(MemoryManager):
@@ -150,6 +168,14 @@ class Qwen3NextMemManager(MemoryManager):
 # 保留混合注意力缓存，仅按连续编号的 full-attention 层收集校准数据。
 class ExportCalibrationQwen3NextMemManager(Qwen3NextMemManager, ExportCalibrationMemoryManager):
     operator_class = _ExportCalibrationLinearAttMemOperator
+
+
+class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerHeadQuantMemManager):
+    operator_class = _FP8StaticPerHeadQuantLinearAttMemOperator
+
+
+class FP8StaticPerTensorQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerTensorQuantMemManager):
+    operator_class = _FP8StaticPerTensorQuantLinearAttMemOperator
 
 
 class Qwen3NextLinearAttPageHelper:
