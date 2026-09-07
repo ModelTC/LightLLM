@@ -27,7 +27,10 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
-from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DSV4_NSA_BACKENDS
+from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
+    DSV4_NSA_BACKENDS,
+    get_dsv4_flashmla_padded_q_heads,
+)
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.deepseek_v4.layer_infer.hyper_connection import (
@@ -95,6 +98,13 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return get_deepseek_v4_compress_rates(self.config, layer_num)
 
     def _init_mem_manager(self):
+        # Auto profiling samples cuda.mem_get_info() in MemoryManager.  These
+        # allocations are persistent, but the normal construction order creates
+        # them later in _init_custom/_init_att_backend.  Make them visible before
+        # that sample; explicit KV sizes and MTP draft models retain their old
+        # construction path.
+        if self.max_total_token_num is None and not self.is_mtp_draft_model:
+            self._init_auto_profile_persistent_runtime()
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
         state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
         self.mem_manager = DeepseekV4MemoryManager(
@@ -117,6 +127,45 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         self.req_manager.mem_manager = self.mem_manager
         return
 
+    def _init_auto_profile_persistent_runtime(self):
+        self._init_to_get_rotary()
+        self._init_dsv4_workspace()
+        real_q_head_num = self.config["num_attention_heads"] // self.tp_world_size_
+        self._init_flashmla_prefill_workspace(
+            real_q_head_num=real_q_head_num,
+            padded_q_head_num=get_dsv4_flashmla_padded_q_heads(real_q_head_num),
+        )
+        self._init_deepep_group()
+
+    def _init_dsv4_workspace(self):
+        if getattr(self, "dsv4_workspace", None) is None:
+            self.dsv4_workspace = DeepseekV4Workspace(self)
+
+    def _init_flashmla_prefill_workspace(self, real_q_head_num, padded_q_head_num):
+        self.dsv4_workspace.init_flashmla_prefill_q(
+            real_q_head_num=real_q_head_num,
+            padded_q_head_num=padded_q_head_num,
+            head_dim=self.config["head_dim"],
+            dtype=self.data_type,
+        )
+        self.dsv4_workspace.init_flashmla_prefill_full_out(
+            q_head_num=padded_q_head_num,
+            head_dim_v=self.config["head_dim"],
+            dtype=self.data_type,
+        )
+
+    def _init_deepep_group(self):
+        if getattr(self, "_dsv4_deepep_group_initialized", False):
+            return
+        dist_group_manager.new_deepep_group(
+            n_routed_experts=self.config["n_routed_experts"],
+            hidden_size=self.config["hidden_size"],
+            expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
+            num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
+            moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+        )
+        self._dsv4_deepep_group_initialized = True
+
     def _init_att_backend(self):
         args = get_env_start_args()
         if args.llm_kv_type == "None":
@@ -129,17 +178,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
         real_q_head_num = self.prefill_att_backend.real_q_head_num
         padded_q_head_num = self.prefill_att_backend.padded_q_head_num
-        self.dsv4_workspace.init_flashmla_prefill_q(
-            real_q_head_num=real_q_head_num,
-            padded_q_head_num=padded_q_head_num,
-            head_dim=self.config["head_dim"],
-            dtype=self.data_type,
-        )
-        self.dsv4_workspace.init_flashmla_prefill_full_out(
-            q_head_num=padded_q_head_num,
-            head_dim_v=self.config["head_dim"],
-            dtype=self.data_type,
-        )
+        self._init_flashmla_prefill_workspace(real_q_head_num, padded_q_head_num)
         for layer_infer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
             if padded_q_head_num == real_q_head_num:
@@ -154,18 +193,12 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
-        self.dsv4_workspace = DeepseekV4Workspace(self)
+        self._init_dsv4_workspace()
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()
             for layer in self.layers_infer:
                 layer.dsv4_prefill_aux_stream = prefill_aux_stream
-        dist_group_manager.new_deepep_group(
-            n_routed_experts=self.config["n_routed_experts"],
-            hidden_size=self.config["hidden_size"],
-            expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
-            num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
-            moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
-        )
+        self._init_deepep_group()
         return
 
     @torch.no_grad()
@@ -296,6 +329,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # Sliding-window and compressed layers both use DeepSeek YaRN correction; only the
         # RoPE base differs (rope_theta vs compress_rope_theta), matching SGLang/vLLM.
         # Kept fp32 for accuracy (the apply upcasts anyway).
+        if hasattr(self, "_freqs_cis_sliding"):
+            self._bind_dsv4_rotary_tables()
+            return
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
         dim = cfg["qk_rope_head_dim"]
@@ -334,6 +370,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         self._sin_cached_sliding = self._freqs_cis_sliding.imag
         self._cos_cached_compress = self._freqs_cis_compress.real
         self._sin_cached_compress = self._freqs_cis_compress.imag
+        self._bind_dsv4_rotary_tables()
+
+    def _bind_dsv4_rotary_tables(self):
+        if not hasattr(self, "layers_infer"):
+            return
         # Each layer uses exactly one rope variant; wire its table once here (layers are already
         # built: _init_infer_layer runs before _init_custom) instead of relaying via infer_state.
         # The compressor needs the full compress tables (entry rope positions != token positions).

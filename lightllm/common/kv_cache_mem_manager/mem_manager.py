@@ -61,6 +61,10 @@ class MemoryManager:
     def get_fixed_memory_size(self):
         return 0
 
+    def get_profiled_size(self, available_memory_bytes):
+        """Select token capacity after fixed KV buffers."""
+        return int(available_memory_bytes / self.get_cell_size())
+
     def profile_size(self, mem_fraction):
         if self.size is not None:
             return
@@ -76,7 +80,7 @@ class MemoryManager:
                 f"{type(self).__name__} fixed buffers require {fixed_memory_size / 1024**3:.2f} GB, "
                 f"but only {available_memory:.2f} GB is available for KV cache"
             )
-        self.size = int(available_memory_bytes / cell_size)
+        self.size = self.get_profiled_size(available_memory_bytes)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
             dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
