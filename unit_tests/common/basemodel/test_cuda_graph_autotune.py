@@ -104,10 +104,8 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
     assert capture_env.capture_count == 1
     assert capture_env.graphs[0].replays == 1
     expected_benchmarks = 0
-    if level == AutotuneLevel.ADAPTIVE_AUTOTUNE:
+    if level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
         expected_benchmarks = 2
-    elif level == AutotuneLevel.FORCE_AUTOTUNE:
-        expected_benchmarks = 2 * len(states)
     assert len(benchmarks) == expected_benchmarks
     assert attention_cache.exists() == (expected_benchmarks > 0)
     assert not general_cache.exists()

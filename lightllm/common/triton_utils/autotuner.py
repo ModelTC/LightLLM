@@ -182,6 +182,18 @@ class Autotuner:
         if autotune_level == AutotuneLevel.CLOSE_AUTOTUNE:
             return self.fn(*args, **kwargs)
 
+        # decode attention 在多层中会重复调用，相同配置只需调优一次，避免强制调优拖慢启动。
+        if self.kernel_type == AutotuneKernelType.DECODE_ATTENTION and autotune_level == AutotuneLevel.FORCE_AUTOTUNE:
+            autotune_level = AutotuneLevel.ADAPTIVE_AUTOTUNE
+            if not getattr(self, "_decode_force_autotune_logged", False):
+                logger.info(
+                    f"Decode attention kernel {self.kernel_name}: FORCE_AUTOTUNE is treated as ADAPTIVE_AUTOTUNE "
+                    "to avoid repeated tuning across layers and reduce startup time. Existing configs are reused. "
+                    f"To retune, delete the cached config files in '{self.cache_dir}' before restarting "
+                    "with LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 or 2."
+                )
+                self._decode_force_autotune_logged = True
+
         rank_id = 0 if not dist.is_initialized() else get_global_rank()
         world_size = 1 if not dist.is_initialized() else get_global_world_size()
 
