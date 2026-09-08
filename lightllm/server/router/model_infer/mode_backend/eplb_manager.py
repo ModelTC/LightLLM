@@ -70,7 +70,6 @@ class EPLBManager:
         # base window before the next fixed sampling boundary.
         self._continuous_collection_start_step: Optional[int] = None
         self._continuous_collection_end_step: Optional[int] = self.step_interval
-        self._sampling_pending = False
         self._steady_collection_end_step: Optional[int] = None
         self._reset_recorded_samples()
         self._set_recording(True)
@@ -108,7 +107,6 @@ class EPLBManager:
         continuous_start = self._continuous_collection_start_step
         continuous_end = self._continuous_collection_end_step
         if continuous_end is not None:
-            # 启动或稀疏样本不足时连续采样，保证负载统计可靠。
             if continuous_start is not None and self.prefill_steps == continuous_start:
                 self._set_recording(True)
             if self.prefill_steps >= continuous_end:
@@ -116,19 +114,17 @@ class EPLBManager:
             return
         sampling_interval = self.sampling_interval
         phase = self.prefill_steps % sampling_interval
-        # _sampling_pending=True 表示稳态采样窗口已启动，防止重复启动；到期后清除标记并评估。
-        if self._sampling_pending:
-            steady_collection_end_step = self._steady_collection_end_step
-            if steady_collection_end_step is None or self.prefill_steps >= steady_collection_end_step:
-                self._clear_steady_collection()
+        steady_collection_end_step = self._steady_collection_end_step
+        if steady_collection_end_step is not None:
+            if self.prefill_steps >= steady_collection_end_step:
+                self._steady_collection_end_step = None
                 self._start_evaluation()
             return
         if sampling_interval == 1:
             self._start_evaluation()
             return
         if phase == sampling_interval - self._steady_sample_window_steps():
-            # 稳态仅在周期末采样少量 step，降低路由计数和评估开销。
-            self._start_steady_sampling_window(self.prefill_steps + self._steady_sample_window_steps())
+            self._arm_steady_collection(self.prefill_steps + self._steady_sample_window_steps())
 
     def _set_recording(self, enabled: bool):
         for state in self._eplb_states:
@@ -149,17 +145,12 @@ class EPLBManager:
         self._continuous_collection_start_step = None
         self._continuous_collection_end_step = None
 
-    def _clear_steady_collection(self):
-        self._sampling_pending = False
-        self._steady_collection_end_step = None
-
     def _steady_sample_window_steps(self) -> int:
         return min(EPLB_STEADY_SAMPLE_STEPS, self.sampling_interval)
 
-    def _start_steady_sampling_window(self, collection_end_step: int):
+    def _arm_steady_collection(self, collection_end_step: int):
         """Start the fixed sparse window without moving its evaluation boundary."""
         self._reset_recorded_samples()
-        self._sampling_pending = True
         self._steady_collection_end_step = collection_end_step
         self._set_recording(True)
 
@@ -167,7 +158,7 @@ class EPLBManager:
         minimum_end = self.prefill_steps + self.step_interval
         collection_end = -(-minimum_end // self.sampling_interval) * self.sampling_interval
         self._reset_recorded_samples()
-        self._clear_steady_collection()
+        self._steady_collection_end_step = None
         self._continuous_collection_start_step = collection_end - self.step_interval
         self._continuous_collection_end_step = collection_end
         self._set_recording(self._continuous_collection_start_step == self.prefill_steps)
@@ -175,7 +166,7 @@ class EPLBManager:
     def _prepare_next_sampling_window(self):
         """Clear the current window and arm the next sparse sampling window."""
         self._clear_continuous_collection()
-        self._clear_steady_collection()
+        self._steady_collection_end_step = None
         if self.sampling_interval == 1:
             self._reset_recorded_samples()
             self._set_recording(True)
@@ -183,7 +174,7 @@ class EPLBManager:
             # There is no later pre-boundary manager step at which to arm a
             # full clamped window, so arm immediately but keep the same next
             # fixed boundary.
-            self._start_steady_sampling_window(self.prefill_steps + self.sampling_interval)
+            self._arm_steady_collection(self.prefill_steps + self.sampling_interval)
         else:
             self._reset_recorded_samples()
             self._set_recording(False)
@@ -533,14 +524,10 @@ class EPLBManager:
 
 
 def _imbalance_summary(rank_load: torch.Tensor) -> Dict[str, float]:
-    if rank_load.ndim == 2:
-        critical = rank_load.max(dim=1).values
-        mean = rank_load.mean(dim=1)
-    elif rank_load.ndim == 3:
-        critical = rank_load.max(dim=2).values.sum(dim=0)
-        mean = rank_load.mean(dim=2).sum(dim=0)
-    else:
-        raise ValueError("rank_load must be [layers, ranks] or [samples, layers, ranks]")
+    if rank_load.ndim != 3:
+        raise ValueError("rank_load must be [samples, layers, ranks]")
+    critical = rank_load.max(dim=2).values.sum(dim=0)
+    mean = rank_load.mean(dim=2).sum(dim=0)
     layer_imbalance = critical / mean.clamp_min(1.0)
     sorted_imbalance = torch.sort(layer_imbalance).values
     p95_index = max(0, (95 * layer_imbalance.numel() + 99) // 100 - 1)

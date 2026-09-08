@@ -440,7 +440,6 @@ def triton_grouped_topk(
 
 
 def triton_grouped_topk_eplb(
-    hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor,
     topk: int,

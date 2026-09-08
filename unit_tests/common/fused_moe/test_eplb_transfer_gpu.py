@@ -90,7 +90,7 @@ def _run_layers(
     callback=lambda layer_index: None,
     before_commit_callback=lambda layer_index: None,
 ):
-    transfer.start(layer_plans)
+    transfer.start(layer_plans, transfer.prepare_transfer(layer_plans))
     committed = 0
     while committed < len(layer_plans):
         pending = _wait_for_ready_prefix(transfer, control_group)

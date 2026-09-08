@@ -127,6 +127,7 @@ def get_eplb_placement_stickiness() -> float:
     return value
 
 
+@lru_cache(maxsize=None)
 def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 

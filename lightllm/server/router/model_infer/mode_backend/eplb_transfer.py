@@ -11,6 +11,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import torch
 import torch.distributed as dist
 
+from lightllm.common.eplb_utils import EPLB_MAX_STAGING_DEPTH, extract_eplb_expert_tensors
+
 
 @dataclass(frozen=True)
 class TransferStep:
@@ -97,8 +99,6 @@ def build_transfer_plan(
 class _EPLBTransferBase:
     """Shared live/staging buffers and publish/commit lifecycle."""
 
-    staging_depth = 1
-
     def __init__(self, weights, transfer_group, global_rank, world_size):
         self._eplb_states = [weight.expert_parallel_state.eplb for weight in weights]
         self.transfer_group = transfer_group
@@ -106,8 +106,8 @@ class _EPLBTransferBase:
         self.world_size = world_size
         self.num_experts_per_rank = weights[0].expert_parallel_state.num_primary_experts_per_rank
         self.device = weights[0].w13.weight.device
-        self.live = [_extract_expert_tensors(weight) for weight in weights]
-        self._validate_live_layout(weights)
+        self.live = [extract_eplb_expert_tensors(weight) for weight in weights]
+        self._validate_live_layout()
         num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
         self.staging = [
             [
@@ -135,7 +135,7 @@ class _EPLBTransferBase:
         self._thread = None
         self._needs_staging_reuse_barrier = False
 
-    def _validate_live_layout(self, weights) -> None:
+    def _validate_live_layout(self) -> None:
         reference = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in self.live[0]]
         num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
         for layer_index, (state, tensors) in enumerate(zip(self._eplb_states, self.live)):
@@ -144,9 +144,6 @@ class _EPLBTransferBase:
             assert (
                 state.num_redundant_experts_per_rank == num_redundant_slots_per_rank
             ), "EPLB redundant slot count must match"
-
-    def _copy_batch(self, batch, prepared_batch) -> None:
-        raise NotImplementedError
 
     def _make_batches(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
         return [
@@ -159,20 +156,9 @@ class _EPLBTransferBase:
             for batch_start in range(0, len(layer_plans), self.staging_depth)
         ]
 
-    def prepare_transfer(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
-        return [(batch, None) for batch in self._make_batches(layer_plans)]
-
-    def _start_transfer_generation(self) -> None:
-        """Prepare backend state after the in-flight worker check succeeds."""
-
-    def _finish_transfer_generation(self) -> None:
-        """Release backend state only after the migration worker has joined."""
-
-    def start(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]], prepared_batches=None) -> None:
+    def start(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]], prepared_batches) -> None:
         if self._thread is not None and self._thread.is_alive():
             raise RuntimeError("EPLB transfer is already in flight")
-        if prepared_batches is None:
-            prepared_batches = self.prepare_transfer(layer_plans)
         expected_batch_count = (len(layer_plans) + self.staging_depth - 1) // self.staging_depth
         if len(prepared_batches) != expected_batch_count:
             raise ValueError("EPLB prepared batch count does not match layer-plan batches")
@@ -263,7 +249,7 @@ class NixlEPLBTransfer(_EPLBTransferBase):
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
         # Reuse at most eight layer buffers to bound EPLB staging memory.
-        self.staging_depth = min(8, len(weights))
+        self.staging_depth = min(EPLB_MAX_STAGING_DEPTH, len(weights))
         super().__init__(weights, transfer_group, global_rank, world_size)
         self._nixl_agent = None
         self._registered_descs = None
@@ -617,18 +603,6 @@ class NixlEPLBTransfer(_EPLBTransferBase):
             self.shutdown()
         except Exception:
             pass
-
-
-def _extract_expert_tensors(weight) -> List[Tuple[str, torch.Tensor]]:
-    result = []
-    for pack_name in ("w13", "w2"):
-        pack = getattr(weight, pack_name)
-        for value_name in ("weight", "weight_scale", "weight_zero_point"):
-            tensor = getattr(pack, value_name, None)
-            if tensor is not None:
-                assert tensor.ndim >= 1 and tensor.is_contiguous(), f"{pack_name}.{value_name} must be contiguous"
-                result.append((f"{pack_name}.{value_name}", tensor))
-    return result
 
 
 def _commit_staging_rows(
