@@ -43,6 +43,24 @@ def make_kernel(tmp_path, monkeypatch, name, kernel_type=None):
     return kernel, calls, benchmarks, cache_dir / "configs.json"
 
 
+def test_key_defaults_preserve_explicit_arguments_and_required_checks():
+    @autotune(
+        kernel_name="key_defaults",
+        configs_gen_func=lambda: [],
+        static_key_func=lambda window: {"window": window},
+        run_key_func=lambda size: size,
+    )
+    def kernel(size, window=(-1, -1), run_config=None):
+        return run_config
+
+    assert kernel._static_key(8) == {"window": (-1, -1)}
+    assert kernel._static_key(8, (511, 0)) == {"window": (511, 0)}
+    assert kernel._static_key(8, window=(1023, 0)) == {"window": (1023, 0)}
+    assert kernel._static_key(8, window=None) == {"window": None}
+    with pytest.raises(KeyError, match="Missing argument 'size'"):
+        kernel._run_key()
+
+
 @pytest.mark.parametrize("level", [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE])
 def test_two_warmup_phases_only_persist_matching_kernel_configs(tmp_path, monkeypatch, level):
     monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: level)

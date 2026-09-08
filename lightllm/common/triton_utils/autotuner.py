@@ -467,7 +467,11 @@ class Autotuner:
             if pos is not None and pos < len(args):
                 values.append(args[pos])
             else:
-                raise KeyError(f"Missing argument '{name}' required by key function")
+                # 可选参数也能参与 key；调用方省略时使用算子函数声明的默认值。
+                parameter = inspect.signature(self.fn).parameters.get(name)
+                if parameter is None or parameter.default is inspect.Parameter.empty:
+                    raise KeyError(f"Missing argument '{name}' required by key function")
+                values.append(parameter.default)
         return tuple(values)
 
     def _static_key(self, *args, **kwargs):

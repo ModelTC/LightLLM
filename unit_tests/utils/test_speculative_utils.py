@@ -165,6 +165,7 @@ def test_triton_mtp_decode_state_builds_group_markers():
         backend=SimpleNamespace(model=model),
         infer_state=SimpleNamespace(
             b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
+            max_kv_seq_len=4,
         ),
     )
 
