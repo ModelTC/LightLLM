@@ -115,6 +115,7 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
         cache_k_scale=cache_k_scale,
         cache_v=cache_v,
         cache_v_scale=cache_v_scale,
+        max_len_in_batch=seq_len,
         alloc_tensor_func=alloc_tensor_func,
     )
     # 运行 diverse 版本
