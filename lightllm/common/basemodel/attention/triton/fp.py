@@ -242,6 +242,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             B_req_idx=self.infer_state.b_req_idx,
             b_seq_len=self.infer_state.b_seq_len,
             b_mark_shared_group=self.b_mark_mtp_shared_group,
+            max_kv_len=self.decode_max_kv_seq_len,
             alloc_tensor_func=alloc_func,
         )
 
