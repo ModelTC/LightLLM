@@ -162,8 +162,9 @@ def flash_attn_with_kvcache_autotune(
     sinks: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    return_softmax_lse: bool = False,
     run_config: Optional[dict] = None,
-    **kwargs,
 ):
     # KV 长度、页表及 query 布局由调用方显式提供；四维 batched Q 的 cu_seqlens_q 可以显式传 None。
     # max_seqlen_k 是 CPU 上已知的真实最大 KV token 数，仅用于配置查找，不传给底层 FA3 算子。
@@ -191,5 +192,6 @@ def flash_attn_with_kvcache_autotune(
         sinks=sinks,
         k_descale=k_descale,
         v_descale=v_descale,
-        **kwargs,
+        softmax_scale=softmax_scale,
+        return_softmax_lse=return_softmax_lse,
     )

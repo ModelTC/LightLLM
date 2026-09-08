@@ -115,8 +115,11 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class Int4kvTritonDecodeAttState(BaseDecodeAttState):
+    decode_max_kv_seq_len: int = None
+
     def init_state(self):
-        pass
+        # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于配置查找。
+        self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
 
     def copy_for_decode_cuda_graph(self, new_state: "Int4kvTritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -166,5 +169,6 @@ class Int4kvTritonDecodeAttState(BaseDecodeAttState):
             cache_k_scale=k_scale,
             cache_v=v,
             cache_v_scale=v_scale,
+            max_kv_seq_len=self.decode_max_kv_seq_len,
             alloc_tensor_func=alloc_func,
         )
