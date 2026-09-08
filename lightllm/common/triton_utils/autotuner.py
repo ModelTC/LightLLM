@@ -47,6 +47,7 @@ def autotune(
     mutates_args: List[str] = [],
     kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
     rebuild_input_func: Optional[Callable] = None,
+    warmup_all_exist_config: bool = True,
 ):
     """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
 
@@ -73,6 +74,14 @@ def autotune(
             因此需要算子通过此回调自行重建输入，例如填入目标 KV 长度并构造对应的合法页表。
             每次实际调优搜索前调用一次，接收算子的原始参数，返回用于计时的 ``(args, kwargs)``。
             回调不应修改原始输入；缓存键、历史配置预热及最终执行仍使用原始参数。
+        warmup_all_exist_config (bool, optional): 是否提前执行所有已有配置进行预热，默认 True。
+            设为 False 后，首次加载缓存和任何 warmup 阶段都不执行这一步，但仍正常加载、选择配置。
+            原地更新持久状态且无法低成本保存/恢复的算子应关闭，例如 MTP linear attention 的
+            SSM 递推、原地追加 KV 或累加持久统计量的算子：每次预热都会额外推进或重复写入状态，
+            可能改变后续正式计算的结果；把大型状态池加入 mutates_args 又会因 clone 增加显存占用，
+            甚至触发 OOM。仅覆盖输出缓冲区，或可通过 mutates_args 完整保护输入的算子可保持默认值。
+            此开关只控制已有配置的额外预热，不关闭新配置的搜索、benchmark 内部的预热/计时和
+            最终正式执行；实际搜索仍需由调用方保证状态可以被反复更新，或提供相应的状态保护。
 
     Returns:
         Callable: A callable object that wraps the original function and performs autotuning
@@ -90,6 +99,7 @@ def autotune(
             mutates_args=mutates_args,
             kernel_type=kernel_type,
             rebuild_input_func=rebuild_input_func,
+            warmup_all_exist_config=warmup_all_exist_config,
         )
 
     return decorator
@@ -141,12 +151,14 @@ class Autotuner:
         mutates_args: List[str] = [],
         kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
         rebuild_input_func: Optional[Callable] = None,
+        warmup_all_exist_config: bool = True,
     ):
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
         self.rebuild_input_func = rebuild_input_func
+        self.warmup_all_exist_config = warmup_all_exist_config
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -201,7 +213,8 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if self._try_load_cache(static_key) or Autotuner.is_autotune_warmup():
+        # 先尝试加载缓存；关闭已有配置预热时仍须正常读取配置，不能用开关短路缓存加载。
+        if (self._try_load_cache(static_key) or Autotuner.is_autotune_warmup()) and self.warmup_all_exist_config:
             all_configs = self.cached_configs.get(static_key, {})
             for run_config in all_configs.values():
                 # warmup all configs

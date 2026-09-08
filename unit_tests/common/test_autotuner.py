@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -16,7 +17,7 @@ def autotune_environment(monkeypatch):
     monkeypatch.setattr(autotuner_module.KernelConfigs, "get_config_file_name", lambda params: "configs.json")
 
 
-def make_kernel(tmp_path, monkeypatch, name, kernel_type=None):
+def make_kernel(tmp_path, monkeypatch, name, kernel_type=None, warmup_all_exist_config=True):
     calls = []
     benchmarks = []
     options = {} if kernel_type is None else {"kernel_type": kernel_type}
@@ -26,6 +27,7 @@ def make_kernel(tmp_path, monkeypatch, name, kernel_type=None):
         configs_gen_func=lambda: [{"block": 1}, {"block": 2}],
         static_key_func=lambda: {"dtype": "test"},
         run_key_func=lambda size: size,
+        warmup_all_exist_config=warmup_all_exist_config,
         **options,
     )
     def kernel(size, run_config=None):
@@ -194,6 +196,64 @@ def test_repeated_configs_are_skipped_after_success(tmp_path, monkeypatch):
     assert kernel(16) == config
     assert calls == [(16, config)] * 3
     assert benchmarks == []
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+@pytest.mark.parametrize("phase", [None, AutotuneKernelType.GENERAL, AutotuneKernelType.DECODE_ATTENTION])
+def test_disabled_history_warmup_loads_cache_without_extra_state_updates(tmp_path, monkeypatch, level, phase):
+    monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: level)
+    calls = []
+
+    @autotune(
+        kernel_name="stateful_kernel",
+        kernel_type=AutotuneKernelType.DECODE_ATTENTION,
+        configs_gen_func=lambda: [{"block": 1}, {"block": 2}],
+        static_key_func=lambda: {},
+        run_key_func=lambda state: state.numel(),
+        warmup_all_exist_config=False,
+    )
+    def kernel(state, run_config=None):
+        calls.append(run_config)
+        state.add_(run_config["block"])
+        return state
+
+    kernel._cache_dir = str(tmp_path)
+    cache_file = tmp_path / "configs.json"
+    cache_file.write_text(json.dumps({"4": {"block": 1}, "8": {"block": 2}}))
+    cache_before = cache_file.read_bytes()
+
+    def unexpected_warmup(*args, **kwargs):
+        pytest.fail("Disabling history warmup must skip its execution and argument cloning")
+
+    monkeypatch.setattr(kernel, "kernel_warmup", unexpected_warmup)
+    monkeypatch.setattr(kernel, "_mutate_args_clone", unexpected_warmup)
+    state = torch.zeros(4)
+    scope = nullcontext() if phase is None else Autotuner.autotune_warmup(phase)
+    with scope:
+        for _ in range(2):
+            assert kernel(state) is state
+    assert calls == [{"block": 1}, {"block": 1}]
+    torch.testing.assert_close(state, torch.full((4,), 2.0))
+    assert cache_file.read_bytes() == cache_before
+    assert not kernel.warmuped_configs_set
+
+
+@pytest.mark.parametrize("kernel_type", [AutotuneKernelType.GENERAL, AutotuneKernelType.DECODE_ATTENTION])
+def test_disabled_history_warmup_still_searches_new_configs(tmp_path, monkeypatch, kernel_type):
+    kernel, calls, benchmarks, cache_file = make_kernel(
+        tmp_path, monkeypatch, kernel_type.value, kernel_type, warmup_all_exist_config=False
+    )
+    with Autotuner.autotune_warmup(kernel_type):
+        for size in [8, 16]:
+            calls.clear()
+            assert kernel(size) == {"block": 2}
+            assert calls == [(size, {"block": 2})]
+            calls.clear()
+            assert kernel(size) == {"block": 2}
+            assert calls == [(size, {"block": 2})]
+    assert len(benchmarks) == 4
+    assert json.loads(cache_file.read_text()) == {"8": {"block": 2}, "16": {"block": 2}}
+    assert not kernel.warmuped_configs_set
 
 
 def test_failed_warmup_retries_only_during_autotune_warmup(tmp_path, monkeypatch):
