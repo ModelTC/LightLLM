@@ -220,17 +220,12 @@ class _DecodeTransModule:
             trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
             with self.waiting_dict_lock:
-                has_waiting_task = False
                 for task in trans_task_group.task_list:
                     if task.need_transfer_page():
                         self.waiting_dict[task.get_key()] = task
-                        has_waiting_task = True
                     else:
                         task.start_trans_time = time.time()
                         self.success_queue.put((None, None, task))
-                if has_waiting_task:
-                    request_id = trans_task_group.task_list[0].request_id
-                    self.request_last_progress_time[request_id] = time.time()
 
             # up status
             task = trans_task_group.task_list[0]
@@ -378,8 +373,10 @@ class _DecodeTransModule:
             now = time.time()
             for key, trans_task in list(self.waiting_dict.items()):
                 if trans_task.start_trans_time is None:
-                    request_last_progress = self.request_last_progress_time[trans_task.request_id]
-                    is_timeout = now - request_last_progress > trans_task.time_out_secs
+                    request_last_progress = self.request_last_progress_time.get(trans_task.request_id)
+                    is_timeout = (
+                        request_last_progress is not None and now - request_last_progress > trans_task.time_out_secs
+                    )
                 else:
                     is_timeout = trans_task.time_out()
                 if is_timeout:
