@@ -14,24 +14,17 @@ def create_fuse_moe_impl(
     expert_parallel_state: ExpertParallelState | None = None,
 ):
     if expert_parallel_state is not None:
-        return FuseMoeDeepGEMM(
-            n_routed_experts=n_routed_experts,
-            num_fused_shared_experts=num_fused_shared_experts,
-            routed_scaling_factor=routed_scaling_factor,
-            quant_method=quant_method,
-            expert_parallel_state=expert_parallel_state,
-        )
-
-    if quant_method.method_name == "awq_marlin":
-        return FuseMoeMarlin(
-            n_routed_experts=n_routed_experts,
-            num_fused_shared_experts=num_fused_shared_experts,
-            routed_scaling_factor=routed_scaling_factor,
-            quant_method=quant_method,
-        )
-    return FuseMoeTriton(
+        impl_cls = FuseMoeDeepGEMM
+    elif quant_method.method_name == "awq_marlin":
+        impl_cls = FuseMoeMarlin
+    else:
+        impl_cls = FuseMoeTriton
+    kwargs = dict(
         n_routed_experts=n_routed_experts,
         num_fused_shared_experts=num_fused_shared_experts,
         routed_scaling_factor=routed_scaling_factor,
         quant_method=quant_method,
     )
+    if expert_parallel_state is not None:
+        kwargs["expert_parallel_state"] = expert_parallel_state
+    return impl_cls(**kwargs)

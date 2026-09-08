@@ -46,13 +46,11 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         """选择 expert；EPLB prefill 统一由融合路径返回 physical ID。"""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         eplb = self.eplb
-        eplb_active = eplb is not None
-        if is_prefill is True and eplb_active:
+        if is_prefill is True and eplb is not None:
             from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
 
             group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
             topk_weights, topk_ids, logical_topk_ids = triton_grouped_topk_eplb(
-                hidden_states=input_tensor,
                 gating_output=router_logits,
                 correction_bias=correction_bias,
                 topk=top_k,
@@ -84,8 +82,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 num_expert_group=num_expert_group,
                 scoring_func=scoring_func,
             )
-            if per_expert_scale is not None:
-                topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
             origin_topk_ids = topk_ids
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
@@ -348,9 +344,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         """返回所有 decode 路径使用的缓存本地主副本视图。"""
         if self.eplb is None:
             return weight_pack
-        cache = getattr(self, "_primary_weight_pack_cache", None)
-        if cache is None:
-            cache = self._primary_weight_pack_cache = {}
+        cache = self._primary_weight_pack_cache
         cache_key = id(weight_pack)
         primary = cache.get(cache_key)
         if primary is None:
@@ -360,11 +354,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 weight_scale=(
                     weight_pack.weight_scale[:num_primary_experts_per_rank]
                     if weight_pack.weight_scale is not None
-                    else None
-                ),
-                weight_zero_point=(
-                    getattr(weight_pack, "weight_zero_point", None)[:num_primary_experts_per_rank]
-                    if getattr(weight_pack, "weight_zero_point", None) is not None
                     else None
                 ),
             )
