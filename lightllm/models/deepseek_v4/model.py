@@ -438,6 +438,15 @@ class DeepSeekV4Tokenizer:
 
         return input_ids
 
+    def decode(self, token_ids, **kwargs):
+        if self.has_vision:
+            # Prompt image embeddings use out-of-vocabulary cache IDs that the HF tokenizer cannot decode.
+            vocab_size = self.model_config["vocab_size"]
+            token_ids = [
+                self.image_token_id if int(token_id) >= vocab_size else int(token_id) for token_id in token_ids
+            ]
+        return self.tokenizer.decode(token_ids, **kwargs)
+
     def _get_encoding_module(self):
         if self._encoding_module is not None:
             return self._encoding_module
