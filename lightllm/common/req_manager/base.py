@@ -72,10 +72,7 @@ class ReqManager:
 
     def free(self, free_req_indexes: List[int], free_token_index):
         for req_index in free_req_indexes:
-            self.req_list.free(req_index)
-
-        if self.req_list.is_all_free():
-            logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
+            self.free_req(req_index)
         self.mem_manager.free(free_token_index)
 
     def free_req(self, free_req_index: int):

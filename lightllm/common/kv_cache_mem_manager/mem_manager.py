@@ -26,7 +26,9 @@ class MemoryManager:
 
     operator_class = NormalMemOperator
 
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
+    def __init__(
+        self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, *, publish_usage=True
+    ):
         self.size = size
         self.head_num = head_num
         self.head_dim = head_dim
@@ -36,7 +38,7 @@ class MemoryManager:
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
-        self.allocator = KvCacheAllocator(self.size)
+        self.allocator = KvCacheAllocator(self.size, publish_usage=publish_usage)
 
         self._init_buffers(
             self.size,

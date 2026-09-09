@@ -1,10 +1,10 @@
+import copy
+from types import SimpleNamespace
+
 import torch
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.common.basemodel.triton_kernel.sliding_window_state import (
-    build_sliding_window_page_table,
-    commit_sliding_window_kv,
-    get_sliding_window_decode_indexes,
-)
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b_image_token_end
 
 
@@ -27,8 +27,8 @@ class Gemma4InferStateInfo(InferStateInfo):
         # image token 可以看到自己当前这个token以及后面的 image token。
         self.b_image_token_end = None
         self.sliding_window_mem_index = None
-        self.sliding_window_page_table = None
-        self.b_sliding_kv_start = None
+        self.sliding_window_mem_index_cpu = None
+        self.sliding_requests = None
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
@@ -47,36 +47,64 @@ class Gemma4InferStateInfo(InferStateInfo):
         )
         if self.is_prefill:
             self._build_b_image_token_end()
-            self.sliding_window_mem_index = self.mem_manager.alloc_sliding_prefill(self.input_ids.shape[0])
-            self.sliding_window_page_table, self.b_sliding_kv_start = build_sliding_window_page_table(
+        sliding_mem_manager = self.req_manager.sliding_mem_manager
+        index_chunks = []
+        token_num = 0
+        for req_idx, _, q_len in self.sliding_requests:
+            if req_idx != self.req_manager.HOLD_REQUEST_ID:
+                index_chunks.append(sliding_mem_manager.alloc(q_len))
+            else:
+                index_chunks.append(
+                    torch.full((q_len,), sliding_mem_manager.HOLD_TOKEN_MEMINDEX, dtype=torch.int32, device="cpu")
+                )
+            token_num += q_len
+        padding_token_num = self.input_ids.shape[0] - token_num
+        if padding_token_num > 0:
+            index_chunks.append(
+                torch.full(
+                    (padding_token_num,), sliding_mem_manager.HOLD_TOKEN_MEMINDEX, dtype=torch.int32, device="cpu"
+                )
+            )
+        # Combine allocator views once into owned pinned storage for asynchronous H2D.
+        self.sliding_window_mem_index_cpu = torch.empty(
+            (self.input_ids.shape[0],), dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        if index_chunks:
+            torch.cat(index_chunks, out=self.sliding_window_mem_index_cpu)
+        self.sliding_window_mem_index = self.sliding_window_mem_index_cpu.cuda(non_blocking=True)
+        if self.is_prefill:
+            init_req_to_token_indexes(
+                self.req_manager.req_to_sliding_window,
                 self.b_req_idx,
                 self.b_seq_len,
                 self.b_ready_cache_len,
                 self.b_q_start_loc,
                 self.sliding_window_mem_index,
-                self.req_manager.sliding_window,
                 self.max_q_seq_len,
             )
         else:
-            self.sliding_window_mem_index = get_sliding_window_decode_indexes(
-                self.b_req_idx, self.b_seq_len, self.req_manager.sliding_window
+            copy_kv_index_to_req(
+                self.req_manager.req_to_sliding_window,
+                self.b_req_idx,
+                self.b_seq_len,
+                self.sliding_window_mem_index,
             )
+            # A metadata view gives the unchanged attention backend its sliding table.
+            # Tensor metadata is shared with this state, including CUDA graph updates.
+            sliding_state = copy.copy(self)
+            sliding_state.req_manager = SimpleNamespace(req_to_token_indexs=self.req_manager.req_to_sliding_window)
+            self.decode_att_state1 = model.decode_att_backend.create_att_decode_state(infer_state=sliding_state)
         return
 
     def finish_forward(self):
-        if not self.is_prefill:
-            return
-        # One commit after all KV-sharing readers, also outside CUDA graph's attention probes.
-        commit_sliding_window_kv(
-            self.mem_manager.sliding_kv_buffer,
-            self.sliding_window_mem_index,
-            self.b_req_idx,
-            self.b_seq_len,
-            self.b_ready_cache_len,
-            self.b_q_start_loc,
-            self.req_manager.sliding_window,
-        )
-        self.mem_manager.free_sliding_prefill()
+        # Keep the latest W token slots after every KV-sharing reader has finished.
+        start = 0
+        for req_idx, seq_len, q_len in self.sliding_requests:
+            if req_idx != self.req_manager.HOLD_REQUEST_ID:
+                self.req_manager.update_sliding_window(
+                    req_idx, seq_len, self.sliding_window_mem_index_cpu[start : start + q_len]
+                )
+            start += q_len
 
     def _build_b_image_token_end(self):
         device = self.position_ids.device

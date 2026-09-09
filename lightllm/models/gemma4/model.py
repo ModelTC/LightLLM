@@ -99,11 +99,42 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             sliding_config=self.sliding_cache_config,
             mem_fraction=self.mem_fraction,
         )
+        self.mem_manager.sliding_kv_buffer = self.req_manager.sliding_mem_manager.kv_buffer
         return
 
+    def _prepare_sliding_requests(self, *model_inputs):
+        # Capture Gemma-only metadata before H2D; padding's copy.copy preserves it.
+        # Normal scheduling supplies CPU tensors; only synthetic GPU warmups need D2H.
+        for model_input in model_inputs:
+            req_indexes = model_input.b_req_idx.cpu()
+            seq_lens = model_input.b_seq_len.cpu()
+            if model_input.is_prefill:
+                q_lens = seq_lens - model_input.b_ready_cache_len.cpu()
+            else:
+                q_lens = torch.ones_like(seq_lens)
+            model_input.sliding_requests = list(zip(req_indexes.tolist(), seq_lens.tolist(), q_lens.tolist()))
+
+    def forward(self, model_input):
+        self._prepare_sliding_requests(model_input)
+        return super().forward(model_input)
+
+    def microbatch_overlap_prefill(self, model_input0, model_input1):
+        self._prepare_sliding_requests(model_input0, model_input1)
+        return super().microbatch_overlap_prefill(model_input0, model_input1)
+
+    def microbatch_overlap_decode(self, model_input0, model_input1):
+        self._prepare_sliding_requests(model_input0, model_input1)
+        return super().microbatch_overlap_decode(model_input0, model_input1)
+
+    def _create_inferstate(self, model_input, microbatch_index=0):
+        infer_state = super()._create_inferstate(model_input, microbatch_index)
+        # CPU rows exclude padding added inside the model; dummy slots are filled separately.
+        infer_state.sliding_requests = model_input.sliding_requests
+        return infer_state
+
     def _init_att_backend(self):
-        # Full attention uses the standard backend. Sliding attention uses
-        # Gemma's local kernels for the compact page table and image mask.
+        # Both pools use main's token-indexed attention. Gemma's sliding prefill
+        # retains its image mask; full layers' head_dim=512 still requires Triton.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
 

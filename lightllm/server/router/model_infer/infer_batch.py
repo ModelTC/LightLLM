@@ -710,10 +710,7 @@ class InferReq:
                         self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         assert self.tail_linear_att_small_page_buffer_id is None
                         # 恢复linear att 状态
-                        g_infer_context.req_manager.restore_small_page_state(
-                            req=self,
-                            small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
-                        )
+                        g_infer_context.req_manager.restore_small_page_state(req=self)
                     else:
                         # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
                         # 对应的小页对应的节点，递归找到对应最近的大叶节点进行返回,然后赋值到req.shared_node 对象上
@@ -743,10 +740,7 @@ class InferReq:
                             )
 
                             self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
-                            g_infer_context.req_manager.restore_small_page_state(
-                                req=self,
-                                small_page_buffers=g_infer_context.radix_cache.linear_att_small_page_buffers,
-                            )
+                            g_infer_context.req_manager.restore_small_page_state(req=self)
                             self.shared_kv_node = None
 
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)

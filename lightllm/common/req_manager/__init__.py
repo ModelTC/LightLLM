@@ -1,5 +1,5 @@
 from .base import ReqManager
-from .hybrid_att import HybridAttentionReqManager
+from .hybrid_base import HybridAttentionReqManager
 from .linear_att import ReqManagerForMamba
 from .req_sampling_params import ReqSamplingParamsManager
 from .sliding_window import ReqManagerForSlidingWindow

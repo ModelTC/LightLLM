@@ -2,7 +2,6 @@ import torch
 import triton
 
 from lightllm.common.sliding_window_cache_manager import SlidingWindowStateCacheManager
-from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .mem_manager import MemoryManager
@@ -10,30 +9,15 @@ from .operator.hybrid_sliding import HybridSlidingMemOperator
 
 
 class HybridSlidingMemoryManager(MemoryManager):
-    """Token-granular full KV plus request-granular sliding-window KV."""
+    """管理 token 粒度的 full KV 和大页 checkpoint，向 attention 提供窗口运行池的引用。"""
 
     operator_class = HybridSlidingMemOperator
+    # Bound by the model to req_manager's runtime pool; no allocation or request-slot ownership here.
+    sliding_kv_buffer: torch.Tensor
 
     def __init__(self, size, sliding_config, always_copy=False, mem_fraction=0.9):
         args = get_env_start_args()
         self.sliding_config = sliding_config
-        self.sliding_prefill_start = (args.running_max_req_size + 1) * sliding_config.sliding_window
-        # Both microbatches share batch_max_tokens; allow TP/dummy padding for each.
-        self.max_sliding_prefill_tokens = args.batch_max_tokens + 2 * get_dp_world_size()
-        self._sliding_prefill_used = 0
-        self._sliding_prefill_batches = 0
-        # One layer-first pool: fixed request rings followed by this batch's new KV.
-        # Reserve it before profiling how much memory can be given to full attention.
-        self.sliding_kv_buffer = torch.zeros(
-            (
-                sliding_config.sliding_layer_num,
-                self.sliding_prefill_start + self.max_sliding_prefill_tokens,
-                2 * sliding_config.sliding_head_num,
-                sliding_config.sliding_head_dim,
-            ),
-            dtype=sliding_config.dtype,
-            device="cuda",
-        )
         self.big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         super().__init__(
             size=size,
@@ -44,29 +28,6 @@ class HybridSlidingMemoryManager(MemoryManager):
             always_copy=always_copy,
             mem_fraction=mem_fraction,
         )
-
-    def alloc_sliding_prefill(self, token_num: int) -> torch.Tensor:
-        # Overlapping microbatches lease disjoint ranges of the same token budget.
-        assert (
-            self._sliding_prefill_used + token_num <= self.max_sliding_prefill_tokens
-        ), "sliding prefill pool exhausted"
-        start = self.sliding_prefill_start + self._sliding_prefill_used
-        indexes = torch.arange(start, start + token_num, dtype=torch.int32, device="cuda")
-        self._sliding_prefill_used += token_num
-        self._sliding_prefill_batches += 1
-        return indexes
-
-    def free_sliding_prefill(self):
-        assert self._sliding_prefill_batches > 0
-        self._sliding_prefill_batches -= 1
-        if self._sliding_prefill_batches == 0:
-            self._sliding_prefill_used = 0
-
-    def free_all(self):
-        super().free_all()
-        # Also discard leases when warmup/error cleanup resets all requests.
-        self._sliding_prefill_used = 0
-        self._sliding_prefill_batches = 0
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)

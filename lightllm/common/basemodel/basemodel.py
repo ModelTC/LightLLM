@@ -939,6 +939,8 @@ class TpPartBaseModel:
                     infer_state1=infer_state1,
                 )
 
+            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
+            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
         else:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
@@ -963,11 +965,11 @@ class TpPartBaseModel:
             infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
+            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
+            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
 
         infer_state0.finish_forward()
         infer_state1.finish_forward()
-        model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
-        model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
         return model_output0, model_output1
 
     @final

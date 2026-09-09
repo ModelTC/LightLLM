@@ -43,7 +43,6 @@ def _fwd_kernel(
     Req_to_tokens,
     B_req_idx,
     B_Image_Token_End,
-    B_KV_Start_Pos,
     stride_qbs,
     stride_qh,
     stride_qd,
@@ -66,7 +65,6 @@ def _fwd_kernel(
     BLOCK_N: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
     SLIDING_WINDOW_LEFT: tl.constexpr,
-    COMPACT_KV: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -79,8 +77,7 @@ def _fwd_kernel(
     prompt_cache_len = tl.load(b_prompt_cache_len + cur_batch)
     total_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_seq_len = total_len - prompt_cache_len  # new tokens this step
-    cur_batch_req_idx = cur_batch if COMPACT_KV else tl.load(B_req_idx + cur_batch)
-    table_start = tl.load(B_KV_Start_Pos + cur_batch) if COMPACT_KV else 0
+    cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 
     block_start_loc = BLOCK_M * start_m
     if block_start_loc >= cur_batch_seq_len:
@@ -130,12 +127,13 @@ def _fwd_kernel(
         k_valid = k_pos < block_end_loc
 
         kv_loc = tl.load(
-            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * (k_pos - table_start),
+            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * k_pos,
             mask=k_valid,
             other=0,
         ).to(tl.int64)
-        k_ptr = K + kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
-        k = tl.load(k_ptr, mask=k_valid[None, :], other=0.0)
+
+        off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
+        k = tl.load(K + off_k, mask=k_valid[None, :], other=0.0)
         qk = tl.dot(q, k)
 
         if USE_SLIDING_WINDOW:
@@ -160,8 +158,8 @@ def _fwd_kernel(
         l_i = l_i * alpha + l_ij
         acc = acc * alpha[:, None]
 
-        v_ptr = V + kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
-        v = tl.load(v_ptr, mask=k_valid[:, None], other=0.0)
+        off_v = kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
+        v = tl.load(V + off_v, mask=k_valid[:, None], other=0.0)
         p = p.to(v.dtype)
         acc = tl.dot(p, v, acc)
 
@@ -190,7 +188,6 @@ def context_attention_fwd_gemma4_mm(
     req_to_token_indexs,
     b_image_token_end,
     sliding_window=(-1, -1),
-    b_kv_start_pos=None,
 ):
     """Prefill attention with image bidirectional masking on sliding layers.
 
@@ -201,9 +198,6 @@ def context_attention_fwd_gemma4_mm(
             position (in the flattened new-token layout), value is the image
             span's end index (in absolute request position) if the token is
             inside an image span, else 0.
-        b_kv_start_pos: Absolute position of column zero in a batch-local compact KV table.
-            None means the table is indexed by request ID and covers the full history. Query and image positions
-            always remain absolute; only the page-table lookup is rebased.
     """
     BLOCK_M = 128 if not is_tesla() else 64
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -231,9 +225,6 @@ def context_attention_fwd_gemma4_mm(
         assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
         sliding_window_left = int(sliding_window[0])
 
-    if b_kv_start_pos is not None:
-        assert use_sliding_window and sliding_window_left >= 0, "compact KV requires a finite sliding window"
-
     _fwd_kernel[grid](
         q,
         k,
@@ -245,7 +236,6 @@ def context_attention_fwd_gemma4_mm(
         req_to_token_indexs,
         b_req_idx,
         b_image_token_end,
-        b_kv_start_pos,
         q.stride(0),
         q.stride(1),
         q.stride(2),
@@ -268,7 +258,6 @@ def context_attention_fwd_gemma4_mm(
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
         SLIDING_WINDOW_LEFT=sliding_window_left,
-        COMPACT_KV=b_kv_start_pos is not None,
         num_warps=num_warps,
         num_stages=num_stages,
     )

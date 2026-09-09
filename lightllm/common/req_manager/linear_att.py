@@ -7,7 +7,7 @@ from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
 from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
 from lightllm.utils.envs_utils import get_env_start_args
 
-from .hybrid_att import HybridAttentionReqManager
+from .hybrid_base import HybridAttentionReqManager
 
 
 if TYPE_CHECKING:
@@ -50,14 +50,26 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         )
         return
 
-    def create_state_cache_manager(self, size: int):
-        return LinearAttCacheManager(size=size, linear_config=self.linear_config)
+    def init_hybrid_attention_state(self, req: "InferReq"):
+        conv_index = req.req_idx
+        ssm_start = req.req_idx * (self.mtp_step + 1)
+        self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
+        # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
+        # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
+        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
+        if self.req_to_mtp_state_index is not None:
+            self.req_to_mtp_state_index[req.req_idx] = 0
+        return
+
+    def create_small_page_cache_manager(self, size: int):
+        self.small_page_buffers = LinearAttCacheManager(size=size, linear_config=self.linear_config)
+        return self.small_page_buffers
 
     def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
         buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
-        state_cache_manager = self.mem_manager.linear_att_big_page_buffers
+        state_cache_manager = self.big_page_buffers
         copy_linear_att_state_to_kv_buffer(
             b_req_idx=b_req_idx,
             big_page_buffer_ids=buffer_indexes,
@@ -70,24 +82,13 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         return
 
     def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager: LinearAttCacheManager):
-        # Preserve main's small-page copies, including the MTP conv-state crop.
+        # checkpoint 只保存标准 conv 窗口和请求的基准 SSM 状态，不包含 MTP 扩展运行态。
         conv_cache_width = self.linear_config.get_conv_state_shape()[-1]
         gpu_conv_state = self.req_to_conv_state.buffer[:, req_idx, ..., :conv_cache_width]
         gpu_ssm_state = self.req_to_ssm_state.buffer[:, req_idx * (self.mtp_step + 1), ...]
         dst_conv_state, dst_ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
         dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
-
-    def init_hybrid_attention_state(self, req: "InferReq"):
-        conv_index = req.req_idx
-        ssm_start = req.req_idx * (self.mtp_step + 1)
-        self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
-        # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
-        # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
-        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
-        if self.req_to_mtp_state_index is not None:
-            self.req_to_mtp_state_index[req.req_idx] = 0
-        return
 
     def get_mamba_cache(self, layer_idx_in_all: int):
         assert (

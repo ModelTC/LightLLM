@@ -154,7 +154,7 @@ class ModeBackend:
         self.is_hybrid_att_mixed_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
 
         if self.is_hybrid_att_mixed_model:
-            self.linear_att_cache_manager = self.model.req_manager.create_state_cache_manager(
+            self.linear_att_cache_manager = self.model.req_manager.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size
             )
         else:

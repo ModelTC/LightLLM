@@ -19,7 +19,7 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     """
     Gemma-4 decoder block. Full-attention KV stays token granular, while
-    sliding attention reads fixed request rings and new-token KV from one pool.
+    sliding attention indexes a bounded KV pool through its own token table.
     """
 
     def __init__(self, layer_num, network_config):
@@ -168,7 +168,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = infer_state.mem_manager.get_att_input_params(self.kv_cache_layer_index_)
         if self.is_sliding:
             if not self.is_kv_shared_:
-                # Use the callback's live indices on prefill graph replay. History stays in the ring.
+                # Use the callback's live indices on prefill graph replay.
                 destindex_copy_kv(
                     kv,
                     infer_state.sliding_window_mem_index,
@@ -187,10 +187,9 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.b_seq_len,
                 infer_state.b_ready_cache_len,
                 infer_state.max_q_seq_len,
-                infer_state.sliding_window_page_table,
+                infer_state.req_manager.req_to_sliding_window,
                 infer_state.b_image_token_end,
                 sliding_window=(self.sliding_window_ - 1, 0),
-                b_kv_start_pos=infer_state.b_sliding_kv_start,
             )
             return o_tensor.view(q.shape)
 
@@ -209,22 +208,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = infer_state.mem_manager.get_att_input_params(self.kv_cache_layer_index_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         if self.is_sliding:
-            from lightllm.models.gemma4.triton_kernel.sliding_window_decode import sliding_window_decode_attention
-
-            o_tensor = sliding_window_decode_attention(
-                q=_q,
-                k=_k,
-                v=_v,
-                b_req_idx=infer_state.b_req_idx,
-                b_seq_len=infer_state.b_seq_len,
-                sliding_window=self.sliding_window_,
-                out=out,
-                alloc_tensor_func=self.alloc_tensor,
-            )
+            att_state = infer_state.decode_att_state1
+            att_control = AttControl(use_sliding_window=True, sliding_window=(self.sliding_window_ - 1, 0))
         else:
-            o_tensor = infer_state.decode_att_state.decode_att(
-                q=_q, k=_k, v=_v, att_control=AttControl(), alloc_func=self.alloc_tensor
-            )
+            att_state = infer_state.decode_att_state
+            att_control = AttControl()
+        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=att_control, alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 
     # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------

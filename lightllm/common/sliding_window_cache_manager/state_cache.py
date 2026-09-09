@@ -7,7 +7,11 @@ from .config import SlidingWindowCacheConfig
 
 
 class SlidingWindowStateCacheManager:
-    """Pinned CPU checkpoints, size-first: [page, layer, window, 2 * heads, dim]."""
+    """大小页共用的 CPU pinned checkpoint 存储，两个池独立分配。
+
+    布局为 size-first: [slot, layer, window, 2 * heads, dim]。
+    本类只管理状态存储与空闲槽位，不判断页面大小或缓存边界，也不持有 GPU 运行态。
+    """
 
     def __init__(self, size: int, sliding_config: SlidingWindowCacheConfig, keep_num: int = 0):
         self.size = size

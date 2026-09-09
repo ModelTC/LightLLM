@@ -9,7 +9,7 @@ logger = init_logger(__name__)
 
 
 class KvCacheAllocator:
-    def __init__(self, size: int) -> None:
+    def __init__(self, size: int, publish_usage: bool = True) -> None:
         self.size = size
         self.mem_state = torch.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
@@ -24,12 +24,14 @@ class KvCacheAllocator:
 
         self.can_use_mem_size = self.size
 
-        rank_in_node = get_current_rank_in_node()
-        # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-        self.shared_can_use_token_num = SharedInt(
-            f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
-        )
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        # Only the full KV pool publishes scheduler capacity; attention-state pools are private.
+        self.shared_can_use_token_num = None
+        if publish_usage:
+            rank_in_node = get_current_rank_in_node()
+            self.shared_can_use_token_num = SharedInt(
+                f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
+            )
+            self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return
 
     def alloc(self, need_size) -> torch.Tensor:
@@ -42,7 +44,8 @@ class KvCacheAllocator:
         self.mark_start += need_size
 
         self.can_use_mem_size -= need_size
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        if self.shared_can_use_token_num is not None:
+            self.shared_can_use_token_num.set_value(self.can_use_mem_size)
 
         # 利用缓冲区返回，避免异步情况下的内存竞争
         if self._return_start + need_size > self._mem_state_return.shape[0]:
@@ -72,7 +75,8 @@ class KvCacheAllocator:
         self.mark_start -= len(free_index)
 
         self.can_use_mem_size += len(free_index)
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        if self.shared_can_use_token_num is not None:
+            self.shared_can_use_token_num.set_value(self.can_use_mem_size)
 
         if self.can_use_mem_size == len(self.mem_state):
             logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
@@ -83,7 +87,8 @@ class KvCacheAllocator:
         self.mark_start = 0
         self.mark_end = len(self.mem_state)
         self.can_use_mem_size = len(self.mem_state)
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        if self.shared_can_use_token_num is not None:
+            self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return
 
     def resize(self, new_size: int) -> None:
@@ -103,4 +108,5 @@ class KvCacheAllocator:
         self._return_start = 0
 
         self.can_use_mem_size = self.size
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        if self.shared_can_use_token_num is not None:
+            self.shared_can_use_token_num.set_value(self.can_use_mem_size)
