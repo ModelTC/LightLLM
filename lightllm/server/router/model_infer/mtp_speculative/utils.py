@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, List, Tuple
 import torch
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
-    linear_att_mtp_state_index_update,
     mtp_scatter_next_token_ids,
     mtp_verify,
 )
@@ -49,9 +48,8 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    if backend.is_linear_att_mixed_model:
-        linear_att_mtp_state_index_update(
-            req_to_mtp_state_index=backend.model.req_manager.req_to_mtp_state_index,
+    if backend.is_hybrid_att_model:
+        backend.model.req_manager.update_mtp_state(
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,

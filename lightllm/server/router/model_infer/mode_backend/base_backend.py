@@ -15,9 +15,8 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
-from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
+from lightllm.common.req_manager import HybridAttentionReqManager
+from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
@@ -151,28 +150,27 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
-        self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
+        self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
 
-        if self.is_linear_att_mixed_model:
-            self.linear_att_cache_manager = LinearAttCacheManager(
+        if self.is_hybrid_att_model:
+            self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size,
-                linear_config=self.model.req_manager.linear_config,
             )
         else:
-            self.linear_att_cache_manager = None
+            self.small_page_buffers = None
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
-            if self.is_linear_att_mixed_model:
-                self.radix_cache = LinearAttPagedRadixCache(
+            if self.is_hybrid_att_model:
+                self.radix_cache = HybridAttPagedRadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
-                    linear_att_small_page_buffers=self.linear_att_cache_manager,
+                    small_page_buffers=self.small_page_buffers,
                 )
             else:
                 self.radix_cache = RadixCache(

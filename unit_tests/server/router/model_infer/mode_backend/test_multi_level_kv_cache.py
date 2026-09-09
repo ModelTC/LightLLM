@@ -41,7 +41,7 @@ def test_cache_tiers_reassignment_is_rejected():
 def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     released_refs = []
     context = InferenceContext()
-    context.is_linear_att_mixed_model = False
+    context.is_hybrid_att_model = False
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14]]))
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
@@ -58,7 +58,7 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
 def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
     context = InferenceContext()
     context.radix_cache = object()
-    context.is_linear_att_mixed_model = False
+    context.is_hybrid_att_model = False
     inserted_reqs = []
     context._full_att_free_req = lambda free_token_index, req: inserted_reqs.append(req)
     req = SimpleNamespace(
@@ -98,7 +98,7 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
         return SimpleNamespace(req=req)
 
     module._start_kv_cache_offload_task = start_offload
-    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_linear_att_mixed_model", False)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(
         multi_level_kv_cache_impl.g_infer_context,
         "get_cpu_kv_cache_stream",
@@ -135,18 +135,18 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     freed_small_pages = []
     freed_big_pages = []
     context = InferenceContext()
-    context.is_linear_att_mixed_model = True
+    context.is_hybrid_att_model = True
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
     context.radix_cache = SimpleNamespace(
-        linear_att_small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
-        linear_att_big_page_buffers=SimpleNamespace(free_state_cache=freed_big_pages.extend),
+        small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
+        big_page_buffers=SimpleNamespace(free_state_cache=freed_big_pages.extend),
     )
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=3,
         shared_kv_node=None,
-        tail_linear_att_small_page_buffer_id=7,
-        linear_att_len_to_big_page_id={128: 8, 256: 9},
+        tail_small_page_buffer_id=7,
+        hybrid_len_to_big_page_id={128: 8, 256: 9},
     )
     free_token_indexes = []
 
@@ -155,5 +155,5 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     assert free_token_indexes[0].tolist() == [10, 11, 12]
     assert freed_small_pages == [7]
     assert freed_big_pages == [8, 9]
-    assert req.tail_linear_att_small_page_buffer_id is None
-    assert req.linear_att_len_to_big_page_id == {}
+    assert req.tail_small_page_buffer_id is None
+    assert req.hybrid_len_to_big_page_id == {}

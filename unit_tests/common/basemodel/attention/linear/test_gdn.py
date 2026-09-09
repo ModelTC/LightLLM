@@ -10,7 +10,7 @@ import lightllm.common.basemodel.attention.create_linear_utils as linear_create_
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.state_cache_manager import LinearAttCacheConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
 

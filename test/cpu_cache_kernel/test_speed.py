@@ -39,7 +39,7 @@ os.environ["LIGHTLLM_START_ARGS"] = json.dumps(_env_args)
 # ---------------------------------------------------------------------------
 # Step 1 – build LinearAttCacheConfig directly (avoids needing a real model dir)
 # ---------------------------------------------------------------------------
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.state_cache_manager import LinearAttCacheConfig
 
 linear_config = LinearAttCacheConfig(
     tp_world_size=8,

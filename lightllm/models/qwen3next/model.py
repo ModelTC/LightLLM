@@ -16,7 +16,7 @@ from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.state_cache_manager import LinearAttCacheConfig
 
 logger = init_logger(__name__)
 

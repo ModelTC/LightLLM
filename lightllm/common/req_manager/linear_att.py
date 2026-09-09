@@ -1,20 +1,18 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 import torch
 
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
-from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
-from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
+from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheConfig, LinearAttCacheManager
 from lightllm.utils.envs_utils import get_env_start_args
 
-from .base import ReqManager
+from .hybrid_base import HybridAttentionReqManager
 
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
 
-class ReqManagerForMamba(ReqManager):
+class ReqManagerForMamba(HybridAttentionReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
@@ -50,7 +48,7 @@ class ReqManagerForMamba(ReqManager):
         )
         return
 
-    def init_linear_att_state(self, req: "InferReq"):
+    def init_hybrid_attention_state(self, req: "InferReq"):
         conv_index = req.req_idx
         ssm_start = req.req_idx * (self.mtp_step + 1)
         self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
@@ -61,6 +59,35 @@ class ReqManagerForMamba(ReqManager):
             self.req_to_mtp_state_index[req.req_idx] = 0
         return
 
+    def create_small_page_cache_manager(self, size: int):
+        self.small_page_buffers = LinearAttCacheManager(size=size, linear_config=self.linear_config)
+        return self.small_page_buffers
+
+    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
+        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+
+        buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+        state_cache_manager = self.big_page_buffers
+        copy_linear_att_state_to_kv_buffer(
+            b_req_idx=b_req_idx,
+            big_page_buffer_ids=buffer_indexes,
+            gpu_conv_state=self.req_to_conv_state.buffer,
+            gpu_ssm_state=self.req_to_ssm_state.buffer,
+            cpu_kv_conv_state=state_cache_manager.conv_state_cache.buffer,
+            cpu_kv_ssm_state=state_cache_manager.ssm_state_cache.buffer,
+            mtp_step=self.mtp_step,
+        )
+        return
+
+    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager: LinearAttCacheManager):
+        # checkpoint 只保存标准 conv 窗口和请求的基准 SSM 状态，不包含 MTP 扩展运行态。
+        conv_cache_width = self.linear_config.get_conv_state_shape()[-1]
+        gpu_conv_state = self.req_to_conv_state.buffer[:, req_idx, ..., :conv_cache_width]
+        gpu_ssm_state = self.req_to_ssm_state.buffer[:, req_idx * (self.mtp_step + 1), ...]
+        dst_conv_state, dst_ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
+        dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
+        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
+
     def get_mamba_cache(self, layer_idx_in_all: int):
         assert (
             0 <= layer_idx_in_all < self.linear_config.all_layer_num
@@ -70,30 +97,23 @@ class ReqManagerForMamba(ReqManager):
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
 
-    def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
-        big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
+    def update_mtp_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
+        from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
 
-        conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
-        conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
-        conv_cache_width = conv_state.shape[-1]
-        self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
-        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_mtp_state_index is not None:
-            self.req_to_mtp_state_index[req.req_idx] = 0
-        return
-
-    def copy_small_page_buffer_to_linear_att_state(
-        self, req: "InferReq", linear_att_small_page_buffers: LinearAttCacheManager
-    ):
-        conv_state, ssm_state = linear_att_small_page_buffers.get_state_cache(
-            buffer_idx=req.shared_kv_node.small_page_buffer_idx
+        linear_att_mtp_state_index_update(
+            req_to_mtp_state_index=self.req_to_mtp_state_index,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            accepted_index=accepted_index,
+            verify_width=verify_width,
         )
+
+    def restore_state(self, req: "InferReq", state_cache_manager: LinearAttCacheManager, buffer_idx: int):
+        conv_state, ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         conv_dest = req.req_idx
         ssm_dest = req.req_idx * (self.mtp_step + 1)
         conv_cache_width = conv_state.shape[-1]
-        # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
-        # 同时，非连续对象的拷贝，可能存在效率问题。
         self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
         if self.req_to_mtp_state_index is not None:

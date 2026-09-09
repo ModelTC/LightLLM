@@ -10,6 +10,9 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+# Keep the existing wire tag so P/D nodes can be upgraded independently.
+HYBRID_ATT_STATE_PAGE_KIND = "linear_att_state"
+
 
 # 节点的行为
 class NodeRole(enum.Enum):
@@ -190,7 +193,7 @@ class PDChunckedTransTask:
             raise ValueError(error_info)
         if self.page_kind == "kv":
             assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
-        elif self.page_kind == "linear_att_state":
+        elif self.page_kind == HYBRID_ATT_STATE_PAGE_KIND:
             assert self.start_kv_index == self.end_kv_index
             assert len(self.mem_indexes) == 0
         else:

@@ -11,7 +11,7 @@ from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLe
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.config_utils import is_linear_att_mixed_model
+from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import Any, Dict, List, Union
 from lightllm.utils.log_utils import init_logger
@@ -145,11 +145,11 @@ class Req(ctypes.Structure):
         # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
         # 该变量为 detokenization 进程写入，http_server 读取
         ("stop_str_matched_token_index", ctypes.c_int),
-        # 用于在 包含linear att 混合模型中，进行输入的提前hash，方便在对应的page radix tree中进行快速操作。
-        ("linear_att_token_hash_list", TokenHashList),
+        # hybrid 模型按 checkpoint 粒度提前计算输入 hash，供大小页 radix 匹配。
+        ("hybrid_token_hash_list", TokenHashList),
         # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
         ("token_hash_list", TokenHashList),
-        # 用于存储每个cpu cache 页面对应的真实token数量，用于linear att的qwen3.5等模型的碎片化处理最后一个页面的问题
+        # 每个 CPU cache 页的真实 token 数，包含 hybrid 模型不足大页的尾页。
         ("token_hash_page_len_list", TokenPageLenList),
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
@@ -216,10 +216,10 @@ class Req(ctypes.Structure):
         self.post_init()
 
         args = get_env_start_args()
-        if is_linear_att_mixed_model(args.model_dir):
-            self._fill_linear_att_token_hash()
+        if is_hybrid_att_model(args.model_dir):
+            self._fill_hybrid_token_hash()
             if args.enable_cpu_cache:
-                cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_linear_att_cpu_cache_page_len_list()
+                cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_hybrid_cpu_cache_page_len_list()
                 self.token_hash_list = TokenHashList()
                 self.token_hash_list.clear()
                 self.token_hash_list.fill(cpu_cache_hash_list)
@@ -243,12 +243,12 @@ class Req(ctypes.Structure):
         # 子类继承进行一些额外的初始化操作
         pass
 
-    def _calcu_linear_att_cpu_cache_page_len_list(self):
-        token_hash_list = self.linear_att_token_hash_list.get_all()
-        linear_att_hash_page_size = get_env_start_args().linear_att_hash_page_size
+    def _calcu_hybrid_cpu_cache_page_len_list(self):
+        token_hash_list = self.hybrid_token_hash_list.get_all()
+        hash_page_size = get_env_start_args().linear_att_hash_page_size
         block_num = get_env_start_args().linear_att_page_block_num
         cpu_cache_page_size = get_env_start_args().cpu_cache_token_page_size
-        assert cpu_cache_page_size == linear_att_hash_page_size * block_num
+        assert cpu_cache_page_size == hash_page_size * block_num
         cpu_cache_hash_list = []
         cpu_cache_page_len_list = []
         cum_sum_len = 0
@@ -260,7 +260,7 @@ class Req(ctypes.Structure):
             elif i == len(token_hash_list) - 1:
                 cpu_cache_hash_list.append(token_hash_list[len(token_hash_list) - 1])
                 page_num = (i % block_num) + 1
-                cum_sum_len += page_num * linear_att_hash_page_size
+                cum_sum_len += page_num * hash_page_size
                 cpu_cache_page_len_list.append(cum_sum_len)
 
         return cpu_cache_hash_list, cpu_cache_page_len_list
@@ -272,11 +272,11 @@ class Req(ctypes.Structure):
         self.token_hash_list.fill(hash_values)
         return
 
-    def _fill_linear_att_token_hash(self):
-        self.linear_att_token_hash_list = TokenHashList()
-        self.linear_att_token_hash_list.clear()
+    def _fill_hybrid_token_hash(self):
+        self.hybrid_token_hash_list = TokenHashList()
+        self.hybrid_token_hash_list.clear()
         hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
-        self.linear_att_token_hash_list.fill(hash_values)
+        self.hybrid_token_hash_list.fill(hash_values)
         return
 
     def create_prompt_ids_shm_array(self):

@@ -2,7 +2,7 @@ import torch.multiprocessing as mp
 import random
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
+from lightllm.server.pd_io_struct import HYBRID_ATT_STATE_PAGE_KIND, PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -87,13 +87,13 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 break
 
         if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
-            if g_infer_context.is_linear_att_mixed_model:
+            if g_infer_context.is_hybrid_att_model:
                 trans_task_list.append(
                     self._create_pd_trans_task(
                         req_obj=req_obj,
                         kv_start_index=input_len,
                         kv_end_index=input_len,
-                        page_kind="linear_att_state",
+                        page_kind=HYBRID_ATT_STATE_PAGE_KIND,
                     )
                 )
             trans_task_list[-1].first_gen_token_id = next_token_id
@@ -127,7 +127,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 .tolist()
             )
             req_idx = None
-        elif page_kind == "linear_att_state":
+        elif page_kind == HYBRID_ATT_STATE_PAGE_KIND:
             mem_indexes = []
             req_idx = req_obj.req_idx
         else:

@@ -468,6 +468,11 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         return False
 
 
+def is_hybrid_att_model(model_path: str) -> bool:
+    """Models whose non-full attention state follows hybrid checkpoint pages."""
+    return is_linear_att_mixed_model(model_path)
+
+
 def get_model_type(model_path: str) -> Optional[str]:
     """Get model type from config.json"""
     try:
