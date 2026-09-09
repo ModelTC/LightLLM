@@ -86,6 +86,11 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             full_attention_interval=self.config["full_attention_interval"],
             all_layer_num=self.config["n_layer"],
             draft_full_att_kv_layer_num=draft_full_att_kv_layer_num,
+            draft_full_att_dtype=(
+                torch.bfloat16
+                if start_args.llm_kv_type == "fp8kv_sph" and start_args.mtp_mode == "dspark"
+                else None
+            ),
         )
 
         if start_args.export_fp8kv_calibration:

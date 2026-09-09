@@ -1,4 +1,5 @@
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.common.basemodel.attention import Fa3AttBackend
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
 from lightllm.models.draft_registry import DraftModelRegistry
 
@@ -39,3 +40,13 @@ class Qwen3_5DSparkModel(Qwen3DSparkModel):
             f"got draft={draft_kv_shape}, target={target_kv_shape}."
         )
         super()._init_mem_manager()
+
+    def _init_att_backend(self):
+        # The target cache is calibrated FP8, while DSpark draft slots are
+        # deliberately BF16.  Keep the draft's non-causal FA3 block path, but
+        # do not route its BF16 KV through the target FP8 backend.
+        if self.main_model.linear_config.use_mixed_target_fp8_draft_bf16():
+            self.prefill_att_backend = Fa3AttBackend(model=self)
+            self.decode_att_backend = Fa3AttBackend(model=self)
+            return
+        super()._init_att_backend()
