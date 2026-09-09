@@ -20,6 +20,7 @@ from lightllm.models.deepseek_v4.image_processor import (
 )
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
+from lightllm.server.visualserver import get_vit_attn_backend
 
 
 @lru_cache(8)
@@ -72,18 +73,14 @@ class Attention(nn.Module):
         self.wqkv = nn.Linear(args.vision_dim, 3 * args.vision_dim, dtype=torch.bfloat16)
         self.wo = nn.Linear(args.vision_dim, args.vision_dim, dtype=torch.bfloat16)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
         n = x.size(0)
         q, k, v = (t.view(n, self.n_heads, self.head_dim) for t in self.wqkv(x).chunk(3, dim=-1))
         q = apply_rotary(q, cos, sin)
         k = apply_rotary(k, cos, sin)
-        # Keep the batch dimension so SDPA can select fused attention kernels.
-        o = F.scaled_dot_product_attention(
-            q.transpose(0, 1).unsqueeze(0),
-            k.transpose(0, 1).unsqueeze(0),
-            v.transpose(0, 1).unsqueeze(0),
-        )
-        return self.wo(o.squeeze(0).transpose(0, 1).reshape(n, -1))
+        o = torch.empty_like(q)
+        get_vit_attn_backend()(q, k, v, o, cu_seqlens, n)
+        return self.wo(o.reshape(n, -1))
 
 
 class MLP(nn.Module):
@@ -115,8 +112,8 @@ class Block(nn.Module):
         self.norm2 = RMSNorm(args.vision_dim)
         self.mlp = MLP(args)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), cos, sin)
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), cos, sin, cu_seqlens)
         return x + self.mlp(self.norm2(x))
 
 
@@ -136,8 +133,9 @@ class ViT(nn.Module):
         cos, sin = get_vision_cos_sin(n_h, n_w, self.rope_dim, self.rope_theta)
         cos = cos.to(device=x.device)
         sin = sin.to(device=x.device)
+        cu_seqlens = torch.tensor([0, x.shape[0]], dtype=torch.int32, device=x.device)
         for block in self.blocks:
-            x = block(x, cos, sin)
+            x = block(x, cos, sin, cu_seqlens)
         return self.norm(x)
 
 
