@@ -173,9 +173,24 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
 
         q_head_num = q.shape[1]
-        if scaled_fp8_quant is None:
-            raise ImportError("scaled_fp8_quant is unavailable. Please install vllm to enable FP8 decode attention.")
-        q, q_scale = scaled_fp8_quant(q.reshape(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
+        att_batch_size = self.b_att_seq_len.shape[0]
+        if self.decode_max_q_seq_len > 1:
+            # Block/speculative decode flattens multiple query tokens for a
+            # logical request. FA3 expects one descale per request and KV head.
+            q_seq_lens = torch.diff(self.cu_seqlens_q)
+            token_batch_ids = torch.repeat_interleave(
+                torch.arange(att_batch_size, device=q.device), q_seq_lens, output_size=q.shape[0]
+            )
+            q, q_scale = q_per_head_fp8_quant(
+                q.reshape(q.shape[0], k_head_num, -1),
+                q_seq_lens,
+                self.cu_seqlens_q,
+                token_batch_ids=token_batch_ids,
+            )
+        else:
+            if scaled_fp8_quant is None:
+                raise ImportError("scaled_fp8_quant is unavailable. Please install vllm to enable FP8 decode attention.")
+            q, q_scale = scaled_fp8_quant(q.reshape(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,
@@ -188,7 +203,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             causal=self.causal,
             window_size=(-1, -1),
             softcap=0.0,
-            q_descale=q_scale.view(self.infer_state.batch_size, k_head_num),
+            q_descale=q_scale.view(att_batch_size, k_head_num),
             k_descale=self.k_descale[layer_index],
             v_descale=self.v_descale[layer_index],
             return_softmax_lse=False,

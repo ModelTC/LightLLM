@@ -38,8 +38,13 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.mtp_mode is not None:
         assert (
-            not args.disable_cudagraph or args.run_mode == "prefill"
-        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
+            not args.disable_cudagraph
+            or args.run_mode == "prefill"
+            or (args.run_mode == "normal" and args.export_fp8kv_calibration)
+        ), (
+            "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled; "
+            "offline FP8 KV calibration also supports normal mode with --export_fp8kv_calibration"
+        )
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -142,6 +147,10 @@ def _launch_subprocesses(args: StartArgs):
     if args.export_fp8kv_calibration:
         assert args.llm_kv_type == "None", "--export_fp8kv_calibration requires llm_kv_type=None"
         assert args.disable_cudagraph is True, "--export_fp8kv_calibration requires --disable_cudagraph"
+        assert not args.enable_prefill_cudagraph, (
+            "--export_fp8kv_calibration requires prefill CUDA Graph to be disabled; "
+            "remove --enable_prefill_cudagraph"
+        )
 
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
         args.enable_tpsp_mix_mode = True

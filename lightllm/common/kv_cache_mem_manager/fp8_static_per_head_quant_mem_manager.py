@@ -5,7 +5,7 @@ import torch.distributed as dist
 from typing import Tuple, Any
 from lightllm.utils.config_utils import get_model_architectures
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from .mem_manager import MemoryManager
 from .operator import FP8StaticPerHeadQuantMemOperator
@@ -33,9 +33,17 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
             cfg = self._load_and_check_config()
             all_head_num = cfg["num_head"]
             all_scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
+            # A joint target+draft config is deliberately usable by a
+            # target-only server. Its metadata has already verified that the
+            # leading rows are exactly this target's packed KV layers.
+            all_scales = all_scales[: self.layer_num]
 
             factor = (get_dp_world_size() * head_num) // all_head_num
-            assert (get_dp_world_size() * head_num) % all_head_num == 0
+            if (get_dp_world_size() * head_num) % all_head_num != 0:
+                raise ValueError(
+                    f"global KV heads {get_dp_world_size() * head_num} are not divisible by "
+                    f"calibration config num_head {all_head_num}"
+                )
             all_scales = torch.repeat_interleave(input=all_scales, repeats=factor, dim=-1)
             rank_in_dp = get_current_rank_in_dp()
 
@@ -63,17 +71,105 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
                 raise ValueError(
                     f"architectures {cfg['architectures']} in config " f"not match current model_arch {model_arch}"
                 )
-            if cfg["num_layers"] != self.layer_num:
-                raise ValueError(
-                    f"num_layers {cfg['num_layers']} in config " f"not match current layer_num {self.layer_num}"
-                )
-            assert (
-                cfg["quant_type"] == "per_head"
-            ), f"quant type {cfg['quant_type']} in config not match per-head backend"
+            if cfg["quant_type"] != "per_head":
+                raise ValueError(f"quant type {cfg['quant_type']} in config not match per-head backend")
+
+            self._validate_config_layout_and_scales(cfg)
             return cfg
         else:
             raise FileNotFoundError(
                 f"kv_quant_calibration_config {get_env_start_args().kv_quant_calibration_config_path} not found"
+            )
+
+    def _validate_config_layout_and_scales(self, cfg):
+        """Validate a complete config before moving calibration scales to CUDA."""
+        def require_integer(name):
+            value = cfg[name]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"calibration config {name} must be an integer, got {value!r}")
+            return value
+
+        try:
+            config_layer_num = require_integer("num_layers")
+            config_head_num = require_integer("num_head")
+            scales_shape = list(cfg["scales_shape"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid FP8 KV calibration config layer/head/shape metadata") from exc
+
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in scales_shape):
+            raise ValueError(f"calibration config scales_shape must contain integers, got {scales_shape!r}")
+
+        if config_layer_num <= 0 or config_head_num <= 0:
+            raise ValueError(
+                f"calibration config requires positive num_layers and num_head, got "
+                f"{config_layer_num} and {config_head_num}"
+            )
+        expected_shape = [config_layer_num, 2 * config_head_num]
+        if scales_shape != expected_shape:
+            raise ValueError(
+                f"scales_shape {scales_shape} in config does not match expected {expected_shape}"
+            )
+
+        try:
+            scales = torch.tensor(cfg["scales"], dtype=torch.float32)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError("calibration config scales must be a numeric two-dimensional array") from exc
+        if list(scales.shape) != expected_shape:
+            raise ValueError(
+                f"scales tensor shape {list(scales.shape)} in config does not match {expected_shape}"
+            )
+        if not torch.isfinite(scales).all():
+            raise ValueError("calibration config scales must all be finite")
+        if not (scales > 0).all():
+            raise ValueError("calibration config scales must all be positive")
+
+        runtime_draft_layers = get_added_mtp_kv_layer_num()
+        runtime_target_layers = self.layer_num - runtime_draft_layers
+        if runtime_target_layers <= 0:
+            raise ValueError(
+                f"runtime packed KV layers={self.layer_num} are inconsistent with "
+                f"draft layers={runtime_draft_layers}"
+            )
+
+        has_target_metadata = "num_target_layers" in cfg
+        has_draft_metadata = "num_draft_layers" in cfg
+        if has_target_metadata != has_draft_metadata:
+            raise ValueError("joint calibration config must declare both num_target_layers and num_draft_layers")
+        if has_target_metadata:
+            try:
+                config_target_layers = require_integer("num_target_layers")
+                config_draft_layers = require_integer("num_draft_layers")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("joint calibration config target/draft layer metadata must be integers") from exc
+            if config_target_layers <= 0 or config_draft_layers < 0:
+                raise ValueError(
+                    f"invalid joint calibration layer metadata: target={config_target_layers}, "
+                    f"draft={config_draft_layers}"
+                )
+            if config_target_layers + config_draft_layers != config_layer_num:
+                raise ValueError(
+                    f"joint calibration metadata target+draft={config_target_layers + config_draft_layers} "
+                    f"does not equal num_layers={config_layer_num}"
+                )
+            if config_target_layers != runtime_target_layers:
+                raise ValueError(
+                    f"joint calibration target layers={config_target_layers} do not match runtime "
+                    f"target layers={runtime_target_layers}"
+                )
+            if runtime_draft_layers > 0 and config_draft_layers != runtime_draft_layers:
+                raise ValueError(
+                    f"joint calibration draft layers={config_draft_layers} do not match runtime "
+                    f"draft layers={runtime_draft_layers}"
+                )
+            return
+
+        # Legacy files describe one contiguous KV layout and remain compatible
+        # whenever their total packed-layer count exactly matches the runtime.
+        if config_layer_num != self.layer_num:
+            raise ValueError(
+                f"legacy calibration num_layers={config_layer_num} does not match runtime "
+                f"layer_num={self.layer_num} (target={runtime_target_layers}, draft={runtime_draft_layers}); "
+                "joint configs require target/draft metadata when the total differs"
             )
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
