@@ -21,11 +21,7 @@ if TYPE_CHECKING:
 
 
 class SpecEngine:
-    """Owns MTP planning and draft proposal generation.
-
-    Target verification, request metrics, stream synchronization, and resource
-    cleanup are stateless operations exposed by ``mtp_speculative.utils``.
-    """
+    """Owns MTP planning, proposal generation, and target verification."""
 
     def __init__(
         self,
@@ -34,6 +30,7 @@ class SpecEngine:
         enable_dynmaic_mtp: bool,
     ) -> None:
         self.backend = backend
+        self.spec_mode = spec_mode
         self.proposer: BaseSpecProposer = build_spec_proposer(
             spec_mode=spec_mode,
             backend=backend,
@@ -130,6 +127,85 @@ class SpecEngine:
             draft_step=draft_step,
             accept_len=accept_len,
         )
+
+    # Target sampling and verification.
+
+    def sample_and_verify(
+        self,
+        logits: torch.Tensor,
+        run_reqs: List,
+        b_req_idx: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
+        b_mtp_index: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+        from lightllm.server.router.model_infer.mtp_speculative.utils import (
+            update_mtp_state_after_verify,
+            verify_mtp_tokens,
+        )
+
+        if self.spec_mode == "dflash2":
+            assert logits.shape[0] == b_req_mtp_start_loc.shape[0] * (
+                self.backend.max_draft_step + 1
+            ), "DFlash2 requires fixed-width verification"
+
+        # Greedy DFlash2 uses token equality and the regular sampler's logprobs,
+        # without reading proposal distributions or consuming rejection RNG.
+        if self.spec_mode == "dflash2" and any(req.sampling_param.shm_param.top_k != 1 for req in run_reqs):
+            from lightllm.server.router.model_infer.mtp_speculative.dflash2 import sample_and_verify_dflash2_tokens
+
+            next_token_ids, next_token_logprobs, accept_lengths, accepted_index = sample_and_verify_dflash2_tokens(
+                backend=self.backend,
+                logits=logits,
+                run_reqs=run_reqs,
+                b_req_idx=b_req_idx,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
+            update_mtp_state_after_verify(
+                backend=self.backend,
+                b_req_idx=b_req_idx,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                b_mtp_index=b_mtp_index,
+                accepted_index=accepted_index,
+            )
+        else:
+            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.backend.eos_id)
+            accept_lengths, accepted_index = verify_mtp_tokens(
+                backend=self.backend,
+                next_token_ids=next_token_ids,
+                b_req_idx=b_req_idx,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                b_mtp_index=b_mtp_index,
+            )
+        return next_token_ids, next_token_logprobs, accept_lengths, accepted_index
+
+    def prepare_next_verification_state(
+        self,
+        proposal: SpecProposal,
+        target_next_token_ids: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        mtp_accept_len: torch.Tensor,
+    ) -> None:
+        from lightllm.server.router.model_infer.mtp_speculative.utils import scatter_mtp_next_tokens
+
+        scatter_mtp_next_tokens(
+            backend=self.backend,
+            proposal=proposal,
+            target_next_token_ids=target_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            mtp_accept_len=mtp_accept_len,
+        )
+        if self.spec_mode == "dflash2":
+            from lightllm.server.router.model_infer.mtp_speculative.dflash2 import save_dflash2_proposal_state
+
+            save_dflash2_proposal_state(
+                backend=self.backend,
+                proposal=proposal,
+                b_req_idx=b_req_idx,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+            )
 
     # Planner runtime statistics.
 
