@@ -210,6 +210,7 @@ def test_full_autotune_before_graph_and_cached_reuse(tmp_path, monkeypatch, kv_l
     monkeypatch.setattr(kernel, "cached_configs", {})
     monkeypatch.setattr(kernel, "fast_match_configs", collections.defaultdict(dict))
     monkeypatch.setattr(kernel, "warmuped_configs_set", set())
+    assert kernel.mutates_args == []
     # 使用生产路径的小 batch 布局，让 stage2 在长请求下归约完整的 128 个分块。
     inputs = make_inputs("cuda", table_width=kv_len, token_count=3 * kv_len, block_num=128)
     stage2 = stage2_module.mtp_diverse_stage2_single_token
@@ -240,8 +241,6 @@ def test_full_autotune_before_graph_and_cached_reuse(tmp_path, monkeypatch, kv_l
         # 不可编译或资源不足的候选按 Autotuner 原有规则返回 inf；完整搜索必须选出有效配置。
         if math.isfinite(elapsed):
             valid_benchmark_count += 1
-        for name in ["mid_out", "mid_out_logsumexp"]:
-            torch.testing.assert_close(inputs[name], snapshots[name])
         benchmark_count += 1
         return elapsed
 

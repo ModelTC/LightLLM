@@ -224,6 +224,7 @@ def test_full_autotune_and_graph_reuse(tmp_path, monkeypatch, kv_len):
     monkeypatch.setattr(kernel, "cached_configs", {})
     monkeypatch.setattr(kernel, "fast_match_configs", collections.defaultdict(dict))
     monkeypatch.setattr(kernel, "warmuped_configs_set", set())
+    assert kernel.mutates_args == []
     inputs = make_inputs("cuda", token_count=2 * kv_len, block_num=128)
     inputs["Req_to_tokens"] = torch.arange(5 * kv_len, dtype=torch.int32, device="cuda").view(5, kv_len) % (2 * kv_len)
     snapshots = {name: value.clone() for name, value in inputs.items() if isinstance(value, torch.Tensor)}
@@ -245,8 +246,6 @@ def test_full_autotune_and_graph_reuse(tmp_path, monkeypatch, kv_len):
             assert rebuilt[name] is inputs[name]
         elapsed = benchmark(*args, **kwargs)
         timings.append(elapsed)
-        for name in ["mid_out", "mid_out_logsumexp"]:
-            torch.testing.assert_close(inputs[name], snapshots[name])
         return elapsed
 
     monkeypatch.setattr(kernel, "rebuild_input_func", checked_rebuild)

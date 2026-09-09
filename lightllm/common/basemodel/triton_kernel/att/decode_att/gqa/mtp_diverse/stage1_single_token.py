@@ -125,7 +125,7 @@ def rebuild_inputs(
     Req_to_tokens = Req_to_tokens.remainder_(num_tokens).view(num_groups, max_kv_len)
 
     # 保留 Q/K/V、block_batch 和中间缓冲区布局；stage1 的每个 program 可循环处理多个 KV 块。
-    # benchmark 的输出由 mutates_args 隔离，选好配置后用原始输入执行并返回 BLOCK_N，供 stage2 归约。
+    # 选好配置后使用原始输入重新覆盖有效中间块，并返回对应的 BLOCK_N 供 stage2 归约。
     return (
         q,
         k,
@@ -268,7 +268,9 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
     static_key_func=get_static_key,
     run_key_func=get_run_key,
     rebuild_input_func=rebuild_inputs,
-    mutates_args=["mid_out", "mid_out_logsumexp"],
+    # stage1 对有效中间块执行覆盖写，候选配置不会读取已有输出，正式执行也会重新覆盖真实请求的有效块。
+    # 不标记这两个大缓冲区，避免每个候选配置 benchmark 时反复 clone，增加显存峰值和拷贝开销。
+    # mutates_args=["mid_out", "mid_out_logsumexp"],
 )
 def mtp_diverse_stage1_single_token(
     q: torch.Tensor,

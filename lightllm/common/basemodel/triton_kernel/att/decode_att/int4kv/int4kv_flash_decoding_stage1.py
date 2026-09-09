@@ -215,7 +215,7 @@ def rebuild_inputs(
     # 保留打包 int4 的 K/V、分组 scale 和原有 stride，不解量化或改变它们的存储布局。
     # 一个 program 可循环处理多个 BLOCK_SEQ，无需按目标长度扩容中间缓冲区。
     # BLOCK_N 只控制块内计算大小，stage2 仍按固定 BLOCK_SEQ 和原缓冲区分块数归约。
-    # benchmark 输出由 mutates_args 隔离，调优后使用原输入重算，不污染正式推理的中间结果。
+    # 调优后的正式执行会使用原始输入重新覆盖真实请求对应的有效中间块。
     return (
         q,
         k,
@@ -239,7 +239,9 @@ def rebuild_inputs(
     static_key_func=get_static_key,
     run_key_func=get_run_key,
     rebuild_input_func=rebuild_inputs,
-    mutates_args=["mid_out", "mid_out_logsumexp"],
+    # stage1 对有效中间块执行覆盖写，候选配置不会读取已有输出，正式执行也会重新覆盖真实请求的有效块。
+    # 不标记这两个大缓冲区，避免每个候选配置 benchmark 时反复 clone，增加显存峰值和拷贝开销。
+    # mutates_args=["mid_out", "mid_out_logsumexp"],
 )
 def int4kv_flash_decode_stage1(
     q,
