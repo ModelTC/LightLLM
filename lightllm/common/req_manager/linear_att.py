@@ -54,10 +54,6 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         return LinearAttCacheManager(size=size, linear_config=self.linear_config)
 
     def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
-        assert len(b_req_idx) == len(buffer_indexes)
-        if not any(buffer_idx != -1 for buffer_idx in buffer_indexes):
-            return
-
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
         buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
@@ -73,12 +69,12 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         )
         return
 
-    def save_small_page_state(self, req_idx: int, buffer_idx: int, small_page_buffers: LinearAttCacheManager):
+    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager: LinearAttCacheManager):
         # Preserve main's small-page copies, including the MTP conv-state crop.
         conv_cache_width = self.linear_config.get_conv_state_shape()[-1]
         gpu_conv_state = self.req_to_conv_state.buffer[:, req_idx, ..., :conv_cache_width]
         gpu_ssm_state = self.req_to_ssm_state.buffer[:, req_idx * (self.mtp_step + 1), ...]
-        dst_conv_state, dst_ssm_state = small_page_buffers.get_state_cache(buffer_idx=buffer_idx)
+        dst_conv_state, dst_ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
         dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
 
@@ -102,26 +98,11 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
 
-    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
-        big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
-
-        conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
+    def restore_state(self, req: "InferReq", state_cache_manager: LinearAttCacheManager, buffer_idx: int):
+        conv_state, ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         conv_dest = req.req_idx
         ssm_dest = req.req_idx * (self.mtp_step + 1)
         conv_cache_width = conv_state.shape[-1]
-        self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
-        self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_mtp_state_index is not None:
-            self.req_to_mtp_state_index[req.req_idx] = 0
-        return
-
-    def restore_small_page_state(self, req: "InferReq", small_page_buffers: LinearAttCacheManager):
-        conv_state, ssm_state = small_page_buffers.get_state_cache(buffer_idx=req.shared_kv_node.small_page_buffer_idx)
-        conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
-        conv_cache_width = conv_state.shape[-1]
-        # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
-        # 同时，非连续对象的拷贝，可能存在效率问题。
         self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
         if self.req_to_mtp_state_index is not None:

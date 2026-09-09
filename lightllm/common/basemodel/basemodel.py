@@ -604,6 +604,7 @@ class TpPartBaseModel:
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
         model_output = self._context_forward(infer_state=infer_state)
+        infer_state.finish_forward()
 
         model_output = self._create_unpad_prefill_model_output(
             padded_model_output=model_output,
@@ -674,11 +675,11 @@ class TpPartBaseModel:
         else:
             model_output = self._token_forward(infer_state)
 
+        infer_state.finish_forward()
         return self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -847,6 +848,8 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event.record()
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
+        infer_state0.finish_forward()
+        infer_state1.finish_forward()
 
         model_output0 = self._create_unpad_prefill_model_output(
             padded_model_output=model_output0,
@@ -936,8 +939,6 @@ class TpPartBaseModel:
                     infer_state1=infer_state1,
                 )
 
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
         else:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
@@ -962,9 +963,11 @@ class TpPartBaseModel:
             infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
 
+        infer_state0.finish_forward()
+        infer_state1.finish_forward()
+        model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
+        model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
         return model_output0, model_output1
 
     @final

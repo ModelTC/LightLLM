@@ -1,4 +1,5 @@
 import dataclasses
+import math
 from typing import Dict
 
 import torch
@@ -26,12 +27,6 @@ class SlidingWindowCacheConfig:
         assert set(self.sliding_layer_to_cache_index.values()) == set(range(self.sliding_layer_num))
         assert set(self.full_layer_to_cache_index.values()) == set(range(self.full_layer_num))
 
-    def get_sliding_layer_index(self, layer_index: int) -> int:
-        return self.sliding_layer_to_cache_index[layer_index]
-
-    def get_full_layer_index(self, layer_index: int) -> int:
-        return self.full_layer_to_cache_index[layer_index]
-
     def get_state_shape(self):
         return (
             self.sliding_layer_num,
@@ -41,13 +36,9 @@ class SlidingWindowCacheConfig:
         )
 
     def get_state_nbytes(self):
-        elements = 1
-        for dim in self.get_state_shape():
-            elements *= dim
-        return elements * self.dtype.itemsize
+        return math.prod(self.get_state_shape()) * self.dtype.itemsize
 
     def get_cpu_cache_full_att_bytes(self, big_page_token_num: int, tp_world_size: int):
-        assert big_page_token_num > 0 and tp_world_size > 0
         return (
             big_page_token_num
             * self.full_layer_num
@@ -59,7 +50,6 @@ class SlidingWindowCacheConfig:
         )
 
     def get_cpu_cache_state_bytes(self, tp_world_size: int):
-        assert tp_world_size > 0
         return self.get_state_nbytes() * tp_world_size
 
     def get_cpu_cache_big_page_bytes(self, big_page_token_num: int, tp_world_size: int):

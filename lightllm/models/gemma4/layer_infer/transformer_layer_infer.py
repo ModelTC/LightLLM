@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
 from lightllm.models.gemma4.kv_layout import get_kv_cache_layout
@@ -18,7 +19,7 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     """
     Gemma-4 decoder block. Full-attention KV stays token granular, while
-    sliding attention reads one runtime KV pool with an adjustable window.
+    sliding attention reads fixed request rings and new-token KV from one pool.
     """
 
     def __init__(self, layer_num, network_config):
@@ -50,16 +51,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # TP shard counts for this layer
         self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
-        self.tp_k_head_num_ = max(total_kv_heads // self.tp_world_size_, 1)
+        self.tp_k_head_num_ = total_kv_heads // self.tp_world_size_
         self.tp_v_head_num_ = self.tp_k_head_num_
         self.tp_o_head_num_ = self.tp_q_head_num_
 
-        # Sliding window (None on full-attn layers)
-        if self.is_sliding:
-            sw = network_config.get("sliding_window", 0)
-            self.sliding_window_ = int(sw) if sw else 0
-        else:
-            self.sliding_window_ = 0
+        # Sliding window (unused on full-attention layers).
+        self.sliding_window_ = network_config["sliding_window"] if self.is_sliding else 0
 
         # E-series Per-Layer Embeddings gate (HF: config.hidden_size_per_layer_input,
         # absent or 0 on 31B).
@@ -69,13 +66,11 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # HF: config.num_kv_shared_layers (may be missing or null on non-E
         # checkpoints — treat as 0).
-        _, kv_owners = get_kv_cache_layout(network_config)
+        cache_maps, kv_owners = get_kv_cache_layout(network_config)
         kv_owner = kv_owners[layer_num]
         self.is_kv_shared_ = kv_owner != layer_num
-        self.kv_share_target_layer_ = kv_owner if self.is_kv_shared_ else None
-        self.finish_sliding_prefill_ = self.is_sliding and not any(
-            kind == "sliding_attention" for kind in network_config["layer_types"][layer_num + 1 :]
-        )
+        self.kv_cache_layer_index_ = kv_owner
+        self.sliding_cache_index_ = cache_maps["sliding_attention"].get(layer_num)
 
         # Always 1.0: NoPE dims for full-attn layers are zero-padded into
         # cos/sin (cos=1, sin=0 → identity), so the kernel walks the whole
@@ -145,34 +140,21 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         return q, cache_kv
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
-        if self.is_kv_shared_ or cache_kv is None:
+        if self.is_kv_shared_:
             return
         if self.is_sliding:
-            from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-            layer_idx = infer_state.req_manager.sliding_config.get_sliding_layer_index(self.layer_num_)
+            # Prefill packs KV inside the attention callback, using its current batch metadata.
+            if infer_state.is_prefill:
+                return
             destindex_copy_kv(
                 cache_kv,
                 infer_state.sliding_window_mem_index,
-                infer_state.req_manager.sliding_kv_buffer[layer_idx],
+                infer_state.mem_manager.sliding_kv_buffer[self.sliding_cache_index_],
             )
             return
         super()._post_cache_kv(cache_kv, infer_state, layer_weight)
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
-
-    def _att_control(self):
-        if self.is_sliding and self.sliding_window_ > 0:
-            w = self.sliding_window_ - 1
-            return AttControl(use_sliding_window=True, sliding_window=(w, 0))
-        return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
-
-    def _get_layer_kv(self, infer_state: InferStateInfo):
-        # KV-shared layers read from the target layer's cache slot.
-        layer_idx = self.kv_share_target_layer_ if self.is_kv_shared_ else self.layer_num_
-        if self.is_sliding:
-            return infer_state.req_manager.get_layer_kv(layer_idx)
-        return infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
 
     def _context_attention_kernel(
         self,
@@ -182,13 +164,19 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Gemma4TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k, _v = infer_state.mem_manager.get_att_input_params(self.kv_cache_layer_index_)
         if self.is_sliding:
+            if not self.is_kv_shared_:
+                # Use the callback's live indices on prefill graph replay. History stays in the ring.
+                destindex_copy_kv(
+                    kv,
+                    infer_state.sliding_window_mem_index,
+                    infer_state.mem_manager.sliding_kv_buffer[self.sliding_cache_index_],
+                )
             # Sliding layers always go through the gemma4_mm Triton kernel: it
             # handles SWA + image bidirectional masking in one pass.
             o_tensor = self.alloc_tensor(_q.shape, q.dtype)
-            sw = (self.sliding_window_ - 1, 0) if self.sliding_window_ > 0 else (-1, -1)
             context_attention_fwd_gemma4_mm(
                 _q,
                 _k,
@@ -199,21 +187,15 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.b_seq_len,
                 infer_state.b_ready_cache_len,
                 infer_state.max_q_seq_len,
-                None,
+                infer_state.sliding_window_page_table,
                 infer_state.b_image_token_end,
-                sliding_window=sw,
-                runtime_token_start=infer_state.sliding_window_runtime_start,
+                sliding_window=(self.sliding_window_ - 1, 0),
+                b_kv_start_pos=infer_state.b_sliding_kv_start,
             )
-            # The final sliding reader compacts all physical windows together.
-            # Graph shape probing must not mutate state; replay uses fresh metadata.
-            if self.finish_sliding_prefill_ and not torch.cuda.is_current_stream_capturing():
-                infer_state.req_manager.finish_prefill(infer_state)
             return o_tensor.view(q.shape)
 
-        # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
-        # triton via backend1.
-        o_tensor = infer_state.prefill_att_state1.prefill_att(
-            q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
+        o_tensor = infer_state.prefill_att_state.prefill_att(
+            q=_q, k=_k, v=_v, att_control=AttControl(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
 
@@ -224,7 +206,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Gemma4TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        _k, _v = self._get_layer_kv(infer_state)
+        _k, _v = infer_state.mem_manager.get_att_input_params(self.kv_cache_layer_index_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         if self.is_sliding:
             from lightllm.models.gemma4.triton_kernel.sliding_window_decode import sliding_window_decode_attention
@@ -240,8 +222,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                 alloc_tensor_func=self.alloc_tensor,
             )
         else:
-            o_tensor = infer_state.decode_att_state1.decode_att(
-                q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
+            o_tensor = infer_state.decode_att_state.decode_att(
+                q=_q, k=_k, v=_v, att_control=AttControl(), alloc_func=self.alloc_tensor
             )
         return o_tensor.view(q.shape)
 

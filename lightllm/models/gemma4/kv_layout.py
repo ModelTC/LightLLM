@@ -13,7 +13,7 @@ def get_kv_cache_layout(config):
         cache_map = layer_maps[layer_type]
         if layer_index < cutoff:
             last_owner[layer_type] = layer_index
-            cache_map[layer_index] = len(set(cache_map.values()))
+            cache_map[layer_index] = len(cache_map)
         else:
             cache_map[layer_index] = cache_map[last_owner[layer_type]]
         owner = last_owner[layer_type]
@@ -25,7 +25,6 @@ def build_sliding_cache_config(config, tp_world_size, dtype):
     """Use the same physical owner layout in model and CPU-cache processes."""
     num_sliding_kv = config["num_key_value_heads"]
     num_full_kv = config.get("num_global_key_value_heads") or num_sliding_kv
-    assert tp_world_size > 0
     assert num_sliding_kv % tp_world_size == 0, "sliding KV heads must be divisible by TP size"
     assert num_full_kv % tp_world_size == 0, "full KV heads must be divisible by TP size"
     layer_maps, _ = get_kv_cache_layout(config)

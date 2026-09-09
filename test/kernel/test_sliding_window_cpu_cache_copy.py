@@ -6,6 +6,7 @@ import torch
 from lightllm.common.basemodel.triton_kernel.sliding_window_cpu_cache_copy import (
     copy_cpu_cache_to_kv_buffer,
     copy_kv_buffer_to_cpu_cache,
+    copy_sliding_window_state,
 )
 from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig
 
@@ -84,7 +85,7 @@ def test_multi_page_round_trip_preserves_tp_slices_tail_and_ring(tp_world_size, 
     sources = []
     for rank in range(tp_world_size):
         full_cpu = _random_bits((full_layers, token_num, 2 * full_heads, full_dim), dtype, generator)
-        window_cpu = _random_bits((slots, *config.get_state_shape()), dtype, generator)
+        window_cpu = _random_bits((slots, *config.get_state_shape()), dtype, generator).pin_memory()
         sources.append((full_cpu, window_cpu))
         for page in [0, 3]:
             cpu_page = page_indexes[page].item()
@@ -104,12 +105,11 @@ def test_multi_page_round_trip_preserves_tp_slices_tail_and_ring(tp_world_size, 
             page_readies=page_readies.cuda(),
             big_page_buffer_ids=big_page_ids.cuda(),
             gpu_full_att_kv_state=full_cpu.cuda(),
-            gpu_sliding_state=window_cpu.cuda(),
+            cpu_kv_sliding_state=window_cpu,
             cpu_cache_tensor=cpu_cache,
             tp_rank=rank,
             tp_world_size=tp_world_size,
             big_page_token_num=big_page_tokens,
-            sliding_config=config,
             grid_num=3,
         )
         torch.cuda.synchronize()
@@ -124,7 +124,7 @@ def test_multi_page_round_trip_preserves_tp_slices_tail_and_ring(tp_world_size, 
     for rank, (full_cpu, window_cpu) in enumerate(sources):
         expected_full = torch.full_like(full_cpu.view(torch.uint8), 0xCD).view(dtype)
         expected_window = torch.full_like(window_cpu.view(torch.uint8), 0xCD).view(dtype)
-        full_gpu, window_gpu = expected_full.cuda(), expected_window.cuda()
+        full_gpu, window_pinned = expected_full.cuda(), expected_window.pin_memory()
         for page in [0, 3]:
             for offset, target in enumerate(load_indexes[page].tolist()):
                 if target != -1:
@@ -137,34 +137,66 @@ def test_multi_page_round_trip_preserves_tp_slices_tail_and_ring(tp_world_size, 
             page_indexes=load_pages,
             big_page_buffer_ids=load_slots.cuda(),
             gpu_full_att_kv_state=full_gpu,
-            gpu_sliding_state=window_gpu,
+            cpu_kv_sliding_state=window_pinned,
             cpu_cache_tensor=cpu_cache,
             tp_rank=rank,
             tp_world_size=tp_world_size,
             big_page_token_num=big_page_tokens,
-            sliding_config=config,
             grid_num=3,
         )
         torch.cuda.synchronize()
         _assert_same_bits(full_gpu, expected_full)
-        _assert_same_bits(window_gpu, expected_window)
+        _assert_same_bits(window_pinned, expected_window)
         _assert_same_bits(cpu_cache.view(cpu_page_num, page_bytes), expected_cache)
 
 
 def test_empty_copy_is_a_noop():
-    config = SlidingWindowCacheConfig({0: 0}, {1: 0}, 8, 1, 64, 1, 64, torch.bfloat16)
     indexes = torch.empty(0, dtype=torch.int64, device="cuda")
     kwargs = dict(
         mem_indexes=indexes,
         page_indexes=indexes,
         big_page_buffer_ids=indexes,
         gpu_full_att_kv_state=None,
-        gpu_sliding_state=None,
+        cpu_kv_sliding_state=None,
         cpu_cache_tensor=None,
         tp_rank=0,
         tp_world_size=1,
         big_page_token_num=16,
-        sliding_config=config,
     )
     copy_kv_buffer_to_cpu_cache(page_readies=indexes, **kwargs)
     copy_cpu_cache_to_kv_buffer(**kwargs)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("layers,window,heads,dim", [(3, 17, 2, 6), (5, 129, 4, 64)])
+def test_state_copy_preserves_layer_strides_and_cpu_staging_stream_order(dtype, layers, window, heads, dim):
+    generator = torch.Generator().manual_seed(71)
+    source = _random_bits((layers, 5 * window + 7, heads, dim), dtype, generator)
+    source_gpu = source.cuda()
+    source_requests = source_gpu[:, : 5 * window].view(layers, 5, window, heads, dim)
+    expected = torch.full((layers, 6 * window + 11, heads, dim), -3, dtype=dtype)
+    restored = expected.cuda()
+    restored_requests = restored[:, : 6 * window].view(layers, 6, window, heads, dim)
+    # Checkpoints are size-first; runtime requests are layer-first views of a
+    # larger pool, so copying one request must preserve both layer strides.
+    checkpoint_pool = torch.zeros((2, layers, window, heads, dim), dtype=dtype, pin_memory=True)
+    checkpoint = checkpoint_pool[1]
+    staging = torch.empty_like(checkpoint, pin_memory=True)
+    staging.zero_()
+    assert checkpoint.is_contiguous() and not source_requests[:, 1].is_contiguous()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        # Keep preceding GPU work pending: a host-side CPU copy_ would bypass it.
+        torch.cuda._sleep(1_000_000)
+        for src_req, dst_req in [(1, 0), (3, 4)]:
+            copy_sliding_window_state(source_requests[:, src_req], checkpoint)
+            copy_sliding_window_state(checkpoint, staging)
+            copy_sliding_window_state(staging, restored_requests[:, dst_req])
+    stream.synchronize()
+    for src_start, dst_start in [(window, 0), (3 * window, 4 * window)]:
+        expected[:, dst_start : dst_start + window] = source[:, src_start : src_start + window]
+    _assert_same_bits(restored, expected)
+    _assert_same_bits(checkpoint, source[:, 3 * window : 4 * window])
+    _assert_same_bits(staging, source[:, 3 * window : 4 * window])
+    assert torch.count_nonzero(checkpoint_pool[0]).item() == 0

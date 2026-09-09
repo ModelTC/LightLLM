@@ -1,5 +1,10 @@
 import torch
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.basemodel.triton_kernel.sliding_window_state import (
+    build_sliding_window_page_table,
+    commit_sliding_window_kv,
+    get_sliding_window_decode_indexes,
+)
 from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b_image_token_end
 
 
@@ -22,6 +27,8 @@ class Gemma4InferStateInfo(InferStateInfo):
         # image token 可以看到自己当前这个token以及后面的 image token。
         self.b_image_token_end = None
         self.sliding_window_mem_index = None
+        self.sliding_window_page_table = None
+        self.b_sliding_kv_start = None
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
@@ -39,12 +46,37 @@ class Gemma4InferStateInfo(InferStateInfo):
             position_ids.shape[0], -1
         )
         if self.is_prefill:
-            self.max_seq_len = self.max_kv_seq_len
             self._build_b_image_token_end()
+            self.sliding_window_mem_index = self.mem_manager.alloc_sliding_prefill(self.input_ids.shape[0])
+            self.sliding_window_page_table, self.b_sliding_kv_start = build_sliding_window_page_table(
+                self.b_req_idx,
+                self.b_seq_len,
+                self.b_ready_cache_len,
+                self.b_q_start_loc,
+                self.sliding_window_mem_index,
+                self.req_manager.sliding_window,
+                self.max_q_seq_len,
+            )
         else:
-            self.b_q_start_loc = self.b1_cu_q_seq_len[:-1]
-        self.req_manager.prepare_sliding_window(self)
+            self.sliding_window_mem_index = get_sliding_window_decode_indexes(
+                self.b_req_idx, self.b_seq_len, self.req_manager.sliding_window
+            )
         return
+
+    def finish_forward(self):
+        if not self.is_prefill:
+            return
+        # One commit after all KV-sharing readers, also outside CUDA graph's attention probes.
+        commit_sliding_window_kv(
+            self.mem_manager.sliding_kv_buffer,
+            self.sliding_window_mem_index,
+            self.b_req_idx,
+            self.b_seq_len,
+            self.b_ready_cache_len,
+            self.b_q_start_loc,
+            self.req_manager.sliding_window,
+        )
+        self.mem_manager.free_sliding_prefill()
 
     def _build_b_image_token_end(self):
         device = self.position_ids.device

@@ -28,18 +28,22 @@ class HybridAttentionReqManager(ReqManager, ABC):
     def init_hybrid_attention_state(self, req: "InferReq"):
         """Initialize request runtime state when no prefix cache is restored."""
 
-    @abstractmethod
     def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
-        """Restore runtime state from a big-page checkpoint."""
+        self.restore_state(req, self.mem_manager.linear_att_big_page_buffers, big_page_buffer_idx)
 
-    @abstractmethod
     def restore_small_page_state(self, req: "InferReq", small_page_buffers):
-        """Restore runtime state from a small-page checkpoint."""
+        self.restore_state(req, small_page_buffers, req.shared_kv_node.small_page_buffer_idx)
 
     @abstractmethod
+    def restore_state(self, req: "InferReq", state_cache_manager, buffer_idx: int):
+        """Restore the same request-state payload from either checkpoint pool."""
+
     def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
-        """Save selected checkpoints; CPU request IDs avoid device-to-host synchronization."""
+        """Default checkpoint copies; models may override with a batched kernel."""
+        for req_idx, buffer_idx in zip(req_indexes, buffer_indexes):
+            if buffer_idx != -1:
+                self.save_state(req_idx, buffer_idx, self.mem_manager.linear_att_big_page_buffers)
 
     @abstractmethod
-    def save_small_page_state(self, req_idx: int, buffer_idx: int, small_page_buffers):
-        """Save a request's final small-page checkpoint in the layout's storage."""
+    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager):
+        """Save a request's payload into either checkpoint pool."""

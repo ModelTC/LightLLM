@@ -69,25 +69,12 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _verify_params(self):
         args = get_env_start_args()
         assert self.load_way == "HF", "Gemma-4 only supports HF format."
-        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
-        # Use `or` rather than the dict.get default: E4B-style configs ship
-        # `num_global_key_value_heads: null`, which the default form would
-        # leave as None.
-        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
-        assert (
-            num_global_kv % self.tp_world_size_ == 0
-        ), f"num_global_key_value_heads={num_global_kv} must be divisible by tp={self.tp_world_size_}"
-        kv_shared = self.config.get("num_kv_shared_layers") or 0
-        assert 0 <= kv_shared < self.config["num_hidden_layers"], (
-            f"num_kv_shared_layers={kv_shared} out of range for "
-            f"num_hidden_layers={self.config['num_hidden_layers']}"
-        )
-        if kv_shared:
-            # Shared-KV microbatch overlap needs separate lifecycle validation.
+        self.sliding_cache_config = build_sliding_cache_config(self.config, self.tp_world_size_, self.data_type)
+        if self.config.get("hidden_size_per_layer_input"):
+            # PLE uses one static buffer, not independent microbatch storage.
             assert not (
                 args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
-            ), "Gemma-4 shared sliding-window KV does not support microbatch overlap yet"
+            ), "Gemma-4 PLE does not support microbatch overlap yet"
         assert args.mtp_step == 0, "Gemma-4 hybrid sliding-window cache does not support MTP yet"
         if args.enable_cpu_cache:
             assert not args.disable_dynamic_prompt_cache, "Gemma-4 CPU cache requires GPU prefix cache"
@@ -98,56 +85,27 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         assert not args.diverse_mode, "Gemma-4 sliding-window state does not support diverse mode yet"
         return
 
-    def _get_sliding_cache_config(self):
-        if hasattr(self, "sliding_cache_config"):
-            return self.sliding_cache_config
-        self.sliding_cache_config = build_sliding_cache_config(self.config, self.tp_world_size_, self.data_type)
-        return self.sliding_cache_config
-
     def _init_req_manager(self):
-        args = get_env_start_args()
-        create_max_seq_len = max(int(self.batch_max_tokens or 0), int(self.max_seq_length or 0))
-        max_prefill_token_num = max(
-            int(self.batch_max_tokens or 0),
-            int(args.prefill_cudagraph_max_handle_token or 0) if args.enable_prefill_cudagraph else 0,
-        )
-        if args.enable_tpsp_mix_mode:
-            max_prefill_token_num = (
-                (max(1, max_prefill_token_num) + self.tp_world_size_ - 1) // self.tp_world_size_ * self.tp_world_size_
-            )
         self.req_manager = ReqManagerForSlidingWindow(
             max_request_num=self.max_req_num,
-            max_sequence_length=create_max_seq_len,
+            max_sequence_length=max(self.batch_max_tokens, self.max_seq_length),
             mem_manager=None,
-            sliding_config=self._get_sliding_cache_config(),
-            max_prefill_token_num=max_prefill_token_num,
-            prefill_microbatch_num=2 if args.enable_prefill_microbatch_overlap else 1,
+            sliding_config=self.sliding_cache_config,
         )
 
     def _init_mem_manager(self):
         self.mem_manager = HybridSlidingMemoryManager(
             size=self.max_total_token_num,
-            sliding_config=self._get_sliding_cache_config(),
+            sliding_config=self.sliding_cache_config,
             mem_fraction=self.mem_fraction,
         )
         return
 
     def _init_att_backend(self):
-        # Gemma-4 has per-layer heterogeneous attention: sliding layers use
-        # (head_dim=256, kv_heads=16); full-attn layers use (head_dim=512,
-        # kv_heads=4, k_eq_v). FA3 caps head_dim at 256 and flashinfer plans
-        # once per infer_state on a single shape — both unworkable for the
-        # heterogeneous layout. Both layer kinds go through triton.
-        #
-        # Sliding layers read their runtime KV pool through model-local kernels.
-        # The framework still requires primary attention states.
+        # Full attention uses the standard backend. Sliding attention uses
+        # Gemma's local kernels for the compact page table and image mask.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
-
-    def _init_att_backend1(self):
-        # Secondary backend = full-attn layers (head_dim=512, plain causal).
-        self.prefill_att_backend1 = TritonAttBackend(model=self)
-        self.decode_att_backend1 = TritonAttBackend(model=self)
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()

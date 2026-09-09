@@ -7,14 +7,17 @@ from .config import SlidingWindowCacheConfig
 
 
 class SlidingWindowStateCacheManager:
-    """GPU storage for immutable request-level sliding-window checkpoints."""
+    """Pinned CPU checkpoints, size-first: [page, layer, window, 2 * heads, dim]."""
 
     def __init__(self, size: int, sliding_config: SlidingWindowCacheConfig, keep_num: int = 0):
         self.size = size
         self.keep_num = keep_num
         assert 0 <= keep_num <= size
         self.state_cache = torch.empty(
-            (size, *sliding_config.get_state_shape()), dtype=sliding_config.dtype, device="cuda"
+            (size, *sliding_config.get_state_shape()),
+            dtype=sliding_config.dtype,
+            device="cpu",
+            pin_memory=True,
         )
         self.clear_to_init_state()
 

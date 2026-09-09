@@ -81,33 +81,25 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     else:
         mem_manager_class = select_mem_manager_class()
 
-    if mem_manager_class is HybridSlidingMemoryManager:
-        from lightllm.models.gemma4.kv_layout import build_sliding_cache_config
+    if mem_manager_class in (Qwen3NextMemManager, HybridSlidingMemoryManager):
+        if mem_manager_class is Qwen3NextMemManager:
+            page_bytes = LinearAttCacheConfig.load_from_args().get_cpu_cache_big_page_bytes()
+        else:
+            from lightllm.models.gemma4.kv_layout import build_sliding_cache_config
 
-        model_config = get_config_json(args.model_dir)
-        text_config = model_config.get("text_config", model_config)
-        tp_world_size = args.tp // args.dp
-        sliding_config = build_sliding_cache_config(text_config, tp_world_size, get_llm_data_type())
-        big_page_token_num = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        assert args.cpu_cache_token_page_size == big_page_token_num
+            model_config = get_config_json(args.model_dir)
+            text_config = model_config.get("text_config", model_config)
+            tp_world_size = args.tp // args.dp
+            sliding_config = build_sliding_cache_config(text_config, tp_world_size, get_llm_data_type())
+            big_page_token_num = args.linear_att_hash_page_size * args.linear_att_page_block_num
+            assert args.cpu_cache_token_page_size == big_page_token_num
+            page_bytes = sliding_config.get_cpu_cache_big_page_bytes(big_page_token_num, tp_world_size)
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=1,
             layer_num=1,
             num_heads=1,
-            head_dim=sliding_config.get_cpu_cache_big_page_bytes(big_page_token_num, tp_world_size),
-            data_type=torch.uint8,
-            scale_head_dim=0,
-            scale_data_type=get_llm_data_type(),
-        )
-    elif mem_manager_class is Qwen3NextMemManager:
-        linear_config = LinearAttCacheConfig.load_from_args()
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=1,
-            layer_num=1,
-            num_heads=1,
-            head_dim=linear_config.get_cpu_cache_big_page_bytes(),
+            head_dim=page_bytes,
             data_type=torch.uint8,
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),

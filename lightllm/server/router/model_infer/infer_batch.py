@@ -439,10 +439,10 @@ class InferenceContext:
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id
-                        self.req_manager.save_small_page_state(
+                        self.req_manager.save_state(
                             req_idx=req.req_idx,
                             buffer_idx=dst_buffer_idx,
-                            small_page_buffers=self.radix_cache.linear_att_small_page_buffers,
+                            state_cache_manager=self.radix_cache.linear_att_small_page_buffers,
                         )
         return
 

@@ -1,16 +1,12 @@
 import torch
-import torch.distributed as dist
 import triton
 
 from lightllm.common.sliding_window_cache_manager import SlidingWindowStateCacheManager
+from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 
 from .mem_manager import MemoryManager
 from .operator.hybrid_sliding import HybridSlidingMemOperator
-
-logger = init_logger(__name__)
 
 
 class HybridSlidingMemoryManager(MemoryManager):
@@ -19,11 +15,25 @@ class HybridSlidingMemoryManager(MemoryManager):
     operator_class = HybridSlidingMemOperator
 
     def __init__(self, size, sliding_config, always_copy=False, mem_fraction=0.9):
-        self.sliding_config = sliding_config
         args = get_env_start_args()
-        self.enable_prompt_cache = not args.disable_dynamic_prompt_cache
-        self.small_page_num = args.linear_att_cache_size if self.enable_prompt_cache else 0
-        self.cpu_cache_temp_page_num = 2 if args.enable_cpu_cache else 0
+        self.sliding_config = sliding_config
+        self.sliding_prefill_start = (args.running_max_req_size + 1) * sliding_config.sliding_window
+        # Both microbatches share batch_max_tokens; allow TP/dummy padding for each.
+        self.max_sliding_prefill_tokens = args.batch_max_tokens + 2 * get_dp_world_size()
+        self._sliding_prefill_used = 0
+        self._sliding_prefill_batches = 0
+        # One layer-first pool: fixed request rings followed by this batch's new KV.
+        # Reserve it before profiling how much memory can be given to full attention.
+        self.sliding_kv_buffer = torch.zeros(
+            (
+                sliding_config.sliding_layer_num,
+                self.sliding_prefill_start + self.max_sliding_prefill_tokens,
+                2 * sliding_config.sliding_head_num,
+                sliding_config.sliding_head_dim,
+            ),
+            dtype=sliding_config.dtype,
+            device="cuda",
+        )
         self.big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         super().__init__(
             size=size,
@@ -35,70 +45,57 @@ class HybridSlidingMemoryManager(MemoryManager):
             mem_fraction=mem_fraction,
         )
 
-    def profile_size(self, mem_fraction):
-        torch.cuda.empty_cache()
-        world_size = dist.get_world_size()
-        available_memory = get_available_gpu_memory(world_size)
-        if self.size is None:
-            available_memory -= get_total_gpu_memory() * (1 - mem_fraction)
-        available_bytes = int(available_memory * 1024 ** 3)
-        cell_size = self.get_cell_size()
-        state_bytes = self.sliding_config.get_state_nbytes()
-        # Runtime windows already exist. Reserve the hold token, small pages
-        # and CPU-transfer slots before sizing full KV and big checkpoints.
-        fixed_bytes = cell_size + (self.small_page_num + self.cpu_cache_temp_page_num) * state_bytes
-        big_page_state_bytes = state_bytes if self.enable_prompt_cache else 0
-        if self.size is None:
-            if available_bytes < fixed_bytes + cell_size + big_page_state_bytes:
-                raise ValueError(
-                    "Insufficient GPU memory for sliding-window checkpoints and full KV; "
-                    "reduce --linear_att_cache_size or --running_max_req_size."
-                )
-            # Each complete page costs B full-KV tokens plus one checkpoint.
-            # A partial page also needs one checkpoint before it can hold tokens.
-            page_bytes = self.big_page_token_num * cell_size + big_page_state_bytes
-            page_num, tail_bytes = divmod(available_bytes - fixed_bytes, page_bytes)
-            self.size = page_num * self.big_page_token_num + max(0, (tail_bytes - big_page_state_bytes) // cell_size)
-            if world_size > 1:
-                size_tensor = torch.tensor(self.size, dtype=torch.int64, device="cuda")
-                dist.all_reduce(size_tensor, op=dist.ReduceOp.MIN)
-                self.size = size_tensor.item()
+    def alloc_sliding_prefill(self, token_num: int) -> torch.Tensor:
+        # Overlapping microbatches lease disjoint ranges of the same token budget.
+        assert (
+            self._sliding_prefill_used + token_num <= self.max_sliding_prefill_tokens
+        ), "sliding prefill pool exhausted"
+        start = self.sliding_prefill_start + self._sliding_prefill_used
+        indexes = torch.arange(start, start + token_num, dtype=torch.int32, device="cuda")
+        self._sliding_prefill_used += token_num
+        self._sliding_prefill_batches += 1
+        return indexes
 
-        big_page_num = triton.cdiv(self.size, self.big_page_token_num) if self.enable_prompt_cache else 0
-        cache_bytes = fixed_bytes + self.size * cell_size + big_page_num * state_bytes
-        if cache_bytes > available_bytes:
-            raise ValueError(
-                "Requested full KV and sliding-window checkpoints exceed available GPU memory; "
-                "reduce --max_total_token_num, --linear_att_cache_size or --running_max_req_size."
-            )
-        logger.info(
-            f"Sliding-window cache budget: {self.size} full-KV tokens, "
-            f"{big_page_num} big pages, {self.small_page_num} small pages, "
-            f"{self.cpu_cache_temp_page_num} CPU-cache staging states, "
-            f"{cache_bytes / 1024 ** 3:.2f} GiB (runtime windows already allocated)"
-        )
+    def free_sliding_prefill(self):
+        assert self._sliding_prefill_batches > 0
+        self._sliding_prefill_batches -= 1
+        if self._sliding_prefill_batches == 0:
+            self._sliding_prefill_used = 0
+
+    def free_all(self):
+        super().free_all()
+        # Also discard leases when warmup/error cleanup resets all requests.
+        self._sliding_prefill_used = 0
+        self._sliding_prefill_batches = 0
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        big_page_num = triton.cdiv(size, self.big_page_token_num) if self.enable_prompt_cache else 0
-        # Keep the existing radix-cache contract; no second alias is needed.
+        # Match linear attention: CPU checkpoints plus two reserved tail-transfer slots.
         self.linear_att_big_page_buffers = SlidingWindowStateCacheManager(
-            size=big_page_num + self.cpu_cache_temp_page_num,
+            size=triton.cdiv(size, self.big_page_token_num) + 2,
             sliding_config=self.sliding_config,
-            keep_num=self.cpu_cache_temp_page_num,
+            keep_num=2,
         )
-        if self.cpu_cache_temp_page_num:
-            self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
-            self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 1
-        self.sliding_small_page_buffers = SlidingWindowStateCacheManager(
-            size=self.small_page_num,
-            sliding_config=self.sliding_config,
-        )
+        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
+        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 1
+
+    def write_to_shm(self, req_manager):
+        # As in Qwen3NextMemManager, keep pickling from replacing pinned CPU
+        # checkpoints with ordinary shared storage inaccessible to Triton.
+        big_page_buffers = self.linear_att_big_page_buffers
+        self.linear_att_big_page_buffers = None
+        try:
+            return super().write_to_shm(req_manager)
+        finally:
+            self.linear_att_big_page_buffers = big_page_buffers
 
     def get_att_input_params(self, layer_index: int):
-        return super().get_att_input_params(self.sliding_config.get_full_layer_index(layer_index))
+        if layer_index in self.sliding_config.sliding_layer_to_cache_index:
+            layer_buffer = self.sliding_kv_buffer[self.sliding_config.sliding_layer_to_cache_index[layer_index]]
+            head_num = self.sliding_config.sliding_head_num
+            return layer_buffer[:, :head_num], layer_buffer[:, head_num:]
+        return super().get_att_input_params(self.sliding_config.full_layer_to_cache_index[layer_index])
 
     def _free_buffers(self):
         super()._free_buffers()
         self.linear_att_big_page_buffers = None
-        self.sliding_small_page_buffers = None

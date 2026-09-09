@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import context_attention_fwd_gemma4_mm
+from lightllm.common.basemodel.triton_kernel.sliding_window_state import build_sliding_window_page_table
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
@@ -26,13 +27,13 @@ def _compare_runtime_and_paged(window, q_len, dtype, head_dim=64, image_span=Non
         offset += length
 
     runtime_start = req_slots * window
-    runtime = torch.full(
-        (runtime_start + query_num + len(req_ids) * window, 2 * kv_heads, head_dim), -3, device="cuda", dtype=dtype
-    )
-    for batch, (req_id, history, length, start) in enumerate(zip(req_ids, histories, lengths, starts)):
-        positions = torch.arange(max(0, history - window), length, device="cuda")
-        current_start = runtime_start + start + (batch + 1) * window
-        runtime[current_start + positions - history] = reference[mapping[req_id, positions].long()]
+    runtime = torch.full((runtime_start + query_num, 2 * kv_heads, head_dim), -3, device="cuda", dtype=dtype)
+    for req_id, history, length, start in zip(req_ids, histories, lengths, starts):
+        positions = torch.arange(max(0, history - window), history, device="cuda")
+        runtime[req_id * window + positions % window] = reference[mapping[req_id, positions].long()]
+        runtime[runtime_start + start : runtime_start + start + length - history] = reference[
+            mapping[req_id, history:length].long()
+        ]
 
     image_ends = torch.zeros(query_num, device="cuda", dtype=torch.int32)
     if image_span is not None:
@@ -58,12 +59,22 @@ def _compare_runtime_and_paged(window, q_len, dtype, head_dim=64, image_span=Non
         req_to_token_indexs=mapping,
         **kwargs,
     )
+    indexes = torch.arange(runtime_start, runtime_start + query_num, device="cuda", dtype=torch.int32)
+    page_table, kv_start = build_sliding_window_page_table(
+        kwargs["b_req_idx"],
+        kwargs["b_seq_len"],
+        kwargs["b_prompt_cache_len"],
+        kwargs["b_start_loc"],
+        indexes,
+        window,
+        max(q_lens),
+    )
     context_attention_fwd_gemma4_mm(
         k=runtime[:, :kv_heads],
         v=runtime[:, kv_heads:],
         o=actual,
-        req_to_token_indexs=None,
-        runtime_token_start=runtime_start,
+        req_to_token_indexs=page_table,
+        b_kv_start_pos=kv_start,
         **kwargs,
     )
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
@@ -105,7 +116,8 @@ def test_runtime_prefill_cuda_graph_replay_reads_updated_request_metadata(window
     req_slots, head_dim, max_q_len = 6, 64, window + 33
     query_num = 2 * (window + 64) + 97
     runtime_start = req_slots * window
-    runtime = torch.randn((runtime_start + query_num + 2 * window, 4, head_dim), device="cuda", dtype=torch.bfloat16)
+    runtime = torch.randn((runtime_start + query_num, 4, head_dim), device="cuda", dtype=torch.bfloat16)
+    indexes = torch.arange(runtime_start, runtime_start + query_num, device="cuda", dtype=torch.int32)
     q = torch.randn((query_num, 4, head_dim), device="cuda", dtype=torch.bfloat16)
     out = torch.full_like(q, -11)
     int_tensor = lambda values: torch.tensor(values, device="cuda", dtype=torch.int32)
@@ -128,7 +140,15 @@ def test_runtime_prefill_cuda_graph_replay_reads_updated_request_metadata(window
     )
 
     def forward():
-        context_attention_fwd_gemma4_mm(o=out, req_to_token_indexs=None, runtime_token_start=runtime_start, **kwargs)
+        page_table, kv_start = build_sliding_window_page_table(
+            b_req, b_seq, b_history, b_start, indexes, window, max_q_len
+        )
+        context_attention_fwd_gemma4_mm(
+            o=out,
+            req_to_token_indexs=page_table,
+            b_kv_start_pos=kv_start,
+            **kwargs,
+        )
 
     forward()
     torch.cuda.synchronize()
@@ -150,9 +170,10 @@ def test_runtime_prefill_cuda_graph_replay_reads_updated_request_metadata(window
     # Materialize a table only for the independent old-path reference, after
     # changing every piece of GPU metadata used by the captured runtime kernel.
     mapping = torch.full((req_slots, max(lengths)), -1, device="cuda", dtype=torch.int32)
-    for batch, (req_id, history, length, start) in enumerate(zip(req_ids, histories, lengths, starts)):
-        positions = torch.arange(max(0, history - window), length, device="cuda", dtype=torch.int32)
-        mapping[req_id, positions.long()] = runtime_start + start + (batch + 1) * window + positions - history
+    for req_id, history, length, start in zip(req_ids, histories, lengths, starts):
+        positions = torch.arange(max(0, history - window), history, device="cuda", dtype=torch.int32)
+        mapping[req_id, positions.long()] = req_id * window + positions % window
+        mapping[req_id, history:length] = indexes[start : start + length - history]
     expected = torch.full_like(q, -11)
     context_attention_fwd_gemma4_mm(o=expected, req_to_token_indexs=mapping, **kwargs)
     # Include gaps to verify the captured grid respects the new query lengths.
