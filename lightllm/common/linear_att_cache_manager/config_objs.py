@@ -31,10 +31,6 @@ class LinearAttCacheConfig:
     full_attention_interval: int
     all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
     draft_full_att_kv_layer_num: int = 0
-    # DSpark draft KV can use a different physical representation from the
-    # calibrated target full-attention cache.  None preserves the historical
-    # single-buffer layout.
-    draft_full_att_dtype: torch.dtype = None
 
     def get_conv_dim(self):
         # 第一项对应q的参数，第二项对应k的参数，第三项对应v的参数
@@ -53,15 +49,6 @@ class LinearAttCacheConfig:
 
     def get_full_att_kv_layer_num_with_draft_model(self):
         return self.get_main_model_full_att_layer_num() + self.draft_full_att_kv_layer_num
-
-    def get_target_full_att_kv_layer_num(self):
-        return self.get_main_model_full_att_layer_num()
-
-    def use_mixed_target_fp8_draft_bf16(self):
-        return self.draft_full_att_dtype is not None and self.draft_full_att_kv_layer_num > 0
-
-    def get_draft_full_att_dtype(self):
-        return self.draft_full_att_dtype if self.draft_full_att_dtype is not None else self.full_att_dtype
 
     def get_full_att_kv_layer_index(self, layer_index: int) -> int:
         """Map a global target/draft layer index to the packed full-attention cache."""
@@ -106,23 +93,9 @@ class LinearAttCacheConfig:
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
-        return self.get_cpu_cache_target_full_att_bytes() + self.get_cpu_cache_draft_full_att_bytes()
-
-    def get_cpu_cache_target_full_att_bytes(self):
-        big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
         full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
-        return full_att_bytes * self.get_target_full_att_kv_layer_num() * big_page_token_num
-
-    def get_cpu_cache_draft_full_att_bytes(self):
-        big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
-        full_att_bytes = (
-            2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.get_draft_full_att_dtype().itemsize
-        )
-        return full_att_bytes * self.draft_full_att_kv_layer_num * big_page_token_num
+        a = full_att_bytes * self.get_full_att_kv_layer_num_with_draft_model() * big_page_token_num
+        return a
 
     def get_cpu_cache_conv_bytes(self):
         b = self.get_conv_state_bytes_per_layer() * self.linear_layer_num * self.tp_world_size
@@ -153,9 +126,6 @@ class LinearAttCacheConfig:
         full_att_dtype = (
             torch.uint8 if args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else get_torch_dtype(args.data_type)
         )
-        draft_full_att_dtype = (
-            torch.bfloat16 if args.llm_kv_type == "fp8kv_sph" and args.mtp_mode == "dspark" else None
-        )
         return LinearAttCacheConfig(
             tp_world_size=tp_world_size,
             full_att_all_num_kv_heads=llm_config["num_key_value_heads"],
@@ -175,5 +145,4 @@ class LinearAttCacheConfig:
             full_attention_interval=llm_config["full_attention_interval"],
             all_layer_num=n_layer,
             draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num(),
-            draft_full_att_dtype=draft_full_att_dtype,
         )

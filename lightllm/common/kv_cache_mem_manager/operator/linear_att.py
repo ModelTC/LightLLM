@@ -88,29 +88,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             tp_world_size=get_dp_world_size(),
             big_page_token_num=args.cpu_cache_token_page_size,
             linear_config=self.linear_config,
-            full_att_bytes=(
-                self.linear_config.get_cpu_cache_target_full_att_bytes()
-                if mem_manager.draft_kv_buffer is not None
-                else None
-            ),
         )
-        if mem_manager.draft_kv_buffer is not None:
-            copy_cpu_cache_to_kv_buffer(
-                mem_indexes=mem_indexes,
-                big_page_buffer_ids=big_page_buffer_ids_gpu,
-                page_indexes=page_indexes,
-                gpu_full_att_kv_state=mem_manager.draft_kv_buffer,
-                cpu_kv_conv_state=mem_manager.linear_att_big_page_buffers.conv_state_cache.buffer,
-                cpu_kv_ssm_state=mem_manager.linear_att_big_page_buffers.ssm_state_cache.buffer,
-                cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,
-                tp_rank=get_current_rank_in_dp(),
-                tp_world_size=get_dp_world_size(),
-                big_page_token_num=args.cpu_cache_token_page_size,
-                linear_config=self.linear_config,
-                full_att_byte_offset=self.linear_config.get_cpu_cache_target_full_att_bytes(),
-                full_att_bytes=self.linear_config.get_cpu_cache_draft_full_att_bytes(),
-                copy_linear_att_state=False,
-            )
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
@@ -208,30 +186,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             tp_world_size=get_dp_world_size(),
             big_page_token_num=args.cpu_cache_token_page_size,
             linear_config=self.linear_config,
-            full_att_bytes=(
-                self.linear_config.get_cpu_cache_target_full_att_bytes()
-                if mem_manager.draft_kv_buffer is not None
-                else None
-            ),
         )
-        if mem_manager.draft_kv_buffer is not None:
-            copy_kv_buffer_to_cpu_cache(
-                mem_indexes=mem_indexes,
-                page_indexes=page_indexes,
-                page_readies=page_readies,
-                big_page_buffer_ids=big_page_buffer_ids_gpu,
-                gpu_kv_full_att_state=mem_manager.draft_kv_buffer,
-                cpu_kv_conv_state=mem_manager.linear_att_big_page_buffers.conv_state_cache.buffer,
-                cpu_kv_ssm_state=mem_manager.linear_att_big_page_buffers.ssm_state_cache.buffer,
-                cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,
-                tp_rank=get_current_rank_in_dp(),
-                tp_world_size=get_dp_world_size(),
-                big_page_token_num=args.cpu_cache_token_page_size,
-                linear_config=self.linear_config,
-                full_att_byte_offset=self.linear_config.get_cpu_cache_target_full_att_bytes(),
-                full_att_bytes=self.linear_config.get_cpu_cache_draft_full_att_bytes(),
-                copy_linear_att_state=False,
-            )
         return
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):

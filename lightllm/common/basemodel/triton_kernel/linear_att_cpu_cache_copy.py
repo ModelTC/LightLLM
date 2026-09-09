@@ -150,9 +150,6 @@ def copy_kv_buffer_to_cpu_cache(
     big_page_token_num: int,
     linear_config: LinearAttCacheConfig,
     grid_num: int = 12,
-    full_att_byte_offset: int = 0,
-    full_att_bytes: int | None = None,
-    copy_linear_att_state: bool = True,
 ):
     assert len(page_indexes) == len(page_readies) == len(big_page_buffer_ids)
     assert len(mem_indexes) % len(page_indexes) == 0
@@ -166,29 +163,20 @@ def copy_kv_buffer_to_cpu_cache(
 
     cpu_page_num = cpu_cache_tensor.shape[0]
     cpu_cache_tensor = cpu_cache_tensor.view(cpu_page_num, -1).view(dtype=torch.uint8)
-    full_att_total_bytes = linear_config.get_cpu_cache_full_att_bytes()
-    a = full_att_total_bytes if full_att_bytes is None else full_att_bytes
+    a = linear_config.get_cpu_cache_full_att_bytes()
     b = linear_config.get_cpu_cache_conv_bytes()
     c = linear_config.get_cpu_cache_ssm_bytes()
 
     if head_scale_size == 1:
-        cpu_cache_full_att = cpu_cache_tensor[:, full_att_byte_offset : full_att_byte_offset + a].view(
-            cpu_page_num, tp_world_size, -1
-        )
+        cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, tp_world_size, -1)
     else:
-        cpu_cache_full_att = cpu_cache_tensor[:, full_att_byte_offset : full_att_byte_offset + a].view(
-            cpu_page_num, linear_config.full_att_all_num_kv_heads, -1
-        )
+        cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, linear_config.full_att_all_num_kv_heads, -1)
 
     cpu_cache_full_att = cpu_cache_full_att.view(dtype=torch.uint64)
 
-    cpu_cache_conv = cpu_cache_tensor[:, full_att_total_bytes : (full_att_total_bytes + b)].view(
-        cpu_page_num, tp_world_size, -1
-    ).view(dtype=torch.uint64)
+    cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
     cpu_cache_ssm = (
-        cpu_cache_tensor[:, (full_att_total_bytes + b) : (full_att_total_bytes + b + c)]
-        .view(cpu_page_num, tp_world_size, -1)
-        .view(dtype=torch.uint64)
+        cpu_cache_tensor[:, (a + b) : (a + b + c)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
     )
 
     gpu_kv_full_att_state = gpu_kv_full_att_state.view(
@@ -201,12 +189,11 @@ def copy_kv_buffer_to_cpu_cache(
     cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint64)
 
     gpu_full_att_tail_dim = gpu_kv_full_att_state.shape[-1] * gpu_kv_full_att_state.shape[-2] * big_page_token_num
-    cpu_kv_conv_tail_dim = cpu_kv_conv_state.shape[-1] if copy_linear_att_state else 0
-    cpu_kv_ssm_tail_dim = cpu_kv_ssm_state.shape[-1] if copy_linear_att_state else 0
+    cpu_kv_conv_tail_dim = cpu_kv_conv_state.shape[-1]
+    cpu_kv_ssm_tail_dim = cpu_kv_ssm_state.shape[-1]
     full_att_layer_num = gpu_kv_full_att_state.shape[-2]
 
-    if full_att_bytes is None:
-        assert full_att_layer_num == linear_config.get_full_att_kv_layer_num_with_draft_model()
+    assert full_att_layer_num == linear_config.get_full_att_kv_layer_num_with_draft_model()
     assert gpu_full_att_tail_dim == cpu_cache_full_att.shape[-1]
     assert cpu_cache_conv.shape[-1] == cpu_kv_conv_state.shape[-1]
     assert cpu_cache_ssm.shape[-1] == cpu_kv_ssm_state.shape[-1]
@@ -396,9 +383,6 @@ def copy_cpu_cache_to_kv_buffer(
     big_page_token_num: int,
     linear_config: LinearAttCacheConfig,
     grid_num: int = 12,
-    full_att_byte_offset: int = 0,
-    full_att_bytes: int | None = None,
-    copy_linear_att_state: bool = True,
 ):
     assert len(mem_indexes) % len(page_indexes) == 0
 
@@ -410,29 +394,20 @@ def copy_cpu_cache_to_kv_buffer(
 
     cpu_page_num = cpu_cache_tensor.shape[0]
     cpu_cache_tensor = cpu_cache_tensor.view(cpu_page_num, -1).view(dtype=torch.uint8)
-    full_att_total_bytes = linear_config.get_cpu_cache_full_att_bytes()
-    a = full_att_total_bytes if full_att_bytes is None else full_att_bytes
+    a = linear_config.get_cpu_cache_full_att_bytes()
     b = linear_config.get_cpu_cache_conv_bytes()
     c = linear_config.get_cpu_cache_ssm_bytes()
 
     if head_scale_size == 1:
-        cpu_cache_full_att = cpu_cache_tensor[:, full_att_byte_offset : full_att_byte_offset + a].view(
-            cpu_page_num, tp_world_size, -1
-        )
+        cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, tp_world_size, -1)
     else:
-        cpu_cache_full_att = cpu_cache_tensor[:, full_att_byte_offset : full_att_byte_offset + a].view(
-            cpu_page_num, linear_config.full_att_all_num_kv_heads, -1
-        )
+        cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, linear_config.full_att_all_num_kv_heads, -1)
 
     cpu_cache_full_att = cpu_cache_full_att.view(dtype=torch.uint64)
 
-    cpu_cache_conv = cpu_cache_tensor[:, full_att_total_bytes : (full_att_total_bytes + b)].view(
-        cpu_page_num, tp_world_size, -1
-    ).view(dtype=torch.uint64)
+    cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
     cpu_cache_ssm = (
-        cpu_cache_tensor[:, (full_att_total_bytes + b) : (full_att_total_bytes + b + c)]
-        .view(cpu_page_num, tp_world_size, -1)
-        .view(dtype=torch.uint64)
+        cpu_cache_tensor[:, (a + b) : (a + b + c)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
     )
 
     gpu_full_att_kv_state = gpu_full_att_kv_state.view(
@@ -444,8 +419,8 @@ def copy_cpu_cache_to_kv_buffer(
     cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint64)
 
     gpu_full_att_tail_dim = gpu_full_att_kv_state.shape[-1] * gpu_full_att_kv_state.shape[-2] * big_page_token_num
-    cpu_kv_conv_tail_dim = cpu_kv_conv_state.shape[-1] if copy_linear_att_state else 0
-    cpu_kv_ssm_tail_dim = cpu_kv_ssm_state.shape[-1] if copy_linear_att_state else 0
+    cpu_kv_conv_tail_dim = cpu_kv_conv_state.shape[-1]
+    cpu_kv_ssm_tail_dim = cpu_kv_ssm_state.shape[-1]
     full_att_layer_num = gpu_full_att_kv_state.shape[-2]
 
     assert gpu_full_att_tail_dim == cpu_cache_full_att.shape[-1]

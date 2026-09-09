@@ -2,7 +2,6 @@ import torch
 import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
-from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .export_calibration_mem_manager import ExportCalibrationMemoryManager
@@ -28,26 +27,7 @@ class _ExportCalibrationLinearAttMemOperator(LinearAttMemOperator):
 class _FP8StaticPerHeadQuantLinearAttMemOperator(LinearAttMemOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
-        if (
-            self.linear_config.use_mixed_target_fp8_draft_bf16()
-            and full_att_layer_index >= self.linear_config.get_target_full_att_kv_layer_num()
-        ):
-            from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-            draft_index = full_att_layer_index - self.linear_config.get_target_full_att_kv_layer_num()
-            destindex_copy_kv(kv, mem_index, self.mem_manager.draft_kv_buffer[draft_index])
-            return
         FP8StaticPerHeadQuantMemOperator.copy_kv_to_mem_manager(self, full_att_layer_index, mem_index, kv)
-
-    def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
-        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
-
-        src = src_mem_index.cuda(non_blocking=True)
-        dst = dst_mem_index.cuda(non_blocking=True)
-        copy_kv_buffer_to_kv_buffer(src, dst, self.mem_manager.kv_buffer)
-        if self.mem_manager.draft_kv_buffer is not None:
-            copy_kv_buffer_to_kv_buffer(src, dst, self.mem_manager.draft_kv_buffer)
-        return
 
 
 class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
@@ -71,53 +51,15 @@ class Qwen3NextMemManager(MemoryManager):
         mem_fraction=0.9,
     ):
         self.linear_config = linear_config
-        self.logical_full_att_layer_num = full_att_layer_num
-        self.target_full_att_layer_num = linear_config.get_target_full_att_kv_layer_num()
-        storage_layer_num = (
-            self.target_full_att_layer_num if linear_config.use_mixed_target_fp8_draft_bf16() else full_att_layer_num
-        )
-        super().__init__(size, dtype, num_kv_heads, head_dim, storage_layer_num, always_copy, mem_fraction)
+
+        super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
-        kv_buffer, buffer_layer_index = self.get_kv_buffer_and_layer_index(layer_index)
-        k = kv_buffer[buffer_layer_index][:, : self.head_num, :]
-        v = kv_buffer[buffer_layer_index][:, self.head_num :, :]
-        return k, v
-
-    def get_kv_buffer_and_layer_index(self, packed_layer_index: int):
-        if self.linear_config.use_mixed_target_fp8_draft_bf16() and packed_layer_index >= self.target_full_att_layer_num:
-            return self.draft_kv_buffer, packed_layer_index - self.target_full_att_layer_num
-        return self.kv_buffer, packed_layer_index
-
-    def get_cell_size(self):
-        if not self.linear_config.use_mixed_target_fp8_draft_bf16():
-            return super().get_cell_size()
-        target = 2 * self.head_num * self.head_dim * self.target_full_att_layer_num * self.dtype.itemsize
-        draft = (
-            2
-            * self.head_num
-            * self.head_dim
-            * self.linear_config.draft_full_att_kv_layer_num
-            * self.linear_config.get_draft_full_att_dtype().itemsize
-        )
-        return target + draft
+        return super().get_att_input_params(layer_index)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        if self.linear_config.use_mixed_target_fp8_draft_bf16():
-            self.draft_kv_buffer = torch.empty(
-                (
-                    self.linear_config.draft_full_att_kv_layer_num,
-                    size + 1,
-                    2 * head_num,
-                    head_dim,
-                ),
-                dtype=self.linear_config.get_draft_full_att_dtype(),
-                device="cuda",
-            )
-        else:
-            self.draft_kv_buffer = None
         # TODO 初始化线性 att 对应的部分 buffer.
         self._init_linear_att_buffers()
         return
@@ -141,25 +83,8 @@ class Qwen3NextMemManager(MemoryManager):
 
     def _free_buffers(self):
         super()._free_buffers()
-        self.draft_kv_buffer = None
         self._free_linear_att_buffers()
         return
-
-    def get_index_kv_buffer(self, index):
-        data = super().get_index_kv_buffer(index)
-        if self.draft_kv_buffer is not None:
-            data["draft_kv_buffer"] = self.draft_kv_buffer[:, index]
-        return data
-
-    def load_index_kv_buffer(self, index, load_tensor_dict):
-        if self.draft_kv_buffer is None or not torch.is_tensor(index):
-            super().load_index_kv_buffer(index, load_tensor_dict)
-            if self.draft_kv_buffer is not None:
-                self.draft_kv_buffer[:, index].copy_(load_tensor_dict["draft_kv_buffer"])
-            return
-        index = index.to(device=self.kv_buffer.device, dtype=torch.long).reshape(-1)
-        self.kv_buffer.index_copy_(1, index, load_tensor_dict["kv_buffer"])
-        self.draft_kv_buffer.index_copy_(1, index, load_tensor_dict["draft_kv_buffer"])
 
     def _free_linear_att_buffers(self):
         self.linear_att_big_page_buffers = None
@@ -181,118 +106,9 @@ class Qwen3NextMemManager(MemoryManager):
             self.linear_att_big_page_buffers = big_page_buffers
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        if self.linear_config.use_mixed_target_fp8_draft_bf16():
-            # NIXL registers one contiguous byte range per page.  Keep its
-            # five-dimensional registration contract while retaining the
-            # token-page size separately for page_io below.
-            global_heads = self.linear_config.full_att_all_num_kv_heads
-            target_bytes = (
-                page_size * self.target_full_att_layer_num * 2 * global_heads * self.head_dim * self.dtype.itemsize
-            )
-            draft_bytes = (
-                page_size
-                * self.linear_config.draft_full_att_kv_layer_num
-                * 2
-                * global_heads
-                * self.head_dim
-                * self.linear_config.get_draft_full_att_dtype().itemsize
-            )
-            conv_bytes = (
-                self.linear_config.linear_layer_num
-                * (
-                    2 * self.linear_config.global_linear_k_heads * self.linear_config.head_linear_k_dim
-                    + self.linear_config.global_linear_v_heads * self.linear_config.head_linear_v_dim
-                )
-                * (self.linear_config.conv_kernel_size - 1)
-                * self.linear_config.conv_state_dtype.itemsize
-            )
-            ssm_bytes = (
-                self.linear_config.linear_layer_num
-                * self.linear_config.global_linear_v_heads
-                * self.linear_config.head_linear_k_dim
-                * self.linear_config.head_linear_v_dim
-                * self.linear_config.ssm_state_dtype.itemsize
-            )
-            self._mixed_target_page_bytes = target_bytes
-            self._mixed_draft_page_bytes = draft_bytes
-            self._mixed_page_token_size = page_size
-            page_nbytes = max(target_bytes + draft_bytes, conv_bytes + ssm_bytes)
-            page_nbytes = (page_nbytes + 15) // 16 * 16
-            self.kv_move_buffer = torch.empty(
-                (page_num, 1, 1, 1, page_nbytes), dtype=torch.uint8, device="cuda"
-            )
-            self._buffer_mem_indexes_tensors = [
-                torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
-            ]
-            Qwen3NextLinearAttPageHelper(self).assert_page_size()
-            return self.kv_move_buffer
         kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
         Qwen3NextLinearAttPageHelper(self).assert_page_size()
         return kv_move_buffer
-
-    def _mixed_target_page_view(self, page_index: int):
-        global_heads = self.linear_config.full_att_all_num_kv_heads
-        page_bytes = self.kv_move_buffer[page_index].view(torch.uint8).reshape(-1)
-        return page_bytes[0 : self._mixed_target_page_bytes].view(
-            self._mixed_page_token_size,
-            self.target_full_att_layer_num,
-            2 * global_heads,
-            self.head_dim,
-        )
-
-    def _mixed_draft_page_view(self, page_index: int):
-        global_heads = self.linear_config.full_att_all_num_kv_heads
-        start = self._mixed_target_page_bytes
-        end = start + self._mixed_draft_page_bytes
-        page_bytes = self.kv_move_buffer[page_index].view(torch.uint8).reshape(-1)
-        return page_bytes[start:end].view(self.linear_config.get_draft_full_att_dtype()).view(
-            self._mixed_page_token_size,
-            self.linear_config.draft_full_att_kv_layer_num,
-            2 * global_heads,
-            self.head_dim,
-        )
-
-    def _write_mixed_kv_page(
-        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size
-    ):
-        pin = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
-        pin.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin.cuda(non_blocking=True)
-        start = dp_index * dp_world_size
-        dp_mems = mem_managers[start : start + dp_world_size]
-        target_page = self._mixed_target_page_view(page_index)
-        repeat_count = dp_world_size * self.kv_buffer.shape[2] // target_page.shape[2]
-        for tp_index, mem in enumerate(dp_mems):
-            if tp_index % repeat_count == 0:
-                page_io(mem_indexes_gpu, target_page, mem.kv_buffer, tp_index, dp_world_size, mode="write")
-                page_io(
-                    mem_indexes_gpu,
-                    self._mixed_draft_page_view(page_index),
-                    mem.draft_kv_buffer,
-                    tp_index,
-                    dp_world_size,
-                    mode="write",
-                )
-
-    def _read_mixed_kv_page(
-        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size
-    ):
-        pin = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
-        pin.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin.cuda(non_blocking=True)
-        start = dp_index * dp_world_size
-        dp_mems = mem_managers[start : start + dp_world_size]
-        target_page = self._mixed_target_page_view(page_index)
-        for tp_index, mem in enumerate(dp_mems):
-            page_io(mem_indexes_gpu, target_page, mem.kv_buffer, tp_index, dp_world_size, mode="read")
-            page_io(
-                mem_indexes_gpu,
-                self._mixed_draft_page_view(page_index),
-                mem.draft_kv_buffer,
-                tp_index,
-                dp_world_size,
-                mode="read",
-            )
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -305,8 +121,6 @@ class Qwen3NextMemManager(MemoryManager):
         req_idx: int = None,
     ):
         if page_kind == "kv":
-            if self.linear_config.use_mixed_target_fp8_draft_bf16():
-                return self._write_mixed_kv_page(mem_indexes, page_index, dp_index, mem_managers, dp_world_size)
             return super().write_mem_to_page_kv_move_buffer(
                 mem_indexes=mem_indexes,
                 page_index=page_index,
@@ -334,8 +148,6 @@ class Qwen3NextMemManager(MemoryManager):
         req_idx: int = None,
     ):
         if page_kind == "kv":
-            if self.linear_config.use_mixed_target_fp8_draft_bf16():
-                return self._read_mixed_kv_page(mem_indexes, page_index, dp_index, mem_managers, dp_world_size)
             return super().read_page_kv_move_buffer_to_mem(
                 mem_indexes=mem_indexes,
                 page_index=page_index,
