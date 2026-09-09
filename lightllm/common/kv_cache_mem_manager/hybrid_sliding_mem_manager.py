@@ -1,7 +1,7 @@
 import torch
 import triton
 
-from lightllm.common.sliding_window_cache_manager import SlidingWindowStateCacheManager
+from lightllm.common.state_cache_manager import SlidingWindowStateCacheManager
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .mem_manager import MemoryManager

@@ -8,7 +8,7 @@ from lightllm.common.basemodel.triton_kernel.sliding_window_cpu_cache_copy impor
     copy_kv_buffer_to_cpu_cache,
     copy_sliding_window_state,
 )
-from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig
+from lightllm.common.state_cache_manager import SlidingWindowCacheConfig
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 

@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Tuple, Dict, Set, List, Optional
 from sortedcontainers import SortedSet, SortedDict
-from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
+from lightllm.common.state_cache_manager import StateCacheManager
 from .shared_arr import SharedArray
 from .radix_cache import time_gen
 
@@ -132,7 +132,7 @@ class LinearAttPagedRadixCache:
 
         self.mem_manager: MemoryManager = kv_cache_mem_manager
 
-        self.linear_att_big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
+        self.linear_att_big_page_buffers: StateCacheManager = self.mem_manager.linear_att_big_page_buffers
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -153,7 +153,7 @@ class LinearAttPagedRadixCache:
             f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
         )
         self.tree_total_tokens_num.arr[0] = 0
-        self.linear_att_small_page_buffers: LinearAttCacheManager = linear_att_small_page_buffers
+        self.linear_att_small_page_buffers: StateCacheManager = linear_att_small_page_buffers
 
     def _discard_node(self, node: LinearAttPagedTreeNode):
         if node.is_leaf():

@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.state_cache_manager import LinearAttCacheConfig
 
 
 @triton.jit

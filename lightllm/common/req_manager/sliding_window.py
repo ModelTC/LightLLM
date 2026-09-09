@@ -4,7 +4,7 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.sliding_window_state import copy_sliding_window_checkpoint
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
-from lightllm.common.sliding_window_cache_manager import SlidingWindowStateCacheManager
+from lightllm.common.state_cache_manager import SlidingWindowStateCacheManager
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -13,7 +13,7 @@ from .hybrid_base import HybridAttentionReqManager
 
 if TYPE_CHECKING:
     from lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager import HybridSlidingMemoryManager
-    from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig
+    from lightllm.common.state_cache_manager import SlidingWindowCacheConfig
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
 
@@ -101,19 +101,20 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
         self._sliding_seq_lens[req.req_idx] = cache_len
         self.req_to_sliding_window[req.req_idx, cache_len - window_len : cache_len].copy_(indexes, non_blocking=True)
         copy_sliding_window_checkpoint(
-            self.sliding_mem_manager.kv_buffer,
-            self.req_to_sliding_window,
-            cache_len,
-            req.req_idx,
-            state_cache_manager.get_state_cache(buffer_idx),
+            gpu_sliding_kv_buffer=self.sliding_mem_manager.kv_buffer,
+            req_to_sliding_window=self.req_to_sliding_window,
+            cache_len=cache_len,
+            req_idx=req.req_idx,
+            cpu_kv_sliding_state=state_cache_manager.get_state_cache(buffer_idx),
             restore=True,
         )
 
     def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager: SlidingWindowStateCacheManager):
         copy_sliding_window_checkpoint(
-            self.sliding_mem_manager.kv_buffer,
-            self.req_to_sliding_window,
-            self._sliding_seq_lens[req_idx],
-            req_idx,
-            state_cache_manager.get_state_cache(buffer_idx),
+            gpu_sliding_kv_buffer=self.sliding_mem_manager.kv_buffer,
+            req_to_sliding_window=self.req_to_sliding_window,
+            cache_len=self._sliding_seq_lens[req_idx],
+            req_idx=req_idx,
+            cpu_kv_sliding_state=state_cache_manager.get_state_cache(buffer_idx),
+            restore=False,
         )

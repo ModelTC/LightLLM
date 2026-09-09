@@ -2,9 +2,7 @@ from typing import TYPE_CHECKING, List
 
 import torch
 
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
-from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
-from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
+from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheConfig, LinearAttCacheManager
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .hybrid_base import HybridAttentionReqManager

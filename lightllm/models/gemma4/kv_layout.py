@@ -1,4 +1,4 @@
-from lightllm.common.sliding_window_cache_manager import SlidingWindowCacheConfig
+from lightllm.common.state_cache_manager import SlidingWindowCacheConfig
 
 
 def get_kv_cache_layout(config):

@@ -3,7 +3,7 @@ import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
+from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .operator import LinearAttMemOperator
 from typing import Tuple, Any, List
 
