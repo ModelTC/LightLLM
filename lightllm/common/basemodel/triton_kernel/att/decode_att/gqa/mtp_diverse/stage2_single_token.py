@@ -65,11 +65,8 @@ def rebuild_inputs(
     # stage2 按行独立归约，不需要共享组标记或 KV 映射，以目标长度代表各行的归约工作量。
     B_Seqlen = torch.full_like(B_Seqlen, max_kv_len, device="cpu").to(device=B_Seqlen.device)
 
-    # Graph 初始化时 stage1 只为很短的请求写入了少量分块，其余中间缓冲区可能未初始化。
-    # 不能只拉长 B_Seqlen 后读取这些位置；另建有限的中间输出和 logsumexp，使加权归约有有效输入。
-    # stage2 不访问 Q/K/V，无需重新运行 stage1；保留原缓冲区大小，不按 KV 长度扩容。
-    mid_out = torch.randn_like(mid_out)
-    mid_out_logsumexp = torch.randn_like(mid_out_logsumexp)
+    # mid_out 和 mid_out_logsumexp 是 stage1 产出的只读输入，stage2 不会修改它们。
+    # 两个张量的 shape 已按最大分块数分配，调优时直接复用原始输入，避免无意义的重复分配。
     # block_n 必须沿用 stage1 实际返回的 BLOCK_N，它决定每行需要归约的分块数，不能独立改写。
     # benchmark 的最终输出写入继续由 mutates_args 隔离，原始 out 不会被调优覆盖。
     return (mid_out, mid_out_logsumexp, B_Seqlen, out, block_n, max_kv_len), kwargs

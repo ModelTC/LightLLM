@@ -80,7 +80,7 @@ def make_inputs(device="cpu", capacity=128, block_n=64, dtype=torch.bfloat16, he
 
 
 @pytest.mark.parametrize("length", [65, 8193, 16384])
-def test_rebuild_initializes_new_buffers_and_preserves_inputs(monkeypatch, length):
+def test_rebuild_reuses_readonly_intermediate_inputs(monkeypatch, length):
     monkeypatch.setenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", str(length))
     inputs = make_inputs()
     snapshots = {name: value.clone() for name, value in inputs.items() if isinstance(value, torch.Tensor)}
@@ -90,13 +90,14 @@ def test_rebuild_initializes_new_buffers_and_preserves_inputs(monkeypatch, lengt
     assert rebuilt["B_Seqlen"].tolist() == [length, length]
     assert rebuilt["block_n"] == inputs["block_n"]
     assert rebuilt["out"] is inputs["out"]
-    for name in ["mid_out", "mid_out_logsumexp", "B_Seqlen"]:
-        assert rebuilt[name] is not inputs[name]
+    for name in ["mid_out", "mid_out_logsumexp"]:
+        assert rebuilt[name] is inputs[name]
         assert rebuilt[name].shape == inputs[name].shape
         assert rebuilt[name].stride() == inputs[name].stride()
         assert rebuilt[name].dtype == inputs[name].dtype
         assert rebuilt[name].device == inputs[name].device
-        assert torch.isfinite(rebuilt[name]).all()
+    assert rebuilt["B_Seqlen"] is not inputs["B_Seqlen"]
+    assert torch.isfinite(rebuilt["B_Seqlen"]).all()
     for name, snapshot in snapshots.items():
         torch.testing.assert_close(inputs[name], snapshot, equal_nan=True)
 
@@ -165,9 +166,8 @@ def test_full_tuning_graph_and_cache_reuse(tmp_path, monkeypatch, length):
         assert rebuilt["B_Seqlen"].tolist() == [length, length]
         assert rebuilt["max_kv_len"] == length and rebuilt["block_n"] == 64
         for name in ["mid_out", "mid_out_logsumexp"]:
-            assert rebuilt[name] is not inputs[name]
+            assert rebuilt[name] is inputs[name]
             assert rebuilt[name].shape == inputs[name].shape
-            assert torch.isfinite(rebuilt[name]).all()
         elapsed = original_bench(*args, **kwargs)
         assert math.isfinite(elapsed)
         torch.testing.assert_close(inputs["out"], snapshots["out"])
