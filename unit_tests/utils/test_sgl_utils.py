@@ -23,7 +23,7 @@ def autotune_seq_len_environment(monkeypatch):
     get_decode_attn_autotune_seq_len.cache_clear()
 
 
-@pytest.mark.parametrize("seq_len, expected_len", [(None, 16384), ("8192", 8192), ("16384", 16384), ("8193", 8704)])
+@pytest.mark.parametrize("seq_len, expected_len", [(None, 32768), ("8192", 8192), ("16384", 16384), ("8193", 8704)])
 @pytest.mark.parametrize("level", [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE])
 def test_fa3_run_key_uses_configured_length_during_tuning(monkeypatch, seq_len, expected_len, level):
     if seq_len is not None:

@@ -163,8 +163,8 @@ def get_triton_autotune_level():
 
 @lru_cache(maxsize=None)
 def get_decode_attn_autotune_seq_len() -> int:
-    """Decode attention 调优的代表性 KV 长度（token），默认 16384；调优时的 run key 按该长度分桶。"""
-    seq_len = int(os.getenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", "16384"))
+    """Decode attention 调优的代表性 KV 长度（token），默认 32768；调优时的 run key 按该长度分桶。"""
+    seq_len = int(os.getenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", "32768"))
     if seq_len <= 0:
         raise ValueError("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN must be positive")
     return seq_len

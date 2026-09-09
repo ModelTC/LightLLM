@@ -62,7 +62,7 @@ def rebuild(inputs):
 
 
 @pytest.mark.parametrize("level", [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE])
-@pytest.mark.parametrize("configured, expected", [(None, 16384), ("8193", 8704)])
+@pytest.mark.parametrize("configured, expected", [(None, 32768), ("8193", 8704)])
 def test_tuning_key_uses_configured_length(monkeypatch, level, configured, expected):
     if configured is not None:
         monkeypatch.setenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", configured)

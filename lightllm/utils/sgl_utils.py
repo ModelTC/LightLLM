@@ -98,7 +98,7 @@ def _flash_attn_kvcache_rebuild_inputs(
     # 因此从页表取得请求数，不能直接把 Q 的 token 数当作 batch_size。
     batch_size = page_table.shape[0]
 
-    # 用 LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN 指定代表性 KV 长度，单位是 token，默认 16384。
+    # 用 LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN 指定代表性 KV 长度，单位是 token，默认 32768。
     # 调优阶段的 run_key 按同一个配置值分桶，保证配置对应实际 benchmark 的长度区间。
     kv_len = get_decode_attn_autotune_seq_len()
 

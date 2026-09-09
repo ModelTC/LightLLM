@@ -181,7 +181,7 @@ def rebuild_inputs(
     # Graph 初始化时真实请求很短，Req_to_tokens 的宽度则是容量上限，都不代表期望调优的长度。
     # 仅在实际搜索配置前重建一次输入，构造开销不计入 benchmark；正常执行和 Graph 捕获使用原输入。
     batch_size = q.shape[0]
-    # 与调优时的 run key 共用该环境变量，默认 16384 token；实际计算保持精确长度，不做 512 分桶。
+    # 与调优时的 run key 共用该环境变量，默认 32768 token；实际计算保持精确长度，不做 512 分桶。
     max_len_in_batch = get_decode_attn_autotune_seq_len()
     assert k.shape[0] == v.shape[0], "K/V caches must have the same number of tokens"
     num_tokens = k.shape[0]
