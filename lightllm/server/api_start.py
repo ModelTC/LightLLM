@@ -319,6 +319,16 @@ def _launch_subprocesses(args: StartArgs):
 
     auto_configure_allreduce_flags_from_args(args)
 
+    # CUDA Graph 只需要覆盖调度器允许同时运行的请求数。配置得更大不会被真实请求使用，
+    # 反而会捕获无效的大 batch Graph 并额外占用显存，因此在全部参数调整完成后收敛到合法上限。
+    # 关闭 CUDA Graph 时该参数不生效，保留用户原值。
+    if not args.disable_cudagraph and args.graph_max_batch_size > args.running_max_req_size:
+        logger.warning(
+            f"graph_max_batch_size {args.graph_max_batch_size} exceeds running_max_req_size "
+            f"{args.running_max_req_size}; set graph_max_batch_size to {args.running_max_req_size}."
+        )
+        args.graph_max_batch_size = args.running_max_req_size
+
     # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
     ports_to_check = [args.port]
     if args.dp == 1 and args.nnodes > 1:
