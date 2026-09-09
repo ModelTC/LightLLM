@@ -77,8 +77,13 @@ class Attention(nn.Module):
         q, k, v = (t.view(n, self.n_heads, self.head_dim) for t in self.wqkv(x).chunk(3, dim=-1))
         q = apply_rotary(q, cos, sin)
         k = apply_rotary(k, cos, sin)
-        o = F.scaled_dot_product_attention(q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1))
-        return self.wo(o.transpose(0, 1).reshape(n, -1))
+        # Keep the batch dimension so SDPA can select fused attention kernels.
+        o = F.scaled_dot_product_attention(
+            q.transpose(0, 1).unsqueeze(0),
+            k.transpose(0, 1).unsqueeze(0),
+            v.transpose(0, 1).unsqueeze(0),
+        )
+        return self.wo(o.squeeze(0).transpose(0, 1).reshape(n, -1))
 
 
 class MLP(nn.Module):
