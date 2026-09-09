@@ -80,6 +80,9 @@ def autotune(
             SSM 递推、原地追加 KV 或累加持久统计量的算子：每次预热都会额外推进或重复写入状态，
             可能改变后续正式计算的结果；把大型状态池加入 mutates_args 又会因 clone 增加显存占用，
             甚至触发 OOM。仅覆盖输出缓冲区，或可通过 mutates_args 完整保护输入的算子可保持默认值。
+            当前关闭该开关的特殊算子是 ``mtp_fused_recurrent_gated_delta_rule``，对应 autotune
+            ``kernel_name`` 为 ``_mtp_fused_recurrent_gated_delta_rule_fwd_kernel:v1``，可用这两个名字
+            查询实现、调用位置和缓存配置目录。
             此开关只控制已有配置的额外预热，不关闭新配置的搜索、benchmark 内部的预热/计时和
             最终正式执行；实际搜索仍需由调用方保证状态可以被反复更新，或提供相应的状态保护。
 
