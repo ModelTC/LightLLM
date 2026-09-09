@@ -123,6 +123,8 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
         p_ht = ht + write_idx * stride_final_state_token
         p_ht = p_ht + i_hv * stride_state_hv + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+        # Match the dtype of the persistent per-token state before continuing.
+        b_h = b_h.to(p_ht.dtype.element_ty).to(tl.float32)
 
         p_q += stride_q_tok
         p_k += stride_k_tok

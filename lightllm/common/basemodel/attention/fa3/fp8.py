@@ -115,8 +115,20 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
     v_descale: torch.Tensor = None
 
     def init_state(self):
-        super().init_state()
         self.backend: Fp8Fa3AttBackend = self.backend
+
+        if self.backend.model.is_mtp_draft_model:
+            # Preserve the existing draft attention layout, including the
+            # DSpark/DFlash noncausal speculative block layout.
+            super().init_state()
+        else:
+            # Target attention is causal.  Each physical target query needs its
+            # own Q scale: later speculative rows must not change the scale (or
+            # output) of an earlier target row.  This matches token-by-token
+            # decode while leaving the draft block layout untouched.
+            self.causal = self.backend.uses_causal_attention()
+            b_att_req_idx = self._init_normal_decode_state()
+            self._init_page_table(b_att_req_idx)
 
         att_batch_size = self.b_att_seq_len.shape[0]
         mem_manager = self.backend.model.mem_manager

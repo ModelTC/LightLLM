@@ -271,7 +271,8 @@ def _causal_conv1d_update_kernel(
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
 
-            acc += matrix_x * matrix_w  # [BLOCK_N]
+            # Avoid BF16 product rounding before the FP32 accumulator.
+            acc += matrix_x.to(tl.float32) * matrix_w.to(tl.float32)  # [BLOCK_N]
 
         if KERNEL_WIDTH == 2:
             col0 = matrix_x

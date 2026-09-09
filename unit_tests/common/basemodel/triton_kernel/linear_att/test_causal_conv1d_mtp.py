@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import causal_conv1d_update
+from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
 
 
 def causal_conv1d_ref(
@@ -965,6 +966,68 @@ def test_bias_none_gives_same_shape(width, mtp_step):
         f"No-bias mismatch: width={width}, mtp_step={mtp_step}\n"
         f"max diff={torch.abs(out_triton - out_ref).max().item():.6f}"
     )
+
+def test_bf16_mtp_conv_matches_decode_pack_and_fp32_reference():
+    """BF16 MTP convolution must equal decode-pack and FP32-product reference."""
+    torch.manual_seed(20260909)
+    T, width, h, hv, head_dim = 3, 4, 4, 12, 128
+    dim = (2 * h + hv) * head_dim
+    x = torch.randn(T, dim, device="cuda", dtype=torch.bfloat16) * 0.2
+    weight = torch.randn(dim, width, device="cuda", dtype=torch.bfloat16) * 0.2
+    history = torch.randn(dim, width - 1, device="cuda", dtype=torch.bfloat16) * 0.2
+    mtp_state = torch.zeros(1, dim, width - 1 + 2, device="cuda", dtype=torch.bfloat16)
+    mtp_state[0, :, : width - 1] = history
+    out_mtp = causal_conv1d_update(
+        x=x.clone(),
+        conv_state=mtp_state,
+        weight=weight,
+        mtp_step=2,
+        activation="silu",
+        conv_state_indices=torch.tensor([0], device="cuda", dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([1], device="cuda", dtype=torch.int32),
+        query_start_loc=torch.tensor([0, T], device="cuda", dtype=torch.int32),
+    )
+    decode_state = history.unsqueeze(0).clone()
+    decode_rows = []
+    for step in range(T):
+        q, k, v, *_ = conv_pack_gdn_decode_inputs(
+            mixed_qkv=x[step : step + 1].clone(),
+            z_raw=torch.zeros(1, hv, head_dim, device="cuda", dtype=torch.bfloat16),
+            a_raw=torch.zeros(1, hv, device="cuda", dtype=torch.bfloat16),
+            b_raw=torch.zeros(1, hv, device="cuda", dtype=torch.bfloat16),
+            conv_state=decode_state,
+            conv_weight=weight,
+            conv_bias=None,
+            conv_state_indices=torch.tensor([0], device="cuda", dtype=torch.int32),
+            activation="silu",
+            conv_size=width,
+            num_k_heads=h,
+            head_k_dim=head_dim,
+            num_v_heads=hv,
+            head_v_dim=head_dim,
+        )
+        decode_rows.append(torch.cat((q.reshape(-1), k.reshape(-1), v.reshape(-1))))
+    out_decode = torch.stack(decode_rows)
+    ref_state = torch.cat(
+        (
+            history.unsqueeze(0),
+            torch.zeros(1, dim, 2, device="cuda", dtype=torch.bfloat16),
+        ),
+        dim=2,
+    )
+    out_ref = causal_conv1d_ref(
+        x=x,
+        conv_state=ref_state,
+        weight=weight,
+        mtp_step=2,
+        activation="silu",
+        conv_state_indices=torch.tensor([0], device="cuda", dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([1], device="cuda", dtype=torch.int32),
+        query_start_loc=torch.tensor([0, T], device="cuda", dtype=torch.int32),
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(out_mtp, out_decode)
+    assert torch.equal(out_mtp, out_ref)
 
 
 if __name__ == "__main__":
