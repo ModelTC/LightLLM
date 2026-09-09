@@ -516,6 +516,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=model_input.b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=model_input.b_mtp_index,
+                    logits=model_output.logits,
+                    run_reqs=run_reqs,
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -804,7 +806,22 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=b_mtp_index,
+                    logits=logits,
+                    run_reqs=run_reqs,
                 )
+                if self.args.mtp_asd_regret_budget is not None:
+                    # ASD rewrites next_token_ids in place during verify (relaxed rows commit
+                    # draft tokens). The early overlap copy above raced ahead of verify, so
+                    # refresh the pinned buffer to surface the committed ids downstream.
+                    (
+                        next_token_ids_cpu,
+                        next_token_logprobs_cpu,
+                        next_token_ranks_cpu,
+                    ) = self._async_copy_next_token_infos_to_pin_mem(
+                        next_token_ids=next_token_ids,
+                        next_token_logprobs=next_token_logprobs,
+                        next_token_ranks=next_token_ranks,
+                    )
                 mtp_accept_len0 = mtp_accept_len[:real_request_num0]
                 mtp_accept_len1 = mtp_accept_len[real_request_num0:]
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 
+from lightllm.common.basemodel.triton_kernel.mtp_asd import mtp_asd_verify
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     linear_att_mtp_state_index_update,
     mtp_scatter_next_token_ids,
     mtp_verify,
 )
+from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -34,21 +36,57 @@ def alloc_mem_indexes(token_count: int) -> torch.Tensor:
     return g_infer_context.req_manager.mem_manager.alloc(token_count)
 
 
+def _is_all_greedy(run_reqs: List[InferReq]) -> bool:
+    """Mirror the greedy rule used by generic_post_process.sample (top_k == 1)."""
+
+    return all(req.sampling_param.shm_param.top_k == 1 for req in run_reqs)
+
+
 def verify_mtp_tokens(
     backend: ModeBackend,
     next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
     b_mtp_index: torch.Tensor,
+    logits: Optional[torch.Tensor] = None,
+    run_reqs: Optional[List[InferReq]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Verify target tokens and update recurrent MTP state when required."""
+    """Verify target tokens and update recurrent MTP state when required.
 
-    accept_lengths, accepted_index = mtp_verify(
-        req_to_next_token_ids=backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-        b_req_mtp_start_loc=b_req_mtp_start_loc,
-        new_next_token_ids=next_token_ids,
-        b_req_idx=b_req_idx,
+    When ASD acceptance is enabled (``--mtp_asd_regret_budget``) and the whole batch is
+    greedy, verification relaxes strict token equality under a bounded per-request regret
+    budget; relaxed rows commit their draft token into ``next_token_ids`` in place, so all
+    downstream consumers keep the same contract as with strict verification.
+    """
+
+    start_args = get_env_start_args()
+    sampling_params_manager = backend.model.req_manager.req_sampling_params_manager
+    use_asd = (
+        start_args.mtp_asd_regret_budget is not None
+        and logits is not None
+        and run_reqs is not None
+        and _is_all_greedy(run_reqs)
     )
+    if use_asd:
+        accept_lengths, accepted_index = mtp_asd_verify(
+            req_to_next_token_ids=sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            new_next_token_ids=next_token_ids,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            logits=logits,
+            req_to_asd_cum_regret=sampling_params_manager.req_to_asd_cum_regret,
+            asd_budget=start_args.mtp_asd_regret_budget,
+            asd_local_ratio=start_args.mtp_asd_local_regret_ratio,
+            asd_max_mismatch=start_args.mtp_asd_block_max_mismatch,
+        )
+    else:
+        accept_lengths, accepted_index = mtp_verify(
+            req_to_next_token_ids=sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            new_next_token_ids=next_token_ids,
+            b_req_idx=b_req_idx,
+        )
     if backend.is_linear_att_mixed_model:
         linear_att_mtp_state_index_update(
             req_to_mtp_state_index=backend.model.req_manager.req_to_mtp_state_index,

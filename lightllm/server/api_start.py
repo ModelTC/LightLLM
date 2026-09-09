@@ -177,6 +177,13 @@ def _launch_subprocesses(args: StartArgs):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    # ASD acceptance params check (see --mtp_asd_regret_budget help)
+    if args.mtp_asd_regret_budget is not None:
+        assert args.mtp_mode is not None, "--mtp_asd_regret_budget requires an enabled mtp_mode"
+        assert args.mtp_asd_regret_budget >= 0.0, "--mtp_asd_regret_budget must be >= 0"
+        assert args.mtp_asd_local_regret_ratio >= 0.0, "--mtp_asd_local_regret_ratio must be >= 0"
+        assert args.mtp_asd_block_max_mismatch >= 0, "--mtp_asd_block_max_mismatch must be >= 0"
+
     # automatically set visual_dp based on visual_tp and tp.
     # In visual proxy mode keep the caller-provided visual_dp / visual_tp.
     if not args.visual_use_proxy_mode and args.visual_tp < args.tp and args.tp % args.visual_tp == 0:

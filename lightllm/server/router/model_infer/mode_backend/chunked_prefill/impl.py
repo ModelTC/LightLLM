@@ -285,6 +285,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_mtp_index=model_input.b_mtp_index,
+                logits=model_output.logits,
+                run_reqs=run_reqs,
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
