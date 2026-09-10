@@ -140,6 +140,14 @@ class InferStateInfo:
             if self.decode_att_state1 is not None:
                 self.decode_att_state1.init_state()
 
+    def finish_forward(self):
+        """Update runtime state after one prefill/decode forward, outside graph capture.
+
+        All microbatches have finished their layers before this hook runs.
+        This precedes prefix checkpoints, not speculative-token acceptance.
+        """
+        return
+
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):

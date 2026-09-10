@@ -1,5 +1,10 @@
+import copy
+from types import SimpleNamespace
+
 import torch
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b_image_token_end
 
 
@@ -21,6 +26,10 @@ class Gemma4InferStateInfo(InferStateInfo):
         # 则对应的 b_image_token_end 为 [0, 0, 4, 4, 0],
         # image token 可以看到自己当前这个token以及后面的 image token。
         self.b_image_token_end = None
+        self.has_image_tokens = False
+        self.sliding_window_mem_index = None
+        self.sliding_window_mem_index_cpu = None
+        self.sliding_requests = None
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
@@ -38,9 +47,68 @@ class Gemma4InferStateInfo(InferStateInfo):
             position_ids.shape[0], -1
         )
         if self.is_prefill:
-            self.max_seq_len = self.max_kv_seq_len
             self._build_b_image_token_end()
+        sliding_mem_manager = self.req_manager.sliding_mem_manager
+        index_chunks = []
+        token_num = 0
+        for req_idx, _, q_len in self.sliding_requests:
+            if req_idx != self.req_manager.HOLD_REQUEST_ID:
+                index_chunks.extend(self.req_manager.alloc_sliding_window_indexes(req_idx, q_len))
+            else:
+                index_chunks.append(
+                    torch.full((q_len,), sliding_mem_manager.HOLD_TOKEN_MEMINDEX, dtype=torch.int32, device="cpu")
+                )
+            token_num += q_len
+        padding_token_num = self.input_ids.shape[0] - token_num
+        if padding_token_num > 0:
+            index_chunks.append(
+                torch.full(
+                    (padding_token_num,), sliding_mem_manager.HOLD_TOKEN_MEMINDEX, dtype=torch.int32, device="cpu"
+                )
+            )
+        # Combine request-window and allocator views into owned pinned storage for asynchronous H2D.
+        self.sliding_window_mem_index_cpu = torch.empty(
+            (self.input_ids.shape[0],), dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        if index_chunks:
+            torch.cat(index_chunks, out=self.sliding_window_mem_index_cpu)
+        self.sliding_window_mem_index = self.sliding_window_mem_index_cpu.cuda(non_blocking=True)
+        if self.is_prefill:
+            init_req_to_token_indexes(
+                self.req_manager.req_to_sliding_window,
+                self.b_req_idx,
+                self.b_seq_len,
+                self.b_ready_cache_len,
+                self.b_q_start_loc,
+                self.sliding_window_mem_index,
+                self.max_q_seq_len,
+            )
+        else:
+            copy_kv_index_to_req(
+                self.req_manager.req_to_sliding_window,
+                self.b_req_idx,
+                self.b_seq_len,
+                self.sliding_window_mem_index,
+            )
         return
+
+    def init_att_state(self):
+        # Share batch tensors, but bind sliding attention to its own token table.
+        sliding_state = copy.copy(self)
+        sliding_state.req_manager = SimpleNamespace(req_to_token_indexs=self.req_manager.req_to_sliding_window)
+        att_state = self.prefill_att_state1 if self.is_prefill else self.decode_att_state1
+        att_state.infer_state = sliding_state
+        super().init_att_state()
+
+    def finish_forward(self):
+        # Keep the latest W token slots after every KV-sharing reader has finished.
+        start = 0
+        for req_idx, seq_len, q_len in self.sliding_requests:
+            if req_idx != self.req_manager.HOLD_REQUEST_ID:
+                self.req_manager.update_sliding_window(
+                    req_idx, seq_len, self.sliding_window_mem_index_cpu[start : start + q_len]
+                )
+            start += q_len
 
     def _build_b_image_token_end(self):
         device = self.position_ids.device
@@ -66,6 +134,7 @@ class Gemma4InferStateInfo(InferStateInfo):
         if image_start_num == 0:
             return
 
+        self.has_image_tokens = True
         build_b_image_token_end(
             b_image_start_idx=torch.tensor(b_image_start_idx, dtype=torch.int32).cuda(non_blocking=True),
             b_image_len=torch.tensor(b_image_len, dtype=torch.int32).cuda(non_blocking=True),

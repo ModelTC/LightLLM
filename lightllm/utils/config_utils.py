@@ -468,9 +468,14 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         return False
 
 
+@lru_cache(maxsize=None)
+def is_sliding_att_mixed_model(model_path: str) -> bool:
+    return get_model_type(model_path) in {"gemma4", "gemma4_text"}
+
+
 def is_hybrid_att_model(model_path: str) -> bool:
     """Models whose non-full attention state follows hybrid checkpoint pages."""
-    return is_linear_att_mixed_model(model_path)
+    return is_linear_att_mixed_model(model_path) or is_sliding_att_mixed_model(model_path)
 
 
 def get_model_type(model_path: str) -> Optional[str]:

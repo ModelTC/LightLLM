@@ -3,16 +3,18 @@ import json
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager import HybridSlidingMemoryManager
+from lightllm.common.req_manager import ReqManagerForSlidingWindow
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
+from lightllm.models.gemma4.kv_layout import build_sliding_cache_config
 from lightllm.models.gemma4.layer_infer.pre_layer_infer import Gemma4PreLayerInfer
 from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerInfer
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma4PreAndPostLayerWeight
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -65,65 +67,77 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         return
 
     def _verify_params(self):
+        args = get_env_start_args()
         assert self.load_way == "HF", "Gemma-4 only supports HF format."
-        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
-        # Use `or` rather than the dict.get default: E4B-style configs ship
-        # `num_global_key_value_heads: null`, which the default form would
-        # leave as None.
-        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
-        assert (
-            num_global_kv % self.tp_world_size_ == 0
-        ), f"num_global_key_value_heads={num_global_kv} must be divisible by tp={self.tp_world_size_}"
-        kv_shared = self.config.get("num_kv_shared_layers") or 0
-        assert 0 <= kv_shared < self.config["num_hidden_layers"], (
-            f"num_kv_shared_layers={kv_shared} out of range for "
-            f"num_hidden_layers={self.config['num_hidden_layers']}"
-        )
+        self.sliding_cache_config = build_sliding_cache_config(self.config, self.tp_world_size_, self.data_type)
+        if self.config.get("hidden_size_per_layer_input"):
+            # PLE uses one static buffer, not independent microbatch storage.
+            assert not (
+                args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
+            ), "Gemma-4 PLE does not support microbatch overlap yet"
+        assert args.mtp_step == 0, "Gemma-4 hybrid sliding-window cache does not support MTP yet"
+        if args.enable_cpu_cache:
+            assert not args.disable_dynamic_prompt_cache, "Gemma-4 CPU cache requires GPU prefix cache"
+        assert not args.disable_chunked_prefill, "Gemma-4 hybrid sliding-window cache requires chunked prefill"
+        assert args.run_mode == "normal", "Gemma-4 hybrid sliding-window cache does not support PD mode yet"
+        assert args.llm_kv_type == "None", "Gemma-4 hybrid sliding-window cache does not support quantized KV yet"
+        assert not args.enable_dp_prompt_cache_fetch, "Gemma-4 sliding-window state does not support DP cache fetch yet"
+        assert not args.diverse_mode, "Gemma-4 sliding-window state does not support diverse mode yet"
         return
+
+    def _init_req_manager(self):
+        self.req_manager = ReqManagerForSlidingWindow(
+            max_request_num=self.max_req_num,
+            max_sequence_length=max(self.batch_max_tokens, self.max_seq_length),
+            mem_manager=None,
+            sliding_config=self.sliding_cache_config,
+        )
 
     def _init_mem_manager(self):
-        # Uniform per-layer KV cache layout. The per-layer cache slot must fit
-        # whichever layer type has the largest per-token K/V width: sliding
-        # (num_key_value_heads * head_dim) or full
-        # (num_global_kv * global_head_dim). Keep cache_slot_dim = head_dim
-        # and pick cache_slot_num = max-width / head_dim. For 31B this
-        # collapses to num_key_value_heads; for E4B the full-attn shape wins
-        # (2*512 > 2*256), so it uses 4 storage slots of 256 dims.
-        # Gemma4TransformerLayerInfer.__init__ computes the same value and
-        # uses it to pack/unpack K/V at write/read time.
-        head_dim = self.config["head_dim"]
-        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
-        sliding_total = self.config["num_key_value_heads"] * self.config["head_dim"]
-        full_total = num_global_kv * self.config["global_head_dim"]
-        per_token_k_width = max(sliding_total, full_total)
-        head_num_per_rank = (per_token_k_width // head_dim) // self.tp_world_size_
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=head_num_per_rank,
-            head_dim=head_dim,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
+        self.mem_manager = HybridSlidingMemoryManager(
+            size=self.max_total_token_num,
+            sliding_config=self.sliding_cache_config,
             mem_fraction=self.mem_fraction,
         )
+        self.mem_manager.sliding_kv_buffer = self.req_manager.sliding_mem_manager.kv_buffer
         return
 
+    def _prepare_sliding_requests(self, *model_inputs):
+        # Capture Gemma-only metadata before H2D; padding's copy.copy preserves it.
+        # Normal scheduling supplies CPU tensors; only synthetic GPU warmups need D2H.
+        for model_input in model_inputs:
+            req_indexes = model_input.b_req_idx.cpu()
+            seq_lens = model_input.b_seq_len.cpu()
+            if model_input.is_prefill:
+                q_lens = seq_lens - model_input.b_ready_cache_len.cpu()
+            else:
+                q_lens = torch.ones_like(seq_lens)
+            model_input.sliding_requests = list(zip(req_indexes.tolist(), seq_lens.tolist(), q_lens.tolist()))
+
+    def forward(self, model_input):
+        self._prepare_sliding_requests(model_input)
+        return super().forward(model_input)
+
+    def microbatch_overlap_prefill(self, model_input0, model_input1):
+        self._prepare_sliding_requests(model_input0, model_input1)
+        return super().microbatch_overlap_prefill(model_input0, model_input1)
+
+    def microbatch_overlap_decode(self, model_input0, model_input1):
+        self._prepare_sliding_requests(model_input0, model_input1)
+        return super().microbatch_overlap_decode(model_input0, model_input1)
+
+    def _create_inferstate(self, model_input, microbatch_index=0):
+        infer_state = super()._create_inferstate(model_input, microbatch_index)
+        # CPU rows exclude padding added inside the model; dummy slots are filled separately.
+        infer_state.sliding_requests = model_input.sliding_requests
+        return infer_state
+
     def _init_att_backend(self):
-        # Gemma-4 has per-layer heterogeneous attention: sliding layers use
-        # (head_dim=256, kv_heads=16); full-attn layers use (head_dim=512,
-        # kv_heads=4, k_eq_v). FA3 caps head_dim at 256 and flashinfer plans
-        # once per infer_state on a single shape — both unworkable for the
-        # heterogeneous layout. Both layer kinds go through triton.
-        #
-        # Primary backend = sliding layers. Sliding prefill bypasses the
-        # backend and calls gemma4_mm directly (SWA + image bidi in one
-        # pass); the prefill_att_state created here is unused but the
-        # framework requires prefill_att_backend to be non-None.
+        # Full-attention head_dim can be 512, beyond FA3's supported limit.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
 
     def _init_att_backend1(self):
-        # Secondary backend = full-attn layers (head_dim=512, plain causal).
         self.prefill_att_backend1 = TritonAttBackend(model=self)
         self.decode_att_backend1 = TritonAttBackend(model=self)
 

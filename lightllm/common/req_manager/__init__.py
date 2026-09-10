@@ -1,6 +1,13 @@
 from .base import ReqManager
-from .linear_att import ReqManagerForMamba
 from .hybrid_base import HybridAttentionReqManager
+from .linear_att import ReqManagerForMamba
 from .req_sampling_params import ReqSamplingParamsManager
+from .sliding_window import ReqManagerForSlidingWindow
 
-__all__ = ["ReqManager", "HybridAttentionReqManager", "ReqManagerForMamba", "ReqSamplingParamsManager"]
+__all__ = [
+    "ReqManager",
+    "HybridAttentionReqManager",
+    "ReqManagerForMamba",
+    "ReqManagerForSlidingWindow",
+    "ReqSamplingParamsManager",
+]
