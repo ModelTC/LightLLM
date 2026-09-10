@@ -85,7 +85,6 @@ class ShmPortArgs:
             self._shm_name,
             self._SHM_SIZE,
             force_mode="create" if create else "link",
-            auto_cleanup=create,
         )
         if create:
             self._save({})

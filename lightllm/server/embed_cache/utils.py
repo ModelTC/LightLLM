@@ -1,5 +1,7 @@
 import multiprocessing.shared_memory as shm
 
+from lightllm.utils.envs_utils import get_unique_server_name
+
 
 def create_shm(name, data):
     try:
@@ -24,4 +26,4 @@ def free_shm(name):
 
 
 def get_shm_name_data(uid):
-    return str(uid) + "-data"
+    return f"{get_unique_server_name()}_{uid}-data"

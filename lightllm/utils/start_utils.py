@@ -7,7 +7,8 @@ import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import is_process_active
-from lightllm.utils.auto_shm_cleanup import get_auto_cleanup
+from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.service_shm_cleanup import register_launcher_shm_cleanup
 
 logger = init_logger(__name__)
 
@@ -16,6 +17,7 @@ class SubmoduleManager:
     def __init__(self):
         self.processes = []
         self.process_names = {}
+        self._cleanup_service_shm = None
 
     def start_submodule_processes(self, start_funcs=[], start_args=[]):
         assert len(start_funcs) == len(start_args)
@@ -95,6 +97,9 @@ class SubmoduleManager:
                 kill_recursive(proc)
                 proc.wait()
 
+        if self._cleanup_service_shm is not None:
+            self._cleanup_service_shm()
+
         # recover the gpu compute mode
         is_enable_mps = get_env_start_args().enable_mps
         if is_enable_mps:
@@ -104,9 +109,8 @@ class SubmoduleManager:
         logger.info("All processes terminated gracefully.")
 
     def setup_signal_handlers(self, http_server_process=None):
-        # AutoShmCleanup 会安装自己的信号处理器；先初始化它，再由 launcher
-        # 接管信号，避免多机 rendezvous 阶段的 SIGINT 被清理器处理后继续阻塞。
-        get_auto_cleanup()
+        # 共享内存由 launcher 在所有子进程退出后统一回收，不再让资源对象注册信号处理器。
+        self._cleanup_service_shm = register_launcher_shm_cleanup(get_unique_server_name())
 
         def signal_handler(sig, _frame):
             if sig == signal.SIGINT:

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from lightllm.utils import start_utils
@@ -144,8 +146,13 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     process_manager = start_utils.SubmoduleManager()
     registered_handlers = {}
     terminate_calls = []
-    auto_cleanup_calls = []
-    monkeypatch.setattr(start_utils, "get_auto_cleanup", lambda: auto_cleanup_calls.append(True))
+    cleanup_calls = []
+    monkeypatch.setattr(start_utils, "get_unique_server_name", lambda: "service_0")
+    monkeypatch.setattr(
+        start_utils,
+        "register_launcher_shm_cleanup",
+        lambda service_name: cleanup_calls.append(("register", service_name)) or (lambda: None),
+    )
     monkeypatch.setattr(
         start_utils.signal,
         "signal",
@@ -160,7 +167,7 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
         start_utils.signal.SIGINT,
         start_utils.signal.SIGHUP,
     }
-    assert auto_cleanup_calls == [True]
+    assert cleanup_calls == [("register", "service_0")]
     with pytest.raises(SystemExit) as exc_info:
         registered_handlers[start_utils.signal.SIGTERM](start_utils.signal.SIGTERM, None)
 
@@ -168,6 +175,19 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     assert http_server_process.sent_signals == [start_utils.signal.SIGTERM]
     assert http_server_process.wait_timeouts == [60]
     assert terminate_calls == [True]
+
+
+def test_terminate_all_processes_runs_launcher_shm_cleanup(monkeypatch):
+    from lightllm.utils import envs_utils
+
+    process_manager = start_utils.SubmoduleManager()
+    cleanup_calls = []
+    process_manager._cleanup_service_shm = lambda: cleanup_calls.append(True)
+    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(enable_mps=False))
+
+    process_manager.terminate_all_processes()
+
+    assert cleanup_calls == [True]
 
 
 def test_supervisor_fails_when_http_server_exits(monkeypatch):
