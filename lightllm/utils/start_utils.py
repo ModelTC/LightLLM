@@ -8,7 +8,7 @@ import psutil
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.service_shm_cleanup import register_launcher_shm_cleanup
+from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_process
 
 logger = init_logger(__name__)
 
@@ -17,7 +17,6 @@ class SubmoduleManager:
     def __init__(self):
         self.processes = []
         self.process_names = {}
-        self._cleanup_service_shm = None
 
     def start_submodule_processes(self, start_funcs=[], start_args=[]):
         assert len(start_funcs) == len(start_args)
@@ -97,9 +96,6 @@ class SubmoduleManager:
                 kill_recursive(proc)
                 proc.wait()
 
-        if self._cleanup_service_shm is not None:
-            self._cleanup_service_shm()
-
         # recover the gpu compute mode
         is_enable_mps = get_env_start_args().enable_mps
         if is_enable_mps:
@@ -109,24 +105,12 @@ class SubmoduleManager:
         logger.info("All processes terminated gracefully.")
 
     def setup_exit_controller(self):
-        """初始化 launcher 退出清理控制器，注册启动阶段信号处理和 atexit 回调。
+        """启动 launcher 的独立资源清理进程。
 
         在 service name 和启动参数写入环境后、创建共享内存或启动子进程前调用。
-        重复调用只注册一次；退出时由 launcher 在子进程停止后统一回收共享内存。
-        启动完成后由 setup_signal_handlers 替换信号处理函数，纳入 HTTP server 的退出流程。
+        launcher 退出后由独立进程回收资源。
         """
-        if self._cleanup_service_shm is not None:
-            return
-        self._cleanup_service_shm = register_launcher_shm_cleanup(get_unique_server_name())
-
-        def signal_handler(sig, _frame):
-            logger.info(f"Received {signal.Signals(sig).name} during startup, shutting down...")
-            self.terminate_all_processes()
-            sys.exit(0)
-
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGHUP, signal_handler)
+        start_launcher_shm_cleanup_process(get_unique_server_name())
 
     def setup_signal_handlers(self, http_server_process=None):
         """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
