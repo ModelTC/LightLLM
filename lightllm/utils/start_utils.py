@@ -109,16 +109,27 @@ class SubmoduleManager:
         logger.info("All processes terminated gracefully.")
 
     def setup_exit_controller(self):
-        """初始化 launcher 退出清理控制器，并注册 atexit 兜底回调。
+        """初始化 launcher 退出清理控制器，注册启动阶段信号处理和 atexit 回调。
 
         在 service name 和启动参数写入环境后、创建共享内存或启动子进程前调用。
         重复调用只注册一次；退出时由 launcher 在子进程停止后统一回收共享内存。
+        启动完成后由 setup_signal_handlers 替换信号处理函数，纳入 HTTP server 的退出流程。
         """
-        if self._cleanup_service_shm is None:
-            self._cleanup_service_shm = register_launcher_shm_cleanup(get_unique_server_name())
+        if self._cleanup_service_shm is not None:
+            return
+        self._cleanup_service_shm = register_launcher_shm_cleanup(get_unique_server_name())
+
+        def signal_handler(sig, _frame):
+            logger.info(f"Received {signal.Signals(sig).name} during startup, shutting down...")
+            self.terminate_all_processes()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGHUP, signal_handler)
 
     def setup_signal_handlers(self, http_server_process=None):
-        """在子进程启动完成后安装退出信号处理函数。"""
+        """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
 
         def signal_handler(sig, _frame):
             if sig == signal.SIGINT:

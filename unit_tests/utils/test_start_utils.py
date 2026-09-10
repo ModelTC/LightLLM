@@ -141,12 +141,14 @@ def test_register_process_tree_ignores_processes_that_exit_during_scan():
     assert process_manager.process_names == {}
 
 
-def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
+@pytest.mark.parametrize("initialize_exit_controller", [False, True])
+def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch, initialize_exit_controller):
     http_server_process = FakeHttpServerProcess()
     process_manager = start_utils.SubmoduleManager()
     registered_handlers = {}
     terminate_calls = []
     cleanup_calls = []
+    monkeypatch.setattr(start_utils, "get_unique_server_name", lambda: "service_0")
     monkeypatch.setattr(
         start_utils,
         "register_launcher_shm_cleanup",
@@ -159,6 +161,9 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     )
     monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
 
+    if initialize_exit_controller:
+        process_manager.setup_exit_controller()
+    startup_handlers = registered_handlers.copy()
     process_manager.setup_signal_handlers(http_server_process)
 
     assert set(registered_handlers) == {
@@ -166,7 +171,12 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
         start_utils.signal.SIGINT,
         start_utils.signal.SIGHUP,
     }
-    assert cleanup_calls == []
+    assert cleanup_calls == ([("register", "service_0")] if initialize_exit_controller else [])
+    if initialize_exit_controller:
+        assert all(registered_handlers[sig] is not handler for sig, handler in startup_handlers.items())
+        runtime_handlers = registered_handlers.copy()
+        process_manager.setup_exit_controller()
+        assert registered_handlers == runtime_handlers
     with pytest.raises(SystemExit) as exc_info:
         registered_handlers[start_utils.signal.SIGTERM](start_utils.signal.SIGTERM, None)
 
@@ -176,29 +186,52 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     assert terminate_calls == [True]
 
 
-def test_setup_exit_controller_registers_once_and_cleans_up_on_termination(monkeypatch):
+@pytest.mark.parametrize(
+    "shutdown_signal", [start_utils.signal.SIGTERM, start_utils.signal.SIGINT, start_utils.signal.SIGHUP]
+)
+def test_setup_exit_controller_registers_once_and_cleans_up_on_signal(monkeypatch, shutdown_signal):
     from lightllm.utils import envs_utils
 
     process_manager = start_utils.SubmoduleManager()
     registration_calls = []
-    cleanup_calls = []
+    registered_handlers = {}
+    shutdown_events = []
+    managed_process = FakeProcess(pid=1234)
+    managed_process.kill = lambda: shutdown_events.append("kill")
+    managed_process.wait = lambda: shutdown_events.append("wait")
+    process_manager.processes = [managed_process]
+    monkeypatch.setattr(start_utils.psutil, "Process", lambda pid: managed_process)
     monkeypatch.setattr(start_utils, "get_unique_server_name", lambda: "service_0")
     monkeypatch.setattr(
         start_utils,
         "register_launcher_shm_cleanup",
-        lambda service_name: registration_calls.append(service_name) or (lambda: cleanup_calls.append(True)),
+        lambda service_name: registration_calls.append(service_name) or (lambda: shutdown_events.append("cleanup")),
+    )
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: registered_handlers.__setitem__(sig, handler),
     )
     monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(enable_mps=False))
 
     process_manager.setup_exit_controller()
+    initial_handlers = registered_handlers.copy()
     process_manager.setup_exit_controller()
 
     assert registration_calls == ["service_0"]
-    assert cleanup_calls == []
+    assert set(registered_handlers) == {
+        start_utils.signal.SIGTERM,
+        start_utils.signal.SIGINT,
+        start_utils.signal.SIGHUP,
+    }
+    assert registered_handlers == initial_handlers
+    assert shutdown_events == []
 
-    process_manager.terminate_all_processes()
+    with pytest.raises(SystemExit) as exc_info:
+        registered_handlers[shutdown_signal](shutdown_signal, None)
 
-    assert cleanup_calls == [True]
+    assert exc_info.value.code == 0
+    assert shutdown_events == ["kill", "wait", "cleanup"]
 
 
 def test_supervisor_fails_when_http_server_exits(monkeypatch):
