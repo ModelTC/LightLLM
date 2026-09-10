@@ -88,12 +88,13 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
             if g_infer_context.is_hybrid_att_model:
+                # KV 分段之外，单独发送 prompt 末尾的 attention 续算状态。
                 trans_task_list.append(
                     self._create_pd_trans_task(
                         req_obj=req_obj,
                         kv_start_index=input_len,
                         kv_end_index=input_len,
-                        page_kind="linear_att_state",
+                        page_kind="att_state",
                     )
                 )
             trans_task_list[-1].first_gen_token_id = next_token_id
@@ -127,7 +128,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 .tolist()
             )
             req_idx = None
-        elif page_kind == "linear_att_state":
+        elif page_kind == "att_state":
             mem_indexes = []
             req_idx = req_obj.req_idx
         else:

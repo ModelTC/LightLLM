@@ -179,6 +179,9 @@ class PDChunckedTransTask:
 
     error_info: Optional[str] = None
     transfer_time_out_secs: int = 66
+    # kv: 通过 mem_indexes 传输 [start_kv_index, end_kv_index) 的 token KV。
+    # att_state: start_kv_index == end_kv_index 处的 attention 续算状态（如 conv/SSM）。
+    # 状态通过本地 req_idx 寻址，mem_indexes 为空；具体打包和恢复由模型 mem_manager 负责。
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
@@ -190,7 +193,7 @@ class PDChunckedTransTask:
             raise ValueError(error_info)
         if self.page_kind == "kv":
             assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
-        elif self.page_kind == "linear_att_state":
+        elif self.page_kind == "att_state":
             assert self.start_kv_index == self.end_kv_index
             assert len(self.mem_indexes) == 0
         else:
@@ -216,6 +219,7 @@ class PDChunckedTransTask:
         return time.time() - self.start_trans_time
 
     def get_key(self) -> str:
+        # page_kind 参与 P/D 任务匹配，发送端和接收端必须使用一致的协议取值。
         return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
 
     def to_str(self):
@@ -237,6 +241,7 @@ class PDChunckedTransTask:
         return self.end_kv_index - self.start_kv_index
 
     def need_transfer_page(self):
+        # att_state 虽然没有 token 区间，仍需传一页；空 kv 任务仅用于完成通知。
         return self.page_kind != "kv" or self.transfer_kv_num() != 0
 
     def createRetObj(self) -> "PDChunckedTransTaskRet":

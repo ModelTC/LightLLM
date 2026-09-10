@@ -158,7 +158,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
                 req_obj.cur_kv_len += len(mem_indexes)
 
-                # hybrid 模型额外传输 prompt 末尾的请求状态页。
+                # 额外接收 prompt 末尾的 attention 续算状态，由本地 req_idx 定位恢复位置。
                 if g_infer_context.is_hybrid_att_model:
                     self._create_pd_trans_task(
                         req_obj=req_obj,
@@ -166,7 +166,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                         kv_start_index=input_len,
                         kv_end_index=input_len,
                         group=group,
-                        page_kind="linear_att_state",
+                        page_kind="att_state",
                     )
         else:
             assert req_obj.cur_kv_len == input_len - 1
@@ -205,7 +205,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
         if page_kind == "kv":
             req_idx = None
-        elif page_kind == "linear_att_state":
+        elif page_kind == "att_state":
             req_idx = req_obj.req_idx
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")

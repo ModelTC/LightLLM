@@ -104,7 +104,7 @@ class Qwen3NextMemManager(MemoryManager):
                 page_kind=page_kind,
                 req_idx=req_idx,
             )
-        assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
+        assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
@@ -131,7 +131,7 @@ class Qwen3NextMemManager(MemoryManager):
                 page_kind=page_kind,
                 req_idx=req_idx,
             )
-        assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
+        assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
