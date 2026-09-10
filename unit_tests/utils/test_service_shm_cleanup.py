@@ -1,5 +1,4 @@
 import json
-import os
 
 from lightllm.utils import service_shm_cleanup
 
@@ -13,14 +12,14 @@ def test_cleanup_service_shm_only_removes_matching_service(monkeypatch, tmp_path
 
     removed_system_v_keys = []
     monkeypatch.setattr(service_shm_cleanup, "SHM_DIR", shm_dir)
-    monkeypatch.setattr(service_shm_cleanup, "_unlink_posix_shm", lambda name: (shm_dir / name).unlink())
     monkeypatch.setattr(
-        service_shm_cleanup,
-        "_remove_system_v_shm",
-        lambda key: removed_system_v_keys.append(key) or True,
+        service_shm_cleanup.ServiceShmCleanup,
+        "cleanup_system_v_shm",
+        staticmethod(lambda keys: removed_system_v_keys.extend(keys) or len(keys)),
     )
 
-    service_shm_cleanup.cleanup_service_shm("service_0", [101, 102])
+    service_shm_cleanup.ServiceShmCleanup.cleanup_posix_shm("service_0")
+    service_shm_cleanup.ServiceShmCleanup.cleanup_system_v_shm([101, 102])
 
     assert all(not (shm_dir / name).exists() for name in matching_names)
     assert (shm_dir / "service_1_req_pool").exists()
@@ -28,46 +27,96 @@ def test_cleanup_service_shm_only_removes_matching_service(monkeypatch, tmp_path
     assert removed_system_v_keys == [101, 102]
 
 
-def test_register_launcher_cleanup_recovers_dead_owner_and_records_current_service(monkeypatch, tmp_path):
-    owner_dir = tmp_path / "owners"
-    owner_dir.mkdir()
-    old_owner_path = owner_dir / "old_service_0.json"
-    old_owner_path.write_text(
-        json.dumps(
-            {
-                "service_name": "old_service_0",
-                "pid": 999999999,
-                "create_time": 1.0,
-                "system_v_shm_keys": [11],
-            }
-        ),
-        encoding="utf-8",
+def test_system_v_shm_keys_follow_feature_switches(monkeypatch):
+    start_args = {
+        "run_mode": "prefill",
+        "enable_cpu_cache": True,
+        "enable_multimodal": False,
+        "cpu_kv_cache_shm_id": 21,
+        "multi_modal_cache_shm_id": 22,
+    }
+    removed_system_v_keys = []
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(start_args))
+    monkeypatch.setattr(
+        service_shm_cleanup.ServiceShmCleanup,
+        "cleanup_posix_shm",
+        staticmethod(lambda service_name: 0),
+    )
+    monkeypatch.setattr(
+        service_shm_cleanup.ServiceShmCleanup,
+        "cleanup_system_v_shm",
+        staticmethod(lambda keys: removed_system_v_keys.extend(keys) or len(keys)),
     )
 
+    service_shm_cleanup.ServiceShmCleanup("current_service_0").cleanup_service_resources()
+
+    assert removed_system_v_keys == [21]
+
+
+def test_non_inference_mode_skips_system_v_shm_cleanup(monkeypatch):
+    start_args = {
+        "run_mode": "visual_only",
+        "enable_cpu_cache": True,
+        "enable_multimodal": True,
+        "cpu_kv_cache_shm_id": 21,
+        "multi_modal_cache_shm_id": 22,
+    }
+    system_v_cleanup_calls = []
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(start_args))
+    monkeypatch.setattr(
+        service_shm_cleanup.ServiceShmCleanup,
+        "cleanup_posix_shm",
+        staticmethod(lambda service_name: 0),
+    )
+    monkeypatch.setattr(
+        service_shm_cleanup.ServiceShmCleanup,
+        "cleanup_system_v_shm",
+        staticmethod(lambda keys: system_v_cleanup_calls.append(keys) or 0),
+    )
+
+    service_shm_cleanup.ServiceShmCleanup("current_service_0").cleanup_service_resources()
+
+    assert system_v_cleanup_calls == []
+
+
+def test_register_launcher_cleanup_uses_current_start_args(monkeypatch):
     cleanup_calls = []
     atexit_callbacks = []
-    monkeypatch.setattr(service_shm_cleanup, "OWNER_DIR", owner_dir)
-    monkeypatch.setattr(service_shm_cleanup, "OWNER_LOCK_PATH", tmp_path / "owners.lock")
-    monkeypatch.setattr(service_shm_cleanup, "cleanup_service_shm", lambda *args: cleanup_calls.append(args))
+    monkeypatch.setattr(
+        service_shm_cleanup.ServiceShmCleanup,
+        "cleanup_posix_shm",
+        staticmethod(lambda service_name: cleanup_calls.append(("posix", service_name)) or 0),
+    )
+    monkeypatch.setattr(
+        service_shm_cleanup.ServiceShmCleanup,
+        "cleanup_system_v_shm",
+        staticmethod(lambda keys: cleanup_calls.append(("system_v", keys)) or 0),
+    )
     monkeypatch.setattr(service_shm_cleanup.atexit, "register", atexit_callbacks.append)
+    start_args = {
+        "run_mode": "normal",
+        "model_dir": "/models/test",
+        "tp": 2,
+        "enable_cpu_cache": True,
+        "enable_multimodal": True,
+        "cpu_kv_cache_shm_id": 21,
+        "multi_modal_cache_shm_id": 22,
+    }
     monkeypatch.setenv(
         "LIGHTLLM_START_ARGS",
-        json.dumps({"cpu_kv_cache_shm_id": 21, "multi_modal_cache_shm_id": 22}),
+        json.dumps(start_args),
     )
-    service_shm_cleanup._registered_cleanups.clear()
 
     cleanup = service_shm_cleanup.register_launcher_shm_cleanup("current_service_0")
 
-    assert cleanup_calls == [("old_service_0", [11])]
-    assert not old_owner_path.exists()
-    current_owner_path = owner_dir / "current_service_0.json"
-    current_owner = json.loads(current_owner_path.read_text(encoding="utf-8"))
-    assert current_owner["pid"] == os.getpid()
-    assert current_owner["system_v_shm_keys"] == [21, 22]
+    assert cleanup_calls == []
     assert atexit_callbacks == [cleanup]
 
     cleanup()
     cleanup()
-    assert cleanup_calls[-1] == ("current_service_0", [21, 22])
-    assert cleanup_calls.count(("current_service_0", [21, 22])) == 1
-    assert not current_owner_path.exists()
+    assert cleanup_calls == [
+        ("posix", "current_service_0"),
+        ("system_v", [21, 22]),
+        ("posix", "current_service_0"),
+        ("system_v", [21, 22]),
+    ]

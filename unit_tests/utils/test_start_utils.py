@@ -161,6 +161,7 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
 
     process_manager.setup_signal_handlers(http_server_process)
+    process_manager.setup_signal_handlers(http_server_process)
 
     assert set(registered_handlers) == {
         start_utils.signal.SIGTERM,

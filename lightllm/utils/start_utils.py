@@ -110,7 +110,9 @@ class SubmoduleManager:
 
     def setup_signal_handlers(self, http_server_process=None):
         # 共享内存由 launcher 在所有子进程退出后统一回收，不再让资源对象注册信号处理器。
-        self._cleanup_service_shm = register_launcher_shm_cleanup(get_unique_server_name())
+        # 启动 HTTP server 前后都会调用本函数，但每个 launcher 只需要一个清理对象和一个 atexit 回调。
+        if self._cleanup_service_shm is None:
+            self._cleanup_service_shm = register_launcher_shm_cleanup(get_unique_server_name())
 
         def signal_handler(sig, _frame):
             if sig == signal.SIGINT:
