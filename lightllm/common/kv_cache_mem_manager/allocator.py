@@ -1,7 +1,6 @@
 import torch
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.dist_utils import get_current_rank_in_node
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from typing import Union, List
 
@@ -25,10 +24,8 @@ class KvCacheAllocator:
         self.can_use_mem_size = self.size
 
         rank_in_node = get_current_rank_in_node()
-        # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-        self.shared_can_use_token_num = SharedInt(
-            f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
-        )
+        # 用共享内存进行共享，router 模块读取进行精确的调度估计；基础层会统一添加服务前缀以防止实例冲突。
+        self.shared_can_use_token_num = SharedInt(f"mem_manger_can_use_token_num_{rank_in_node}")
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return
 

@@ -30,6 +30,8 @@ def _get_system_v_shm_keys():
 
 
 def _unlink_posix_shm(name):
+    # name 来自 /dev/shm 的实际条目，可能属于上一次异常退出的其他 service。
+    # 这里必须直接使用完整名称，不能再按当前 service 添加前缀。
     shm = shared_memory.SharedMemory(name=name, create=False)
     try:
         shm.unlink()

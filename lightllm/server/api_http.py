@@ -111,7 +111,7 @@ class G_Objs:
             self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
-            self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)
+            self.shared_token_load = TokenLoad("shared_token_load", dp_size_in_node)
 
 
 g_objs = G_Objs()

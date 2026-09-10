@@ -64,7 +64,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.load_way = args.load_way
         self.max_total_token_num = args.max_total_token_num
         # 存储在共享内存中的真实token容量数据
-        self.shm_max_total_token_num = SharedInt(f"{get_unique_server_name()}_shm_max_total_token_num")
+        self.shm_max_total_token_num = SharedInt("shm_max_total_token_num")
         self.shm_req_manager = ShmReqManager()
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
@@ -72,7 +72,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.radix_cache_client = None
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
-        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
+        self.shared_token_load = TokenLoad("shared_token_load", self.dp_size_in_node)
         for dp_index in range(self.dp_size_in_node):
             self.shared_token_load.set_estimated_peak_token_count(0, dp_index)
             self.shared_token_load.set_current_load(0.0, dp_index)
@@ -197,7 +197,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
         if not self.args.disable_dynamic_prompt_cache:
             self.radix_cache_client = RadixCacheReadOnlyClient(
-                get_unique_server_name(),
                 self.max_total_token_num,
                 node_world_size=self.node_world_size,
                 dp_world_size=self.dp_world_size,

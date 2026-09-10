@@ -20,7 +20,6 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridA
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -121,7 +120,7 @@ class ModeBackend:
         )
         dist_group_manager.create_groups(group_size=group_size)  # set the default group
 
-        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
+        self.shared_token_load = TokenLoad("shared_token_load", self.dp_size_in_node)
 
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
@@ -164,7 +163,6 @@ class ModeBackend:
         else:
             if self.is_hybrid_att_model:
                 self.radix_cache = HybridAttPagedRadixCache(
-                    unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     hash_page_size=self.args.linear_att_hash_page_size,
@@ -174,7 +172,6 @@ class ModeBackend:
                 )
             else:
                 self.radix_cache = RadixCache(
-                    unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,

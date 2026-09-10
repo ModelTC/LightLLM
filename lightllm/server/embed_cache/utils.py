@@ -1,9 +1,10 @@
 import multiprocessing.shared_memory as shm
 
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_utils import get_service_shm_name
 
 
 def create_shm(name, data):
+    name = get_service_shm_name(name)
     try:
         data_size = len(data)
         shared_memory = shm.SharedMemory(name=name, create=True, size=data_size)
@@ -14,16 +15,18 @@ def create_shm(name, data):
 
 
 def read_shm(name):
+    name = get_service_shm_name(name)
     shared_memory = shm.SharedMemory(name=name)
     data = shared_memory.buf.tobytes()
     return data
 
 
 def free_shm(name):
+    name = get_service_shm_name(name)
     shared_memory = shm.SharedMemory(name=name)
     shared_memory.close()
     shared_memory.unlink()
 
 
 def get_shm_name_data(uid):
-    return f"{get_unique_server_name()}_{uid}-data"
+    return f"{uid}-data"

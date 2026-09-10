@@ -112,7 +112,6 @@ class HybridAttPagedTreeNode:
 class HybridAttPagedRadixCache:
     def __init__(
         self,
-        unique_name: str,
         total_token_num: int,
         rank_in_node: int,
         hash_page_size: int,
@@ -147,11 +146,9 @@ class HybridAttPagedRadixCache:
             key=lambda x: x.get_compare_key_for_buffer_idx()
         )
 
-        self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
+        self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
-        self.tree_total_tokens_num = SharedArray(
-            f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
-        )
+        self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
         self.small_page_buffers: StateCacheManager = small_page_buffers
 

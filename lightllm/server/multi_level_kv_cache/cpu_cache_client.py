@@ -1,5 +1,5 @@
 import ctypes
-from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name, get_disk_cache_prompt_limit_length
+from lightllm.utils.envs_utils import get_env_start_args, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.cpu_cache import CpuCacheCreator, CpuCacheTensorSpec
@@ -20,7 +20,7 @@ class CpuKvCacheClient(object):
         # to do here need calcu from from settings.
         self.kv_cache_tensor_meta = calcu_cpu_cache_meta()
         self.page_num: int = self.kv_cache_tensor_meta.page_num
-        self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_cpu_kv_cache_client_lock")
+        self.lock = AtomicShmLock(lock_name="cpu_kv_cache_client_lock")
         self._create_cpu_status_list(init_shm_data)
 
         if not only_create_meta_data:
@@ -268,18 +268,18 @@ class CpuKvCacheClient(object):
 
     def _create_cpu_status_list(self, init_shm_data: bool):
         self.page_items = ShmLinkedList(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_page_items",
+            name="cpu_kv_cache_page_items",
             item_class=_CpuPageStatus,
             capacity=self.page_num,
             init_shm_data=init_shm_data,
         )
         self.page_hash_dict = ShmDict(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_hash",
+            name="cpu_kv_cache_hash",
             capacity=self.page_num * 2,
             init_shm_data=init_shm_data,
         )
         self.offload_page_indexes = IntList(
-            name=f"{get_unique_server_name()}_cpu_kv_cache_offload_page_indexes",
+            name="cpu_kv_cache_offload_page_indexes",
             capacity=self.page_num * 2,
             init_shm_data=init_shm_data,
         )

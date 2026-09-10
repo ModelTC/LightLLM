@@ -36,7 +36,6 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import (
     ClientDisconnected,
@@ -62,7 +61,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
-        self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 2)
+        self._shm_lock_pool = AtomicShmArrayLock("lightllm_resource_lock", 2)
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
         self._run_reqs_count_lock = AsyncLock(self._shm_lock_pool.get_lock_context(1))
         self.node_rank = args.node_rank
@@ -129,19 +128,19 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
 
         # Timemark of the latest successful inference, used by passive /health checks.
-        self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
+        self.latest_success_infer_time_mark = SharedInt("latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
 
         self.rl_controller: Optional[HttpRlController] = HttpRlController(self) if args.enable_rl else None
 
-        self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
+        self.run_reqs_count_mark = SharedInt("run_reqs_count_mark")
         self.run_reqs_count_mark.set_value(0)
 
         # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
         # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
         # 会触发整个系统崩溃，所以httpserver需要知道真实的 max_total_token_num的数据，用于提前拦截非法请求等参数。
         # router 进程会在启动后向这个共享内存写入正确的max_total_token_num 参数，用于后续的请求控制。
-        self.shm_max_total_token_num = SharedInt(f"{get_unique_server_name()}_shm_max_total_token_num")
+        self.shm_max_total_token_num = SharedInt("shm_max_total_token_num")
         return
 
     def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):

@@ -99,11 +99,7 @@ def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
 
 
 class RadixCache:
-    """
-    unique_name 主要用于解决单机，多实列部署时的shm冲突
-    """
-
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
+    def __init__(self, total_token_num, rank_in_node, mem_manager=None):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         self.total_token_num = total_token_num
@@ -119,11 +115,9 @@ class RadixCache:
         self.evict_tree_set: Set[TreeNode] = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
         self.evict_tree_set.add(self.root_node)
 
-        self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
+        self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
-        self.tree_total_tokens_num = SharedArray(
-            f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
-        )
+        self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
 
     def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
@@ -515,11 +509,9 @@ class _RadixCacheReadOnlyClient:
     router 端只读用的客户端，用于从共享内存中读取树结构中的信息，用于进行prompt cache 的调度估计。
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node):
-        self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
-        self.tree_total_tokens_num = SharedArray(
-            f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
-        )
+    def __init__(self, total_token_num, rank_in_node):
+        self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
+        self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
 
     def get_refed_tokens_num(self):
         return self.refed_tokens_num.arr[0]
@@ -532,9 +524,9 @@ class _RadixCacheReadOnlyClient:
 
 
 class RadixCacheReadOnlyClient:
-    def __init__(self, unique_name, total_token_num, node_world_size, dp_world_size):
+    def __init__(self, total_token_num, node_world_size, dp_world_size):
         self.dp_rank_clients: List[_RadixCacheReadOnlyClient] = [
-            _RadixCacheReadOnlyClient(unique_name, total_token_num, rank_in_node)
+            _RadixCacheReadOnlyClient(total_token_num, rank_in_node)
             for rank_in_node in range(0, node_world_size, dp_world_size)
         ]
 

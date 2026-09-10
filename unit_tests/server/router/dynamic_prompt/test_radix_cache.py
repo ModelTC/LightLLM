@@ -4,7 +4,7 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 
 
 def test_case1():
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     assert ans == 0
     tree.print_self()
@@ -25,7 +25,7 @@ def test_case1():
 
 
 def test_case2():
-    tree = RadixCache("unique_name", 100, 1)
+    tree = RadixCache(100, 1)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
     tree.print_self()
@@ -51,7 +51,7 @@ def test_case2():
 
 
 def test_case3():
-    tree = RadixCache("unique_name", 100, 2)
+    tree = RadixCache(100, 2)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
     tree.print_self()
@@ -81,7 +81,7 @@ def test_case3():
 
 def test_case4():
 
-    tree = RadixCache("unique_name", 100, 2)
+    tree = RadixCache(100, 2)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
     tree.print_self()
@@ -96,7 +96,7 @@ def test_case5():
     测试场景：一个简单的父子节点链 (A -> B)，在 ref_counter 都为 0 时，应该成功合并。
     """
     print("\nTest Case 5: Merging simple parent-child nodes when ref_counter is 0\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     _, node_a = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
@@ -125,7 +125,7 @@ def test_case6():
     测试场景：一个长的节点链 (A -> B -> C)，在 ref_counter 都为 0 时，应该级联合并成一个节点。
     """
     print("\nTest Case 6: Merging long nodes when ref_counter is 0\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
     _, node_a = tree.insert(torch.tensor([1], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2], dtype=torch.int64))
     _, node_c = tree.insert(torch.tensor([1, 2, 3, 4], dtype=torch.int64))
@@ -149,7 +149,7 @@ def test_case7():
     测试场景：由于父节点或子节点的 ref_counter > 0，合并不应该发生。
     """
     print("\nTest Case 7: Merging when parent or child ref_counter > 0\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     _, node_a = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
@@ -173,7 +173,7 @@ def test_case8():
     测试场景：由于父节点有多个子节点，合并不应该发生。
     """
     print("\nTest Case 8: Merging when parent has multiple children\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     _, node_a = tree.insert(torch.tensor([1, 2], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
@@ -199,7 +199,7 @@ def test_case9():
     测试场景：在一个复杂的树中，只有满足条件的分支被合并。
     """
     print("\nTest Case 9: Merging in a complex tree with mixed conditions\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     # 分支1: 可合并的链 A -> B
     _, node_a = tree.insert(torch.tensor([1, 2], dtype=torch.int64))
@@ -235,7 +235,7 @@ def test_case10():
     测试场景：测试 flush_cache 函数
     """
     print("\nTest Case 10: Testing flush_cache function\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
     tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
     tree_node, size, values = tree.match_prefix(

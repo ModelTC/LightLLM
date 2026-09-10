@@ -5,7 +5,7 @@ import dataclasses
 import torch
 from typing import List
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
@@ -26,7 +26,7 @@ class DPKVSharedMoudle:
 
         # 0 代表 kv_len, 1 代表 radix_cache_len
         self.shared_req_infos = ShmArray(
-            name=f"{get_unique_server_name()}_dp_shared_req_infos",
+            name="dp_shared_req_infos",
             shape=(self.max_req_num, dp_size_in_node, 2),
             dtype=np.int64,
         )

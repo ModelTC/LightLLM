@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_utils import create_or_link_shm
 
@@ -175,5 +174,4 @@ class ReqFinalTokenMetadata:
         }
 
     def _shm_name(self) -> str:
-        service_uni_name = get_unique_server_name()
-        return f"{service_uni_name}_shm_final_token_metadata_{self.req.index_in_shm_mem}"
+        return f"shm_final_token_metadata_{self.req.index_in_shm_mem}"

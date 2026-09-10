@@ -14,7 +14,8 @@ from lightllm.utils.dist_utils import (
     get_current_rank_in_node,
     get_node_world_size,
 )
-from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.shm_utils import get_service_shm_name
 from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.device_utils import kv_trans_use_p2p
@@ -237,10 +238,10 @@ class MemoryManager:
         # 避免过多无用的数据复制和传输开销。
         self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
 
-        lock = FileLock(f"/tmp/{get_unique_server_name()}_mem_manager_lock")
+        lock = FileLock(f"/tmp/{get_service_shm_name('mem_manager_lock')}")
         with lock:
             node_world_size = get_node_world_size()
-            shm_name = f"{get_unique_server_name()}_mem_manager_{get_current_rank_in_node()}"
+            shm_name = f"mem_manager_{get_current_rank_in_node()}"
             obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
             obj_size = len(obj_bytes_array[0])
             shm = create_or_link_shm(
@@ -256,8 +257,8 @@ class MemoryManager:
 
     @staticmethod
     def loads_from_shm(rank_in_node: int) -> "MemoryManager":
-        shm_name = f"{get_unique_server_name()}_mem_manager_{rank_in_node}"
-        lock = FileLock(f"/tmp/{get_unique_server_name()}_mem_manager_lock")
+        shm_name = f"mem_manager_{rank_in_node}"
+        lock = FileLock(f"/tmp/{get_service_shm_name('mem_manager_lock')}")
         logger.info(f"get memmanager from shm {shm_name}")
         with lock:
             shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
@@ -285,7 +286,7 @@ class ReadOnlyStaticsMemoryManager:
         # 兼容多机 dp size=1 纯 tp 模式的情况
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.shared_tp_infos = [
-            SharedInt(f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}")
+            SharedInt(f"mem_manger_can_use_token_num_{rank_in_node}")
             for rank_in_node in range(0, self.node_world_size, self.dp_world_size)
         ]
 

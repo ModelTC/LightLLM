@@ -1,14 +1,29 @@
 from multiprocessing import shared_memory
 from filelock import FileLock
+from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
+def get_service_shm_name(name):
+    """为内部共享内存统一添加当前服务（UUID + node rank）前缀。
+
+    已带当前服务前缀的完整名称保持不变，便于底层包装函数安全复用；未运行在
+    launcher 环境中的独立工具和单元测试没有 service name，此时保留原名称。
+    """
+    name = str(name)
+    service_name = get_unique_server_name()
+    if not service_name:
+        return name
+    prefix = f"{service_name}_"
+    return name if name.startswith(prefix) else f"{prefix}{name}"
+
+
 def create_or_link_shm(name, expected_size, force_mode=None):
     """
     Args:
-        name: name of the shared memory
+        name: logical name of the shared memory; the current service prefix is added here
         expected_size: expected size of the shared memory, if expected_size == -1, no check for size linked.
         force_mode: force mode
             - 'create': force create new shared memory, if exists, delete and create
@@ -22,6 +37,7 @@ def create_or_link_shm(name, expected_size, force_mode=None):
         FileNotFoundError: when force_mode='link' but shared memory not exists
         ValueError: when force_mode='link' but size mismatch
     """
+    name = get_service_shm_name(name)
     lock_name = f"/tmp/{name}.lock"
 
     if force_mode == "create":

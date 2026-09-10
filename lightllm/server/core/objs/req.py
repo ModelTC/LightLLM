@@ -9,7 +9,6 @@ from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
 from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLenList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
@@ -280,22 +279,19 @@ class Req(ctypes.Structure):
         return
 
     def create_prompt_ids_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_prompts_{self.index_in_shm_mem}"
+        name = f"shm_prompts_{self.index_in_shm_mem}"
         self.shm_prompt_ids = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.int64)
         self.shm_prompt_ids.create_shm()
         return
 
     def link_prompt_ids_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_prompts_{self.index_in_shm_mem}"
+        name = f"shm_prompts_{self.index_in_shm_mem}"
         self.shm_prompt_ids = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.int64)
         self.shm_prompt_ids.link_shm()
         return
 
     def create_logprobs_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
+        name = f"shm_logprobs_{self.index_in_shm_mem}"
         self.shm_logprobs = ShmArray(
             name,
             (self.alloc_shm_numpy_len,),
@@ -308,8 +304,7 @@ class Req(ctypes.Structure):
         return
 
     def link_logprobs_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
+        name = f"shm_logprobs_{self.index_in_shm_mem}"
         self.shm_logprobs = ShmArray(
             name,
             (self.alloc_shm_numpy_len,),
