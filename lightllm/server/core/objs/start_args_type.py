@@ -201,6 +201,36 @@ class StartArgs:
     mtp_draft_model_dir: Optional[List[str]] = field(default=None)
     mtp_step: int = field(default=0)
     mtp_dynamic_verify: bool = field(default=False)
+    mtp_asd_regret_budget: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": (
+                "enable Approximate Speculative Decoding (ASD) acceptance for MTP greedy verification "
+                "with this per-request cumulative regret budget B (arxiv:2608.03447). A draft token whose "
+                "target-logit regret keeps the request-level cumulative regret within B is accepted. "
+                "None (default) keeps strict lossless verification; B=0 recovers it exactly. Regrets are "
+                "measured on the post-penalty, post-temperature logits used for token selection."
+            )
+        },
+    )
+    mtp_asd_local_regret_ratio: float = field(
+        default=0.25,
+        metadata={
+            "help": (
+                "ASD local gate g: a draft token at position i (of K draft tokens) is accepted only if "
+                "regret_i / (K - i) <= g. Later draft positions get less slack."
+            )
+        },
+    )
+    mtp_asd_block_max_mismatch: int = field(
+        default=2,
+        metadata={
+            "help": (
+                "ASD per-block cap m: at most m relaxed (non-argmax) draft tokens are accepted per "
+                "verify step. m=0 recovers strict greedy verification."
+            )
+        },
+    )
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)
