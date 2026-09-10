@@ -1,9 +1,38 @@
 from multiprocessing import shared_memory
+from threading import RLock
+from unittest.mock import patch
 from filelock import FileLock
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+class ServiceSharedMemory(shared_memory.SharedMemory):
+    """Shared memory reclaimed by the launcher's dedicated cleanup process."""
+
+    # patch() changes process-wide functions. Share one lock across all instances
+    # so concurrent calls through this class cannot restore patches out of order.
+    # RLock also allows the constructor to call unlink() if initialization fails.
+    _tracking_lock = RLock()
+
+    def __init__(self, name, create=False, size=0):
+        # Python's resource_tracker registers shared memory even when this process
+        # only attaches to a block created elsewhere (create=False). This can cause
+        # premature unlinking or shutdown warnings when another process owns cleanup.
+        # LightLLM reclaims service-owned blocks via its launcher cleanup process,
+        # so skip tracking for both creation and attachment.
+        # Workaround: https://stackoverflow.com/q/62748654/9191338
+        with self._tracking_lock:
+            with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
+                super().__init__(name=name, create=create, size=size)
+
+    def unlink(self):
+        # These blocks bypass registration, so suppress unregister as well.
+        # Unregistering an unknown name would raise KeyError in the tracker process.
+        with self._tracking_lock:
+            with patch("multiprocessing.resource_tracker.unregister", lambda *args, **kwargs: None):
+                super().unlink()
 
 
 def get_service_shm_name(name):
@@ -55,14 +84,14 @@ def create_or_link_shm(name, expected_size, force_mode=None):
 def _force_create_shm(name, expected_size):
     """强制创建新的共享内存"""
     try:
-        existing_shm = shared_memory.SharedMemory(name=name)
+        existing_shm = ServiceSharedMemory(name=name)
         existing_shm.close()
         existing_shm.unlink()
     except:
         pass
 
     # 创建新的共享内存
-    shm = shared_memory.SharedMemory(name=name, create=True, size=expected_size)
+    shm = ServiceSharedMemory(name=name, create=True, size=expected_size)
     return shm
 
 
@@ -70,7 +99,7 @@ def _force_link_shm(name, expected_size):
     """强制连接到已存在的共享内存,
     如果 expected_size 为 -1, 则不进行link的size校验比对"""
     try:
-        shm = shared_memory.SharedMemory(name=name)
+        shm = ServiceSharedMemory(name=name)
         # 验证大小
         if expected_size != -1 and shm.size != expected_size:
             shm.close()
