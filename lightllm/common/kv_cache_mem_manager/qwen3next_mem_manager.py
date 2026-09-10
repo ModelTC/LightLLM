@@ -1,5 +1,4 @@
 import torch
-from lightllm.server.pd_io_struct import HYBRID_ATT_STATE_PAGE_KIND
 import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
@@ -105,7 +104,7 @@ class Qwen3NextMemManager(MemoryManager):
                 page_kind=page_kind,
                 req_idx=req_idx,
             )
-        assert page_kind == HYBRID_ATT_STATE_PAGE_KIND, f"unknown page_kind={page_kind}"
+        assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
@@ -132,7 +131,7 @@ class Qwen3NextMemManager(MemoryManager):
                 page_kind=page_kind,
                 req_idx=req_idx,
             )
-        assert page_kind == HYBRID_ATT_STATE_PAGE_KIND, f"unknown page_kind={page_kind}"
+        assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)

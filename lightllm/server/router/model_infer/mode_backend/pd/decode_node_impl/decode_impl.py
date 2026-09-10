@@ -1,11 +1,6 @@
 import random
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import (
-    HYBRID_ATT_STATE_PAGE_KIND,
-    PDChunckedTransTask,
-    PDChunckedTransTaskGroup,
-    PDAbortReq,
-)
+from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
@@ -171,7 +166,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                         kv_start_index=input_len,
                         kv_end_index=input_len,
                         group=group,
-                        page_kind=HYBRID_ATT_STATE_PAGE_KIND,
+                        page_kind="linear_att_state",
                     )
         else:
             assert req_obj.cur_kv_len == input_len - 1
@@ -210,7 +205,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
         if page_kind == "kv":
             req_idx = None
-        elif page_kind == HYBRID_ATT_STATE_PAGE_KIND:
+        elif page_kind == "linear_att_state":
             req_idx = req_obj.req_idx
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")

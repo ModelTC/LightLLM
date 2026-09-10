@@ -178,6 +178,7 @@ class LinearAttCacheManager(StateCacheManager):
             device="cpu",
             size_first=True,
         )
+        self.clear_to_init_state()
         return
 
     def get_state_cache(self, buffer_idx: int):
