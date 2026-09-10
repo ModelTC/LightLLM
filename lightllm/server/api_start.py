@@ -338,6 +338,7 @@ def _launch_subprocesses(args: StartArgs):
     validate_ports(ports_to_check)
 
     set_env_start_args(args)
+    process_manager.setup_signal_handlers()
     get_shm_port_args(create=True)
     # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
     send_and_receive_node_ip(args)
@@ -424,9 +425,7 @@ def _hypercorn_config_args(args: StartArgs):
 
 
 def normal_or_p_d_start(args: StartArgs):
-    # Install this before _launch_subprocesses creates multiprocessing children.
-    process_manager.setup_signal_handlers()
-    _launch_subprocesses(args)
+    process_manager = _launch_subprocesses(args)
 
     # 启动 Hypercorn
     command = [
@@ -462,7 +461,6 @@ def normal_or_p_d_start(args: StartArgs):
 
 
 def pd_master_start(args: StartArgs):
-    process_manager.setup_signal_handlers()
     _set_envs_and_config(args)
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
@@ -483,6 +481,7 @@ def pd_master_start(args: StartArgs):
 
     validate_ports([args.port])
     set_env_start_args(args)
+    process_manager.setup_signal_handlers()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -524,7 +523,6 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
-    process_manager.setup_signal_handlers()
     _set_envs_and_config(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
@@ -549,6 +547,7 @@ def visual_only_start(args):
         ports_to_check.append(args.visual_rpyc_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
+    process_manager.setup_signal_handlers()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -566,7 +565,6 @@ def visual_only_start(args):
 
 
 def config_server_start(args):
-    process_manager.setup_signal_handlers()
     set_unique_server_name(args)
     if args.run_mode != "config_server":
         return
@@ -576,6 +574,7 @@ def config_server_start(args):
         ports_to_check.append(args.config_server_visual_redis_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
+    process_manager.setup_signal_handlers()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 

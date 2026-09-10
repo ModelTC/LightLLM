@@ -40,7 +40,7 @@ class AutoShmCleanup:
             self.libc = None
 
     def _register_handlers_for_cleanup(self):
-        atexit.register(self.cleanup)
+        atexit.register(self._cleanup)
         self.register_signal_handlers()
 
     def register_signal_handlers(self):
@@ -51,13 +51,13 @@ class AutoShmCleanup:
         self.signal_handlers_registered = True
 
     def _signal_cleanup_handler(self, signum, frame):
-        self.cleanup()
+        self._cleanup()
         parent = psutil.Process(os.getpid())
         # 递归拿到所有子进程并终止
         for ch in parent.children(recursive=True):
             ch.kill()
 
-    def cleanup(self):
+    def _cleanup(self):
         """清理：System V 执行 IPC_RMID，POSIX 执行 unlink。"""
         removed_sysv = 0
         IPC_RMID = 0
