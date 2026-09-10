@@ -133,10 +133,13 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         return infer_state
 
     def _init_att_backend(self):
-        # Both pools use main's token-indexed attention. Gemma's sliding prefill
-        # retains its image mask; full layers' head_dim=512 still requires Triton.
+        # Full-attention head_dim can be 512, beyond FA3's supported limit.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
+
+    def _init_att_backend1(self):
+        self.prefill_att_backend1 = TritonAttBackend(model=self)
+        self.decode_att_backend1 = TritonAttBackend(model=self)
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()

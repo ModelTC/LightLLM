@@ -26,6 +26,7 @@ class Gemma4InferStateInfo(InferStateInfo):
         # 则对应的 b_image_token_end 为 [0, 0, 4, 4, 0],
         # image token 可以看到自己当前这个token以及后面的 image token。
         self.b_image_token_end = None
+        self.has_image_tokens = False
         self.sliding_window_mem_index = None
         self.sliding_window_mem_index_cpu = None
         self.sliding_requests = None
@@ -52,7 +53,7 @@ class Gemma4InferStateInfo(InferStateInfo):
         token_num = 0
         for req_idx, _, q_len in self.sliding_requests:
             if req_idx != self.req_manager.HOLD_REQUEST_ID:
-                index_chunks.append(sliding_mem_manager.alloc(q_len))
+                index_chunks.extend(self.req_manager.alloc_sliding_window_indexes(req_idx, q_len))
             else:
                 index_chunks.append(
                     torch.full((q_len,), sliding_mem_manager.HOLD_TOKEN_MEMINDEX, dtype=torch.int32, device="cpu")
@@ -65,7 +66,7 @@ class Gemma4InferStateInfo(InferStateInfo):
                     (padding_token_num,), sliding_mem_manager.HOLD_TOKEN_MEMINDEX, dtype=torch.int32, device="cpu"
                 )
             )
-        # Combine allocator views once into owned pinned storage for asynchronous H2D.
+        # Combine request-window and allocator views into owned pinned storage for asynchronous H2D.
         self.sliding_window_mem_index_cpu = torch.empty(
             (self.input_ids.shape[0],), dtype=torch.int32, device="cpu", pin_memory=True
         )
@@ -89,12 +90,15 @@ class Gemma4InferStateInfo(InferStateInfo):
                 self.b_seq_len,
                 self.sliding_window_mem_index,
             )
-            # A metadata view gives the unchanged attention backend its sliding table.
-            # Tensor metadata is shared with this state, including CUDA graph updates.
-            sliding_state = copy.copy(self)
-            sliding_state.req_manager = SimpleNamespace(req_to_token_indexs=self.req_manager.req_to_sliding_window)
-            self.decode_att_state1 = model.decode_att_backend.create_att_decode_state(infer_state=sliding_state)
         return
+
+    def init_att_state(self):
+        # Share batch tensors, but bind sliding attention to its own token table.
+        sliding_state = copy.copy(self)
+        sliding_state.req_manager = SimpleNamespace(req_to_token_indexs=self.req_manager.req_to_sliding_window)
+        att_state = self.prefill_att_state1 if self.is_prefill else self.decode_att_state1
+        att_state.infer_state = sliding_state
+        super().init_att_state()
 
     def finish_forward(self):
         # Keep the latest W token slots after every KV-sharing reader has finished.
@@ -130,6 +134,7 @@ class Gemma4InferStateInfo(InferStateInfo):
         if image_start_num == 0:
             return
 
+        self.has_image_tokens = True
         build_b_image_token_end(
             b_image_start_idx=torch.tensor(b_image_start_idx, dtype=torch.int32).cuda(non_blocking=True),
             b_image_len=torch.tensor(b_image_len, dtype=torch.int32).cuda(non_blocking=True),

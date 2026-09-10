@@ -48,35 +48,57 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
         # Absolute-token addressing matches full attention, using a separate physical pool.
         self.req_to_sliding_window = torch.zeros_like(self.req_to_token_indexs)
         self.req_to_sliding_window[self.HOLD_REQUEST_ID].fill_(self.sliding_mem_manager.HOLD_TOKEN_MEMINDEX)
-        self._sliding_req_indexes = [torch.empty(0, dtype=torch.int32) for _ in range(self.max_request_num)]
+        # Each request owns W slots, addressed by absolute position % W on the CPU.
+        # Prefill may exchange their physical indices; decode reuses them in place.
+        self._sliding_req_indexes = torch.empty(
+            (self.max_request_num, self.sliding_window), dtype=torch.int32, device="cpu"
+        )
         self._sliding_seq_lens = [0] * self.max_request_num
 
+    def alloc(self):
+        req_idx = super().alloc()
+        if req_idx is not None:
+            self._sliding_req_indexes[req_idx].copy_(self.sliding_mem_manager.alloc(self.sliding_window))
+        return req_idx
+
     def init_hybrid_attention_state(self, req: "InferReq"):
-        # A cache miss owns no history slots; the forward allocates only its new tokens.
-        self._release_sliding_window(req.req_idx)
+        # The request already owns its window; a cache miss has no valid history.
+        self._sliding_seq_lens[req.req_idx] = 0
+
+    def alloc_sliding_window_indexes(self, req_idx: int, token_num: int):
+        """先复用请求窗口的空闲槽，再借用本轮额外槽位；返回 CPU 索引片段供 batch 合并。"""
+        seq_len = self._sliding_seq_lens[req_idx]
+        # The first query needs at most W-1 history tokens, so at least one slot is reusable.
+        reuse_num = min(token_num, self.sliding_window - min(seq_len, self.sliding_window - 1))
+        ring_start = seq_len % self.sliding_window
+        indexes = [self._sliding_req_indexes[req_idx, ring_start : ring_start + reuse_num]]
+        if token_num > reuse_num:
+            indexes.append(self.sliding_mem_manager.alloc(token_num - reuse_num))
+        return indexes
 
     def update_sliding_window(self, req_idx: int, seq_len: int, new_indexes: torch.Tensor):
-        """所有层读取后只保留最后 W 个槽位，无需移动 KV 或清空过期映射。"""
-        indexes = torch.cat((self._sliding_req_indexes[req_idx], new_indexes))
-        expired = max(0, indexes.numel() - self.sliding_window)
-        if expired:
-            self.sliding_mem_manager.free(indexes[:expired])
-        # Retain only the suffix, not the whole forward's pinned index buffer.
-        self._sliding_req_indexes[req_idx] = indexes[expired:].clone()
+        """所有层读取后将借用的尾部槽纳入请求窗口，归还被替换和过期的槽；不移动 KV。"""
+        token_num = new_indexes.numel()
+        old_seq_len = seq_len - token_num
+        reuse_num = min(token_num, self.sliding_window - min(old_seq_len, self.sliding_window - 1))
+        if token_num > reuse_num:
+            # Retain only borrowed tokens in the final W positions, replacing their old ring slots.
+            retain_start = max(reuse_num, token_num - self.sliding_window)
+            ring_positions = torch.arange(old_seq_len + retain_start, seq_len, device="cpu") % self.sliding_window
+            ring = self._sliding_req_indexes[req_idx]
+            expired_indexes = torch.cat((ring[ring_positions], new_indexes[reuse_num:retain_start]))
+            self.sliding_mem_manager.free(expired_indexes)
+            ring[ring_positions] = new_indexes[retain_start:]
+        # Decode only advances the position: no allocator call or window-index copy.
         self._sliding_seq_lens[req_idx] = seq_len
 
-    def _release_sliding_window(self, req_idx: int):
-        self.sliding_mem_manager.free(self._sliding_req_indexes[req_idx])
-        self._sliding_req_indexes[req_idx] = torch.empty(0, dtype=torch.int32)
-        self._sliding_seq_lens[req_idx] = 0
-
     def free_req(self, free_req_index: int):
-        self._release_sliding_window(free_req_index)
+        self.sliding_mem_manager.free(self._sliding_req_indexes[free_req_index])
+        self._sliding_seq_lens[free_req_index] = 0
         super().free_req(free_req_index)
 
     def free_all(self):
         self.sliding_mem_manager.free_all()
-        self._sliding_req_indexes = [torch.empty(0, dtype=torch.int32) for _ in range(self.max_request_num)]
         self._sliding_seq_lens = [0] * self.max_request_num
         self.req_to_sliding_window.zero_()
         self.req_to_sliding_window[self.HOLD_REQUEST_ID].fill_(self.sliding_mem_manager.HOLD_TOKEN_MEMINDEX)
@@ -92,12 +114,11 @@ class ReqManagerForSlidingWindow(HybridAttentionReqManager):
             # GPU small-page matching restores before updating cur_kv_len;
             # a subsequent CPU-cache load can extend beyond this shared node.
             cache_len = max(cache_len, req.shared_kv_node.node_prefix_total_len)
-        self._release_sliding_window(req.req_idx)
         window_len = min(cache_len, self.sliding_window)
-        # Own the indices: MemoryManager.alloc() returns a reusable staging-buffer view.
+        # Restore into the window reserved by alloc(), ordered by absolute token position.
+        ring_positions = torch.arange(cache_len - window_len, cache_len, device="cpu") % self.sliding_window
         indexes = torch.empty(window_len, dtype=torch.int32, device="cpu", pin_memory=True)
-        indexes.copy_(self.sliding_mem_manager.alloc(window_len))
-        self._sliding_req_indexes[req.req_idx] = indexes
+        indexes.copy_(self._sliding_req_indexes[req.req_idx, ring_positions])
         self._sliding_seq_lens[req.req_idx] = cache_len
         self.req_to_sliding_window[req.req_idx, cache_len - window_len : cache_len].copy_(indexes, non_blocking=True)
         copy_sliding_window_checkpoint(

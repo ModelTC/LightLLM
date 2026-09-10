@@ -174,28 +174,30 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
                     infer_state.sliding_window_mem_index,
                     infer_state.mem_manager.sliding_kv_buffer[self.sliding_cache_index_],
                 )
-            # Sliding layers always go through the gemma4_mm Triton kernel: it
-            # handles SWA + image bidirectional masking in one pass.
-            o_tensor = self.alloc_tensor(_q.shape, q.dtype)
-            context_attention_fwd_gemma4_mm(
-                _q,
-                _k,
-                _v,
-                o_tensor,
-                infer_state.b_req_idx,
-                infer_state.b_q_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_ready_cache_len,
-                infer_state.max_q_seq_len,
-                infer_state.req_manager.req_to_sliding_window,
-                infer_state.b_image_token_end,
-                sliding_window=(self.sliding_window_ - 1, 0),
-            )
-            return o_tensor.view(q.shape)
-
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q, k=_k, v=_v, att_control=AttControl(), alloc_func=self.alloc_tensor
-        )
+            if infer_state.has_image_tokens:
+                # Image tokens need Gemma's bidirectional mask in addition to SWA.
+                o_tensor = self.alloc_tensor(_q.shape, q.dtype)
+                context_attention_fwd_gemma4_mm(
+                    _q,
+                    _k,
+                    _v,
+                    o_tensor,
+                    infer_state.b_req_idx,
+                    infer_state.b_q_start_loc,
+                    infer_state.b_seq_len,
+                    infer_state.b_ready_cache_len,
+                    infer_state.max_q_seq_len,
+                    infer_state.req_manager.req_to_sliding_window,
+                    infer_state.b_image_token_end,
+                    sliding_window=(self.sliding_window_ - 1, 0),
+                )
+                return o_tensor.view(q.shape)
+            att_state = infer_state.prefill_att_state1
+            att_control = AttControl(use_sliding_window=True, sliding_window=(self.sliding_window_ - 1, 0))
+        else:
+            att_state = infer_state.prefill_att_state
+            att_control = AttControl()
+        o_tensor = att_state.prefill_att(q=_q, k=_k, v=_v, att_control=att_control, alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 
     def _token_attention_kernel(

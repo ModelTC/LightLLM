@@ -1,8 +1,7 @@
 from .base import StateCacheManager
 from .layer_cache import LayerCache
 from .linear_att import LinearAttCacheConfig, LinearAttCacheManager
-from .sliding_window import SlidingWindowStateCacheManager
-from .sliding_window_config import SlidingWindowCacheConfig
+from .sliding_window import SlidingWindowCacheConfig, SlidingWindowStateCacheManager
 
 
 def get_hybrid_cache_config():
