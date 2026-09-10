@@ -5,11 +5,14 @@ from unittest.mock import MagicMock
 
 from easydict import EasyDict
 from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
+from lightllm.utils import shm_utils
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_env():
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_shm_req_manager_service_0")
     original = os.environ.get("LIGHTLLM_START_ARGS")
     set_env_start_args(
         EasyDict(
@@ -33,6 +36,7 @@ def setup_env():
         os.environ.pop("LIGHTLLM_START_ARGS", None)
     if hasattr(get_env_start_args, "cache_clear"):
         get_env_start_args.cache_clear()
+    monkeypatch.undo()
 
 
 @pytest.fixture(scope="module")

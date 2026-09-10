@@ -1,6 +1,15 @@
 import pytest
 import torch
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.utils import shm_utils
+
+
+@pytest.fixture(scope="module", autouse=True)
+def service_name():
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_radix_cache_service_0")
+    yield
+    monkeypatch.undo()
 
 
 def test_case1():

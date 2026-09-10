@@ -1,4 +1,13 @@
+import pytest
+
 from lightllm.utils import shm_utils
+
+
+def test_get_service_shm_name_requires_service_name(monkeypatch):
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: None)
+
+    with pytest.raises(RuntimeError, match="LIGHTLLM_UNIQUE_SERVICE_NAME_ID is unset"):
+        shm_utils.get_service_shm_name("req_pool")
 
 
 def test_get_service_shm_name_adds_prefix_once(monkeypatch):

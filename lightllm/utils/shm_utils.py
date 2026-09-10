@@ -9,13 +9,15 @@ logger = init_logger(__name__)
 def get_service_shm_name(name):
     """为内部共享内存统一添加当前服务（UUID + node rank）前缀。
 
-    已带当前服务前缀的完整名称保持不变，便于底层包装函数安全复用；未运行在
-    launcher 环境中的独立工具和单元测试没有 service name，此时保留原名称。
+    已带当前服务前缀的完整名称保持不变，便于底层包装函数安全复用。service name
+    未初始化时直接报错，避免创建无法区分服务、也无法被 launcher 定向回收的裸名称。
     """
     name = str(name)
     service_name = get_unique_server_name()
     if not service_name:
-        return name
+        raise RuntimeError(
+            "LIGHTLLM_UNIQUE_SERVICE_NAME_ID is unset; " "call set_unique_server_name(args) before using shared memory"
+        )
     prefix = f"{service_name}_"
     return name if name.startswith(prefix) else f"{prefix}{name}"
 
