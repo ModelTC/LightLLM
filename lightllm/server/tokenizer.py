@@ -63,6 +63,13 @@ def get_tokenizer(
         # tokenizer = convert_slow_tokenizer(tokenizer)
         # return tokenizer
 
+    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
+    model_type = model_cfg.get("model_type", "")
+    if model_type in ("glm5_next", "glm5_next_text"):
+        from ..models.glm5_next.tokenizer import get_glm5_next_tokenizer
+
+        return get_glm5_next_tokenizer(tokenizer_name, *args, **kwargs)
+
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
     except TypeError as e:
@@ -78,8 +85,6 @@ def get_tokenizer(
             "slowdown. Consider using a fast tokenizer instead."
         )
 
-    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
-    model_type = model_cfg.get("model_type", "")
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.
     if model_type == "deepseek_v32":

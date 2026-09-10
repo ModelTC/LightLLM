@@ -27,6 +27,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             routed_expert_counter_tensor=routed_expert_counter_tensor,
             auto_update_redundancy_expert=auto_update_redundancy_expert,
         )
+        self.swiglu_limit = None
+        self.swiglu_clamp_up_add_one = True
 
     def create_workspace(self):
         return None
@@ -104,6 +106,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             use_fp8_w8a8=use_fp8_w8a8,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            limit=self.swiglu_limit,
+            alpha=1.0 if self.swiglu_limit is not None else None,
+            clamp_up_add_one=self.swiglu_clamp_up_add_one,
         )
         return input_tensor
 
