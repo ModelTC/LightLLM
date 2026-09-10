@@ -26,6 +26,7 @@ LightLLM 的 router、model、HTTP server 等子进程通过共享内存交换�
 import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -146,6 +147,9 @@ def is_process_active(pid):
 
 def run_launcher_shm_cleanup_process(service_name, parent_pid):
     """每 2 秒检查 launcher，launcher 退出后清理其服务资源。"""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     while is_process_active(parent_pid):
         time.sleep(PARENT_CHECK_INTERVAL)
     logger.info(f"Launcher {parent_pid} exited; cleaning service {service_name}")

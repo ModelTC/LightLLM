@@ -145,8 +145,10 @@ def test_cleanup_process_checks_parent_every_two_seconds(monkeypatch):
     states = iter([object(), object(), None])
     sleeps = []
     cleanup_calls = []
+    signal_calls = []
     monkeypatch.setattr(service_shm_cleanup, "is_process_active", lambda pid: next(states))
     monkeypatch.setattr(service_shm_cleanup.time, "sleep", sleeps.append)
+    monkeypatch.setattr(service_shm_cleanup.signal, "signal", lambda sig, handler: signal_calls.append((sig, handler)))
     monkeypatch.setattr(
         service_shm_cleanup.ServiceShmCleanup,
         "cleanup_service_resources",
@@ -157,6 +159,11 @@ def test_cleanup_process_checks_parent_every_two_seconds(monkeypatch):
 
     assert sleeps == [2.0, 2.0]
     assert cleanup_calls == ["service_0"]
+    assert signal_calls == [
+        (signal.SIGINT, signal.SIG_IGN),
+        (signal.SIGTERM, signal.SIG_IGN),
+        (signal.SIGHUP, signal.SIG_IGN),
+    ]
 
 
 def test_start_cleanup_process_is_independent_session(monkeypatch):
@@ -210,6 +217,12 @@ def _process_stopped(pid):
         return True
 
 
+def _cleanup_signals_are_ignored(pid):
+    status = Path(f"/proc/{pid}/status").read_text()
+    ignored = int(next(line.split()[1] for line in status.splitlines() if line.startswith("SigIgn:")), 16)
+    return all(ignored & (1 << (sig.value - 1)) for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+
+
 @pytest.mark.parametrize("exit_mode", ["normal", "exception", "os_exit", "SIGKILL", "SIGINT", "SIGTERM", "SIGHUP"])
 def test_cleanup_process_after_real_launcher_exit(tmp_path, exit_mode):
     service = "cleanup_test_" + uuid.uuid4().hex
@@ -237,8 +250,13 @@ def test_cleanup_process_after_real_launcher_exit(tmp_path, exit_mode):
         watcher_pid = json.loads((tmp_path / "launcher.json").read_text())["watcher"]
         assert os.getsid(watcher_pid) == watcher_pid
         assert os.getsid(watcher_pid) != os.getsid(process.pid)
+        _wait_until(lambda: _cleanup_signals_are_ignored(watcher_pid))
         assert (Path("/dev/shm") / (service + "_req_pool")).exists()
         assert libc.shmget(key, 0, 0) == shmid
+        if exit_mode == "normal":
+            os.kill(watcher_pid, signal.SIGTERM)
+            time.sleep(0.1)
+            assert not _process_stopped(watcher_pid)
         if exit_mode.startswith("SIG"):
             if exit_mode == "SIGKILL":
                 process.kill()
