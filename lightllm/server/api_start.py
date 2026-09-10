@@ -19,7 +19,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.config_utils import (
     has_audio_module,
     has_vision_module,
-    is_hybrid_att_mixed_model,
+    is_hybrid_att_model,
     auto_set_max_req_total_len,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
@@ -256,23 +256,23 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
-    # linear att cache 参数自动设置
+    # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
-        # 混合 attention 模型使用请求级状态缓存，保留原有 linear_att 参数名。
+        # 小页池大小只对 hybrid 模型生效。
         default_cache_size = args.running_max_req_size * 2
         dp_size_in_node = max(1, args.dp // args.nnodes)
         per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
         args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
 
     if args.run_mode == "decode":
-        # PD Decode 节点只接收 prompt 末尾位置的 linear attention state，不具备
+        # PD Decode 节点只接收 prompt 末尾位置的 hybrid checkpoint，不具备
         # 中间大页边界对应的 state。因此 Decode 节点必须使用默认值关闭大页功能，
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_hybrid_att_mixed_model(args.model_dir):
+    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid attention model")
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -318,6 +318,16 @@ def _launch_subprocesses(args: StartArgs):
         )
 
     auto_configure_allreduce_flags_from_args(args)
+
+    # CUDA Graph 只需要覆盖调度器允许同时运行的请求数。配置得更大不会被真实请求使用，
+    # 反而会捕获无效的大 batch Graph 并额外占用显存，因此在全部参数调整完成后收敛到合法上限。
+    # 关闭 CUDA Graph 时该参数不生效，保留用户原值。
+    if not args.disable_cudagraph and args.graph_max_batch_size > args.running_max_req_size:
+        logger.warning(
+            f"graph_max_batch_size {args.graph_max_batch_size} exceeds running_max_req_size "
+            f"{args.running_max_req_size}; set graph_max_batch_size to {args.running_max_req_size}."
+        )
+        args.graph_max_batch_size = args.running_max_req_size
 
     # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
     ports_to_check = [args.port]

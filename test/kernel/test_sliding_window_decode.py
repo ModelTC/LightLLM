@@ -43,10 +43,22 @@ def test_main_gqa_reads_scattered_window_slots(dtype, window, q_heads, kv_heads,
         req_manager=SimpleNamespace(req_to_token_indexs=full_table),
     )
     expected = gqa_token_decode_attention_flash_decoding(
-        q, state, full[:, :kv_heads], full[:, kv_heads:], out=torch.empty_like(q), sliding_window=(window - 1, 0)
+        q,
+        state,
+        full[:, :kv_heads],
+        full[:, kv_heads:],
+        max_len_in_batch=state.max_kv_seq_len,
+        out=torch.empty_like(q),
+        sliding_window=(window - 1, 0),
     )
     state.req_manager.req_to_token_indexs = window_table
     actual = gqa_token_decode_attention_flash_decoding(
-        q, state, pool[:, :kv_heads], pool[:, kv_heads:], out=torch.empty_like(q), sliding_window=(window - 1, 0)
+        q,
+        state,
+        pool[:, :kv_heads],
+        pool[:, kv_heads:],
+        max_len_in_batch=state.max_kv_seq_len,
+        out=torch.empty_like(q),
+        sliding_window=(window - 1, 0),
     )
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)

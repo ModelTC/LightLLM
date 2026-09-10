@@ -95,8 +95,11 @@ class TritonPrefillAttState(BasePrefillAttState):
 @dataclasses.dataclass
 class TritonDecodeAttState(BaseDecodeAttState):
     b_mark_mtp_shared_group: torch.Tensor = None
+    decode_max_kv_seq_len: int = None
 
     def init_state(self):
+        # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于 GQA decode 配置查找。
+        self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
             self.b_mark_mtp_shared_group = build_mtp_shared_group_markers(
@@ -212,6 +215,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             infer_state=self.infer_state,
             cache_k=k,
             cache_v=v,
+            max_len_in_batch=self.decode_max_kv_seq_len,
             out=out,
             alloc_tensor_func=alloc_func,
             sliding_window=sliding_window,
@@ -238,6 +242,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             B_req_idx=self.infer_state.b_req_idx,
             b_seq_len=self.infer_state.b_seq_len,
             b_mark_shared_group=self.b_mark_mtp_shared_group,
+            max_kv_len=self.decode_max_kv_seq_len,
             alloc_tensor_func=alloc_func,
         )
 

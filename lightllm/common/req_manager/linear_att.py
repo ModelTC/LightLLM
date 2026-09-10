@@ -97,6 +97,18 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
 
+    def update_mtp_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
+        from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
+
+        linear_att_mtp_state_index_update(
+            req_to_mtp_state_index=self.req_to_mtp_state_index,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            b_req_idx=b_req_idx,
+            b_mtp_index=b_mtp_index,
+            accepted_index=accepted_index,
+            verify_width=verify_width,
+        )
+
     def restore_state(self, req: "InferReq", state_cache_manager: LinearAttCacheManager, buffer_idx: int):
         conv_state, ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         conv_dest = req.req_idx

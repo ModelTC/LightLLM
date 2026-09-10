@@ -21,7 +21,7 @@ import torch
 from lightllm.utils.sgl_utils import sgl_ops
 from typing import Callable, List, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.fused_moe.softmax_topk import softmax_topk
-from lightllm.common.triton_utils.autotuner import Autotuner
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
 
 def fused_topk(
@@ -170,7 +170,7 @@ def select_experts(
 
     ######################################## warning ##################################################
     # here is used to match autotune feature, make topk_ids more random
-    if Autotuner.is_autotune_warmup():
+    if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL):
         rand_gen = torch.Generator(device="cuda")
         rand_gen.manual_seed(router_logits.shape[0])
         router_logits = torch.randn(size=router_logits.shape, generator=rand_gen, dtype=torch.float32, device="cuda")

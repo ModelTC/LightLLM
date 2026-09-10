@@ -13,6 +13,7 @@ def token_decode_attention_flash_decoding(
     cache_k_scale: torch.Tensor,
     cache_v: torch.Tensor,
     cache_v_scale: torch.Tensor,
+    max_len_in_batch: int,
     out: Optional[torch.Tensor] = None,
     alloc_tensor_func=torch.empty,
 ):
@@ -48,7 +49,7 @@ def token_decode_attention_flash_decoding(
         Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
         B_req_idx=infer_state.b_req_idx,
         B_seq_len=infer_state.b_seq_len,
-        max_len_in_batch=infer_state.max_kv_seq_len,
+        max_len_in_batch=max_len_in_batch,
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logexpsum,
         block_seq=BLOCK_SEQ,

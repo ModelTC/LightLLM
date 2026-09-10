@@ -76,8 +76,8 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ git clone https://github.com/ModelTC/lightllm.git
     $ cd lightllm
     $
-    $ # 安装lightllm的依赖 (cuda 12.8)
-    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+    $ # 安装lightllm的依赖 (CUDA 13.0)
+    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu130
     $
     $ # 安装lightllm的依赖 (摩尔线程 GPU)
     $ ./generate_requirements_musa.sh
@@ -85,3 +85,20 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $
     $ # 安装lightllm
     $ python setup.py install
+
+使用 uv 安装
+----------------
+
+也可以使用 `uv <https://docs.astral.sh/uv/>`_ 安装 Lightllm：
+
+.. code-block:: console
+
+    $ # 创建 Python 3.10 虚拟环境
+    $ uv venv --python 3.10
+    $ source .venv/bin/activate
+    $
+    $ # 安装 Lightllm 依赖 (CUDA 13.0)
+    $ uv pip install -r requirements.txt --torch-backend=cu130
+    $
+    $ # 安装 Lightllm
+    $ uv pip install -e .

@@ -195,8 +195,11 @@ def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
                 value = config_json["llm_config"][key]
             except:
                 value = config_json.get("text_config", {}).get(key)
-        if config_json.get("thinker_config") is not None:
-            value = config_json.get("thinker_config", {}).get("text_config").get(key)
+        thinker_config = config_json.get("thinker_config")
+        if isinstance(thinker_config, dict):
+            thinker_text_config = thinker_config.get("text_config")
+            if isinstance(thinker_text_config, dict):
+                value = thinker_text_config.get(key, value)
         if value is not None:
             return value
 
@@ -470,7 +473,8 @@ def is_sliding_att_mixed_model(model_path: str) -> bool:
     return get_model_type(model_path) in {"gemma4", "gemma4_text"}
 
 
-def is_hybrid_att_mixed_model(model_path: str) -> bool:
+def is_hybrid_att_model(model_path: str) -> bool:
+    """Models whose non-full attention state follows hybrid checkpoint pages."""
     return is_linear_att_mixed_model(model_path) or is_sliding_att_mixed_model(model_path)
 
 

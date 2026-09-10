@@ -52,8 +52,28 @@ class SlidingWindowCacheConfig:
     def get_cpu_cache_state_bytes(self, tp_world_size: int):
         return self.get_state_nbytes() * tp_world_size
 
-    def get_cpu_cache_big_page_bytes(self, big_page_token_num: int, tp_world_size: int):
+    def get_cpu_cache_big_page_bytes(self, big_page_token_num: int = None, tp_world_size: int = None):
+        if big_page_token_num is None or tp_world_size is None:
+            from lightllm.utils.envs_utils import get_env_start_args
+
+            args = get_env_start_args()
+            if big_page_token_num is None:
+                big_page_token_num = args.linear_att_hash_page_size * args.linear_att_page_block_num
+                assert args.cpu_cache_token_page_size == big_page_token_num
+            if tp_world_size is None:
+                tp_world_size = args.tp // args.dp
         # One CPU page contains all TP shards: full KV, window state, padding.
         payload_bytes = self.get_cpu_cache_full_att_bytes(big_page_token_num, tp_world_size)
         payload_bytes += self.get_cpu_cache_state_bytes(tp_world_size)
         return (payload_bytes + 15) // 16 * 16
+
+    @classmethod
+    def load_from_args(cls):
+        from lightllm.models.gemma4.kv_layout import build_sliding_cache_config
+        from lightllm.utils.config_utils import get_config_json
+        from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
+
+        args = get_env_start_args()
+        model_config = get_config_json(args.model_dir)
+        text_config = model_config.get("text_config", model_config)
+        return build_sliding_cache_config(text_config, args.tp // args.dp, get_llm_data_type())

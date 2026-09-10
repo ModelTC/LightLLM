@@ -158,6 +158,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     b_att_seq_len: torch.Tensor = None
     # 在是否开启mtp 的不同模式下，其设置不同的值，可以加速算子的运行。
     decode_max_q_seq_len: int = None
+    decode_max_kv_seq_len: int = None
     causal: bool = None
 
     def init_state(self):
@@ -225,6 +226,8 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
         actual_max_kv_len = self.infer_state.max_kv_seq_len
+        # Graph 捕获会将 infer_state.max_kv_seq_len 改为容量上限，提前保存真实长度用于 FA3 配置查找。
+        self.decode_max_kv_seq_len = actual_max_kv_len
         page_table_width = actual_max_kv_len
         if model.graph is not None and model.graph.can_run(
             batch_size=self.infer_state.batch_size,
@@ -295,8 +298,9 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             page_table=self.page_table,
             cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
-            cu_seqlens_k_new=self.cu_seqlens_k,
+            cu_seqlens_k_new=None,  # KV 已提前写入缓存，此处不追加新的 K/V。
             max_seqlen_q=self.decode_max_q_seq_len,
+            max_seqlen_k=self.decode_max_kv_seq_len,
             softmax_scale=sm_scale,
             causal=self.causal,
             window_size=window_size,

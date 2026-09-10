@@ -2,7 +2,8 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len, get_triton_autotune_level
 
 
 @triton.jit
@@ -169,15 +170,84 @@ def get_static_key(q, k, k_scale, block_seq):
 
 def get_run_key(q, max_len_in_batch):
     batch_size = q.shape[0]
+    # 正常查找使用 Graph 改写长度上限前保存的真实 KV 长度，不读取 GPU 张量或请求表容量。
+    max_len_in_batch = int(max_len_in_batch)
+    if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION) and get_triton_autotune_level() in [
+        AutotuneLevel.ADAPTIVE_AUTOTUNE,
+        AutotuneLevel.FORCE_AUTOTUNE,
+    ]:
+        max_len_in_batch = get_decode_attn_autotune_seq_len()
+    # 调优和正常查找统一按 512 token 向上分桶；实际 benchmark 保留环境变量指定的精确长度。
+    max_len_in_batch = (max_len_in_batch + 511) // 512 * 512
     return batch_size * 1000 * 1000 * 1000 + max_len_in_batch
 
 
+def rebuild_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    k_scale: torch.Tensor,
+    v: torch.Tensor,
+    v_scale: torch.Tensor,
+    Req_to_tokens: torch.Tensor,
+    B_req_idx: torch.Tensor,
+    B_seq_len: torch.Tensor,
+    max_len_in_batch: int,
+    mid_out: torch.Tensor,
+    mid_out_logsumexp: torch.Tensor,
+    block_seq: int,
+    **kwargs,
+):
+    # Graph 初始化请求很短，请求表宽度又是容量上限，两者都不能代表实际 decode 的计算量。
+    # 仅在实际搜索前重建一次输入，不计入 benchmark；正式执行和 Graph 捕获仍使用原始输入。
+    batch_size = q.shape[0]
+    max_len_in_batch = get_decode_attn_autotune_seq_len()
+    # int8 数据和 scale 按同一物理 token 索引访问，四个缓存的 token 容量必须一致。
+    assert (
+        k.shape[0] == v.shape[0] == k_scale.shape[0] == v_scale.shape[0]
+    ), "K/V caches and scales must have the same number of tokens"
+    num_tokens = k.shape[0]
+    if num_tokens == 0:
+        raise ValueError("Int8 KV decode autotuning requires a non-empty KV cache")
+
+    # 新建已初始化的映射，不能只拉长 B_seq_len 后访问原请求表中未填充的位置。
+    # 物理容量充足时各请求使用不同 token，不足时取模复用已有 K/V 和 scale，保证索引不越界。
+    # 复用可避免重新分配完整的量化缓存，但可能提高 GPU 缓存命中率，影响调优的访存特征。
+    Req_to_tokens = torch.arange(batch_size * max_len_in_batch, dtype=Req_to_tokens.dtype, device=Req_to_tokens.device)
+    Req_to_tokens = Req_to_tokens.remainder_(num_tokens).view(batch_size, max_len_in_batch)
+    # 新表只有 batch_size 行，因此请求索引也需重建，不能继续使用原全局请求表的行号。
+    B_req_idx = torch.arange(batch_size, dtype=B_req_idx.dtype, device=B_req_idx.device)
+    B_seq_len = torch.full_like(B_seq_len, max_len_in_batch)
+
+    # 保留 int8 K/V、分组 scale 和原有 stride，不解量化或改变它们的存储布局。
+    # 一个 program 可循环处理多个 BLOCK_SEQ，无需按目标长度扩容中间缓冲区。
+    # BLOCK_N 只控制块内计算大小，stage2 仍按固定 BLOCK_SEQ 和原缓冲区分块数归约。
+    # 调优后的正式执行会使用原始输入重新覆盖真实请求对应的有效中间块。
+    return (
+        q,
+        k,
+        k_scale,
+        v,
+        v_scale,
+        Req_to_tokens,
+        B_req_idx,
+        B_seq_len,
+        max_len_in_batch,
+        mid_out,
+        mid_out_logsumexp,
+        block_seq,
+    ), kwargs
+
+
 @autotune(
-    kernel_name="_fwd_kernel_flash_decode_normal_stage1:v3",
+    kernel_name="_fwd_kernel_flash_decode_normal_stage1:v4",
+    kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
-    mutates_args=["mid_out", "mid_out_logsumexp"],
+    rebuild_input_func=rebuild_inputs,
+    # stage1 对有效中间块执行覆盖写，候选配置不会读取已有输出，正式执行也会重新覆盖真实请求的有效块。
+    # 不标记这两个大缓冲区，避免每个候选配置 benchmark 时反复 clone，增加显存峰值和拷贝开销。
+    # mutates_args=["mid_out", "mid_out_logsumexp"],
 )
 def flash_decode_stage1(
     q: torch.Tensor,
@@ -276,8 +346,6 @@ def flash_decode_stage1(
 
 
 if __name__ == "__main__":
-    from lightllm.utils.envs_utils import get_triton_autotune_level
-
     if get_triton_autotune_level() != 2:
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
@@ -289,11 +357,11 @@ if __name__ == "__main__":
     out_dtype = torch.bfloat16
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
-    decode_lengths = [1024, 2048, 8192, 16384]
+    decode_lengths = [get_decode_attn_autotune_seq_len()]
 
     q_head_num = gqa_group_size
 
-    Autotuner.start_autotune_warmup()
+    Autotuner.start_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
     # autotuing kernel
     for batch_size in batch_sizes:
         for length in decode_lengths:

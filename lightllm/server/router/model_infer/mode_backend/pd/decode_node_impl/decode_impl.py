@@ -158,15 +158,16 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
                 req_obj.cur_kv_len += len(mem_indexes)
 
-                # 如果当前是linear att 混合模型，则需要创建一个linear att 状态的传输任务
-                if g_infer_context.is_linear_att_mixed_model:
+                # 混合注意力模型还需接收请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
+                # 通过本地 req_idx 定位运行态 buffer 的恢复位置。
+                if g_infer_context.is_hybrid_att_model:
                     self._create_pd_trans_task(
                         req_obj=req_obj,
                         mem_indexes=[],
                         kv_start_index=input_len,
                         kv_end_index=input_len,
                         group=group,
-                        page_kind="linear_att_state",
+                        page_kind="att_state",
                     )
         else:
             assert req_obj.cur_kv_len == input_len - 1
@@ -205,7 +206,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
         if page_kind == "kv":
             req_idx = None
-        elif page_kind == "linear_att_state":
+        elif page_kind == "att_state":
             req_idx = req_obj.req_idx
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")

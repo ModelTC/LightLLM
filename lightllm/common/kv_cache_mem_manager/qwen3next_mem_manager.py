@@ -45,14 +45,14 @@ class Qwen3NextMemManager(MemoryManager):
         # 申请大页可能需要对应的资源, 多申请了两个linear att的状态，理论上这个状态
         # 永远不会被 alloc 申请到，只会在 cpu cache中，用于过渡和存储碎页情况下的
         # cpu cache 的页面拷贝。
-        self.linear_att_big_page_buffers = LinearAttCacheManager(
+        self.big_page_buffers = LinearAttCacheManager(
             size=triton.cdiv(self.size, big_page_token_num) + 2,
             linear_config=self.linear_config,
             keep_num=2,
         )
 
-        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
-        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 1
+        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
+        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
         return
 
     def _free_buffers(self):
@@ -61,7 +61,7 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def _free_linear_att_buffers(self):
-        self.linear_att_big_page_buffers = None
+        self.big_page_buffers = None
         return
 
     def write_to_shm(self, req_manager):
@@ -72,12 +72,12 @@ class Qwen3NextMemManager(MemoryManager):
         # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针
         # 启动会报 "Pointer argument cannot be accessed from Triton (cpu tensor?)"。
         # 跨进程消费方并不使用 cpu 侧大页 state cache，序列化期间临时剔除以保住 pinned。
-        big_page_buffers = self.linear_att_big_page_buffers
-        self.linear_att_big_page_buffers = None
+        big_page_buffers = self.big_page_buffers
+        self.big_page_buffers = None
         try:
             return super().write_to_shm(req_manager)
         finally:
-            self.linear_att_big_page_buffers = big_page_buffers
+            self.big_page_buffers = big_page_buffers
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
@@ -104,7 +104,7 @@ class Qwen3NextMemManager(MemoryManager):
                 page_kind=page_kind,
                 req_idx=req_idx,
             )
-        assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
+        assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
@@ -131,7 +131,7 @@ class Qwen3NextMemManager(MemoryManager):
                 page_kind=page_kind,
                 req_idx=req_idx,
             )
-        assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
+        assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)

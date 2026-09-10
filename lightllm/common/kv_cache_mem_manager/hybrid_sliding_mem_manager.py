@@ -32,23 +32,23 @@ class HybridSlidingMemoryManager(MemoryManager):
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
         # Match linear attention: CPU checkpoints plus two reserved tail-transfer slots.
-        self.linear_att_big_page_buffers = SlidingWindowStateCacheManager(
+        self.big_page_buffers = SlidingWindowStateCacheManager(
             size=triton.cdiv(size, self.big_page_token_num) + 2,
             sliding_config=self.sliding_config,
             keep_num=2,
         )
-        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
-        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 1
+        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
+        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
 
     def write_to_shm(self, req_manager):
         # As in Qwen3NextMemManager, keep pickling from replacing pinned CPU
         # checkpoints with ordinary shared storage inaccessible to Triton.
-        big_page_buffers = self.linear_att_big_page_buffers
-        self.linear_att_big_page_buffers = None
+        big_page_buffers = self.big_page_buffers
+        self.big_page_buffers = None
         try:
             return super().write_to_shm(req_manager)
         finally:
-            self.linear_att_big_page_buffers = big_page_buffers
+            self.big_page_buffers = big_page_buffers
 
     def get_att_input_params(self, layer_index: int):
         if layer_index in self.sliding_config.sliding_layer_to_cache_index:
@@ -59,4 +59,4 @@ class HybridSlidingMemoryManager(MemoryManager):
 
     def _free_buffers(self):
         super()._free_buffers()
-        self.linear_att_big_page_buffers = None
+        self.big_page_buffers = None

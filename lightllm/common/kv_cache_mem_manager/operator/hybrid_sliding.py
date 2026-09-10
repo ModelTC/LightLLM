@@ -28,9 +28,9 @@ class HybridSlidingMemOperator(NormalMemOperator):
         max_kv_len = (req.cur_kv_len // page_size) * page_size
         big_page_ids = []
         for _ in range(big_page_num):
-            page_id = mem_manager.linear_att_big_page_buffers.alloc_one_state_cache()
+            page_id = mem_manager.big_page_buffers.alloc_one_state_cache()
             assert page_id is not None
-            req.linear_att_len_to_big_page_id[max_kv_len] = page_id
+            req.hybrid_len_to_big_page_id[max_kv_len] = page_id
             big_page_ids.append(page_id)
             max_kv_len -= page_size
         big_page_ids.reverse()
@@ -48,7 +48,7 @@ class HybridSlidingMemOperator(NormalMemOperator):
             page_indexes=page_indexes,
             big_page_buffer_ids=big_page_ids_gpu,
             gpu_full_att_kv_state=mem_manager.kv_buffer,
-            cpu_kv_sliding_state=mem_manager.linear_att_big_page_buffers.state_cache,
+            cpu_kv_sliding_state=mem_manager.big_page_buffers.state_cache,
             cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,
             tp_rank=get_current_rank_in_dp(),
             tp_world_size=get_dp_world_size(),
@@ -75,17 +75,15 @@ class HybridSlidingMemOperator(NormalMemOperator):
         max_kv_len = (len(mem_indexes) // page_size) * page_size
         start_kv_len = (len(big_page_ids) + 1) * page_size
         for seq_len in range(start_kv_len, max_kv_len + 1, page_size):
-            big_page_ids.append(req.linear_att_len_to_big_page_id[seq_len])
+            big_page_ids.append(req.hybrid_len_to_big_page_id[seq_len])
 
         if len(mem_indexes) % page_size:
             padded_token_num = triton.cdiv(len(mem_indexes), page_size) * page_size - len(mem_indexes)
             mem_indexes = torch.nn.functional.pad(mem_indexes, (0, padded_token_num), value=-1)
-            assert req.tail_linear_att_small_page_buffer_id is not None
+            assert req.tail_small_page_buffer_id is not None
             temp_id = mem_manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID
-            src_state = radix_cache.linear_att_small_page_buffers.get_state_cache(
-                req.tail_linear_att_small_page_buffer_id
-            )
-            copy_sliding_window_state(src_state, mem_manager.linear_att_big_page_buffers.get_state_cache(temp_id))
+            src_state = radix_cache.small_page_buffers.get_state_cache(req.tail_small_page_buffer_id)
+            copy_sliding_window_state(src_state, mem_manager.big_page_buffers.get_state_cache(temp_id))
             big_page_ids.append(temp_id)
 
         big_page_ids_gpu = torch.tensor(big_page_ids, dtype=torch.int64, device="cpu").cuda(non_blocking=True)
@@ -98,7 +96,7 @@ class HybridSlidingMemOperator(NormalMemOperator):
             page_readies=page_readies,
             big_page_buffer_ids=big_page_ids_gpu,
             gpu_full_att_kv_state=mem_manager.kv_buffer,
-            cpu_kv_sliding_state=mem_manager.linear_att_big_page_buffers.state_cache,
+            cpu_kv_sliding_state=mem_manager.big_page_buffers.state_cache,
             cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,
             tp_rank=get_current_rank_in_dp(),
             tp_world_size=get_dp_world_size(),

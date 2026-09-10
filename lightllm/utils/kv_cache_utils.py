@@ -16,30 +16,20 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import (
-    get_config_json,
-    get_num_key_value_heads,
-    get_head_dim,
-    get_layer_num,
-    is_linear_att_mixed_model,
-    is_sliding_att_mixed_model,
-    is_hybrid_att_mixed_model,
-)
+from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_hybrid_att_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
-    Qwen3NextMemManager,
 )
 
 from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.common.state_cache_manager import LinearAttCacheConfig
-from lightllm.common.kv_cache_mem_manager.hybrid_sliding_mem_manager import HybridSlidingMemoryManager
+from lightllm.common.state_cache_manager import get_hybrid_cache_config
 
 logger = init_logger(__name__)
 
@@ -73,33 +63,16 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    if is_linear_att_mixed_model(args.model_dir):
-        # 对于 qwen3.5 等 linear att 混合模型的特殊处理。
-        mem_manager_class = Qwen3NextMemManager
-    elif is_sliding_att_mixed_model(args.model_dir):
-        mem_manager_class = HybridSlidingMemoryManager
-    else:
-        mem_manager_class = select_mem_manager_class()
-
-    if mem_manager_class in (Qwen3NextMemManager, HybridSlidingMemoryManager):
-        if mem_manager_class is Qwen3NextMemManager:
-            page_bytes = LinearAttCacheConfig.load_from_args().get_cpu_cache_big_page_bytes()
-        else:
-            from lightllm.models.gemma4.kv_layout import build_sliding_cache_config
-
-            model_config = get_config_json(args.model_dir)
-            text_config = model_config.get("text_config", model_config)
-            tp_world_size = args.tp // args.dp
-            sliding_config = build_sliding_cache_config(text_config, tp_world_size, get_llm_data_type())
-            big_page_token_num = args.linear_att_hash_page_size * args.linear_att_page_block_num
-            assert args.cpu_cache_token_page_size == big_page_token_num
-            page_bytes = sliding_config.get_cpu_cache_big_page_bytes(big_page_token_num, tp_world_size)
+    is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    mem_manager_class = None if is_hybrid_model else select_mem_manager_class()
+    if is_hybrid_model:
+        hybrid_config = get_hybrid_cache_config()
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=1,
             layer_num=1,
             num_heads=1,
-            head_dim=page_bytes,
+            head_dim=hybrid_config.get_cpu_cache_big_page_bytes(),
             data_type=torch.uint8,
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
@@ -143,9 +116,10 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
     if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
-        if not is_hybrid_att_mixed_model(args.model_dir):
-            # 普通 token KV 需要额外增加 MTP 的 KV 层数；hybrid cache
-            # 已将所有 payload 打包成字节页，其 layer_num 始终为 1。
+        if not is_hybrid_model:
+            # 对于非 hybrid 模型，需要额外增加 mtp 的 kv 层数，
+            # 对于 hybrid 模型，如 qwen 3.5 mtp，已经将 kv 数据
+            # 打包成一个块了，所以不需要额外增加，其 layer_num 一直都保持为 1
             cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
