@@ -88,7 +88,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
             if g_infer_context.is_hybrid_att_model:
-                # KV 分段之外，单独发送 prompt 末尾的 attention 续算状态。
+                # 混合注意力模型除 KV 外，还需传输 prefill 完成时的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
                 trans_task_list.append(
                     self._create_pd_trans_task(
                         req_obj=req_obj,

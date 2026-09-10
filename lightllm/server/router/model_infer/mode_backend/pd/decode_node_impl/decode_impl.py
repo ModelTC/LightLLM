@@ -158,7 +158,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
                 req_obj.cur_kv_len += len(mem_indexes)
 
-                # 额外接收 prompt 末尾的 attention 续算状态，由本地 req_idx 定位恢复位置。
+                # 混合注意力模型还需接收请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
+                # 通过本地 req_idx 定位运行态 buffer 的恢复位置。
                 if g_infer_context.is_hybrid_att_model:
                     self._create_pd_trans_task(
                         req_obj=req_obj,

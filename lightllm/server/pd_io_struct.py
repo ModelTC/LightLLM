@@ -180,8 +180,9 @@ class PDChunckedTransTask:
     error_info: Optional[str] = None
     transfer_time_out_secs: int = 66
     # kv: 通过 mem_indexes 传输 [start_kv_index, end_kv_index) 的 token KV。
-    # att_state: start_kv_index == end_kv_index 处的 attention 续算状态（如 conv/SSM）。
-    # 状态通过本地 req_idx 寻址，mem_indexes 为空；具体打包和恢复由模型 mem_manager 负责。
+    # att_state: 混合注意力模型的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
+    # start_kv_index == end_kv_index 标记状态对应的 token 位置，mem_indexes 为空。
+    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 mem_manager 负责。
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
