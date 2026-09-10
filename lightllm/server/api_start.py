@@ -338,7 +338,7 @@ def _launch_subprocesses(args: StartArgs):
     validate_ports(ports_to_check)
 
     set_env_start_args(args)
-    process_manager.setup_signal_handlers()
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
     send_and_receive_node_ip(args)
@@ -446,7 +446,6 @@ def normal_or_p_d_start(args: StartArgs):
 
     # 启动子进程
     http_server_process = subprocess.Popen(command)
-    process_manager.setup_signal_handlers(http_server_process)
 
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_clear
@@ -457,6 +456,7 @@ def normal_or_p_d_start(args: StartArgs):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+    process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
 
 
@@ -481,7 +481,7 @@ def pd_master_start(args: StartArgs):
 
     validate_ports([args.port])
     set_env_start_args(args)
-    process_manager.setup_signal_handlers()
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -509,13 +509,13 @@ def pd_master_start(args: StartArgs):
     ]
 
     http_server_process = subprocess.Popen(command)
-    process_manager.setup_signal_handlers(http_server_process)
 
     if args.health_monitor:
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
+    process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
 
 
@@ -547,7 +547,7 @@ def visual_only_start(args):
         ports_to_check.append(args.visual_rpyc_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
-    process_manager.setup_signal_handlers()
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -561,6 +561,7 @@ def visual_only_start(args):
             (args,),
         ],
     )
+    process_manager.setup_signal_handlers()
     process_manager.supervise_processes()
 
 
@@ -574,7 +575,7 @@ def config_server_start(args):
         ports_to_check.append(args.config_server_visual_redis_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
-    process_manager.setup_signal_handlers()
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 

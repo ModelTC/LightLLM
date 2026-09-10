@@ -147,7 +147,6 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     registered_handlers = {}
     terminate_calls = []
     cleanup_calls = []
-    monkeypatch.setattr(start_utils, "get_unique_server_name", lambda: "service_0")
     monkeypatch.setattr(
         start_utils,
         "register_launcher_shm_cleanup",
@@ -161,14 +160,13 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
 
     process_manager.setup_signal_handlers(http_server_process)
-    process_manager.setup_signal_handlers(http_server_process)
 
     assert set(registered_handlers) == {
         start_utils.signal.SIGTERM,
         start_utils.signal.SIGINT,
         start_utils.signal.SIGHUP,
     }
-    assert cleanup_calls == [("register", "service_0")]
+    assert cleanup_calls == []
     with pytest.raises(SystemExit) as exc_info:
         registered_handlers[start_utils.signal.SIGTERM](start_utils.signal.SIGTERM, None)
 
@@ -178,13 +176,25 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     assert terminate_calls == [True]
 
 
-def test_terminate_all_processes_runs_launcher_shm_cleanup(monkeypatch):
+def test_setup_exit_controller_registers_once_and_cleans_up_on_termination(monkeypatch):
     from lightllm.utils import envs_utils
 
     process_manager = start_utils.SubmoduleManager()
+    registration_calls = []
     cleanup_calls = []
-    process_manager._cleanup_service_shm = lambda: cleanup_calls.append(True)
+    monkeypatch.setattr(start_utils, "get_unique_server_name", lambda: "service_0")
+    monkeypatch.setattr(
+        start_utils,
+        "register_launcher_shm_cleanup",
+        lambda service_name: registration_calls.append(service_name) or (lambda: cleanup_calls.append(True)),
+    )
     monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(enable_mps=False))
+
+    process_manager.setup_exit_controller()
+    process_manager.setup_exit_controller()
+
+    assert registration_calls == ["service_0"]
+    assert cleanup_calls == []
 
     process_manager.terminate_all_processes()
 
