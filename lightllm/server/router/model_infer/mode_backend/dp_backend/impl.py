@@ -130,6 +130,12 @@ class DPChunkedPrefillBackend(ModeBackend):
                     recover_paused=self.control_state_machine.try_recover_paused_reqs(),
                 )
 
+                if self.support_overlap:
+                    # The previous infer thread releases forward before its GPU work finishes.
+                    # Keep the next DP collective behind that work to avoid overlapping NCCL
+                    # with the previous DeepEP/MTP kernels.
+                    torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
+
                 dp_prefill_req_nums, dp_decode_req_nums = self._dp_all_gather_prefill_and_decode_req_num(
                     prefill_reqs=prefill_reqs, decode_reqs=decode_reqs
                 )
