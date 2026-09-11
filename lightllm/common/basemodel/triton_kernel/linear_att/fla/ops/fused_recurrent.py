@@ -20,7 +20,6 @@ from .op import exp
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-        "IS_SINGLE_TOKEN": lambda args: args["cu_seqlens"] is None and args["T"] == 1,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
         "HAS_SEPARATE_WRITE_INDICES": lambda args: args["ssm_state_write_indices"] is not None,
@@ -42,8 +41,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     num_accepted_tokens,
     # Fused gating parameters (only used when FUSE_GATING=True)
     A_log,  # [HV] per-head log decay
-    dt_bias,  # [HV] for GDN, [HV, K] for KDA
-    a_raw,  # [B*T, HV] for GDN, [B*T, HV, K] for KDA
+    dt_bias,  # [HV] per-head dt bias
+    a_raw,  # [B*T, HV] raw alpha values (before softplus)
     b_raw,  # [B*T, HV] raw beta values (before sigmoid)
     scale,
     N: tl.int64,  # num of sequences
@@ -68,13 +67,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_write_indices_tok: tl.constexpr,  # NEW: stride for write indices
     SOFTPLUS_BETA: tl.constexpr,  # softplus beta parameter (default 1.0)
     SOFTPLUS_THRESHOLD: tl.constexpr,  # softplus threshold (default 20.0)
-    LOWER_BOUND: tl.constexpr,  # bounded sigmoid gate when provided; otherwise softplus
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    IS_SINGLE_TOKEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
@@ -84,8 +81,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
-    if IS_SINGLE_TOKEN:
-        T = 1
     if IS_VARLEN:
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int64),
@@ -103,9 +98,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    mask_k = o_k < K
-    mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
 
     p_q = q + bos * stride_q_tok + i_h * K + o_k
     p_k = k + bos * stride_k_tok + i_h * K + o_k
@@ -113,12 +105,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if FUSE_GATING:
         # Fused gating: load per-head constants once, compute g/beta inline per token
         b_A_log = tl.load(A_log + i_hv).to(tl.float32)
-        if IS_KDA:
-            b_dt_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
-            p_a_raw = a_raw + bos * stride_a_tok + i_hv * K + o_k
-        else:
-            b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
-            p_a_raw = a_raw + bos * stride_a_tok + i_hv
+        b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
+        p_a_raw = a_raw + bos * stride_a_tok + i_hv
         p_b_raw = b_raw + bos * stride_b_tok + i_hv
     else:
         if IS_BETA_HEADWISE:
@@ -132,6 +120,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             p_gk = g + (bos * HV + i_hv) * K + o_k
 
     p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
+
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_k[:, None] & mask_v[None, :]
 
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
@@ -159,24 +151,16 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = b_q * scale
         # [BK, BV]
         if FUSE_GATING:
-            if IS_KDA:
-                b_a = tl.load(p_a_raw, mask=mask_k, other=0).to(tl.float32)
-            else:
-                b_a = tl.load(p_a_raw).to(tl.float32)
+            # Compute g = -exp(A_log) * softplus(a_raw + dt_bias) inline
+            b_a = tl.load(p_a_raw).to(tl.float32)
             x = b_a + b_dt_bias
-            if LOWER_BOUND is not None:
-                b_g = LOWER_BOUND * tl.sigmoid(tl.exp(b_A_log) * x)
-            else:
-                softplus_x = tl.where(
-                    SOFTPLUS_BETA * x <= SOFTPLUS_THRESHOLD,
-                    (1.0 / SOFTPLUS_BETA) * tl.log(1.0 + tl.exp(SOFTPLUS_BETA * x)),
-                    x,
-                )
-                b_g = -tl.exp(b_A_log) * softplus_x
-            if IS_KDA:
-                b_h *= exp(b_g[:, None])
-            else:
-                b_h *= exp(b_g)
+            softplus_x = tl.where(
+                SOFTPLUS_BETA * x <= SOFTPLUS_THRESHOLD,
+                (1.0 / SOFTPLUS_BETA) * tl.log(1.0 + tl.exp(SOFTPLUS_BETA * x)),
+                x,
+            )
+            b_g = -tl.exp(b_A_log) * softplus_x
+            b_h *= exp(b_g)
             # Compute beta = sigmoid(b_raw) inline
             b_b = tl.load(p_b_raw).to(tl.float32)
             b_beta = tl.sigmoid(b_b)
@@ -185,7 +169,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 b_g = tl.load(p_g).to(tl.float32)
                 b_h *= exp(b_g)
             else:
-                b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
+                b_gk = tl.load(p_gk).to(tl.float32)
                 b_h *= exp(b_gk[:, None])
             if IS_BETA_HEADWISE:
                 b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
@@ -256,8 +240,8 @@ def _ensure_gate_token_strided(x: torch.Tensor, inner_numel: int):
     """Return a_raw/b_raw and token stride, copying only when needed."""
     if x is None:
         return None, 0
-    # Gates use [tokens, HV], or [tokens, HV, K] for KDA's per-channel decay.
-    if x.stride(-1) != 1 or (x.ndim == 3 and x.stride(-2) != x.shape[-1]):
+    # a_raw/b_raw are 2D [tokens, HV]; the tail HV dimension must be packed.
+    if x.stride(1) != 1:
         x = x.contiguous()
         return x, inner_numel
     return x, x.stride(0)
@@ -283,7 +267,6 @@ def fused_recurrent_gated_delta_rule_fwd(
     a_raw: torch.Tensor | None = None,
     b_raw: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
-    lower_bound: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -291,12 +274,10 @@ def fused_recurrent_gated_delta_rule_fwd(
     # Qwen3Next MTP verify path passes cu_seqlens for variable-length verify
     # chunks. Both flow through the per-token strided-view path below.
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    fuse_gating = A_log is not None
-    is_kda = a_raw.ndim == 3 if fuse_gating else g.ndim == 4
     q, stride_q_tok = _ensure_qkv_token_strided(q, H * K)
     k, stride_k_tok = _ensure_qkv_token_strided(k, H * K)
     v, stride_v_tok = _ensure_qkv_token_strided(v, HV * V)
-    a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV * K if is_kda else HV)
+    a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV)
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw, HV)
     BK = triton.next_power_of_2(K)
     if T == 1:
@@ -312,6 +293,8 @@ def fused_recurrent_gated_delta_rule_fwd(
         num_stages = 3
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
+
+    fuse_gating = A_log is not None
 
     if out is not None:
         o = out.unsqueeze(0) if out.ndim == v.ndim else out
@@ -385,11 +368,10 @@ def fused_recurrent_gated_delta_rule_fwd(
         stride_write_indices_tok=stride_write_indices_tok,
         SOFTPLUS_BETA=1.0,
         SOFTPLUS_THRESHOLD=20.0,
-        LOWER_BOUND=lower_bound,
         IS_BETA_HEADWISE=False if fuse_gating else (beta.ndim == v.ndim),
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
-        IS_KDA=is_kda,
+        IS_KDA=False,
         FUSE_GATING=fuse_gating,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -420,7 +402,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
         a_raw: torch.Tensor | None = None,
         b_raw: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
-        lower_bound: float | None = None,
     ):
         # q/k/v/a_raw/b_raw may be non-contiguous column views of one projection
         # output; the kernel handles them via per-token strides (no copies).
@@ -443,7 +424,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
             a_raw=a_raw,
             b_raw=b_raw,
             out=out,
-            lower_bound=lower_bound,
         )
 
         return o, final_state
@@ -469,7 +449,6 @@ def fused_recurrent_gated_delta_rule(
     a_raw: torch.Tensor | None = None,
     b_raw: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
-    lower_bound: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -481,7 +460,7 @@ def fused_recurrent_gated_delta_rule(
             values of shape `[B, T, HV, V]`.
             GVA is applied if `HV > H`.
         g (torch.Tensor):
-            Log decays of shape `[B, T, HV]` for GDN or `[B, T, HV, K]` for KDA.
+            g (decays) of shape `[B, T, HV]`.
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
         scale (Optional[int]):
@@ -502,15 +481,6 @@ def fused_recurrent_gated_delta_rule(
             Indices to map the input sequences to the initial/final states.
         num_accepted_tokens (Optional[torch.Tensor]):
             Number of accepted tokens for each sequence during decoding.
-        a_raw (Optional[torch.Tensor]):
-            Raw decay gates of shape `[B*T, HV]` for GDN or `[B*T, HV, K]`
-            for KDA. With `A_log`, `dt_bias`, and `b_raw`, fuse gate computation.
-            `A_log` is per-head; `dt_bias` has the same trailing shape as `a_raw`.
-        b_raw (Optional[torch.Tensor]):
-            Raw beta gates of shape `[B*T, HV]`, before sigmoid.
-        lower_bound (Optional[float]):
-            Use `lower_bound * sigmoid(exp(A_log) * (a_raw + dt_bias))` for
-            fused log decays. `None` keeps `-exp(A_log) * softplus(a_raw + dt_bias)`.
 
     Returns:
         o (torch.Tensor):
@@ -561,6 +531,5 @@ def fused_recurrent_gated_delta_rule(
         a_raw,
         b_raw,
         out,
-        lower_bound,
     )
     return o, final_state

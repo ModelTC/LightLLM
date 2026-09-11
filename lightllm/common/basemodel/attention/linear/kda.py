@@ -20,9 +20,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_update,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.index import prepare_chunk_indices
 
 if TYPE_CHECKING:
@@ -159,18 +157,19 @@ class KDADecodeAttState(BaseDecodeAttState):
             conv_state_indices=self.b_conv_buffer_idx,
         )
         q, k, v = [backend.reshape_qkv(x, decode=True) for x in backend.split_qkv(mixed_qkv)]
-        output, _ = fused_recurrent_gated_delta_rule(
+        raw_gate = raw_gate.view(-1, 1, backend.tp_projection_size)
+        raw_beta = raw_beta.view(-1, 1, backend.tp_num_heads)
+        output, _ = fused_recurrent_kda(
             q=q,
             k=k,
             v=v,
-            a_raw=raw_gate.view(-1, backend.tp_num_heads, backend.head_dim),
-            b_raw=raw_beta.view(-1, backend.tp_num_heads),
-            A_log=layer_weight.linear_A_log.weight,
-            dt_bias=layer_weight.linear_dt_bias.weight,
+            raw_gate=raw_gate,
+            raw_beta=raw_beta,
+            a_log=layer_weight.linear_A_log.weight,
+            gate_bias=layer_weight.linear_dt_bias.weight,
             initial_state=ssm_states,
             lower_bound=backend.lower_bound,
             inplace_final_state=True,
-            use_qk_l2norm_in_kernel=True,
             ssm_state_indices=self.b_ssm_buffer_idx,
         )
         return output

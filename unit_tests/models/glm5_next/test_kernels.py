@@ -8,9 +8,7 @@ import triton
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools, gather_pools, expand_topk
 from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
 from lightllm.models.glm5_next.triton_kernel.mhc import hc_pre_norm, hc_pre_reference, hc_post, hc_post_reference
@@ -73,18 +71,16 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
     states[2] = initial[0]
     unchanged = states[[0, 1, 3]].clone()
     for i in range(tokens):
-        out, _ = fused_recurrent_gated_delta_rule(
+        out, _ = fused_recurrent_kda(
             q[:, i : i + 1],
             k[:, i : i + 1],
             v[:, i : i + 1],
-            a_raw=gate[:, i],
-            b_raw=beta[:, i],
-            A_log=a,
-            dt_bias=bias.flatten(),
-            initial_state=states,
-            ssm_state_indices=torch.tensor([2], device="cuda", dtype=torch.int32),
-            use_qk_l2norm_in_kernel=True,
-            lower_bound=-5.0,
+            gate[:, i : i + 1].reshape(1, 1, -1),
+            beta[:, i : i + 1],
+            a,
+            bias.flatten(),
+            states,
+            torch.tensor([2], device="cuda", dtype=torch.int32),
         )
         torch.testing.assert_close(out[0, 0].float(), expected[0, i], atol=2e-3, rtol=1e-2)
     torch.testing.assert_close(states[2], state, atol=2e-5, rtol=2e-4)
