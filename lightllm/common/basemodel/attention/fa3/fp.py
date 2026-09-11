@@ -39,9 +39,9 @@ class Fa3AttBackend(BaseAttBackend):
         self.page_table_max_batch_size = max(running_max_batch_size, model.graph_max_batch_size)
         # max_seq_length is max_req_total_len plus the MTP headroom reserved when
         # the model is initialized.
-        self.page_table_max_seq_len = triton.cdiv(model.max_seq_length, self.page_size)
+        self.supported_max_seq_len = model.max_seq_length
         buffer_count = 2 if args.enable_decode_microbatch_overlap else 1
-        workspace_size = self.page_table_max_batch_size * self.page_table_max_seq_len
+        workspace_size = self.page_table_max_batch_size * triton.cdiv(self.supported_max_seq_len, self.page_size)
         self.page_table_buffers = [
             self.get_gpu_workspace_buffer(
                 key_name=f"fa3_page_table_{buffer_index}",
@@ -59,11 +59,11 @@ class Fa3AttBackend(BaseAttBackend):
                 f"FA3 attention batch size {att_batch_size} exceeds page-table capacity "
                 f"{self.page_table_max_batch_size}"
             )
-        max_page_len = triton.cdiv(max_kv_len, self.page_size)
-        if max_page_len > self.page_table_max_seq_len:
+        if max_kv_len > self.supported_max_seq_len:
             raise RuntimeError(
-                f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity " f"{self.page_table_max_seq_len}"
+                f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity " f"{self.supported_max_seq_len}"
             )
+        max_page_len = triton.cdiv(max_kv_len, self.page_size)
         return self.page_table_buffers[microbatch_index][: att_batch_size * max_page_len].reshape(
             att_batch_size, max_page_len
         )
