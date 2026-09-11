@@ -81,7 +81,7 @@ class EagleWithAttProposer(BaseSpecProposer):
 
         # 只在 req_num 行 logits 上进行 argmax，避免为未接受的 verify 行执行
         # vocabulary reduction。第一列 proposal 来自每个请求的 accepted tail。
-        accepted_tail_output = ModelOutput(logits=extend_output.logits.index_select(0, accepted_tail_rows))
+        accepted_tail_output = extend_output.index_select_logits_rows(accepted_tail_rows)
         if self.enable_dynmaic_mtp:
             draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(accepted_tail_output)
             schedule_scores_by_step.append(draft_token_probs.float().unsqueeze(1))

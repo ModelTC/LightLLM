@@ -199,11 +199,32 @@ class ModelOutput:
     # 此时 logits 依然只保存每个请求最后一个位置的 logits，prompt_logics 为可选项，仅在
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
+    # Sparse draft logits map each candidate column back to a token id in the
+    # draft model's output vocabulary.  None means logits are dense and their
+    # column indexes are already token ids. Keep this optional field last so
+    # existing positional ModelOutput construction remains compatible.
+    logits_token_ids: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
+        if self.logits_token_ids is not None:
+            assert self.logits_token_ids.shape == self.logits.shape
+            assert self.logits_token_ids.dtype in (torch.int32, torch.int64)
+            assert self.logits_token_ids.device == self.logits.device
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
+        if self.logits_token_ids is not None:
+            self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
         self.mtp_collector.to_no_ref_tensor()
+
+    def index_select_logits_rows(self, index: torch.Tensor) -> "ModelOutput":
+        """Select vocabulary-output rows while preserving sparse token ids."""
+
+        return ModelOutput(
+            logits=self.logits.index_select(0, index),
+            logits_token_ids=(
+                self.logits_token_ids.index_select(0, index) if self.logits_token_ids is not None else None
+            ),
+        )
