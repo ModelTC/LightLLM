@@ -5,12 +5,12 @@ import torch
 import triton
 
 from lightllm.common.build_utils import repair_config
+from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
+from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.registry import ModelRegistry
-from .attention import Glm5NextSparseAttBackend
 from .cache_config import Glm5NextCacheConfig
-from .kda_backend import KDALinearAttBackend
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight

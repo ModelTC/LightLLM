@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
 
-"""KDA helpers built on LightLLM's continuous-batching recurrent kernel."""
+"""Chunkwise KDA prefill with per-channel decay gates."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ import torch
 import triton
 import triton.language as tl
 
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.cumsum import chunk_local_cumsum
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.index import prepare_chunk_indices
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.l2norm import l2norm_fwd
+from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from .cumsum import chunk_local_cumsum
+from .index import prepare_chunk_indices
+from .l2norm import l2norm_fwd
 from triton.language import exp2, log
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril import solve_tril
+from .solve_tril import solve_tril
 
 
 FLA_CHUNK_SIZE = 64

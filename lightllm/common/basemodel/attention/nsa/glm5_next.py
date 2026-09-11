@@ -2,7 +2,7 @@ import dataclasses
 
 import torch
 
-from lightllm.common.basemodel.attention.nsa.flashmla_sparse import (
+from .flashmla_sparse import (
     NsaFlashMlaSparseAttBackend,
     NsaFlashMlaSparsePrefillAttState,
     NsaFlashMlaSparseDecodeAttState,
