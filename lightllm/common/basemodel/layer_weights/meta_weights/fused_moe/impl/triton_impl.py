@@ -6,6 +6,8 @@ from .base_impl import FuseMoeBaseImpl
 
 
 class FuseMoeTriton(FuseMoeBaseImpl):
+    supports_swiglu_clamp = True
+
     def __init__(
         self,
         n_routed_experts: int,
@@ -16,7 +18,16 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         redundancy_expert_ids_tensor: torch.Tensor,
         routed_expert_counter_tensor: torch.Tensor,
         auto_update_redundancy_expert: bool,
+        *,
+        swiglu_alpha: Optional[float] = None,
+        swiglu_limit: Optional[float] = None,
     ):
+        if (swiglu_alpha is None) != (swiglu_limit is None):
+            raise ValueError("swiglu_alpha and swiglu_limit must be specified together")
+        if swiglu_limit is not None and not self.supports_swiglu_clamp:
+            raise NotImplementedError(f"{type(self).__name__} does not support clamped SwiGLU")
+        self.swiglu_alpha = swiglu_alpha
+        self.swiglu_limit = swiglu_limit
         super().__init__(
             n_routed_experts=n_routed_experts,
             num_fused_shared_experts=num_fused_shared_experts,
@@ -27,8 +38,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             routed_expert_counter_tensor=routed_expert_counter_tensor,
             auto_update_redundancy_expert=auto_update_redundancy_expert,
         )
-        self.swiglu_limit = None
-        self.swiglu_clamp_up_add_one = True
 
     def create_workspace(self):
         return None
@@ -107,8 +116,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             w1_scale=w13_scale,
             w2_scale=w2_scale,
             limit=self.swiglu_limit,
-            alpha=1.0 if self.swiglu_limit is not None else None,
-            clamp_up_add_one=self.swiglu_clamp_up_add_one,
+            alpha=self.swiglu_alpha,
+            # GPT-OSS owns its up + 1 variant in its dedicated experts path.
+            clamp_up_add_one=False,
         )
         return input_tensor
 

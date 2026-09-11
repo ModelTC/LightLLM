@@ -20,6 +20,8 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
+    supports_swiglu_clamp = False
+
     def _select_experts(
         self,
         input_tensor: torch.Tensor,

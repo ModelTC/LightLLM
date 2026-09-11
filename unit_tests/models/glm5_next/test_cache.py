@@ -155,8 +155,10 @@ def test_clamped_swiglu_preserves_gpt_oss_default(add_one):
     x = torch.linspace(-25, 25, 2048, device="cuda", dtype=torch.bfloat16).view(4, 512)
     out = torch.empty(4, 256, device="cuda", dtype=torch.bfloat16)
     kwargs = {} if add_one else {"clamp_up_add_one": False}
-    silu_and_mul_fwd(x, out, limit=10.0, alpha=1.0, **kwargs)
+    alpha, limit = (1.702, 7.0) if add_one else (1.0, 10.0)
+    silu_and_mul_fwd(x, out, limit=limit, alpha=alpha, **kwargs)
     gate, up = x.float().chunk(2, -1)
-    gate = torch.nn.functional.silu(gate.clamp(max=10)).bfloat16().float()
-    expected = gate * (up.clamp(-10, 10) + int(add_one))
+    gate = gate.clamp(max=limit)
+    gate = (gate * torch.sigmoid(alpha * gate)).bfloat16().float()
+    expected = gate * (up.clamp(-limit, limit) + int(add_one))
     torch.testing.assert_close(out, expected.bfloat16(), atol=0.008, rtol=0.008)

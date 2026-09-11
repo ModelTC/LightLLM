@@ -35,6 +35,9 @@ class FusedMoeWeight(BaseWeightTpl):
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
         per_expert_scale_name: str = "",
+        *,
+        swiglu_alpha: Optional[float] = None,
+        swiglu_limit: Optional[float] = None,
     ) -> None:
         super().__init__(data_type=data_type)
         self.w1_weight_name = gate_proj_name
@@ -67,6 +70,8 @@ class FusedMoeWeight(BaseWeightTpl):
             redundancy_expert_ids_tensor=self.redundancy_expert_ids_tensor,
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_limit=swiglu_limit,
         )
         self.lock = threading.Lock()
         self._create_weight()

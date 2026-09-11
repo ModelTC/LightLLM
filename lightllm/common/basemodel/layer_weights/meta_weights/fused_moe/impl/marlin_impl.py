@@ -11,6 +11,8 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
+    supports_swiglu_clamp = False
+
     def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM
 
