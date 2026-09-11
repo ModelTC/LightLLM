@@ -168,7 +168,7 @@ class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
             dim=head_dim,
             weight_name=f"{prefix}.o_norm.weight",
             data_type=self.data_type_,
-            activation="sigmoid",
+            gate_type="sigmoid",
         )
         self.linear_o_proj = COLMMWeight(
             in_dim=projection,

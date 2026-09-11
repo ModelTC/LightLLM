@@ -78,11 +78,11 @@ class GatedRMSNormWeight(RMSNormWeight):
         dim: int,
         weight_name: str,
         data_type: torch.dtype,
-        activation: str = "silu",
+        gate_type: str = "silu",
     ):
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
-        assert activation in ("silu", "sigmoid")
-        self.activation = activation
+        assert gate_type in ("silu", "sigmoid")
+        self.gate_type = gate_type
 
     def _triton_forward(
         self,
@@ -104,7 +104,7 @@ class GatedRMSNormWeight(RMSNormWeight):
             eps=eps,
             z=gate_value,
             out=out,
-            activation=self.activation,
+            gate_type=self.gate_type,
         )
 
     def _cuda_forward(

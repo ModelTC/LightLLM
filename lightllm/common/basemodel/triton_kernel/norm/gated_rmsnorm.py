@@ -110,7 +110,7 @@ def gated_rmsnorm_forward(
     group_size: int = None,
     norm_before_gate: bool = True,
     run_config: dict = None,
-    activation: str = "silu",
+    gate_type: str = "silu",
 ):
     M, N = x.shape
     if group_size is None:
@@ -120,7 +120,7 @@ def gated_rmsnorm_forward(
     assert x.stride(-1) == 1
     # z is required for gated_rmsnorm
     assert z is not None, "z cannot be None for gated_rmsnorm_forward"
-    assert activation in ("silu", "sigmoid"), f"unsupported gate activation: {activation}"
+    assert gate_type in ("silu", "sigmoid"), f"unsupported gate type: {gate_type}"
     # Accept GDN's strided 3D gate without materializing a flattened copy.
     assert z.ndim in (2, 3), f"z must be [M, N] or [tokens, heads, N], got shape={z.shape}"
     assert z.stride(-1) == 1
@@ -184,7 +184,7 @@ def gated_rmsnorm_forward(
         eps,
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
-        SIGMOID_GATE=activation == "sigmoid",
+        SIGMOID_GATE=gate_type == "sigmoid",
         Z_HEADS=z_heads,
         num_warps=num_warps,
     )

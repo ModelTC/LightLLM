@@ -134,17 +134,17 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         assert torch.equal(big.ssm_state_cache.buffer[0], ssm)
 
 
-@pytest.mark.parametrize("activation", ["silu", "sigmoid"])
-def test_gated_norm_activation_and_strided_gate(activation):
+@pytest.mark.parametrize("gate_type", ["silu", "sigmoid"])
+def test_gated_norm_gate_type_and_strided_gate(gate_type):
     from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
 
     x = torch.randn(12, 128, device="cuda", dtype=torch.bfloat16)
     gate = torch.randn(3, 8, 128, device="cuda", dtype=torch.bfloat16)[:, :4]
     weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
-    actual = gated_rmsnorm_forward(x, weight, None, 1e-5, gate, activation=activation)
+    actual = gated_rmsnorm_forward(x, weight, None, 1e-5, gate, gate_type=gate_type)
     expected = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-5) * weight.float()
     z = gate.reshape(12, 128).float()
-    expected *= z.sigmoid() if activation == "sigmoid" else torch.nn.functional.silu(z)
+    expected *= z.sigmoid() if gate_type == "sigmoid" else torch.nn.functional.silu(z)
     torch.testing.assert_close(actual, expected.bfloat16(), atol=0.008, rtol=0.008)
 
 
