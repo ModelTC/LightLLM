@@ -163,6 +163,11 @@ def _launch_subprocesses(args: StartArgs):
                 f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
             )
 
+    if args.mtp_draft_cache_mode == "windowed":
+        from lightllm.utils.windowed_mtp import validate_windowed_mtp
+
+        validate_windowed_mtp(args)
+
     # mtp params check
     if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:

@@ -199,6 +199,9 @@ class StartArgs:
         },
     )
     mtp_draft_model_dir: Optional[List[str]] = field(default=None)
+    mtp_draft_cache_mode: str = field(default="full", metadata={"choices": ["full", "windowed"]})
+    mtp_draft_window: int = field(default=512)
+    mtp_draft_sinks: int = field(default=1)
     mtp_step: int = field(default=0)
     mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
