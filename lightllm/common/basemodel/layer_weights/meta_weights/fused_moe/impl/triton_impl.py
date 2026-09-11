@@ -112,8 +112,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
     ):
-        if (alpha is None) != (limit is None):
-            raise ValueError("alpha and limit must be specified together")
         topk_weights, topk_ids, origin_topk_ids = self._select_experts(
             input_tensor=input_tensor,
             router_logits=router_logits,
