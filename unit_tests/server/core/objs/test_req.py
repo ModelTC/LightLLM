@@ -1,24 +1,33 @@
 import pytest
 import easydict
+from types import SimpleNamespace
 from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
-from lightllm.utils.envs_utils import set_env_start_args
+from lightllm.utils import shm_utils
+from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_module_env():
-    set_env_start_args(
-        easydict.EasyDict(
-            {
-                "mtp_step": 0,
-                "llm_prefill_att_backend": ["None"],
-                "llm_decode_att_backend": ["None"],
-                "cpu_cache_token_page_size": 256,
-                "enable_cpu_cache": False,
-                "model_dir": "",
-            }
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_req_service_0")
+        monkeypatch.setenv("LIGHTLLM_START_ARGS", "{}")
+        set_env_start_args(
+            easydict.EasyDict(
+                {
+                    "mtp_step": 0,
+                    "llm_prefill_att_backend": ["None"],
+                    "llm_decode_att_backend": ["None"],
+                    "cpu_cache_token_page_size": 256,
+                    "enable_cpu_cache": False,
+                    "model_dir": "",
+                    "page_size": 4,
+                }
+            )
         )
-    )
+        get_env_start_args.cache_clear()
+        yield
+        get_env_start_args.cache_clear()
 
 
 @pytest.fixture
@@ -71,11 +80,15 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     ]
 
 
-# def test_chunked_req_get_tuple_tokens():
-#     chunked_req = ChunkedPrefillReq()
-#     chunked_req.init(1, [1, 2, 3], {"max_new_tokens": 1}, None, chunked_prefill_size=256)
-#     result = chunked_req.get_tuple_tokens(False, 10)
-#     assert isinstance(result, tuple)
+def test_chunked_req_get_tuple_tokens_adds_page_reserve():
+    req = SimpleNamespace(
+        input_len=10,
+        shm_cur_output_len=0,
+        shm_cur_kv_len=0,
+        sample_params=SimpleNamespace(ignore_eos=True, max_new_tokens=5),
+    )
+
+    assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 8)
 
 
 def test_finish_status(req):

@@ -14,7 +14,6 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
@@ -377,12 +376,6 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        proposal.extra_mem_indexes_cpu.append(
-            MtpMemIndexesToFree(
-                mem_indexes_cpu=model_input.mem_indexes_cpu,
-                free_mask_cpu=accepted_index_cpu == 0,
-            ),
-        )
         mtp_utils.free_mem_indexes(
             backend=self,
             extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,

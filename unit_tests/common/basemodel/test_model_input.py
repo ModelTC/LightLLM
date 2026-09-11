@@ -17,7 +17,6 @@ def _create_model_input(*, is_prefill=False):
         b_req_idx=torch.arange(batch_size, dtype=torch.int32),
         b_mtp_index=torch.zeros(batch_size, dtype=torch.int32),
         b_seq_len=torch.ones(batch_size, dtype=torch.int32),
-        mem_indexes_cpu=torch.arange(batch_size, dtype=torch.int32),
         is_prefill=is_prefill,
         multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
@@ -46,7 +45,6 @@ def test_decode_requires_shared_radix_metadata():
             b_mtp_index=torch.zeros(1, dtype=torch.int32),
             b_seq_len=torch.ones(1, dtype=torch.int32),
             b_position_delta=torch.zeros(1, dtype=torch.int32),
-            mem_indexes_cpu=torch.zeros(1, dtype=torch.int32),
             is_prefill=False,
             multimodal_params=[{"images": [], "audios": []}],
         )
@@ -120,13 +118,12 @@ def test_padded_prefill_adds_non_decode_request_marker():
         b_is_decode_req=torch.ones(1, dtype=torch.bool),
         b_ready_cache_len=torch.zeros(1, dtype=torch.int32),
         b_prefill_start_loc=torch.zeros(1, dtype=torch.int32),
-        mem_indexes=torch.arange(2, dtype=torch.int32),
         is_prefill=True,
         b_prefill_has_output_cpu=[False],
         multimodal_params=[{"images": [], "audios": []}],
     )
     model = SimpleNamespace(
-        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=-1),
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=-1, page_size=1),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
 
@@ -154,14 +151,13 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
         b_is_decode_req=torch.empty((0,), dtype=torch.bool),
         b_ready_cache_len=torch.empty((0,), dtype=torch.int32),
         b_prefill_start_loc=torch.empty((0,), dtype=torch.int32),
-        mem_indexes=torch.empty((0,), dtype=torch.int32),
         is_prefill=True,
         b_prefill_has_output_cpu=[],
         multimodal_params=[],
         mtp_draft_input_hiddens=torch.empty((0, 4), dtype=torch.float32),
     )
     model = SimpleNamespace(
-        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99),
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
     )
 
@@ -174,7 +170,6 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
     assert model_input.batch_size == 0
     assert padded_input.batch_size == 1
     assert padded_input.input_ids.tolist() == [1]
-    assert padded_input.mem_indexes.tolist() == [99]
     assert padded_input.b_req_idx.tolist() == [88]
     assert padded_input.b_seq_len.tolist() == [1]
     assert padded_input.b_prefill_has_output_cpu == [False]
@@ -194,12 +189,11 @@ def test_padded_decode_builds_internal_request_from_empty_token_tensor():
         b_position_delta=torch.empty((0,), dtype=torch.int32),
         b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
         b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
-        mem_indexes=torch.empty((0,), dtype=torch.int32),
         is_prefill=False,
         multimodal_params=[],
     )
     model = SimpleNamespace(
-        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99),
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
     )
 
@@ -212,7 +206,6 @@ def test_padded_decode_builds_internal_request_from_empty_token_tensor():
     assert model_input.batch_size == 0
     assert padded_input.batch_size == 1
     assert padded_input.input_ids.tolist() == [1]
-    assert padded_input.mem_indexes.tolist() == [99]
     assert padded_input.b_req_idx.tolist() == [88]
     assert padded_input.b_seq_len.tolist() == [2]
     assert padded_input.b_shared_seq_len.tolist() == [0]

@@ -107,7 +107,8 @@ def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_mod
 
 
 @pytest.mark.parametrize("state_class", [Fa3PrefillAttState, MlaFa3PrefillAttState])
-def test_fa3_prefill_state_owns_causality(state_class):
+def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
+    monkeypatch.setattr(import_module(Fa3PrefillAttState.__module__), "page_table_copy", lambda **kwargs: None)
     infer_state = SimpleNamespace(
         b1_cu_q_seq_len=torch.tensor([0, 1, 2], dtype=torch.int32),
         b1_cu_kv_seq_len=torch.tensor([0, 3, 7], dtype=torch.int32),
@@ -118,7 +119,7 @@ def test_fa3_prefill_state_owns_causality(state_class):
         req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4)),
     )
     state = state_class(
-        backend=SimpleNamespace(uses_causal_attention=lambda: False),
+        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1),
         infer_state=infer_state,
     )
 

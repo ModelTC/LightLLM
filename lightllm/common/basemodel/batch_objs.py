@@ -32,7 +32,6 @@ class ModelInput:
     # Decode 逐行携带的 radix node 标识。相同 id 表示请求引用同一个共享
     # radix node；该 id 只用于重建 diverse attention 的 b_mark_shared_group。
     b_shared_radix_node_id: torch.Tensor = None
-    mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
     # Request/row-aligned MRoPE position offset. It is decode-only; prefill
@@ -41,8 +40,6 @@ class ModelInput:
     b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
-    # cpu 变量
-    mem_indexes_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
     # 标记 prefill 请求是否会在本轮产生输出。Prefill 必填（空 batch 使用空 list），decode 不使用。
@@ -59,8 +56,6 @@ class ModelInput:
         self.check_input()
 
         # Prefill 和 decode 都必须提供的公共张量。
-        if self.mem_indexes is None:
-            self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
@@ -94,8 +89,6 @@ class ModelInput:
         assert self.b_mtp_index is not None
         assert self.b_seq_len is not None
         assert self.multimodal_params is not None
-        assert self.mem_indexes is not None or self.mem_indexes_cpu is not None
-
         assert self.b_req_idx.shape == (self.batch_size,)
         assert self.b_mtp_index.shape == self.b_req_idx.shape
         assert self.b_seq_len.shape == self.b_req_idx.shape
@@ -122,10 +115,6 @@ class ModelInput:
             assert self.b_position_delta.shape == self.b_req_idx.shape
             assert self.b_shared_seq_len.shape == self.b_req_idx.shape
             assert self.b_shared_radix_node_id.shape == self.b_req_idx.shape
-
-        mem_indexes = self.mem_indexes if self.mem_indexes is not None else self.mem_indexes_cpu
-        assert mem_indexes.ndim == 1
-
 
 @dataclass
 class ModelMtpOutputCollector:
