@@ -678,6 +678,28 @@ MTP 多预测参数
     * ``eagle_no_att``
     * ``None``: 不启用 mtp（默认）
 
+.. option:: --mtp_draft_cache_mode
+
+    草稿 KV 缓存策略，默认 ``full``。dflash style 草稿模型支持 ``windowed``，
+    仅保留开头和最近窗口内的 KV。target 仍使用完整上下文。
+
+    当前要求 ``--run_mode normal``、``--dp 1``、未量化 KV，且设置
+    ``--disable_dynamic_prompt_cache``。暂不支持 CPU/prefix 缓存、动态验证、
+    diverse、混合 prefill/decode 或 overlap 模式。
+
+.. option:: --mtp_draft_window
+
+    ``windowed`` 策略保留的最近位置数，默认 ``512``，必须大于 0。
+
+.. option:: --mtp_draft_sinks
+
+    ``windowed`` 策略保留的开头位置数，默认 ``1``；设为 ``0`` 可关闭。
+    每个请求的历史容量上限为 ``mtp_draft_window + mtp_draft_sinks``。
+
+    示例：在已有 dflash style 草稿模型启动命令中添加::
+
+        --mtp_draft_cache_mode windowed --mtp_draft_window 512 --mtp_draft_sinks 1 --disable_dynamic_prompt_cache
+
 .. option:: --mtp_draft_model_dir
 
     MTP 多预测功能的草稿模型路径

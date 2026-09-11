@@ -342,6 +342,10 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
+            if self.args.mtp_draft_cache_mode == "windowed":
+                from lightllm.models.windowed_mtp.model import windowed_model_class
+
+                draft_model_class = windowed_model_class(draft_model_class)
             self.draft_models.append(draft_model_class(draft_model_kvargs))
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")

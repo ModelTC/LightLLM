@@ -768,6 +768,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",
     )
     parser.add_argument(
+        "--mtp_draft_cache_mode",
+        choices=["full", "windowed"],
+        default="full",
+        help="Draft KV retention policy for parallel block MTP",
+    )
+    parser.add_argument("--mtp_draft_window", type=int, default=512)
+    parser.add_argument("--mtp_draft_sinks", type=int, default=1)
+    parser.add_argument(
         "--mtp_mode",
         choices=[
             "vanilla_with_att",

@@ -44,6 +44,9 @@ class DSparkProposer(BaseSpecProposer):
         # DSpark prefill 直接使用 target prompt 的 token 布局和 hidden，将 prompt
         # KV 写入唯一的 parallel-block draft model。使用浅副本，避免把 draft
         # 专用 hidden 挂到后续流程仍可能读取的 target ModelInput 上。
+        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False) is True:
+            self.backend.draft_models[0].commit_features(target_model_input, target_hidden)
+            return
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
         self.backend.draft_models[0].forward(draft_input)
@@ -85,17 +88,31 @@ class DSparkProposer(BaseSpecProposer):
 
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
 
-        # target verify 的行布局和 mem_indexes 已经对应本轮所有被验证 token。
-        # 仅附加 target hidden 后执行一次 draft forward，即可把这些行提交到
-        # DSpark KV cache；浅副本保证 target_model_input 本身不被修改。
-        verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        draft_model.forward(verify_draft_input)
+        # full 模式通过 draft forward 写入 verify 行对应的 KV；windowed 模式
+        # 只将接受的 target hidden 投影并写入独立窗口，不保留被拒绝的行。
+        windowed = getattr(draft_model, "uses_windowed_draft_kv", False) is True
+        if windowed:
+            draft_model.commit_features(
+                target_model_input, target_model_output.mtp_collector.spec_hidden, b_req_mtp_start_loc, accept_len
+            )
+        else:
+            verify_draft_input = copy.copy(target_model_input)
+            verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+            draft_model.forward(verify_draft_input)
 
-        # DSpark 每个请求固定展开一个完整 block，临时 KV 在 target verify 完成
-        # 后通过 proposal 统一释放。block 第一行是 accepted-tail anchor，其余行
-        # 使用 mask token，由 parallel backbone 一次并行计算。
-        extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * block_size)
+        # 每个请求固定展开完整 block：首行是 accepted-tail anchor，其余为 mask。
+        # full 模式的临时 KV 在 verify 后释放；windowed 模式不占用 target KV slot。
+        if windowed:
+            extra_mem_indexes_cpu = None
+            scratch_indexes = torch.full(
+                (req_num * block_size,),
+                draft_model.mem_manager.HOLD_TOKEN_MEMINDEX,
+                dtype=torch.int32,
+                device=target_next_token_ids.device,
+            )
+        else:
+            extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * block_size)
+            scratch_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
         block_input_ids = target_next_token_ids.new_full(
             (req_num * block_size,),
             fill_value=draft_model.mask_token_id,
@@ -143,7 +160,7 @@ class DSparkProposer(BaseSpecProposer):
             .repeat_interleave(block_size)
             .contiguous()
         )
-        draft_input.mem_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
+        draft_input.mem_indexes = scratch_indexes
         draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         draft_output = draft_model.forward(draft_input)
@@ -184,7 +201,11 @@ class DSparkProposer(BaseSpecProposer):
 
         return DSparkSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
+            extra_mem_indexes_cpu=(
+                [MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)]
+                if extra_mem_indexes_cpu is not None
+                else []
+            ),
             schedule_scores=schedule_scores,
             schedule_scores_cpu=schedule_scores_cpu,
         )
