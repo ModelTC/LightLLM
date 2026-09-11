@@ -454,6 +454,42 @@ class SamplingParams(ctypes.Structure):
 
         return
 
+    @classmethod
+    def verify_vocab_parallel_sampling(cls, request_params, start_args=None):
+        """Check generation requests before initialization, including model defaults."""
+        if start_args is None:
+            if "LIGHTLLM_START_ARGS" not in os.environ:
+                return
+            start_args = get_env_start_args()
+        if getattr(start_args, "vocab_parallel_sampling", "draft") != "both":
+            return
+
+        unsupported = []
+        for name, neutral in (("presence_penalty", 0.0), ("frequency_penalty", 0.0), ("repetition_penalty", 1.0)):
+            if request_params.get(name, getattr(cls, "_" + name)) != neutral:
+                unsupported.append(name)
+        if request_params.get("exponential_decay_length_penalty", (1, 1.0))[1] != 1.0:
+            unsupported.append("exponential_decay_length_penalty")
+        if request_params.get("min_new_tokens", 1) > 1:
+            unsupported.append("min_new_tokens")
+        prompt_logprobs = request_params.get("prompt_logprobs")
+        if prompt_logprobs is not None and int(prompt_logprobs) >= 0:
+            unsupported.append("prompt_logprobs")
+        for name in (
+            "allowed_token_ids",
+            "invalid_token_ids",
+            "logit_bias",
+            "regular_constraint",
+            "guided_grammar",
+            "guided_json",
+        ):
+            if request_params.get(name):
+                unsupported.append(name)
+        if unsupported:
+            raise ValueError(
+                f"--vocab_parallel_sampling both does not support {', '.join(unsupported)}; use draft or off"
+            )
+
     @staticmethod
     def _normalize_and_verify_seed(seed: Optional[int]) -> int:
         seed = -1 if seed is None else seed

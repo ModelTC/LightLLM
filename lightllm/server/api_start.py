@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 
 
 def _set_envs_and_config(args: StartArgs):
+    StartArgs.verify_vocab_parallel_sampling(args)
     mp.set_start_method("spawn", force=True)
 
 

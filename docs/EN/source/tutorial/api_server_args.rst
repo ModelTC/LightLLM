@@ -5,6 +5,49 @@ APIServer Parameter Details
 
 This document provides detailed information about all startup parameters and their usage for LightLLM APIServer.
 
+Vocabulary Parallel Sampling
+----------------------------
+
+.. option:: --vocab_parallel_sampling {off,draft,both}
+
+    Defaults to ``draft`` and applies to both fixed-step and dynamic-step speculative decoding:
+
+    * ``off`` retains full-vocabulary logits communication and existing sampling.
+    * ``draft`` uses exact distributed argmax for draft tokens, preserving global token IDs.
+      Target sampling is unchanged. Without speculative decoding it has no target effect;
+      draft communication optimization is disabled at TP=1.
+    * ``both`` also samples the target from global top-128 candidates. At TP=1 the target
+      still keeps at most 128 candidates, so sampling remains approximate.
+
+    Dynamic MTP additionally uses FP32 reductions to recover the full-vocabulary softmax top-1
+    probability for the existing scheduler. Fixed MTP does not compute this probability.
+    Candidates and statistics share one collective: communication volume decreases, while its count stays the same.
+    Each model fixes its output layout at initialization without adding CUDA Graph capture layouts.
+
+    ``both`` selects global top-128 from raw target logits before temperature, top-k, and top-p.
+    The existing sampling backend then normalizes and samples within those candidates.
+    Greedy, temperature, top-k, top-p, seed, ordinary stop sequences, and EOS termination are supported.
+    With top-k=-1 or top-k>128, sampling still only considers the candidate set.
+    Generated-token logprobs are normalized over candidates, following the existing backend's
+    pre-top-k/top-p probability semantics. They are not full-vocabulary logprobs, and top-p does
+    not measure full-vocabulary cumulative probability. ``both`` explicitly opts into approximate sampling.
+    Seed support follows the existing sampling backend; the same seed need not produce the same
+    token sequence as the full-vocabulary path.
+
+    Startup rejects ``both`` with ``--enable_prompt_logprobs``, ``--enable_rl`` (full-vocabulary token rank),
+    ``--use_reward_model``, ``--first_token_constraint_mode``, or an ``--output_constraint_mode`` other
+    than ``none``. Internal ``return_all_prompt_logics`` is also unsupported.
+    Request validation runs before admission or shared-memory allocation and includes effective model
+    generation-config defaults: presence/frequency penalties must be 0, repetition penalty must be 1,
+    exponential_decay_length_penalty must have multiplier 1, and min_new_tokens must be 1.
+    Nonempty allowed_token_ids, invalid_token_ids, logit_bias, regex, grammar, and JSON constraints
+    are rejected. Use matching settings on PD master, prefill, and decode services.
+
+    Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
+    ``_lm_head_and_gather`` implementations; normalization overrides are allowed.
+    Unsupported draft heads fall back to the original full-vocabulary path at startup.
+    An unsupported target head with ``both`` fails at startup.
+
 Basic Configuration Parameters
 ------------------------------
 

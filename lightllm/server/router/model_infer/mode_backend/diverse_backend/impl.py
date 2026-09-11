@@ -40,7 +40,6 @@ class DiversehBackend(ChunkedPrefillBackend):
         )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-
             model_output = self.model.forward(model_input)
             logits = model_output.logits
 
@@ -61,9 +60,14 @@ class DiversehBackend(ChunkedPrefillBackend):
             )
 
             logits = logits[batch_idx]
+            logits_token_ids = (
+                model_output.logits_token_ids[batch_idx] if model_output.logits_token_ids is not None else None
+            )
             b_mtp_index = model_input.b_mtp_index[batch_idx]
 
-            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+            next_token_ids, next_token_logprobs = sample(
+                logits, run_reqs, self.eos_id, logits_token_ids=logits_token_ids
+            )
             next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
 
             scatter_token(

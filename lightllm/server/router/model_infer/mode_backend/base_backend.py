@@ -698,7 +698,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -893,10 +892,17 @@ class ModeBackend:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
-        logits = model_output.logits
-        return torch.argmax(logits, dim=-1)
+        if model_output.logits_token_ids is not None:
+            assert model_output.logits_token_ids.shape[1] == 1
+            # Draft candidates are already global top-1. Snapshot graph-owned
+            # output because the next draft step replays into the same storage.
+            return model_output.logits_token_ids.view(-1).clone()
+        return torch.argmax(model_output.logits, dim=-1)
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        if model_output.logits_token_ids is not None:
+            assert model_output.draft_token_probs is not None
+            return self._gen_argmax_token_ids(model_output), model_output.draft_token_probs.clone()
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
@@ -911,13 +917,13 @@ class ModeBackend:
         is_prefill: bool,
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
+        logits_token_ids: Optional[torch.Tensor] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
 
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id, logits_token_ids=logits_token_ids)
         next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
         b_has_out = None
         if is_prefill:

@@ -364,6 +364,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+    SamplingParams.verify_vocab_parallel_sampling(sampling_params_dict)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
@@ -878,6 +879,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+    SamplingParams.verify_vocab_parallel_sampling(sampling_params_dict)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     sampling_params.verify()

@@ -5,6 +5,44 @@ APIServer 参数详解
 
 本文档详细介绍了 LightLLM APIServer 的所有启动参数及其用法。
 
+词表并行采样
+------------
+
+.. option:: --vocab_parallel_sampling {off,draft,both}
+
+    默认 ``draft``，该参数同时控制固定步数和动态步数的 draft 推测解码：
+
+    * ``off``：保持完整词表 logits 通信和现有采样路径。
+    * ``draft``：draft 使用分布式精确 argmax，保留全局 token ID；target 保持完整词表采样。
+      无推测解码时不改变 target 路径，TP=1 时 draft 不启用通信优化。
+    * ``both``：同时启用 draft 优化，以及 target 的全局 top-128 候选采样。
+      TP=1 时 target 仍截取最多 128 个候选，因此同样具有近似语义。
+
+    动态 MTP 额外以 FP32 归约恢复全词表 softmax 的 top-1 概率，供原调度逻辑使用；
+    固定 MTP 不计算该概率。候选和统计量共用一次通信，只减少通信数据量，不减少通信次数。
+    输出布局在模型初始化时固定，不随请求参数切换，也不新增 CUDA Graph 捕获布局。
+
+    ``both`` 在温度、top-k、top-p 处理之前，先从原始 target logits 选取全局 top-128。
+    然后在候选集合上归一化并执行现有采样后端。支持 greedy、temperature、top-k、top-p、seed、
+    普通 stop 序列和 EOS 终止；top-k=-1 或 top-k>128 仍只能覆盖候选集合。
+    生成 token 的 logprob 是候选集合上的归一化概率对应的对数，沿用现有后端在 top-k/top-p
+    过滤前取概率的语义，不是完整词表上的 logprob；top-p 也不代表完整词表累计概率。
+    ``both`` 是显式启用的近似采样，不能视为完整分布等价。
+    seed 沿用现有采样后端的支持范围，不保证相同 seed 与完整词表路径逐 token 一致。
+
+    ``both`` 不兼容 ``--enable_prompt_logprobs``、``--enable_rl``（需要完整词表 token rank）、
+    ``--use_reward_model``、``--first_token_constraint_mode`` 和非 ``none`` 的
+    ``--output_constraint_mode``，启动时直接报错。内部 ``return_all_prompt_logics`` 也不支持。
+    请求入口在排队及共享内存分配之前检查有效采样参数，包括模型 generation config 默认值：
+    presence/frequency penalty 必须为 0，repetition penalty 必须为 1，
+    exponential_decay_length_penalty 的倍率必须为 1，min_new_tokens 必须为 1。
+    非空 allowed_token_ids、invalid_token_ids、logit_bias，以及正则、grammar、JSON 约束均被拒绝。
+    PD 部署应在 master、prefill 和 decode 上使用相同配置。
+
+    仅支持使用 Llama 标准 ``token_forward``、``_token_forward`` 和 ``_lm_head_and_gather``
+    实现的输出层；允许模型覆盖归一化实现。特殊 draft 输出层在启动时回退到原完整词表路径；
+    ``both`` 遇到不支持的 target 输出层则在启动时报错。
+
 基础配置参数
 ------------
 

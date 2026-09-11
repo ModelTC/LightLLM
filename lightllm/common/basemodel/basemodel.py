@@ -107,6 +107,7 @@ class TpPartBaseModel:
         self._init_config()
         self._verify_must()
         self._verify_params()
+        self._init_vocab_parallel_sampling()
         self._init_quant()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
@@ -165,6 +166,37 @@ class TpPartBaseModel:
         assert self.load_way == "HF", "only support HF format weights"
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
         return
+
+    def _init_vocab_parallel_sampling(self):
+        from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+
+        mode = getattr(self.args, "vocab_parallel_sampling", "draft")
+        self.vocab_parallel_top_k = 0
+        self.vocab_parallel_need_probs = False
+        requested = mode != "off" if self.is_mtp_draft_model else mode == "both"
+        if not requested:
+            return
+        head = self.post_layer_infer_class
+        supported = issubclass(head, LlamaPostLayerInfer) and all(
+            getattr(head, name) is getattr(LlamaPostLayerInfer, name)
+            for name in ("token_forward", "_token_forward", "_lm_head_and_gather")
+        )
+        if not supported:
+            if not self.is_mtp_draft_model:
+                raise ValueError(f"vocab_parallel_sampling=both does not support {head.__name__}")
+            logger.info(f"Vocabulary candidate optimization disabled for draft head {head.__name__}")
+            return
+        if self.is_mtp_draft_model and self.tp_world_size_ == 1:
+            logger.info("Vocabulary candidate optimization disabled for TP=1 draft")
+            return
+        if not self.is_mtp_draft_model and self.return_all_prompt_logics:
+            raise ValueError("vocab_parallel_sampling=both does not support prompt logprobs")
+        self.vocab_parallel_top_k = 1 if self.is_mtp_draft_model else 128
+        self.vocab_parallel_need_probs = self.is_mtp_draft_model and self.args.mtp_dynamic_verify
+        logger.info(
+            f"Vocabulary candidate optimization: draft={self.is_mtp_draft_model}, "
+            f"top_k={self.vocab_parallel_top_k}, draft_probs={self.vocab_parallel_need_probs}"
+        )
 
     def _init_quant(self):
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
@@ -326,6 +358,8 @@ class TpPartBaseModel:
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
+        infer_state.vocab_parallel_top_k = getattr(self, "vocab_parallel_top_k", 0)
+        infer_state.vocab_parallel_need_probs = getattr(self, "vocab_parallel_need_probs", False)
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
@@ -470,12 +504,30 @@ class TpPartBaseModel:
         new_model_input.check_input()
         return new_model_input
 
+    def _create_model_output(self, logits: torch.Tensor, infer_state: InferStateInfo):
+        output = ModelOutput(
+            logits=logits.contiguous(),
+            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
+            prompt_logics=infer_state.prompt_logics,
+            logits_token_ids=infer_state.logits_token_ids,
+            draft_token_probs=infer_state.draft_token_probs,
+        )
+        # Graph outputs own these views; retaining originals on the captured state
+        # would defeat to_no_ref_tensor and prevent the graph pool from reusing memory.
+        infer_state.logits_token_ids = None
+        infer_state.draft_token_probs = None
+        return output
+
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
         padded_batch_size = model_output.logits.shape[0]
         if padded_batch_size == origin_batch_size:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
+        if new_model_output.draft_token_probs is not None:
+            new_model_output.draft_token_probs = new_model_output.draft_token_probs[:origin_batch_size]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -488,6 +540,10 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.logits_token_ids is not None:
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
+        if new_model_output.draft_token_probs is not None:
+            new_model_output.draft_token_probs = new_model_output.draft_token_probs[:origin_batch_size]
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
             origin_handle_token_num=origin_handle_token_num
         )
@@ -620,7 +676,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -677,11 +732,7 @@ class TpPartBaseModel:
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         hidden_collector = infer_state.hidden_collector
         hidden_collector.add_final_hidden(last_input_embs)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-            prompt_logics=infer_state.prompt_logics,
-        )
+        model_output = self._create_model_output(predict_logits, infer_state)
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -706,10 +757,7 @@ class TpPartBaseModel:
         )
 
         hidden_collector.add_final_hidden(last_input_embs)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-        )
+        model_output = self._create_model_output(predict_logits, infer_state)
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -960,16 +1008,8 @@ class TpPartBaseModel:
 
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-            prompt_logics=infer_state.prompt_logics,
-        )
-        model_output1 = ModelOutput(
-            logits=predict_logits1.contiguous(),
-            mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
-            prompt_logics=infer_state1.prompt_logics,
-        )
+        model_output = self._create_model_output(predict_logits, infer_state)
+        model_output1 = self._create_model_output(predict_logits1, infer_state1)
 
         return model_output, model_output1
 
@@ -1009,14 +1049,8 @@ class TpPartBaseModel:
 
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
-        model_output = ModelOutput(
-            logits=predict_logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-        )
-        model_output1 = ModelOutput(
-            logits=predict_logits1.contiguous(),
-            mtp_collector=infer_state1.hidden_collector.finish_output(infer_state=infer_state1),
-        )
+        model_output = self._create_model_output(predict_logits, infer_state)
+        model_output1 = self._create_model_output(predict_logits1, infer_state1)
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()

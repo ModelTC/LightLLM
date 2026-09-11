@@ -378,6 +378,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
+    parser.add_argument(
+        "--vocab_parallel_sampling",
+        choices=["off", "draft", "both"],
+        default="draft",
+        help="draft: exact distributed draft argmax; both: also sample target global top-128 candidates (approximate)",
+    )
 
     parser.add_argument(
         "--output_constraint_mode",

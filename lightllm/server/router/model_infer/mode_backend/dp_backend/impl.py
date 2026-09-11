@@ -188,6 +188,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
                     logits=model_output.logits,
+                    logits_token_ids=model_output.logits_token_ids,
                     b_req_idx=model_input.b_req_idx,
                     b_mtp_index=model_input.b_mtp_index,
                     run_reqs=run_reqs,
@@ -241,6 +242,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
                     logits=model_output.logits,
+                    logits_token_ids=model_output.logits_token_ids,
                     b_req_idx=model_input.b_req_idx,
                     b_mtp_index=model_input.b_mtp_index,
                     run_reqs=run_reqs,
@@ -301,6 +303,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
 
             if req_num0 + req_num1 > 0:
+                logits_token_ids = (
+                    torch.cat((model_output0.logits_token_ids, model_output1.logits_token_ids), dim=0)
+                    if model_output0.logits_token_ids is not None
+                    else None
+                )
                 (
                     _,
                     next_token_ids_cpu,
@@ -308,6 +315,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
                     logits=logits,
+                    logits_token_ids=logits_token_ids,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
@@ -357,6 +365,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             if req_num0 + req_num1 > 0:
                 logits = torch.cat((model_output0.logits, model_output1.logits), dim=0)
+                logits_token_ids = (
+                    torch.cat((model_output0.logits_token_ids, model_output1.logits_token_ids), dim=0)
+                    if model_output0.logits_token_ids is not None
+                    else None
+                )
                 b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
                 b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
                 (
@@ -366,6 +379,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
                     logits=logits,
+                    logits_token_ids=logits_token_ids,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
@@ -422,6 +436,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
                     logits=model_output.logits,
+                    logits_token_ids=model_output.logits_token_ids,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
@@ -446,7 +461,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
-
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
@@ -502,6 +516,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     model_output.logits,
                     run_reqs,
                     self.eos_id,
+                    logits_token_ids=model_output.logits_token_ids,
                 )
                 next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
@@ -667,6 +682,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
 
             if req_num > 0:
+                logits_token_ids = (
+                    torch.cat((model_output0.logits_token_ids, model_output1.logits_token_ids), dim=0)
+                    if model_output0.logits_token_ids is not None
+                    else None
+                )
                 (
                     next_token_ids,
                     next_token_ids_cpu,
@@ -674,6 +694,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
                     logits=logits,
+                    logits_token_ids=logits_token_ids,
                     run_reqs=run_reqs,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
@@ -773,6 +794,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             logits1 = model_output1.logits
             run_reqs = run_reqs0 + run_reqs1
             if req_num > 0:
+                logits_token_ids = (
+                    torch.cat((model_output0.logits_token_ids, model_output1.logits_token_ids), dim=0)
+                    if model_output0.logits_token_ids is not None
+                    else None
+                )
                 assert len(run_reqs) == verify_row_num
                 logits = torch.empty(
                     (verify_row_num, logits0.shape[1]),
@@ -781,7 +807,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
                 logits[:verify_row_num0, :].copy_(logits0, non_blocking=True)
                 logits[verify_row_num0:, :].copy_(logits1, non_blocking=True)
-                next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+                next_token_ids, next_token_logprobs = sample(
+                    logits, run_reqs, self.eos_id, logits_token_ids=logits_token_ids
+                )
                 next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
                 (
                     next_token_ids_cpu,

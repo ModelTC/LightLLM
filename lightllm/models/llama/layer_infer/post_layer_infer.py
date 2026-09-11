@@ -8,6 +8,7 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
 from lightllm.distributed.communication_op import all_gather
+from lightllm.common.basemodel.triton_kernel.vocab_parallel_sampling import vocab_parallel_candidates
 
 
 class LlamaPostLayerInfer(PostLayerInferTpl):
@@ -64,7 +65,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if prompt_logics_hiddens is not None:
             prompt_token_num = prompt_logics_hiddens.shape[0]
             infer_state.prompt_logics = self._lm_head_and_gather(
-                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state
+                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state, use_candidates=False
             )
 
         return ans_logics
@@ -75,6 +76,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         token_num: int,
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
+        use_candidates: bool = True,
     ) -> torch.Tensor:
         normed = self._norm(hidden, infer_state, layer_weight)
         normed = normed.permute(1, 0).view(-1, token_num)
@@ -82,6 +84,20 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         normed = None
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
+        if use_candidates and infer_state.vocab_parallel_top_k:
+            logits, token_ids, token_probs = vocab_parallel_candidates(
+                local_logits=logic_batch,
+                vocab_start=layer_weight.lm_head_weight_.tp_vocab_start_id,
+                vocab_size=vocab_size,
+                top_k=infer_state.vocab_parallel_top_k,
+                need_probs=infer_state.vocab_parallel_need_probs,
+                group=infer_state.dist_group,
+                world_size=self.tp_world_size_,
+                alloc_func=self.alloc_tensor,
+            )
+            infer_state.logits_token_ids = token_ids
+            infer_state.draft_token_probs = token_probs
+            return logits
         if self.tp_world_size_ == 1:
             gather_data = logic_batch
         else:
@@ -103,7 +119,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
-
         return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
@@ -114,7 +129,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
     ):
-
         logics = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
         logics1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)

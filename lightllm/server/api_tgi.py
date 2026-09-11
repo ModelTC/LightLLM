@@ -57,12 +57,12 @@ def format_tgi_params(params, num_beam: int = 1):
 
 
 async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerManager) -> Response:
-
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     num_beam = request_dict.get("num_beam", 1)
     sample_params_dict = format_tgi_params(request_dict["parameters"], num_beam)
     return_details = sample_params_dict.pop("return_details", False)
+    SamplingParams.verify_vocab_parallel_sampling(sample_params_dict)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
@@ -138,11 +138,11 @@ async def tgi_generate_impl(request: Request, httpserver_manager: HttpServerMana
 
 
 async def tgi_generate_stream_impl(request: Request, httpserver_manager: HttpServerManager) -> Response:
-
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = format_tgi_params(request_dict["parameters"])
     return_details = sample_params_dict.pop("return_details", False)
+    SamplingParams.verify_vocab_parallel_sampling(sample_params_dict)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
