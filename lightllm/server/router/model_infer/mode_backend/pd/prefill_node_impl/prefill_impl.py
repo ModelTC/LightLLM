@@ -97,8 +97,9 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                         page_kind="att_state",
                     )
                 )
-            trans_task_list[-1].first_gen_token_id = next_token_id
-            trans_task_list[-1].first_gen_token_logprob = next_token_prob
+            if req_obj.sampling_param.pd_decode_node.recovery_epoch == 0:
+                trans_task_list[-1].first_gen_token_id = next_token_id
+                trans_task_list[-1].first_gen_token_logprob = next_token_prob
 
         if self.is_master_in_dp:
             for trans_task in trans_task_list:
@@ -134,7 +135,9 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")
         trans_task = PDChunckedTransTask(
-            request_id=req_obj.req_id,
+            request_id=pd_decode_node_info.request_id,
+            local_request_id=req_obj.req_id,
+            recovery_epoch=pd_decode_node_info.recovery_epoch,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
             time_out_secs=182,

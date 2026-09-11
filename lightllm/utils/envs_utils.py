@@ -336,3 +336,9 @@ def get_pd_cache_high_priority_min_prompt_tokens() -> int:
 @lru_cache(maxsize=None)
 def get_lightllm_url_pool_maxsize() -> int:
     return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))
+
+
+@lru_cache(maxsize=None)
+def get_pd_request_timeout_seconds():
+    """PD 整个生成请求的期限（含暂停与恢复），负值关闭。"""
+    return int(os.getenv("LIGHTLLM_PD_REQUEST_TIMEOUT_SECONDS", "1800"))

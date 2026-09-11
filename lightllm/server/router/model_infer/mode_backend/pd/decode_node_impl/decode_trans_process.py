@@ -229,6 +229,8 @@ class _DecodeTransModule:
                 page_reg_desc=self.transporter.local_page_mem_desc,
                 request_id=task.request_id,
                 ready_kv_len=task.start_kv_index,
+                recovery_epoch=task.recovery_epoch,
+                recovery_token_ids=trans_task_group.recovery_token_ids,
             )
 
             up_status = PDUpKVStatus(

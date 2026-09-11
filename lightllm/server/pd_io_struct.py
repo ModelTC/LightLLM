@@ -43,6 +43,7 @@ class ObjType(enum.Enum):
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
     PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
     PD_UPLOAD_SERVER_BUSY = 8  # P/D 节点向 pd master 上报本地服务繁忙。
+    PD_RECOVER_KV = 9  # 为已有 D 请求恢复 KV，不创建新的生成请求。
 
 
 @dataclass
@@ -126,6 +127,8 @@ class PDDecodeNodeInfo:
 
     request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
+    recovery_epoch: int = 0
+    recovery_token_ids: Optional[List[int]] = None
 
 
 @dataclass
@@ -186,6 +189,9 @@ class PDChunckedTransTask:
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
+    recovery_epoch: int = 0
+    # P 恢复工作的本地 ID；request_id 始终指向 D 上保留的原请求。
+    local_request_id: Optional[int] = None
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
@@ -204,7 +210,7 @@ class PDChunckedTransTask:
 
     def time_out(self) -> bool:
         if self.start_trans_time is None:
-            if time.time() - self.create_time > self.time_out_secs:
+            if self.time_out_secs >= 0 and time.time() - self.create_time > self.time_out_secs:
                 return True
             return False
         else:
@@ -220,8 +226,8 @@ class PDChunckedTransTask:
         return time.time() - self.start_trans_time
 
     def get_key(self) -> str:
-        # page_kind 参与 P/D 任务匹配，发送端和接收端必须使用一致的协议取值。
-        return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
+        # page_kind 和恢复轮次共同隔离 P/D 传输任务。
+        return f"{self.request_id}_{self.recovery_epoch}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
 
     def to_str(self):
         obj: PDChunckedTransTask = copy.copy(self)
@@ -247,7 +253,8 @@ class PDChunckedTransTask:
 
     def createRetObj(self) -> "PDChunckedTransTaskRet":
         ret = PDChunckedTransTaskRet(
-            request_id=self.request_id,
+            request_id=self.request_id if self.local_request_id is None else self.local_request_id,
+            recovery_epoch=self.recovery_epoch,
             start_kv_index=self.start_kv_index,
             end_kv_index=self.end_kv_index,
             has_error=self.error_info is not None,
@@ -281,6 +288,7 @@ class PDChunckedTransTaskRet:
     end_kv_index: int
     has_error: bool
     error_info: str = None
+    recovery_epoch: int = 0
     first_gen_token_id: Optional[int] = None
     first_gen_token_logprob: Optional[float] = None
 
@@ -291,6 +299,7 @@ class PDChunckedTransTaskRet:
 @dataclass
 class PDChunckedTransTaskGroup:
     task_list: List[PDChunckedTransTask] = field(default_factory=list)
+    recovery_token_ids: Optional[List[int]] = None
 
 
 @dataclass

@@ -539,6 +539,8 @@ class ModeBackend:
             for obj in cmds:
                 if obj.request_id in g_infer_context.requests_mapping:
                     req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                    if self.is_pd_decode_mode and obj.recovery_epoch != req.pd_recovery_epoch:
+                        continue
                     if obj.has_error:
                         req.pd_task_failed_num += 1
                     else:
@@ -546,7 +548,7 @@ class ModeBackend:
                         # pd decode 节点需要预填充 prefill 节点发送过来的产生的首token信息，以使
                         # 推理过程可以继续。
                         if self.is_pd_decode_mode:
-                            if obj.first_gen_token_id is not None:
+                            if obj.first_gen_token_id is not None and obj.recovery_epoch == 0:
                                 assert req.cur_output_len == 0
                                 req.cur_output_len += 1
                                 req_to_next_token_ids = (
@@ -612,8 +614,8 @@ class ModeBackend:
         return
 
     def _reorder_pd_high_priority_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
-        """将 PD 分段续跑的高优先级请求前置，普通请求保持在其后。"""
-        # PD 分段续跑请求已经完成前一段推理，需要优先进入本轮调度；将请求拆分后再拼接，
+        """将 PD KV 恢复和 cache 命中的高优先级请求前置，保持各组内顺序。"""
+        # PD KV 恢复任务服务于已接纳的请求，需要优先调度；按优先级分组后拼接，
         # 保持各自原有顺序，并确保高优先级请求位于普通请求之前。
         high_priority_reqs = [req for req in ready_reqs if req.shm_req.sample_params.pd_high_priority_request]
         normal_reqs = [req for req in ready_reqs if not req.shm_req.sample_params.pd_high_priority_request]
@@ -690,7 +692,7 @@ class ModeBackend:
         decode_reqs = []
 
         # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
-        # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
+        # 包括 PD Decode 在内均保留请求，进入暂停队列等待 KV 恢复。
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
@@ -703,6 +705,14 @@ class ModeBackend:
                 finished_reqs.append(req_obj)
                 continue
 
+            # 暂停中的请求也必须响应取消，不能被 paused 分支永久挡住。
+            if req_obj.infer_aborted or req_obj.finish_status.is_finished():
+                if support_overlap:
+                    req_obj.filter_mark = True
+                else:
+                    finished_reqs.append(req_obj)
+                continue
+
             if req_obj.wait_pause:
                 wait_pause_reqs.append(req_obj)
                 continue
@@ -710,15 +720,6 @@ class ModeBackend:
             if req_obj.paused:
                 paused_reqs.append(req_obj)
                 continue
-
-            if req_obj.infer_aborted or req_obj.finish_status.is_finished():
-                if support_overlap:
-                    # 延迟处理
-                    req_obj.filter_mark = True
-                    continue
-                else:
-                    finished_reqs.append(req_obj)
-                    continue
 
             if no_decode:
                 is_decode = False
@@ -734,24 +735,8 @@ class ModeBackend:
                     can_alloc_token_num -= token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
-                        if self.args.run_mode == "decode":
-                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
-                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
-                            wait_pause_count += 1
-                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
-                            if support_overlap:
-                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
-                                req_obj.filter_mark = True
-                            else:
-                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
-                                finished_reqs.append(req_obj)
-                            self.logger.info(
-                                f"force early finish for PD decode req_id={req_obj.req_id} "
-                                f"because token capacity is insufficient"
-                            )
-                        else:
-                            req_obj.wait_pause = True
-                            wait_pause_count += 1
+                        req_obj.wait_pause = True
+                        wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -795,10 +780,9 @@ class ModeBackend:
         g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
-        if recover_paused:
-            g_infer_context.recover_paused_reqs(
-                paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp, can_alloc_token_num=can_alloc_token_num
-            )
+        # D 已无可运行请求时立即尝试恢复，避免空转 100 轮（每轮 sleep 20ms）。
+        if recover_paused or (paused_reqs and self.args.run_mode == "decode" and not prefill_reqs and not decode_reqs):
+            self._recover_paused_reqs(paused_reqs, can_alloc_token_num)
 
         # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，
         # 并且 prefill 请求需要的 token 数量 + decode 请求需要的 token 数量小于等于 batch_max_tokens，
@@ -814,6 +798,11 @@ class ModeBackend:
                 decode_reqs = []
 
         return prefill_reqs, decode_reqs
+
+    def _recover_paused_reqs(self, paused_reqs, can_alloc_token_num):
+        g_infer_context.recover_paused_reqs(
+            paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp, can_alloc_token_num=can_alloc_token_num
+        )
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

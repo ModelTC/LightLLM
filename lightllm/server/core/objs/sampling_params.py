@@ -284,7 +284,7 @@ class SamplingParams(ctypes.Structure):
         ("stop_sequences", StopSequenceGroups),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
-        # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
+        # 由 PD Master 为 KV 恢复任务或预计 cache 命中率较高的请求设置，表示请求需
         # 以高优先级插入 Router 调度队列。
         ("pd_high_priority_request", ctypes.c_bool),
         # P/D 节点的资源等待超时，由 PD Master 下发。非负值用于控制 shm_req 申请和

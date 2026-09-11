@@ -102,11 +102,16 @@ PD disaggregation Mode Parameters
     By default, PD Master supplies
     ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
     ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
-    or timeout settings. The first segment's timeout is
-    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
-    to -1 to wait indefinitely. Continuation segments with ``segment_index > 0`` use a separate timeout controlled by
-    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 60 seconds, improving the chance
-    that requests which have already produced partial results complete successfully. When set to a non-negative value,
+    or timeout settings. The new-request timeout is
+    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 20 seconds; set it
+    to -1 to wait indefinitely. Once admitted to D, requests retain their state when paused for capacity.
+    Missing KV is recomputed on P using exact token IDs; D does not allocate another request slot or restart generation.
+    Internal P recovery work uses high priority and has no new-request resource wait timeout.
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` no longer controls this path.
+    ``LIGHTLLM_PD_REQUEST_TIMEOUT_SECONDS`` on Master bounds generation, including pauses and recovery, to 1800 seconds
+    by default; a negative value disables it. This deadline is independent of admission limiting and does not replace
+    client or gateway timeouts. Upgrade and restart Master, P, D and all workers together: recovery epochs change
+    the transfer protocol and mixed versions are unsupported. For new requests with a non-negative admission timeout,
     a timeout reports ``Server is busy``; a request that has
     entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
     While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
@@ -126,16 +131,16 @@ PD disaggregation Mode Parameters
 
     .. code-block:: bash
 
-        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
-            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=20 \
+            LIGHTLLM_PD_REQUEST_TIMEOUT_SECONDS=1800 \
             LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
             python -m lightllm.server.api_server --run_mode pd_master ...
 
 .. option:: --disable_pd_cache_high_priority
 
     Disable PD Master from promoting sufficiently long first-segment requests whose estimated input cache hit rate
-    is high and whose cache record is still fresh. This does not affect segmented continuation requests after PD
-    Decode capacity exhaustion; continuation requests remain high priority. Disabled by default, so eligible requests
+    is high and whose cache record is still fresh. This does not affect internal KV recovery work for already admitted
+    Decode requests; recovery work remains high priority. Disabled by default, so eligible requests
     are promoted unless this option is set.
 
     Configure this option only on PD Master. When a Prefill node's combined GPU, CPU, and disk cache capacity is small

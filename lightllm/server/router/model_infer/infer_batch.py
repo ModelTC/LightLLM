@@ -551,6 +551,8 @@ class InferReq:
         self.pd_task_success_num: int = 0
         self.pd_task_failed_num: int = 0
         self.pd_trans_device_id: int = -1
+        self.pd_recovery_epoch = 0
+        self.pd_recovering = False
 
         # hybrid checkpoint 槽位：prefill 到达边界后保存运行态，供请求释放时插入 radix cache。
         # 方便被后续的请求使用，因为这种资源是有限的，也可能不存在的情况，申请不到时, 为None，则这种小块对应长度的 kv 无法
@@ -879,15 +881,8 @@ class InferReq:
         if self.finish_status.is_finished():
             return
 
-        # 仅在请求本身尚未结束时，才将 finished_by_pd_decode_capacity
-        # 转换为 PD 内部分段状态，补模拟结束 token 并交给 PD Master 续跑。
-        if getattr(self, "finished_by_pd_decode_capacity", False):
-            finish_status = FinishStatus.FINISHED_PD_DECODE_CAPACITY
-        else:
-            finish_status = FinishStatus.FINISHED_ABORTED
-
         self.shm_req.mark_simulated_finished(
-            finish_status,
+            FinishStatus.FINISHED_ABORTED,
             output_len=self.cur_output_len,
         )
         return

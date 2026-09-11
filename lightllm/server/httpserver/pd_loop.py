@@ -9,10 +9,12 @@ import weakref
 import os
 import signal
 import sys
+from contextlib import aclosing
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
+from lightllm.server.httpserver.pd_context import PDRequestContext
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
@@ -85,6 +87,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
         forwarding_tokens_task = None
         heartbeat_task = None
         generation_tasks: Dict[int, asyncio.Task] = {}
+        request_contexts: Dict[int, PDRequestContext] = {}
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
@@ -120,10 +123,27 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 while True:
                     recv_bytes = await websocket.recv()
                     obj = pickle.loads(recv_bytes)
-                    if obj[0] == ObjType.REQ:
-                        prompt, sampling_params, multimodal_params = obj[1]
-                        group_req_id = sampling_params.group_request_id
+                    if obj[0] in (ObjType.REQ, ObjType.PD_RECOVER_KV):
                         pd_event = asyncio.Event()
+                        if obj[0] == ObjType.PD_RECOVER_KV:
+                            _, original_id, prompt, sampling_params, decode_node_info = obj
+                            context = request_contexts.get(original_id)
+                            if context is None or context.closed:
+                                continue
+                            if decode_node_info.recovery_epoch <= context.recovery_epoch:
+                                continue
+                            context.recovery_epoch = decode_node_info.recovery_epoch
+                            multimodal_params = context.multimodal_params
+                            pd_event.context = context
+                            pd_event.is_kv_recovery = True
+                            sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
+                        else:
+                            prompt, sampling_params, multimodal_params = obj[1]
+                            if manager.pd_mode.is_P():
+                                context = PDRequestContext(manager, sampling_params.group_request_id, multimodal_params)
+                                request_contexts[context.request_id] = context
+                                pd_event.context = context
+                        group_req_id = sampling_params.group_request_id
                         group_req_id_to_event[group_req_id] = pd_event
                         generation_task = asyncio.create_task(
                             _pd_process_generate(
@@ -146,6 +166,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
+                        context = request_contexts.pop(group_req_id, None)
+                        if context is not None:
+                            await context.close()
+                            for work_id in context.work_ids | {group_req_id}:
+                                task = generation_tasks.get(work_id)
+                                if task is not None:
+                                    task.cancel()
+                                await manager.abort(work_id)
+                            continue
                         generation_task = generation_tasks.get(group_req_id)
                         if generation_task is not None and not generation_task.done():
                             generation_task.cancel()
@@ -179,6 +208,10 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
         finally:
+            for context in request_contexts.values():
+                await context.close()
+                for work_id in list(context.work_ids):
+                    await manager.abort(work_id)
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
@@ -235,20 +268,24 @@ async def _pd_process_generate(
     pd_event: asyncio.Event,
 ):
     try:
-        async for sub_req_id, request_output, metadata, finish_status in manager.generate(
+        results = manager.generate(
             prompt=prompt,
             sampling_params=sampling_params,
             multimodal_params=multimodal_params,
             request=None,
             pd_upload_websocket=pd_upload_websocket,
             pd_event=pd_event,
-        ):
-            metadata["node_mode"] = manager.args.run_mode
-            await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
+        )
+        async with aclosing(results):
+            async for sub_req_id, request_output, metadata, finish_status in results:
+                if not getattr(pd_event, "is_kv_recovery", False):
+                    metadata["node_mode"] = manager.args.run_mode
+                    await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
     except ServerBusyError as e:
-        group_request_id = sampling_params.group_request_id
+        context = getattr(pd_event, "context", None)
+        group_request_id = context.request_id if context is not None else sampling_params.group_request_id
         logger.warning(f"pd node rejected request {group_request_id}: {e.message}")
         try:
             await pd_upload_websocket.send(pickle.dumps((ObjType.PD_UPLOAD_SERVER_BUSY, group_request_id, e.message)))
@@ -258,7 +295,8 @@ async def _pd_process_generate(
         # PD master 主动 abort 或连接断开清理任务时会走取消路径，不需要反向重复上报。
         pass
     except BaseException as e:
-        group_request_id = sampling_params.group_request_id
+        context = getattr(pd_event, "context", None)
+        group_request_id = context.request_id if context is not None else sampling_params.group_request_id
         logger.exception(f"pd node generate request {group_request_id} failed: {str(e)}")
         try:
             # 本地生成在任意阶段失败后，及时通知 PD master 终止对应请求，避免 master

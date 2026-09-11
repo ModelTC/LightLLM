@@ -331,6 +331,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
+        pd_context = getattr(pd_event, "context", None)
+        is_kv_recovery = getattr(pd_event, "is_kv_recovery", False)
+        context_owned_by_req_status = False
+        if pd_context is not None:
+            pd_context.acquire(group_request_id)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
         self._log_stage_timing(
@@ -363,7 +368,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if self.is_multinode_tp_master:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
 
-            if self.pd_mode.is_P_or_NORMAL():
+            if self.pd_mode.is_P_or_NORMAL() and not is_kv_recovery:
                 await multimodal_params.verify_and_preload(request)
                 self._log_stage_timing(
                     group_request_id,
@@ -374,7 +379,20 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
             # encode
-            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            if is_kv_recovery:
+                # 已经是 D 的准确 token 历史，包含原多模态 token；不得再次展开或分词。
+                prompt_ids = list(prompt)
+                original_ids = pd_context.prompt_ids
+                # D 可能在产生首 token 前暂停；此时历史只到原 prompt 的倒数第二个 token。
+                prefix_len = min(len(prompt_ids), len(original_ids)) if original_ids is not None else 0
+                if (
+                    original_ids is None
+                    or len(prompt_ids) < len(original_ids) - 1
+                    or prompt_ids[:prefix_len] != original_ids[:prefix_len]
+                ):
+                    raise ValueError("KV recovery does not match the original prompt")
+            else:
+                prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -383,6 +401,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             prompt_tokens = len(prompt_ids)
             prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+            if pd_context is not None and not is_kv_recovery:
+                pd_context.prompt_ids = list(prompt_ids)
             # 监控
             self.metric_client.counter_inc("lightllm_request_count")
             self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
@@ -394,7 +414,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 "check_and_repair_length_done",
             )
 
-            if pd_upload_websocket is not None and self.pd_mode.is_P():
+            if pd_upload_websocket is not None and self.pd_mode.is_P() and not is_kv_recovery:
                 # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
                 # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
                 logger.info(
@@ -461,6 +481,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
+            req_status.pd_context = pd_context
+            context_owned_by_req_status = True
             self.req_id_to_out_inf[group_request_id] = req_status
             # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
             # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
@@ -515,11 +537,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
-            if group_request_id not in self.req_id_to_out_inf:
+            if pd_context is None and group_request_id not in self.req_id_to_out_inf:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
         finally:
+            if pd_context is not None and not context_owned_by_req_status:
+                await pd_context.release(group_request_id)
             # RL：兜底注销 generation admission（含中途异常 / abort 提前 return），
             # 防止 pending 请求泄漏导致 pause 无法正确结束。
             if self.rl_controller is not None:
@@ -959,7 +983,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
-                await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
+                pd_context = getattr(req_status, "pd_context", None)
+                if pd_context is None:
+                    await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
+                else:
+                    await pd_context.release(req_status.group_req_objs.group_req_id)
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:

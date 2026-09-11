@@ -55,6 +55,35 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
         return
 
+    def _recover_paused_reqs(self, paused_reqs, can_alloc_token_num):
+        for req in paused_reqs:
+            if req.pd_recovering:
+                continue
+            # 计入重新引用的缓存和下一轮 decode 所需空间，避免刚恢复就再次暂停。
+            reserve = req.get_cur_total_len() - 1 + req.decode_need_token_num()
+            if reserve > can_alloc_token_num:
+                # 后面的短请求可能有足够空间恢复；暂停期间 Router 不再接纳新请求，
+                # 继续扫描不会让新请求持续插队而饿死当前长请求。
+                continue
+            prompt_cache_len = req.shm_req.prompt_cache_len
+            if g_infer_context.is_hybrid_att_model:
+                req._hybrid_match_radix_cache()
+            else:
+                req._match_radix_cache()
+            req.shm_req.prompt_cache_len = prompt_cache_len
+            can_alloc_token_num -= reserve
+            if req.cur_kv_len == req.get_cur_total_len() - 1:
+                req.paused = False
+                if self.is_master_in_dp:
+                    req.shm_req.is_paused = False
+                continue
+
+            req.pd_recovery_epoch += 1
+            req.pd_recovering = True
+            req.pd_task_num = req.pd_task_success_num = req.pd_task_failed_num = 0
+            req.pd_abort_req_send_count = 0
+            self._decode_node_gen_trans_tasks(req)
+
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         """
         将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
@@ -116,6 +145,11 @@ class PDDecodeNode(ChunkedPrefillBackend):
                     if self.is_master_in_dp:
                         req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
+            if req_obj.pd_recovering:
+                req_obj.pd_recovering = False
+                req_obj.paused = False
+                if self.is_master_in_dp:
+                    req_obj.shm_req.is_paused = False
             ans_list.append(req_obj)
         return ans_list
 
@@ -125,8 +159,12 @@ class PDDecodeNode(ChunkedPrefillBackend):
         """
         group = PDChunckedTransTaskGroup()
         input_len = req_obj.shm_req.input_len
+        if req_obj.pd_recovering:
+            # 最后一个 token 已由原请求采样，留给 D 计算；P 只恢复之前的 KV。
+            input_len = req_obj.get_cur_total_len() - 1
+            group.recovery_token_ids = req_obj.shm_req.shm_prompt_ids.arr[:input_len].tolist()
         # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
-        if input_len - req_obj.cur_kv_len > 1:
+        if req_obj.cur_kv_len < input_len - (0 if req_obj.pd_recovering else 1):
             page_size = self.args.pd_kv_page_size
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
             need_mem_size = input_len - req_obj.cur_kv_len
@@ -215,7 +253,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
-            time_out_secs=180,
+            time_out_secs=-1 if req_obj.pd_recovering else 180,
+            recovery_epoch=req_obj.pd_recovery_epoch,
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=None,
             decode_dp_index=self.dp_rank_in_node,

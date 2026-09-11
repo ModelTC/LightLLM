@@ -154,11 +154,17 @@ class _PrefillTransModule:
                 torch.cuda.current_stream().synchronize()
         return
 
-    def _abort(self, request_id: int, error_info: str = "aborted req"):
+    def _abort(self, request_id: int, error_info: str = "aborted req", recovery_epoch=None, local_request=True):
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == request_id and trans_task.xfer_handle is None:
+                owner_id = getattr(trans_task, "local_request_id", None)
+                task_request_id = owner_id if local_request and owner_id is not None else trans_task.request_id
+                if (
+                    task_request_id == request_id
+                    and (recovery_epoch is None or trans_task.recovery_epoch == recovery_epoch)
+                    and trans_task.xfer_handle is None
+                ):
                     # 已经提交给底层 transporter 的异步传输不能直接失败，
                     # 否则 fail_loop 可能在传输静默前归还 source page，导致脏数据。
                     aborted_tasks.append(self.waiting_dict.pop(key))
@@ -265,7 +271,12 @@ class _PrefillTransModule:
 
                         if notify_obj.error_info is not None:
                             logger.warning(f"recv WRITE error from decode: {notify_obj.to_str()}")
-                            self._abort(request_id=notify_obj.request_id, error_info=notify_obj.error_info)
+                            self._abort(
+                                request_id=notify_obj.request_id,
+                                error_info=notify_obj.error_info,
+                                recovery_epoch=notify_obj.recovery_epoch,
+                                local_request=False,
+                            )
                             continue
 
                         if notify_obj.write_stage == "ready":
@@ -452,5 +463,10 @@ class _PrefillTransModule:
             logger.info(f"trans task ret fail:{ret}")
 
             if trans_task.error_info is not None:
-                self._abort(request_id=trans_task.request_id, error_info=trans_task.error_info)
+                self._abort(
+                    request_id=trans_task.request_id,
+                    error_info=trans_task.error_info,
+                    recovery_epoch=trans_task.recovery_epoch,
+                    local_request=False,
+                )
                 self.transporter.send_error_info_to_decode_node(trans_task=trans_task)
