@@ -21,6 +21,12 @@ from .token_metadata import ReqFinalTokenMetadata
 logger = init_logger(__name__)
 
 
+# ActivationTransfer is the storage-neutral external-consumer boundary.
+# Model inference only publishes readiness; autonomous servers own leases.
+KV_CONSUMER_GENERATION = 1 << 0
+KV_CONSUMER_MASK_BITS = 64
+
+
 class FinishStatus(ctypes.Structure):
     """请求结束状态。API 侧通过 ``get_finish_reason()`` 映射为字符串。
 
@@ -90,6 +96,14 @@ class Req(ctypes.Structure):
         ("shm_infer_released", ctypes.c_bool),  # 推理进程用于标记请求对象已经被推理进程释放，router进程得到信息后亦可释放shm req对象
         ("shm_cur_kv_len", ctypes.c_int),  # 推理进程记录自己当前占用kv 显存长度
         ("shm_cur_output_len", ctypes.c_int),  # 推理进程记录自己输出长度的计数
+        # KV 外部消费者协议。request_id 同时作为 shm slot 的 generation，
+        # 消费者必须同时校验 (index_in_shm_mem, request_id)。
+        ("infer_req_idx", ctypes.c_int),  # req_to_token_indexs 中的请求行；-1 表示尚未绑定
+        (
+            "kv_ready_rank_mask",
+            ctypes.c_uint64,
+        ),  # 已完成 KV commit 的 target TP rank bitset
+        ("kv_consumer_mask", ctypes.c_uint64),  # 尚持有 KV lease 的外部 consumer bitset
         # candetoken_out_len 推理进程修改这个数据，让detokenization进程知道需要detoken的长度，
         # 虽然某种程度上 cur_output_len 也有同样的功能，但是为了避免多进程访问导致的问题，添加
         # candetoken_out_len 变量单独传输这个信息。
@@ -166,6 +180,9 @@ class Req(ctypes.Structure):
         self.shm_infer_released = False
         self.shm_cur_kv_len = 0
         self.shm_cur_output_len = 0
+        self.infer_req_idx = -1
+        self.kv_ready_rank_mask = 0
+        self.kv_consumer_mask = 0
         self.candetoken_out_len = 0
         self.prompt_cache_len = 0
         self.cpu_prompt_cache_len = 0
@@ -406,9 +423,22 @@ class Req(ctypes.Structure):
         return True
 
     def can_release(self):
+        # The shm slot is also the identity anchor for asynchronous KV
+        # consumers.  Do not recycle it until the target TP command boundary
+        # has cleared every consumer lease bit.
+        if self.kv_consumer_mask != 0:
+            return False
+
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
+
+        # A request aborted before fan-out has no Infer/Detokenizer owner that
+        # could publish finish_status. The HTTP manager sets both flags only
+        # for that pre-forward path; an outstanding generation KV lease was
+        # already rejected above.
+        if self.is_aborted and can_released_mark and ref_count_ok:
+            return True
 
         # Infer put_back 前会写好 finish_status；ref_count_ok 已保证 Infer 已退出，
         # 无需再 or stop_str_matched。

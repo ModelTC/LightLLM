@@ -19,7 +19,59 @@ from .infer_struct import InferStateInfo
 logger = init_logger(__name__)
 
 
-class CudaGraph:
+class _CudaGraphCapture:
+    def __init__(self, mempool=None):
+        self.mempool = (
+            mempool
+            if mempool is not None
+            else (torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None)
+        )
+        self.args = get_env_start_args()
+        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
+
+    def _capture_call(self, forward):
+        graph_obj = torch.cuda.CUDAGraph()
+        with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
+            output = forward()
+        return graph_obj, output
+
+
+class CudaGraphRunner(_CudaGraphCapture):
+    """Input-agnostic CUDA Graph capture and replay.
+
+    The first state for each key is promoted to graph-owned input storage during
+    warmup/capture. ``copy_for_cuda_graph`` updates that storage before later
+    replays.
+    """
+
+    def __init__(self, mempool=None):
+        super().__init__(mempool=mempool)
+        self.graph = {}
+
+    def needs_capture(self, key) -> bool:
+        return key not in self.graph
+
+    def run(self, key, state, forward):
+        """Capture once for ``key`` and replay with graph-owned inputs."""
+
+        entry = self.graph.get(key)
+        if entry is None:
+            graph_state = state
+            # Materialize lazy kernels and autotuning outside capture.
+            forward(graph_state)
+            torch.cuda.synchronize()
+            graph_obj, output = self._capture_call(lambda: forward(graph_state))
+            self.graph[key] = (graph_obj, graph_state, output)
+            graph_obj.replay()
+            return output
+
+        graph_obj, graph_state, output = entry
+        graph_state.copy_for_cuda_graph(state)
+        graph_obj.replay()
+        return output
+
+
+class CudaGraph(_CudaGraphCapture):
     # CudaGraph forward pass for the decoding stage.
 
     @staticmethod
@@ -60,14 +112,12 @@ class CudaGraph:
         tp_world_size: int = 1,
         capture_infer_cost: bool = False,
     ):
+        super().__init__()
         self.graph = {}
         self.tp_world_size = tp_world_size
-        self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
-        self.args = get_env_start_args()
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
-        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.capture_infer_cost = capture_infer_cost
         self.infer_cost_ms_by_batch_size = {}
 
@@ -99,7 +149,6 @@ class CudaGraph:
             return None
 
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
-        graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
         infer_state.max_kv_seq_len = self.graph_max_len_in_batch
@@ -123,8 +172,7 @@ class CudaGraph:
                 if param_name not in pure_para_set:
                     delattr(infer_state, param_name)
 
-        with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
-            model_output = decode_func(infer_state)
+        graph_obj, model_output = self._capture_call(lambda: decode_func(infer_state))
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
         self._measure_replay_cost(graph_obj=graph_obj, batch_size=batch_size)
@@ -136,7 +184,6 @@ class CudaGraph:
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
     ):
-        graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
         infer_state.max_kv_seq_len = self.graph_max_len_in_batch
@@ -158,8 +205,10 @@ class CudaGraph:
                 if para_name not in pure_para_set1:
                     delattr(infer_state1, para_name)
 
-        with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
-            model_output, model_output1 = decode_func(infer_state, infer_state1)
+        graph_obj, outputs = self._capture_call(
+            lambda: decode_func(infer_state, infer_state1)
+        )
+        model_output, model_output1 = outputs
         self.graph[batch_size] = (
             graph_obj,
             infer_state,

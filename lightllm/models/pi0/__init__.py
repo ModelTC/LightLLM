@@ -1,12 +1,6 @@
-from .config import Pi0VLAConfig, StateMode, VLAModelType
-
 __all__ = [
-    "Pi0VLAConfig",
     "Pi0ActionExpertModel",
     "Pi0VLMModel",
-    "StateMode",
-    "VLAModelType",
-    "VLAActionModelOutput",
 ]
 
 
@@ -18,8 +12,4 @@ def __getattr__(name):
             "Pi0ActionExpertModel": Pi0ActionExpertModel,
             "Pi0VLMModel": Pi0VLMModel,
         }[name]
-    if name == "VLAActionModelOutput":
-        from .model_io import VLAActionModelOutput
-
-        return VLAActionModelOutput
     raise AttributeError(name)

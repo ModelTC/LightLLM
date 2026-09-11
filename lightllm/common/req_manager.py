@@ -12,6 +12,10 @@ from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
 from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
+from lightllm.common.req_to_token_ipc import (
+    load_req_to_token_indexs_from_shm as _load_req_to_token_indexs_from_shm,
+    write_req_to_token_indexs_to_shm as _write_req_to_token_indexs_to_shm,
+)
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -99,6 +103,21 @@ class ReqManager:
     def free_all(self):
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
+
+    def write_to_shm(self):
+        """Publish the request-to-token table to colocated worker processes.
+
+        Request rows belong to ``ReqManager``; KV storage belongs to
+        ``MemoryManager``.  Only the CUDA tensor is exported here—the request
+        allocator and its CPU bookkeeping remain private to the router worker.
+        """
+
+        _write_req_to_token_indexs_to_shm(self.req_to_token_indexs)
+
+    @staticmethod
+    def load_req_to_token_indexs_from_shm(rank_in_node: int) -> torch.Tensor:
+        """Attach to the target rank's CUDA request-to-token table."""
+        return _load_req_to_token_indexs_from_shm(rank_in_node)
 
 
 class ReqSamplingParamsManager:

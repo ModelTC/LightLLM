@@ -78,7 +78,9 @@ class DPKVSharedMoudle:
                 max_kv_len_req_idx = int(self.shared_req_infos.arr[req_index, max_kv_len_dp_rank, self._REQ_IDX_INDEX])
                 max_kv_len_mem_manager_index = max_kv_len_dp_rank * self.backend.dp_world_size + self.backend.rank_in_dp
                 max_kv_len_mem_manager: MemoryManager = self.backend.mem_managers[max_kv_len_mem_manager_index]
-                max_kv_len_mem_indexes = max_kv_len_mem_manager.req_to_token_indexs[
+                max_kv_len_mem_indexes = self.backend.req_to_token_indexs_by_rank[
+                    max_kv_len_mem_manager_index
+                ][
                     max_kv_len_req_idx, req.cur_kv_len : req.cur_kv_len + trans_size
                 ]
                 trans_tasks.append(

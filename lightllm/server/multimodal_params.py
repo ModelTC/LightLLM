@@ -114,6 +114,10 @@ class ImageItem:
     def __init__(self, **kwargs):
         self._type = kwargs["type"]
         self._data = kwargs["data"]
+        # Optional semantic name supplied by structured model inputs (for
+        # example, an OpenPI camera key).  The transport keeps the name, while
+        # the owning model adapter decides whether and how it affects ordering.
+        self.input_key = kwargs.get("input_key")
         # the unique id for the image
         self.uuid = None
         # the start image token id
@@ -218,6 +222,8 @@ class ImageItem:
         ret["grid_thwd"] = self.grid_thwd
         ret["start_idx"] = self.start_idx
         ret["md5"] = self.md5
+        if self.input_key is not None:
+            ret["input_key"] = self.input_key
         return ret
 
     def to_origin_dict(self):
@@ -227,6 +233,8 @@ class ImageItem:
         ret = {}
         ret["type"] = self._type
         ret["data"] = self._data
+        if self.input_key is not None:
+            ret["input_key"] = self.input_key
         return ret
 
 
@@ -236,16 +244,19 @@ class MultimodalParams:
         images: List[dict] = [],
         audios: List[dict] = [],
         action=None,
+        generation=None,
+        generation_role=None,
         outputs=None,
         state=None,
     ) -> None:
         self.images = [ImageItem(**i) for i in images]
         self.audios = [AudioItem(**a) for a in audios]
-        if isinstance(action, dict):
-            from lightllm.server.actionserver.objs import ActionRequest
-
-            action = ActionRequest.from_dict(action)
         self.action = action
+        # Optional non-text generation branch. Model tokenizers own query
+        # planning; this transport only associates an ordinary LightLLM
+        # request with one model-declared prefix role.
+        self.generation = generation
+        self.generation_role = generation_role
         # ``outputs`` is intentionally transported with the multimodal payload:
         # it describes which inference branches consume the already prepared
         # prefix, rather than a sampling policy.  ``None`` retains the legacy
@@ -295,7 +306,14 @@ class MultimodalParams:
         ret["images"] = [i.to_dict() for i in self.images]
         ret["audios"] = [a.to_dict() for a in self.audios]
         if self.action is not None:
-            ret["action"] = self.action.to_dict()
+            ret["action"] = self.action.to_dict() if hasattr(self.action, "to_dict") else self.action
+        if self.generation is not None:
+            ret["generation"] = (
+                self.generation.to_dict()
+                if hasattr(self.generation, "to_dict")
+                else self.generation
+            )
+            ret["generation_role"] = self.generation_role
         if self.outputs is not None:
             ret["outputs"] = self.outputs
         if self.state is not None:
@@ -310,7 +328,14 @@ class MultimodalParams:
         ret["images"] = [i.to_origin_dict() for i in self.images]
         ret["audios"] = [a.to_origin_dict() for a in self.audios]
         if self.action is not None:
-            ret["action"] = self.action.to_dict()
+            ret["action"] = self.action.to_dict() if hasattr(self.action, "to_dict") else self.action
+        if self.generation is not None:
+            ret["generation"] = (
+                self.generation.to_dict()
+                if hasattr(self.generation, "to_dict")
+                else self.generation
+            )
+            ret["generation_role"] = self.generation_role
         if self.outputs is not None:
             ret["outputs"] = self.outputs
         if self.state is not None:

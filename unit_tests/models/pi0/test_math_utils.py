@@ -1,34 +1,30 @@
-import math
-
 import pytest
 import torch
 
-from lightllm.models.pi0.math_utils import (
-    create_sinusoidal_pos_embedding,
-    denoise_schedule,
-)
-
-
-def test_timestep_embedding_endpoints_match_formula():
-    time = torch.tensor([0.0, 1.0], dtype=torch.float32)
-    result = create_sinusoidal_pos_embedding(time, 4, min_period=0.004, max_period=4.0)
-    expected_at_one = torch.tensor(
-        [
-            math.sin(2 * math.pi / 0.004),
-            math.sin(2 * math.pi / 4.0),
-            math.cos(2 * math.pi / 0.004),
-            math.cos(2 * math.pi / 4.0),
-        ],
-        dtype=torch.float64,
-    )
-    torch.testing.assert_close(result[0], torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float64))
-    torch.testing.assert_close(result[1], expected_at_one, atol=1e-12, rtol=1e-12)
+from lightllm.models.pi0.model import Pi0ActionExpertModel
 
 
 @pytest.mark.parametrize("steps", [1, 4, 10])
 def test_denoise_schedule_has_exact_requested_step_count(steps):
-    times, dt = denoise_schedule(steps)
-    assert len(times) == steps
-    assert times[0] == 1.0
-    torch.testing.assert_close(times[-1], torch.tensor(1.0 / steps, dtype=torch.float32))
+    model = Pi0ActionExpertModel.__new__(Pi0ActionExpertModel)
+    model.device = torch.device("cpu")
+    model.data_type = torch.float64
+    model.vla_config = {
+        "expert_hidden_size": 4,
+        "min_period": 0.004,
+        "max_period": 4.0,
+    }
+    model._denoise_constants = model._init_denoise_constants(10)
+    embeddings, dt = model._get_denoise_constants(steps)
+    cached_embeddings, cached_dt = model._get_denoise_constants(steps)
+    assert embeddings.shape == (steps, 4)
+    assert cached_embeddings is embeddings
+    assert cached_dt is dt
     torch.testing.assert_close(dt, torch.tensor(-1.0 / steps, dtype=torch.float32))
+
+
+def test_denoise_schedule_rejects_steps_not_precomputed_at_startup():
+    model = Pi0ActionExpertModel.__new__(Pi0ActionExpertModel)
+    model._denoise_constants = {1: (None, None)}
+    with pytest.raises(ValueError, match=r"\[1, 1\]"):
+        model._get_denoise_constants(2)

@@ -1,5 +1,6 @@
-import torch
 import math
+
+import torch
 import triton
 import triton.language as tl
 
@@ -44,9 +45,18 @@ def _gelu_and_mul_kernel(
     input_n_offsets = pid * BLOCK_N + tl.arange(0, BLOCK_N)
     output_n_offsets = pid * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    up_offsets = input_m_offsets[:, None] * stride_input_m + (input_n_offsets[None, :] + size_n) * stride_input_n
-    gate_offsets = input_m_offsets[:, None] * stride_input_m + input_n_offsets[None, :] * stride_input_n
-    res_offsets = output_m_offsets[:, None] * stride_output_m + output_n_offsets[None, :] * stride_output_n
+    up_offsets = (
+        input_m_offsets[:, None] * stride_input_m
+        + (input_n_offsets[None, :] + size_n) * stride_input_n
+    )
+    gate_offsets = (
+        input_m_offsets[:, None] * stride_input_m
+        + input_n_offsets[None, :] * stride_input_n
+    )
+    res_offsets = (
+        output_m_offsets[:, None] * stride_output_m
+        + output_n_offsets[None, :] * stride_output_n
+    )
 
     up = tl.load(
         input_ptr + up_offsets,
@@ -65,22 +75,21 @@ def _gelu_and_mul_kernel(
     tl.store(
         output_ptr + res_offsets,
         up * gate,
-        mask=(output_n_offsets < size_n)[None, :] * (output_m_offsets < size_m)[:, None],
+        mask=(output_n_offsets < size_n)[None, :]
+        * (output_m_offsets < size_m)[:, None],
     )
 
 
-def gelu_and_mul_fwd(input, output):
+def gelu_and_mul_fwd(input, output, *, block_m=128, block_n=128):
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
     stride_output_m = output.stride(0)
     stride_output_n = output.stride(1)
     size_m = input.shape[0]
     size_n = input.shape[-1] // 2
-    BLOCK_M = 128
-    BLOCK_N = 128
     grid = (
-        triton.cdiv(size_m, BLOCK_M),
-        triton.cdiv(size_n, BLOCK_N),
+        triton.cdiv(size_m, block_m),
+        triton.cdiv(size_n, block_n),
     )
     _gelu_and_mul_kernel[grid](
         input,
@@ -91,14 +100,17 @@ def gelu_and_mul_fwd(input, output):
         stride_output_n,
         size_m,
         size_n,
-        BLOCK_M,
-        BLOCK_N,
+        block_m,
+        block_n,
     )
     return output
 
 
 def torch_gelu_and_mul(input: torch.Tensor):
-    return torch.nn.functional.gelu(input[:, 0 : (input.shape[-1] // 2)]) * input[:, (input.shape[-1] // 2) :]
+    return (
+        torch.nn.functional.gelu(input[:, 0 : (input.shape[-1] // 2)])
+        * input[:, (input.shape[-1] // 2) :]
+    )
 
 
 def test_gelu_and_mul(M, N, dtype, device="cuda"):

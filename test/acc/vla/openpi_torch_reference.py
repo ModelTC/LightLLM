@@ -13,6 +13,7 @@ import numpy as np
 import sentencepiece
 import torch
 import torch.nn.functional as F
+from safetensors import safe_open
 from torch import nn
 from transformers import GemmaConfig, SiglipVisionConfig, SiglipVisionModel
 from transformers.cache_utils import DynamicCache
@@ -22,11 +23,11 @@ from transformers.models.gemma.modeling_gemma import (
     GemmaRotaryEmbedding,
 )
 
-from lightllm.models.pi0.config import Pi0VLAConfig
-from lightllm.models.pi0.layer_weights.loader import Pi0SafeTensorLoader
-
-
 OPENPI_ATTENTION_MASK_VALUE = -2.3819763e38
+
+
+def _checkpoint_tensor(checkpoint, name: str, device: torch.device, dtype: torch.dtype):
+    return checkpoint.get_tensor(name).to(device=device, dtype=dtype)
 
 
 def _reference_time_embedding(
@@ -55,7 +56,7 @@ def _reference_denoise_schedule(num_steps: int, device: torch.device) -> tuple[t
 
 
 def reference_tokenize(
-    config: Pi0VLAConfig,
+    config: dict,
     prompts: list[str],
     states: torch.Tensor,
     tokenizer_path: str,
@@ -67,16 +68,16 @@ def reference_tokenize(
     state_values = states.detach().cpu().numpy()
     for index, prompt in enumerate(prompts):
         cleaned = prompt.strip().replace("_", " ").replace("\n", " ")
-        if config.is_pi05:
+        if config["model_type"] == "pi05":
             bins = np.digitize(state_values[index], bins=np.linspace(-1, 1, 257)[:-1]) - 1
             state_text = " ".join(map(str, bins))
             text = f"Task: {cleaned}, State: {state_text};\nAction: "
             tokens = tokenizer.encode(text, add_bos=True)
         else:
             tokens = tokenizer.encode(cleaned, add_bos=True) + tokenizer.encode("\n")
-        tokens = tokens[: config.tokenizer_max_length]
+        tokens = tokens[: config["tokenizer_max_length"]]
         mask = [True] * len(tokens)
-        padding = config.tokenizer_max_length - len(tokens)
+        padding = config["tokenizer_max_length"] - len(tokens)
         rows.append(tokens + [0] * padding)
         masks.append(mask + [False] * padding)
     return torch.tensor(rows, dtype=torch.long), torch.tensor(masks, dtype=torch.bool)
@@ -121,7 +122,7 @@ def _reference_preprocess_image(images: torch.Tensor, resolution: tuple[int, int
 
 @torch.no_grad()
 def reference_vision_encode(
-    config: Pi0VLAConfig,
+    config: dict,
     images: torch.Tensor,
     *,
     device: torch.device | str,
@@ -135,21 +136,23 @@ def reference_vision_encode(
         num_attention_heads=16,
         num_channels=3,
         patch_size=14,
-        image_size=config.image_resolution[0],
+        image_size=config["image_resolution"][0],
         attention_dropout=0.0,
         layer_norm_eps=1e-6,
         hidden_act="gelu_pytorch_tanh",
-        projection_dim=config.vlm_hidden_size,
+        projection_dim=config["vlm_hidden_size"],
         vision_use_head=False,
     )
     vision_config._attn_implementation = "eager"
     with torch.device("meta"):
         vision_model = SiglipVisionModel(vision_config)
     checkpoint_prefix = "paligemma_with_expert.paligemma.model.vision_tower."
-    with Pi0SafeTensorLoader(config.checkpoint_path) as loader:
+    with safe_open(config["checkpoint_path"], framework="pt", device="cpu") as checkpoint:
         state = {
-            key[len(checkpoint_prefix) :]: loader.tensor(key, device=device, dtype=torch.float32)
-            for key in loader.keys()
+            key[len(checkpoint_prefix) :]: _checkpoint_tensor(
+                checkpoint, key, device, torch.float32
+            )
+            for key in checkpoint.keys()
             if key.startswith(checkpoint_prefix)
         }
         missing, unexpected = vision_model.load_state_dict(state, strict=False, assign=True)
@@ -157,18 +160,20 @@ def reference_vision_encode(
             raise RuntimeError(f"reference vision load mismatch: missing={missing}, unexpected={unexpected}")
         embeddings = vision_model.vision_model.embeddings
         embeddings.position_ids = torch.arange(embeddings.num_patches, dtype=torch.long, device=device).expand(1, -1)
-        projector_weight = loader.tensor(
+        projector_weight = _checkpoint_tensor(
+            checkpoint,
             "paligemma_with_expert.paligemma.model.multi_modal_projector.linear.weight",
-            device=device,
-            dtype=torch.float32,
+            device,
+            torch.float32,
         )
-        projector_bias = loader.tensor(
+        projector_bias = _checkpoint_tensor(
+            checkpoint,
             "paligemma_with_expert.paligemma.model.multi_modal_projector.linear.bias",
-            device=device,
-            dtype=torch.float32,
+            device,
+            torch.float32,
         )
     vision_model.eval()
-    pixels = _reference_preprocess_image(images, config.image_resolution).to(device)
+    pixels = _reference_preprocess_image(images, config["image_resolution"]).to(device)
     hidden_states = vision_model(pixel_values=pixels).last_hidden_state
     return F.linear(hidden_states, projector_weight, projector_bias)
 
@@ -273,30 +278,32 @@ class _ReferenceGemmaModel(nn.Module):
         return hidden_states, cache
 
 
-def _gemma_config(config: Pi0VLAConfig, component: str) -> GemmaConfig:
-    hidden_size = config.vlm_hidden_size if component == "vlm" else config.expert_hidden_size
-    intermediate = config.vlm_intermediate_size if component == "vlm" else config.expert_intermediate_size
+def _gemma_config(config: dict, component: str) -> GemmaConfig:
+    hidden_size = config["vlm_hidden_size"] if component == "vlm" else config["expert_hidden_size"]
+    intermediate = config["vlm_intermediate_size"] if component == "vlm" else config["expert_intermediate_size"]
     result = GemmaConfig(
         hidden_size=hidden_size,
         intermediate_size=intermediate,
-        num_hidden_layers=config.depth,
-        num_attention_heads=config.num_attention_heads,
-        num_key_value_heads=config.num_key_value_heads,
-        head_dim=config.head_dim,
+        num_hidden_layers=config["num_hidden_layers"],
+        num_attention_heads=config["num_attention_heads"],
+        num_key_value_heads=config["num_key_value_heads"],
+        head_dim=config["head_dim"],
         hidden_activation="gelu_pytorch_tanh",
-        vocab_size=config.vocab_size,
+        # Both Pi checkpoints use PaliGemma's fixed vocabulary; LeRobot's
+        # policy config intentionally does not duplicate this model constant.
+        vocab_size=257_152,
     )
     result._attn_implementation = "eager"
     return result
 
 
 def _load_gemma(
-    loader: Pi0SafeTensorLoader,
-    config: Pi0VLAConfig,
+    checkpoint,
+    config: dict,
     component: str,
     device: torch.device,
 ) -> _ReferenceGemmaModel:
-    adaptive = config.is_pi05 and component == "expert"
+    adaptive = config["model_type"] == "pi05" and component == "expert"
     gemma_config = _gemma_config(config, component)
     with torch.device("meta"):
         model = _ReferenceGemmaModel(gemma_config, adaptive)
@@ -306,8 +313,8 @@ def _load_gemma(
         else "paligemma_with_expert.gemma_expert.model."
     )
     state = {
-        key[len(root) :]: loader.tensor(key, device=device, dtype=torch.float32)
-        for key in loader.keys()
+        key[len(root) :]: _checkpoint_tensor(checkpoint, key, device, torch.float32)
+        for key in checkpoint.keys()
         if key.startswith(root) and ".embed_tokens." not in key
     }
     missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
@@ -326,16 +333,17 @@ def _clone_cache(cache: DynamicCache, config: GemmaConfig) -> DynamicCache:
 
 
 class OpenPiTorchReference:
-    def __init__(self, config: Pi0VLAConfig, *, device: torch.device | str = "cuda"):
+    def __init__(self, config: dict, *, device: torch.device | str = "cuda"):
         self.config = config
         self.device = torch.device(device)
-        with Pi0SafeTensorLoader(config.checkpoint_path) as loader:
-            self.vlm = _load_gemma(loader, config, "vlm", self.device)
-            self.expert = _load_gemma(loader, config, "expert", self.device)
-            self.token_embedding = loader.tensor(
+        with safe_open(config["checkpoint_path"], framework="pt", device="cpu") as checkpoint:
+            self.vlm = _load_gemma(checkpoint, config, "vlm", self.device)
+            self.expert = _load_gemma(checkpoint, config, "expert", self.device)
+            self.token_embedding = _checkpoint_tensor(
+                checkpoint,
                 "paligemma_with_expert.paligemma.lm_head.weight",
-                device=self.device,
-                dtype=torch.float32,
+                self.device,
+                torch.float32,
             )
             names = {
                 "action_in_weight": "action_in_proj.weight",
@@ -343,7 +351,7 @@ class OpenPiTorchReference:
                 "action_out_weight": "action_out_proj.weight",
                 "action_out_bias": "action_out_proj.bias",
             }
-            if config.is_pi05:
+            if config["model_type"] == "pi05":
                 names.update(
                     {
                         "time_in_weight": "time_mlp_in.weight",
@@ -367,7 +375,7 @@ class OpenPiTorchReference:
                 setattr(
                     self,
                     attribute,
-                    loader.tensor(key, device=self.device, dtype=torch.float32),
+                    _checkpoint_tensor(checkpoint, key, self.device, torch.float32),
                 )
 
     def prefill(
@@ -382,7 +390,7 @@ class OpenPiTorchReference:
             mask.to(self.device)[:, None].expand(embedding.shape[:2]).bool()
             for embedding, mask in zip(embeddings, image_masks, strict=True)
         ]
-        language = F.embedding(tokens.to(self.device), self.token_embedding) * math.sqrt(self.config.vlm_hidden_size)
+        language = F.embedding(tokens.to(self.device), self.token_embedding) * math.sqrt(self.config["vlm_hidden_size"])
         embeddings.append(language)
         masks.append(token_mask.to(self.device).bool())
         hidden_states = torch.cat(embeddings, dim=1)
@@ -403,11 +411,11 @@ class OpenPiTorchReference:
         action_tokens = F.linear(actions, self.action_in_weight, self.action_in_bias)
         time_embedding = _reference_time_embedding(
             timestep,
-            self.config.expert_hidden_size,
-            self.config.min_period,
-            self.config.max_period,
+            self.config["expert_hidden_size"],
+            self.config["min_period"],
+            self.config["max_period"],
         ).float()
-        if self.config.is_pi05:
+        if self.config["model_type"] == "pi05":
             condition = F.silu(F.linear(time_embedding, self.time_in_weight, self.time_in_bias))
             condition = F.silu(F.linear(condition, self.time_out_weight, self.time_out_bias))
             hidden_states = action_tokens

@@ -127,10 +127,10 @@ def init_audio_distributed_env(kvargs):
     del _a
 
 
-def init_action_distributed_env(kvargs):
-    """Initialize the action expert TP group on the corresponding LLM ranks."""
+def init_generation_distributed_env(kvargs):
+    """Initialize a GenerationServer model TP group on the target ranks."""
 
-    tp_world_size = kvargs["action_tp"]
+    tp_world_size = kvargs["generation_tp"]
     tp_rank_id = kvargs["tp_rank_id"]
     device_id = kvargs["device_id"]
 
@@ -148,7 +148,7 @@ def init_action_distributed_env(kvargs):
     torch.cuda.set_device(device_id)
     dist.init_process_group(
         "nccl",
-        init_method=f'tcp://127.0.0.1:{kvargs["action_nccl_port"]}',
+        init_method=f'tcp://127.0.0.1:{kvargs["generation_nccl_port"]}',
         rank=tp_rank_id,
         world_size=tp_world_size,
         device_id=torch.device(f"cuda:{device_id}"),

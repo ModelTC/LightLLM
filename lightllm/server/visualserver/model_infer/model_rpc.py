@@ -16,6 +16,7 @@ from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.models.pi0.visual import Pi0VisionModel
+from lightllm.models.neo_chat.neo_visual import NeoVisionTransformerPretrainedModel
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
@@ -94,6 +95,12 @@ class VisualModelRpcServer(rpyc.Service):
                 )
             elif self.model_type in {"pi0", "pi05"}:
                 self.model = Pi0VisionModel(kvargs)
+            elif self.model_type == "neo_chat":
+                self.model = (
+                    NeoVisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"])
+                    .eval()
+                    .bfloat16()
+                )
             elif model_cfg.get("architectures", [""])[0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
@@ -119,6 +126,13 @@ class VisualModelRpcServer(rpyc.Service):
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
             self._hold_vision_peak_vram()
+            # Pi cameras are already grouped by observation, even when a
+            # domain enables only a subset of the checkpoint image slots.
+            # Keep the established queued path for every other VLM model.
+            self.inline_visual_batch = bool(
+                getattr(self.model, "inline_visual_batch", False)
+                and not self.is_visual_only_mode
+            )
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -136,7 +150,8 @@ class VisualModelRpcServer(rpyc.Service):
                         capacity=self.args.afs_embed_capacity,
                     )
 
-            self._init_taskes()
+            if not self.inline_visual_batch:
+                self._init_taskes()
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -179,15 +194,46 @@ class VisualModelRpcServer(rpyc.Service):
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
         try:
             images = obtain(images)
-            for i in range(len(images)):
-                images[i].event = ref_event_list[i]
-                images[i].start_time = time.time()
-                self.infer_queue.put(images[i])
+            if self.inline_visual_batch:
+                self._run_inline_batch(images)
+                return True
+            # Publish all images from one request atomically.  Without this
+            # lock the infer thread can consume the first item while this loop
+            # is still publishing the rest, splitting a three-camera request
+            # into two small ViT forwards (usually 1 + 2).
+            with self.infer_queue_batch_lock:
+                for i in range(len(images)):
+                    images[i].event = ref_event_list[i]
+                    images[i].start_time = time.time()
+                    self.infer_queue.put(images[i])
 
         except BaseException as e:
             logger.exception(str(e))
             raise e
-        return
+        return False
+
+    @torch.no_grad()
+    def _run_inline_batch(self, images: List[ImageItem]) -> None:
+        """Infer and publish one already-batched policy observation."""
+
+        torch.cuda.set_device(self.device_id)
+        all_img_embeds, uuids, valid_ids = self._forward(images)
+        if self.tp_rank_id != 0:
+            return
+
+        for image, (start, end) in zip(images, valid_ids, strict=True):
+            self.cpu_embed_cache_client.copy_vision_to_cache(
+                embed_tensor=all_img_embeds[start:end],
+                start_index_in_cache=image.start_index_in_embed_cache,
+            )
+
+        # One event is the completion boundary for the whole camera batch.
+        # Publishing the cache keys after it synchronizes guarantees that the
+        # router never observes partially copied image embeddings.
+        batch_ready = torch.cuda.Event()
+        batch_ready.record()
+        batch_ready.synchronize()
+        self.cache_client.root.set_items_embed(uuids)
 
     def _log_latency(self, image: ImageItem, stage: str):
         latency = time.time() - image.start_time
@@ -200,6 +246,7 @@ class VisualModelRpcServer(rpyc.Service):
 
         # 异步队列, 用于接受任务
         self.infer_queue = queue.Queue()
+        self.infer_queue_batch_lock = threading.Lock()
         # 将计算得到的结果放入 afs 或者 embed cache 的 queue
         self.store_queue = queue.Queue()
 
@@ -233,16 +280,23 @@ class VisualModelRpcServer(rpyc.Service):
         tasks.append(task)
 
         if not force_same:
-            # 尝试继续获取更多任务，直到达到 max_num
-            while len(tasks) < max_num:
-                try:
-                    self.sempare.acquire()
-                    task = self.infer_queue.get(block=False)
-                    tasks.append(task)
-                except queue.Empty:
-                    self.sempare.release()
-                    break
+            # The first item wakes this consumer. Wait for its producer to
+            # finish publishing the request, then drain without splitting the
+            # batch. Only the non-blocking drain belongs under this lock.
+            with self.infer_queue_batch_lock:
+                # 尝试继续获取更多任务，直到达到 max_num
+                while len(tasks) < max_num:
+                    try:
+                        self.sempare.acquire()
+                        task = self.infer_queue.get(block=False)
+                        tasks.append(task)
+                    except queue.Empty:
+                        self.sempare.release()
+                        break
         else:
+            # A non-zero ViT rank may need items from later requests to match
+            # rank 0's collective batch size. Never hold the producer lock
+            # while blocking for those future requests.
             while len(tasks) < max_num:
                 self.sempare.acquire()
                 task = self.infer_queue.get(block=True)

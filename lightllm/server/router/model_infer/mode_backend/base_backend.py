@@ -23,6 +23,8 @@ from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
+from lightllm.server.activation_transfer import ActivationRef
+from lightllm.server.activation_transfer.shm_kv import PagedKVPublisher
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
@@ -57,7 +59,6 @@ from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()
-        self.request_lifecycle = None
 
         self.overlap_event_manager = OverlapEventManager()
         # 标识是否支持 overlap 功能，很多子类模式如 xgrammar 和 outlines 当前不支持 overlap 高性能模式
@@ -91,6 +92,13 @@ class ModeBackend:
     def init_model(self, kvargs):
         self.args: StartArgs = kvargs.get("args", None)
         assert self.args is not None
+        # Keep the inference poll interval consistent with the router's
+        # scheduling interval. Models that need a lower-latency schedule set
+        # the existing generic option; the common backend never names them.
+        self.infer_loop_idle_time = min(
+            self.infer_loop_idle_time,
+            self.args.schedule_time_interval,
+        )
         # p d 分离模式下会有特殊的一些初始化, 所以需要传递
         # 模式参数到模型的初始化过程中进行控制
         self.run_mode = self.args.run_mode
@@ -114,11 +122,21 @@ class ModeBackend:
 
         self.logger = init_logger(__name__)
 
+        # Action requests commit one prefix and stop; they have no following
+        # decode work for the two infer threads to overlap. Serializing the
+        # existing stages avoids paying the cross-thread barriers at batch 1.
+        if self.args.output_modality == "action":
+            self.support_overlap = False
+
         self.weight_dir = kvargs["weight_dir"]
         max_total_token_num = kvargs["max_total_token_num"]
 
         init_distributed_env(kvargs)
         self.init_rank_infos()
+        self.activation_publisher = PagedKVPublisher(
+            self.shm_req_manager,
+            rank=self.rank_in_dp,
+        )
         group_size = (
             2 if (self.args.enable_decode_microbatch_overlap or self.args.enable_prefill_microbatch_overlap) else 1
         )
@@ -225,10 +243,15 @@ class ModeBackend:
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
-        if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
+        if (
+            self.args.run_mode in ["prefill", "decode"]
+            or self.args.enable_dp_prompt_cache_fetch
+            or getattr(self.args, "output_modality", None) is not None
+        ):
             # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
             # 读取
             self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            self.model.req_manager.write_to_shm()
             dist.barrier(group=self.node_nccl_group)
 
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
@@ -245,22 +268,6 @@ class ModeBackend:
                     mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
 
         self.init_custom()
-
-        if self.args.enable_vla:
-            from lightllm.server.inference_runtime.runtime import (
-                VLARequestLifecycle,
-            )
-
-            self.request_lifecycle = VLARequestLifecycle(self)
-            self.request_lifecycle.init()
-            # Action submission contains target-TP collectives.  Keep their
-            # ordering identical on every rank by serializing the ordinary
-            # backend's two infer-loop threads.  This is scoped to the
-            # optional action runtime; normal text backends retain overlap.
-            self.support_overlap = False
-            # Action completion and the next state tick are latency-sensitive;
-            # keep the generic idle loop responsive while no LM batch runs.
-            self.infer_loop_idle_time = 0.001
 
         if self.args.enable_dp_prompt_cache_fetch:
             self.init_dp_kv_shared()
@@ -294,6 +301,7 @@ class ModeBackend:
     def init_dp_kv_shared(self):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
         from lightllm.common.kv_cache_mem_manager import MemoryManager
+        from lightllm.common.req_manager import ReqManager
 
         torch.cuda.set_device(get_current_device_id())
 
@@ -305,11 +313,18 @@ class ModeBackend:
 
         # Collect mem_managers from all ranks
         self.mem_managers = []
+        self.req_to_token_indexs_by_rank = []
         for rank_idx in range(self.node_world_size):
             if rank_idx != self.rank_in_node:
                 self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
+                self.req_to_token_indexs_by_rank.append(
+                    ReqManager.load_req_to_token_indexs_from_shm(rank_idx)
+                )
             else:
                 self.mem_managers.append(self.model.mem_manager)
+                self.req_to_token_indexs_by_rank.append(
+                    self.model.req_manager.req_to_token_indexs
+                )
         return
 
     def get_max_total_token_num(self):
@@ -681,10 +696,6 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
-        lifecycle = self.request_lifecycle
-        if lifecycle is not None:
-            lifecycle.poll()
-
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
 
@@ -719,6 +730,8 @@ class ModeBackend:
 
         for req_obj in ready_reqs:
 
+            has_kv_consumers = req_obj.shm_req.kv_consumer_mask != 0
+
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -732,7 +745,7 @@ class ModeBackend:
                 continue
 
             if req_obj.infer_aborted or req_obj.finish_status.is_finished():
-                if lifecycle is not None and lifecycle.should_defer_release(req_obj):
+                if has_kv_consumers:
                     continue
                 if support_overlap:
                     # 延迟处理
@@ -741,9 +754,6 @@ class ModeBackend:
                 else:
                     finished_reqs.append(req_obj)
                     continue
-
-            if lifecycle is not None and not lifecycle.is_schedulable(req_obj):
-                continue
 
             if no_decode:
                 is_decode = False
@@ -758,9 +768,7 @@ class ModeBackend:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num and (
-                        lifecycle is None or lifecycle.can_pause(req_obj)
-                    ):
+                    if wait_pause_count < pause_max_req_num and not has_kv_consumers:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
             else:
@@ -778,9 +786,7 @@ class ModeBackend:
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num and (
-                        lifecycle is None or lifecycle.can_pause(req_obj)
-                    ):
+                    if wait_pause_count < pause_max_req_num and not has_kv_consumers:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 
@@ -889,9 +895,20 @@ class ModeBackend:
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=pd_prefill_chunked_handle_func,
             )
+            self._publish_kv_ready(req_obj)
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
             req_objs=run_reqs, next_token_ids=next_token_ids
+        )
+        return
+
+    def _publish_kv_ready(self, req_obj: InferReq):
+        """Publish this rank's KV commit after the forward sync boundary."""
+        self.activation_publisher.publish(
+            ActivationRef.kv(req_obj.shm_index, req_obj.req_id),
+            shm_req=req_obj.shm_req,
+            infer_req_idx=req_obj.req_idx,
+            committed_tokens=req_obj.cur_kv_len,
         )
         return
 

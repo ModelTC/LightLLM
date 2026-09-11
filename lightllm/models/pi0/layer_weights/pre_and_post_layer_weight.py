@@ -33,88 +33,86 @@ class Pi0VLMPreAndPostLayerWeight(PreAndPostLayerWeight):
         )
         self.final_norm_weight_ = NoTpGEMMANormWeight(
             dim=hidden_size,
-            weight_name=("paligemma_with_expert.paligemma.model.language_model.norm.weight"),
+            weight_name=(
+                "paligemma_with_expert.paligemma.model.language_model.norm.weight"
+            ),
             data_type=data_type,
         )
 
 
 class Pi0ActionPreAndPostLayerWeight(PreAndPostLayerWeight):
-    """Replicated action projections backed by LightLLM meta weights."""
+    """Pi0 projections for the continuous-state action suffix."""
+
+    time_mlp_prefix = "action_time_mlp"
+    time_mlp_input_multiplier = 2
 
     def __init__(self, data_type, network_config, quant_cfg: Quantcfg):
         self.quant_cfg = quant_cfg
         super().__init__(data_type, network_config)
         hidden_size = network_config["hidden_size"]
         max_action_dim = network_config["max_action_dim"]
-        max_state_dim = network_config["max_state_dim"]
-        is_pi05 = bool(network_config["is_pi05"])
 
-        def row(in_dim, out_dim, weight_name, bias_name, quant_name):
-            return ROWMMWeight(
-                in_dim=in_dim,
-                out_dims=[out_dim],
-                weight_names=weight_name,
-                data_type=data_type,
-                bias_names=bias_name,
-                quant_method=quant_cfg.get_quant_method(-1, quant_name),
-                tp_rank=0,
-                tp_world_size=1,
-            )
+        self.action_in_proj = ROWMMWeight(
+            in_dim=max_action_dim,
+            out_dims=[hidden_size],
+            weight_names="action_in_proj.weight",
+            data_type=data_type,
+            bias_names="action_in_proj.bias",
+            quant_method=quant_cfg.get_quant_method(-1, "action_in_proj"),
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.action_out_proj = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[max_action_dim],
+            weight_names="action_out_proj.weight",
+            data_type=data_type,
+            bias_names="action_out_proj.bias",
+            quant_method=quant_cfg.get_quant_method(-1, "action_out_proj"),
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self._init_variant_weights(hidden_size, data_type, network_config, quant_cfg)
+        self.time_mlp_in = ROWMMWeight(
+            in_dim=self.time_mlp_input_multiplier * hidden_size,
+            out_dims=[hidden_size],
+            weight_names=f"{self.time_mlp_prefix}_in.weight",
+            data_type=data_type,
+            bias_names=f"{self.time_mlp_prefix}_in.bias",
+            quant_method=quant_cfg.get_quant_method(-1, "time_mlp_in"),
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.time_mlp_out = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[hidden_size],
+            weight_names=f"{self.time_mlp_prefix}_out.weight",
+            data_type=data_type,
+            bias_names=f"{self.time_mlp_prefix}_out.bias",
+            quant_method=quant_cfg.get_quant_method(-1, "time_mlp_out"),
+            tp_rank=0,
+            tp_world_size=1,
+        )
 
-        self.action_in_proj = row(
-            max_action_dim,
-            hidden_size,
-            "action_in_proj.weight",
-            "action_in_proj.bias",
-            "action_in_proj",
+    def _init_variant_weights(
+        self,
+        hidden_size: int,
+        data_type,
+        network_config: dict,
+        quant_cfg: Quantcfg,
+    ) -> None:
+        self.state_proj = ROWMMWeight(
+            in_dim=network_config["max_state_dim"],
+            out_dims=[hidden_size],
+            weight_names="state_proj.weight",
+            data_type=data_type,
+            bias_names="state_proj.bias",
+            quant_method=quant_cfg.get_quant_method(-1, "state_proj"),
+            tp_rank=0,
+            tp_world_size=1,
         )
-        self.action_out_proj = row(
-            hidden_size,
-            max_action_dim,
-            "action_out_proj.weight",
-            "action_out_proj.bias",
-            "action_out_proj",
-        )
-        if is_pi05:
-            time_prefix = "time_mlp"
-            time_input_size = hidden_size
-            self.state_proj = None
-            self.final_norm_weight_ = None
-            self.final_norm_dense = row(
-                hidden_size,
-                3 * hidden_size,
-                "paligemma_with_expert.gemma_expert.model.norm.dense.weight",
-                "paligemma_with_expert.gemma_expert.model.norm.dense.bias",
-                "final_norm_dense",
-            )
-        else:
-            time_prefix = "action_time_mlp"
-            time_input_size = 2 * hidden_size
-            self.state_proj = row(
-                max_state_dim,
-                hidden_size,
-                "state_proj.weight",
-                "state_proj.bias",
-                "state_proj",
-            )
-            self.final_norm_weight_ = NoTpGEMMANormWeight(
-                dim=hidden_size,
-                weight_name="paligemma_with_expert.gemma_expert.model.norm.weight",
-                data_type=data_type,
-            )
-            self.final_norm_dense = None
-
-        self.time_mlp_in = row(
-            time_input_size,
-            hidden_size,
-            f"{time_prefix}_in.weight",
-            f"{time_prefix}_in.bias",
-            "time_mlp_in",
-        )
-        self.time_mlp_out = row(
-            hidden_size,
-            hidden_size,
-            f"{time_prefix}_out.weight",
-            f"{time_prefix}_out.bias",
-            "time_mlp_out",
+        self.final_norm_weight_ = NoTpGEMMANormWeight(
+            dim=hidden_size,
+            weight_name="paligemma_with_expert.gemma_expert.model.norm.weight",
+            data_type=data_type,
         )

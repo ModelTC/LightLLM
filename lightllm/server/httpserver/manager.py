@@ -109,6 +109,18 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
+        self.output_client = None
+        self.output_modality = getattr(args, "output_modality", None)
+        if self.output_modality is not None:
+            from lightllm.server.generationserver.modes import (
+                create_generation_client,
+            )
+
+            self.output_client = create_generation_client(
+                args,
+                self.output_modality,
+            )
+
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
@@ -327,6 +339,56 @@ class HttpServerManager(HttpRlManagerHelper, object):
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
+        action_request = getattr(multimodal_params, "action", None)
+        image_request = getattr(multimodal_params, "generation", None)
+        image_role = getattr(multimodal_params, "generation_role", None)
+        outputs = getattr(multimodal_params, "outputs", None)
+        default_outputs = (
+            {"action"}
+            if action_request is not None
+            else {"image"}
+            if image_request is not None
+            else {"text"}
+        )
+        outputs = default_outputs if outputs is None else set(outputs)
+        if not outputs or not outputs.issubset({"text", "action", "image"}):
+            raise ValueError("outputs contain an unsupported modality")
+        wants_action = "action" in outputs
+        wants_image = "image" in outputs
+        wants_text = "text" in outputs
+        if wants_action and wants_image:
+            raise ValueError(
+                "action and media generation cannot share one prefix request"
+            )
+        if wants_action:
+            if (
+                self.output_client is None
+                or self.output_modality != "action"
+                or action_request is None
+            ):
+                raise ValueError("action output is not enabled for this model")
+            from lightllm.server.generationserver.action.protocol import ActionRequest
+
+            if isinstance(action_request, dict):
+                action_request = ActionRequest.from_dict(action_request)
+                multimodal_params.action = action_request
+            if sampling_params.n != 1 or sampling_params.best_of != 1:
+                raise ValueError("action requests require n=1 and best_of=1")
+        if wants_image:
+            from lightllm.server.generationserver.image.protocol import (
+                ImageGenerationInput,
+            )
+
+            if (
+                self.output_client is None
+                or self.output_modality != "image"
+                or not isinstance(image_request, ImageGenerationInput)
+            ):
+                raise ValueError("media output requires an enabled generation server")
+            if image_role not in image_request.prefix_roles:
+                raise ValueError("generation prefix role is missing or invalid")
+            if sampling_params.n != 1 or sampling_params.best_of != 1:
+                raise ValueError("generation prefix requests require n=1 and best_of=1")
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
         self._log_stage_timing(
@@ -468,9 +530,110 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if self.rl_controller is not None:
                 await self.rl_controller.unregister_generation_admission(group_request_id)
 
+            if wants_action:
+                from lightllm.server.generationserver.action.client import (
+                    ActionDispatchNotSent,
+                )
+                from lightllm.server.generationserver.action.protocol import ActionTask
+                from lightllm.server.activation_transfer import ActivationRef
+                from lightllm.server.core.objs import KV_CONSUMER_GENERATION
+
+                req = req_objs[0]
+                action_task = ActionTask(
+                    activation=ActivationRef.kv(
+                        req.index_in_shm_mem,
+                        int(req.request_id),
+                    ),
+                    action_request=action_request,
+                    default_seed=int(req.sample_params.seed),
+                )
+                if not self.shm_req_manager.register_kv_consumer(
+                    req.index_in_shm_mem,
+                    int(req.request_id),
+                    KV_CONSUMER_GENERATION,
+                ):
+                    raise RuntimeError(
+                        "action request shm generation changed before fanout"
+                    )
+                req_status.output_modality = "action"
+                req_status.output_correlation_id = action_task.correlation_id
+                try:
+                    # Complete the local VLAServer send before starting
+                    # the independent Visual->Router fan-out.  From this point
+                    # aborting the waiter always sends ActionCancel.
+                    req_status.output_result_task = (
+                        await self.output_client.dispatch(
+                            action_task,
+                            timeout=action_request.timeout,
+                        )
+                    )
+                except ActionDispatchNotSent:
+                    # No action consumer accepted the task, so HTTP still owns
+                    # the just-registered bit and may undo it locally.
+                    self.shm_req_manager.release_kv_consumer(
+                        req.index_in_shm_mem,
+                        int(req.request_id),
+                        KV_CONSUMER_GENERATION,
+                    )
+                    req_status.output_correlation_id = None
+                    raise
+
+            if wants_image:
+                from lightllm.server.core.objs import KV_CONSUMER_GENERATION
+                from lightllm.server.generationserver.image.client import (
+                    ImageDispatchNotSent,
+                )
+                from lightllm.server.generationserver.image.protocol import (
+                    ImageActivationTask,
+                )
+                from lightllm.server.activation_transfer import ActivationRef
+
+                req = req_objs[0]
+                image_task = ImageActivationTask(
+                    activation=ActivationRef.kv(
+                        req.index_in_shm_mem,
+                        int(req.request_id),
+                        position_offset=self.tokenizer.get_generation_position_offset(
+                            req.input_len,
+                            multimodal_params,
+                        ),
+                    ),
+                    role=image_role,
+                    generation=image_request,
+                )
+                if not self.shm_req_manager.register_kv_consumer(
+                    req.index_in_shm_mem,
+                    int(req.request_id),
+                    KV_CONSUMER_GENERATION,
+                ):
+                    raise RuntimeError(
+                        "generation request shm generation changed before fanout"
+                    )
+                req_status.output_modality = "image"
+                req_status.output_correlation_id = image_task.correlation_id
+                try:
+                    req_status.output_result_task = (
+                        await self.output_client.dispatch(
+                            image_task,
+                            timeout=image_request.timeout,
+                        )
+                    )
+                except ImageDispatchNotSent:
+                    self.shm_req_manager.release_kv_consumer(
+                        req.index_in_shm_mem,
+                        int(req.request_id),
+                        KV_CONSUMER_GENERATION,
+                    )
+                    req_status.output_correlation_id = None
+                    raise
+
             await self.transfer_to_next_module_or_node(
                 prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
             )
+            # This is an ownership barrier, not merely a success marker.  Set
+            # it only after the local downstream send has succeeded; before
+            # that point HTTP still owns the normal release mark.
+            req_status.request_forwarded = True
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -496,13 +659,46 @@ class HttpServerManager(HttpRlManagerHelper, object):
             }
 
             is_first_gen_token = True
-            async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                # 只有第一个生成的 token 的 metadata 中包含 input_usage
+            if not wants_action and not wants_image:
+                async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                    # 只有第一个生成的 token 的 metadata 中包含 input_usage
+                    if is_first_gen_token:
+                        metadata["input_usage"] = input_usage
+                        is_first_gen_token = False
+
+                    yield sub_req_id, request_output, metadata, finish_status
+
+            else:
+                # The ordinary LLM finish path is still the owner of request
+                # retirement.  Action-only calls drain its single internal
+                # token, while text+action calls expose the unchanged stream.
+                async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                    if wants_text:
+                        if is_first_gen_token:
+                            metadata["input_usage"] = input_usage
+                            is_first_gen_token = False
+                        yield sub_req_id, request_output, metadata, finish_status
+
+                if wants_action:
+                    branch_result = await req_status.output_result_task
+                    metadata = {
+                        "is_token": False,
+                        "action_response": branch_result.to_dict(),
+                    }
+                else:
+                    branch_result = await req_status.output_result_task
+                    metadata = {
+                        "is_token": False,
+                        "generation_response": branch_result,
+                    }
                 if is_first_gen_token:
                     metadata["input_usage"] = input_usage
-                    is_first_gen_token = False
-
-                yield sub_req_id, request_output, metadata, finish_status
+                yield (
+                    group_request_id,
+                    "",
+                    metadata,
+                    FinishStatus(FinishStatus.FINISHED_STOP),
+                )
 
         except (asyncio.CancelledError, BaseException) as e:
             if isinstance(e, ClientDisconnected):
@@ -853,11 +1049,94 @@ class HttpServerManager(HttpRlManagerHelper, object):
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
             return False
 
+        output_task = req_status.output_result_task
+        output_result = None
+        if output_task is not None:
+            if not output_task.done():
+                await self.output_client.cancel(
+                    req_status.output_correlation_id,
+                    reason="HTTP request was aborted",
+                )
+                output_task.cancel()
+            completed = await asyncio.gather(output_task, return_exceptions=True)
+            if completed and not isinstance(completed[0], BaseException):
+                output_result = completed[0]
+        elif req_status.output_correlation_id is not None:
+            # Dispatch may have been cancelled after the DEALER send but before
+            # it could return the waiter to this ReqStatus.
+            await self.output_client.cancel(
+                req_status.output_correlation_id,
+                reason="HTTP request was aborted during output dispatch",
+            )
+
+        if (
+            req_status.output_modality == "action"
+            and output_result is not None
+            and not req_status.action_result_delivered
+            and getattr(output_result, "ok", False)
+            and getattr(output_result, "committed_new_context", False)
+            and getattr(output_result, "prefix_context", None) is not None
+        ):
+            try:
+                await self.output_client.close_context(
+                    output_result.prefix_context,
+                    request_id=output_result.request_id,
+                )
+            except BaseException:
+                logger.exception(
+                    "failed to release undelivered action context for group_request_id %s",
+                    group_req_id,
+                )
+
         group_req_objs: GroupReqObjs = req_status.group_req_objs
         for req in group_req_objs.shm_req_objs:
             req.is_aborted = True
+            if not req_status.request_forwarded:
+                # No downstream module can publish its final-release mark when
+                # action registration/dispatch fails before fan-out.  Keep the
+                # normal recycle path as the sole resource owner; an active KV
+                # consumer lease still makes Req.can_release() return False.
+                req.can_released_mark = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
+
+    async def submit_action_context(self, action_request):
+        """Send a hot REUSE/CLOSE command without creating an LLM request."""
+
+        if self.output_client is None or self.output_modality != "action":
+            raise RuntimeError("action generation is not enabled for this model")
+        from lightllm.server.generationserver.action.protocol import (
+            ActionContextTask,
+            ActionRequest,
+        )
+
+        if isinstance(action_request, dict):
+            action_request = ActionRequest.from_dict(action_request)
+        task = ActionContextTask(action_request=action_request)
+        return await self.output_client.submit(task, timeout=action_request.timeout)
+
+    async def settle_action_response_delivery(
+        self,
+        group_req_id: int,
+        *,
+        delivered: bool,
+    ) -> bool:
+        """Resolve ownership of a newly committed persistent action context.
+
+        The action generator yielding a result is not a delivery boundary: the
+        ASGI server can still fail while sending the JSON body.  Only the
+        response object knows whether that send completed.  On failure, reuse
+        the ordinary abort path so an undelivered CREATE/REPLACE is closed and
+        its KV-consumer lease is retired.
+        """
+
+        req_status = self.req_id_to_out_inf.get(group_req_id)
+        if req_status is None:
+            return False
+        if delivered:
+            req_status.action_result_delivered = True
+            return True
+        return await self.abort(group_req_id)
 
     def _get_router_profiler_client(self):
         router_profiler_client = getattr(self, "router_profiler_client", None)
@@ -1042,6 +1321,12 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+        self.aborted = False
+        self.output_modality = None
+        self.output_result_task = None
+        self.output_correlation_id = None
+        self.action_result_delivered = False
+        self.request_forwarded = False
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:

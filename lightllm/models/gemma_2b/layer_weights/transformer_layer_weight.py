@@ -1,8 +1,10 @@
-import torch
-import math
-import numpy as np
-from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import NoTpGEMMANormWeight, ROWMMWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import (
+    NoTpGEMMANormWeight,
+    ROWMMWeight,
+)
+from lightllm.models.llama.layer_weights.transformer_layer_weight import (
+    LlamaTransformerLayerWeight,
+)
 
 
 class Gemma_2bTransformerLayerWeight(LlamaTransformerLayerWeight):
@@ -33,8 +35,12 @@ class Gemma_2bTransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_norm(self):
         self.att_norm_weight_ = NoTpGEMMANormWeight(
-            dim=self.n_embed, weight_name=self._att_norm_weight_name, data_type=self.data_type_, bias_name=None
+            dim=self.n_embed,
+            weight_name=self._att_norm_weight_name,
+            data_type=self.data_type_,
         )
         self.ffn_norm_weight_ = NoTpGEMMANormWeight(
-            dim=self.n_embed, weight_name=self._ffn_norm_weight_name, data_type=self.data_type_, bias_name=None
+            dim=self.n_embed,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
         )

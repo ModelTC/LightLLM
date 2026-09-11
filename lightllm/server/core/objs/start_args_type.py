@@ -104,6 +104,33 @@ class StartArgs:
     output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
+    # Optional Action/Image sidecar. The target model still follows the
+    # ordinary LightLLM path; GenerationServer only borrows committed Prefix KV.
+    generation_backend: Optional[str] = field(default=None)
+    # Effective Omni output derived from ModelRegistry. This is internal;
+    # ``generation_backend`` remains the user-facing enable flag.
+    output_modality: Optional[str] = field(default=None)
+    generation_backend_path: Optional[str] = field(default=None)
+    generation_model_dir: Optional[str] = field(default=None)
+    generation_config: Optional[str] = field(default=None)
+    # Resolved sidecar config shared with child processes. Unlike
+    # generation_config, this is internal state rather than a CLI path.
+    generation_runtime_config: Optional[dict] = field(default=None)
+    generation_max_concurrency: int = field(default=1)
+    # pi0 / pi0.5 VLA inference mode. These fields are inert for normal LLM/VLM
+    # startup paths.
+    vla_action_dim: Optional[int] = field(default=None)
+    vla_action_horizon: Optional[int] = field(default=None)
+    vla_num_denoise_steps: Optional[int] = field(default=None)
+    vla_max_prefix_tokens: int = field(default=1024)
+    vla_tokenizer_path: Optional[str] = field(default=None)
+    vla_norm_config: Optional[str] = field(default=None)
+    vla_robot_adapter: Optional[str] = field(default=None)
+    vla_action_postprocess_config: Optional[str] = field(default=None)
+    # Optional environment profiles (camera mapping, state/action shape and
+    # per-domain normalization) used by the Action HTTP adapter.
+    vla_domain_config: Optional[str] = field(default=None)
+    generation_nccl_port: Optional[int] = field(default=None)
     disable_vision: Optional[bool] = field(default=None)
     disable_audio: Optional[bool] = field(default=None)
     # Cache image, video, and audio URL content to avoid repeated downloads.

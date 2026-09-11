@@ -955,7 +955,31 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--vla_norm_config", type=str, default=None)
     parser.add_argument("--vla_robot_adapter", type=str, default=None)
     parser.add_argument("--vla_action_postprocess_config", type=str, default=None)
-    parser.add_argument("--action_nccl_port", type=int, default=None)
+    parser.add_argument(
+        "--vla_domain_config",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON object overriding model-owned action domain profiles. "
+            "A profile owns camera aliases, state/action dimensions, and "
+            "domain-specific normalization/postprocessing."
+        ),
+    )
+    parser.add_argument("--generation_nccl_port", type=int, default=None)
+    parser.add_argument(
+        "--generation_backend",
+        default=None,
+        help="Enable the model-declared Action or Image branch fed by Prefix KV.",
+    )
+    parser.add_argument(
+        "--generation_backend_path",
+        type=str,
+        default=None,
+        help="Optional source checkout added when importing the generation backend.",
+    )
+    parser.add_argument("--generation_model_dir", type=str, default=None)
+    parser.add_argument("--generation_config", type=str, default=None)
+    parser.add_argument("--generation_max_concurrency", type=int, default=1)
     return parser
 
 

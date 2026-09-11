@@ -107,4 +107,4 @@ Reward模型
   * - OpenPI π₀
     - LeRobot checkpoint；使用 :doc:`VLA 推理路径 <../tutorial/vla_pi0>`。
   * - OpenPI π₀.₅
-    - LeRobot checkpoint；复用普通 VLM pipeline，并启动独立 actionserver。
+    - LeRobot checkpoint；复用普通 VLM pipeline，并启动统一 GenerationServer。

@@ -121,6 +121,7 @@ class VisualOnlyManager(rpyc.Service):
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": max(self.infer_batch_size // self.vit_dp, 1),
                     "vit_attn_backend": self.vit_attn_backend,
+                    "disable_cudagraph": self.args.disable_cudagraph,
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)

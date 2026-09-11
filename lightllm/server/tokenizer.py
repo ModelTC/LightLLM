@@ -49,12 +49,18 @@ def get_tokenizer(
     """Gets a tokenizer for the given model name via Huggingface."""
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type") or model_cfg.get("type", "")
-    if model_type in {"pi0", "pi05"}:
+    if model_type == "pi0":
         from lightllm.models.pi0.tokenizer import Pi0TokenizerAdapter
         from lightllm.utils.envs_utils import get_env_start_args
 
         configured_path = getattr(get_env_start_args(), "vla_tokenizer_path", None)
         return Pi0TokenizerAdapter(tokenizer_name, configured_path)
+    if model_type == "pi05":
+        from lightllm.models.pi05.tokenizer import Pi05TokenizerAdapter
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        configured_path = getattr(get_env_start_args(), "vla_tokenizer_path", None)
+        return Pi05TokenizerAdapter(tokenizer_name, configured_path)
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
@@ -87,7 +93,7 @@ def get_tokenizer(
             "slowdown. Consider using a fast tokenizer instead."
         )
 
-    model_type = model_cfg.get("model_type", "")
+    model_type = model_cfg.get("model_type") or model_cfg.get("type", "")
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.
     if model_type == "deepseek_v32":
@@ -99,7 +105,11 @@ def get_tokenizer(
         logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
         return DeepSeekV32Tokenizer(hf_tokenizer)
 
-    if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+    if model_type == "neo_chat":
+        from ..models.neo_chat.tokenizer import NeoChatTokenizer
+
+        tokenizer = NeoChatTokenizer(tokenizer, model_cfg=model_cfg)
+    elif model_cfg.get("architectures", [""])[0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 
         image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)

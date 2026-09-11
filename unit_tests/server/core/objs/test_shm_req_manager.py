@@ -81,6 +81,24 @@ def test_put_back_req_obj(shm_req_manager):
     shm_req_manager.release_req_index(index)
 
 
+def test_kv_consumer_mask_updates_are_generation_safe(shm_req_manager):
+    index = shm_req_manager.alloc_req_index()
+    req_obj = shm_req_manager.get_req_obj_by_index(index)
+    req_obj.request_id = 123
+    req_obj.kv_consumer_mask = 0
+
+    assert shm_req_manager.register_kv_consumer(index, 123, 0b001)
+    assert shm_req_manager.register_kv_consumer(index, 123, 0b100)
+    assert req_obj.kv_consumer_mask == 0b101
+    assert not shm_req_manager.release_kv_consumer(index, 124, 0b001)
+    assert req_obj.kv_consumer_mask == 0b101
+    assert shm_req_manager.release_kv_consumer(index, 123, 0b001)
+    assert req_obj.kv_consumer_mask == 0b100
+
+    shm_req_manager.put_back_req_obj(req_obj)
+    shm_req_manager.release_req_index(index)
+
+
 def test_alloc_req_index_no_available(shm_req_manager):
     for _ in range(shm_req_manager.max_req_num):
         shm_req_manager.alloc_req_index()

@@ -107,4 +107,4 @@ Vision-Language-Action Models
   * - OpenPI π₀
     - LeRobot checkpoint; use :doc:`the VLA inference path <../tutorial/vla_pi0>`.
   * - OpenPI π₀.₅
-    - LeRobot checkpoint using the normal VLM pipeline plus actionserver.
+    - LeRobot checkpoint using the normal VLM pipeline plus unified GenerationServer.

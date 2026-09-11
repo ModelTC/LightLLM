@@ -31,6 +31,20 @@ def req():
 def test_req_init(req):
     assert req.request_id == 1
     assert req.input_len == 3
+    assert req.infer_req_idx == -1
+    assert req.kv_ready_rank_mask == 0
+    assert req.kv_consumer_mask == 0
+
+
+def test_kv_consumer_blocks_shm_slot_release(req):
+    req.ref_count = 1
+    req.can_released_mark = True
+    req.finish_status.set_status(req.finish_status.FINISHED_STOP)
+    req.kv_consumer_mask = 1
+    assert not req.can_release()
+
+    req.kv_consumer_mask = 0
+    assert req.can_release()
 
 
 def test_create_prompt_ids_shm_array(req):

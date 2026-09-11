@@ -14,6 +14,130 @@ def get_config_json(model_path: str):
     return json_obj
 
 
+def _normalize_pi_dtype(value) -> str:
+    value = str(value).removeprefix("torch.").lower()
+    aliases = {
+        "fp32": "float32",
+        "bf16": "bfloat16",
+        "fp16": "float16",
+    }
+    value = aliases.get(value, value)
+    if value not in {"float32", "bfloat16", "float16"}:
+        raise ValueError(f"unsupported VLA dtype: {value}")
+    return value
+
+
+def get_pi_config(
+    model_path: str,
+    *,
+    model_type: Optional[str] = None,
+    action_dim: Optional[int] = None,
+    action_horizon: Optional[int] = None,
+    num_denoise_steps: Optional[int] = None,
+    dtype=None,
+    robot_adapter: Optional[dict] = None,
+    norm_config: Optional[dict] = None,
+    action_postprocess_config: Optional[dict] = None,
+) -> dict:
+    """Return the ordinary dict config consumed by the Pi model processes."""
+
+    raw = get_config_json(model_path)
+    checkpoint_type = raw.get("model_type") or raw.get("type")
+    resolved_type = model_type or checkpoint_type
+    if resolved_type not in {"pi0", "pi05"}:
+        raise ValueError(f"unsupported VLA model type: {resolved_type}")
+    if (
+        model_type is not None
+        and checkpoint_type is not None
+        and model_type != checkpoint_type
+    ):
+        raise ValueError(
+            f"requested model_type={model_type} does not match checkpoint model_type={checkpoint_type}"
+        )
+
+    output_shape = raw.get("output_features", {}).get("action", {}).get("shape", [32])
+    image_keys = tuple(
+        key
+        for key, feature in raw.get("input_features", {}).items()
+        if str(feature.get("type", "")).upper() == "VISUAL"
+    )
+    config = {
+        "model_type": resolved_type,
+        "model_dir": str(model_path),
+        "checkpoint_path": os.path.join(model_path, "model.safetensors"),
+        "action_dim": int(output_shape[-1]) if action_dim is None else int(action_dim),
+        "action_horizon": int(raw.get("chunk_size", 50))
+        if action_horizon is None
+        else int(action_horizon),
+        "num_denoise_steps": (
+            int(raw.get("num_inference_steps", 10))
+            if num_denoise_steps is None
+            else int(num_denoise_steps)
+        ),
+        "robot_adapter": robot_adapter,
+        "norm_config": norm_config,
+        "action_postprocess_config": action_postprocess_config,
+        "dtype": _normalize_pi_dtype(
+            raw.get("dtype", "float32") if dtype is None else dtype
+        ),
+        "image_resolution": tuple(raw.get("image_resolution", (224, 224))),
+        "image_keys": image_keys,
+        "tokenizer_max_length": int(
+            raw.get("tokenizer_max_length", 200 if resolved_type == "pi05" else 48)
+        ),
+        "min_period": float(raw.get("min_period", 0.004)),
+        "max_period": float(raw.get("max_period", 4.0)),
+        "max_action_dim": int(raw.get("max_action_dim", 32)),
+        "max_state_dim": int(raw.get("max_state_dim", 32)),
+        "state_in_prefix": resolved_type == "pi05",
+        "action_expert_uses_state": resolved_type == "pi0",
+        # Fixed OpenPI PaliGemma/action-expert architecture.
+        "num_hidden_layers": 18,
+        "vlm_hidden_size": 2048,
+        "expert_hidden_size": 1024,
+        "vlm_intermediate_size": 16384,
+        "expert_intermediate_size": 4096,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 1,
+        "head_dim": 256,
+    }
+    config = with_pi_config_overrides(config)
+    if any(value <= 0 for value in config["image_resolution"]):
+        raise ValueError("image_resolution values must be positive")
+    if config["tokenizer_max_length"] <= 0:
+        raise ValueError("tokenizer_max_length must be positive")
+    if not os.path.isdir(config["model_dir"]):
+        raise ValueError(f"VLA model_dir does not exist: {config['model_dir']}")
+    if not os.path.isfile(config["checkpoint_path"]):
+        raise ValueError(f"VLA checkpoint does not exist: {config['checkpoint_path']}")
+    return config
+
+
+def with_pi_config_overrides(
+    config: dict,
+    *,
+    action_dim: Optional[int] = None,
+    action_horizon: Optional[int] = None,
+    num_denoise_steps: Optional[int] = None,
+) -> dict:
+    result = dict(config)
+    if action_dim is not None:
+        result["action_dim"] = int(action_dim)
+    if action_horizon is not None:
+        result["action_horizon"] = int(action_horizon)
+    if num_denoise_steps is not None:
+        result["num_denoise_steps"] = int(num_denoise_steps)
+    if not 0 < result["action_dim"] <= result["max_action_dim"]:
+        raise ValueError(
+            f"action_dim must be in [1, {result['max_action_dim']}], got {result['action_dim']}"
+        )
+    if result["action_horizon"] <= 0:
+        raise ValueError("action_horizon must be positive")
+    if result["num_denoise_steps"] <= 0:
+        raise ValueError("num_denoise_steps must be positive")
+    return result
+
+
 def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
     """
     Derive `max_req_total_len` from model config.json.
@@ -187,15 +311,12 @@ def auto_set_fused_shared_experts(args) -> None:
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
     if config_json.get("type") in {"pi0", "pi05"}:
-        from lightllm.models.pi0.config import Pi0VLAConfig
-
-        config = Pi0VLAConfig.from_model_dir(model_path)
         pi0_text_config = {
-            "hidden_size": config.vlm_hidden_size,
-            "num_hidden_layers": config.depth,
-            "num_attention_heads": config.num_attention_heads,
-            "num_key_value_heads": config.num_key_value_heads,
-            "head_dim": config.head_dim,
+            "hidden_size": 2048,
+            "num_hidden_layers": 18,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 1,
+            "head_dim": 256,
         }
         for key in key_name:
             if key in pi0_text_config:
@@ -367,11 +488,10 @@ def get_vocab_size(model_path: str):
         return 0
 
     if config_json.get("type") in {"pi0", "pi05"}:
-        from lightllm.models.pi0.config import Pi0VLAConfig
-
-        # LeRobot config.json omits this field. Keep checkpoint parsing errors
-        # visible instead of silently starting with an invalid zero-sized head.
-        return Pi0VLAConfig.from_model_dir(model_path).vocab_size
+        # Pi model.py fixes this value as PI_VOCAB_SIZE.  The generic request
+        # manager asks for it before model construction, so keep this tiny
+        # startup bridge instead of importing the full Pi model here.
+        return 257_152
 
     try:
         # qwen3-omini special
@@ -420,6 +540,8 @@ def has_vision_module(model_path: str) -> bool:
         model_type = model_cfg.get("model_type") or model_cfg.get("type")
         if model_type in {"pi0", "pi05"}:
             return True
+        if model_type == "neo_chat":
+            return True
         if model_type == "qwen":
             # QWenVisionTransformer
             model_cfg["visual"]
@@ -436,7 +558,9 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
-        elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+        elif (
+            model_cfg.get("architectures", [""])[0] == "TarsierForConditionalGeneration"
+        ):
             # TarsierVisionTransformerPretrainedModel
             return True
         elif model_type == "llava":

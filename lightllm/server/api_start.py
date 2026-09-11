@@ -40,6 +40,24 @@ def _launch_subprocesses(args: StartArgs):
         assert (
             not args.disable_cudagraph or args.run_mode == "prefill"
         ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
+        # Keep main's MTP argument validation ahead of optional model-sidecar
+        # discovery, which may need to read model config files.
+        assert args.mtp_step > 0
+
+    # Models declare only their output capability. GenerationServer owns all
+    # process, transport, and backend wiring for that capability.
+    from lightllm.models.registry import get_output_modality
+    from lightllm.server.generationserver.modes import configure_generation
+    from lightllm.utils.config_utils import get_config_json
+
+    output_modality = get_output_modality(get_config_json(args.model_dir))
+    if output_modality is not None:
+        configure_generation(args, output_modality)
+    elif args.generation_backend is not None:
+        raise ValueError("this model does not declare a generation output")
+    args.output_modality = (
+        output_modality if args.generation_backend is not None else None
+    )
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -325,6 +343,8 @@ def _launch_subprocesses(args: StartArgs):
         ports_to_check.extend([args.multinode_httpmanager_port, args.multinode_router_gloo_port])
     if args.node_rank == 0 and args.nccl_port is not None:
         ports_to_check.append(args.nccl_port)
+    if args.generation_nccl_port is not None:
+        ports_to_check.append(args.generation_nccl_port)
     validate_ports(ports_to_check)
 
     set_env_start_args(args)
@@ -403,6 +423,16 @@ def _launch_subprocesses(args: StartArgs):
         ],
     )
     process_manager.register_process_tree(router_process)
+
+    if args.output_modality is not None:
+        from lightllm.server.generationserver.modes import (
+            get_generation_start_process,
+        )
+
+        process_manager.start_submodule_processes(
+            start_funcs=[get_generation_start_process(args.output_modality)],
+            start_args=[(args,)],
+        )
 
     return process_manager
 

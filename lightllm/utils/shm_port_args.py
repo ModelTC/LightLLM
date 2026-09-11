@@ -207,6 +207,16 @@ class ShmPortArgs:
     def rl_rpyc_port(self) -> int:
         return self._get_from_args_or_alloc("rl_rpyc_port")
 
+    # [dynamic] HTTP worker <-> GenerationServer transport
+    @property
+    def generation_port(self) -> int:
+        return self._get_from_args_or_alloc("generation_port")
+
+    # [dynamic] Pi action-expert distributed group
+    @property
+    def generation_nccl_port(self) -> int:
+        return self._get_from_args_or_alloc("generation_nccl_port")
+
     def close(self) -> None:
         if self.shm is not None:
             self.shm.close()

@@ -138,6 +138,38 @@ class ShmReqManager:
     async def async_put_back_req_obj(self, req: Req):
         return self.put_back_req_obj(req)
 
+    def register_kv_consumer(self, req_index_in_mem: int, request_id: int, consumer_mask: int) -> bool:
+        """Atomically add KV-consumer bits for one shm-slot generation.
+
+        Registration must happen before the request is forwarded to the
+        router.  ``False`` means the slot has already been reused.
+        """
+        self._validate_kv_consumer_mask(consumer_mask)
+        assert 0 <= req_index_in_mem < self.max_req_num
+        req = self.reqs[req_index_in_mem]
+        with self.get_req_lock_by_index(req_index_in_mem):
+            if int(req.request_id) != request_id:
+                return False
+            req.kv_consumer_mask = int(req.kv_consumer_mask) | consumer_mask
+        return True
+
+    def release_kv_consumer(self, req_index_in_mem: int, request_id: int, consumer_mask: int) -> bool:
+        """Atomically clear KV-consumer bits for one shm-slot generation."""
+        self._validate_kv_consumer_mask(consumer_mask)
+        assert 0 <= req_index_in_mem < self.max_req_num
+        req = self.reqs[req_index_in_mem]
+        with self.get_req_lock_by_index(req_index_in_mem):
+            if int(req.request_id) != request_id:
+                return False
+            req.kv_consumer_mask = int(req.kv_consumer_mask) & ~consumer_mask
+        return True
+
+    @staticmethod
+    def _validate_kv_consumer_mask(consumer_mask: int):
+        if consumer_mask <= 0 or consumer_mask >= (1 << 64):
+            raise ValueError("consumer_mask must be a non-zero uint64 mask")
+        return
+
     def __del__(self):
         self.reqs = None
 
