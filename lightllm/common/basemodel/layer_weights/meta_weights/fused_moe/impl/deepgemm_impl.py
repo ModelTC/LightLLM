@@ -20,7 +20,12 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
-    supports_swiglu_clamp = False
+    def __init__(self, *args, swiglu_alpha: Optional[float] = None, swiglu_limit: Optional[float] = None, **kwargs):
+        if swiglu_alpha is not None or swiglu_limit is not None:
+            raise NotImplementedError(
+                "FuseMoeDeepGEMM does not support clamped SwiGLU: EP activation kernels need alpha/limit support"
+            )
+        super().__init__(*args, **kwargs)
 
     def _select_experts(
         self,

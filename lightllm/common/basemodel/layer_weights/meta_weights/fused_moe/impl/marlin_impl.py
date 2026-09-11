@@ -11,7 +11,10 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
-    supports_swiglu_clamp = False
+    def __init__(self, *args, swiglu_alpha: Optional[float] = None, swiglu_limit: Optional[float] = None, **kwargs):
+        if swiglu_alpha is not None or swiglu_limit is not None:
+            raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")
+        super().__init__(*args, **kwargs)
 
     def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM

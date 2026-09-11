@@ -6,8 +6,6 @@ from .base_impl import FuseMoeBaseImpl
 
 
 class FuseMoeTriton(FuseMoeBaseImpl):
-    supports_swiglu_clamp = True
-
     def __init__(
         self,
         n_routed_experts: int,
@@ -24,8 +22,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
     ):
         if (swiglu_alpha is None) != (swiglu_limit is None):
             raise ValueError("swiglu_alpha and swiglu_limit must be specified together")
-        if swiglu_limit is not None and not self.supports_swiglu_clamp:
-            raise NotImplementedError(f"{type(self).__name__} does not support clamped SwiGLU")
         self.swiglu_alpha = swiglu_alpha
         self.swiglu_limit = swiglu_limit
         super().__init__(
