@@ -78,6 +78,9 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
             infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
         )
 
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:

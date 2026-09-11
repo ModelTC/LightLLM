@@ -32,9 +32,10 @@ token KV 重建，不引入独立的池化尾状态，也不改 scheduler/radix 
 
 共享算子的扩展参数保持原默认值；GLM 显式启用 sigmoid gate、无 `up + 1` 的 clamp、
 KDA 的 exp2 gate。模型特有的权重、attention、索引和 tokenizer 适配放在本目录。
-MoE 的 `swiglu_alpha=1.0`、`swiglu_limit=10.0` 沿构造链传入 `FusedMoeWeight` 和 Triton
-实现，初始化后不再修改实现对象。`up + 1` 由 GPT-OSS 的专用 experts 调用显式选择；
-EP/Marlin 尚未实现的 clamped SwiGLU 组合会在初始化时拒绝。
+MoE 在推理调用处显式传入 `alpha=1.0`、`limit=10.0`、`clamp_up_add_one=False`，
+沿 `experts → __call__ → _fused_experts` 传给激活算子，不在通用 MoE 对象上保存激活配置。
+GPT-OSS 的专用 experts 调用仍显式选择 `up + 1`；EP/Marlin 尚未实现的 clamped SwiGLU
+组合会在执行时拒绝。
 
 ## 启动与测速
 

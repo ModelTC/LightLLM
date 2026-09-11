@@ -223,7 +223,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
                 quant_method=self.get_quant_method("down_proj"),
             )
 
-    def _init_moe(self, *, swiglu_alpha=None, swiglu_limit=None):
+    def _init_moe(self):
         moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         self.moe_gate = ROWMMWeight(
             in_dim=self.n_embed,
@@ -256,8 +256,6 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             num_fused_shared_experts=self.num_fused_shared_experts,
             layer_num=self.layer_num_,
             network_config=self.network_config_,
-            swiglu_alpha=swiglu_alpha,
-            swiglu_limit=swiglu_limit,
         )
 
     def _init_ffn(self):

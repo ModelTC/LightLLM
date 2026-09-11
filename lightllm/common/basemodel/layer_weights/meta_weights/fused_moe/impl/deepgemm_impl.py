@@ -20,13 +20,6 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
-    def __init__(self, *args, swiglu_alpha: Optional[float] = None, swiglu_limit: Optional[float] = None, **kwargs):
-        if swiglu_alpha is not None or swiglu_limit is not None:
-            raise NotImplementedError(
-                "FuseMoeDeepGEMM does not support clamped SwiGLU: EP activation kernels need alpha/limit support"
-            )
-        super().__init__(*args, **kwargs)
-
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -83,7 +76,14 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
+        if alpha is not None or limit is not None:
+            raise NotImplementedError(
+                "FuseMoeDeepGEMM does not support clamped SwiGLU: EP activation kernels need alpha/limit support"
+            )
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,

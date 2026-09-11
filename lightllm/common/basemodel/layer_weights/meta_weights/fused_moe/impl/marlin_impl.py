@@ -11,11 +11,6 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
-    def __init__(self, *args, swiglu_alpha: Optional[float] = None, swiglu_limit: Optional[float] = None, **kwargs):
-        if swiglu_alpha is not None or swiglu_limit is not None:
-            raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")
-        super().__init__(*args, **kwargs)
-
     def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM
 
@@ -35,7 +30,12 @@ class FuseMoeMarlin(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
+        if alpha is not None or limit is not None:
+            raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")
 
         w1_weight, w1_scale, w1_zero_point = w13.weight, w13.weight_scale, w13.weight_zero_point
         w2_weight, w2_scale, w2_zero_point = w2.weight, w2.weight_scale, w2.weight_zero_point

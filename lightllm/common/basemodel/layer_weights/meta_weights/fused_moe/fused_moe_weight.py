@@ -35,9 +35,6 @@ class FusedMoeWeight(BaseWeightTpl):
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
         per_expert_scale_name: str = "",
-        *,
-        swiglu_alpha: Optional[float] = None,
-        swiglu_limit: Optional[float] = None,
     ) -> None:
         super().__init__(data_type=data_type)
         self.w1_weight_name = gate_proj_name
@@ -70,8 +67,6 @@ class FusedMoeWeight(BaseWeightTpl):
             redundancy_expert_ids_tensor=self.redundancy_expert_ids_tensor,
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
-            swiglu_alpha=swiglu_alpha,
-            swiglu_limit=swiglu_limit,
         )
         self.lock = threading.Lock()
         self._create_weight()
@@ -142,6 +137,9 @@ class FusedMoeWeight(BaseWeightTpl):
         is_prefill: Optional[bool] = None,
         infer_state=None,
         shared_expert_gate: Optional[torch.Tensor] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ) -> torch.Tensor:
         # Captures MoE topk expert ids for routed-experts metadata when enabled.
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
@@ -161,6 +159,9 @@ class FusedMoeWeight(BaseWeightTpl):
             moe_capture_callback=moe_capture_callback,
             per_expert_scale=self.per_expert_scale,
             shared_expert_gate=shared_expert_gate,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
 
     def low_latency_dispatch(

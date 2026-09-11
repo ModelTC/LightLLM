@@ -76,7 +76,7 @@ class Glm5NextMergedKdaProjection(MMWeightTpl):
 
 class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
     def _init_moe(self):
-        super()._init_moe(swiglu_alpha=1.0, swiglu_limit=self.network_config_["swiglu_limit"])
+        super()._init_moe()
         self.moe_gate = ROWMMWeight(
             in_dim=self.n_embed,
             out_dims=[self.n_routed_experts],

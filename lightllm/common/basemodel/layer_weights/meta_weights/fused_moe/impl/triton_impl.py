@@ -1,40 +1,10 @@
 import torch
 from typing import Callable, Optional
 from lightllm.common.quantization.no_quant import WeightPack
-from lightllm.common.quantization.quantize_method import QuantizationMethod
 from .base_impl import FuseMoeBaseImpl
 
 
 class FuseMoeTriton(FuseMoeBaseImpl):
-    def __init__(
-        self,
-        n_routed_experts: int,
-        num_fused_shared_experts: int,
-        routed_scaling_factor: float,
-        quant_method: QuantizationMethod,
-        redundancy_expert_num: int,
-        redundancy_expert_ids_tensor: torch.Tensor,
-        routed_expert_counter_tensor: torch.Tensor,
-        auto_update_redundancy_expert: bool,
-        *,
-        swiglu_alpha: Optional[float] = None,
-        swiglu_limit: Optional[float] = None,
-    ):
-        if (swiglu_alpha is None) != (swiglu_limit is None):
-            raise ValueError("swiglu_alpha and swiglu_limit must be specified together")
-        self.swiglu_alpha = swiglu_alpha
-        self.swiglu_limit = swiglu_limit
-        super().__init__(
-            n_routed_experts=n_routed_experts,
-            num_fused_shared_experts=num_fused_shared_experts,
-            routed_scaling_factor=routed_scaling_factor,
-            quant_method=quant_method,
-            redundancy_expert_num=redundancy_expert_num,
-            redundancy_expert_ids_tensor=redundancy_expert_ids_tensor,
-            routed_expert_counter_tensor=routed_expert_counter_tensor,
-            auto_update_redundancy_expert=auto_update_redundancy_expert,
-        )
-
     def create_workspace(self):
         return None
 
@@ -94,6 +64,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -111,10 +84,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             use_fp8_w8a8=use_fp8_w8a8,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
-            limit=self.swiglu_limit,
-            alpha=self.swiglu_alpha,
-            # GPT-OSS owns its up + 1 variant in its dedicated experts path.
-            clamp_up_add_one=False,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
         return input_tensor
 
@@ -136,7 +108,12 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         moe_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
+        if (alpha is None) != (limit is None):
+            raise ValueError("alpha and limit must be specified together")
         topk_weights, topk_ids, origin_topk_ids = self._select_experts(
             input_tensor=input_tensor,
             router_logits=router_logits,
@@ -162,5 +139,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_ids=topk_ids,
             router_logits=router_logits,
             is_prefill=is_prefill,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
         return output

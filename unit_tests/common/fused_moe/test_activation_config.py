@@ -30,15 +30,18 @@ def runtime(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("activation", ["silu", "clamped_silu", "gelu"])
-def test_constructor_config_reaches_expert_activation(monkeypatch, activation):
+@pytest.mark.parametrize("activation", ["silu", "clamped_silu", "clamped_silu_add_one", "gelu"])
+def test_call_parameters_reach_expert_activation(monkeypatch, activation):
     monkeypatch.setattr(
         "lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul.ffn_use_tanh_approximate_gelu",
         lambda: activation == "gelu",
     )
     dim, count = 128, 4
     config = {"norm_topk_prob": True, "num_experts_per_tok": 2, "scoring_func": "softmax"}
-    kwargs = {"swiglu_alpha": 1.0, "swiglu_limit": 10.0} if activation == "clamped_silu" else {}
+    kwargs = {
+        "clamped_silu": {"alpha": 1.0, "limit": 10.0, "clamp_up_add_one": False},
+        "clamped_silu_add_one": {"alpha": 1.702, "limit": 7.0},
+    }.get(activation, {})
     weight = FusedMoeWeight(
         gate_proj_name="gate",
         up_proj_name="up",
@@ -51,7 +54,6 @@ def test_constructor_config_reaches_expert_activation(monkeypatch, activation):
         data_type=torch.bfloat16,
         quant_method=NoQuantization(),
         network_config=config,
-        **kwargs,
     )
     eye = torch.eye(dim, device="cuda", dtype=torch.bfloat16)
     weights = {}
@@ -71,32 +73,56 @@ def test_constructor_config_reaches_expert_activation(monkeypatch, activation):
             i = int(top.indices[row, choice])
             gate = (x[row] * (1 + i / 4)).float()
             up = (x[row] * (2 + i / 8)).float()
-            if activation == "clamped_silu":
-                gate = gate.clamp(max=10)
-                up = up.clamp(-10, 10)
-            gate = (
-                torch.nn.functional.gelu(gate, approximate="tanh")
-                if activation == "gelu"
-                else torch.nn.functional.silu(gate)
-            )
+            if kwargs:
+                gate = gate.clamp(max=kwargs["limit"])
+                up = up.clamp(-kwargs["limit"], kwargs["limit"])
+                gate = gate * torch.sigmoid(kwargs["alpha"] * gate)
+                if kwargs.get("clamp_up_add_one", True):
+                    up += 1
+            elif activation == "gelu":
+                gate = torch.nn.functional.gelu(gate, approximate="tanh")
+            else:
+                gate = torch.nn.functional.silu(gate)
             expert_out = (gate.bfloat16() * up.bfloat16()).bfloat16()
             expected[row] += (expert_out.float() * probs[row, choice]).bfloat16().float()
-    actual = weight.experts(x.clone(), router, 2, True, False, 0, 0)
+    if kwargs:
+        default_output = weight.experts(x.clone(), router, 2, True, False, 0, 0)
+    actual = weight.experts(x.clone(), router, 2, True, False, 0, 0, **kwargs)
     torch.testing.assert_close(actual, expected.bfloat16(), atol=0.125, rtol=0.01)
+    if kwargs:
+        # A clamped call must not change subsequent calls on the same weight.
+        actual_default = weight.experts(x.clone(), router, 2, True, False, 0, 0)
+        torch.testing.assert_close(actual_default, default_output, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("backend", [FuseMoeDeepGEMM, FuseMoeMarlin])
-def test_unsupported_backend_rejects_clamp_at_construction(backend):
+def test_unsupported_backend_rejects_clamp_at_call(monkeypatch, backend):
+    monkeypatch.setattr(backend, "create_workspace", lambda self: None)
+    monkeypatch.setattr(backend, "_select_experts", lambda *args, **kwargs: (None, None, None))
+    impl = backend(
+        n_routed_experts=4,
+        num_fused_shared_experts=0,
+        routed_scaling_factor=1.0,
+        quant_method=None,
+        redundancy_expert_num=0,
+        redundancy_expert_ids_tensor=None,
+        routed_expert_counter_tensor=None,
+        auto_update_redundancy_expert=False,
+    )
     with pytest.raises(NotImplementedError, match="does not support clamped SwiGLU"):
-        backend(
-            n_routed_experts=4,
-            num_fused_shared_experts=0,
-            routed_scaling_factor=1.0,
-            quant_method=None,
-            redundancy_expert_num=0,
-            redundancy_expert_ids_tensor=None,
-            routed_expert_counter_tensor=None,
-            auto_update_redundancy_expert=False,
-            swiglu_alpha=1.0,
-            swiglu_limit=10.0,
+        impl(
+            input_tensor=None,
+            router_logits=None,
+            w13=None,
+            w2=None,
+            correction_bias=None,
+            scoring_func="softmax",
+            top_k=2,
+            renormalize=True,
+            use_grouped_topk=False,
+            topk_group=0,
+            num_expert_group=0,
+            alpha=1.0,
+            limit=10.0,
+            clamp_up_add_one=False,
         )
