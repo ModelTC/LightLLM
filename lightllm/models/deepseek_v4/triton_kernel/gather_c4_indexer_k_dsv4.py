@@ -42,6 +42,7 @@ def build_c4_indexer_page_table(
     c4_cap: int,
     req_to_token_indexs: torch.Tensor,
     hold_req_id: int,
+    out: torch.Tensor = None,
 ):
     """Build the logical-c4-page -> physical-c4-page table expected by DeepGEMM paged logits.
 
@@ -54,7 +55,12 @@ def build_c4_indexer_page_table(
     assert c4_cap % page_size == 0
     batch = b_req_idx.shape[0]
     page_cap = c4_cap // page_size
-    page_table = torch.empty((batch, page_cap), dtype=torch.int32, device=b_req_idx.device)
+    if out is None:
+        page_table = torch.empty((batch, page_cap), dtype=torch.int32, device=b_req_idx.device)
+    else:
+        assert out.shape == (batch, page_cap)
+        assert out.dtype == torch.int32 and out.device == b_req_idx.device and out.is_contiguous()
+        page_table = out
     _build_c4_indexer_page_table_kernel[(page_cap, batch)](
         b_req_idx,
         c4_len,

@@ -183,6 +183,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 head_dim_v=self.config["head_dim"],
                 dtype=self.data_type,
             )
+        if self.run_mode != "decode":
+            self.dsv4_workspace.init_flashmla_prefill_split_kv_workspace(
+                q_head_num=padded_q_head_num,
+                head_dim_v=self.config["head_dim"],
+            )
         for layer_infer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
             if padded_q_head_num == real_q_head_num:
@@ -197,9 +202,22 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
-        self.dsv4_workspace = DeepseekV4Workspace(self)
+        prefill_aux_stream = None
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()
+        self.dsv4_workspace = DeepseekV4Workspace(self)
+        if self.dsv4_workspace.needs_c4_prefill_aux(self):
+            import deep_gemm
+
+            if "out:" not in (deep_gemm.fp8_paged_mqa_logits.__doc__ or ""):
+                raise RuntimeError(
+                    "C4 prefill overlap workspace requires a DeepGEMM build whose "
+                    "fp8_paged_mqa_logits API accepts out="
+                )
+            assert prefill_aux_stream is not None
+            with torch.cuda.stream(prefill_aux_stream):
+                self.dsv4_workspace.init_c4_prefill_aux(self)
+        if prefill_aux_stream is not None:
             for layer in self.layers_infer:
                 layer.dsv4_prefill_aux_stream = prefill_aux_stream
         dist_group_manager.new_deepep_group(

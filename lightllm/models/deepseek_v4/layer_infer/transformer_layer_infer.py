@@ -18,9 +18,7 @@ from ..infer_struct import DeepseekV4InferStateInfo
 import deep_gemm
 from lightllm.models.deepseek_v4.triton_kernel.topk_transform import topk_transform_512
 from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
-
-
-_C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
+from lightllm.models.deepseek_v4.workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES
 
 
 class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
@@ -432,10 +430,21 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
                 x.record_stream(aux_stream)
                 q_lora.record_stream(aux_stream)
                 self.index_infer.write_indexer_k(
-                    x, infer_state, layer_weight, cos_table, sin_table, use_custom_tensor_manager=False
+                    x,
+                    infer_state,
+                    layer_weight,
+                    cos_table,
+                    sin_table,
+                    use_custom_tensor_manager=False,
+                    c4_aux_workspace=infer_state.dsv4_workspace.c4_prefill_aux,
                 )
                 meta = self.index_infer.build_metadata(
-                    x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=False
+                    x,
+                    q_lora,
+                    infer_state,
+                    layer_weight,
+                    use_custom_tensor_manager=False,
+                    c4_aux_workspace=infer_state.dsv4_workspace.c4_prefill_aux,
                 )
             self.compressor.compress(x, infer_state, layer_weight, cos_table, sin_table)
             main_stream.wait_stream(aux_stream)  # join before prefill_att reads the indices / latent KV
@@ -662,12 +671,17 @@ class CompressorInfer(BaseLayerInfer):
         cos_table: torch.Tensor,
         sin_table: torch.Tensor,
         use_custom_tensor_manager: bool = True,
+        kv_score_out: torch.Tensor = None,
+        out_buffer: torch.Tensor = None,
     ):
         if self.compress_ratio == 0:
             return None
         if self.is_in_indexer:
             kv_score = layer_weight.idx_cmp_wkv_gate_.mm(
-                x, use_custom_tensor_mananger=use_custom_tensor_manager, out_dtype=torch.float32
+                x,
+                out=kv_score_out,
+                use_custom_tensor_mananger=use_custom_tensor_manager,
+                out_dtype=torch.float32,
             )
             norm_weight = layer_weight.idx_cmp_norm_.weight
             ape = layer_weight.idx_cmp_ape_.weight
@@ -685,8 +699,7 @@ class CompressorInfer(BaseLayerInfer):
             ape=ape,
             compress_ratio=self.compress_ratio,
         )
-        out_buffer = None
-        if self.is_in_indexer and use_custom_tensor_manager:
+        if self.is_in_indexer and use_custom_tensor_manager and out_buffer is None:
             out_buffer = self.alloc_tensor(
                 (infer_state.mem_index.numel(), self.index_head_dim),
                 torch.bfloat16,
@@ -747,10 +760,14 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         cos_table,
         sin_table,
         use_custom_tensor_manager=True,
+        c4_aux_workspace=None,
     ):
         if self.compress_ratio != 4:
             return
         # Only group-end rows in this dense bf16 scratch are valid indexer keys.
+        kv_score_out = indexer_k_out = hadamard_out = None
+        if c4_aux_workspace is not None:
+            kv_score_out, indexer_k_out, hadamard_out = c4_aux_workspace.indexer_k_buffers(x.shape[0])
         scratch = self.indexer_compressor.compress(
             x,
             infer_state,
@@ -758,12 +775,13 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             cos_table,
             sin_table,
             use_custom_tensor_manager=use_custom_tensor_manager,
+            kv_score_out=kv_score_out,
+            out_buffer=indexer_k_out,
         )
         # Rotate K (post norm+rope) by the SAME 1/sqrt(d) Hadamard the q kernel applies, so
         # (Hq)·(Hk)=q·k (H orthogonal) and the fp8 quant of K stays accurate.
         from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
 
-        hadamard_out = None
         if use_custom_tensor_manager:
             hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)
         scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5, out=hadamard_out)
@@ -776,7 +794,13 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         )
 
     def build_metadata(
-        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
+        self,
+        x,
+        q_lora,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight,
+        use_custom_tensor_manager=True,
+        c4_aux_workspace=None,
     ):
         swa_indices = infer_state.dsv4_swa_indices.unsqueeze(1)
         swa_lengths = infer_state.dsv4_swa_lengths
@@ -784,9 +808,16 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         extra_indices = extra_lengths = None
         if self.compress_ratio == 4:
             idx_q_fp8, weights = self._indexer_q_weight(
-                x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=use_custom_tensor_manager
+                x,
+                q_lora,
+                infer_state,
+                layer_weight,
+                use_custom_tensor_manager=use_custom_tensor_manager,
+                c4_aux_workspace=c4_aux_workspace,
             )
-            extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q_fp8, weights, positions)
+            extra_indices, extra_lengths = self._c4_indices(
+                infer_state, idx_q_fp8, weights, positions, c4_aux_workspace=c4_aux_workspace
+            )
         elif self.compress_ratio == 128:
             extra_indices = infer_state.dsv4_c128_indices.unsqueeze(1)
             extra_lengths = infer_state.dsv4_c128_lengths
@@ -798,7 +829,13 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         }
 
     def _indexer_q_weight(
-        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
+        self,
+        x,
+        q_lora,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight,
+        use_custom_tensor_manager=True,
+        c4_aux_workspace=None,
     ):
         # Fused: wq_b mm -> rope(last rope dims) -> 1/sqrt(d) Hadamard -> per-token fp8 quant, with the
         # per-token q scale + indexer_weight_scale folded into weights, all in ONE kernel (was 4 kernels:
@@ -813,14 +850,21 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             raise RuntimeError(
                 f"DeepSeek-V4 indexer expects full-token hidden states, got x={x.shape[0]} q_lora={token_num}"
             )
-        idx_q = layer_weight.idx_wq_b_.mm(q_lora, use_custom_tensor_mananger=use_custom_tensor_manager).view(
-            token_num, self.index_n_heads, self.index_head_dim
-        )
-        raw_w = layer_weight.idx_weights_proj_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager).view(
+        idx_q_out = raw_w_out = None
+        if c4_aux_workspace is not None:
+            idx_q_out, raw_w_out = c4_aux_workspace.indexer_q_inputs(token_num)
+        idx_q = layer_weight.idx_wq_b_.mm(
+            q_lora, out=idx_q_out, use_custom_tensor_mananger=use_custom_tensor_manager
+        ).view(token_num, self.index_n_heads, self.index_head_dim)
+        raw_w = layer_weight.idx_weights_proj_.mm(
+            x, out=raw_w_out, use_custom_tensor_mananger=use_custom_tensor_manager
+        ).view(
             token_num, self.index_n_heads
         )  # [T, H] raw
         idx_q_fp8_out = weights_out = None
-        if use_custom_tensor_manager:
+        if c4_aux_workspace is not None:
+            idx_q_fp8_out, weights_out = c4_aux_workspace.indexer_q_outputs(token_num)
+        elif use_custom_tensor_manager:
             idx_q_fp8_out = self.alloc_tensor(idx_q.shape, torch.float8_e4m3fn, device=idx_q.device)
             weights_out = self.alloc_tensor((*idx_q.shape[:-1], 1), torch.float32, device=idx_q.device)
         idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
@@ -834,7 +878,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1)
 
-    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions):
+    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions, c4_aux_workspace=None):
         """c4 scorer via the page-safe deep_gemm.fp8_paged_mqa_logits over the paged c4 indexer pool,
         then masked topk-512 -> c4 slots. Fixed shapes (c4_cap pinned per graph bucket) keep the decode
         cuda graph capturable."""
@@ -859,7 +903,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             )
             return slots.unsqueeze(1), lengths
 
-        device = positions.device
         page_size = mem_manager.c4_indexer_pool.page_size
 
         cached = getattr(infer_state, "_c4_paged_meta", None)
@@ -868,7 +911,15 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
 
             b_req_idx = infer_state.b_req_idx
             batch = b_req_idx.shape[0]
-            c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)  # entries/req
+            token_num = positions.numel()
+            if c4_aux_workspace is None:
+                c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)
+                page_table_out = row_page_table = None
+            else:
+                page_cap = c4_cap // page_size
+                page_table_out, row_page_table = c4_aux_workspace.page_tables(batch, token_num, page_cap)
+                c4_len, _, _, _ = c4_aux_workspace.metadata(batch, token_num)
+                c4_len.copy_(torch.div(infer_state.b_seq_len, 4, rounding_mode="floor"))
             page_table = build_c4_indexer_page_table(
                 mem_manager,
                 b_req_idx,
@@ -876,24 +927,35 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 c4_cap,
                 infer_state.req_manager.req_to_token_indexs,
                 infer_state.req_manager.HOLD_REQUEST_ID,
+                out=page_table_out,
             )
 
             if infer_state.is_prefill:
-                token_batch_pos = torch.repeat_interleave(
-                    torch.arange(batch, device=device, dtype=torch.int32),
-                    infer_state.b_q_seq_len,
-                    output_size=positions.numel(),
-                )
-                row_page_table = page_table[token_batch_pos]
+                token_batch_pos = infer_state._dsv4_token_to_batch_idx
+                if row_page_table is None:
+                    row_page_table = page_table[token_batch_pos]
+                else:
+                    torch.index_select(page_table, 0, token_batch_pos, out=row_page_table)
             else:
                 row_page_table = page_table
 
-            valid_len = ((positions + 1) // 4).to(torch.int32)
-            ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1)
+            if c4_aux_workspace is None:
+                valid_len = ((positions + 1) // 4).to(torch.int32)
+                ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1)
+                topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
+            else:
+                _, valid_len, ctx_lens, topk_lengths = c4_aux_workspace.metadata(batch, token_num)
+                valid_len.copy_((positions + 1) // 4)
+                torch.clamp(valid_len, min=1, out=ctx_lens[:, 0])
+                torch.clamp(valid_len, min=1, max=index_topk, out=topk_lengths)
             rows_per_chunk = None
             chunk_metadata = None
             if infer_state.is_prefill:
-                rows_per_chunk = max(1, _C4_PREFILL_LOGITS_BUDGET_BYTES // (c4_cap * 4))
+                if c4_aux_workspace is None:
+                    aligned_c4_cap = ((c4_cap + C4_LOGITS_ALIGNMENT - 1) // C4_LOGITS_ALIGNMENT) * C4_LOGITS_ALIGNMENT
+                    rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_c4_cap * 4))
+                else:
+                    rows_per_chunk = c4_aux_workspace.rows_per_logits_chunk(c4_cap)
                 if positions.numel() > rows_per_chunk:
                     chunk_metadata = tuple(
                         deep_gemm.get_paged_mqa_logits_metadata(
@@ -913,7 +975,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 if chunk_metadata is None
                 else None
             )
-            topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
             cached = (
                 row_page_table,
                 valid_len,
@@ -949,6 +1010,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                     valid_len[start:end],
                     top_slots[start:end],
                     page_size,
+                    logits_out=(c4_aux_workspace.logits(end - start, c4_cap) if c4_aux_workspace is not None else None),
                 )
             return top_slots.unsqueeze(1), topk_lengths
 
@@ -963,6 +1025,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             valid_len,
             top_slots,
             page_size,
+            logits_out=(c4_aux_workspace.logits(idx_q_fp8.shape[0], c4_cap) if c4_aux_workspace is not None else None),
         )
         return top_slots.unsqueeze(1), topk_lengths
 
@@ -978,8 +1041,9 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         valid_len,
         top_slots,
         page_size,
+        logits_out=None,
     ):
-        logits = deep_gemm.fp8_paged_mqa_logits(
+        args = (
             idx_q_fp8.unsqueeze(1),
             indexer_k_cache,
             weights,
@@ -988,6 +1052,11 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             metadata,
             c4_cap,
             False,
+        )
+        logits = (
+            deep_gemm.fp8_paged_mqa_logits(*args)
+            if logits_out is None
+            else deep_gemm.fp8_paged_mqa_logits(*args, out=logits_out)
         )
         topk_transform_512(
             logits,

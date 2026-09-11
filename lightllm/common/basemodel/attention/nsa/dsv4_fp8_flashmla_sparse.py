@@ -28,6 +28,34 @@ def _view_cache(buffer: torch.Tensor, page_size: int) -> torch.Tensor:
     return buffer[:, :byte_num].view(buffer.shape[0], page_size, 1, DSV4_MLA_BYTES_PER_TOKEN)
 
 
+def _flashmla_sparse_decode_with_workspace(kwargs: dict, sched_meta, o_accum: torch.Tensor, lse_accum: torch.Tensor):
+    try:
+        op = torch.ops._flashmla_C.sparse_decode_fwd_with_workspace
+    except AttributeError as exc:
+        raise RuntimeError("DeepSeek-V4 prefill requires the workspace-enabled vllm._flashmla_C extension") from exc
+
+    out, lse, new_tile_scheduler_metadata, new_num_splits = op(
+        kwargs["q"],
+        kwargs["k_cache"],
+        kwargs["indices"],
+        kwargs["topk_length"],
+        kwargs["attn_sink"],
+        sched_meta.tile_scheduler_metadata,
+        sched_meta.num_splits,
+        kwargs["extra_k_cache"],
+        kwargs["extra_indices_in_kvcache"],
+        kwargs["extra_topk_length"],
+        kwargs["head_dim_v"],
+        kwargs["softmax_scale"],
+        kwargs["out"],
+        o_accum,
+        lse_accum,
+    )
+    sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata
+    sched_meta.num_splits = new_num_splits
+    return out, lse
+
+
 class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
@@ -43,6 +71,8 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         nsa_dict: dict,
         sched_meta,
         flashmla_out: torch.Tensor = None,
+        flashmla_o_accum: torch.Tensor = None,
+        flashmla_lse_accum: torch.Tensor = None,
     ) -> torch.Tensor:
         from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
             DSV4_C128_PAGE_SIZE,
@@ -82,7 +112,15 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         )
         if flashmla_out is not None:
             kwargs["out"] = flashmla_out
-        full_out, _ = flashmla.flash_mla_with_kvcache(**kwargs)
+        if flashmla_o_accum is None:
+            full_out, _ = flashmla.flash_mla_with_kvcache(**kwargs)
+        else:
+            full_out, _ = _flashmla_sparse_decode_with_workspace(
+                kwargs,
+                sched_meta,
+                flashmla_o_accum,
+                flashmla_lse_accum,
+            )
         return full_out[:, 0, : self.real_q_head_num, :]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":
@@ -136,6 +174,8 @@ class _PrefillAttState(BasePrefillAttState):
             nsa_dict,
             self._get_sched_meta(nsa_dict["compress_ratio"]),
             flashmla_out=full_out,
+            flashmla_o_accum=self.infer_state.dsv4_workspace.flashmla_prefill_o_accum,
+            flashmla_lse_accum=self.infer_state.dsv4_workspace.flashmla_prefill_lse_accum,
         )
         if needs_padding:
             out.copy_(att_out)
