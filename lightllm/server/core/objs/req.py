@@ -152,6 +152,8 @@ class Req(ctypes.Structure):
         ("token_hash_page_len_list", TokenPageLenList),
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
+        # 历史碎页的实际前缀终点；0 表示沿用原始页边界。与 offload 的 hash/长度列表分开保存。
+        ("cpu_cache_match_tail_len", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -188,6 +190,7 @@ class Req(ctypes.Structure):
         self.candetoken_out_len = 0
         self.prompt_cache_len = 0
         self.cpu_prompt_cache_len = 0
+        self.cpu_cache_match_tail_len = 0
         self.disk_prompt_cache_len = 0
         self.finish_token_index = -1
         self.can_released_mark = False
@@ -528,5 +531,4 @@ class ChunkedPrefillReq(Req):
         return need_tokens
 
     def get_first_router_need_tokens(self):
-
         return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)

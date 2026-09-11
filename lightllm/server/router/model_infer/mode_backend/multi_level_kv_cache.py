@@ -75,8 +75,12 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
-            page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
+            # 只调整加载视图，不能把后续 offload 的新尾页边界替换成历史边界。
+            page_len_list = page_len_list[: len(page_list)]
+            if page_list and req.shm_req.cpu_cache_match_tail_len:
+                page_len_list[-1] = req.shm_req.cpu_cache_match_tail_len
+            page_len_start_list = [0] + page_len_list
 
             if page_list:
                 match_tokens = page_len_list[len(page_list) - 1]
@@ -226,7 +230,6 @@ class MultiLevelKvCacheModule(object):
             assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 

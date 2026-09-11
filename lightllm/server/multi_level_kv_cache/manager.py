@@ -19,6 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.config_utils import is_hybrid_att_model
 
 logger = init_logger(__name__)
 
@@ -29,6 +30,7 @@ class MultiLevelKVCacheManager:
         args: StartArgs,
     ):
         self.args: StartArgs = args
+        self.is_hybrid_att_model = is_hybrid_att_model(args.model_dir)
         ports = get_shm_port_args()
         context = zmq.Context(2)
         self.zmq_recv_socket = context.socket(zmq.PULL)
@@ -137,6 +139,28 @@ class MultiLevelKVCacheManager:
         self.cpu_cache_client.lock.release()
         return all_pages, len(new_page_indexes)
 
+    def _match_hybrid_att_tail(self, req: Req, pages: List[int]):
+        """在首个缺失页内回退到最长的历史碎页，命中后不再向后拼接页面。"""
+        if not self.is_hybrid_att_model:
+            return
+        page_lens = req.token_hash_page_len_list.get_all()
+        if len(pages) == len(page_lens):
+            return
+        page_start = len(pages) * self.args.cpu_cache_token_page_size
+        page_end = page_lens[len(pages)]
+        hash_size = self.args.linear_att_hash_page_size
+        hashes = req.hybrid_token_hash_list.get_all()
+        self.cpu_cache_client.lock.acquire_sleep1ms()
+        try:
+            for end in range(page_end - hash_size, page_start, -hash_size):
+                page_index, _ = self.cpu_cache_client.query_one_page(hashes[end // hash_size - 1])
+                if page_index is not None:
+                    pages.append(page_index)
+                    req.cpu_cache_match_tail_len = end
+                    return
+        finally:
+            self.cpu_cache_client.lock.release()
+
     def _handle_group_req_multi_cache_match(self, group_req_indexes: GroupReqIndexes, start_time: float):
         """
         match cpu cache and disk cache pages
@@ -202,6 +226,9 @@ class MultiLevelKVCacheManager:
                     # 日志无法记录， 无法排查问题。
                     logger.exception(f"calculate disk prompt cache len has exception {str(e)}")
                     raise e
+
+            # 优先保留完整 CPU/disk 页的命中机会，再查首个缺失页内的历史碎页。
+            self._match_hybrid_att_tail(req, finded_page_indexes)
 
             while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
                 time.sleep(0.01)
