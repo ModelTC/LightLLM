@@ -429,7 +429,10 @@ def _launch_subprocesses(args: StartArgs):
     instance_disk_cache_dir = None
     if args.enable_cpu_cache and args.enable_disk_cache:
         cache_base_dir = args.disk_cache_dir or tempfile.gettempdir()
-        instance_disk_cache_dir = os.path.join(cache_base_dir, f"lightllm_disk_cache_{get_unique_server_name()}")
+        disk_cache_name = os.getenv("DISK_CACHE_NAME") or f"lightllm_disk_cache_{get_unique_server_name()}"
+        if disk_cache_name in (".", "..") or os.path.basename(disk_cache_name) != disk_cache_name:
+            raise ValueError("DISK_CACHE_NAME must be a single directory name")
+        instance_disk_cache_dir = os.path.join(cache_base_dir, disk_cache_name)
     process_manager.register_disk_cache_dir(instance_disk_cache_dir)
 
     if args.enable_cpu_cache:
