@@ -21,7 +21,6 @@ from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.index import prepare_chunk_indices
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -59,13 +58,10 @@ class KDALinearAttBackend(BaseAttBackend):
 class KDAPrefillAttState(BasePrefillAttState):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
-    chunk_indices: torch.Tensor = None
 
     def init_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx
-        # Build variable-length chunk metadata once for all KDA layers.
-        self.chunk_indices = prepare_chunk_indices(self.infer_state.b1_cu_q_seq_len, 64)
 
     def prefill_att(
         self,
@@ -113,7 +109,6 @@ class KDAPrefillAttState(BasePrefillAttState):
             output_final_state=True,
             use_qk_l2norm_in_kernel=True,
             cu_seqlens=self.infer_state.b1_cu_q_seq_len,
-            chunk_indices=self.chunk_indices,
             safe_gate=True,
             lower_bound=backend.lower_bound,
         )

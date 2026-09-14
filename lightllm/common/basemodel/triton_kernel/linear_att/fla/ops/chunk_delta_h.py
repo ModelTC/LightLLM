@@ -268,7 +268,6 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     run_config=None,
-    chunk_indices: torch.Tensor | None = None,
     use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
@@ -277,8 +276,7 @@ def chunk_gated_delta_rule_fwd_h(
     H = u.shape[-2]
     BT = chunk_size
 
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None

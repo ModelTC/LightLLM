@@ -1,4 +1,5 @@
 import dataclasses
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,10 @@ import triton
 
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
+    chunk_kda_with_fused_gate,
+    fused_kda_gate_chunk_cumsum,
+)
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools, gather_pools, expand_topk
 from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
@@ -85,6 +89,52 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
         torch.testing.assert_close(out[0, 0].float(), expected[0, i], atol=2e-3, rtol=1e-2)
     torch.testing.assert_close(states[2], state, atol=2e-5, rtol=2e-4)
     assert torch.equal(states[[0, 1, 3]], unchanged)
+
+
+@pytest.mark.parametrize("seq_lens", [(65,), (3, 65, 129)])
+@pytest.mark.parametrize("safe_gate", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+def test_kda_gate_cumsum_packed_shape(seq_lens, safe_gate, strided):
+    heads, dim, chunk_size = 2, 128, 64
+    if strided:
+        # All three input strides differ from contiguous [T, H, D]; empty_like
+        # allocates a contiguous output for this sliced, non-dense input view.
+        storage = torch.randn(sum(seq_lens) * 2, heads * 2, dim * 2, device="cuda", dtype=torch.bfloat16)
+        raw_g = storage[::2, ::2, ::2]
+    else:
+        raw_g = torch.randn(sum(seq_lens), heads, dim, device="cuda", dtype=torch.bfloat16)
+    a_log = torch.randn(heads, device="cuda")
+    bias = torch.randn(heads, dim, device="cuda") if len(seq_lens) > 1 else None
+    cu_seqlens = torch.tensor([0, *seq_lens], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    lower_bound = -3.0
+
+    actual = fused_kda_gate_chunk_cumsum(
+        raw_g,
+        A_log=a_log,
+        g_bias=bias.flatten() if bias is not None else None,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
+    )
+
+    gate_input = raw_g.float() + (bias if bias is not None else 0)
+    amplitude = a_log.exp()[None, :, None]
+    if safe_gate:
+        log_gate = lower_bound * torch.sigmoid(amplitude * gate_input)
+    else:
+        log_gate = -amplitude * torch.nn.functional.softplus(gate_input)
+    expected = torch.empty_like(log_gate)
+    seq_start = 0
+    for seq_len in seq_lens:
+        for offset in range(0, seq_len, chunk_size):
+            start = seq_start + offset
+            end = seq_start + min(offset + chunk_size, seq_len)
+            expected[start:end] = log_gate[start:end].cumsum(0) / math.log(2)
+        seq_start += seq_len
+
+    assert actual.shape == raw_g.shape
+    torch.testing.assert_close(actual, expected, atol=2e-5, rtol=1e-5)
 
 
 def test_kpool_chunk_boundaries_and_fragmented_token_kv():

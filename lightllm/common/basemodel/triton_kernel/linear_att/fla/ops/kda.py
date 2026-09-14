@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import autotune
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .cumsum import chunk_local_cumsum
 from .index import prepare_chunk_indices
@@ -685,17 +687,8 @@ def chunk_gla_fwd_o_gk(
     return o
 
 
-@triton.heuristics(
-    {
-        "HAS_BIAS": lambda args: args["g_bias"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
-@triton.autotune(
-    configs=[triton.Config({"BD": BD}, num_warps=num_warps) for BD in [32, 64] for num_warps in [2, 4, 8]],
-    key=["H", "D", "BT", "IS_VARLEN"],
-)
-@triton.jit(do_not_specialize=["T"])
+@triton.heuristics({"HAS_BIAS": lambda args: args["g_bias"] is not None})
+@triton.jit
 def kda_gate_cumsum_fwd_kernel(
     g,
     A,
@@ -703,63 +696,67 @@ def kda_gate_cumsum_fwd_kernel(
     g_bias,
     cu_seqlens,
     chunk_indices,
+    # Element strides for input/output [T, H, D]: token, head, channel.
+    stride_g_t: tl.constexpr,
+    stride_g_h: tl.constexpr,
+    stride_g_d: tl.constexpr,
+    stride_y_t: tl.constexpr,
+    stride_y_h: tl.constexpr,
+    stride_y_d: tl.constexpr,
     cumsum_scale,
     beta,
     threshold,
     SAFE_GATE: tl.constexpr,
     LOWER_BOUND: tl.constexpr,
-    T,
     H: tl.constexpr,
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_b, i_h = i_bh // H, i_bh % H
-    if IS_VARLEN:
-        i_n, i_t = (
-            tl.load(chunk_indices + i_t * 2).to(tl.int32),
-            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
-        )
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
-        )
-        T = eos - bos
-    else:
-        bos = i_b * T
+    # One program handles one [BT, BD] tile for one request/head.
+    dim_block_id, global_chunk_id, head_id = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    # chunk_indices[global_chunk_id] = (seq_id, chunk_id_in_seq).
+    seq_id = tl.load(chunk_indices + global_chunk_id * 2).to(tl.int32)
+    chunk_id_in_seq = tl.load(chunk_indices + global_chunk_id * 2 + 1).to(tl.int32)
+    seq_start = tl.load(cu_seqlens + seq_id).to(tl.int32)
+    seq_end = tl.load(cu_seqlens + seq_id + 1).to(tl.int32)
+    seq_len = seq_end - seq_start
+    chunk_start = chunk_id_in_seq * BT
+    dim_start = dim_block_id * BD
 
+    # Fix the request/head, then view [T, H, D] as a [seq_len, D] matrix.
+    # Moving one token/channel advances by stride_*_t/stride_*_d elements.
+    g_seq_head = g + seq_start * stride_g_t + head_id * stride_g_h
+    y_seq_head = y + seq_start * stride_y_t + head_id * stride_y_h
     p_g = tl.make_block_ptr(
-        g + (bos * H + i_h) * D,
-        (T, D),
-        (H * D, 1),
-        (i_t * BT, i_d * BD),
-        (BT, BD),
-        (1, 0),
+        base=g_seq_head,
+        shape=(seq_len, D),
+        strides=(stride_g_t, stride_g_d),
+        offsets=(chunk_start, dim_start),
+        block_shape=(BT, BD),
+        order=(1, 0),
     )
     p_y = tl.make_block_ptr(
-        y + (bos * H + i_h) * D,
-        (T, D),
-        (H * D, 1),
-        (i_t * BT, i_d * BD),
-        (BT, BD),
-        (1, 0),
+        base=y_seq_head,
+        shape=(seq_len, D),
+        strides=(stride_y_t, stride_y_d),
+        offsets=(chunk_start, dim_start),
+        block_shape=(BT, BD),
+        order=(1, 0),
     )
 
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    b_g = tl.load(p_g, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
     if HAS_BIAS:
-        o_d = i_d * BD + tl.arange(0, BD)
-        b_bias = tl.load(g_bias + i_h * D + o_d, mask=o_d < D, other=0.0).to(tl.float32)
+        dim_indices = dim_start + tl.arange(0, BD)
+        b_bias = tl.load(g_bias + head_id * D + dim_indices, mask=dim_indices < D, other=0.0).to(tl.float32)
         b_g = b_g + b_bias[None, :]
 
-    b_a = tl.load(A + i_h).to(tl.float32)
+    b_a = tl.load(A + head_id).to(tl.float32)
     b_a = tl.exp(b_a) if SAFE_GATE else -tl.exp(b_a)
     if SAFE_GATE:
-        # y = lower_bound * sigmoid(exp(A) * (g + g_bias)); bounded to
-        # (lower_bound, 0). Mirrors the SGlang safe_gate branch used by GLM5-Next
-        # checkpoints whose linear_attn_config["safe_gate"] is True.
+        # log_gate = lower_bound * sigmoid(exp(A_log) * (raw_g + bias)).
+        # For lower_bound < 0, log_gate is in [lower_bound, 0]; decay = exp(log_gate).
         b_gate = LOWER_BOUND / (1.0 + tl.exp(-(b_a * b_g)))
     else:
         b_g_scaled = b_g * beta
@@ -780,34 +777,68 @@ def kda_gate_cumsum_fwd_kernel(
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _get_kda_gate_cumsum_configs():
+    return [{"BD": BD, "num_warps": num_warps} for BD in [32, 64] for num_warps in [2, 4, 8]]
+
+
+def _get_kda_gate_cumsum_static_key(raw_g, g_bias, chunk_size, output_dtype, safe_gate):
+    return {
+        "H": raw_g.shape[1],
+        "D": raw_g.shape[2],
+        "BT": chunk_size,
+        "SAFE_GATE": safe_gate,
+        "HAS_BIAS": g_bias is not None,
+        "dtype": str(raw_g.dtype),
+        "out_dtype": str(output_dtype or raw_g.dtype),
+    }
+
+
+@autotune(
+    kernel_name="fused_kda_gate_chunk_cumsum:v1",
+    configs_gen_func=_get_kda_gate_cumsum_configs,
+    static_key_func=_get_kda_gate_cumsum_static_key,
+    run_key_func=lambda raw_g: raw_g.shape[0],  # Total packed token count T.
+)
 def fused_kda_gate_chunk_cumsum(
     raw_g: torch.Tensor,
     A_log: torch.Tensor,
+    cu_seqlens: torch.Tensor,
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
-    cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
     output_dtype: torch.dtype | None = torch.float,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
+    run_config: dict | None = None,
 ) -> torch.Tensor:
-    if cu_seqlens is not None:
-        assert raw_g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
-    B, T, H, D = raw_g.shape
-    if chunk_indices is None and cu_seqlens is not None:
+    """Activate packed decay gates and return chunk-local log2 prefix sums in [T, H, D].
+
+    raw_g: [T, H, D], packed tokens, local heads, and key channels.
+        Input/output addressing uses each tensor's strides, measured in elements.
+    A_log: [H]; g_bias: [H * D] or [H, D], or None to skip the bias.
+    cu_seqlens: [N + 1], required token boundaries for N packed requests.
+    run_config: optional LightLLM autotune config with BD and num_warps.
+    """
+    assert raw_g.ndim == 3, "raw_g must have packed shape [T, H, D]"
+    assert cu_seqlens is not None, "cu_seqlens is required for packed KDA prefill"
+    H, D = raw_g.shape[1:]
+    if chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
-    NT = cdiv(T, chunk_size) if cu_seqlens is None else len(chunk_indices)
+    NT = len(chunk_indices)
 
     A_log = A_log.reshape(-1)
     if g_bias is not None:
         g_bias = g_bias.reshape(-1)
     y = torch.empty_like(raw_g, dtype=output_dtype or raw_g.dtype)
 
-    def grid(meta):
-        return (cdiv(meta["D"], meta["BD"]), NT, B * H)
+    if run_config is None:
+        run_config = {"BD": 32, "num_warps": 4}
+    BD = run_config.get("BD", 32)
+    num_warps = run_config.get("num_warps", 4)
 
+    grid = (cdiv(D, BD), NT, H)
     kda_gate_cumsum_fwd_kernel[grid](
         g=raw_g,
         A=A_log,
@@ -815,6 +846,12 @@ def fused_kda_gate_chunk_cumsum(
         g_bias=g_bias,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        stride_g_t=raw_g.stride(0),
+        stride_g_h=raw_g.stride(1),
+        stride_g_d=raw_g.stride(2),
+        stride_y_t=y.stride(0),
+        stride_y_h=y.stride(1),
+        stride_y_d=y.stride(2),
         # RCP_LN2 folds in the natural-log -> log2 conversion so downstream
         # exp2-based kernels reproduce exp(g). Keep this in sync with the
         # `use_exp2=True` path in `_chunk_kda_fwd_with_cumulative_g`.
@@ -823,10 +860,11 @@ def fused_kda_gate_chunk_cumsum(
         threshold=threshold,
         SAFE_GATE=safe_gate,
         LOWER_BOUND=lower_bound,
-        T=T,
         H=H,
         D=D,
         BT=chunk_size,
+        BD=BD,
+        num_warps=num_warps,
     )
     return y
 
@@ -864,7 +902,6 @@ def _chunk_kda_fwd_with_cumulative_g(
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
         output_dtype=k.dtype,
     )
     w, u, _, kg = recompute_w_u_fwd(
@@ -885,7 +922,6 @@ def _chunk_kda_fwd_with_cumulative_g(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
         chunk_size=chunk_size,
         use_exp2=True,
     )
@@ -954,16 +990,19 @@ def chunk_kda_with_fused_gate_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens: torch.Tensor,
     chunk_indices: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
 ):
+    assert raw_g.ndim == 4 and raw_g.shape[0] == 1, "KDA prefill expects packed gates shaped [1, T, H, D]"
     chunk_size = FLA_CHUNK_SIZE
-    if chunk_indices is None and cu_seqlens is not None:
+    if chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    # The gate kernel uses [T, H, D]; downstream FLA ops use [1, T, H, D].
+    # Removing/restoring the leading dimension only creates tensor views.
     g = fused_kda_gate_chunk_cumsum(
-        raw_g,
+        raw_g.squeeze(0),
         A_log=A_log,
         g_bias=g_bias,
         cu_seqlens=cu_seqlens,
@@ -971,7 +1010,7 @@ def chunk_kda_with_fused_gate_fwd(
         chunk_size=chunk_size,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
-    )
+    ).unsqueeze(0)
     return _chunk_kda_fwd_with_cumulative_g(
         q=q,
         k=k,
@@ -1029,17 +1068,55 @@ def chunk_kda_with_fused_gate(
     beta: torch.Tensor,
     A_log: torch.Tensor,
     g_bias: torch.Tensor | None,
+    cu_seqlens: torch.Tensor,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
     **kwargs,
 ):
-    """Run chunk KDA from raw gate projection using fused gate+cumsum."""
+    """Run 64-token chunk KDA with fused decay-gate activation and chunk-local prefix sums.
+
+    Shapes use token count T, local heads H, and key/value dimensions K/V.
+    The leading dimension is always 1; required cu_seqlens splits the packed tokens
+    into N=len(cu_seqlens)-1 requests.
+
+    Args:
+        q, k: [1, T, H, K], query/key projections, optionally L2-normalized by this function.
+        v: [1, T, H, V], value projections.
+        raw_g: [1, T, H, K], raw per-token, per-key-channel decay-gate projection.
+        beta: [1, T, H], per-token/head update strength; sigmoid is applied by the caller.
+        A_log: [H], learned per-head log gate scale, shared across tokens and key channels.
+        g_bias: [H * K] or [H, K], learned gate bias per head/key channel; None skips the bias.
+        initial_state: [N, H, K, V], previous recurrent state; None starts from zeros.
+        cu_seqlens: [N + 1], required cumulative sequence lengths for packed inputs.
+        chunk_indices: [num_chunks, 2], optional (request ID, local 64-token chunk ID) pairs.
+            None prepares the indices from cu_seqlens; provided indices are reused.
+
+    Per-token formulas (one sequence/head, column vectors, state S: [K, V]):
+        a = exp(A_log), bias = 0 if g_bias is None else g_bias
+        ell_t = lower_bound * sigmoid(a * (raw_g_t + bias))  # safe_gate=True
+        ell_t = -a * softplus(raw_g_t + bias)               # safe_gate=False
+        alpha_t = exp(ell_t)
+        S_decay = diag(alpha_t) @ S_prev
+        delta_t = beta_t * (v_t - S_decay.T @ k_t)
+        S_t = S_decay + outer(k_t, delta_t)
+        o_t = scale * (S_t.T @ q_t)
+
+        When use_qk_l2norm_in_kernel=True, q_t/k_t above are normalized as
+        x / sqrt(sum(x * x) + 1e-6). The default scale is K ** -0.5.
+
+    The fused gate kernel stores G_t = sum(ell_r, r=chunk_start..t) / ln(2).
+    This prefix sum resets within each sequence at every 64-token chunk boundary.
+    For j <= i in the same chunk, exp2(G_i - G_j) = product(alpha_r, r=j+1..i).
+
+    Returns:
+        Output [1, T, H, V] in v.dtype, and final state [N, H, K, V] in float32.
+        The final state is None when output_final_state=False.
+    """
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
