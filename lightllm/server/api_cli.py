@@ -827,6 +827,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Path of the kv quant calibration config. It can be used for llama and qwen model.""",
     )
     parser.add_argument(
+        "--export_fp8kv_calibration",
+        action="store_true",
+        default=False,
+        help="""Export offline KV calibration data. Qwen3.5 per-head DSpark calibration writes
+                kv_cache_calib_per_head_with_draft.json with target and draft layers. Requires
+                --disable_cudagraph, no --enable_prefill_cudagraph, and --llm_kv_type None.""",
+    )
+    parser.add_argument(
         "--schedule_time_interval",
         type=float,
         default=0.03,

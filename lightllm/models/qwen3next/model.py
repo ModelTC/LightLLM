@@ -14,6 +14,7 @@ from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
+    ExportCalibrationQwen3NextMemManager,
     FP8StaticPerHeadQuantQwen3NextMemManager,
     FP8StaticPerTensorQuantQwen3NextMemManager,
     Qwen3NextMemManager,
@@ -87,7 +88,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             draft_full_att_kv_layer_num=draft_full_att_kv_layer_num,
         )
 
-        if start_args.llm_kv_type == "None":
+        if start_args.export_fp8kv_calibration:
+            mem_manager_class = ExportCalibrationQwen3NextMemManager
+        elif start_args.llm_kv_type == "None":
             mem_manager_class = Qwen3NextMemManager
         elif start_args.llm_kv_type == "fp8kv_sph":
             mem_manager_class = FP8StaticPerHeadQuantQwen3NextMemManager
