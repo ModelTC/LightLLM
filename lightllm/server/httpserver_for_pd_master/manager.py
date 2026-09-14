@@ -986,4 +986,10 @@ class PDManager:
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
+        if not self.prefill_nodes or not self.decode_nodes:
+            raise ServerBusyError(
+                "PD nodes unavailable: "
+                f"registered_prefill={len(self.prefill_nodes)}, registered_decode={len(self.decode_nodes)}",
+                status_code=503,
+            )
         return self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)
