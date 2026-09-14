@@ -30,6 +30,9 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
+_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS = 5
+_PD_RECONNECT_DELAY_SECONDS = 10
+
 
 async def timer_log(manager: HttpServerManager):
     while True:
@@ -83,10 +86,9 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     pd_handle_loop 主要负责与 pd master 进行注册连接，然后接收pd master发来的请求，然后
     将推理结果转发给 pd master进行处理。
     """
-    # 创建转发队列
-    forwarding_queue = AsyncQueue()
-
     while True:
+        # 转发队列属于当前连接，避免超时未退出的旧请求在重连后上报过期 token。
+        forwarding_queue = AsyncQueue()
         forwarding_tokens_task = None
         heartbeat_task = None
         generation_tasks: Dict[int, asyncio.Task] = {}
@@ -144,9 +146,11 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         )
                         generation_tasks[group_req_id] = generation_task
 
-                        def remove_generation_task(task: asyncio.Task, request_id: int = group_req_id):
-                            if generation_tasks.get(request_id) is task:
-                                generation_tasks.pop(request_id, None)
+                        def remove_generation_task(
+                            task: asyncio.Task, request_id: int = group_req_id, tasks=generation_tasks
+                        ):
+                            if tasks.get(request_id) is task:
+                                tasks.pop(request_id, None)
                                 # task 可能在首次运行前被取消，此时协程内的 finally 不会执行。
                                 manager.cancel_pd_request_registration(request_id)
 
@@ -184,10 +188,21 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
-                await asyncio.gather(*child_tasks, return_exceptions=True)
+                done_tasks, pending_tasks = await asyncio.wait(
+                    child_tasks, timeout=_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS
+                )
+                if done_tasks:
+                    await asyncio.gather(*done_tasks, return_exceptions=True)
+                if pending_tasks:
+                    logger.warning(
+                        "timed out after %s seconds cleaning up %s PD child task(s); reconnecting",
+                        _PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS,
+                        len(pending_tasks),
+                    )
+                    for task in pending_tasks:
+                        task.cancel()
 
-        await asyncio.sleep(10)
-        await forwarding_queue.get_all_data()
+        await asyncio.sleep(_PD_RECONNECT_DELAY_SECONDS)
         logger.info("reconnection to pd_master")
 
 

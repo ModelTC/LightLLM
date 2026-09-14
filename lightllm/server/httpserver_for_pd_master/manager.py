@@ -449,7 +449,7 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.send_control_message(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -468,7 +468,7 @@ class HttpServerManagerForPDMaster:
         logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.websocket.send_bytes(
+        await d_node.send_control_message(
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
@@ -489,7 +489,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
         pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
         decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
-        await p_node.websocket.send_bytes(
+        await p_node.send_control_message(
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
@@ -676,12 +676,12 @@ class HttpServerManagerForPDMaster:
             pass
 
         try:
-            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await p_node.send_control_message(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
         try:
-            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await d_node.send_control_message(pickle.dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
@@ -955,7 +955,10 @@ class PDManager:
     def remove_pd(self, pd_info_json):
         pd_client = PD_Client_Obj(**pd_info_json)
 
-        self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
+        removed_client = self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
+        if removed_client is not None:
+            # In-flight requests can still hold this node after it leaves the selector.
+            removed_client.websocket = None
         self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
         self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
 
