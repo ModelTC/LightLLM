@@ -118,10 +118,6 @@ class LinearAttCacheConfig:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ("glm5_next", "glm5_next_text"):
-            from lightllm.models.glm5_next.cache_config import Glm5NextCacheConfig
-
-            return Glm5NextCacheConfig.from_model_config(model_cfg, args)
         assert model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]
         llm_config = model_cfg
         try:

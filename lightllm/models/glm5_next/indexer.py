@@ -1,13 +1,14 @@
 import torch
 import triton
 
-from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+
 from .triton_kernel.index_quant import hadamard_transform_quant_fp8
-from .triton_kernel.kpool import compress_pools, gather_pools, expand_topk
+from .triton_kernel.kpool import compress_pools, gather_pools, get_pool_ranges, expand_topk
 
 
 class Glm5NextNsaInfer:
-    """K-pool indexing with all persistent history stored in token KV."""
+    """K-pool indexing with pooled token KV and a small per-request raw tail."""
 
     def __init__(self, layer_idx, network_config, tp_world_size):
         self.layer_idx = layer_idx
@@ -16,20 +17,39 @@ class Glm5NextNsaInfer:
         self.dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
 
+    def select_topk_indices(self, logits, lengths, indices):
+        """Select row-relative indices, with valid entries before -1 padding."""
+        if HAS_VLLM:
+            # next_n=1 treats each query as an independent row, including prefill.
+            # The decode entry splits long rows before merging their candidates.
+            # Tested with vLLM 0.22.1; persistent_topk can drop candidates (#51782).
+            vllm_ops.top_k_per_row_decode(
+                logits, 1, lengths, indices, logits.shape[0], logits.stride(0), logits.stride(1), indices.shape[1]
+            )
+        else:
+            positions = torch.arange(logits.shape[1], device=logits.device)
+            logits.masked_fill_(positions[None, :] >= lengths[:, None], -float("inf"))
+            selected = torch.topk(logits, indices.shape[1], dim=-1, sorted=True).indices
+            indices.copy_(selected.masked_fill(selected >= lengths[:, None], -1))
+
     def _get_indices(self, hidden_states, q_lora, infer_state, att_state, layer_weight):
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.eps)
         gate = layer_weight.index_kpool_compress_gate.mm(hidden_states)
-        raw = torch.cat((k, gate), -1).unsqueeze(1)
-        raw_buffer = infer_state.mem_manager.get_indexer_raw_buffer(self.layer_idx)
+        raw = torch.cat((k, gate), -1)
+        tail = infer_state.req_manager.get_indexer_tail_buffer(self.layer_idx)
         packed_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx)
-        destindex_copy_kv(raw, infer_state.mem_index, raw_buffer)
         compress_pools(
-            raw_buffer,
-            packed_buffer,
-            layer_weight.index_kpool_compress_ape.weight,
-            att_state.lengths,
-            att_state.ks,
-            att_state.ragged_mem_index,
+            raw=raw,
+            tail=tail,
+            packed_buffer=packed_buffer,
+            ape=layer_weight.index_kpool_compress_ape.weight,
+            lengths=att_state.lengths,
+            starts=att_state.ks,
+            ragged=att_state.ragged_mem_index,
+            req_idx=infer_state.b_req_idx,
+            cu_q_lens=infer_state.b1_cu_q_seq_len,
+            seq_lens=infer_state.b_seq_len,
+            max_q_len=infer_state.max_q_seq_len,
         )
 
         if infer_state.max_kv_seq_len <= self.topk:
@@ -49,15 +69,13 @@ class Glm5NextNsaInfer:
             infer_state.b_seq_len,
             max_pools,
         )
-        lengths = att_state.lengths // 4
-        starts = att_state.query_batch * max_pools
-        ends = starts + lengths
+        starts, ends, lengths = get_pool_ranges(
+            att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
+        )
         groups = torch.empty((q.shape[0], self.topk // 4), dtype=torch.int32, device=q.device)
         # Bound the transient score matrix independently of total batch length.
         chunk_size = max(1, min(q.shape[0], 16 * 1024 * 1024 // max_pools))
         import deep_gemm
-
-        pool_positions = torch.arange(max_pools, device=q.device)
 
         for start in range(0, q.shape[0], chunk_size):
             end = min(start + chunk_size, q.shape[0])
@@ -70,8 +88,5 @@ class Glm5NextNsaInfer:
                 clean_logits=False,
                 max_seqlen_k=max_pools,
             )
-            # The current image's fast_topk_v2 only supports 2048 entries;
-            # K-pool selects 512 groups. Torch topk is CUDA-graph compatible.
-            logits.masked_fill_(pool_positions[None, :] >= lengths[start:end, None], -float("inf"))
-            groups[start:end] = torch.topk(logits, self.topk // 4, dim=-1, sorted=True).indices
+            self.select_topk_indices(logits, lengths[start:end], groups[start:end])
         return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)

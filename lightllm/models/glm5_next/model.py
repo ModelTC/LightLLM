@@ -7,20 +7,22 @@ import triton
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.req_manager import ReqManagerForMamba
+from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
+from lightllm.common.req_manager import Glm5NextReqManager
+from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.registry import ModelRegistry
-from .cache_config import Glm5NextCacheConfig
+from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
-from .mem_manager import Glm5NextMemManager
 
 
 @ModelRegistry(["glm5_next", "glm5_next_text"])
 class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
+    pre_layer_infer_class = Glm5NextPreLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
 
     def _init_config(self):
@@ -41,25 +43,17 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
     def _verify_params(self):
         super()._verify_params()
         args = self.args
-        assert self.data_type == torch.bfloat16, "GLM-5.3 Flash currently requires bfloat16 activations"
-        assert self.run_mode == "normal", "GLM-5.3 Flash v1 supports normal TP serving"
         assert args.dp == 1 and not args.enable_tpsp_mix_mode, "GLM-5.3 Flash v1 uses plain tensor parallelism"
-        assert args.mtp_mode is None and args.mtp_step == 0, "GLM-5.3 Flash MTP is not implemented yet"
+        assert args.mtp_mode is None, "GLM-5.3 Flash MTP is not implemented yet"
         assert not args.enable_ep_moe, "GLM-5.3 Flash v1 uses tensor-parallel MoE"
-        assert not (
-            args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
-        ), "GLM-5.3 Flash mHC does not support microbatch overlap yet"
         assert not args.enable_prefill_cudagraph, "GLM-5.3 Flash v1 supports decode CUDA graphs"
-        assert args.llm_kv_type in (None, "None"), "GLM-5.3 Flash v1 uses BF16 MLA KV with FP8 index keys"
-        assert self.config["qk_rope_head_dim"] == 0 and self.config["kv_lora_rank"] == 512
-        assert self.config["index_head_dim"] == 128 and self.config["index_kpool"] == 4
 
     def autotune_layers(self):
         return 4
 
     def _init_req_manager(self):
         self.linear_config = Glm5NextCacheConfig.from_model_config(self.config, self.args)
-        self.req_manager = ReqManagerForMamba(
+        self.req_manager = Glm5NextReqManager(
             self.max_req_num,
             max(self.batch_max_tokens or 0, self.max_seq_length or 0),
             None,

@@ -55,7 +55,7 @@ def generate(url, prompt, output_tokens):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:18153")
-    parser.add_argument("--model-dir", default="/mtc/models/GLM-5.3-Flash")
+    parser.add_argument("--model-dir", default="/nvme/models/GLM-5.3-Flash")
     parser.add_argument("--input-tokens", type=int, nargs="+", default=[1024, 4096])
     parser.add_argument("--concurrency", type=int, nargs="+", default=[1, 4, 8])
     parser.add_argument("--output-tokens", type=int, default=128)

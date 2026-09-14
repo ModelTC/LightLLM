@@ -12,9 +12,8 @@ from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import (
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
 )
-from lightllm.models.glm5_next.triton_kernel.mhc import (
+from lightllm.common.basemodel.triton_kernel.mhc import (
     hc_contract,
-    hc_expand,
     hc_post,
     hc_pre_norm,
 )
@@ -139,34 +138,32 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             ),
         )
 
-    def _kda_projections(self, input, infer_state, layer_weight):
-        # KDA shards heads across TP ranks, so every rank still needs every
-        # token before updating its recurrent head state.  In TP/SP mode the
-        # layer input is sequence-sharded; gather it here just like the MLA
-        # projection path and reduce-scatter the output in _kda_post.
-        input = input.view(-1, self.embed_dim_)
-        input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        projected = layer_weight.linear_qkvbfg_a_proj.mm(input)
-        qkv_size = 3 * self.tp_linear_projection_size
-        mixed_qkv, raw_beta, f_a, g_a = projected.split(
+    def _kda_projections(self, hidden_states, infer_state, layer_weight):
+        # Gather sequence-sharded tokens for each rank's KDA heads;
+        # _kda_post reduces the output back to the sequence shard.
+        hidden_states = hidden_states.view(-1, self.embed_dim_)
+        hidden_states = self._tpsp_allgather(input=hidden_states, infer_state=infer_state)
+        qkv_gate_proj = layer_weight.linear_qkvbfg_a_proj.mm(hidden_states)
+        qkv_dim = 3 * self.tp_linear_projection_size
+        qkv, beta_logits, decay_gate_hidden, output_gate_hidden = qkv_gate_proj.split(
             [
-                qkv_size,
+                qkv_dim,
                 self.tp_linear_num_heads,
                 self.linear_head_dim,
                 self.linear_head_dim,
             ],
             dim=-1,
         )
-        raw_gate, norm_gate = layer_weight.project_kda_fg_b(f_a, g_a)
-        return mixed_qkv, raw_gate, raw_beta, norm_gate
+        raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(decay_gate_hidden, output_gate_hidden)
+        return qkv, raw_decay_gate, beta_logits, raw_output_gate
 
-    def _kda_post(self, core_output, norm_gate, infer_state, layer_weight):
-        tokens = norm_gate.shape[0]
+    def _kda_post(self, core_output, raw_output_gate, infer_state, layer_weight):
+        tokens = raw_output_gate.shape[0]
         core_output = core_output.view(-1, self.linear_head_dim)
-        norm_gate = norm_gate.view(tokens, self.tp_linear_num_heads, self.linear_head_dim)
+        raw_output_gate = raw_output_gate.view(tokens, self.tp_linear_num_heads, self.linear_head_dim)
         output = layer_weight.linear_o_norm(
             input=core_output,
-            gate_value=norm_gate,
+            gate_value=raw_output_gate,
             eps=self.eps_,
             alloc_func=self.alloc_tensor,
         )
@@ -176,7 +173,9 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def context_attention_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.is_linear_attention_layer:
             return super().context_attention_forward(input_embeddings, infer_state, layer_weight)
-        mixed_qkv, raw_gate, raw_beta, norm_gate = self._kda_projections(input_embeddings, infer_state, layer_weight)
+        qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
+            input_embeddings, infer_state, layer_weight
+        )
         core_output = infer_state.prefill_att_state1.prefill_att(
             q=None,
             k=None,
@@ -184,21 +183,23 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             att_control=AttControl(
                 linear_att_prefill=True,
                 linear_att_prefill_dict={
-                    "mixed_qkv": mixed_qkv,
-                    "raw_gate": raw_gate,
-                    "raw_beta": raw_beta,
+                    "mixed_qkv": qkv,
+                    "raw_gate": raw_decay_gate,
+                    "raw_beta": beta_logits,
                     "layer_weight": layer_weight,
                     "layer_num": self.layer_num_,
                 },
             ),
             alloc_func=self.alloc_tensor,
         )
-        return self._kda_post(core_output, norm_gate, infer_state, layer_weight)
+        return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def token_attention_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.is_linear_attention_layer:
             return super().token_attention_forward(input_embeddings, infer_state, layer_weight)
-        mixed_qkv, raw_gate, raw_beta, norm_gate = self._kda_projections(input_embeddings, infer_state, layer_weight)
+        qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
+            input_embeddings, infer_state, layer_weight
+        )
         core_output = infer_state.decode_att_state1.decode_att(
             q=None,
             k=None,
@@ -206,16 +207,16 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             att_control=AttControl(
                 linear_att_decode=True,
                 linear_att_decode_dict={
-                    "mixed_qkv": mixed_qkv,
-                    "raw_gate": raw_gate,
-                    "raw_beta": raw_beta,
+                    "mixed_qkv": qkv,
+                    "raw_gate": raw_decay_gate,
+                    "raw_beta": beta_logits,
                     "layer_weight": layer_weight,
                     "layer_num": self.layer_num_,
                 },
             ),
             alloc_func=self.alloc_tensor,
         )
-        return self._kda_post(core_output, norm_gate, infer_state, layer_weight)
+        return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def _hc_pre(self, streams, layer_weight, prefix, norm_weight):
         return hc_pre_norm(
@@ -233,8 +234,6 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
 
     def _forward_mhc(self, input_embeddings, infer_state, layer_weight, *, prefill):
         streams = input_embeddings
-        if self.layer_num_ == 0:
-            streams = hc_expand(streams.view(-1, self.embed_dim_), self.mhc_streams)
 
         layer_input, residual_mix, post_mix = self._hc_pre(streams, layer_weight, "attn", layer_weight.att_norm_weight_)
         if prefill:

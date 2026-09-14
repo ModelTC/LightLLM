@@ -35,7 +35,7 @@ class KDALinearAttBackend(BaseAttBackend):
         self.head_dim = config["head_dim"]
         assert self.num_heads % model.tp_world_size_ == 0
         self.tp_num_heads = self.num_heads // model.tp_world_size_
-        self.tp_projection_size = self.tp_num_heads * self.head_dim
+        self.tp_hidden_size = self.tp_num_heads * self.head_dim
         self.conv_kernel_size = config["short_conv_kernel_size"]
         self.lower_bound = config.get("gate_lower_bound", -5.0)
 
@@ -46,12 +46,7 @@ class KDALinearAttBackend(BaseAttBackend):
         return KDADecodeAttState(backend=self, infer_state=infer_state)
 
     def split_qkv(self, mixed_qkv: torch.Tensor):
-        return mixed_qkv.split(self.tp_projection_size, dim=-1)
-
-    def reshape_qkv(self, value: torch.Tensor, *, decode: bool):
-        if decode:
-            return value.view(-1, 1, self.tp_num_heads, self.head_dim)
-        return value.view(1, -1, self.tp_num_heads, self.head_dim)
+        return mixed_qkv.split(self.tp_hidden_size, dim=-1)
 
 
 @dataclasses.dataclass
@@ -92,8 +87,11 @@ class KDAPrefillAttState(BasePrefillAttState):
             activation="silu",
         ).transpose(0, 1)
 
-        q, k, v = [backend.reshape_qkv(x, decode=False) for x in backend.split_qkv(mixed_qkv)]
-        raw_gate = raw_gate.view(1, -1, backend.tp_projection_size)
+        q, k, v = backend.split_qkv(mixed_qkv)
+        q = q.view(1, -1, backend.tp_num_heads, backend.head_dim)
+        k = k.view(1, -1, backend.tp_num_heads, backend.head_dim)
+        v = v.view(1, -1, backend.tp_num_heads, backend.head_dim)
+        raw_gate = raw_gate.view(1, -1, backend.tp_hidden_size)
         raw_beta = raw_beta.view(1, -1, backend.tp_num_heads)
 
         initial_state = ssm_states[self.b_ssm_buffer_idx].contiguous()
@@ -151,8 +149,11 @@ class KDADecodeAttState(BaseDecodeAttState):
             activation="silu",
             conv_state_indices=self.b_conv_buffer_idx,
         )
-        q, k, v = [backend.reshape_qkv(x, decode=True) for x in backend.split_qkv(mixed_qkv)]
-        raw_gate = raw_gate.view(-1, 1, backend.tp_projection_size)
+        q, k, v = backend.split_qkv(mixed_qkv)
+        q = q.view(-1, 1, backend.tp_num_heads, backend.head_dim)
+        k = k.view(-1, 1, backend.tp_num_heads, backend.head_dim)
+        v = v.view(-1, 1, backend.tp_num_heads, backend.head_dim)
+        raw_gate = raw_gate.view(-1, 1, backend.tp_hidden_size)
         raw_beta = raw_beta.view(-1, 1, backend.tp_num_heads)
         output, _ = fused_recurrent_kda(
             q=q,

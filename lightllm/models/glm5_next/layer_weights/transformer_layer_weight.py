@@ -298,11 +298,11 @@ class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
     def get_merged_kda_conv_weight(self):
         return self.linear_qkv_conv1d.mm_param.weight
 
-    def project_kda_fg_b(self, f_a: torch.Tensor, g_a: torch.Tensor):
-        method = self.linear_fg_b_proj.quant_method
-        f = method.apply(f_a, self.linear_fg_b_proj.mm_param_list[0])
-        g = method.apply(g_a, self.linear_fg_b_proj.mm_param_list[1])
-        return f, g
+    def project_kda_fg_b(self, decay_gate_hidden: torch.Tensor, output_gate_hidden: torch.Tensor):
+        quant_method = self.linear_fg_b_proj.quant_method
+        raw_decay_gate = quant_method.apply(decay_gate_hidden, self.linear_fg_b_proj.mm_param_list[0])
+        raw_output_gate = quant_method.apply(output_gate_hidden, self.linear_fg_b_proj.mm_param_list[1])
+        return raw_decay_gate, raw_output_gate
 
     def _preprocess_kda_weights(self, weights):
         prefix = f"model.layers.{self.layer_num_}.self_attn"

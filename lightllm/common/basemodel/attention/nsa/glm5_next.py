@@ -19,26 +19,16 @@ class Glm5NextSparseAttBackend(NsaFlashMlaSparseAttBackend):
 
 @dataclasses.dataclass
 class Glm5NextSparsePrefillState(NsaFlashMlaSparsePrefillAttState):
-    query_batch: torch.Tensor = None
-
-    def init_state(self):
-        super().init_state()
-        state = self.infer_state
-        self.query_batch = torch.repeat_interleave(
-            torch.arange(state.batch_size, device=state.b_req_idx.device, dtype=torch.int32),
-            state.b_q_seq_len,
-            output_size=state.input_ids.numel(),
-        )
-
     def _nsa_prefill_att(self, q, kv, att_control):
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
         tokens, heads, dim = q.shape
-        # The installed Hopper kernel accepts 576-wide Q/K and 64 heads.
-        # Zero padding preserves NoPE attention and avoids a runtime fork.
+        # FlashMLA accepts native 512-wide NoPE Q/K; head counts still use 64-head tiles.
         padded_heads = ((heads + 63) // 64) * 64
-        padded_q = q.new_zeros((tokens, padded_heads, dim + 64))
-        padded_q[:, :heads, :dim] = q
+        padded_q = q
+        if padded_heads != heads:
+            padded_q = q.new_zeros((tokens, padded_heads, dim))
+            padded_q[:, :heads] = q
         params = att_control.nsa_prefill_dict
         out, _, _ = flash_mla_sparse_fwd(
             q=padded_q,
@@ -52,12 +42,8 @@ class Glm5NextSparsePrefillState(NsaFlashMlaSparsePrefillAttState):
 
 @dataclasses.dataclass
 class Glm5NextSparseDecodeState(NsaFlashMlaSparseDecodeAttState):
-    query_batch: torch.Tensor = None
-
     def init_state(self):
         super().init_state()
-        state = self.infer_state
-        self.query_batch = torch.arange(state.batch_size, device=state.b_req_idx.device, dtype=torch.int32)
         pool = self.backend.model.config["index_kpool"]
         topk = self.backend.model.config["index_topk"]
         self.nsa_cache_seqlens = (
@@ -69,13 +55,15 @@ class Glm5NextSparseDecodeState(NsaFlashMlaSparseDecodeAttState):
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
         q_nope, _ = q
-        q_rope = q_nope.new_zeros((*q_nope.shape[:-1], 64))
+        kv_nope = kv.view(-1, 1, 1, 512)
         params = att_control.nsa_decode_dict
+        # only_qv skips QK entirely. Reuse views for the API's required Q/K tensors
+        # so the wrapper does not allocate a dummy 64-wide query or KV cache.
         return flash_attn_with_kvcache(
-            q=q_rope,
+            q=q_nope[..., :64],
             qv=q_nope,
-            k_cache=kv[:, :, 512:].view(-1, 1, 1, 64),
-            v_cache=kv[:, :, :512].view(-1, 1, 1, 512),
+            k_cache=kv_nope[..., :64],
+            v_cache=kv_nope,
             page_table=params["topk_mem_indices"],
             cache_seqlens=self.nsa_cache_seqlens,
             cu_seqlens_q=self.infer_state.b1_cu_q_seq_len,
@@ -83,4 +71,5 @@ class Glm5NextSparseDecodeState(NsaFlashMlaSparseDecodeAttState):
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=params["softmax_scale"],
             causal=False,
+            only_qv=True,
         )

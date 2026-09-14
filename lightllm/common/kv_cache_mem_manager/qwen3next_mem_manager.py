@@ -81,8 +81,12 @@ class Qwen3NextMemManager(MemoryManager):
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
-        Qwen3NextLinearAttPageHelper(self).assert_page_size()
+        self.att_state_page_helper = self._create_att_state_page_helper()
+        self.att_state_page_helper.assert_page_size()
         return kv_move_buffer
+
+    def _create_att_state_page_helper(self):
+        return Qwen3NextLinearAttPageHelper(self)
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -106,7 +110,7 @@ class Qwen3NextMemManager(MemoryManager):
             )
         assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
-        helper = Qwen3NextLinearAttPageHelper(self)
+        helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.write_req_to_page(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         return
@@ -133,7 +137,7 @@ class Qwen3NextMemManager(MemoryManager):
             )
         assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
-        helper = Qwen3NextLinearAttPageHelper(self)
+        helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.read_page_to_req(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         return
