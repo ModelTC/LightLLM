@@ -1,3 +1,5 @@
+"""Bounded KV storage for parallel-block speculative decoding."""
+
 import torch
 import triton
 import triton.language as tl
@@ -121,6 +123,11 @@ class WindowKVStore:
         self.kv = torch.zeros((layers, requests, capacity, 2 * kv_heads, head_dim), dtype=dtype, device=device)
         self.ends = torch.zeros(requests, dtype=torch.int64, device=device)
         self.counts = torch.zeros(requests, dtype=torch.int32, device=device)
+
+    def reset(self):
+        """Invalidate all request windows without changing captured buffer addresses."""
+        self.ends.zero_()
+        self.counts.zero_()
 
     def prepare(self, reqs, features, starts, first, lengths, max_new):
         n = min(max_new, self.capacity)

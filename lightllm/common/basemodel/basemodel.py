@@ -555,6 +555,15 @@ class TpPartBaseModel:
         model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         return model_output
 
+    def _update_decode_req_to_token(self, infer_state: InferStateInfo):
+        """Record decode KV slots before initializing attention state."""
+        copy_kv_index_to_req(
+            self.req_manager.req_to_token_indexs,
+            infer_state.b_req_idx,
+            infer_state.b_seq_len,
+            infer_state.mem_index,
+        )
+
     def _decode(
         self,
         model_input: ModelInput,
@@ -599,12 +608,7 @@ class TpPartBaseModel:
         # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
         # 因此必须在 init_att_state 之前完成赋值。
         infer_state.is_cuda_graph = need_capture
-        copy_kv_index_to_req(
-            self.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_seq_len,
-            infer_state.mem_index,
-        )
+        self._update_decode_req_to_token(infer_state)
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
 
@@ -620,7 +624,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -846,23 +849,13 @@ class TpPartBaseModel:
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             infer_state0.is_cuda_graph = need_capture
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
+            self._update_decode_req_to_token(infer_state0)
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state1.is_cuda_graph = need_capture
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
+            self._update_decode_req_to_token(infer_state1)
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -884,22 +877,12 @@ class TpPartBaseModel:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
+            self._update_decode_req_to_token(infer_state0)
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(model_input1, 1)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
+            self._update_decode_req_to_token(infer_state1)
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
