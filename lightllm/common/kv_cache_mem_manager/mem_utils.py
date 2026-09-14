@@ -7,6 +7,7 @@ from . import (
     FP8StaticPerHeadQuantMemManager,
     FP8StaticPerTensorQuantMemManager,
 )
+from .export_calibration_mem_manager import ExportCalibrationMemoryManager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.llm_utils import get_llm_model_class
@@ -52,6 +53,9 @@ def select_mem_manager_class():
         memory_manager_class = FP8StaticPerTensorQuantMemManager
     elif get_env_start_args().llm_kv_type == "None":
         memory_manager_class = MemoryManager
+
+    if get_env_start_args().export_fp8kv_calibration:
+        memory_manager_class = ExportCalibrationMemoryManager
 
     logger.info(f"Model kv cache using mem_manager class: {memory_manager_class}")
     return memory_manager_class
