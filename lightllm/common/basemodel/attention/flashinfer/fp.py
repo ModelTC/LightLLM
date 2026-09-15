@@ -55,6 +55,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         device = self.infer_state.input_ids.device
 
         q_starts = self.infer_state.b1_cu_q_seq_len.int()
+        # TODO: 将页数、页数前缀和及末页有效 token 数的计算融合为一个 Triton 算子。
         # token 长度除以页大小并向上取整，末页不足一页也计为一页。
         b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
         kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
