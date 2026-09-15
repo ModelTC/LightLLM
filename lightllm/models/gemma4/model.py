@@ -1,10 +1,7 @@
-import os
-import json
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
 from lightllm.models.gemma4.layer_infer.pre_layer_infer import Gemma4PreLayerInfer
@@ -39,17 +36,13 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
+        self.config = self._load_model_config_dict()
         # The shipped checkpoint is a multimodal config wrapping a Gemma4TextConfig
         # under text_config; flatten it so downstream code sees text-model fields
         # at the top level (mirrors the gemma3 approach).
         if "text_config" in self.config:
             self.config = self.config["text_config"].copy()
 
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         self._reset_num_key_value_heads()
 
         if self.finetune_config:

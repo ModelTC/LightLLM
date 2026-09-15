@@ -1,3 +1,4 @@
+from lightllm.utils.model_config import load_model_config_dict
 import os
 import rpyc
 import torch
@@ -8,7 +9,6 @@ import threading
 import time
 import torch.distributed as dist
 from typing import Dict, List, Tuple, Deque, Optional
-from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
@@ -66,7 +66,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.vit_attn_backend = kvargs["vit_attn_backend"]
         set_vit_att_backend(self.vit_attn_backend)
         init_vision_distributed_env(kvargs)
-        model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
+        model_cfg = load_model_config_dict(weight_dir)
 
         try:
             kvargs = {

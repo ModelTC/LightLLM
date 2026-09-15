@@ -16,11 +16,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from lightllm.utils.model_config import load_model_config_dict
 from typing import List, Tuple, Union
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from transformers.convert_slow_tokenizer import convert_slow_tokenizer
-from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.log_utils import init_logger
 from ..models.tarsier2.model import Tarsier2Tokenizer
 
@@ -33,7 +33,6 @@ from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
 from ..models.gemma4.tokenizer import Gemma4Tokenizer
 from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
-from ..models import deepseek3_2  # noqa: F401  # registers the deepseek_v32 config with transformers
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
@@ -63,6 +62,8 @@ def get_tokenizer(
         # tokenizer = convert_slow_tokenizer(tokenizer)
         # return tokenizer
 
+    model_cfg = load_model_config_dict(tokenizer_name, trust_remote_code=trust_remote_code, **kwargs)
+
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
     except TypeError as e:
@@ -78,7 +79,6 @@ def get_tokenizer(
             "slowdown. Consider using a fast tokenizer instead."
         )
 
-    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type", "")
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.
@@ -91,7 +91,7 @@ def get_tokenizer(
         logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
         return DeepSeekV32Tokenizer(hf_tokenizer)
 
-    if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+    if (model_cfg.get("architectures") or [""])[0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 
         image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)

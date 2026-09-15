@@ -1,5 +1,3 @@
-import os
-import json
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
@@ -14,8 +12,6 @@ from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
-from lightllm.common.build_utils import repair_config
-from transformers import AutoConfig
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -151,14 +147,8 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-        # rename keys
+        self.config = self._load_model_config_dict()
         if "text_config" in self.config:
-            config = AutoConfig.from_pretrained(self.weight_dir_, trust_remote_code=True)
-            self.config = config.text_config.to_dict()
+            self.config = self.config["text_config"]
 
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         return

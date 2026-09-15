@@ -171,8 +171,8 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
             self.multi_modal_projector = PixelShuffleMultiModalProjector(
                 image_newline_idx,
                 image_new_idx,
-                vision_config.hidden_size,
-                text_config.hidden_size,
+                vision_config["hidden_size"],
+                text_config["hidden_size"],
                 vision_feature_select_strategy,
                 vision_feature_layer,
             )
@@ -180,8 +180,8 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
             self.multi_modal_projector = LlavaMultiModalProjector(
                 image_newline_idx,
                 image_new_idx,
-                vision_config.hidden_size,
-                text_config.hidden_size,
+                vision_config["hidden_size"],
+                text_config["hidden_size"],
                 vision_feature_select_strategy,
                 vision_feature_layer,
                 projector_hidden_act,

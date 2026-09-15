@@ -263,14 +263,14 @@ def test_draft_model_registry_rejects_unsupported_mode(model_type, spec_mode):
 def test_hidden_collector_reads_target_layer_ids(monkeypatch):
     config_reads = []
 
-    def get_config_dict(path):
+    def load_model_config(path, **kwargs):
         config_reads.append(path)
-        return {"target_layer_ids": [1, 20, 36]}, {}
+        return SimpleNamespace(target_layer_ids=[1, 20, 36])
 
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig,
-        "get_config_dict",
-        get_config_dict,
+        hidden_collector_module,
+        "load_model_config",
+        load_model_config,
     )
     monkeypatch.setattr(
         hidden_collector_module,
@@ -349,6 +349,11 @@ def test_qwen35_dflash_added_kv_layers_come_from_nested_draft_config(tmp_path):
     )
 
     assert envs_utils.get_added_mtp_kv_layer_num() == 5
+
+
+def test_draft_layer_alias_override_is_applied_before_normalization(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"n_layer": 48, "dflash_config": {"n_layer": 5}}))
+    assert envs_utils._get_mtp_draft_backbone_layer_num(str(tmp_path)) == 5
 
 
 def test_dspark_added_kv_layers_come_from_draft_config(tmp_path):

@@ -1,6 +1,6 @@
 import os
-import json
 import torch
+from lightllm.utils.model_config import load_model_config_dict
 from lightllm.models.vit.layer_infer.pre_layer_infer import ViTPreLayerInfer
 from lightllm.models.vit.layer_infer.post_layer_infer import ViTPostLayerInfer
 from lightllm.models.vit.layer_infer.transformer_layer_infer import ViTTransformerLayerInfer
@@ -55,12 +55,11 @@ class VisionTransformer:
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-            self.select_layer = self.config["select_layer"]
-            self.config["vision_config"]["llm_hidden_size"] = self.config["llm_config"]["hidden_size"]
-            self.config["vision_config"]["downsample_ratio"] = self.config["downsample_ratio"]
-            self.config = self.config["vision_config"]
+        self.config = load_model_config_dict(self.weight_dir_)
+        self.select_layer = self.config["select_layer"]
+        self.config["vision_config"]["llm_hidden_size"] = self.config["llm_config"]["hidden_size"]
+        self.config["vision_config"]["downsample_ratio"] = self.config["downsample_ratio"]
+        self.config = self.config["vision_config"]
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])

@@ -1,6 +1,3 @@
-import os
-import json
-from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
@@ -26,13 +23,8 @@ class Qwen3VLMOETpPartModel(Qwen3MOEModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            all_config = json.load(json_file)
-            self.config = all_config["text_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        all_config = self._load_model_config_dict()
+        self.config = all_config["text_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return

@@ -55,12 +55,12 @@ def _launch_subprocesses(args: StartArgs):
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
-        if has_vision_module(args.model_dir):
+        if has_vision_module(args.model_dir, trust_remote_code=args.trust_remote_code):
             args.disable_vision = False
         else:
             args.disable_vision = True
     if args.disable_audio is None:
-        if has_audio_module(args.model_dir):
+        if has_audio_module(args.model_dir, trust_remote_code=args.trust_remote_code):
             args.disable_audio = False
         else:
             args.disable_audio = True
@@ -284,14 +284,14 @@ def _launch_subprocesses(args: StartArgs):
     if args.eos_id is None:
         from lightllm.utils.config_utils import get_eos_token_ids
 
-        args.eos_id = get_eos_token_ids(args.model_dir)
+        args.eos_id = get_eos_token_ids(args.model_dir, trust_remote_code=args.trust_remote_code)
 
     auto_set_response_parsers(args)
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
-        args.data_type = get_dtype(args.model_dir)
+        args.data_type = get_dtype(args.model_dir, trust_remote_code=args.trust_remote_code)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     set_unique_server_name(args)
@@ -537,7 +537,7 @@ def visual_only_start(args):
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
-        args.data_type = get_dtype(args.model_dir)
+        args.data_type = get_dtype(args.model_dir, trust_remote_code=args.trust_remote_code)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     args.visual_node_id = uuid.uuid4().int

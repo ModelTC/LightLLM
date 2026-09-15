@@ -1,5 +1,4 @@
 import os
-import json
 import torch
 import math
 from lightllm.models.registry import ModelRegistry

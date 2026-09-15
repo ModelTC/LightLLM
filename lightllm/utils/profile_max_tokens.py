@@ -1,11 +1,9 @@
 import os
 import gc
-import json
 import torch
 from contextlib import contextmanager
 from transformers import AutoModelForCausalLM
 import argparse
-from lightllm.common.build_utils import repair_config
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_mtp_weight_layer_num
 
@@ -90,12 +88,16 @@ def load_config(weight_dir_):
     Returns:
         config: Model configuration
     """
-    with open(os.path.join(weight_dir_, "config.json"), "r") as json_file:
-        config = json.load(json_file)
-    repair_config(config, same_names=["num_attention_heads", "n_head"])
-    repair_config(config, same_names=["hidden_size", "n_embd", "n_embed"])
-    repair_config(config, same_names=["num_hidden_layers", "n_layer"])
-    return config
+    from lightllm.utils.model_config import (
+        get_text_config,
+        load_model_config,
+        to_model_config_dict,
+        get_config_trust_remote_code,
+    )
+
+    return to_model_config_dict(
+        get_text_config(load_model_config(weight_dir_, trust_remote_code=get_config_trust_remote_code()))
+    )
 
 
 def load_model(model_dir, tp_size, data_type):

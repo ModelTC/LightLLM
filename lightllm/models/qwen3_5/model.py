@@ -1,5 +1,3 @@
-import os
-import json
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
@@ -16,7 +14,6 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
     Qwen35TransformerLayerInfer,
 )
 from lightllm.models.qwen3_5.infer_struct import Qwen35InferStateInfo
-from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -60,20 +57,13 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     infer_state_class = Qwen35InferStateInfo
 
     def _init_config(self):
-        config_path = os.path.join(self.weight_dir_, "config.json")
+        all_config = self._load_model_config_dict()
 
-        with open(config_path, "r") as json_file:
-            all_config = json.load(json_file)
+        self.config = all_config.get("text_config") or all_config
+        self.vision_config = all_config.get("vision_config", None)
 
-            self.config = all_config["text_config"]
-            self.vision_config = all_config.get("vision_config", None)
-
-            if self.vision_config is None:
-                logger.warning("No vision_config found in checkpoint. " "Multimodal features may not work correctly.")
-
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        if self.vision_config is None:
+            logger.warning("No vision_config found in checkpoint. " "Multimodal features may not work correctly.")
 
         rope_parameters = self.config.get("rope_parameters")
         if isinstance(rope_parameters, dict):

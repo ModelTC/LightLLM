@@ -1,8 +1,5 @@
-import json
-import os
-from lightllm.models.registry import ModelRegistry, llm_model_type_is
+from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
@@ -51,7 +48,6 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         raise NotImplementedError
 
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
-
         origin_ids = self.tokenizer.encode(prompt)
 
         # <img><image_pad></img> -> <img></img>
@@ -86,7 +82,12 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry("llava", condition=llm_model_type_is("qwen2"))
+@ModelRegistry(
+    "llava",
+    is_multimodal=True,
+    condition=lambda cfg: (cfg.get("architectures") or [])[:1] == ["TarsierForConditionalGeneration"]
+    and (cfg.get("text_config") or {}).get("model_type") == "qwen2",
+)
 class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
     # weight class
     pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
@@ -99,16 +100,16 @@ class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["text_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["text_config"]
         return
 
 
-@ModelRegistry("llava", condition=llm_model_type_is("qwen2_vl"))
+@ModelRegistry(
+    "llava",
+    is_multimodal=True,
+    condition=lambda cfg: (cfg.get("architectures") or [])[:1] == ["TarsierForConditionalGeneration"]
+    and (cfg.get("text_config") or {}).get("model_type") == "qwen2_vl",
+)
 class Tarsier2Qwen2VLTpPartModel(Qwen2VLTpPartModel):
     # weight class
     pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
@@ -121,16 +122,16 @@ class Tarsier2Qwen2VLTpPartModel(Qwen2VLTpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["text_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["text_config"]
         return
 
 
-@ModelRegistry("llava", condition=llm_model_type_is("llama"))
+@ModelRegistry(
+    "llava",
+    is_multimodal=True,
+    condition=lambda cfg: (cfg.get("architectures") or [])[:1] == ["TarsierForConditionalGeneration"]
+    and (cfg.get("text_config") or {}).get("model_type") == "llama",
+)
 class Tarsier2LlamaTpPartModel(LlamaTpPartModel):
 
     pre_and_post_weight_class = Tarsier2LlamaPreAndPostLayerWeight
@@ -143,10 +144,5 @@ class Tarsier2LlamaTpPartModel(LlamaTpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["text_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["text_config"]
         return

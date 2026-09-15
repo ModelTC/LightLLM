@@ -1,18 +1,16 @@
-import json
 import numpy as np
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
-from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
 from .vision_process import smart_resize
 from lightllm.models.qwen2.model import Qwen2TpPartModel
-import os
 from typing import Union, List
+
 
 # Warp of the origal tokenizer
 class QWen2VLTokenizer(BaseMultiModalTokenizer):
@@ -112,12 +110,7 @@ class Qwen2VLTpPartModel(Qwen2TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["text_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return

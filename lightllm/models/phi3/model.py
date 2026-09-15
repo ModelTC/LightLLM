@@ -1,5 +1,3 @@
-import os
-import json
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.phi3.layer_weights.transformer_layer_weight import Phi3TransformerLayerWeight

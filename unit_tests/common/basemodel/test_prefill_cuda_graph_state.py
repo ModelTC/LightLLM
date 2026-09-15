@@ -35,9 +35,9 @@ def _create_layer_collector(monkeypatch):
         lambda: SimpleNamespace(mtp_draft_model_dir=["/models/draft"]),
     )
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig,
-        "get_config_dict",
-        lambda _: ({"target_layer_ids": [0]}, {}),
+        hidden_collector_module,
+        "load_model_config",
+        lambda _, **kwargs: SimpleNamespace(target_layer_ids=[0]),
     )
     model = SimpleNamespace(layers_num=2, pre_infer=_IdentityPreInfer())
     return LayerHiddenCollector(model=model)

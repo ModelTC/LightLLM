@@ -1,8 +1,6 @@
 import os
-import json
 from lightllm.models.registry import ModelRegistry, llm_model_type_is
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.common.build_utils import repair_config
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.models.internlm2.model import Internlm2TpPartModel
@@ -107,7 +105,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
             mel_len = chunk_len // 160
             dilation = 1
             L_in = mel_len
-            for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
+            for padding, kernel_size, stride in eval("[(1,3,1)] + [(1,3,2)] "):
                 L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
                 L_out = 1 + L_out // stride
                 L_in = L_out
@@ -199,12 +197,7 @@ class InternVLPhi3TpPartModel(Phi3TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["llm_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -223,12 +216,7 @@ class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["llm_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -247,12 +235,7 @@ class InternVLLlamaTpPartModel(LlamaTpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["llm_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -271,12 +254,7 @@ class InternVLQwen2TpPartModel(Qwen2TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["llm_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -296,12 +274,7 @@ class InternVLDeepSeek2TpPartModel(Deepseek2TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["llm_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -320,12 +293,7 @@ class InternVLQwen3TpPartModel(Qwen3TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["llm_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -344,12 +312,7 @@ class InternVLQwen3MOETpPartModel(Qwen3MOEModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()["llm_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return

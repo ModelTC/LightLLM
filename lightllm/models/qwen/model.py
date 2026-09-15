@@ -1,5 +1,3 @@
-import os
-import json
 import torch
 import math
 import numpy as np
@@ -65,7 +63,6 @@ class QWenTpPartModel(LlamaTpPartModel):
         self._sin_cached = []
 
         for ntk_alpha in ntk_alphas:
-
             base = self.config.get("rotary_emb_base", 10000)
             base = base * ntk_alpha ** (self.head_dim_ / (self.head_dim_ - 2))
             inv_freq = 1.0 / (
