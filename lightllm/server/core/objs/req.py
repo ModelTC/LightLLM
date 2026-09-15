@@ -479,6 +479,15 @@ class ChunkedPrefillReq(Req):
             cur_max_new_token_len = min(self.sample_params.max_new_tokens, max(int(1.1 * has_out_len), ema_req_out_len))
 
         a_len = max(self.input_len + has_out_len + 1, self.shm_cur_kv_len + 1)
-        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size
+        # b_len 用于调度时估算请求后续需要的 token 容量，各项含义如下：
+        # 1. 预计生成总量减去已输出的 has_out_len，以及 a_len 已预留的 1 个 token；用 max(0, ...) 避免负数。
+        # 2. page_size：KV cache 按页分配，预留一页以覆盖逻辑 token 长度与实际分配容量之间的对齐开销。
+        # 3. 2 * (mtp_step + 1)：按每轮最多推进 mtp_step + 1 个 token，预留两轮推理的容量，
+        #    为 MTP 和 overlap 执行留出空间；mtp_step 为 0 时仍保留两个普通 decode token 的余量。
+        # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。例如 stop_str 需要先由 detokenization
+        #    进程匹配，再由 router 通知推理端停止请求；在状态传播、停止处理及 KV 释放完成之前，
+        #    请求仍可能继续推进推理或占用 KV。这 16 个 token 是吸收此类延迟的保守余量，
+        #    避免调度时过早将这部分容量分配给其他请求；它不表示固定的等待时间或异步延迟上限。
+        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
 
         return (a_len, b_len)

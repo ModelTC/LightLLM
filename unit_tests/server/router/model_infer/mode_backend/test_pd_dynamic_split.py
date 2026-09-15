@@ -1,9 +1,10 @@
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs import req as req_module
 from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import (
     decode_impl as pd_decode_impl,
@@ -172,7 +173,8 @@ def test_pd_nodes_use_pd_queue(overrides):
 
 
 @pytest.mark.parametrize("page_size", [1, 16])
-def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length(page_size):
+def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length(page_size, monkeypatch):
+    monkeypatch.setattr(req_module, "get_env_start_args", lambda: SimpleNamespace(page_size=page_size, mtp_step=0))
     queue = PDDecodeQueue.__new__(PDDecodeQueue)
     queue.args = SimpleNamespace(run_mode="decode", page_size=page_size)
     queue.dp_index = 0
@@ -189,30 +191,41 @@ def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length(page_size):
 
     req = SimpleNamespace(
         input_len=10,
-        sample_params=SimpleNamespace(suggested_dp_index=0, max_new_tokens=1024),
+        shm_cur_output_len=0,
+        shm_cur_kv_len=0,
+        sample_params=SimpleNamespace(suggested_dp_index=0, max_new_tokens=1024, ignore_eos=False),
         is_infer_decode=MagicMock(return_value=False),
     )
+    req.get_tuple_tokens = MagicMock(wraps=MethodType(req_module.ChunkedPrefillReq.get_tuple_tokens, req))
     batch = SimpleNamespace(reqs=[req])
 
-    assert queue._caclu_batch_estimated_peak_token_num(batch) == 138 + page_size
-    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 138 + page_size, 1)
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 156 + page_size
+    req.get_tuple_tokens.assert_called_once_with(False, 128)
+    req.get_tuple_tokens.reset_mock()
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 156 + page_size, 1)
+    req.get_tuple_tokens.assert_called_once_with(False, 128)
 
-    # 接近上下文上限的请求可能只剩很少输出额度，估算值不能超过请求自身的 max_new_tokens，
-    # 否则本来能够运行的请求会因为 EMA 偏大而永久滞留在 Decode 等待队列。
+    # 接近上下文上限的请求可能只剩很少输出额度，预计输出长度仍受 max_new_tokens 约束，
+    # 并在此基础上计入分页、MTP 和异步退出余量，避免因 EMA 偏大而永久滞留在 Decode 等待队列。
     req.sample_params.max_new_tokens = 20
-    assert queue._caclu_batch_estimated_peak_token_num(batch) == 30 + page_size
-    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 30 + page_size, 1)
+    assert queue._caclu_batch_estimated_peak_token_num(batch) == 48 + page_size
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 48 + page_size, 1)
 
     req.sample_params.max_new_tokens = 1024
+    req.get_tuple_tokens.reset_mock()
     prefill_queue = PDPrefillQueue.__new__(PDPrefillQueue)
     prefill_queue.args = SimpleNamespace(run_mode="prefill", page_size=page_size)
     prefill_queue.dp_index = queue.dp_index
     prefill_queue.max_total_tokens = queue.max_total_tokens
     prefill_queue.running_max_req_size = queue.running_max_req_size
     prefill_queue.router = queue.router
-    assert prefill_queue._caclu_batch_estimated_peak_token_num(batch) == 1034 + page_size
+    prefill_queue.is_busy = MagicMock(return_value=False)
+    assert prefill_queue._caclu_batch_estimated_peak_token_num(batch) == 156 + page_size
+    req.get_tuple_tokens.assert_called_once_with(False, 128)
+    req.get_tuple_tokens.reset_mock()
     assert prefill_queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (
         True,
-        1034 + page_size,
+        156 + page_size,
         1,
     )
+    req.get_tuple_tokens.assert_called_once_with(False, 128)

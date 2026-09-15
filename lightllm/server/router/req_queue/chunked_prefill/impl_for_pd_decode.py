@@ -11,11 +11,11 @@ class PDDecodeQueue(BaseQueue):
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
-        # 尚未进入 decode 的请求按历史输出长度估算，并受请求的最大输出长度约束。
-        estimated_output_len = min(self.router.router_statics.ema_req_out_len, req.sample_params.max_new_tokens)
-        req_token_num = req.input_len + estimated_output_len
-        req_token_num += self.args.page_size
-        estimated_peak_token_num += req_token_num
+        # 与 batch 中尚未进入 decode 的请求使用相同的容量估算，直接累加 a_len + b_len。
+        # get_tuple_tokens 统一处理输出长度估算，并计入分页对齐、MTP 和异步退出所需的余量，
+        # 确保新请求准入时也为这些额外的 KV 占用预留容量。
+        a_len, b_len = req.get_tuple_tokens(self.is_busy(), self.router.router_statics.ema_req_out_len)
+        estimated_peak_token_num += a_len + b_len
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -44,13 +44,11 @@ class PDDecodeQueue(BaseQueue):
                             req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                         )
                     else:
-                        # 与新请求准入使用相同的历史输出长度估算。
-                        estimated_output_len = min(
-                            self.router.router_statics.ema_req_out_len, req.sample_params.max_new_tokens
-                        )
-                        req_token_num = req.input_len + estimated_output_len
-                        req_token_num += self.args.page_size
-                        estimated_peak_token_num += req_token_num
+                        # 尚未进入 decode 的请求，与新请求准入一样直接累加 a_len + b_len。
+                        # 复用 get_tuple_tokens，统一计入分页对齐、两轮 MTP，以及 stop_str 等异步操作
+                        # 造成的退出延迟所需的余量，再与下方 decode 请求的动态 KV 峰值相加。
+                        a_len, b_len = req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+                        estimated_peak_token_num += a_len + b_len
 
         if decoding_req_list:
             # 按预计剩余输出长度排序，计算每个请求结束时仍存活请求的 KV 占用峰值，

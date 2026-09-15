@@ -80,7 +80,7 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     ]
 
 
-def test_chunked_req_get_tuple_tokens_adds_page_reserve():
+def test_chunked_req_get_tuple_tokens_adds_page_and_async_reserve():
     req = SimpleNamespace(
         input_len=10,
         shm_cur_output_len=0,
@@ -88,7 +88,7 @@ def test_chunked_req_get_tuple_tokens_adds_page_reserve():
         sample_params=SimpleNamespace(ignore_eos=True, max_new_tokens=5),
     )
 
-    assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 8)
+    assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 26)
 
 
 def test_finish_status(req):

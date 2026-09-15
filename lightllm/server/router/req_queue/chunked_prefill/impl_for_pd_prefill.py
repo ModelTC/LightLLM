@@ -13,14 +13,15 @@ class PDPrefillQueue(BaseQueue):
         super().__init__(args, router, dp_index, dp_size_in_node)
         logger.info(
             "PD prefill requests normally generate only one output token; "
-            "estimate peak KV usage by adding one page to each request and summing the token counts"
+            "estimate peak KV usage by summing each request's a_len + b_len, "
+            "including page alignment, MTP and asynchronous exit reserves"
         )
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
-        req_token_num = req.input_len + req.sample_params.max_new_tokens
-        req_token_num += self.args.page_size
-        estimated_peak_token_num += req_token_num
+        # 与已有 batch 使用相同的请求容量估算，确保新请求准入也计入分页、MTP 和异步退出所需的余量。
+        a_len, b_len = req.get_tuple_tokens(self.is_busy(), self.router.router_statics.ema_req_out_len)
+        estimated_peak_token_num += a_len + b_len
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -36,15 +37,17 @@ class PDPrefillQueue(BaseQueue):
             return False, None, None
 
     def _caclu_batch_estimated_peak_token_num(self, batch: Batch):
+        is_busy = self.is_busy()
         estimated_peak_token_num = 0
         if batch is not None:
             for req in batch.reqs:
                 if req.sample_params.suggested_dp_index == self.dp_index:
                     # PD prefill 请求通常只生成一个 token，其 KV 占用不会像 decode 请求一样持续增长，
-                    # 因此为每个请求额外增加一个 page_size 后直接线性相加即可完成估算。
-                    req_token_num = req.input_len + req.sample_params.max_new_tokens
-                    req_token_num += self.args.page_size
-                    estimated_peak_token_num += req_token_num
+                    # 因此直接累加每个请求的 a_len + b_len，作为整个 batch 的峰值容量估算。
+                    # get_tuple_tokens 会结合当前输出长度和 KV 长度估算请求容量，并统一计入分页对齐、
+                    # 两轮 MTP 以及 stop_str 等异步操作造成的退出延迟所需的余量，具体计算见该方法。
+                    a_len, b_len = req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+                    estimated_peak_token_num += a_len + b_len
 
         return estimated_peak_token_num
 
