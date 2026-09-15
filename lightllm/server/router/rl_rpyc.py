@@ -84,6 +84,8 @@ class RouterRlOpHelper(rpyc.Service):
                 ret = res
                 break
         ret.success = all(res.success for res in all_ret)
+        if req.op_name.startswith("calibration_"):
+            ret.op_result = [res.op_result for res in all_ret]
 
         if self.is_multinode_tp:
             # True/False -> 1/0；MIN all_reduce：任一节点失败则全体 success=False

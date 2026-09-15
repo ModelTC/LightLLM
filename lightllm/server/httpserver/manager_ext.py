@@ -35,6 +35,9 @@ class HttpRlManagerHelper:
     async def continue_generation(self):
         return await self.rl_controller.continue_generation()
 
+    async def calibration_op(self, op_name: str, job_id: str) -> RlOpRsp:
+        return await self.rl_controller.calibration_op(op_name, job_id)
+
     async def flush_cache(self, request: FlushCacheReq):
         return await self.rl_controller.flush_cache(request)
 

@@ -260,6 +260,9 @@ class HttpRlController:
                 op_name=op_name,
             )
 
+    async def calibration_op(self, op_name: str, job_id: str) -> RlOpRsp:
+        return await self._call_rl_op(op_name, {"job_id": job_id})
+
     async def flush_cache(self, request: FlushCacheReq):
         return await self._call_rl_op("flush_cache", request)
 
