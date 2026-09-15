@@ -55,7 +55,8 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         device = self.infer_state.input_ids.device
 
         q_starts = self.infer_state.b1_cu_q_seq_len.int()
-        b_page_len = triton.cdiv(self.infer_state.b_seq_len, self.backend.page_size)
+        # token 长度除以页大小并向上取整，末页不足一页也计为一页。
+        b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
         kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
         kv_last_page_len = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
         kv_indices = torch.empty(
@@ -150,7 +151,8 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         self.backend: FlashInferAttBackend = self.backend
         device = self.infer_state.input_ids.device
         model = self.backend.model
-        b_page_len = triton.cdiv(self.infer_state.b_seq_len, self.backend.page_size)
+        # token 长度除以页大小并向上取整，末页不足一页也计为一页。
+        b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
         self.kv_last_page_len_buffer = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
         if (
             self.infer_state.batch_size <= model.graph_max_batch_size
