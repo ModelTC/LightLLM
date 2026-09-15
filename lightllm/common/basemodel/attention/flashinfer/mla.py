@@ -139,6 +139,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         device = self.infer_state.input_ids.device
         batch_size = self.infer_state.batch_size
 
+        # TODO: 将页数及页数前缀和的计算融合为一个 Triton 算子。
         # token 长度除以页大小并向上取整，末页不足一页也计为一页。
         b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
         self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)

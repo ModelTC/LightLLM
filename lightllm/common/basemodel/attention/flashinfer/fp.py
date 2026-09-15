@@ -152,6 +152,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         self.backend: FlashInferAttBackend = self.backend
         device = self.infer_state.input_ids.device
         model = self.backend.model
+        # TODO: 将页数、页数前缀和及末页有效 token 数的计算融合为一个 Triton 算子。
         # token 长度除以页大小并向上取整，末页不足一页也计为一页。
         b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
         self.kv_last_page_len_buffer = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
