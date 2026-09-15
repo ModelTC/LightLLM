@@ -63,6 +63,8 @@ class Glm5NextNsaInfer:
         weights = layer_weight.weights_proj_.mm(hidden_states.float())
         weights = weights * (self.heads ** -0.5 * self.dim ** -0.5) * q_scale.squeeze(-1)
         max_pools = triton.cdiv(infer_state.max_kv_seq_len, 4 * 128) * 128
+        # Prefill usually has many queries: parallelize over Q and reuse K within each query tile.
+        # Decode has few queries, so paged MQA also splits K across SMs for parallelism.
         if infer_state.is_prefill:
             groups = self._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
         else:
@@ -81,7 +83,8 @@ class Glm5NextNsaInfer:
             att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
         groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
-        # Bound the transient score matrix independently of total batch length.
+        # Budget 64 MiB for FP32 logits. At 1M tokens this permits 64 queries per chunk,
+        # limiting Q parallelism even when the prefill batch contains many tokens.
         chunk_size = max(1, min(q_fp8.shape[0], 16 * 1024 * 1024 // max_pools))
         import deep_gemm
 
@@ -111,8 +114,9 @@ class Glm5NextNsaInfer:
             max_pools,
         )
         metadata = deep_gemm.get_paged_mqa_logits_metadata(lengths, 64, deep_gemm.get_num_sms())
-        # Each physical query has its own length, including MTP and HOLD rows.
-        # next_n=1 also supports verify widths above Hopper's native limit of 2.
+        # Each MTP position has its own pool length; HOLD rows have no valid pools.
+        # Fixed-width mtp_step=2 gives Q=[3 * num_requests, 1, heads, dim], so next_n stays 1.
+        # All three verify positions are preserved despite the SM90 kernel's native next_n limit of 2.
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8.unsqueeze(1), pages, weights, lengths, block_table, metadata, max_pools, clean_logits=False
         )
