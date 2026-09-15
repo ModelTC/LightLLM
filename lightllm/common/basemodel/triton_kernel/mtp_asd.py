@@ -133,6 +133,11 @@ def mtp_asd_verify(
     # not verify any draft, so its column is clamped and its regret is never consumed.
     draft_columns = torch.clamp(b_mtp_index + 1, max=verify_width - 1).to(torch.int64)
     row_draft_token_ids = req_to_next_token_ids[b_req_idx.to(torch.int64), draft_columns]
+    # Rows that do not verify a real draft (a request's bonus row, or -1 padding in
+    # sparsely filled production buffers) can read token id -1 here; their regrets are
+    # masked out inside the kernel, so clamp to a valid index instead of letting
+    # gather hit a device-side out-of-bounds assert.
+    row_draft_token_ids = row_draft_token_ids.clamp(min=0)
     row_max_logits = logits.max(dim=-1).values
     row_draft_logits = logits.gather(dim=-1, index=row_draft_token_ids.view(-1, 1)).squeeze(-1)
     row_regrets = (row_max_logits - row_draft_logits).to(torch.float32)

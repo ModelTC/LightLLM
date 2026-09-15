@@ -821,6 +821,30 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Enable dynamic speculative scheduling.""",
     )
     parser.add_argument(
+        "--mtp_asd_regret_budget",
+        type=float,
+        default=None,
+        help="""Enable Approximate Speculative Decoding (ASD) acceptance for MTP greedy
+        verification with this per-request cumulative regret budget B (arxiv:2608.03447).
+        A draft token whose target-logit regret keeps the request-level cumulative regret
+        within B is accepted. None (default) keeps strict lossless verification;
+        B=0 recovers it exactly.""",
+    )
+    parser.add_argument(
+        "--mtp_asd_local_regret_ratio",
+        type=float,
+        default=0.25,
+        help="""ASD local gate g: a draft token at position i (of K draft tokens) is
+        accepted only if regret_i / (K - i) <= g. Later draft positions get less slack.""",
+    )
+    parser.add_argument(
+        "--mtp_asd_block_max_mismatch",
+        type=int,
+        default=2,
+        help="""ASD per-block cap m: at most m relaxed (non-argmax) draft tokens are
+        accepted per verify step. m=0 recovers strict greedy verification.""",
+    )
+    parser.add_argument(
         "--kv_quant_calibration_config_path",
         type=str,
         default=None,
