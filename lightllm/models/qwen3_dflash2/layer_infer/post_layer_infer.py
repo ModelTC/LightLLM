@@ -125,7 +125,7 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
             dtype=torch.float32,
             device=candidate_ids.device,
         )
-        selected_ids, q_rows, _ = selector_walk(
+        selected_ids, q_rows = selector_walk(
             scores=score_lattice,
             candidate_ids=candidate_ids,
             uniforms=uniforms,

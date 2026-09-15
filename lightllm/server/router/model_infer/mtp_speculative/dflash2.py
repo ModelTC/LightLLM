@@ -167,7 +167,8 @@ def _rejection_sample_from_probs(
     # Only the first rejected position needs a residual sample. If all drafts
     # are accepted, sample the target model's final bonus row instead.
     selected_target_row = accepted_draft_count.long()
-    correction_probs = sampling_probs[row_ids, selected_target_row].clone()
+    target_fallback = sampling_probs[row_ids, selected_target_row]
+    correction_probs = target_fallback.clone()
     is_rejection = accepted_draft_count.lt(draft_width)
     rejected_slot = accepted_draft_count.clamp_max(draft_width - 1).long()
     rejected_candidate_ids = candidate_ids[row_ids, rejected_slot]
@@ -175,7 +176,6 @@ def _rejection_sample_from_probs(
     correction_probs.scatter_add_(1, rejected_candidate_ids, -rejected_q_rows)
     correction_probs.clamp_min_(0.0)
     correction_mass = correction_probs.sum(dim=-1, keepdim=True)
-    target_fallback = sampling_probs[row_ids, selected_target_row]
     correction_probs = torch.where(
         correction_mass > 1e-20,
         correction_probs / correction_mass.clamp_min(1e-20),

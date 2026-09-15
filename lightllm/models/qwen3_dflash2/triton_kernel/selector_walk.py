@@ -12,7 +12,6 @@ def _selector_walk_kernel(
     greedy_mask_ptr,
     tokens_ptr,
     q_ptr,
-    path_indices_ptr,
     SLOT_NUM: tl.constexpr,
     TOP_K: tl.constexpr,
 ):
@@ -45,7 +44,6 @@ def _selector_walk_kernel(
         candidate_offset = output_offset * TOP_K
         tl.store(q_ptr + candidate_offset + offsets, probabilities)
         tl.store(tokens_ptr + output_offset, tl.load(candidate_ids_ptr + candidate_offset + selected_index))
-        tl.store(path_indices_ptr + output_offset, selected_index)
         previous_index = selected_index
 
 
@@ -74,7 +72,6 @@ def selector_walk(
     greedy_mask = greedy_mask.contiguous()
     tokens = torch.empty((req_num, slot_num), dtype=torch.int64, device=scores.device)
     q_rows = torch.empty((req_num, slot_num, top_k), dtype=torch.float32, device=scores.device)
-    path_indices = torch.empty((req_num, slot_num), dtype=torch.int64, device=scores.device)
 
     _selector_walk_kernel[(req_num,)](
         scores,
@@ -84,10 +81,9 @@ def selector_walk(
         greedy_mask,
         tokens,
         q_rows,
-        path_indices,
         SLOT_NUM=slot_num,
         TOP_K=top_k,
         num_warps=1,
         num_stages=1,
     )
-    return tokens, q_rows, path_indices
+    return tokens, q_rows

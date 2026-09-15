@@ -192,11 +192,7 @@ class ModelMtpOutputCollector:
         if collector.draft_candidate_probs is not None:
             collector.draft_candidate_probs = unpad_head_rows(collector.draft_candidate_probs)
         if collector.confidence_logits is not None:
-            confidence_row_count = collector.confidence_logits.shape[0]
-            assert confidence_row_count > 0 and padded_batch_size % confidence_row_count == 0
-            rows_per_confidence = padded_batch_size // confidence_row_count
-            assert origin_batch_size % rows_per_confidence == 0
-            collector.confidence_logits = collector.confidence_logits[: origin_batch_size // rows_per_confidence]
+            collector.confidence_logits = unpad_head_rows(collector.confidence_logits)
         return collector
 
     def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutputCollector":
