@@ -3,7 +3,7 @@ import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
-from ...triton_kernel.repack_kv_index import repack_kv_index, repack_page_kv_index
+from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
 from .utils import should_init_decode_wrapper
 
@@ -22,16 +22,13 @@ class FlashInferAttBackend(BaseAttBackend):
         head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
         self.head_dim = model.config.get("head_dim", head_dim)
         self.max_seq_length = model.max_seq_length
+        self.max_page_num = triton.cdiv(self.max_seq_length, self.page_size)
         self.kv_indices_buffer = [
             torch.empty(
-                model.graph_max_batch_size * triton.cdiv(self.max_seq_length, self.page_size),
-                dtype=torch.int32,
-                device=get_current_device_id(),
+                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
             ),
             torch.empty(
-                model.graph_max_batch_size * triton.cdiv(self.max_seq_length, self.page_size),
-                dtype=torch.int32,
-                device=get_current_device_id(),
+                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
             ),
         ]
         self.q_data_type = model.data_type
@@ -62,29 +59,19 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         kv_starts[1:] = b_page_len.cumsum(0)
         kv_last_page_len = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
         kv_indices = torch.empty(
-            batch_size * triton.cdiv(self.backend.max_seq_length, self.backend.page_size),
+            batch_size * self.backend.max_page_num,
             dtype=torch.int32,
             device=device,
         )
-        if self.backend.page_size == 1:
-            repack_kv_index(
-                self.infer_state.req_manager.req_to_token_indexs,
-                self.infer_state.b_req_idx,
-                self.infer_state.b_seq_len,
-                kv_starts[:-1],
-                self.infer_state.max_kv_seq_len,
-                kv_indices,
-            )
-        else:
-            repack_page_kv_index(
-                self.infer_state.req_manager.req_to_token_indexs,
-                self.infer_state.b_req_idx,
-                b_page_len,
-                kv_starts[:-1],
-                triton.cdiv(self.infer_state.max_kv_seq_len, self.backend.page_size),
-                kv_indices,
-                self.backend.page_size,
-            )
+        repack_kv_index(
+            self.infer_state.req_manager.req_to_token_indexs,
+            self.infer_state.b_req_idx,
+            self.infer_state.b_seq_len,
+            kv_starts[:-1],
+            self.infer_state.max_kv_seq_len,
+            kv_indices,
+            page_size=self.backend.page_size,
+        )
         self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
             self.backend.get_gpu_workspace_buffer(
                 key_name=self.backend.workspace_buffer_key,
@@ -165,40 +152,31 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         model = self.backend.model
         b_page_len = triton.cdiv(self.infer_state.b_seq_len, self.backend.page_size)
         self.kv_last_page_len_buffer = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
-        buffer_len = self.infer_state.batch_size * triton.cdiv(self.backend.max_seq_length, self.backend.page_size)
         if (
             self.infer_state.batch_size <= model.graph_max_batch_size
             and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
         ):
-            self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][:buffer_len]
+            self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][
+                : self.infer_state.batch_size * self.backend.max_page_num
+            ]
         else:
             self.kv_indices = torch.empty(
-                buffer_len,
+                self.infer_state.batch_size * self.backend.max_page_num,
                 dtype=torch.int32,
                 device=device,
             )
 
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len.int().clone()
         self.kv_starts[1:] = b_page_len.cumsum(0)
-        if self.backend.page_size == 1:
-            repack_kv_index(
-                self.infer_state.req_manager.req_to_token_indexs,
-                self.infer_state.b_req_idx,
-                self.infer_state.b_seq_len,
-                self.kv_starts[:-1],
-                self.infer_state.max_kv_seq_len,
-                self.kv_indices,
-            )
-        else:
-            repack_page_kv_index(
-                self.infer_state.req_manager.req_to_token_indexs,
-                self.infer_state.b_req_idx,
-                b_page_len,
-                self.kv_starts[:-1],
-                triton.cdiv(self.infer_state.max_kv_seq_len, self.backend.page_size),
-                self.kv_indices,
-                self.backend.page_size,
-            )
+        repack_kv_index(
+            self.infer_state.req_manager.req_to_token_indexs,
+            self.infer_state.b_req_idx,
+            self.infer_state.b_seq_len,
+            self.kv_starts[:-1],
+            self.infer_state.max_kv_seq_len,
+            self.kv_indices,
+            page_size=self.backend.page_size,
+        )
         if not self._should_init_decode_wrapper():
             # 处于 graph replay 回放阶段，不需要特殊初始化 decode wrapper。
             return

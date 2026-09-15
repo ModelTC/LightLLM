@@ -1,7 +1,7 @@
 import torch
 import pytest
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index, repack_page_kv_index
+from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
 
 logger = init_logger(__name__)
 
@@ -43,30 +43,32 @@ def test_repack_kv_index(batch, max_seq_len):
     assert torch.allclose(output.float(), ref.float())
 
 
-def test_repack_page_kv_index():
-    page_size = 4
+@pytest.mark.parametrize("page_size, page_count", [(1, 3), (3, 3), (4, 3), (16, 3), (4, 65), (16, 65)])
+def test_repack_kv_index_with_pages(page_size, page_count):
     req_to_token_indexs = torch.tensor(
         [
-            list(range(40, 52)),
-            list(range(80, 92)),
-            list(range(120, 132)),
+            list(range(10 * page_size, (10 + page_count) * page_size)),
+            list(range(20 * page_size, (20 + page_count) * page_size)),
+            list(range(30 * page_size, (30 + page_count) * page_size)),
         ],
         dtype=torch.int32,
         device="cuda",
     )
     req_indexes = torch.tensor([2, 0, 1], dtype=torch.int32, device="cuda")
-    page_lens = torch.tensor([2, 1, 3], dtype=torch.int32, device="cuda")
+    # 使用不满的末页，并覆盖超过单个 block（64 页）的请求。
+    max_seq_len = page_count * page_size - (page_size > 1)
+    seq_lens = torch.tensor([2 * page_size, 1, max_seq_len], dtype=torch.int32, device="cuda")
     starts = torch.tensor([0, 2, 3], dtype=torch.int32, device="cuda")
-    output = torch.empty((6,), dtype=torch.int32, device="cuda")
+    output = torch.empty((3 + page_count,), dtype=torch.int32, device="cuda")
 
-    repack_page_kv_index(
+    repack_kv_index(
         req_to_token_indexs,
         req_indexes,
-        page_lens,
+        seq_lens,
         starts,
-        max_page_len=3,
+        max_seq_len=max_seq_len,
         out_kv_index=output,
         page_size=page_size,
     )
 
-    assert output.cpu().tolist() == [30, 31, 10, 20, 21, 22]
+    assert output.cpu().tolist() == [30, 31, 10] + list(range(20, 20 + page_count))
