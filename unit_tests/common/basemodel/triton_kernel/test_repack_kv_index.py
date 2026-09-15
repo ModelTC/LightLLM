@@ -39,7 +39,14 @@ def test_repack_kv_index(batch, max_seq_len):
         req_to_token_indexs[b][:sl] = rand_idx[start : start + sl]
 
     repack_kv_ref(req_to_token_indexs, b_req_idx, b_seq_len, b_start_loc, ref)
-    repack_kv_index(req_to_token_indexs, b_req_idx, b_seq_len, b_start_loc, MAX_SEQ_LEN, output)
+    repack_kv_index(
+        req_to_token_indexs=req_to_token_indexs,
+        b_req_idx=b_req_idx,
+        b_token_len=b_seq_len,
+        b_page_start_loc=b_start_loc,
+        max_token_len=MAX_SEQ_LEN,
+        out_page_indices=output,
+    )
     assert torch.allclose(output.float(), ref.float())
 
 
@@ -62,12 +69,12 @@ def test_repack_kv_index_with_pages(page_size, page_count):
     output = torch.empty((3 + page_count,), dtype=torch.int32, device="cuda")
 
     repack_kv_index(
-        req_to_token_indexs,
-        req_indexes,
-        seq_lens,
-        starts,
-        max_seq_len=max_seq_len,
-        out_kv_index=output,
+        req_to_token_indexs=req_to_token_indexs,
+        b_req_idx=req_indexes,
+        b_token_len=seq_lens,
+        b_page_start_loc=starts,
+        max_token_len=max_seq_len,
+        out_page_indices=output,
         page_size=page_size,
     )
 

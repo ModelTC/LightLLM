@@ -157,12 +157,12 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             )
 
         repack_kv_index(
-            self.infer_state.req_manager.req_to_token_indexs,
-            self.infer_state.b_req_idx,
-            self.infer_state.b_seq_len,
-            self.kv_starts[:-1],
-            self.infer_state.max_kv_seq_len,
-            self.kv_indices,
+            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=self.infer_state.b_req_idx,
+            b_token_len=self.infer_state.b_seq_len,
+            b_page_start_loc=self.kv_starts[:-1],
+            max_token_len=self.infer_state.max_kv_seq_len,
+            out_page_indices=self.kv_indices,
             page_size=self.backend.page_size,
         )
 
