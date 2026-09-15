@@ -52,7 +52,7 @@ def _launch_subprocesses(args: StartArgs):
             or (args.run_mode == "normal" and args.export_fp8kv_calibration)
         ), (
             "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled; "
-            "offline FP8 KV calibration also supports normal mode with --export_fp8kv_calibration"
+            "the internal FP8 KV calibration job also supports normal mode"
         )
 
     auto_set_max_req_total_len(args)
@@ -154,10 +154,10 @@ def _launch_subprocesses(args: StartArgs):
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
     if args.export_fp8kv_calibration:
-        assert args.llm_kv_type == "None", "--export_fp8kv_calibration requires llm_kv_type=None"
-        assert args.disable_cudagraph is True, "--export_fp8kv_calibration requires --disable_cudagraph"
+        assert args.llm_kv_type == "None", "internal FP8 KV calibration requires llm_kv_type=None"
+        assert args.disable_cudagraph is True, "internal FP8 KV calibration requires disable_cudagraph"
         assert not args.enable_prefill_cudagraph, (
-            "--export_fp8kv_calibration requires prefill CUDA Graph to be disabled; "
+            "internal FP8 KV calibration requires prefill CUDA Graph to be disabled; "
             "remove --enable_prefill_cudagraph"
         )
 

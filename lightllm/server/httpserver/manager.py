@@ -131,7 +131,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.latest_success_infer_time_mark = SharedInt("latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
 
-        self.rl_controller: Optional[HttpRlController] = HttpRlController(self) if args.enable_rl else None
+        self.rl_controller: Optional[HttpRlController] = (
+            HttpRlController(self) if (args.enable_rl or args.export_fp8kv_calibration) else None
+        )
 
         self.run_reqs_count_mark = SharedInt("run_reqs_count_mark")
         self.run_reqs_count_mark.set_value(0)

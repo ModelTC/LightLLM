@@ -470,7 +470,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
 
-        if self.args.enable_rl:
+        if self.args.enable_rl or self.args.export_fp8kv_calibration:
             await self.process_rl_ops()
 
         if self.is_multinode_tp:
@@ -506,7 +506,7 @@ def start_router_process(args, pipe_writer):
             router.profiler_cmd_queue,
         )
         router.rl_rpyc_server, router.rl_rpyc_thread = None, None
-        if args.enable_rl:
+        if args.enable_rl or args.export_fp8kv_calibration:
             router.rl_rpyc_server, router.rl_rpyc_thread = start_router_rl_rpyc_server(args, router)
     except:
         import traceback

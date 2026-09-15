@@ -109,9 +109,34 @@ class ModelRpcServer(rpyc.Service):
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
+    def _calibration_control(self, req: RlOpReq) -> RlOpRsp:
+        if not self.args.export_fp8kv_calibration:
+            raise ValueError("calibration control is unavailable outside internal export mode")
+        if not isinstance(req.op_args, dict) or req.op_args.get("job_id") != self.args.calibration_job_id:
+            raise ValueError("calibration job_id does not match this service")
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        infer_pending = len(g_infer_context.infer_req_ids)
+        mapped_pending = len(g_infer_context.requests_mapping)
+        io_pending = int(self.backend.shm_reqs_io_buffer.is_ready())
+        mem = self.backend.model.mem_manager
+        if req.op_name == "calibration_status":
+            return RlOpRsp(
+                success=True,
+                msg="ok",
+                op_name=req.op_name,
+                op_result={"idle": not (infer_pending or mapped_pending or io_pending), **mem.calibration_status()},
+            )
+        if infer_pending or mapped_pending or io_pending:
+            raise ValueError("calibration operation requires an idle rank")
+        op = mem.begin_calibration if req.op_name == "calibration_begin" else mem.snapshot_calibration
+        return RlOpRsp(success=True, msg="ok", op_name=req.op_name, op_result={"idle": True, **op()})
+
     def exposed_rl_op(self, req: RlOpReq) -> RlOpRsp:
         try:
             req = obtain(req)
+            if req.op_name in {"calibration_status", "calibration_begin", "calibration_snapshot"}:
+                return self._calibration_control(req)
             if self.rl_backend_ops is None:
                 raise ValueError("RL backend ops is not initialized")
             if not RlBackendOps.supports(req.op_name):

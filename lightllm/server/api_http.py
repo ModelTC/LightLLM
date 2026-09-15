@@ -577,6 +577,10 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
+    if g_objs.args.export_fp8kv_calibration:
+        from .api_http_calibration import router as calibration_router
+
+        app.include_router(calibration_router)
     loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return
