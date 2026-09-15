@@ -13,7 +13,13 @@ from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
     fused_kda_gate_chunk_cumsum,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools, gather_pools, get_pool_ranges, expand_topk
+from lightllm.models.glm5_next.triton_kernel.kpool import (
+    compress_pools,
+    gather_pools,
+    gather_paged_pools,
+    get_pool_ranges,
+    expand_topk,
+)
 from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
 
 
@@ -297,6 +303,48 @@ def test_kpool_decode_cuda_graph_and_padding():
                 assert torch.equal(actual[:128], key.view(torch.uint8)[0])
                 assert torch.equal(actual[128:].view(torch.float32), scale.flatten())
         assert not tail[[0, 2, 4]].any()
+
+
+@pytest.mark.parametrize("max_pools", [640, 262144])
+def test_gather_paged_pools_valid_pages_and_graph_replay(max_pools):
+    storage = torch.zeros(64, 1, 584, device="cuda", dtype=torch.bfloat16)
+    packed = storage.view(torch.uint8)[:, :, -132:]
+    source_keys = torch.randn(64, 128, device="cuda").to(torch.float8_e4m3fn).view(torch.uint8)
+    source_scales = torch.rand(64, device="cuda") + 0.1
+    packed[:, 0, :128] = source_keys
+    packed[:, 0, 128:] = source_scales.view(torch.uint8).view(64, 4)
+    table = torch.full((4, max_pools * 4), -1, device="cuda", dtype=torch.int32)
+    locations = torch.randint(0, 64, (4, max_pools), device="cuda", dtype=torch.int32)
+    table[:, 3::4] = locations
+    req_idx = torch.tensor([2, 0, 3], device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([max_pools, 3, 0], device="cuda", dtype=torch.int32)
+
+    def check(pages, block_table):
+        page_bytes = pages.view(pages.shape[0], -1)
+        for row, (req, length) in enumerate(zip(req_idx.tolist(), lengths.tolist())):
+            page_ids = block_table[row, : triton.cdiv(length, 64)].long()
+            keys = page_bytes[page_ids, : 64 * 128].reshape(-1, 128)
+            scales = page_bytes[page_ids, 64 * 128 :].contiguous().view(torch.float32).flatten()
+            locs = locations[req, :length].long()
+            assert torch.equal(keys[:length], source_keys[locs])
+            assert torch.equal(scales[:length], source_scales[locs])
+            assert not keys[length:].any()
+            assert (scales[length:] == 1).all()
+
+    check(*gather_paged_pools(packed, table, req_idx, lengths, max_pools))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        pages, block_table = gather_paged_pools(packed, table, req_idx, lengths, max_pools)
+    # Empty HOLD rows must do no page writes, even with a 1M graph capacity.
+    pages.fill_(127)
+    lengths.zero_()
+    graph.replay()
+    assert (pages == 127).all()
+    for counts in ([513, 65, max_pools], [1, 0, 3]):
+        lengths.copy_(torch.tensor(counts, device="cuda", dtype=torch.int32))
+        req_idx.copy_(torch.tensor([1, 3, 0], device="cuda", dtype=torch.int32))
+        graph.replay()
+        check(pages, block_table)
 
 
 @pytest.mark.parametrize("max_pools", [65535, 65536, 262144])

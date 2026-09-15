@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
+from lightllm.utils.device_utils import get_device_sm_count
 
 
 @triton.jit
@@ -256,6 +257,56 @@ def gather_pools(packed_buffer, req_table, req_idx, seq_len, max_pools):
         num_warps=4,
     )
     return keys, scales
+
+
+@triton.jit
+def _gather_paged_pools(
+    Packed,
+    ReqTable,
+    ReqIdx,
+    PoolLengths,
+    Pages,
+    PACKED_STRIDE: tl.constexpr,
+    REQ_STRIDE: tl.constexpr,
+    MAX_PAGES: tl.constexpr,
+):
+    batch = tl.program_id(1)
+    req = tl.load(ReqIdx + batch)
+    length = tl.load(PoolLengths + batch)
+    rows = tl.arange(0, 64)
+    cols = tl.arange(0, 128)
+    # A fixed grid is replayable at 1M; the GPU length bounds the work.
+    for page in range(tl.program_id(0), tl.cdiv(length, 64), tl.num_programs(0)):
+        pools = page * 64 + rows
+        valid = pools < length
+        locs = tl.load(ReqTable + req * REQ_STRIDE + pools * 4 + 3, valid, 0).to(tl.int64)
+        keys = tl.load(Packed + locs[:, None] * PACKED_STRIDE + cols[None, :], valid[:, None], 0)
+        scales = tl.load((Packed + locs * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)), valid, 1.0)
+        dest = Pages + (batch.to(tl.int64) * MAX_PAGES + page) * (64 * 132)
+        # DeepGEMM stores 64 FP8 keys followed by their 64 FP32 scales.
+        tl.store(dest + rows[:, None] * 128 + cols[None, :], keys)
+        tl.store((dest + 64 * 128).to(tl.pointer_type(tl.float32)) + rows, scales)
+
+
+def gather_paged_pools(packed_buffer, req_table, req_idx, pool_lengths, max_pools):
+    """Pack valid pools into DeepGEMM pages; unused pages remain unread."""
+    batch = req_idx.numel()
+    max_pages = triton.cdiv(max_pools, 64)
+    pages = torch.empty((batch * max_pages, 64, 1, 132), device=packed_buffer.device, dtype=torch.uint8)
+    block_table = torch.arange(batch * max_pages, device=pages.device, dtype=torch.int32).view(batch, max_pages)
+    blocks = min(max_pages, triton.cdiv(get_device_sm_count() * 4, batch))
+    _gather_paged_pools[(blocks, batch)](
+        packed_buffer,
+        req_table,
+        req_idx,
+        pool_lengths,
+        pages,
+        packed_buffer.stride(0),
+        req_table.stride(0),
+        max_pages,
+        num_warps=4,
+    )
+    return pages, block_table
 
 
 @triton.jit

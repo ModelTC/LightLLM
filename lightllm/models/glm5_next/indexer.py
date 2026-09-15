@@ -4,7 +4,7 @@ import triton
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 
 from .triton_kernel.index_quant import hadamard_transform_quant_fp8
-from .triton_kernel.kpool import compress_pools, gather_pools, get_pool_ranges, expand_topk
+from .triton_kernel.kpool import compress_pools, gather_pools, gather_paged_pools, get_pool_ranges, expand_topk
 
 
 class Glm5NextNsaInfer:
@@ -63,6 +63,13 @@ class Glm5NextNsaInfer:
         weights = layer_weight.weights_proj_.mm(hidden_states.float())
         weights = weights * (self.heads ** -0.5 * self.dim ** -0.5) * q_scale.squeeze(-1)
         max_pools = triton.cdiv(infer_state.max_kv_seq_len, 4 * 128) * 128
+        if infer_state.is_prefill:
+            groups = self._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
+        else:
+            groups = self._get_decode_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
+        return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
+
+    def _get_prefill_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
         keys = gather_pools(
             packed_buffer,
             infer_state.req_manager.req_to_token_indexs,
@@ -73,13 +80,13 @@ class Glm5NextNsaInfer:
         starts, ends, lengths = get_pool_ranges(
             att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
-        groups = torch.empty((q.shape[0], self.topk // 4), dtype=torch.int32, device=q.device)
+        groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
         # Bound the transient score matrix independently of total batch length.
-        chunk_size = max(1, min(q.shape[0], 16 * 1024 * 1024 // max_pools))
+        chunk_size = max(1, min(q_fp8.shape[0], 16 * 1024 * 1024 // max_pools))
         import deep_gemm
 
-        for start in range(0, q.shape[0], chunk_size):
-            end = min(start + chunk_size, q.shape[0])
+        for start in range(0, q_fp8.shape[0], chunk_size):
+            end = min(start + chunk_size, q_fp8.shape[0])
             logits = deep_gemm.fp8_mqa_logits(
                 q_fp8[start:end],
                 keys,
@@ -90,4 +97,25 @@ class Glm5NextNsaInfer:
                 max_seqlen_k=max_pools,
             )
             self.select_topk_indices(logits, lengths[start:end], groups[start:end])
-        return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
+        return groups
+
+    def _get_decode_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
+        import deep_gemm
+
+        lengths = (att_state.lengths // 4).view(-1, 1)
+        pages, block_table = gather_paged_pools(
+            packed_buffer,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_req_idx,
+            lengths,
+            max_pools,
+        )
+        metadata = deep_gemm.get_paged_mqa_logits_metadata(lengths, 64, deep_gemm.get_num_sms())
+        # Each physical query has its own length, including MTP and HOLD rows.
+        # next_n=1 also supports verify widths above Hopper's native limit of 2.
+        logits = deep_gemm.fp8_paged_mqa_logits(
+            q_fp8.unsqueeze(1), pages, weights, lengths, block_table, metadata, max_pools, clean_logits=False
+        )
+        groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
+        self.select_topk_indices(logits, lengths.view(-1), groups)
+        return groups
