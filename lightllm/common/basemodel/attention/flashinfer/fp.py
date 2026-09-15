@@ -3,6 +3,7 @@ import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
+from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
 from .utils import should_init_decode_wrapper
@@ -54,9 +55,8 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         device = self.infer_state.input_ids.device
 
         q_starts = self.infer_state.b1_cu_q_seq_len.int()
-        kv_starts = self.infer_state.b1_cu_kv_seq_len.int().clone()
         b_page_len = triton.cdiv(self.infer_state.b_seq_len, self.backend.page_size)
-        kv_starts[1:] = b_page_len.cumsum(0)
+        kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
         kv_last_page_len = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
         kv_indices = torch.empty(
             batch_size * self.backend.max_page_num,
@@ -166,8 +166,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
                 device=device,
             )
 
-        self.kv_starts = self.infer_state.b1_cu_kv_seq_len.int().clone()
-        self.kv_starts[1:] = b_page_len.cumsum(0)
+        self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
         repack_kv_index(
             self.infer_state.req_manager.req_to_token_indexs,
             self.infer_state.b_req_idx,

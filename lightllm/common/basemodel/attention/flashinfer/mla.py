@@ -3,6 +3,7 @@ import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
+from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from ...triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
 from typing import Tuple
@@ -138,9 +139,8 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         device = self.infer_state.input_ids.device
         batch_size = self.infer_state.batch_size
 
-        self.kv_starts = self.infer_state.b1_cu_kv_seq_len.clone()
         b_page_len = triton.cdiv(self.infer_state.b_seq_len, self.backend.page_size)
-        self.kv_starts[1:] = b_page_len.cumsum(0)
+        self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
 
         self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device="cuda")
         self.q_indptr_host = torch.arange(batch_size + 1, dtype=torch.int32, device="cpu")
