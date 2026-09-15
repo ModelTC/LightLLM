@@ -397,8 +397,7 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen2_5_VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
-        elif model_type in ["qwen3_vl", "qwen3_vl_moe"]:
-            # Qwen3VisionTransformerPretrainedModel
+        elif model_type in ["qwen3_vl", "qwen3_vl_moe", "glm5_next"]:
             model_cfg["vision_config"]
             return True
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":

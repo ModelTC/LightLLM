@@ -94,9 +94,8 @@ class Glm5NextAttStatePageHelper(Qwen3NextLinearAttPageHelper):
         super().__init__(mem_manager)
         self.tail_dtype = mem_manager.req_to_indexer_tail.buffer.dtype
         self.tail_shape = (
-            self.linear_config.get_main_model_full_att_layer_num(),
-            self.linear_config.index_kpool,
-            2 * self.linear_config.index_head_dim,
+            self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
+            *mem_manager.req_to_indexer_tail.buffer.shape[2:],
         )
         self.tail_offset = ((self.state_nbytes + 15) // 16) * 16
         self.tail_nbytes = self.tail_shape[0] * self.tail_shape[1] * self.tail_shape[2] * self.tail_dtype.itemsize
@@ -112,8 +111,8 @@ class Glm5NextAttStatePageHelper(Qwen3NextLinearAttPageHelper):
 
     def write_req_to_page(self, page_index, req_idx, dp_mems):
         super().write_req_to_page(page_index, req_idx, dp_mems)
-        # All four slots travel together; the existing sequence length determines
-        # which 0-3 entries are live. No additional PD metadata is needed.
+        # The ring uses absolute token positions; sequence length already travels
+        # with the request, so restoring it needs no additional PD metadata.
         self._view_page_to_tail(page_index).copy_(dp_mems[0].req_to_indexer_tail.buffer[:, req_idx], non_blocking=True)
 
     def read_page_to_req(self, page_index, req_idx, dp_mems):

@@ -14,12 +14,19 @@ from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, se
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-@pytest.fixture
-def make_mems(monkeypatch):
+@pytest.fixture(params=[0, 2])
+def make_mems(monkeypatch, request):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
-    args = StartArgs(data_type="bfloat16", linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    mtp_step = request.param
+    args = StartArgs(
+        data_type="bfloat16",
+        linear_att_hash_page_size=4,
+        linear_att_page_block_num=2,
+        mtp_step=mtp_step,
+        mtp_mode="eagle_with_att" if mtp_step else None,
+    )
     set_unique_server_name(args)
     get_env_start_args.cache_clear()
     set_env_start_args(dataclasses.asdict(args))
@@ -51,10 +58,11 @@ def make_mems(monkeypatch):
             ssm_state_dtype=torch.float32,
             full_attention_interval=4,
             all_layer_num=8,
+            draft_full_att_kv_layer_num=int(mtp_step > 0),
         )
         mems = []
         for _ in range(tp):
-            mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2, config)
+            mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0), config)
             req = Glm5NextReqManager(3, 32, mem, config)
             mem.write_to_shm(req)
             assert mem.big_page_buffers is not None
@@ -69,21 +77,23 @@ def make_mems(monkeypatch):
 @pytest.mark.parametrize("remainder", range(4))
 def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, remainder):
     source, dest = make_mems(prefill_tp), make_mems(decode_tp)
+    mtp_size = get_env_start_args().mtp_step + 1
+    layers = source[0].layer_num
     src_req, dst_req = 0, 2
     length = 8 + remainder
     src_indexes = torch.randperm(32)[:length].tolist()
     dst_indexes = torch.randperm(32)[:length].tolist()
-    packed = torch.randint(0, 256, (2, length, 1, 1168), dtype=torch.uint8, device="cuda")
+    packed = torch.randint(0, 256, (layers, length, 1, 1168), dtype=torch.uint8, device="cuda")
     conv = torch.randn(6, 3, 8, 128, 3, dtype=torch.bfloat16, device="cuda")
     ssm = torch.randn(6, 8, 128, 128, dtype=torch.float32, device="cuda")
     # Non-live slots deliberately contain stale data. The sequence length, not
     # the bytes in these slots, controls subsequent K-pool completion.
-    tail = torch.randn(2, 4, 256, dtype=torch.bfloat16, device="cuda")
+    tail = torch.randn(layers, 3 + mtp_size, 256, dtype=torch.bfloat16, device="cuda")
     for rank, mem in enumerate(source):
         heads = slice(rank * 8 // prefill_tp, (rank + 1) * 8 // prefill_tp)
         mem.kv_buffer.view(torch.uint8)[:, src_indexes] = packed
-        mem.req_to_conv_state.buffer[:, src_req].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        mem.req_to_ssm_state.buffer[:, src_req].copy_(ssm[:, heads])
+        mem.req_to_conv_state.buffer[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
+        mem.req_to_ssm_state.buffer[:, src_req * mtp_size].copy_(ssm[:, heads])
         mem.req_to_indexer_tail.buffer[:, src_req].copy_(tail)
 
     untouched = []
@@ -94,8 +104,12 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
         mem.req_to_indexer_tail.buffer.normal_()
         untouched.append(
             [
-                x.buffer[:, [0, 1, 3]].clone()
-                for x in (mem.req_to_conv_state, mem.req_to_ssm_state, mem.req_to_indexer_tail)
+                x.buffer[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
+                for x, stride in (
+                    (mem.req_to_conv_state, 1),
+                    (mem.req_to_ssm_state, mtp_size),
+                    (mem.req_to_indexer_tail, 1),
+                )
             ]
         )
 
@@ -111,13 +125,15 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     for rank, mem in enumerate(dest):
         heads = slice(rank * 8 // decode_tp, (rank + 1) * 8 // decode_tp)
         assert torch.equal(mem.kv_buffer.view(torch.uint8)[:, dst_indexes], packed)
-        assert torch.equal(mem.req_to_conv_state.buffer[:, dst_req], conv[:, :, heads].reshape(6, -1, 3))
-        assert torch.equal(mem.req_to_ssm_state.buffer[:, dst_req], ssm[:, heads])
+        assert torch.equal(mem.req_to_conv_state.buffer[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3))
+        assert torch.equal(mem.req_to_ssm_state.buffer[:, dst_req * mtp_size], ssm[:, heads])
         assert torch.equal(mem.req_to_indexer_tail.buffer[:, dst_req], tail)
-        for state, expected in zip(
-            (mem.req_to_conv_state, mem.req_to_ssm_state, mem.req_to_indexer_tail), untouched[rank]
+        for (state, stride), expected in zip(
+            ((mem.req_to_conv_state, 1), (mem.req_to_ssm_state, mtp_size), (mem.req_to_indexer_tail, 1)),
+            untouched[rank],
         ):
-            assert torch.equal(state.buffer[:, [0, 1, 3]], expected)
+            indexes = torch.tensor([0, 1, 3], device="cuda") * stride
+            assert torch.equal(state.buffer[:, indexes], expected)
 
     # Continue through the next pool boundary on P and on the restored D state.
     # Different physical KV/request slots must yield identical pooled FP8 bytes.
@@ -154,4 +170,4 @@ def test_pd_page_capacity_includes_tail_without_resizing(make_mems):
     with pytest.raises(AssertionError, match="smaller than global linear att state"):
         helper.assert_page_size()
     shape = mem.get_paged_kv_move_buffer_shape(2, 2048)
-    assert shape == (2, 2048, 2, 1, 584)
+    assert shape == (2, 2048, mem.layer_num, 1, 584)

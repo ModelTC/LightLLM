@@ -13,16 +13,19 @@ from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.registry import ModelRegistry
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
+from .layer_infer.post_layer_infer import Glm5NextPostLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 
 
-@ModelRegistry(["glm5_next", "glm5_next_text"])
+@ModelRegistry("glm5_next", is_multimodal=True)
+@ModelRegistry("glm5_next_text")
 class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextPreLayerInfer
+    post_layer_infer_class = Glm5NextPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
 
     def _init_config(self):
@@ -31,7 +34,8 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
         self.config = dict(outer_config.get("text_config", outer_config))
         if "quantization_config" in outer_config:
             self.config["quantization_config"] = dict(outer_config["quantization_config"])
-        self.config["quantization_config"].setdefault("scale_fmt", "ue8m0")
+        if "quantization_config" in self.config:
+            self.config["quantization_config"].setdefault("scale_fmt", "ue8m0")
         self.config["autotune_layer_num"] = 4
         for names in (
             ["num_attention_heads", "n_head"],
@@ -44,7 +48,7 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
         super()._verify_params()
         args = self.args
         assert args.dp == 1 and not args.enable_tpsp_mix_mode, "GLM-5.3 Flash v1 uses plain tensor parallelism"
-        assert args.mtp_mode is None, "GLM-5.3 Flash MTP is not implemented yet"
+        assert args.mtp_mode in (None, "eagle_with_att", "vanilla_with_att"), "Unsupported GLM NextN mode"
         assert not args.enable_ep_moe, "GLM-5.3 Flash v1 uses tensor-parallel MoE"
         assert not args.enable_prefill_cudagraph, "GLM-5.3 Flash v1 supports decode CUDA graphs"
 
@@ -66,7 +70,7 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
             dtype=self.data_type,
             num_kv_heads=1,
             head_dim=self.linear_config.full_att_head_dim,
-            full_att_layer_num=self.linear_config.get_main_model_full_att_layer_num(),
+            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
             linear_config=self.linear_config,
             mem_fraction=self.mem_fraction,
         )

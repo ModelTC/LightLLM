@@ -17,8 +17,8 @@ class Glm5NextReqManager(ReqManagerForMamba):
         self.req_to_indexer_tail = LayerCache(
             size=max_request_num + 1,
             dtype=linear_config.full_att_dtype,
-            shape=(linear_config.index_kpool, 2 * linear_config.index_head_dim),
-            layer_num=linear_config.get_main_model_full_att_layer_num(),
+            shape=(linear_config.index_kpool + self.mtp_step, 2 * linear_config.index_head_dim),
+            layer_num=linear_config.get_full_att_kv_layer_num_with_draft_model(),
             device="cuda",
         )
 

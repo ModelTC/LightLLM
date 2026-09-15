@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from lightllm.common.basemodel.triton_kernel.mhc import hc_expand
-from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
+from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 
 
-class Glm5NextPreLayerInfer(LlamaPreLayerInfer):
+class Glm5NextPreLayerInfer(LlamaMultimodalPreLayerInfer):
     """Initialize mHC residual streams after token embedding and TP reduction."""
 
     def __init__(self, network_config):

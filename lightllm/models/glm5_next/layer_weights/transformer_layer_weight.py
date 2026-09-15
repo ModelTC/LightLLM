@@ -93,7 +93,10 @@ class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
         # surrounding projections are native FP8.  Its compressed-context
         # shortcut assumes a quantized kv_b matrix, so GLM uses the BMM split.
         self.enable_cc_method = False
-        self.is_linear_attention_layer = self.network_config_["layer_types"][self.layer_num_] == "linear_attention"
+        self.is_linear_attention_layer = (
+            self.layer_num_ < self.network_config_["num_hidden_layers"]
+            and self.network_config_["layer_types"][self.layer_num_] == "linear_attention"
+        )
         linear = self.network_config_["linear_attn_config"]
         self.linear_num_heads = linear["num_heads"]
         self.linear_head_dim = linear["head_dim"]
@@ -113,7 +116,8 @@ class Glm5NextTransformerLayerWeight(Deepseek3_2TransformerLayerWeight):
         else:
             self._init_ffn()
         self._init_glm_norms()
-        self._init_mhc()
+        if self.network_config_.get("mhc", True):
+            self._init_mhc()
 
     def _init_kda(self):
         prefix = f"model.layers.{self.layer_num_}.self_attn"

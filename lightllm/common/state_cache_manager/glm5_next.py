@@ -1,6 +1,6 @@
 import dataclasses
 
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 from .linear_att import LinearAttCacheConfig
@@ -46,6 +46,7 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=4,
             all_layer_num=layers,
+            draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num() if args.mtp_mode is not None else 0,
             index_kpool=config["index_kpool"],
             index_head_dim=config["index_head_dim"],
         )
@@ -57,6 +58,6 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
         return (
             self.full_att_head_dim
             * self.full_att_dtype.itemsize
-            * self.get_main_model_full_att_layer_num()
+            * self.get_full_att_kv_layer_num_with_draft_model()
             * page_tokens
         )

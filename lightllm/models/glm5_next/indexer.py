@@ -50,6 +50,7 @@ class Glm5NextNsaInfer:
             cu_q_lens=infer_state.b1_cu_q_seq_len,
             seq_lens=infer_state.b_seq_len,
             max_q_len=infer_state.max_q_seq_len,
+            mtp_index=None if infer_state.is_prefill else infer_state.b_mtp_index,
         )
 
         if infer_state.max_kv_seq_len <= self.topk:

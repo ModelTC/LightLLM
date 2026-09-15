@@ -26,7 +26,10 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.num_hidden_layers = network_config["num_hidden_layers"]
         self.autotune_layer_num = network_config.get("autotune_layer_num", self.num_hidden_layers)
-        self.is_linear_attention_layer = network_config["layer_types"][layer_num] == "linear_attention"
+        self.is_linear_attention_layer = (
+            layer_num < self.num_hidden_layers and network_config["layer_types"][layer_num] == "linear_attention"
+        )
+        self.use_mhc = network_config.get("mhc", True)
         self.mhc_streams = network_config.get("hc_mult", 4)
         self.hc_eps = network_config.get("hc_eps", 1e-6)
         self.hc_sinkhorn_iters = network_config.get("hc_sinkhorn_iters", 20)
@@ -255,7 +258,11 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         return streams
 
     def context_forward(self, input_embeddings, infer_state, layer_weight):
+        if not self.use_mhc:
+            return super().context_forward(input_embeddings, infer_state, layer_weight)
         return self._forward_mhc(input_embeddings, infer_state, layer_weight, prefill=True)
 
     def token_forward(self, input_embeddings, infer_state, layer_weight):
+        if not self.use_mhc:
+            return super().token_forward(input_embeddings, infer_state, layer_weight)
         return self._forward_mhc(input_embeddings, infer_state, layer_weight, prefill=False)

@@ -373,7 +373,10 @@ def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size)
     embeddings = torch.randn(1, hidden, device="cuda", dtype=torch.bfloat16)
     input_ids = torch.zeros(1, device="cuda", dtype=torch.long)
     pre_weight = SimpleNamespace(wte_weight_=lambda input_ids, alloc_func: embeddings[input_ids])
-    infer_state = SimpleNamespace(dist_group=None)
+    pre_weight.wte_weight_.weight = embeddings
+    pre_weight.wte_weight_.tp_vocab_start_id = 0
+    pre_weight.wte_weight_.tp_vocab_end_id = 1
+    infer_state = SimpleNamespace(dist_group=None, multimodal_params=[])
 
     def all_reduce(input_embeddings, **kwargs):
         # TP communication must operate on the original embedding width.
@@ -381,6 +384,7 @@ def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size)
         input_embeddings.mul_(tp_world_size)
 
     monkeypatch.setattr("lightllm.models.llama.layer_infer.pre_layer_infer.all_reduce", all_reduce)
+    monkeypatch.setattr("lightllm.models.qwen_vl.layer_infer.pre_layer_infer.all_reduce", all_reduce)
     expected_streams = (embeddings * tp_world_size).unsqueeze(1).expand(-1, 4, -1)
     weight = SimpleNamespace(
         att_norm_weight_=SimpleNamespace(weight=torch.ones(hidden, device="cuda", dtype=torch.bfloat16)),
@@ -391,6 +395,7 @@ def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size)
         setattr(weight, f"hc_{prefix}_base", SimpleNamespace(weight=torch.zeros(24, device="cuda")))
         setattr(weight, f"hc_{prefix}_scale", SimpleNamespace(weight=torch.ones(3, device="cuda")))
     layer = object.__new__(Glm5NextTransformerLayerInfer)
+    layer.use_mhc = True
     layer.embed_dim_, layer.mhc_streams = hidden, 4
     layer.num_hidden_layers, layer.autotune_layer_num = 5, 4
     layer.eps_, layer.hc_eps, layer.hc_sinkhorn_iters = 1e-5, 1e-6, 20
@@ -532,6 +537,8 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     )
     infer = SimpleNamespace(
         mem_manager=manager,
+        is_prefill=True,
+        b_mtp_index=torch.zeros(1, device="cuda", dtype=torch.int32),
         mem_index=ragged,
         # A large capacity also exercises query chunking and uninitialized
         # logits beyond each query's actual pool range.
@@ -561,6 +568,7 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     storage = storage.clone()
     storage[ragged[prefix:].long()] = 0
     tail.zero_()
+    infer.is_prefill = False
     infer.b1_cu_q_seq_len[1] = 1
     infer.max_q_seq_len = 1
     for pos in range(prefix, tokens):

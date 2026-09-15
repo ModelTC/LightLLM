@@ -34,6 +34,7 @@ def _compress_pools(
     Ragged,
     ReqIdx,
     CuQLens,
+    MtpIndex,
     RAW_STRIDE: tl.constexpr,
     TAIL_REQ_STRIDE: tl.constexpr,
     TAIL_SLOT_STRIDE: tl.constexpr,
@@ -41,12 +42,17 @@ def _compress_pools(
     HOLD_REQ: tl.constexpr,
     BATCH: tl.constexpr,
     SINGLE_QUERY: tl.constexpr,
+    TAIL_SIZE: tl.constexpr,
+    HAS_MTP_INDEX: tl.constexpr,
 ):
     if SINGLE_QUERY:
         batch = tl.program_id(0)
         row = batch
         length = tl.load(Lengths + row)
         valid = length > 0 and length % 4 == 0
+        q_start = row
+        if HAS_MTP_INDEX:
+            q_start -= tl.load(MtpIndex + row)
     else:
         batch, q_start, q_end, pool_index = _get_query_block(CuQLens, BATCH, 4)
         prefix = tl.load(Lengths + q_start, q_start < q_end, 1) - 1
@@ -60,9 +66,10 @@ def _compress_pools(
         pool = tl.arange(0, 4)
         cols = tl.arange(0, 128)
         raw_rows = row - 3 + pool
-        from_chunk = raw_rows >= tl.load(CuQLens + batch)
+        from_chunk = raw_rows >= q_start
         chunk_ptr = Raw + raw_rows[:, None] * RAW_STRIDE + cols[None, :]
-        tail_ptr = Tail + req * TAIL_REQ_STRIDE + pool[:, None] * TAIL_SLOT_STRIDE + cols[None, :]
+        tail_slots = (length - 4 + pool) % TAIL_SIZE
+        tail_ptr = Tail + req * TAIL_REQ_STRIDE + tail_slots[:, None] * TAIL_SLOT_STRIDE + cols[None, :]
         raw = tl.where(
             from_chunk[:, None],
             tl.load(chunk_ptr, from_chunk[:, None], 0),
@@ -99,6 +106,7 @@ def _save_pool_tails(
     TAIL_REQ_STRIDE: tl.constexpr,
     TAIL_SLOT_STRIDE: tl.constexpr,
     HOLD_REQ: tl.constexpr,
+    TAIL_SIZE: tl.constexpr,
 ):
     batch = tl.program_id(0)
     req = tl.load(ReqIdx + batch)
@@ -106,18 +114,24 @@ def _save_pool_tails(
         length = tl.load(SeqLens + batch)
         q_start = tl.load(CuQLens + batch)
         q_end = tl.load(CuQLens + batch + 1)
-        slots = tl.arange(0, 4)
+        slots = tl.arange(0, triton.next_power_of_2(TAIL_SIZE))
         cols = tl.arange(0, 256)
-        positions = length // 4 * 4 + slots
+        positions = length - TAIL_SIZE + slots
         raw_rows = q_end - length + positions
-        # A short chunk may extend an existing tail without completing it.
-        # Only overwrite the new rows; the earlier tail rows remain valid.
-        mask = ((positions < length) & (raw_rows >= q_start))[:, None]
+        # Absolute positions address a short ring, preserving the raw history
+        # needed after rejecting candidates or revisiting draft positions.
+        mask = ((slots < TAIL_SIZE) & (positions >= 0) & (raw_rows >= q_start))[:, None]
         raw = tl.load(Raw + raw_rows[:, None] * RAW_STRIDE + cols[None, :], mask, 0)
-        tl.store(Tail + req * TAIL_REQ_STRIDE + slots[:, None] * TAIL_SLOT_STRIDE + cols[None, :], raw, mask)
+        tl.store(
+            Tail + req * TAIL_REQ_STRIDE + (positions % TAIL_SIZE)[:, None] * TAIL_SLOT_STRIDE + cols[None, :],
+            raw,
+            mask,
+        )
 
 
-def compress_pools(raw, tail, packed_buffer, ape, lengths, starts, ragged, req_idx, cu_q_lens, seq_lens, max_q_len):
+def compress_pools(
+    raw, tail, packed_buffer, ape, lengths, starts, ragged, req_idx, cu_q_lens, seq_lens, max_q_len, mtp_index=None
+):
     batch = req_idx.numel()
     single_query = max_q_len == 1 and lengths.numel() == batch
     blocks = batch if single_query else lengths.numel() // 4 + batch
@@ -131,6 +145,7 @@ def compress_pools(raw, tail, packed_buffer, ape, lengths, starts, ragged, req_i
         ragged,
         req_idx,
         cu_q_lens,
+        mtp_index,
         raw.stride(0),
         tail.stride(0),
         tail.stride(1),
@@ -138,6 +153,8 @@ def compress_pools(raw, tail, packed_buffer, ape, lengths, starts, ragged, req_i
         tail.shape[0] - 1,
         batch,
         single_query,
+        tail.shape[1],
+        mtp_index is not None,
         num_warps=4,
     )
     # Complete all boundary pools before replacing the previous chunk's tail.
@@ -151,6 +168,7 @@ def compress_pools(raw, tail, packed_buffer, ape, lengths, starts, ragged, req_i
         tail.stride(0),
         tail.stride(1),
         tail.shape[0] - 1,
+        tail.shape[1],
         num_warps=4,
     )
 
