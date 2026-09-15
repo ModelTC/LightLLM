@@ -201,18 +201,19 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFlashInferDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
-        self._refresh_cuda_graph_decode_plan(new_state.infer_state.max_kv_seq_len)
+        self._refresh_cuda_graph_decode_plan(new_state.infer_state.b_seq_len, new_state.infer_state.max_kv_seq_len)
         return
 
-    def _refresh_cuda_graph_decode_plan(self, max_kv_len: int):
+    def _refresh_cuda_graph_decode_plan(self, kv_lens: torch.Tensor, max_kv_len: int):
         # Prefer the GPU-generated split plan for long decode; use exact non-split for
         # short or unsupported graph shapes.
         fill_mla_decode_plan_for_cuda_graph(
-            self.decode_wrapper,
-            self.kv_starts,
-            self.infer_state.batch_size,
-            self.backend.tp_q_head_num,
-            triton.cdiv(max_kv_len, self.backend.page_size),
+            decode_wrapper=self.decode_wrapper,
+            kv_page_indptr=self.kv_starts,
+            kv_lens=kv_lens,
+            batch_size=self.infer_state.batch_size,
+            num_heads=self.backend.tp_q_head_num,
+            max_kv_len=max_kv_len,
         )
 
     def decode_att(
