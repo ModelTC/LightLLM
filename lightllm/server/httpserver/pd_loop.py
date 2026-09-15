@@ -183,6 +183,10 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
         finally:
+            # Cancel the connection's requests even if their generators cannot exit promptly.
+            # abort() also defers cancellation for requests that have not registered shm_req yet.
+            for group_req_id in generation_tasks:
+                await manager.abort(group_req_id)
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:

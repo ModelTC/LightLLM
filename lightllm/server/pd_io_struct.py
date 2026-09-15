@@ -176,6 +176,11 @@ class PD_Client_Obj:
         return f"http://{self.client_ip_port}/pd_generate_stream"
 
     async def send_control_message(self, payload: bytes) -> None:
+        # A disconnected client may still have an old send holding the lock. Do not
+        # let cleanup messages wait for that send before noticing the invalidation.
+        if self.websocket is None:
+            raise ConnectionError(f"PD control connection unavailable: {self.client_ip_port}")
+
         # Waiting requests remain cancellable BEFORE they advance the compression dictionary.
         await self._send_lock.acquire()
         try:

@@ -33,7 +33,7 @@ async def register_and_keep_alive(websocket: WebSocket):
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
     regist_json = json.loads(await websocket.receive_text())
     logger.info(f"received regist_json {regist_json}")
-    await g_objs.httpserver_manager.register_pd(regist_json, websocket)
+    pd_client = await g_objs.httpserver_manager.register_pd(regist_json, websocket)
 
     try:
         heartbeat_timeout_seconds = 30
@@ -60,7 +60,7 @@ async def register_and_keep_alive(websocket: WebSocket):
         logger.exception(str(e))
     finally:
         logger.error(f"client {regist_json} removed")
-        await g_objs.httpserver_manager.remove_pd(regist_json)
+        await g_objs.httpserver_manager.remove_pd(pd_client)
     return
 
 

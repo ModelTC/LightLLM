@@ -89,11 +89,14 @@ class HttpServerManagerForPDMaster:
         return False
 
     async def register_pd(self, pd_info_json, websocket):
-        self.pd_manager.register_pd(pd_info_json, websocket)
-        return
+        return self.pd_manager.register_pd(pd_info_json, websocket)
 
-    async def remove_pd(self, pd_info_json):
-        self.pd_manager.remove_pd(pd_info_json)
+    async def remove_pd(self, pd_client: PD_Client_Obj):
+        self.pd_manager.remove_pd(pd_client)
+        # Wake every stage so the request's existing error path aborts the surviving peer.
+        for req_status in self.req_id_to_out_inf.values():
+            if req_status.p_node is pd_client or req_status.d_node is pd_client:
+                await req_status.set_error(f"PD {pd_client.mode} node {pd_client.client_ip_port} disconnected")
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -950,15 +953,15 @@ class PDManager:
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
-        return
+        return pd_client
 
-    def remove_pd(self, pd_info_json):
-        pd_client = PD_Client_Obj(**pd_info_json)
+    def remove_pd(self, pd_client: PD_Client_Obj):
+        # A closing connection must not remove a newer registration at the same address.
+        pd_client.websocket = None
+        if self.url_to_pd_nodes.get(pd_client.client_ip_port) is not pd_client:
+            return
 
-        removed_client = self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
-        if removed_client is not None:
-            # In-flight requests can still hold this node after it leaves the selector.
-            removed_client.websocket = None
+        self.url_to_pd_nodes.pop(pd_client.client_ip_port)
         self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
         self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
 

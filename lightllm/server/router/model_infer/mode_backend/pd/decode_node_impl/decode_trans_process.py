@@ -193,10 +193,10 @@ class _DecodeTransModule:
     def recv_task_loop(self):
         while True:
             obj: Union[PDChunckedTransTaskGroup, PDAbortReq] = self.task_in_queue.get()
-            if isinstance(obj, PDChunckedTransTaskGroup):
+            if isinstance(obj, (PDChunckedTransTaskGroup, PDAbortReq)):
+                # Keep the producer's group-before-abort order through dispatch as well.
+                # Aborting here can miss a group that is still waiting in this queue.
                 self.recv_task_group_queue.put(obj)
-            elif isinstance(obj, PDAbortReq):
-                self._abort(request_id=obj.request_id)
             else:
                 assert False, f"recv error obj {obj}"
 
@@ -217,7 +217,10 @@ class _DecodeTransModule:
     @log_exception
     def dispatch_task_loop(self):
         while True:
-            trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
+            trans_task_group: Union[PDChunckedTransTaskGroup, PDAbortReq] = self.recv_task_group_queue.get()
+            if isinstance(trans_task_group, PDAbortReq):
+                self._abort(request_id=trans_task_group.request_id)
+                continue
 
             with self.waiting_dict_lock:
                 for task in trans_task_group.task_list:
