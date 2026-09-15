@@ -750,7 +750,8 @@ class ModeBackend:
                     is_decode = False
 
             if is_decode:
-                alloc_token_num = req_obj.decode_need_token_num()
+                # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
+                _, alloc_token_num = req_obj.decode_need_token_num()
                 if alloc_token_num <= can_alloc_token_num:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num)
                     decode_reqs.append(req_obj)
@@ -782,15 +783,12 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
-                if self.disable_chunked_prefill:
-                    token_num = req_obj.get_cur_total_len() - req_obj.cur_kv_len
-                else:
-                    token_num = req_obj.get_chuncked_input_token_len() - req_obj.cur_kv_len
-                if prefill_tokens + token_num > self.batch_max_tokens:
-                    continue
-                alloc_token_num = req_obj.prefill_need_token_num(
+                # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
+                token_num, alloc_token_num = req_obj.prefill_need_token_num(
                     is_chuncked_prefill=not self.disable_chunked_prefill
                 )
+                if prefill_tokens + token_num > self.batch_max_tokens:
+                    continue
                 if alloc_token_num <= can_alloc_token_num:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num)
                     prefill_tokens += token_num

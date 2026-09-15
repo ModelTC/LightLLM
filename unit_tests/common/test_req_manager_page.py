@@ -1,5 +1,6 @@
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
+import pytest
 import torch
 
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
@@ -80,7 +81,7 @@ def test_reservation_fills_each_request_table_row(monkeypatch):
     assert req0.hold_kv_len == req1.hold_kv_len == 4
 
 
-def test_need_token_num_returns_page_aligned_allocation():
+def test_need_token_num_distinguishes_compute_and_page_allocation():
     req = SimpleNamespace(
         args=SimpleNamespace(page_size=4),
         cur_kv_len=3,
@@ -91,12 +92,79 @@ def test_need_token_num_returns_page_aligned_allocation():
     )
     req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
 
-    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=True) == 4
-    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=False) == 8
-    assert InferReq.decode_need_token_num(req) == 0
+    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=True) == (3, 4)
+    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=False) == (7, 8)
+    assert InferReq.decode_need_token_num(req) == (1, 0)
 
     req.cur_kv_len = 4
-    assert InferReq.decode_need_token_num(req) == 4
+    assert InferReq.decode_need_token_num(req) == (1, 4)
+
+    req.hold_kv_len = 8
+    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=True) == (2, 0)
+    assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=False) == (6, 4)
+
+    req.mtp_step = 2
+    assert InferReq.decode_need_token_num(req) == (6, 4)
+    req.hold_kv_len = 12
+    assert InferReq.decode_need_token_num(req) == (6, 0)
+
+
+@pytest.mark.parametrize(
+    "hold_kv_len, can_alloc_token_num, batch_max_tokens, expected_alloc_sizes, second_req_wait_pause",
+    [
+        (4, 8, 3, [4], False),
+        (8, 0, 3, [], False),
+        (4, 4, 6, [4], True),
+    ],
+)
+def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
+    monkeypatch, hold_kv_len, can_alloc_token_num, batch_max_tokens, expected_alloc_sizes, second_req_wait_pause
+):
+    context, backend = _make_context(monkeypatch)
+    backend.args.enable_cpu_cache = False
+    backend.args.enable_prefill_decode_mixed = False
+    backend.support_overlap = False
+    backend.disable_chunked_prefill = False
+    backend.batch_max_tokens = batch_max_tokens
+    backend.is_master_in_dp = True
+    backend._timer_merge_radix_tree = lambda: None
+    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
+    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    context.get_can_alloc_token_num = lambda: can_alloc_token_num
+    context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
+    context.filter_reqs = lambda finished_reqs: None
+    context.pause_reqs = lambda reqs, is_master_in_dp: None
+
+    reqs = [_make_req(0), _make_req(1)]
+    for req in reqs:
+        req.args = context.args
+        req.cur_kv_len = 3
+        req.hold_kv_len = hold_kv_len
+        req.filter_mark = False
+        req.wait_pause = False
+        req.paused = False
+        req.infer_aborted = False
+        req.finish_status = infer_batch.FinishStatus()
+        req.is_slave_req = lambda: False
+        req.get_cur_total_len = lambda: 6
+        req.get_chuncked_input_token_len = lambda: 6
+        req.prefill_need_token_num = MethodType(InferReq.prefill_need_token_num, req)
+        start_index = req.req_idx * hold_kv_len
+        context.req_manager.req_to_token_indexs[req.req_idx, :hold_kv_len] = torch.arange(
+            start_index, start_index + hold_kv_len, dtype=torch.int32
+        )
+    context.req_manager.mem_manager.next_index = 2 * hold_kv_len
+    backend._filter_not_ready_reqs = lambda req_ids: reqs
+
+    prefill_reqs, decode_reqs = backend._get_classed_reqs(req_ids=[0, 1])
+
+    assert prefill_reqs == [reqs[0]]
+    assert decode_reqs == []
+    assert context.req_manager.mem_manager.alloc_sizes == expected_alloc_sizes
+    assert reqs[0].hold_kv_len == 8
+    assert not reqs[0].wait_pause
+    assert reqs[1].hold_kv_len == hold_kv_len
+    assert reqs[1].wait_pause is second_req_wait_pause
 
 
 def test_decode_reserves_mtp_headroom(monkeypatch):
@@ -113,7 +181,9 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
 
     context.req_manager.req_to_token_indexs[0, :4] = torch.arange(4, dtype=torch.int32)
     context.req_manager.mem_manager.next_index = 4
-    alloc_token_num = InferReq.decode_need_token_num(req)
+    token_num, alloc_token_num = InferReq.decode_need_token_num(req)
+    assert token_num == 6
+    assert alloc_token_num == 8
     backend._alloc_req_kv_mem(req, alloc_token_num)
 
     model_input, run_reqs = generic_pre_process.prepare_decode_inputs([req])
@@ -139,7 +209,8 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
     req.args = context.args
     context.req_manager.req_to_token_indexs[0, :3] = torch.arange(3, dtype=torch.int32)
     context.req_manager.mem_manager.next_index = 3
-    alloc_token_num = InferReq.decode_need_token_num(req)
+    token_num, alloc_token_num = InferReq.decode_need_token_num(req)
+    assert token_num == alloc_token_num == 6
     backend._alloc_req_kv_mem(req, alloc_token_num)
 
     model_input, _ = generic_pre_process.prepare_decode_inputs([req])

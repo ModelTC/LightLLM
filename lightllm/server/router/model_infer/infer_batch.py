@@ -927,16 +927,32 @@ class InferReq:
                         return True
         return False
 
-    def prefill_need_token_num(self, is_chuncked_prefill: bool):
+    def prefill_need_token_num(self, is_chuncked_prefill: bool) -> Tuple[int, int]:
+        """返回 (本轮需要计算的 token 数, 需要额外分配的 KV token 容量)。
+
+        第一个值为目标 KV 长度减去已计算的 cur_kv_len，用于限制 batch 的计算量。
+        第二个值先将目标 KV 长度按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
+        用于检查和分配 KV 空间。已有页的剩余容量足够时，即使仍需计算 token，第二个值也可以为 0。
+        """
         if is_chuncked_prefill:
             target_kv_len = self.get_chuncked_input_token_len()
         else:
             target_kv_len = self.get_cur_total_len()
-        return self._kv_cache_alloc_need(target_kv_len)
+        token_num = target_kv_len - self.cur_kv_len
+        alloc_token_num = self._kv_cache_alloc_need(target_kv_len)
+        return token_num, alloc_token_num
 
-    def decode_need_token_num(self) -> int:
+    def decode_need_token_num(self) -> Tuple[int, int]:
+        """返回 (decode 需要的 token 数, 需要额外分配的 KV token 容量)。
+
+        第一个值沿用分页分配前的需求估算：普通 decode 为 1，MTP 为 2 * (mtp_step + 1)，
+        其中 MTP 的两倍系数包含原有的预留窗口，并非本轮实际接受的输出 token 数。
+        第二个值将 cur_kv_len 加上上述需求后按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
+        用于检查和分配 KV 空间。已有页的剩余容量足够时，第二个值为 0，仍可继续 decode。
+        """
         decode_token_num = 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
-        return self._kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
+        alloc_token_num = self._kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
+        return decode_token_num, alloc_token_num
 
     def _kv_cache_alloc_need(self, target_kv_len: int) -> int:
         page_size = self.args.page_size

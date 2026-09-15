@@ -30,7 +30,7 @@ def _make_infer_req(cur_output_len: int, shm_output_len: int):
             shm_param=SimpleNamespace(max_new_tokens=65535),
         ),
         get_cur_total_len=MagicMock(return_value=11),
-        decode_need_token_num=MagicMock(return_value=1),
+        decode_need_token_num=MagicMock(return_value=(1, 1)),
     )
 
 
