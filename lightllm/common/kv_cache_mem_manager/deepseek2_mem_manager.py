@@ -26,6 +26,7 @@ class Deepseek2MemoryManager(MemoryManager):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
+        assert size % self.page_size == 0, f"KV cache size {size} must be a multiple of page_size {self.page_size}"
         self.kv_buffer = torch.empty((layer_num, size + self.page_size, head_num, head_dim), dtype=dtype, device="cuda")
 
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):

@@ -27,6 +27,7 @@ class _FakeMemManager:
 def test_bind_mem_manager_initializes_hold_request_with_reserved_page():
     req_manager = ReqManager.__new__(ReqManager)
     req_manager.HOLD_REQUEST_ID = 2
+    req_manager.req_list = SimpleNamespace(is_all_free=lambda: True)
     req_manager.req_to_token_indexs = torch.full((3, 8), -1, dtype=torch.int32)
     mem_manager = SimpleNamespace(page_size=4, HOLD_TOKEN_MEMINDEXES=(100, 101, 102, 103))
 
@@ -35,6 +36,14 @@ def test_bind_mem_manager_initializes_hold_request_with_reserved_page():
     assert req_manager.mem_manager is mem_manager
     assert req_manager.req_to_token_indexs[2].tolist() == [100, 101, 102, 103] * 2
     assert req_manager.req_to_token_indexs[:2].eq(-1).all()
+
+
+def test_hold_request_indexes_require_all_requests_released():
+    req_manager = ReqManager.__new__(ReqManager)
+    req_manager.req_list = SimpleNamespace(is_all_free=lambda: False)
+
+    with pytest.raises(AssertionError, match="all requests are released"):
+        req_manager.init_hold_request_indexs()
 
 
 def _make_context(monkeypatch):

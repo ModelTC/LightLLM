@@ -27,6 +27,7 @@ class PPLINT8KVMemoryManager(MemoryManager):
         )
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
+        assert size % self.page_size == 0, f"KV cache size {size} must be a multiple of page_size {self.page_size}"
         self.kv_buffer = torch.empty(
             (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=torch.int8, device="cuda"
         )
