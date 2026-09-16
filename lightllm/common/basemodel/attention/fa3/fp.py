@@ -288,6 +288,16 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         else:
             sink_weight = None
 
+        mem_manager = getattr(self.backend.model, "mem_manager", None)
+        if getattr(mem_manager, "calibration_target", None) in {"q", "qkv"}:
+            assert not getattr(self.infer_state, "is_prefill", False), "Q calibration only collects decode attention"
+            request_ids = self.infer_state.b_req_idx
+            if request_ids.numel() != q.shape[0]:
+                raise ValueError("decode Q rows must align with b_req_idx before calibration collection")
+            layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
+            valid_rows = request_ids != self.backend.model.req_manager.HOLD_REQUEST_ID
+            mem_manager.update_q_calibration_data(q, layer_index, valid_rows)
+
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)

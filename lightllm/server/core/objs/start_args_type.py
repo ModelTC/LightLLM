@@ -210,6 +210,7 @@ class StartArgs:
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
     # Internal-only.  tools/calibrate_fp8kv.py sets this directly; it is not a public CLI option.
     export_fp8kv_calibration: bool = field(default=False)
+    calibration_target: str = field(default="kv")
     calibration_job_id: Optional[str] = field(default=None)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)

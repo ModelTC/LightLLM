@@ -154,6 +154,7 @@ def _launch_subprocesses(args: StartArgs):
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
     if args.export_fp8kv_calibration:
+        assert args.calibration_target in {"kv", "q", "qkv"}, "internal calibration target must be kv, q, or qkv"
         assert args.llm_kv_type == "None", "internal FP8 KV calibration requires llm_kv_type=None"
         assert args.disable_cudagraph is True, "internal FP8 KV calibration requires disable_cudagraph"
         assert not args.enable_prefill_cudagraph, (
