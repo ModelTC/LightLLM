@@ -46,7 +46,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
 
         assert self.args.mtp_step <= self.config["block_size"]
         self.config["block_size"] = self.args.mtp_step
-        self.uses_windowed_draft_kv = getattr(self.args, "mtp_draft_cache_mode", "full") == "windowed"
+        self.uses_windowed_draft_kv = getattr(self.args, "mtp_draft_kv_mode", "full") == "window"
         if self.uses_windowed_draft_kv:
             validate_windowed_mtp(self.args)
 
@@ -65,12 +65,10 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         if self.uses_windowed_draft_kv:
             self.mem_manager.init_windowed_draft_kv(
                 requests=self.args.running_max_req_size + 1,
-                capacity=window_capacity(self.args),
                 layers=self.config["n_layer"],
                 kv_heads=self.config["num_key_value_heads"] // self.tp_world_size_,
                 head_dim=self.config.get("head_dim", self.config["n_embed"] // self.config["num_attention_heads"]),
-                window=self.args.mtp_draft_window,
-                sinks=self.args.mtp_draft_sinks,
+                window=window_capacity(self.args),
             )
 
     def _init_att_backend(self):

@@ -690,30 +690,25 @@ MTP Multi-Prediction Parameters
     * ``eagle_no_att``
     * ``None``: Do not enable mtp (default)
 
-.. option:: --mtp_draft_cache_mode
+.. option:: --mtp_draft_kv_mode
 
     Draft KV cache policy; defaults to ``full``. dflash style draft models support
-    ``windowed``, which retains only initial and recent-window KV. The target still
+    ``window``, which retains only recent-window KV. The target still
     uses its full context.
 
     Currently requires ``--run_mode normal``, ``--dp 1``, unquantized KV, and
     ``--disable_dynamic_prompt_cache``. CPU/prefix caching, dynamic verification,
     diverse, mixed prefill/decode, and overlap modes are not supported.
 
-.. option:: --mtp_draft_window
+.. option:: --mtp_draft_window_size
 
-    Number of recent positions retained by ``windowed``; defaults to ``512`` and
+    Number of recent positions retained by ``window``; defaults to ``512`` and
     must be positive.
 
-.. option:: --mtp_draft_sinks
-
-    Number of initial positions retained by ``windowed``; defaults to ``1``.
-    Set to ``0`` to disable sinks. Per-request history capacity is bounded by
-    ``mtp_draft_window + mtp_draft_sinks``.
 
     Add these options to an existing launch command for a dflash style draft model::
 
-        --mtp_draft_cache_mode windowed --mtp_draft_window 512 --mtp_draft_sinks 1 --disable_dynamic_prompt_cache
+        --mtp_draft_kv_mode window --mtp_draft_window_size 512 --disable_dynamic_prompt_cache
 
 .. option:: --mtp_draft_model_dir
 

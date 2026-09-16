@@ -6,9 +6,9 @@ from lightllm.common.build_utils import repair_config
 
 
 def window_capacity(args):
-    if args.mtp_draft_window <= 0 or args.mtp_draft_sinks < 0:
-        raise ValueError("mtp_draft_window must be positive and mtp_draft_sinks nonnegative")
-    return args.mtp_draft_window + args.mtp_draft_sinks
+    if args.mtp_draft_window_size <= 0:
+        raise ValueError("mtp_draft_window_size must be positive")
+    return args.mtp_draft_window_size
 
 
 def window_kv_pool_bytes(args, element_size):
