@@ -129,6 +129,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
         # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
         if input_len - req_obj.cur_kv_len > 1:
             trans_page_size = self.args.pd_kv_page_size
+            assert trans_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
             assert req_obj.hold_kv_len == req_obj.cur_kv_len
             need_mem_size = req_obj._kv_cache_alloc_need(input_len)

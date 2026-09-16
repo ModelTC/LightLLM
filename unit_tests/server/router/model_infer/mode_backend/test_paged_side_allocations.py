@@ -38,7 +38,7 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     next_index = [4]
     tasks = []
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
-    backend.args = SimpleNamespace(pd_kv_page_size=3)
+    backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
     backend.is_master_in_dp = False
     backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
@@ -73,13 +73,22 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     assert req.cur_kv_len == 10
     assert req.hold_kv_len == 12
     expected_tasks = [
-        (4, 7, [4, 5, 6], "kv"),
-        (7, 10, [7, 8, 9], "kv"),
+        (4, 8, [4, 5, 6, 7], "kv"),
+        (8, 10, [8, 9], "kv"),
     ]
     if is_hybrid_att_model:
         expected_tasks.append((10, 10, [], "att_state"))
     assert tasks == expected_tasks
     assert table[0, :12].tolist() == list(range(12))
+
+
+def test_pd_decode_rejects_unaligned_transfer_page_size():
+    backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
+    backend.args = SimpleNamespace(pd_kv_page_size=3, page_size=4)
+    req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
+
+    with pytest.raises(AssertionError, match="pd_kv_page_size must be divisible by page_size"):
+        backend._decode_node_gen_trans_tasks(req)
 
 
 def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypatch):
