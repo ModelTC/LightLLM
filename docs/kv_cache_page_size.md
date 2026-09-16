@@ -32,9 +32,9 @@ KV 存储和请求表，但资源的申请、缓存和释放以完整物理页�
 
 ## 当前兼容范围
 
-首版支持普通与分块 Prefill、Decode、动态 Prompt Cache，以及非量化 FA3/FlashInfer（含 MLA Decode）。
-MTP、PD 分离、CPU KV Cache、DP Prompt Cache 拉取、DP Prefill Balance、diverse mode 和混合线性注意力
-拥有额外的 KV 申请或迁移语义；这些组合在启动阶段明确报错，后续应在各自模块接入统一的页所有权接口后再开放。
+当前支持普通与分块 Prefill、Decode、动态 Prompt Cache、FA3/FlashInfer（含 MLA Decode）、MTP、
+PD 分离、CPU KV Cache、DP Prompt Cache 拉取、DP Prefill Balance 和混合线性注意力。
+diverse mode 仍只支持 `page_size=1`，启动阶段会对其他取值明确报错。
 
 ## 边界处理
 

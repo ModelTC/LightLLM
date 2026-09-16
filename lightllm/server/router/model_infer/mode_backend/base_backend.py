@@ -228,7 +228,8 @@ class ModeBackend:
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.is_master_in_dp:
-            kv_cache_size = self.model.mem_manager.size + 1
+            # Capture 只保存 allocator 管理的真实 KV 槽位，HOLD 页对应的 padding 写入由 kernel 过滤。
+            kv_cache_size = self.model.mem_manager.size
             if self.args.enable_prompt_logprobs:
                 mgr = PromptLogprobsCaptureManager.get_instance()
                 if mgr is not None:

@@ -10,6 +10,7 @@ from lightllm.server.router.model_infer.mode_backend import generic_pre_process 
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend.dp_backend import dp_shared_kv_trans
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
+from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_impl
 
 
 def _bind_alloc_need(req, page_size):
@@ -89,6 +90,17 @@ def test_pd_decode_rejects_unaligned_transfer_page_size():
 
     with pytest.raises(AssertionError, match="pd_kv_page_size must be divisible by page_size"):
         backend._decode_node_gen_trans_tasks(req)
+
+
+def test_pd_prefill_rejects_unaligned_transfer_page_size():
+    backend = prefill_impl.PDChunkedPrefillForPrefillNode.__new__(
+        prefill_impl.PDChunkedPrefillForPrefillNode
+    )
+    backend.args = SimpleNamespace(pd_kv_page_size=3, page_size=4)
+    req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
+
+    with pytest.raises(AssertionError, match="pd_kv_page_size must be divisible by page_size"):
+        backend._prefill_chuncked_handle_func(req, next_token_id=1, next_token_prob=1.0, output_len=0)
 
 
 def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypatch):

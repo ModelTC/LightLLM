@@ -114,8 +114,8 @@ class MemoryManager:
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         assert size % self.page_size == 0, f"KV cache size {size} must be a multiple of page_size {self.page_size}"
-        # 在初始化 kv_buffer 的时候，每层多初始化了一个 token，这个 token 永远不会被真的被对外
-        # 分配，内部实际也没有管理。这一页用于多 DP、overlap microbatch 等模式下的 padding 请求，
+        # 在初始化 kv_buffer 时，每层额外保留一整页；这部分空间不会被 allocator 对外分配。
+        # 这一页用于多 DP、overlap microbatch 等模式下的 padding 请求，
         # 页内索引存储在 HOLD_TOKEN_MEMINDEXES 中，与 req_manager 的 HOLD_REQUEST_ID 作用类似。
         self.kv_buffer = torch.empty(
             (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=dtype, device="cuda"
