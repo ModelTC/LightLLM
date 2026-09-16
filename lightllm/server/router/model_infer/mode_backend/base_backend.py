@@ -414,10 +414,7 @@ class ModeBackend:
 
         start_loc = 0
         for req_obj in run_reqs:
-            if self.disable_chunked_prefill:
-                q_len = req_obj.get_cur_total_len() - req_obj.cur_kv_len
-            else:
-                q_len = req_obj.get_chuncked_input_token_len() - req_obj.cur_kv_len
+            q_len, _ = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
             topk = req_obj.sampling_param.shm_param.prompt_logprobs
             capture_count = min(q_len, req_obj.shm_req.input_len - req_obj.cur_kv_len - 1)
             if capture_count > 0 and topk == 0 and self.is_master_in_dp:
