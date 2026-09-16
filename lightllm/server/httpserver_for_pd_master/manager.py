@@ -58,6 +58,7 @@ class HttpServerManagerForPDMaster:
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
         self.next_request_queue_metric_time = 0.0
+        self._abort_notify_tasks = set()
         # 高优先级请求仍可比普通请求等待更久，但通过请求参数向开启本地限流的
         # P/D 节点传递有限的等待时间，避免资源异常时永久占用请求链路。
         self.pd_high_priority_request_time_out_seconds = get_pd_high_priority_request_timeout_seconds()
@@ -678,15 +679,24 @@ class HttpServerManagerForPDMaster:
         except:
             pass
 
-        try:
-            await p_node.send_control_message(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
+        async def notify_node(node: Optional[PD_Client_Obj]):
+            if node is None:
+                return
+            try:
+                await node.send_control_message(pickle.dumps((ObjType.ABORT, group_request_id)))
+            except BaseException:
+                pass
 
-        try:
-            await d_node.send_control_message(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
+        # HTTP request cancellation must not cancel an ABORT while it is waiting for
+        # the node's websocket send lock. Keep independent tasks alive until both
+        # nodes have received the cleanup message or their connections fail.
+        notify_tasks = [asyncio.create_task(notify_node(node)) for node in (p_node, d_node) if node is not None]
+        self._abort_notify_tasks.update(notify_tasks)
+        for task in notify_tasks:
+            task.add_done_callback(self._abort_notify_tasks.discard)
+
+        if notify_tasks:
+            await asyncio.gather(*(asyncio.shield(task) for task in notify_tasks))
 
         return
 
