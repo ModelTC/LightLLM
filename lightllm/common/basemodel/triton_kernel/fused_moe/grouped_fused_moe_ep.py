@@ -130,7 +130,10 @@ def _get_mega_moe_cumulative_stats(num_local_experts: int, device: torch.device,
     return stats
 
 
-def prepare_mega_moe_weights(w13: Any, w2: Any, quant_method: Any):
+def prepare_ep_moe_weights(w13: Any, w2: Any, quant_method: Any):
+    if dist_group_manager.ep_triton_moe_quant_method == quant_method.method_name:
+        quant_method.mega_moe_mma_type = None
+        return
     mma_type = dist_group_manager.ep_mega_moe_mma_type
     if dist_group_manager.ep_mega_moe_quant_method != quant_method.method_name:
         quant_method.mega_moe_mma_type = None

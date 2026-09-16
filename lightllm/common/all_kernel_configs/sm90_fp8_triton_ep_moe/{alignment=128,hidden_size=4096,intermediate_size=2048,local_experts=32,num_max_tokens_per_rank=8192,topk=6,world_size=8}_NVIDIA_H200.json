@@ -1,0 +1,16 @@
+{
+  "publish_rows_large": 32,
+  "publish_rows_small": 4,
+  "publish_num_warps": 2,
+  "histogram_block": 2048,
+  "histogram_num_warps": 8,
+  "pull_num_warps": 8,
+  "activation_programs": 1024,
+  "activation_rows": 32,
+  "activation_num_warps": 8,
+  "return_num_warps": 8,
+  "combine_rows_large": 2,
+  "combine_rows_small": 1,
+  "combine_block": 512,
+  "combine_num_warps": 4
+}

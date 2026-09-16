@@ -750,6 +750,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable ep moe for deepseekv3 model.""",
     )
     parser.add_argument(
+        "--ep_moe_backend",
+        type=str,
+        choices=["auto", "triton"],
+        default="auto",
+        help=(
+            "EP MoE execution backend. 'auto' keeps the existing backend selection; "
+            "'triton' selects the single-node SM90 FP8 Triton peer backend on Prefill nodes "
+            "for experts resolved by --expert_dtype fp8."
+        ),
+    )
+    parser.add_argument(
         "--disable_ep_balance_monitor",
         action="store_true",
         help="""Disable the prefill expert balance monitor enabled by default for EP-MoE.""",

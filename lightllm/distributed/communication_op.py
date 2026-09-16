@@ -171,6 +171,8 @@ class DistributeGroupManager:
         self.ep_mega_moe_buffer = None
         self.ep_mega_moe_mma_type = None
         self.ep_mega_moe_quant_method = None
+        self.ep_triton_moe_buffer = None
+        self.ep_triton_moe_quant_method = None
         self.ep_num_sms = None
 
     def __len__(self):
@@ -239,8 +241,8 @@ class DistributeGroupManager:
 
         ``expert_quant_method_names`` 是各 MoE 层最终绑定的 quant method 名称集合。
         同一个模型可能逐层混用多种 expert quant method：满足约束的 SM100 FP4 和
-        SM90 FP8 层走 Mega MoE，其他层走 DeepEP legacy 路径。这里只为实际存在的
-        执行路径分配 buffer，避免为未使用的路径长期占用显存。
+        SM90 FP8 层走 Mega/Triton EP MoE，其他层走 DeepEP legacy 路径。这里只为实际
+        存在的执行路径分配 buffer，避免为未使用的路径长期占用显存。
         """
         args = get_env_start_args()
         enable_ep_moe = args.enable_ep_moe
@@ -255,6 +257,8 @@ class DistributeGroupManager:
             self.ep_mega_moe_buffer = None
             self.ep_mega_moe_mma_type = None
             self.ep_mega_moe_quant_method = None
+            self.ep_triton_moe_buffer = None
+            self.ep_triton_moe_quant_method = None
             self.ep_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
@@ -289,6 +293,7 @@ class DistributeGroupManager:
             allow_multiple_reduction=True,
         )
         self.ep_mega_moe_buffer = None
+        self.ep_triton_moe_buffer = None
         self.ep_low_latency_buffer = None
         self.ep_prefill_moe_workspace = None
 
@@ -297,42 +302,33 @@ class DistributeGroupManager:
 
         self.ep_mega_moe_mma_type = None
         self.ep_mega_moe_quant_method = None
-        if is_sm100_gpu() and FP4_MOE_QUANT_METHOD in expert_quant_method_names:
+        self.ep_triton_moe_quant_method = None
+        if args.ep_moe_backend == "triton" and FP8_MOE_QUANT_METHOD in expert_quant_method_names:
+            self.ep_triton_moe_quant_method = FP8_MOE_QUANT_METHOD
+
+        if (
+            self.ep_triton_moe_quant_method is None
+            and is_sm100_gpu()
+            and FP4_MOE_QUANT_METHOD in expert_quant_method_names
+        ):
             self.ep_mega_moe_mma_type = "fp8xfp4"
             self.ep_mega_moe_quant_method = FP4_MOE_QUANT_METHOD
-        elif (
+        elif self.ep_triton_moe_quant_method is None and (
             enable_env_vars("LIGHTLLM_ENABLE_SM90_FP8_MEGA_MOE")
             and is_sm90_gpu()
             and FP8_MOE_QUANT_METHOD in expert_quant_method_names
             and total_redundant_experts == 0
+            and args.nnodes == 1
+            and not args.enable_rl
         ):
             self.ep_mega_moe_mma_type = "fp8xfp8"
             self.ep_mega_moe_quant_method = FP8_MOE_QUANT_METHOD
-        if self.ep_mega_moe_mma_type == "fp8xfp8":
-            import deep_gemm
-
-            fallback_reason = None
-            if not hasattr(deep_gemm, "fp8_fp8_mega_moe") or not hasattr(
-                getattr(deep_gemm, "_C", None), "fp8_fp8_mega_moe"
-            ):
-                fallback_reason = (
-                    "the loaded DeepGEMM Python package and extension do not both provide fp8_fp8_mega_moe "
-                    f"({getattr(deep_gemm, '__file__', '<unknown>')})"
-                )
-            elif getattr(args, "nnodes", 1) != 1:
-                fallback_reason = "Mega MoE only supports a single-node expert-parallel group"
-            elif getattr(args, "enable_rl", False):
-                fallback_reason = "online expert-weight updates require the canonical non-interleaved layout"
-            elif not has_nvlink():
-                fallback_reason = "NVLink is unavailable"
-            if fallback_reason is not None:
-                logger.warning("Disable SM90 FP8 Mega MoE and use legacy DeepEP because %s", fallback_reason)
-                self.ep_mega_moe_mma_type = None
-                self.ep_mega_moe_quant_method = None
 
         enable_mega_moe_buffer = self.ep_mega_moe_mma_type is not None
-        has_legacy_moe_layer = not enable_mega_moe_buffer or any(
-            method_name != self.ep_mega_moe_quant_method for method_name in expert_quant_method_names
+        enable_triton_ep_moe_buffer = self.ep_triton_moe_quant_method is not None
+        fused_moe_quant_method = self.ep_triton_moe_quant_method or self.ep_mega_moe_quant_method
+        has_legacy_moe_layer = fused_moe_quant_method is None or any(
+            method_name != fused_moe_quant_method for method_name in expert_quant_method_names
         )
 
         enable_low_latency_buffer = has_legacy_moe_layer and args.run_mode != "prefill"
@@ -387,9 +383,24 @@ class DistributeGroupManager:
             )
 
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_prefill_num_experts, num_experts_per_tok)
-        deepep_sms = 0 if self.ep_mega_moe_mma_type == "fp8xfp8" and not has_legacy_moe_layer else theoretical_sms
+        use_all_sms_for_fp8 = enable_triton_ep_moe_buffer or self.ep_mega_moe_mma_type == "fp8xfp8"
+        deepep_sms = 0 if use_all_sms_for_fp8 and not has_legacy_moe_layer else theoretical_sms
         low_latency_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_decode_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(deepep_sms, low_latency_sms)
+
+        if enable_triton_ep_moe_buffer:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_triton_ep_moe import (
+                SM90FP8TritonEPMoEBuffer,
+            )
+
+            self.ep_triton_moe_buffer = SM90FP8TritonEPMoEBuffer(
+                deepep_group,
+                num_experts=self.ll_decode_num_experts,
+                num_max_tokens_per_rank=self.ll_num_tokens,
+                topk=num_experts_per_tok,
+                hidden_size=self.ll_hidden,
+                intermediate_size=moe_intermediate_size,
+            )
 
         if enable_mega_moe_buffer:
             if moe_intermediate_size is None:
@@ -397,13 +408,18 @@ class DistributeGroupManager:
 
             import deep_gemm
 
+            num_max_tokens_per_rank = (
+                self.ll_decode_num_tokens
+                if self.ep_mega_moe_mma_type == "fp8xfp8" and args.run_mode == "decode"
+                else self.ll_num_tokens
+            )
             mega_buffer_kwargs = (
                 {"mma_type": self.ep_mega_moe_mma_type} if self.ep_mega_moe_mma_type == "fp8xfp8" else {}
             )
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
                 self.ll_decode_num_experts,
-                self.ll_num_tokens,
+                num_max_tokens_per_rank,
                 num_experts_per_tok,
                 self.ll_hidden,
                 moe_intermediate_size,
@@ -411,12 +427,13 @@ class DistributeGroupManager:
             )
         logger.info(
             "Initialize DeepEP MoE buffers: low_latency=%s, prefill_workspace_bytes=%s, "
-            "mega_moe=%s, mega_moe_mma_type=%s, ll_prefill_num_experts=%s, "
+            "mega_moe=%s, mega_moe_mma_type=%s, triton_ep_moe=%s, ll_prefill_num_experts=%s, "
             "ll_decode_num_experts=%s, expert_quant_method_names=%s",
             enable_low_latency_buffer,
             self.ep_prefill_moe_workspace.numel() if self.ep_prefill_moe_workspace is not None else 0,
             enable_mega_moe_buffer,
             self.ep_mega_moe_mma_type,
+            enable_triton_ep_moe_buffer,
             self.ll_prefill_num_experts,
             self.ll_decode_num_experts,
             sorted(expert_quant_method_names),

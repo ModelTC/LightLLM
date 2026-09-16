@@ -27,7 +27,7 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
-from lightllm.utils.device_utils import is_sm100_gpu
+from lightllm.utils.device_utils import is_sm100_gpu, is_sm90_gpu
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 
 logger = init_logger(__name__)
@@ -178,6 +178,13 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
+
+    if args.ep_moe_backend == "triton":
+        assert args.enable_ep_moe, "--ep_moe_backend triton requires --enable_ep_moe"
+        assert args.run_mode == "prefill", "--ep_moe_backend triton only supports --run_mode prefill"
+        assert args.nnodes == 1, "--ep_moe_backend triton only supports a single node"
+        assert not args.enable_prefill_eplb, "--ep_moe_backend triton does not support --enable_prefill_eplb"
+        assert is_sm90_gpu(), "--ep_moe_backend triton only supports SM90 GPUs"
 
     if args.enable_prefill_eplb:
         assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"

@@ -30,10 +30,10 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
 
     def finalize_moe_weight(self, moe_weight):
         from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-            prepare_mega_moe_weights,
+            prepare_ep_moe_weights,
         )
 
-        prepare_mega_moe_weights(moe_weight.w13, moe_weight.w2, self)
+        prepare_ep_moe_weights(moe_weight.w13, moe_weight.w2, self)
 
     def apply(
         self,

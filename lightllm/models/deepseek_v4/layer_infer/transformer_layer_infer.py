@@ -3,6 +3,7 @@ import triton
 from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_mega_moe
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.triton_ep_impl import FuseMoeTritonEP
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
@@ -150,7 +151,11 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
         experts = layer_weight.experts_
-        if not self.enable_ep_moe or use_mega_moe(experts.quant_method):
+        if (
+            not self.enable_ep_moe
+            or use_mega_moe(experts.quant_method)
+            or isinstance(experts.fuse_moe_impl, FuseMoeTritonEP)
+        ):
             input_embdings = self.context_forward(input_embdings, infer_state, layer_weight)
             input_embdings1 = self.context_forward(input_embdings1, infer_state1, layer_weight)
             return input_embdings, input_embdings1
@@ -254,7 +259,11 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
         experts = layer_weight.experts_
-        if not self.enable_ep_moe or use_mega_moe(experts.quant_method):
+        if (
+            not self.enable_ep_moe
+            or use_mega_moe(experts.quant_method)
+            or isinstance(experts.fuse_moe_impl, FuseMoeTritonEP)
+        ):
             input_embdings = self.token_forward(input_embdings, infer_state, layer_weight)
             input_embdings1 = self.token_forward(input_embdings1, infer_state1, layer_weight)
             return input_embdings, input_embdings1

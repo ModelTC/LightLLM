@@ -61,7 +61,8 @@ class FusedMoeWeight(BaseWeightTpl):
         self.moe_intermediate_size = moe_intermediate_size
         self.quant_method = quant_method
         assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
-        self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        args = get_env_start_args()
+        self.enable_ep_moe = args.enable_ep_moe
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
@@ -73,6 +74,7 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
             expert_parallel_state=self.expert_parallel_state,
+            ep_moe_backend=args.ep_moe_backend,
         )
         self.lock = threading.Lock()
         self._moe_weight_finalized = False

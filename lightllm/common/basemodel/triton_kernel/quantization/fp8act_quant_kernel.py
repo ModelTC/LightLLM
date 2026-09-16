@@ -29,6 +29,7 @@ def _per_token_group_quant_fp8(
     y_q_ptr,
     y_s_ptr,
     y_stride,
+    M,
     N,
     eps,
     fp8_min,
@@ -48,18 +49,19 @@ def _per_token_group_quant_fp8(
     NEED_MASK: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
     COPY_TOPK: tl.constexpr,
+    GROUPS_PER_CTA: tl.constexpr,
 ):
-    g_id = tl.program_id(0)
-    y_ptr += g_id * y_stride
-    y_q_ptr += g_id * y_stride
+    g_id = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
+    y_ptr += g_id[:, None] * y_stride
+    y_q_ptr += g_id[:, None] * y_stride
     row_id = g_id // xs_n
     col_id = g_id % xs_n
     y_s_ptr += row_id * xs_stride_m + col_id * xs_stride_n
 
-    cols = tl.arange(0, BLOCK)  # N <= BLOCK
+    cols = tl.arange(0, BLOCK)[None, :]  # N <= BLOCK
 
-    if NEED_MASK:
-        mask = cols < N
+    if NEED_MASK or GROUPS_PER_CTA > 1:
+        mask = (g_id[:, None] < M) & (cols < N)
         other = 0.0
     else:
         mask = None
@@ -67,21 +69,21 @@ def _per_token_group_quant_fp8(
 
     y = tl.load(y_ptr + cols, mask=mask, other=other).to(tl.float32)
     # Quant
-    _absmax = tl.max(tl.abs(y))
+    _absmax = tl.max(tl.abs(y), axis=1)
     if USE_UE8M0_SCALE:
         y_s = _ceil_to_ue8m0(tl.maximum(_absmax, 1.0e-4) / fp8_max)
     else:
         y_s = tl.maximum(_absmax, eps) / fp8_max
-    y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+    y_q = tl.clamp(y / y_s[:, None], fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
-    tl.store(y_s_ptr, y_s)
+    tl.store(y_s_ptr, y_s, mask=g_id < M)
 
     if COPY_TOPK:
-        topk_cols = tl.arange(0, TOPK_BLOCK)
-        topk_mask = (col_id == 0) & (topk_cols < num_topk)
-        topk_offsets = row_id * topk_row_stride + topk_cols
-        topk_out_offsets = row_id * topk_out_row_stride + topk_cols
+        topk_cols = tl.arange(0, TOPK_BLOCK)[None, :]
+        topk_mask = (g_id[:, None] < M) & (col_id[:, None] == 0) & (topk_cols < num_topk)
+        topk_offsets = row_id[:, None] * topk_row_stride + topk_cols
+        topk_out_offsets = row_id[:, None] * topk_out_row_stride + topk_cols
         topk_ids = tl.load(topk_ids_ptr + topk_offsets, mask=topk_mask)
         topk_weights = tl.load(topk_weights_ptr + topk_offsets, mask=topk_mask)
         tl.store(topk_ids_out_ptr + topk_out_offsets, topk_ids, mask=topk_mask)
@@ -136,11 +138,16 @@ def lightllm_per_token_group_quant_fp8(
         topk_ids = topk_weights = topk_ids_out = topk_weights_out = x
         topk_block = 1
         num_topk = topk_row_stride = topk_out_row_stride = 0
-    _per_token_group_quant_fp8[(M,)](
+    # Large Mega inputs otherwise launch one CTA per 128-element group.
+    groups_per_cta = 16 if copy_topk and M >= 4096 else 1
+    if groups_per_cta > 1:
+        num_warps = 4
+    _per_token_group_quant_fp8[(triton.cdiv(M, groups_per_cta),)](
         x,
         x_q,
         x_s,
         group_size,
+        M,
         N,
         eps,
         fp8_min=fp8_min,
@@ -160,6 +167,7 @@ def lightllm_per_token_group_quant_fp8(
         NEED_MASK=BLOCK != group_size,
         USE_UE8M0_SCALE=use_ue8m0_scales,
         COPY_TOPK=copy_topk,
+        GROUPS_PER_CTA=groups_per_cta,
         num_warps=num_warps,
         num_stages=num_stages,
     )
