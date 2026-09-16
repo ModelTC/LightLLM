@@ -119,7 +119,10 @@ class TpPartBaseModel:
             self._init_req_manager()
             self._init_mem_manager()
 
-        self._bind_mem_manager_to_req_manager()
+        # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
+        # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
+        # 因此 req_manager 创建时暂不传入 mem_manager，需要在两者初始化完成后再进行绑定。
+        self.req_manager.bind_mem_manager(self.mem_manager)
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -238,24 +241,6 @@ class TpPartBaseModel:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
-        return
-
-    def _bind_mem_manager_to_req_manager(self):
-        # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
-        # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
-        # 因此 req_manager 创建时暂不传入 mem_manager，需要在两者初始化完成后再进行绑定。
-        self.req_manager.mem_manager = self.mem_manager
-
-        # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
-        # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
-        # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
-        hold_row = self.req_manager.req_to_token_indexs[self.req_manager.HOLD_REQUEST_ID]
-        hold_page = torch.tensor(
-            self.mem_manager.HOLD_TOKEN_MEMINDEXES,
-            dtype=hold_row.dtype,
-            device=hold_row.device,
-        )
-        hold_row.view(-1, self.mem_manager.page_size).copy_(hold_page)
         return
 
     def _init_infer_layer(self, start_layer_index=0):

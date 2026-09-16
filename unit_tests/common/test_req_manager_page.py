@@ -3,6 +3,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
@@ -21,6 +22,19 @@ class _FakeMemManager:
         result = torch.arange(self.next_index, self.next_index + size, dtype=torch.int32)
         self.next_index += size
         return result
+
+
+def test_bind_mem_manager_initializes_hold_request_with_reserved_page():
+    req_manager = ReqManager.__new__(ReqManager)
+    req_manager.HOLD_REQUEST_ID = 2
+    req_manager.req_to_token_indexs = torch.full((3, 8), -1, dtype=torch.int32)
+    mem_manager = SimpleNamespace(page_size=4, HOLD_TOKEN_MEMINDEXES=(100, 101, 102, 103))
+
+    req_manager.bind_mem_manager(mem_manager)
+
+    assert req_manager.mem_manager is mem_manager
+    assert req_manager.req_to_token_indexs[2].tolist() == [100, 101, 102, 103] * 2
+    assert req_manager.req_to_token_indexs[:2].eq(-1).all()
 
 
 def _make_context(monkeypatch):

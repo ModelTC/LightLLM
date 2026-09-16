@@ -65,10 +65,27 @@ class ReqManager:
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )
-        self.mem_manager = mem_manager
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
+        self.mem_manager = None
+        if mem_manager is not None:
+            self.bind_mem_manager(mem_manager)
+
+    def bind_mem_manager(self, mem_manager: MemoryManager):
+        self.mem_manager = mem_manager
+
+        # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
+        # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
+        # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
+        hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
+        hold_page = torch.tensor(
+            mem_manager.HOLD_TOKEN_MEMINDEXES,
+            dtype=hold_row.dtype,
+            device=hold_row.device,
+        )
+        hold_row.view(-1, mem_manager.page_size).copy_(hold_page)
+        return
 
     def alloc(self):
         return self.req_list.alloc()
