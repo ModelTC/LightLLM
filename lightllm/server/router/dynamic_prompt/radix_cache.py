@@ -17,12 +17,14 @@ class UniqueTimeIdGenerator:
 
 
 time_gen = UniqueTimeIdGenerator()
+RadixChildKey = Union[int, Tuple[int, ...]]
 
 
 class TreeNode:
     def __init__(self, page_size: int = 1):
         self.page_size = page_size
-        self.children: Dict[int, TreeNode] = {}  # 这里的键 为 token_id_key 的第一个元素
+        # page_size=1 时 key 为首个 token id，否则为首个完整页的 token tuple。
+        self.children: Dict[RadixChildKey, "TreeNode"] = {}
         self.parent: TreeNode = None
         self.token_id_key: torch.Tensor = None
         self.token_mem_index_value: torch.Tensor = None  # 用于记录存储的 token_index 为每个元素在 token mem 中的index位置
@@ -116,6 +118,10 @@ class RadixCache:
         self._value_dtype = torch.int64
         if page_size < 1:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
+        if mem_manager is not None and page_size != mem_manager.page_size:
+            raise ValueError(
+                f"RadixCache page_size {page_size} must match mem_manager page_size {mem_manager.page_size}"
+            )
         self.page_size = page_size
 
         self.root_node = TreeNode(page_size=page_size)

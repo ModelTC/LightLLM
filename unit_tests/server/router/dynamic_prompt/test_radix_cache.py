@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
+
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.utils import shm_utils
 
@@ -293,6 +296,13 @@ def test_page_aligned_insert_and_match():
     )
     assert prefix_len == 4
     assert tree.get_tree_total_tokens_num() == 12
+
+
+def test_page_size_must_match_mem_manager():
+    mem_manager = SimpleNamespace(page_size=8)
+
+    with pytest.raises(ValueError, match="must match mem_manager page_size 8"):
+        RadixCache(100, 100, mem_manager=mem_manager, page_size=4)
 
 
 if __name__ == "__main__":
