@@ -18,7 +18,7 @@ class MlaFlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
-        self.page_size = model.args.page_size
+        self._init_infer_page_size()
         num_heads = model.config["num_attention_heads"]
         self.tp_q_head_num = num_heads // get_dp_world_size()
         self.qk_nope_head_dim = model.qk_nope_head_dim
@@ -28,7 +28,7 @@ class MlaFlashInferAttBackend(BaseAttBackend):
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
         self.max_seq_length = model.max_seq_length
-        self.max_page_num = triton.cdiv(self.max_seq_length, self.page_size)
+        self.max_page_num = triton.cdiv(self.max_seq_length, self.infer_page_size)
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         self.kv_indices_buffer = [
             torch.empty(
@@ -49,6 +49,13 @@ class MlaFlashInferAttBackend(BaseAttBackend):
                 mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
         return
+
+    def _init_infer_page_size(self):
+        self.infer_page_size = self.model.args.page_size
+        assert self.model.args.page_size % self.infer_page_size == 0, (
+            f"model page_size {self.model.args.page_size} "
+            f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
 
     def create_att_prefill_state(self, infer_state) -> "MlaFlashInferPrefillAttState":
         return MlaFlashInferPrefillAttState(backend=self, infer_state=infer_state)
@@ -141,7 +148,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
 
         # TODO: 将页数及页数前缀和的计算融合为一个 Triton 算子。
         # token 长度除以页大小并向上取整，末页不足一页也计为一页。
-        b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
+        b_page_len = (self.infer_state.b_seq_len + (self.backend.infer_page_size - 1)) // self.backend.infer_page_size
         self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
 
         self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device="cuda")
@@ -164,7 +171,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             b_page_start_loc=self.kv_starts[:-1],
             max_token_len=self.infer_state.max_kv_seq_len,
             out_page_indices=self.kv_indices,
-            page_size=self.backend.page_size,
+            page_size=self.backend.infer_page_size,
         )
 
         if not self._should_init_decode_wrapper():
@@ -191,7 +198,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.backend.tp_q_head_num,
             self.backend.kv_lora_rank,
             self.backend.qk_rope_head_dim,
-            self.backend.page_size,
+            self.backend.infer_page_size,
             False,  # causal
             self.backend.softmax_scale,
             self.backend.q_data_type,
@@ -256,8 +263,8 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         self.decode_wrapper.run(
             q_nope,
             q_rope,
-            k[:, :, :-qk_rope_head_dim].view(-1, self.backend.page_size, 1, k.shape[-1] - qk_rope_head_dim),
-            k[:, :, -qk_rope_head_dim:].view(-1, self.backend.page_size, 1, qk_rope_head_dim),
+            k[:, :, :-qk_rope_head_dim].view(-1, self.backend.infer_page_size, 1, k.shape[-1] - qk_rope_head_dim),
+            k[:, :, -qk_rope_head_dim:].view(-1, self.backend.infer_page_size, 1, qk_rope_head_dim),
             out=o_tensor,
             return_lse=False,
         )

@@ -16,14 +16,14 @@ class FlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
-        self.page_size = model.args.page_size
+        self._init_infer_page_size()
         tp_world_size = get_dp_world_size()
         self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
         self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
         head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
         self.head_dim = model.config.get("head_dim", head_dim)
         self.max_seq_length = model.max_seq_length
-        self.max_page_num = triton.cdiv(self.max_seq_length, self.page_size)
+        self.max_page_num = triton.cdiv(self.max_seq_length, self.infer_page_size)
         self.kv_indices_buffer = [
             torch.empty(
                 model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
@@ -34,6 +34,13 @@ class FlashInferAttBackend(BaseAttBackend):
         ]
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
+
+    def _init_infer_page_size(self):
+        self.infer_page_size = self.model.args.page_size
+        assert self.model.args.page_size % self.infer_page_size == 0, (
+            f"model page_size {self.model.args.page_size} "
+            f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
 
     def create_att_prefill_state(self, infer_state) -> "FlashInferPrefillAttState":
         return FlashInferPrefillAttState(backend=self, infer_state=infer_state)
@@ -57,9 +64,9 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         q_starts = self.infer_state.b1_cu_q_seq_len.int()
         # TODO: 将页数、页数前缀和及末页有效 token 数的计算融合为一个 Triton 算子。
         # token 长度除以页大小并向上取整，末页不足一页也计为一页。
-        b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
+        b_page_len = (self.infer_state.b_seq_len + (self.backend.infer_page_size - 1)) // self.backend.infer_page_size
         kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-        kv_last_page_len = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
+        kv_last_page_len = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.infer_page_size
         kv_indices = torch.empty(
             batch_size * self.backend.max_page_num,
             dtype=torch.int32,
@@ -72,7 +79,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             b_page_start_loc=kv_starts[:-1],
             max_token_len=self.infer_state.max_kv_seq_len,
             out_page_indices=kv_indices,
-            page_size=self.backend.page_size,
+            page_size=self.backend.infer_page_size,
         )
         self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
             self.backend.get_gpu_workspace_buffer(
@@ -92,7 +99,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             self.backend.tp_q_head_num,
             self.backend.tp_kv_head_num,
             self.backend.head_dim,
-            self.backend.page_size,
+            self.backend.infer_page_size,
             causal=True,
             pos_encoding_mode="NONE",
             logits_soft_cap=0.0,
@@ -128,8 +135,8 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         self.prefill_wrapper.run(
             q,
             (
-                k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
-                v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
+                k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
+                v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
             ),
             out=o_tensor,
         )
@@ -154,8 +161,8 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         model = self.backend.model
         # TODO: 将页数、页数前缀和及末页有效 token 数的计算融合为一个 Triton 算子。
         # token 长度除以页大小并向上取整，末页不足一页也计为一页。
-        b_page_len = (self.infer_state.b_seq_len + (self.backend.page_size - 1)) // self.backend.page_size
-        self.kv_last_page_len_buffer = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.page_size
+        b_page_len = (self.infer_state.b_seq_len + (self.backend.infer_page_size - 1)) // self.backend.infer_page_size
+        self.kv_last_page_len_buffer = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.infer_page_size
         if (
             self.infer_state.batch_size <= model.graph_max_batch_size
             and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
@@ -178,7 +185,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             b_page_start_loc=self.kv_starts[:-1],
             max_token_len=self.infer_state.max_kv_seq_len,
             out_page_indices=self.kv_indices,
-            page_size=self.backend.page_size,
+            page_size=self.backend.infer_page_size,
         )
         if not self._should_init_decode_wrapper():
             # 处于 graph replay 回放阶段，不需要特殊初始化 decode wrapper。
@@ -204,7 +211,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             self.backend.tp_q_head_num,
             self.backend.tp_kv_head_num,
             self.backend.head_dim,
-            self.backend.page_size,
+            self.backend.infer_page_size,
             q_data_type=self.backend.q_data_type,
             kv_data_type=self.backend.kv_data_type,
             non_blocking=True,
@@ -225,7 +232,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
                 dtype=torch.int32,
                 device="cpu",
             )
-            * triton.cdiv(max_kv_len, self.backend.page_size)
+            * triton.cdiv(max_kv_len, self.backend.infer_page_size)
         )
 
         fast_decode_plan(
@@ -236,7 +243,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             num_qo_heads=self.backend.tp_q_head_num,
             num_kv_heads=self.backend.tp_kv_head_num,
             head_dim=self.backend.head_dim,
-            page_size=self.backend.page_size,
+            page_size=self.backend.infer_page_size,
             q_data_type=self.backend.q_data_type,
             kv_data_type=self.backend.kv_data_type,
             non_blocking=True,
@@ -275,8 +282,8 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         self.decode_wrapper.run(
             q,
             (
-                k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
-                v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
+                k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
+                v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
             ),
             out=o_tensor,
         )

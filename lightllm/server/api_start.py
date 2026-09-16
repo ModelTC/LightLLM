@@ -175,9 +175,6 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.page_size < 1:
         raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
-    if args.llm_kv_type in ("fp8kv_sph", "fp8kv_spt"):
-        # TODO: 适配两种 FP8 attention backend 的多 token KV page layout 后移除此限制。
-        assert args.page_size == 1, f"{args.llm_kv_type} only supports --page_size 1"
     if args.run_mode in ("prefill", "decode"):
         assert args.pd_kv_page_size % args.page_size == 0, "--pd_kv_page_size must be divisible by --page_size"
 

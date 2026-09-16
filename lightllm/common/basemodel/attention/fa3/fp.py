@@ -19,7 +19,14 @@ class Fa3AttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
-        self.page_size = model.args.page_size
+        self._init_infer_page_size()
+
+    def _init_infer_page_size(self):
+        self.infer_page_size = self.model.args.page_size
+        assert self.model.args.page_size % self.infer_page_size == 0, (
+            f"model page_size {self.model.args.page_size} "
+            f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
 
     # 延迟到首次获取 page table 时再初始化，避免 PD 分离模式下的 prefill 节点
     # 分配仅供 decode 使用的 buffer，减少显存浪费。
@@ -41,7 +48,7 @@ class Fa3AttBackend(BaseAttBackend):
         # the model is initialized.
         self.supported_max_seq_len = model.max_seq_length
         buffer_count = 2 if args.enable_decode_microbatch_overlap else 1
-        workspace_size = self.page_table_max_batch_size * triton.cdiv(self.supported_max_seq_len, self.page_size)
+        workspace_size = self.page_table_max_batch_size * triton.cdiv(self.supported_max_seq_len, self.infer_page_size)
         self.page_table_buffers = [
             self.get_gpu_workspace_buffer(
                 key_name=f"fa3_page_table_{buffer_index}",
@@ -63,7 +70,7 @@ class Fa3AttBackend(BaseAttBackend):
             raise RuntimeError(
                 f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity " f"{self.supported_max_seq_len}"
             )
-        max_page_len = triton.cdiv(max_kv_len, self.page_size)
+        max_page_len = triton.cdiv(max_kv_len, self.infer_page_size)
         return self.page_table_buffers[microbatch_index][: att_batch_size * max_page_len].reshape(
             att_batch_size, max_page_len
         )
@@ -89,7 +96,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
         self.page_table = torch.empty(
             (
                 self.infer_state.batch_size,
-                triton.cdiv(self.infer_state.max_kv_seq_len, self.backend.page_size),
+                triton.cdiv(self.infer_state.max_kv_seq_len, self.backend.infer_page_size),
             ),
             dtype=torch.int32,
             device=self.infer_state.input_ids.device,
@@ -98,7 +105,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
             page_table=self.page_table,
             req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
             b_req_idx=self.infer_state.b_req_idx,
-            page_size=self.backend.page_size,
+            page_size=self.backend.infer_page_size,
         )
 
     def prefill_att(
@@ -138,8 +145,8 @@ class Fa3PrefillAttState(BasePrefillAttState):
         sm_scale = 1.0 / (Lq ** 0.5)
         o = flash_attn_with_kvcache(
             q=q,
-            k_cache=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
-            v_cache=v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
+            k_cache=k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
+            v_cache=v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.infer_state.b_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
@@ -235,7 +242,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         actual_max_kv_len = self.infer_state.max_kv_seq_len
         # Graph 捕获会将 infer_state.max_kv_seq_len 改为容量上限，提前保存真实长度用于 FA3 配置查找。
         self.decode_max_kv_seq_len = actual_max_kv_len
-        actual_max_page_len = triton.cdiv(actual_max_kv_len, self.backend.page_size)
+        actual_max_page_len = triton.cdiv(actual_max_kv_len, self.backend.infer_page_size)
         page_table_width = actual_max_kv_len
         if model.graph is not None and model.graph.can_run(
             batch_size=self.infer_state.batch_size,
@@ -256,7 +263,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             page_table=self.page_table[:, :actual_max_page_len],
             req_to_token_indexs=model.req_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
-            page_size=self.backend.page_size,
+            page_size=self.backend.infer_page_size,
         )
 
     def copy_for_decode_cuda_graph(self, new_state: "Fa3DecodeAttState"):
@@ -302,8 +309,8 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         sm_scale = 1.0 / (Lq ** 0.5)
         o = flash_attn_with_kvcache_autotune(
             q=q,
-            k_cache=k.view(-1, self.backend.page_size, k.shape[1], k.shape[2]),
-            v_cache=v.view(-1, self.backend.page_size, v.shape[1], v.shape[2]),
+            k_cache=k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
+            v_cache=v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,

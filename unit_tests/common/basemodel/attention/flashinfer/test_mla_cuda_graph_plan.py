@@ -122,7 +122,7 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
         page_size,
         init_short=True,
     )
-    backend = SimpleNamespace(tp_q_head_num=num_heads, page_size=page_size)
+    backend = SimpleNamespace(tp_q_head_num=num_heads, infer_page_size=page_size)
     graph_state = MlaFlashInferDecodeAttState(
         backend=backend,
         infer_state=SimpleNamespace(batch_size=batch_size, b_seq_len=graph_wrapper._kv_len_arr_buf),
