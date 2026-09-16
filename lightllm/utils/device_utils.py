@@ -150,8 +150,9 @@ def has_nvlink():
         # Call nvidia-smi to get the topology matrix
         result = subprocess.check_output(["nvidia-smi", "topo", "--matrix"])
         result = result.decode("utf-8")
-        # Check if the output contains 'NVLink'
-        return any(f"NV{i}" in result for i in range(1, 8))
+        # NVLink topology entries are reported as NV followed by the link count,
+        # for example NV8 on H800 and NV18 on B300.
+        return any(entry.startswith("NV") and entry[2:].isdigit() for entry in result.split())
     except FileNotFoundError:
         # nvidia-smi is not installed, assume no NVLink
         return False
