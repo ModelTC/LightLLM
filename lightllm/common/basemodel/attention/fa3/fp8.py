@@ -8,6 +8,8 @@ from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
 class Fp8Fa3AttBackend(Fa3AttBackend):
     def __init__(self, model):
+        # FP8 FA3 的 KV tensor 当前仍按单 token page 布局，不能复用多 token page table。
+        assert model.args.page_size == 1, "Fp8Fa3AttBackend only supports page_size == 1"
         super().__init__(model=model)
 
     def create_att_prefill_state(self, infer_state) -> "Fp8Fa3PrefillAttState":

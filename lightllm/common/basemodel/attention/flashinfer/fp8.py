@@ -7,6 +7,8 @@ from .env_utils import set_flashinfer_envs
 
 class Fp8FlashInferAttBackend(FlashInferAttBackend):
     def __init__(self, model):
+        # FP8 FlashInfer 的 KV tensor 当前仍按单 token page 布局，必须与 wrapper plan 保持一致。
+        assert model.args.page_size == 1, "Fp8FlashInferAttBackend only supports page_size == 1"
         set_flashinfer_envs()
         super().__init__(model=model)
         self.kv_data_type = torch.float8_e4m3fn

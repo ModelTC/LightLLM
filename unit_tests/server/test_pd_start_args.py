@@ -46,3 +46,22 @@ def test_normal_mode_does_not_validate_pd_kv_page_size(monkeypatch):
 
     with pytest.raises(RuntimeError, match="PD page-size validation passed"):
         _launch_subprocesses(args)
+
+
+@pytest.mark.parametrize("llm_kv_type", ["fp8kv_sph", "fp8kv_spt"])
+def test_fp8_kv_cache_rejects_multi_token_pages(monkeypatch, llm_kv_type):
+    monkeypatch.setattr("lightllm.server.api_start._set_envs_and_config", lambda args: None)
+    monkeypatch.setattr("lightllm.server.api_start.auto_set_max_req_total_len", lambda args: None)
+    monkeypatch.setattr("lightllm.server.api_start.auto_set_fused_shared_experts", lambda args: None)
+    monkeypatch.setattr("lightllm.server.api_start.set_unique_server_name", lambda args: None)
+    args = StartArgs(
+        llm_kv_type=llm_kv_type,
+        kv_quant_calibration_config_path="unused",
+        page_size=2,
+        disable_vision=True,
+        disable_audio=True,
+        disable_shm_warning=True,
+    )
+
+    with pytest.raises(AssertionError, match=rf"{llm_kv_type} only supports --page_size 1"):
+        _launch_subprocesses(args)
