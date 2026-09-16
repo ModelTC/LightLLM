@@ -197,6 +197,9 @@ class MemoryManager:
         self.kv_buffer = None
 
     def alloc(self, need_size) -> torch.Tensor:
+        assert (
+            need_size % self.page_size == 0
+        ), f"KV cache allocation size {need_size} must be a multiple of page_size {self.page_size}"
         return self.allocator.alloc(need_size)
 
     def free(self, free_index: Union[torch.Tensor, List[int]]) -> None:

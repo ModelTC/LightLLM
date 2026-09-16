@@ -119,16 +119,7 @@ class TpPartBaseModel:
             self._init_req_manager()
             self._init_mem_manager()
 
-        # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
-        # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
-        self.req_manager.mem_manager = self.mem_manager
-        hold_row = self.req_manager.req_to_token_indexs[self.req_manager.HOLD_REQUEST_ID]
-        hold_page = torch.tensor(
-            self.mem_manager.HOLD_TOKEN_MEMINDEXES,
-            dtype=hold_row.dtype,
-            device=hold_row.device,
-        )
-        hold_row.view(-1, self.mem_manager.page_size).copy_(hold_page)
+        self._bind_mem_manager_to_req_manager()
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -247,6 +238,24 @@ class TpPartBaseModel:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
+        return
+
+    def _bind_mem_manager_to_req_manager(self):
+        # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
+        # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
+        # 因此 req_manager 创建时暂不传入 mem_manager，需要在两者初始化完成后再进行绑定。
+        self.req_manager.mem_manager = self.mem_manager
+
+        # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
+        # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
+        # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
+        hold_row = self.req_manager.req_to_token_indexs[self.req_manager.HOLD_REQUEST_ID]
+        hold_page = torch.tensor(
+            self.mem_manager.HOLD_TOKEN_MEMINDEXES,
+            dtype=hold_row.dtype,
+            device=hold_row.device,
+        )
+        hold_row.view(-1, self.mem_manager.page_size).copy_(hold_page)
         return
 
     def _init_infer_layer(self, start_layer_index=0):
@@ -988,7 +997,9 @@ class TpPartBaseModel:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-            mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+            page_size = self.mem_manager.page_size
+            alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
+            mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
             self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
@@ -1067,7 +1078,9 @@ class TpPartBaseModel:
                     0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-                mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+                page_size = self.mem_manager.page_size
+                alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
+                mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
                 self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
