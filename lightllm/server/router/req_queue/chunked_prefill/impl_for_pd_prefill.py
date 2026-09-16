@@ -21,7 +21,7 @@ class PDPrefillQueue(BaseQueue):
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
         # 与已有 batch 使用相同的请求容量估算，确保新请求准入也计入分页、MTP 和异步退出所需的余量。
         a_len, b_len = req.get_tuple_tokens(self.is_busy(), self.router.router_statics.ema_req_out_len)
-        estimated_peak_token_num += a_len + b_len
+        estimated_peak_token_num = estimated_peak_token_num + (a_len + b_len)
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -47,7 +47,7 @@ class PDPrefillQueue(BaseQueue):
                     # get_tuple_tokens 会结合当前输出长度和 KV 长度估算请求容量，并统一计入分页对齐、
                     # 两轮 MTP 以及 stop_str 等异步操作造成的退出延迟所需的余量，具体计算见该方法。
                     a_len, b_len = req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
-                    estimated_peak_token_num += a_len + b_len
+                    estimated_peak_token_num = estimated_peak_token_num + (a_len + b_len)
 
         return estimated_peak_token_num
 

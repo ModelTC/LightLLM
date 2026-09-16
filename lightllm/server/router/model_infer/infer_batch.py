@@ -197,7 +197,7 @@ class InferenceContext:
         if req.tail_small_page_buffer_id is not None:
             assert req.hybrid_cache_len <= req.cur_kv_len
 
-        if req.cur_kv_len == 0:
+        if req.cur_kv_len == 0 and req.hold_kv_len == 0:
             return
 
         if req.hybrid_cache_len <= req.cur_kv_len and req.tail_small_page_buffer_id is not None:
@@ -367,12 +367,16 @@ class InferenceContext:
                 self.req_manager.free_token(free_token_index)
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
+    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
         if paused_reqs:
+            # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
+            can_alloc_token_num = self.get_can_alloc_token_num()
 
             for req in paused_reqs:
-                prefill_need_token_num = req.get_cur_total_len()
-                if prefill_need_token_num > can_alloc_token_num:
+                # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
+                # 才允许执行 radix cache 匹配，避免在容量不足时提前改变引用或重建 hybrid cache 状态。
+                alloc_token_num = req._kv_cache_alloc_need(req.get_cur_total_len())
+                if alloc_token_num > can_alloc_token_num:
                     break
 
                 if g_infer_context.is_hybrid_att_model:
@@ -385,7 +389,7 @@ class InferenceContext:
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
-                can_alloc_token_num -= prefill_need_token_num
+                can_alloc_token_num -= alloc_token_num
         return
 
     def get_can_alloc_token_num(self):

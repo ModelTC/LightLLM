@@ -283,3 +283,118 @@ def test_linear_attention_frees_reserved_page_tail(monkeypatch):
     infer_context._hybrid_att_free_req(free_token_indexes, req)
 
     assert free_token_indexes[0].tolist() == list(range(8))
+
+
+def test_linear_attention_frees_preallocated_pages_before_first_forward(monkeypatch):
+    infer_context = InferenceContext.__new__(InferenceContext)
+    infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    infer_context.radix_cache = SimpleNamespace()
+    infer_context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32)[None, :])
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=0,
+        hold_kv_len=8,
+        hybrid_cache_len=0,
+        tail_small_page_buffer_id=None,
+        hybrid_len_to_big_page_id={},
+        shared_kv_node=None,
+    )
+    free_token_indexes = []
+    monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
+    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: infer_context.args)
+
+    infer_context._hybrid_att_free_req(free_token_indexes, req)
+
+    assert free_token_indexes[0].tolist() == list(range(8))
+
+
+def _make_paused_req(req_idx, target_kv_len, page_size, match_kv_len=0, chunk_kv_len=None):
+    if chunk_kv_len is None:
+        chunk_kv_len = target_kv_len
+    req = SimpleNamespace(
+        args=SimpleNamespace(page_size=page_size),
+        req_id=req_idx,
+        req_idx=req_idx,
+        cur_kv_len=0,
+        hold_kv_len=0,
+        paused=True,
+        match_call_count=0,
+        shared_kv_node=None,
+        shm_req=SimpleNamespace(is_paused=True, shm_cur_kv_len=0),
+        get_cur_total_len=lambda: target_kv_len,
+        get_chuncked_input_token_len=lambda: chunk_kv_len,
+    )
+
+    def match_radix_cache():
+        req.match_call_count += 1
+        req.cur_kv_len = match_kv_len
+        req.hold_kv_len = match_kv_len
+        req.shm_req.shm_cur_kv_len = match_kv_len
+
+    req._match_radix_cache = match_radix_cache
+    req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
+    req.prefill_need_token_num = MethodType(InferReq.prefill_need_token_num, req)
+    return req
+
+
+def test_recover_paused_reqs_uses_page_allocation_need(monkeypatch):
+    infer_context = InferenceContext.__new__(InferenceContext)
+    infer_context.args = SimpleNamespace(page_size=4)
+    infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
+    infer_context.radix_cache = None
+    freed_indexes = []
+    infer_context.req_manager = SimpleNamespace(
+        req_to_token_indexs=torch.arange(16, dtype=torch.int32).reshape(2, 8),
+        free_token=lambda indexes: freed_indexes.extend(indexes.tolist()),
+    )
+    infer_context.get_can_alloc_token_num = lambda: 5
+    large_req = _make_paused_req(req_idx=0, target_kv_len=5, page_size=4)
+    small_req = _make_paused_req(req_idx=1, target_kv_len=4, page_size=4)
+    monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", False)
+    monkeypatch.setattr(infer_batch, "custom_cat", lambda tensors: torch.cat(tensors))
+
+    infer_context.recover_paused_reqs([large_req, small_req], is_master_in_dp=True)
+
+    assert large_req.paused is True
+    assert large_req.shm_req.is_paused is True
+    assert large_req.match_call_count == 0
+    assert small_req.paused is True
+    assert small_req.shm_req.is_paused is True
+    assert small_req.match_call_count == 0
+    assert freed_indexes == []
+
+
+def test_recover_paused_reqs_requires_capacity_for_the_full_sequence(monkeypatch):
+    infer_context = InferenceContext.__new__(InferenceContext)
+    infer_context.args = SimpleNamespace(page_size=4)
+    infer_context.radix_cache = None
+    infer_context.req_manager = SimpleNamespace(
+        req_to_token_indexs=torch.arange(8, dtype=torch.int32)[None, :],
+        free_token=lambda indexes: None,
+    )
+    infer_context.get_can_alloc_token_num = lambda: 4
+    req = _make_paused_req(req_idx=0, target_kv_len=8, page_size=4, chunk_kv_len=4)
+    monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", False)
+    monkeypatch.setattr(infer_batch, "custom_cat", lambda tensors: torch.cat(tensors))
+
+    infer_context.recover_paused_reqs([req], is_master_in_dp=True)
+
+    assert req.paused is True
+    assert req.shm_req.is_paused is True
+    assert req.match_call_count == 0
+
+
+def test_recover_paused_reqs_accounts_for_rematched_prefix(monkeypatch):
+    infer_context = InferenceContext.__new__(InferenceContext)
+    infer_context.args = SimpleNamespace(page_size=4)
+    infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
+    infer_context.get_can_alloc_token_num = lambda: 12
+    req = _make_paused_req(req_idx=0, target_kv_len=9, page_size=4, match_kv_len=8)
+    monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", False)
+
+    infer_context.recover_paused_reqs([req], is_master_in_dp=True)
+
+    assert req.cur_kv_len == req.hold_kv_len == 8
+    assert req.paused is False
+    assert req.shm_req.is_paused is False
+    assert req.match_call_count == 1

@@ -655,9 +655,7 @@ class ModeBackend:
         old_hold_kv_len = req_obj.hold_kv_len
         new_hold_kv_len = old_hold_kv_len + alloc_token_num
         mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
-        g_infer_context.req_manager.req_to_token_indexs[
-            req_obj.req_idx, old_hold_kv_len:new_hold_kv_len
-        ] = mem_indexes
+        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len] = mem_indexes
         req_obj.hold_kv_len = new_hold_kv_len
         return mem_indexes
 
@@ -823,7 +821,8 @@ class ModeBackend:
 
         if recover_paused:
             g_infer_context.recover_paused_reqs(
-                paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp, can_alloc_token_num=can_alloc_token_num
+                paused_reqs=paused_reqs,
+                is_master_in_dp=self.is_master_in_dp,
             )
 
         # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，
@@ -1022,9 +1021,7 @@ class ModeBackend:
             return
 
         prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
-        prompt_cache_kv_buffer = {
-            name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()
-        }
+        prompt_cache_kv_buffer = {name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()}
         intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
         self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
         intact_token_ids = torch.tensor(

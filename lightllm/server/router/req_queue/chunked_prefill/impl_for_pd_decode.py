@@ -15,7 +15,7 @@ class PDDecodeQueue(BaseQueue):
         # get_tuple_tokens 统一处理输出长度估算，并计入分页对齐、MTP 和异步退出所需的余量，
         # 确保新请求准入时也为这些额外的 KV 占用预留容量。
         a_len, b_len = req.get_tuple_tokens(self.is_busy(), self.router.router_statics.ema_req_out_len)
-        estimated_peak_token_num += a_len + b_len
+        estimated_peak_token_num = estimated_peak_token_num + (a_len + b_len)
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -48,7 +48,7 @@ class PDDecodeQueue(BaseQueue):
                         # 复用 get_tuple_tokens，统一计入分页对齐、两轮 MTP，以及 stop_str 等异步操作
                         # 造成的退出延迟所需的余量，再与下方 decode 请求的动态 KV 峰值相加。
                         a_len, b_len = req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
-                        estimated_peak_token_num += a_len + b_len
+                        estimated_peak_token_num = estimated_peak_token_num + (a_len + b_len)
 
         if decoding_req_list:
             # 按预计剩余输出长度排序，计算每个请求结束时仍存活请求的 KV 占用峰值，
