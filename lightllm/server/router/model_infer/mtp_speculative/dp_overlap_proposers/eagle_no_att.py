@@ -59,7 +59,6 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
         if draft_step == 0:
             return EagleSpecProposal(
                 token_ids=proposal_token_ids,
-                extra_mem_indexes_cpu=[],
                 schedule_scores=schedule_scores,
             )
 
@@ -142,6 +141,5 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
 
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )

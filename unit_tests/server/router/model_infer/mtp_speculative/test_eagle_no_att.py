@@ -72,7 +72,6 @@ def test_eagle_no_att_recurrently_proposes_from_accepted_tails():
 
     torch.testing.assert_close(proposal.token_ids, torch.tensor([[21, 31], [24, 34]], device=device))
     torch.testing.assert_close(proposal.schedule_scores, torch.tensor([[0.8, 0.6], [0.7, 0.5]], device=device))
-    assert proposal.extra_mem_indexes_cpu == []
     assert len(draft_calls) == 2
     assert draft_calls[0]["batch_size"] == 2
     torch.testing.assert_close(draft_calls[0]["input_ids"], torch.tensor([11, 14]))

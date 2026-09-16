@@ -193,7 +193,6 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
     assert isinstance(proposal, EagleSpecProposal)
     torch.testing.assert_close(proposal.token_ids, torch.tensor([[32, 40], [34, 41]], device=device))
     torch.testing.assert_close(proposal.schedule_scores, torch.tensor([[0.32, 0.40], [0.34, 0.41]], device=device))
-    assert proposal.extra_mem_indexes_cpu == []
     assert len(draft_calls) == 2
     assert draft_calls[0]["model_input"] is not target_input
     assert draft_calls[0]["batch_size"] == 6

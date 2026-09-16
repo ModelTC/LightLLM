@@ -59,7 +59,6 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         if draft_step == 0:
             return VanillaSpecProposal(
                 token_ids=proposal_token_ids,
-                extra_mem_indexes_cpu=[],
                 schedule_scores=schedule_scores,
             )
 
@@ -141,6 +140,5 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
 
         return VanillaSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )

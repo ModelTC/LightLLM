@@ -376,11 +376,6 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        mtp_utils.free_mem_indexes(
-            backend=self,
-            extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-        )
-
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return

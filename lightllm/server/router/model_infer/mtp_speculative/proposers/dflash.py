@@ -152,6 +152,5 @@ class DFlashProposer(BaseSpecProposer):
             schedule_scores = block_draft_token_probs[:, :draft_step].float().contiguous()
         return DFlashSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )

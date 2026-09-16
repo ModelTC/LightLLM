@@ -612,10 +612,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -623,10 +619,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
             event_pack.notify_pre_post_handle()
         return
 
@@ -890,18 +882,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
             event_pack.notify_pre_post_handle()
         else:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
             event_pack.notify_pre_post_handle()
         return

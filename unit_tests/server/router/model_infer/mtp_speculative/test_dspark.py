@@ -127,4 +127,3 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
     )
     assert torch.equal(proposal.schedule_scores_cpu, proposal.schedule_scores)
     assert proposal.schedule_scores_cpu is not proposal.schedule_scores
-    assert proposal.extra_mem_indexes_cpu == []

@@ -13,10 +13,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
-        MtpMemIndexesToFree,
-        SpecProposal,
-    )
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 def verify_mtp_tokens(
@@ -96,26 +93,7 @@ def record_request_mtp_metrics(
             req.update_mtp_verify_step_num(verify_step_num=1)
 
 
-def free_mem_indexes(
-    backend: ModeBackend,
-    extra_mem_indexes_cpu: List[MtpMemIndexesToFree],
-) -> None:
-    """Free all KV indexes described by the unified MTP memory list."""
-
-    mem_indexes_to_free = []
-    for extra_mem_to_free in extra_mem_indexes_cpu:
-        extra_indexes_cpu = extra_mem_to_free.mem_indexes_cpu
-        if extra_mem_to_free.free_mask_cpu is not None:
-            extra_indexes_cpu = extra_indexes_cpu[extra_mem_to_free.free_mask_cpu]
-        if extra_indexes_cpu.numel() > 0:
-            mem_indexes_to_free.append(extra_indexes_cpu)
-
-    if mem_indexes_to_free:
-        backend.model.req_manager.mem_manager.free(torch.cat(mem_indexes_to_free, dim=0))
-
-
 __all__ = [
-    "free_mem_indexes",
     "record_request_mtp_metrics",
     "scatter_mtp_next_tokens",
     "verify_mtp_tokens",

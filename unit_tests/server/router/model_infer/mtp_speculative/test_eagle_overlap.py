@@ -140,7 +140,6 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
     assert draft_model.decode_batch_sizes == [(3, 6), (1, 2)]
     assert proposal.token_ids.shape == (3, 2)
     assert torch.equal(proposal.token_ids, torch.tensor([[1, 0], [0, 0], [5, 1]]))
-    assert proposal.extra_mem_indexes_cpu == []
 
 
 def test_overlap_eagle_supports_empty_verify_rows():
@@ -324,7 +323,6 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     assert draft_model.decode_batch_sizes == [(3, 6), (1, 2)]
     assert proposal.token_ids.shape == (3, 2)
     assert torch.equal(proposal.token_ids, torch.tensor([[1, 0], [0, 0], [5, 1]]))
-    assert proposal.extra_mem_indexes_cpu == []
 
 
 def test_eagle3_maps_draft_token_ids_in_proposer():

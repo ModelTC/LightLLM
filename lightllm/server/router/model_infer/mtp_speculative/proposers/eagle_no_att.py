@@ -37,7 +37,6 @@ class EagleNoAttProposer(BaseSpecProposer):
         if draft_step == 0:
             return EagleSpecProposal(
                 token_ids=target_next_token_ids.new_empty((req_num, 0)),
-                extra_mem_indexes_cpu=[],
                 schedule_scores=(
                     torch.empty(
                         (req_num, 0),
@@ -100,6 +99,5 @@ class EagleNoAttProposer(BaseSpecProposer):
         schedule_scores = torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )

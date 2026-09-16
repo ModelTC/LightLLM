@@ -95,7 +95,6 @@ class EagleWithAttProposer(BaseSpecProposer):
         if draft_step == 1:
             return EagleSpecProposal(
                 token_ids=torch.cat(proposal_token_ids_by_step, dim=1),
-                extra_mem_indexes_cpu=[],
                 schedule_scores=torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None,
             )
 
@@ -155,7 +154,6 @@ class EagleWithAttProposer(BaseSpecProposer):
         schedule_scores = torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )
 

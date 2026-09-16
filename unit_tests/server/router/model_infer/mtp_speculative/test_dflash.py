@@ -114,4 +114,3 @@ def test_dflash_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         proposal.schedule_scores,
         flat_draft_token_probs.reshape(2, block_size)[:, :2].float(),
     )
-    assert proposal.extra_mem_indexes_cpu == []
