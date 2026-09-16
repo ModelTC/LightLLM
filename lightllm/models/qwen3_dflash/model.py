@@ -105,6 +105,8 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.mem_manager = self.mem_manager
         infer_state.mem_index = self._select_mem_indexes(model_input)
 
+        # 这里调用的是 DFlash 覆写后的 context_forward：pre layer 只投影 target hidden，
+        # transformer layer 只生成带 RoPE 的 K/V 并写入 draft cache，不会计算 attention、FFN 和 logits。
         hidden = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
         for layer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
             hidden = layer.context_forward(hidden, infer_state, layer_weight)
