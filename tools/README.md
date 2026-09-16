@@ -55,3 +55,42 @@ silently exporting the wrong granularity. The first release supports a single
 node, `dp=1`, and normal mode. JSON puts target layers before draft layers;
 target-only jobs are supported. Vision and audio are disabled for this text-only
 workflow.
+
+## Combined KV and decode-only Q calibration
+
+Use `--calibration_target qkv` to collect normal KV maxima and decode-only,
+post-RoPE Q maxima in one BF16 reference-service run. It writes one per-head KV
+artifact with an embedded `q_calibration` object; prefill Q remains dynamic.
+
+```bash
+python tools/calibrate_fp8kv.py --calibration_target qkv --num_samples 128 \
+  --max_input_tokens 1024 --max_new_tokens 256 --concurrency 4 \
+  --output kv_cache_calib_per_head_with_q_with_draft.json \
+  -- --model_dir "$MODEL" --chat_template "$CHAT" --mtp_mode dspark \
+  --mtp_draft_model_dir "$DRAFT" --mtp_step 3 \
+  --llm_prefill_att_backend fa3 --llm_decode_att_backend fa3
+```
+
+## Add Q to an existing KV calibration
+
+Use `--calibration_target q` to add decode-only per-KV-head Q scales to a copy
+of an existing per-head KV calibration file. The isolated service still uses
+BF16 KV storage as the reference path. It collects only post-RoPE Q in decode
+attention; prefill Q remains dynamically quantized at inference. Q calibration
+requires explicit FA3 for both full-attention prefill and decode. The source KV
+file is read before startup, never rewritten, and the output path must differ.
+
+```bash
+python tools/calibrate_fp8kv.py --calibration_target q --num_samples 128 \
+  --max_input_tokens 1024 --max_new_tokens 256 --concurrency 4 \
+  --output kv_cache_calib_per_head_with_q_with_draft.json \
+  -- --model_dir "$MODEL" --chat_template "$CHAT" --mtp_mode dspark \
+  --mtp_draft_model_dir "$DRAFT" --mtp_step 3 \
+  --kv_quant_calibration_config_path KV.json \
+  --llm_prefill_att_backend fa3 --llm_decode_att_backend fa3
+```
+
+At FP8 KV inference, load the single merged file with
+`--kv_quant_calibration_config_path KV_with_q.json`. When its optional
+`q_calibration` object is present, it is accepted only with `--llm_kv_type
+fp8kv_sph` and FA3 decode; without it, decode Q keeps the existing dynamic path.

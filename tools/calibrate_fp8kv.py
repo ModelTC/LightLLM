@@ -148,6 +148,125 @@ def merge_rank_snapshots(snapshots: list[dict[str, Any]], *, expected_ranks: int
     }
 
 
+def merge_q_rank_snapshots(snapshots: list[dict[str, Any]], *, expected_ranks: int | None = None) -> dict[str, Any]:
+    """Merge decode-Q maxima into canonical global KV-head order.
+
+    TP ranks can replicate a KV head when TP exceeds global KV heads; those
+    copies are conservative maxima of distinct Q-head groups and must be
+    reduced rather than concatenated.
+    """
+    if not snapshots:
+        raise ValueError("no Q rank snapshots received")
+    required = {
+        "rank",
+        "layer_num",
+        "head_num",
+        "global_head_num",
+        "shape",
+        "counts",
+        "observed_token_rows",
+        "abs_max",
+        "qmin",
+        "qmax",
+        "architecture",
+        "num_target_layers",
+        "num_draft_layers",
+        "tensor",
+    }
+    for row in snapshots:
+        missing = required - row.keys()
+        if missing:
+            raise ValueError(f"Q rank snapshot missing fields: {sorted(missing)}")
+        for key, lower in {
+            "rank": 0,
+            "layer_num": 1,
+            "head_num": 1,
+            "global_head_num": 1,
+            "num_target_layers": 1,
+            "num_draft_layers": 0,
+        }.items():
+            if type(row[key]) is not int or row[key] < lower:
+                raise ValueError(f"Q rank snapshot has invalid {key}")
+        if row["tensor"] != "q" or row.get("per_head") is not True:
+            raise ValueError("Q rank snapshot must be per-head tensor=q")
+        if row["num_target_layers"] + row["num_draft_layers"] != row["layer_num"]:
+            raise ValueError("Q rank snapshot target/draft layers do not cover all layers")
+        if row["qmin"] != -QMAX or row["qmax"] != QMAX:
+            raise ValueError("Q rank snapshot q-range is invalid")
+        if row["shape"] != [row["layer_num"], row["head_num"]]:
+            raise ValueError("Q rank snapshot shape is invalid")
+        if any(
+            not isinstance(row[key], list) or len(row[key]) != row["layer_num"]
+            for key in ("counts", "observed_token_rows", "abs_max")
+        ):
+            raise ValueError("Q rank snapshot layer data length is inconsistent")
+        if any(
+            type(value) is not int or value <= 0
+            for values in (row["counts"], row["observed_token_rows"])
+            for value in values
+        ):
+            raise ValueError("Q rank snapshot has an unobserved decode layer")
+        if any(
+            not isinstance(values, list)
+            or len(values) != row["head_num"]
+            or not all(_finite_number(v) and v >= 0 for v in values)
+            for values in row["abs_max"]
+        ):
+            raise ValueError("Q rank snapshot contains invalid maxima")
+    ranks = sorted(snapshots, key=lambda row: row["rank"])
+    if expected_ranks is not None and len(ranks) != expected_ranks:
+        raise ValueError(f"expected {expected_ranks} Q rank snapshots, got {len(ranks)}")
+    if [row["rank"] for row in ranks] != list(range(len(ranks))):
+        raise ValueError("Q rank snapshots must be contiguous starting at zero")
+    first = ranks[0]
+    for row in ranks[1:]:
+        for key in (
+            "layer_num",
+            "head_num",
+            "global_head_num",
+            "qmin",
+            "qmax",
+            "architecture",
+            "num_target_layers",
+            "num_draft_layers",
+        ):
+            if row[key] != first[key]:
+                raise ValueError(f"Q rank snapshots disagree on {key}")
+    global_heads = first["global_head_num"]
+    local_head_slots = len(ranks) * first["head_num"]
+    if local_head_slots % global_heads:
+        raise ValueError("Q rank snapshots do not have an integral KV-head replication factor")
+    replication_factor = local_head_slots // global_heads
+    maxima = [[0.0] * global_heads for _ in range(first["layer_num"])]
+    coverage = [0] * global_heads
+    for row in ranks:
+        for local_head in range(row["head_num"]):
+            flat_index = row["rank"] * row["head_num"] + local_head
+            global_head = flat_index // replication_factor
+            coverage[global_head] += 1
+            for layer, values in enumerate(row["abs_max"]):
+                maxima[layer][global_head] = max(maxima[layer][global_head], float(values[local_head]))
+    if not all(coverage):
+        raise ValueError("Q rank snapshots do not cover every global KV head")
+    scales = [[value / QMAX if value > 0 else 1.0 for value in values] for values in maxima]
+    return {
+        "version": "1.0",
+        "tensor": "q",
+        "calibration_stage": "decode",
+        "quant_type": "per_head",
+        "scale_layout": "kv_head_group",
+        "architectures": first["architecture"],
+        "num_layers": first["layer_num"],
+        "num_target_layers": first["num_target_layers"],
+        "num_draft_layers": first["num_draft_layers"],
+        "num_head": global_heads,
+        "qmin": first["qmin"],
+        "qmax": first["qmax"],
+        "scales_shape": [first["layer_num"], global_heads],
+        "scales": scales,
+    }
+
+
 def _post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     req = Request(url, data=json.dumps(payload).encode(), headers={"content-type": "application/json"}, method="POST")
     try:
@@ -233,6 +352,7 @@ def jsonl_token_samples(path: Path, tokenizer, *, max_input_tokens: int, require
 def _parse() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path)
+    parser.add_argument("--calibration_target", choices=("kv", "q", "qkv"), default="kv")
     parser.add_argument("--num_samples", type=int, default=128)
     parser.add_argument("--max_input_tokens", type=int, default=1024)
     parser.add_argument("--max_new_tokens", type=int, default=256)
@@ -251,7 +371,64 @@ def _parse() -> tuple[argparse.Namespace, list[str]]:
     return own, rest
 
 
-def _service_args(service_argv: list[str], job_id: str):
+def _q_calibration_source(service_argv: list[str]) -> tuple[Path, dict[str, Any], str]:
+    """Read the existing per-head KV artifact that a Q-only export augments."""
+    from lightllm.server.api_cli import add_cli_args
+
+    parser = argparse.ArgumentParser(add_help=False)
+    add_cli_args(parser)
+    path_value = vars(parser.parse_args(service_argv)).get("kv_quant_calibration_config_path")
+    if not path_value:
+        raise ValueError("Q calibration requires --kv_quant_calibration_config_path with an existing per-head KV file")
+    path = Path(path_value)
+    if not path.is_file():
+        raise FileNotFoundError(f"Q calibration KV source {path} not found")
+    source_bytes = path.read_bytes()
+    try:
+        cfg = json.loads(source_bytes)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Q calibration KV source {path} is not valid JSON") from exc
+    if not isinstance(cfg, dict) or cfg.get("quant_type") != "per_head":
+        raise ValueError("Q calibration KV source must be a per_head calibration object")
+    if cfg.get("qmin") != -QMAX or cfg.get("qmax") != QMAX:
+        raise ValueError("Q calibration KV source has an incompatible q-range")
+    for key in ("num_layers", "num_head"):
+        if type(cfg.get(key)) is not int or cfg[key] < 1:
+            raise ValueError(f"Q calibration KV source has invalid {key}")
+    if "num_target_layers" in cfg or "num_draft_layers" in cfg:
+        for key, lower in (("num_target_layers", 1), ("num_draft_layers", 0)):
+            if type(cfg.get(key)) is not int or cfg[key] < lower:
+                raise ValueError(f"Q calibration KV source has invalid {key}")
+        if cfg["num_target_layers"] + cfg["num_draft_layers"] != cfg["num_layers"]:
+            raise ValueError("Q calibration KV source target/draft layers do not cover all layers")
+    scales = cfg.get("scales")
+    expected_shape = [cfg["num_layers"], 2 * cfg["num_head"]]
+    if (
+        cfg.get("scales_shape") != expected_shape
+        or not isinstance(scales, list)
+        or len(scales) != expected_shape[0]
+        or any(not isinstance(row, list) or len(row) != expected_shape[1] for row in scales)
+        or any(not _finite_number(value) or value <= 0 for row in scales for value in row)
+    ):
+        raise ValueError("Q calibration KV source scales shape is invalid")
+    return path, cfg, hashlib.sha256(source_bytes).hexdigest()
+
+
+def _embed_q_calibration(kv_source: dict[str, Any], q_calibration: dict[str, Any]) -> dict[str, Any]:
+    for key in ("architectures", "qmin", "qmax", "quant_type", "num_layers"):
+        if q_calibration.get(key) != kv_source.get(key):
+            raise ValueError(f"Q calibration result {key} differs from KV source")
+    if kv_source["num_head"] % q_calibration["num_head"]:
+        raise ValueError("Q calibration result global KV heads are incompatible with KV source")
+    for key in ("num_target_layers", "num_draft_layers"):
+        if key in kv_source and q_calibration[key] != kv_source[key]:
+            raise ValueError(f"Q calibration result {key} differs from KV source")
+    merged = dict(kv_source)
+    merged["q_calibration"] = q_calibration
+    return merged
+
+
+def _service_args(service_argv: list[str], job_id: str, calibration_target: str = "kv"):
     from lightllm.server.api_cli import add_cli_args
     from lightllm.server.core.objs import StartArgs
 
@@ -265,6 +442,10 @@ def _service_args(service_argv: list[str], job_id: str):
     if any(backend == "auto" for backend in backends):
         raise ValueError("calibration requires explicit FA3 (per-head) or FlashInfer (per-tensor) prefill backend")
     per_head, per_tensor = "fa3" in backends, "flashinfer" in backends
+    if calibration_target in {"q", "qkv"} and (
+        not per_head or values.get("llm_decode_att_backend", ["auto"])[0] != "fa3"
+    ):
+        raise ValueError("Q calibration requires explicit FA3 full-attention prefill and decode backends")
     if per_head == per_tensor:
         raise ValueError("calibration requires exactly one supported prefill backend: FA3 or FlashInfer")
     expected = "fp8kv_sph" if per_head else "fp8kv_spt"
@@ -275,6 +456,7 @@ def _service_args(service_argv: list[str], job_id: str):
         {
             "export_fp8kv_calibration": True,
             "calibration_job_id": job_id,
+            "calibration_target": calibration_target,
             "enable_rl": False,
             "llm_kv_type": "None",  # collect unquantized KV after checking user granularity intent
             "disable_cudagraph": True,
@@ -291,6 +473,10 @@ def _service_args(service_argv: list[str], job_id: str):
             "host": "127.0.0.1",
         }
     )
+    if calibration_target == "q":
+        # The user-provided KV path is an input artifact only.  The isolated
+        # reference service always uses BF16 KV and must not load static Q.
+        values["kv_quant_calibration_config_path"] = None
     explicit_port = any(token == "--port" or token.startswith("--port=") for token in service_argv)
     try:
         values["port"] = _pick_port(int(values["port"]) if explicit_port else 0)
@@ -433,13 +619,25 @@ def main() -> int:
         if not _finite_number(getattr(own, name)) or getattr(own, name) <= 0:
             raise ValueError(f"{name} must be a finite positive timeout")
     job_id = uuid.uuid4().hex
-    args = _service_args(service_argv, job_id)
+    calibration_target = getattr(own, "calibration_target", "kv")
+    q_source_path, q_source, q_source_sha256 = (None, None, None)
+    if calibration_target == "q":
+        q_source_path, q_source, q_source_sha256 = _q_calibration_source(service_argv)
+    args = _service_args(service_argv, job_id, calibration_target)
     grain = "per_head" if "fa3" in args.llm_prefill_att_backend else "per_tensor"
-    output = own.output or Path(f"kv_cache_calib_{grain}{'_with_draft' if args.mtp_mode else ''}.json")
+    if calibration_target in {"q", "qkv"}:
+        grain = "per_head"
+        output = own.output or Path(f"kv_cache_calib_per_head_with_q{'_with_draft' if args.mtp_mode else ''}.json")
+    else:
+        output = own.output or Path(f"kv_cache_calib_{grain}{'_with_draft' if args.mtp_mode else ''}.json")
     report_path = output.with_name(output.name + ".report.json")
     if (output.exists() or report_path.exists()) and not own.overwrite:
         raise FileExistsError(f"output or report exists: {output}; pass --overwrite to replace both")
+    if q_source_path is not None and q_source_path.resolve() in {output.resolve(), report_path.resolve()}:
+        raise ValueError("Q calibration output and report must differ from its KV source, even with --overwrite")
     tokenizer, model_vocab, architectures = _load_tokenizer(args)
+    if q_source is not None and q_source["architectures"] != architectures:
+        raise ValueError("Q calibration KV source architecture disagrees with local model config")
     samples = (
         jsonl_token_samples(own.dataset, tokenizer, max_input_tokens=own.max_input_tokens, required=own.num_samples)
         if own.dataset
@@ -487,15 +685,46 @@ def main() -> int:
             pool.shutdown(wait=True)
         _wait_idle(base, job_id, own.drain_timeout)
         snapshot = _post(base + "/_calibration/snapshot", {"job_id": job_id}, own.drain_timeout)
-        merged = merge_rank_snapshots(snapshot["ranks"], expected_ranks=args.tp)
+        if calibration_target == "q":
+            merged = merge_q_rank_snapshots(snapshot["ranks"], expected_ranks=args.tp)
+            calibration = _embed_q_calibration(q_source, merged)
+            q_rows = snapshot["ranks"]
+        elif calibration_target == "qkv":
+            merged = merge_rank_snapshots(snapshot["ranks"], expected_ranks=args.tp)
+            q_rows = [row.get("q_snapshot") for row in snapshot["ranks"]]
+            if any(row is None for row in q_rows):
+                raise ValueError("qkv snapshot is missing a rank-local Q snapshot")
+            q_merged = merge_q_rank_snapshots(q_rows, expected_ranks=args.tp)
+            calibration = _embed_q_calibration(merged, q_merged)
+        else:
+            merged = merge_rank_snapshots(snapshot["ranks"], expected_ranks=args.tp)
+            calibration = merged
+            q_rows = None
         if merged["quant_type"] != grain:
             raise ValueError(f"snapshot grain {merged['quant_type']} differs from requested {grain}")
         if merged["architectures"] != architectures:
             raise ValueError("rank snapshot architecture disagrees with local model config")
+        report_rank_observations = [
+            {"rank": row["rank"], "counts": row["counts"], "observed_token_rows": row["observed_token_rows"]}
+            for row in snapshot["ranks"]
+        ]
+        q_rank_observations = (
+            [
+                {"rank": row["rank"], "counts": row["counts"], "observed_token_rows": row["observed_token_rows"]}
+                for row in q_rows
+            ]
+            if q_rows is not None
+            else None
+        )
         report = {
+            "calibration_target": calibration_target,
+            "calibration_stage": "decode" if calibration_target == "q" else "prefill_and_decode",
+            "q_calibration_stage": "decode" if calibration_target == "qkv" else None,
             "random_input": own.dataset is None,
             "seed": own.seed if own.dataset is None else None,
             "dataset": str(own.dataset) if own.dataset else None,
+            "kv_calibration_source": str(q_source_path) if q_source_path else None,
+            "kv_calibration_source_sha256": q_source_sha256,
             "samples": len(samples),
             "input_tokens": sum(map(len, samples)),
             "output_tokens": output_tokens,
@@ -512,12 +741,10 @@ def main() -> int:
             "input_token_ids_sha256": hashlib.sha256(json.dumps(samples, separators=(",", ":")).encode()).hexdigest(),
             "job_id": job_id,
             "run_dir": str(run_dir),
-            "rank_observations": [
-                {"rank": row["rank"], "counts": row["counts"], "observed_token_rows": row["observed_token_rows"]}
-                for row in snapshot["ranks"]
-            ],
+            "rank_observations": report_rank_observations,
+            "q_rank_observations": q_rank_observations,
         }
-        _atomic_publish(output, merged, report, overwrite=own.overwrite, job_id=job_id)
+        _atomic_publish(output, calibration, report, overwrite=own.overwrite, job_id=job_id)
         print(f"exported {output} report={report_path} elapsed_s={report['elapsed_s']:.2f}", flush=True)
     finally:
         _terminate(proc)
