@@ -123,9 +123,8 @@ class TpPartBaseModel:
         # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
         self.req_manager.mem_manager = self.mem_manager
         hold_row = self.req_manager.req_to_token_indexs[self.req_manager.HOLD_REQUEST_ID]
-        hold_page = torch.arange(
-            self.mem_manager.HOLD_TOKEN_MEMINDEX,
-            self.mem_manager.HOLD_TOKEN_MEMINDEX + self.mem_manager.page_size,
+        hold_page = torch.tensor(
+            self.mem_manager.HOLD_TOKEN_MEMINDEXES,
             dtype=hold_row.dtype,
             device=hold_row.device,
         )

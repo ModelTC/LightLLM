@@ -123,7 +123,7 @@ def test_padded_prefill_adds_non_decode_request_marker():
         multimodal_params=[{"images": [], "audios": []}],
     )
     model = SimpleNamespace(
-        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=-1, page_size=1),
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(-1,), page_size=1),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
 
@@ -157,7 +157,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
         mtp_draft_input_hiddens=torch.empty((0, 4), dtype=torch.float32),
     )
     model = SimpleNamespace(
-        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
     )
 
@@ -193,7 +193,7 @@ def test_padded_decode_builds_internal_request_from_empty_token_tensor():
         multimodal_params=[],
     )
     model = SimpleNamespace(
-        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
+        mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
     )
 

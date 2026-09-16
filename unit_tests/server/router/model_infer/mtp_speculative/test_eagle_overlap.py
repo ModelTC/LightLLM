@@ -109,7 +109,7 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
         draft_models=[draft_model],
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
-                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
+                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1),
             )
         ),
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
@@ -150,7 +150,7 @@ def test_overlap_eagle_supports_empty_verify_rows():
         draft_models=[draft_model],
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
-                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
+                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1),
             )
         ),
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),
@@ -187,7 +187,7 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
         draft_models=[draft_model],
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
-                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
+                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1),
             )
         ),
         _gen_argmax_token_ids_and_prob=lambda output: (
@@ -289,7 +289,7 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
         draft_models=[draft_model],
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
-                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEX=99, page_size=1),
+                mem_manager=SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1),
             )
         ),
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].to(torch.int64),

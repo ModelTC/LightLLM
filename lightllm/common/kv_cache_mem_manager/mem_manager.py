@@ -56,7 +56,7 @@ class MemoryManager:
             head_dim,
             layer_num,
         )
-        self.HOLD_TOKEN_MEMINDEX = self.size
+        self.HOLD_TOKEN_MEMINDEXES = tuple(range(self.size, self.size + self.page_size))
 
         # 构建对外的操作类接口
         self.operator: BaseMemManagerOperator = self.operator_class(self)
@@ -114,9 +114,8 @@ class MemoryManager:
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         # 在初始化 kv_buffer 的时候，每层多初始化了一个 token，这个 token 永远不会被真的被对外
-        # 分配，内部实际也没有管理，这个token是预留来对一些特殊的运行模式，如多dp下，overlap microbatch
-        # 等模式下 padding 一些请求，使推理过程可以正常运行采用的，其索引值为size，存储在HOLD_TOKEN_MEMINDEX
-        # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
+        # 分配，内部实际也没有管理。这一页用于多 DP、overlap microbatch 等模式下的 padding 请求，
+        # 页内索引存储在 HOLD_TOKEN_MEMINDEXES 中，与 req_manager 的 HOLD_REQUEST_ID 作用类似。
         self.kv_buffer = torch.empty(
             (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=dtype, device="cuda"
         )
@@ -220,7 +219,7 @@ class MemoryManager:
         self.allocator.resize(size)
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        self.HOLD_TOKEN_MEMINDEX = self.size
+        self.HOLD_TOKEN_MEMINDEXES = tuple(range(self.size, self.size + self.page_size))
         return
 
     def get_index_kv_buffer(self, index):

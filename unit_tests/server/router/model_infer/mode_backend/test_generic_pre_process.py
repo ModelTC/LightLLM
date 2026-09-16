@@ -6,7 +6,7 @@ from lightllm.server.router.model_infer.mode_backend import generic_pre_process
 
 def _patch_empty_input_context(monkeypatch):
     mem_manager = SimpleNamespace(
-        HOLD_TOKEN_MEMINDEX=-1,
+        HOLD_TOKEN_MEMINDEXES=(-1,),
         alloc=lambda size: torch.empty((size,), dtype=torch.int32),
     )
     infer_context = SimpleNamespace(
