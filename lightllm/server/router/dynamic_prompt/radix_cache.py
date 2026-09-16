@@ -17,13 +17,13 @@ class UniqueTimeIdGenerator:
 
 
 time_gen = UniqueTimeIdGenerator()
-RadixChildKey = Union[int, Tuple[int, ...]]
+RadixChildKey = Union[int, bytes]
 
 
 class TreeNode:
     def __init__(self, page_size: int = 1):
         self.page_size = page_size
-        # page_size=1 时 key 为首个 token id，否则为首个完整页的 token tuple。
+        # page_size=1 时 key 为首个 token id，否则将首个完整页编码为紧凑的 bytes。
         self.children: Dict[RadixChildKey, "TreeNode"] = {}
         self.parent: TreeNode = None
         self.token_id_key: torch.Tensor = None
@@ -41,7 +41,7 @@ class TreeNode:
         first_page = token_ids[: self.page_size]
         if self.page_size == 1:
             return first_page.item()
-        return tuple(first_page.tolist())
+        return first_page.numpy().tobytes()
 
     def split_node(self, prefix_len):
         assert prefix_len > 0 and prefix_len % self.page_size == 0

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.utils import shm_utils
 
 
@@ -303,6 +303,18 @@ def test_page_size_must_match_mem_manager():
 
     with pytest.raises(ValueError, match="must match mem_manager page_size 8"):
         RadixCache(100, 100, mem_manager=mem_manager, page_size=4)
+
+
+def test_page_key_bytes_does_not_share_tensor_memory():
+    token_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+    expected_key = token_ids.clone().numpy().tobytes()
+    key = TreeNode(page_size=4).get_child_key(token_ids)
+
+    token_ids[0] = 100
+
+    assert isinstance(key, bytes)
+    assert key == expected_key
+    assert key != TreeNode(page_size=4).get_child_key(token_ids)
 
 
 if __name__ == "__main__":
