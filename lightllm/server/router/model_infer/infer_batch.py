@@ -166,6 +166,9 @@ class InferenceContext:
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
         page_size = self.args.page_size
         cache_kv_len = req.cur_kv_len // page_size * page_size
+        # radix cache 只保存完整页，因此不足一页的有效 KV 和页内预留空间都不会参与插入。
+        # 先释放截断后的 [cache_kv_len, hold_kv_len) 区间，再处理可缓存前缀的插入和去重。
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
         input_token_ids = req.get_input_token_ids()
         key = torch.tensor(input_token_ids[0:cache_kv_len], dtype=torch.int64, device="cpu")
         # .cpu() 是 流内阻塞操作
@@ -174,7 +177,6 @@ class InferenceContext:
         prefix_len, _ = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
-        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
