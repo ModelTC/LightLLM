@@ -104,6 +104,40 @@ def test_reservation_fills_each_request_table_row(monkeypatch):
     assert req0.hold_kv_len == req1.hold_kv_len == 4
 
 
+def test_alloc_req_kv_mem_forwards_non_blocking_copy_option(monkeypatch):
+    class _CopyTarget:
+        def __init__(self):
+            self.non_blocking_values = []
+
+        def copy_(self, source, non_blocking=False):
+            self.non_blocking_values.append(non_blocking)
+
+    class _ReqToTokenIndexes:
+        def __init__(self, target):
+            self.target = target
+
+        def __getitem__(self, key):
+            return self.target
+
+    target = _CopyTarget()
+    context = SimpleNamespace(
+        req_manager=SimpleNamespace(
+            mem_manager=_FakeMemManager(),
+            req_to_token_indexs=_ReqToTokenIndexes(target),
+        ),
+        radix_cache=None,
+    )
+    monkeypatch.setattr(base_backend, "g_infer_context", context)
+    backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
+    backend.args = SimpleNamespace(page_size=4)
+    req = _make_req(0)
+
+    backend._alloc_req_kv_mem(req, alloc_token_num=4)
+    backend._alloc_req_kv_mem(req, alloc_token_num=4, no_blcoking_copy=True)
+
+    assert target.non_blocking_values == [False, True]
+
+
 def test_need_token_num_distinguishes_compute_and_page_allocation():
     req = SimpleNamespace(
         args=SimpleNamespace(page_size=4),
@@ -178,6 +212,18 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
         )
     context.req_manager.mem_manager.next_index = 2 * hold_kv_len
     backend._filter_not_ready_reqs = lambda req_ids: reqs
+    copy_modes = []
+    original_alloc_req_kv_mem = backend._alloc_req_kv_mem
+
+    def _record_alloc(req_obj, alloc_token_num, no_blcoking_copy=False):
+        copy_modes.append(no_blcoking_copy)
+        return original_alloc_req_kv_mem(
+            req_obj,
+            alloc_token_num,
+            no_blcoking_copy=no_blcoking_copy,
+        )
+
+    backend._alloc_req_kv_mem = _record_alloc
 
     prefill_reqs, decode_reqs = backend._get_classed_reqs(req_ids=[0, 1])
 
@@ -188,6 +234,61 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
     assert not reqs[0].wait_pause
     assert reqs[1].hold_kv_len == hold_kv_len
     assert reqs[1].wait_pause is second_req_wait_pause
+    assert copy_modes == [True]
+
+
+def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
+    context, backend = _make_context(monkeypatch)
+    backend.args.enable_cpu_cache = False
+    backend.args.enable_prefill_decode_mixed = False
+    backend.args.run_mode = "normal"
+    backend.support_overlap = False
+    backend.batch_max_tokens = 8
+    backend.is_master_in_dp = True
+    backend._timer_merge_radix_tree = lambda: None
+    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
+    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    context.get_can_alloc_token_num = lambda: 4
+    context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
+    context.filter_reqs = lambda finished_reqs: None
+    context.pause_reqs = lambda reqs, is_master_in_dp: None
+
+    req = _make_req(0)
+    req.args = context.args
+    req.cur_kv_len = 4
+    req.hold_kv_len = 4
+    req.mtp_step = 0
+    req.filter_mark = False
+    req.wait_pause = False
+    req.paused = False
+    req.infer_aborted = False
+    req.finish_status = infer_batch.FinishStatus()
+    req.get_cur_total_len = lambda: 5
+    req.decode_need_token_num = MethodType(InferReq.decode_need_token_num, req)
+    context.req_manager.req_to_token_indexs[0, :4] = torch.arange(4, dtype=torch.int32)
+    context.req_manager.mem_manager.next_index = 4
+    backend._filter_not_ready_reqs = lambda req_ids: [req]
+
+    copy_modes = []
+    original_alloc_req_kv_mem = backend._alloc_req_kv_mem
+
+    def _record_alloc(req_obj, alloc_token_num, no_blcoking_copy=False):
+        copy_modes.append(no_blcoking_copy)
+        return original_alloc_req_kv_mem(
+            req_obj,
+            alloc_token_num,
+            no_blcoking_copy=no_blcoking_copy,
+        )
+
+    backend._alloc_req_kv_mem = _record_alloc
+
+    prefill_reqs, decode_reqs = backend._get_classed_reqs(req_ids=[0])
+
+    assert prefill_reqs == []
+    assert decode_reqs == [req]
+    assert req.hold_kv_len == 8
+    assert context.req_manager.mem_manager.alloc_sizes == [4]
+    assert copy_modes == [True]
 
 
 def test_decode_reserves_mtp_headroom(monkeypatch):

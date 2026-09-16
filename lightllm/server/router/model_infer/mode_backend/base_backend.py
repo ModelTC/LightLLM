@@ -644,7 +644,12 @@ class ModeBackend:
         return ready_reqs
 
     # 一些可以复用的通用功能函数
-    def _alloc_req_kv_mem(self, req_obj: InferReq, alloc_token_num: int) -> Optional[torch.Tensor]:
+    def _alloc_req_kv_mem(
+        self,
+        req_obj: InferReq,
+        alloc_token_num: int,
+        no_blcoking_copy: bool = False,
+    ) -> Optional[torch.Tensor]:
         if alloc_token_num == 0:
             return None
 
@@ -655,7 +660,10 @@ class ModeBackend:
         old_hold_kv_len = req_obj.hold_kv_len
         new_hold_kv_len = old_hold_kv_len + alloc_token_num
         mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
-        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len] = mem_indexes
+        # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
+        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
+            mem_indexes, non_blocking=no_blcoking_copy
+        )
         req_obj.hold_kv_len = new_hold_kv_len
         return mem_indexes
 
@@ -749,7 +757,7 @@ class ModeBackend:
                 # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
                 else:
@@ -786,7 +794,7 @@ class ModeBackend:
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
