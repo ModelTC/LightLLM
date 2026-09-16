@@ -1015,23 +1015,22 @@ class ModeBackend:
         prompt_cache_kv_buffer_path = os.path.join(
             self.weight_dir, model_cfg["prompt_cache_kv_buffer"][f"rank_{cur_rank}"]
         )
-        prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
-        intact_kv_len = len(model_cfg["prompt_cache_token_ids"])
         page_size = self.args.page_size
-        cache_kv_len = intact_kv_len // page_size * page_size
-        intact_hold_len = (intact_kv_len + page_size - 1) // page_size * page_size
-        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_hold_len)
-        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index[:intact_kv_len], prompt_cache_kv_buffer)
-        self.radix_cache.insert(
-            torch.tensor(model_cfg["prompt_cache_token_ids"][:cache_kv_len], dtype=torch.int64, device="cpu"),
-            intact_kv_index[:cache_kv_len],
+        intact_kv_len = len(model_cfg["prompt_cache_token_ids"]) // page_size * page_size
+        if intact_kv_len == 0:
+            return
+
+        prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
+        prompt_cache_kv_buffer = {
+            name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()
+        }
+        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
+        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
+        intact_token_ids = torch.tensor(
+            model_cfg["prompt_cache_token_ids"][:intact_kv_len], dtype=torch.int64, device="cpu"
         )
-        if intact_hold_len > cache_kv_len:
-            self.radix_cache.mem_manager.free(intact_kv_index[cache_kv_len:intact_hold_len])
-        self.radix_cache.match_prefix(
-            torch.tensor(model_cfg["prompt_cache_token_ids"][:cache_kv_len], dtype=torch.int64, device="cpu"),
-            update_refs=True,
-        )
+        self.radix_cache.insert(intact_token_ids, intact_kv_index)
+        self.radix_cache.match_prefix(intact_token_ids, update_refs=True)
 
     def init_rank_infos(self):
         self.node_world_size = get_node_world_size()
