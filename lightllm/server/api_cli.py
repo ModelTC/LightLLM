@@ -767,11 +767,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable ep moe for deepseekv3 model.""",
     )
     parser.add_argument(
-        "--disable_ep_balance_monitor",
-        action="store_true",
-        help="""Disable the prefill expert balance monitor enabled by default for EP-MoE.""",
-    )
-    parser.add_argument(
         "--eplb_num_redundant_experts_per_rank",
         type=int,
         default=0,

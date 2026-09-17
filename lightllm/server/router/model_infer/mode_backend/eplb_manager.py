@@ -20,6 +20,7 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     align_target_placement,
     build_transfer_plan,
 )
+from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
@@ -31,12 +32,14 @@ from lightllm.utils.envs_utils import (
     get_prefill_eplb_step_interval,
 )
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 EPLB_MIN_AVG_TOKENS_PER_EXPERT = 100
 EPLB_EXPERT_ALIGNMENT = 128
 EPLB_CONTROL_ERROR = -1
 EPLB_STEADY_SAMPLE_STEPS = 4
+EPLB_EXPERT_IMBALANCE_RATIO_METRIC = "lightllm_eplb_topk_expert_imbalance_ratio"
 
 
 class EPLBManager:
@@ -81,6 +84,7 @@ class EPLBManager:
         self._evaluation_result = None
         self._evaluation_error = None
         self._evaluation_thread = None
+        self.metric_client = None
         # A fresh manager starts with one continuous base window. After a
         # sufficient evaluation, steady state returns to the cheap sparse
         # probe. An insufficient sparse probe schedules one fresh continuous
@@ -199,6 +203,13 @@ class EPLBManager:
         if any(counter.ndim != 1 or counter.shape[0] != self.num_logical_experts for counter in counters):
             raise RuntimeError("EPLB route counter shape must be [num_logical_experts]")
         return torch.stack(counters).unsqueeze(0).cpu()
+
+    def _publish_expert_load_metrics(self, result):
+        if self.global_rank != 0 or "expert_imbalance_ratio" not in result:
+            return
+        if self.metric_client is None:
+            self.metric_client = MetricClient(get_shm_port_args().metric_port)
+        self.metric_client.gauge_set(EPLB_EXPERT_IMBALANCE_RATIO_METRIC, result["expert_imbalance_ratio"])
 
     def _commit_layer_metadata(self, layer_index: int):
         impl = self._eplb_impls[layer_index]
@@ -334,6 +345,7 @@ class EPLBManager:
             global_load[:, :, self.global_rank] = local_load
             dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.evaluation_group)
             result = self._plan_and_broadcast(global_load)
+            result["expert_imbalance_ratio"] = _expert_load_imbalance_ratio(global_load)
             result["sample_window_steps"] = sample_window_steps
             if result["kind"] == "planned":
                 metadata = [None] * len(self.weights)
@@ -417,6 +429,7 @@ class EPLBManager:
         self._evaluation_thread.join()
         self.evaluation_in_flight = False
         self._evaluation_thread = None
+        self._publish_expert_load_metrics(result)
         if result["kind"] == "insufficient":
             from_continuous_window = self._continuous_collection_end_step is not None
             if from_continuous_window:
@@ -535,6 +548,21 @@ def _imbalance_summary(rank_load: torch.Tensor) -> Dict[str, float]:
         "max": float(layer_imbalance.max().item()),
         "p95": float(sorted_imbalance[p95_index].item()),
     }
+
+
+def _expert_load_imbalance_ratio(global_load: torch.Tensor) -> float:
+    """Average each layer's maximum-to-mean logical-expert token ratio."""
+    if global_load.ndim != 4:
+        raise ValueError("global_load must be [samples, layers, ranks, logical_experts]")
+    if global_load.shape[1] == 0 or global_load.shape[3] == 0:
+        raise ValueError("global_load must contain at least one layer and logical expert")
+    layer_expert_load = global_load.sum(dim=(0, 2)).to(torch.float64)
+    layer_means = layer_expert_load.mean(dim=1)
+    valid_layers = layer_means > 0
+    if not torch.any(valid_layers):
+        return 0.0
+    layer_ratios = layer_expert_load.max(dim=1).values[valid_layers] / layer_means[valid_layers]
+    return float(layer_ratios.mean().item())
 
 
 def _find_fused_moe_weights(model):

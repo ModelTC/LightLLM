@@ -71,7 +71,6 @@ class TpPartBaseModel:
     def __init__(self, kvargs):
         self.args = get_env_start_args()
         self.eplb_manager = None
-        self.ep_balance_monitor = None
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
@@ -324,8 +323,6 @@ class TpPartBaseModel:
         return self._decode(model_input)
 
     def _after_prefill(self):
-        if self.ep_balance_monitor is not None:
-            self.ep_balance_monitor.record_prefill_round()
         if self.eplb_manager is not None:
             self.eplb_manager.step()
 

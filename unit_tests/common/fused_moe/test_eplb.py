@@ -1342,6 +1342,39 @@ def test_manager_collects_aggregated_route_counters():
     )
 
 
+def test_expert_load_imbalance_ratio_averages_layer_ratios():
+    global_load = torch.tensor(
+        [
+            [
+                [[1, 2, 3], [1, 2, 3]],
+                [[4, 5, 6], [6, 5, 4]],
+            ]
+        ],
+        dtype=torch.int64,
+    )
+
+    ratio = manager_module._expert_load_imbalance_ratio(global_load)
+
+    assert ratio == pytest.approx(1.25)
+
+
+def test_manager_publishes_expert_load_metrics_from_rank_zero():
+    calls = []
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.global_rank = 0
+    manager.metric_client = SimpleNamespace(gauge_set=lambda name, value: calls.append((name, value)))
+
+    manager._publish_expert_load_metrics(
+        {
+            "expert_imbalance_ratio": 1.25,
+        }
+    )
+
+    assert calls == [
+        (manager_module.EPLB_EXPERT_IMBALANCE_RATIO_METRIC, 1.25),
+    ]
+
+
 def test_eplb_route_counter_has_one_entry_per_logical_expert(monkeypatch):
     args = type(
         "Args",
@@ -1469,6 +1502,7 @@ def test_manager_evaluation_collective_preserves_current_rank_axis(monkeypatch):
     assert torch.equal(seen["global_load"][:, :, 2], expected_local)
     assert torch.equal(seen["global_load"][:, :, 3], torch.zeros_like(expected_local))
     assert manager._evaluation_error is None
+    assert manager._evaluation_result["expert_imbalance_ratio"] == 1.0
     assert manager._evaluation_result["sample_window_steps"] == 4
 
 
@@ -1751,7 +1785,6 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
         recording=True,
     )
     _set_deepgemm_runtime(impl, runtime)
-    impl.ep_balance_counters = None
     calls, repair_calls = [], []
     logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
     physical_ids = torch.tensor([[130, 131]], dtype=torch.long)
@@ -1814,7 +1847,6 @@ def test_prefill_dispatch_preserves_event(monkeypatch):
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True))
-    impl.ep_balance_counters = None
     calls = []
     caller_event = object()
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
@@ -1926,7 +1958,6 @@ def test_decode_fused_experts_uses_full_weight_packs_and_physical_experts(
         ),
     )
     impl.quant_method = object()
-    impl.ep_balance_counters = None
     captured = []
 
     def fused(**kwargs):

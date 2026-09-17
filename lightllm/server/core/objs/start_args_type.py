@@ -186,7 +186,6 @@ class StartArgs:
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
     enable_ep_moe: bool = field(default=False)
-    disable_ep_balance_monitor: bool = field(default=False)
     eplb_num_redundant_experts_per_rank: int = field(default=0)
     enable_fused_shared_experts: bool = field(default=False)
     mtp_mode: Optional[str] = field(

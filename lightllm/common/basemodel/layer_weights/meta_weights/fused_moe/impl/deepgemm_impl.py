@@ -34,7 +34,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._init_eplb_runtime()
-        self.ep_balance_counters = None
 
     def _init_eplb_runtime(self):
         world_size = get_global_world_size()
@@ -141,7 +140,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
-            ep_balance_counters=self.ep_balance_counters,
         )
         return output
 
@@ -238,20 +236,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             use_tma_aligned_col_major_sf=True,
         )
 
-        counters = self.ep_balance_counters
-        route_load = compute_load = 0
-        if counters is not None:
-            # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
-            route_load = topk_idx.numel()
-            compute_load = recv_x[0].shape[0]
-
         def hook():
             event.current_stream_wait()
-            if counters is not None:
-                counters.accumulate(
-                    route_load=route_load,
-                    compute_load=compute_load,
-                )
 
         return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
