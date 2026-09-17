@@ -270,12 +270,12 @@ def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
     assert manager_module._find_fused_moe_weights(model) == [alternate, aliased, first]
 
 
-def test_eplb_redundant_experts_defaults_per_ep_rank():
+def test_eplb_redundant_experts_default_to_disabled():
     parser = make_argument_parser()
 
-    assert parser.parse_args([]).eplb_num_redundant_experts_per_rank == 2
+    assert parser.parse_args([]).eplb_num_redundant_experts_per_rank == 0
     assert parser.parse_args(["--eplb_num_redundant_experts_per_rank", "3"]).eplb_num_redundant_experts_per_rank == 3
-    assert StartArgs().eplb_num_redundant_experts_per_rank == 2
+    assert StartArgs().eplb_num_redundant_experts_per_rank == 0
 
 
 @pytest.mark.parametrize(
@@ -1348,7 +1348,7 @@ def test_eplb_counter_capacity_covers_default_dense_interval(monkeypatch):
     args = type(
         "Args",
         (),
-        {"enable_prefill_eplb": True, "eplb_num_redundant_experts_per_rank": 2},
+        {"eplb_num_redundant_experts_per_rank": 2},
     )()
     weight = object.__new__(fused_weight_module.FusedMoeWeight)
     weight.n_routed_experts = 4
@@ -1399,7 +1399,7 @@ def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
     args = type(
         "Args",
         (),
-        {"enable_prefill_eplb": False, "eplb_num_redundant_experts_per_rank": 2},
+        {"eplb_num_redundant_experts_per_rank": 0},
     )()
     weight = object.__new__(fused_weight_module.FusedMoeWeight)
     weight.n_routed_experts = 4
@@ -1422,7 +1422,7 @@ def test_disable_eplb_model_init_skips_eplb_state(monkeypatch):
     args = type(
         "Args",
         (),
-        {"enable_prefill_eplb": True, "eplb_num_redundant_experts_per_rank": 2},
+        {"eplb_num_redundant_experts_per_rank": 2},
     )()
     weight = object.__new__(fused_weight_module.FusedMoeWeight)
     weight.n_routed_experts = 4

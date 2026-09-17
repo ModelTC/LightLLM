@@ -93,8 +93,8 @@ class FusedMoeWeight(BaseWeightTpl):
         self._initial_redundant_expert_ids = []
         self._initial_redundant_expert_idx_to_local_idx = {}
         eplb = None
-        if args.enable_prefill_eplb and not is_eplb_model_init_disabled():
-            num_redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
+        num_redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
+        if num_redundant_experts_per_rank > 0 and not is_eplb_model_init_disabled():
             all_initial_ids = build_initial_redundant_expert_ids(
                 self.n_routed_experts,
                 self.global_world_size,

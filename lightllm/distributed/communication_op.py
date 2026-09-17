@@ -201,11 +201,7 @@ class DistributeGroupManager:
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        total_redundant_experts = (
-            get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
-            if get_env_start_args().enable_prefill_eplb
-            else 0
-        )
+        total_redundant_experts = get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
         self.ll_prefill_num_experts = n_routed_experts + total_redundant_experts
         # EPLB's redundant rows are a prefill-only physical layout; decode
         # always routes the logical expert space.
