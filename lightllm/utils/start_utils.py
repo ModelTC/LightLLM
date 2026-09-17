@@ -1,4 +1,5 @@
 import os
+import ctypes
 import signal
 import subprocess
 import sys
@@ -105,6 +106,14 @@ class SubmoduleManager:
         在 service name 和启动参数写入环境后、创建共享内存或启动子进程前调用。
         launcher 退出后由独立进程回收资源。
         """
+        if sys.platform == "linux":
+            # 接管 router 退出后的 model/KV 后代，使现有 wait_procs 能真正回收它们，
+            # 避免交给不执行 wait 的容器 PID 1（如 sleep infinity）。
+            prctl = ctypes.CDLL(None, use_errno=True).prctl
+            prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+            if prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                error = ctypes.get_errno()
+                raise OSError(error, f"Failed to enable child subreaper: {os.strerror(error)}")
         start_launcher_shm_cleanup_process(get_unique_server_name())
 
     def setup_signal_handlers(self, http_server_process=None):
