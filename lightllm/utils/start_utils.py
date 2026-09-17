@@ -79,22 +79,16 @@ class SubmoduleManager:
     def terminate_all_processes(self):
         from lightllm.utils.envs_utils import get_env_start_args
 
-        def kill_recursive(proc):
-            try:
-                parent = psutil.Process(proc.pid)
-                children = parent.children(recursive=True)
-                for child in children:
-                    logger.info(f"Killing child process {child.pid}")
-                    child.kill()
-                logger.info(f"Killing parent process {proc.pid}")
-                parent.kill()
-            except psutil.NoSuchProcess:
-                logger.warning(f"Process {proc.pid} does not exist.")
-
         for proc in self.processes:
             if proc.is_running():
                 kill_recursive(proc)
-                proc.wait()
+
+        # Signal every process before waiting. Registered router descendants may
+        # remain zombies under another parent, so bound the total wait time.
+        _, alive = psutil.wait_procs(self.processes, timeout=5)
+        alive_pids = [proc.pid for proc in alive if is_process_active(proc.pid)]
+        if alive_pids:
+            logger.warning(f"Processes still alive after SIGKILL: {alive_pids}")
 
         # recover the gpu compute mode
         is_enable_mps = get_env_start_args().enable_mps
@@ -102,7 +96,8 @@ class SubmoduleManager:
             from lightllm.utils.device_utils import stop_mps
 
             stop_mps()
-        logger.info("All processes terminated gracefully.")
+        if not alive_pids:
+            logger.info("All processes terminated gracefully.")
 
     def setup_exit_controller(self):
         """启动 launcher 的独立资源清理进程。
@@ -237,13 +232,17 @@ def kill_recursive(proc):
     try:
         parent = psutil.Process(proc.pid)
         children = parent.children(recursive=True)
-        for child in children:
-            logger.info(f"Killing child process {child.pid}")
-            child.kill()
-        logger.info(f"Killing parent process {proc.pid}")
-        parent.kill()
     except psutil.NoSuchProcess:
         logger.warning(f"Process {proc.pid} does not exist.")
+        return
+
+    for process in [*reversed(children), parent]:
+        try:
+            logger.info(f"Killing process {process.pid}")
+            process.kill()
+        except psutil.NoSuchProcess:
+            # A concurrent exit must not skip the remaining children or parent.
+            logger.warning(f"Process {process.pid} does not exist.")
 
 
 process_manager = SubmoduleManager()
