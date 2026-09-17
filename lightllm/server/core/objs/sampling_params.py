@@ -382,7 +382,8 @@ class SamplingParams(ctypes.Structure):
         guided_grammar = kwargs.get("guided_grammar", "")
         guided_json = kwargs.get("guided_json", "")
         if (guided_grammar or guided_json) and get_env_start_args().output_constraint_mode != "xgrammar":
-            raise ValueError("Structured output is not supported")
+            guided_grammar = ""
+            guided_json = ""
 
         self.guided_grammar = GuidedGrammar()
         self.guided_grammar.initialize(guided_grammar, tokenizer)
