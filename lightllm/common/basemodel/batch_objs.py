@@ -116,6 +116,7 @@ class ModelInput:
             assert self.b_shared_seq_len.shape == self.b_req_idx.shape
             assert self.b_shared_radix_node_id.shape == self.b_req_idx.shape
 
+
 @dataclass
 class ModelMtpOutputCollector:
     """保存一次模型 forward 为 MTP 推理产生的可选输出。"""

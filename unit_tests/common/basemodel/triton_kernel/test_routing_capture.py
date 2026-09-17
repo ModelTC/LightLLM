@@ -88,9 +88,7 @@ def test_scatter_routing_topk_ignores_hold_indexes():
     num_moe_layers = 2
     topk = 2
     topk_ids = torch.arange(8, dtype=torch.int64, device="cuda").view(4, topk)
-    mem_indexes = torch.tensor(
-        [3, kv_cache_size, kv_cache_size + 1, -1], dtype=torch.int32, device="cuda"
-    )
+    mem_indexes = torch.tensor([3, kv_cache_size, kv_cache_size + 1, -1], dtype=torch.int32, device="cuda")
     routing_buffer = torch.zeros(
         (kv_cache_size, num_moe_layers, topk),
         dtype=torch.int16,
