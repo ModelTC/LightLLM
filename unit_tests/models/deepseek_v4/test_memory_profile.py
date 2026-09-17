@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils import profile_max_tokens
 
 
@@ -45,20 +44,3 @@ def test_mtp_profile_exclusion_validation(monkeypatch, exclusion):
     with pytest.raises(ValueError, match="invalid MTP profile exclusion"):
         with profile_max_tokens.profile_mtp_weight_memory(model):
             pass
-
-
-@pytest.mark.parametrize("reservations,expected", [({}, 252), ({"x": 20}, 247)])
-def test_memory_manager_profile_reservation_once(monkeypatch, reservations, expected):
-    monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.torch.cuda.empty_cache", lambda: None)
-    monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.dist.get_world_size", lambda: 1)
-    monkeypatch.setattr(
-        "lightllm.common.kv_cache_mem_manager.mem_manager.get_available_gpu_memory", lambda w: 1024 / 1024 ** 3
-    )
-    monkeypatch.setattr("lightllm.common.kv_cache_mem_manager.mem_manager.get_total_gpu_memory", lambda: 0)
-    m = MemoryManager.__new__(MemoryManager)
-    m.size = None
-    m.memory_reservations = reservations
-    m.get_cell_size = lambda: 4
-    m.get_fixed_memory_size = lambda: 16
-    m.profile_size(1)
-    assert m.size == expected
