@@ -23,9 +23,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     chunked_expanded_moe_forward,
     quantize_fused_experts_input,
 )
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
-    silu_and_mul_fwd,
-)
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
     eplb_repair_topk_ids,
 )
@@ -88,9 +86,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         per_expert_scale: Optional[torch.Tensor] = None,
     ):
         """Select logical experts without applying the EPLB physical layout."""
-        from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import (
-            select_experts,
-        )
+        from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
             hidden_states=input_tensor,
@@ -257,14 +253,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                     compute_load=compute_load,
                 )
 
-        return (
-            recv_x,
-            recv_topk_idx,
-            recv_topk_weights,
-            handle.num_recv_tokens_per_expert_list,
-            handle,
-            hook,
-        )
+        return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
     def masked_group_gemm(
         self,
@@ -347,12 +336,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         handle: Any,
     ):
         combined_x, event_overlap, hook = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
-            gemm_out_b,
-            topk_idx,
-            topk_weights,
-            handle,
-            async_finish=False,
-            return_recv_hook=True,
+            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
         )
         return combined_x, hook
 
