@@ -123,7 +123,6 @@ def _validated_expert_parallel_state(
 
 def _set_expert_parallel_state(impl, state):
     impl.expert_parallel_state = state
-    impl.eplb = state.eplb
 
 
 def _manual_runtime_rank_load(source_load, placement, node_world_size, alignment):
@@ -1707,21 +1706,21 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
     assert calls[0]["num_experts"] == 144
 
 
-def test_select_returns_logical_ids_without_eplb_mapping(monkeypatch):
+def test_select_returns_logical_ids_and_applies_expert_scale(monkeypatch):
     from lightllm.common.basemodel.triton_kernel.fused_moe import topk_select
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    impl.routed_scaling_factor = 1.0
+    impl.routed_scaling_factor = 2.0
     _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
     calls = []
 
     def select(**kwargs):
         calls.append(kwargs)
-        return torch.ones((1, 2)), logical_ids
+        return torch.tensor([[0.5, 0.25]]), logical_ids
 
     monkeypatch.setattr(topk_select, "select_experts", select)
-    _, selected = impl._select_experts(
+    weights, selected = impl._select_experts(
         torch.empty((1, 4)),
         torch.empty((1, 128)),
         None,
@@ -1731,9 +1730,11 @@ def test_select_returns_logical_ids_without_eplb_mapping(monkeypatch):
         0,
         0,
         "softmax",
+        per_expert_scale=torch.tensor([1.0, 1.0, 1.0, 3.0, 5.0]),
     )
 
     assert len(calls) == 1
+    assert weights.tolist() == [[3.0, 2.5]]
     assert selected is logical_ids
 
 

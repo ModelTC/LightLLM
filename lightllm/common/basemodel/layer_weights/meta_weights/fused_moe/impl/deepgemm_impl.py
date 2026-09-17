@@ -24,7 +24,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
     def __init__(self, *args, expert_parallel_state: ExpertParallelState, **kwargs):
         super().__init__(*args, **kwargs)
         self.expert_parallel_state = expert_parallel_state
-        self.eplb = expert_parallel_state.eplb
         self.ep_balance_counters = None
 
     def _select_experts(
@@ -56,6 +55,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         )
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
+        if per_expert_scale is not None:
+            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         return topk_weights, topk_ids
 
     def _prepare_expert_execution(
@@ -65,7 +66,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
-        eplb = self.eplb
+        eplb = self.expert_parallel_state.eplb
         if eplb is not None:
             topk_ids = eplb_repair_topk_ids(
                 logical_topk_ids=topk_ids,
@@ -195,18 +196,15 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         )
 
         counters = self.ep_balance_counters
-        if counters is None:
-
-            def hook():
-                event.current_stream_wait()
-
-        else:
+        route_load = compute_load = 0
+        if counters is not None:
             # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
             route_load = topk_idx.numel()
             compute_load = recv_x[0].shape[0]
 
-            def hook():
-                event.current_stream_wait()
+        def hook():
+            event.current_stream_wait()
+            if counters is not None:
                 counters.accumulate(
                     route_load=route_load,
                     compute_load=compute_load,
