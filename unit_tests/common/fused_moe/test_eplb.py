@@ -164,7 +164,6 @@ def test_base_call_template_forwards_selection_and_capture_callback():
             scoring_func,
             per_expert_scale=None,
             shared_expert_gate=None,
-            is_prefill=None,
             preserve_logical_ids=False,
         ):
             seen["select"] = {"preserve_logical_ids": preserve_logical_ids}
@@ -1699,7 +1698,7 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
     assert calls[0]["num_experts"] == 144
 
 
-def test_decode_select_uses_eplb_mapping(monkeypatch):
+def test_select_uses_eplb_mapping(monkeypatch):
     from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_topk
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
@@ -1723,7 +1722,6 @@ def test_decode_select_uses_eplb_mapping(monkeypatch):
         0,
         0,
         "softmax",
-        is_prefill=False,
     )
 
     assert len(calls) == 1
@@ -1884,7 +1882,7 @@ def test_deepgemm_constructor_configures_eplb():
     assert impl.expert_parallel_state is state
 
 
-def test_prefill_eplb_returns_requested_logical_ids(monkeypatch):
+def test_eplb_select_returns_requested_logical_ids(monkeypatch):
     from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_topk
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
@@ -1910,7 +1908,6 @@ def test_prefill_eplb_returns_requested_logical_ids(monkeypatch):
         0,
         0,
         "softmax",
-        is_prefill=True,
         preserve_logical_ids=True,
     )
 

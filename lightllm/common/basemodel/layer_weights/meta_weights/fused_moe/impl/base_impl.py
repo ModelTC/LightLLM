@@ -52,7 +52,6 @@ class FuseMoeBaseImpl(ABC):
             scoring_func=scoring_func,
             per_expert_scale=per_expert_scale,
             shared_expert_gate=shared_expert_gate,
-            is_prefill=is_prefill,
             preserve_logical_ids=moe_capture_callback is not None,
         )
         if moe_capture_callback is not None:
@@ -81,7 +80,6 @@ class FuseMoeBaseImpl(ABC):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         pass

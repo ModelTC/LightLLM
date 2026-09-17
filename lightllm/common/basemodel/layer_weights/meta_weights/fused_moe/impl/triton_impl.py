@@ -18,7 +18,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
     ):
         """Select experts and return topk weights and ids."""

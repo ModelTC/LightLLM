@@ -39,7 +39,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
     ):
         """选择 expert；EPLB 统一由融合路径返回 physical ID。"""
@@ -132,7 +131,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             topk_group=topk_group,
             num_expert_group=n_group,
             scoring_func=scoring_func,
-            is_prefill=False,
         )
 
         topk_idx = topk_idx.to(torch.long)
@@ -172,7 +170,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             topk_group=topk_group,
             num_expert_group=n_group,
             scoring_func=scoring_func,
-            is_prefill=True,
         )
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
