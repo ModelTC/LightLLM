@@ -27,6 +27,14 @@ class DFlashSpecProposal(SpecProposal):
 
 
 @dataclass
+class DFlash2SpecProposal(SpecProposal):
+    """Fixed-width DFlash2 proposal with selector sampling state."""
+
+    candidate_ids: torch.Tensor | None = None
+    q_probs: torch.Tensor | None = None
+
+
+@dataclass
 class DSparkSpecProposal(SpecProposal):
     """DSpark proposal with GPU confidence scores and their CPU planner view."""
 

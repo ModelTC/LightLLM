@@ -47,6 +47,9 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import (
     DFlashProposer,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash2 import (
+    DFlash2Proposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import (
     DSparkProposer,
 )
@@ -60,6 +63,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att
     EagleWithAttProposer,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
+    DFlash2SpecProposal,
     DFlashSpecProposal,
     DSparkSpecProposal,
     EagleSpecProposal,
@@ -167,7 +171,7 @@ def test_common_engine_delegates_empty_dp_batch_to_lightspec_planner():
     )
 
 
-def test_spec_engine_only_exposes_planning_and_proposal_interfaces():
+def test_spec_engine_exposes_planning_proposal_and_verification_interfaces():
     public_methods = {
         name for name, value in SpecEngine.__dict__.items() if callable(value) and not name.startswith("_")
     }
@@ -177,6 +181,8 @@ def test_spec_engine_only_exposes_planning_and_proposal_interfaces():
         "plan_decode",
         "prepare_decode_model_input",
         "propose_next",
+        "sample_and_verify",
+        "prepare_next_verification_state",
         "update_planner_statics",
     }
 
@@ -196,6 +202,7 @@ def test_mode_proposals_own_their_schedule_metadata():
     assert "schedule_scores_cpu" not in EagleSpecProposal.__dataclass_fields__
     assert "schedule_scores_cpu" not in DFlashSpecProposal.__dataclass_fields__
     assert "schedule_scores_cpu" in DSparkSpecProposal.__dataclass_fields__
+    assert "schedule_scores" not in DFlash2SpecProposal.__dataclass_fields__
 
 
 def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
@@ -307,6 +314,11 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
     assert isinstance(dflash_planner, LightSpecPlanner)
     assert dflash_planner.draft_steps == (3,)
 
+    dflash2_planner = build_planner("dflash2", enable_dynmaic_mtp=False)
+    assert isinstance(dflash2_planner, FixedSpecPlanner)
+    with pytest.raises(ValueError, match="unsupported LightSpec mode: dflash2"):
+        build_planner("dflash2")
+
     eagle_planner = build_planner("eagle3")
     assert isinstance(eagle_planner, LightSpecPlanner)
     assert eagle_planner.draft_steps == (1, 2, 3)
@@ -376,6 +388,7 @@ def test_each_mode_proposer_inherits_its_expected_implementation_base():
     for proposer_type in proposer_types:
         assert proposer_type.__bases__ == (BaseSpecProposer,)
     assert Eagle3Proposer.__bases__ == (EagleWithAttProposer,)
+    assert DFlash2Proposer.__bases__ == (DFlashProposer,)
     for proposer_type in dp_overlap_proposer_types:
         assert proposer_type.__bases__ == (BaseDpOverlapProposer,)
     assert DpOverlapEagle3Proposer.__bases__ == (DpOverlapEagleWithAttProposer,)
@@ -390,6 +403,7 @@ def test_each_mtp_mode_builds_its_own_proposer():
         "eagle_no_att": EagleNoAttProposer,
         "eagle3": Eagle3Proposer,
         "dflash": DFlashProposer,
+        "dflash2": DFlash2Proposer,
         "dspark": DSparkProposer,
     }
 
