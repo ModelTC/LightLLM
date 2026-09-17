@@ -38,6 +38,7 @@ class BaseLayerWeight:
                 else:
                     layer_num = None
                 assert attr.verify_load(), f"Loading {attr_name} of layers {layer_num} fails."
+                attr.finalize_load()
 
     def _cuda(self, cpu_tensor):
         return cpu_tensor.contiguous().to(self.data_type_).cuda(get_current_device_id())
