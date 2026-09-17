@@ -9,28 +9,30 @@ def build_initial_local_expert_ids(
 ) -> list[list[int]]:
     """构建每个 rank 初始持有的完整 logical expert ID 列表。
 
-    每个 rank 先持有连续划分得到的主专家，再用本 rank 最后一个主专家
-    填充额外物理槽。这里仅负责生成 Python 列表；调用方如果要参与 tensor
+    每个 rank 先持有连续划分得到的主专家，再按 rank 顺序选择不属于
+    本 rank 的专家作为默认冗余副本。这里仅负责生成 Python 列表；调用方如果要参与 tensor
     运算，需要自行转换为 ``torch.Tensor``。
 
     例如 ``num_logical_experts=8``、``num_ranks=4``、每个 rank 有 2 个
     额外槽时，每个 rank 分到 2 个主专家，结果为：
 
-    ``[[0, 1, 1, 1], [2, 3, 3, 3], [4, 5, 5, 5], [6, 7, 7, 7]]``
+    ``[[0, 1, 2, 3], [2, 3, 4, 5], [4, 5, 6, 7], [6, 7, 0, 1]]``
 
-    其中每行前两个值是主专家，后两个值是等待首次 EPLB 调整的占位副本。
+    其中每行前两个值是主专家，后两个值是已在初始加载阶段就可用的冗余副本。
     """
     assert num_logical_experts % num_ranks == 0
     num_experts_per_rank = num_logical_experts // num_ranks
-    assert num_redundant_experts_per_rank >= 0
+    assert 0 <= num_redundant_experts_per_rank <= num_logical_experts - num_experts_per_rank
 
     local_expert_ids_by_rank = []
     for rank in range(num_ranks):
         first_expert_id = rank * num_experts_per_rank
         local_expert_ids = list(range(first_expert_id, first_expert_id + num_experts_per_rank))
-        # 额外物理槽先复制本 rank 最后一个主专家。首次 EPLB 规划完成后，
-        # transfer 会把这些占位行替换成实际需要的跨 rank 冗余专家。
-        local_expert_ids.extend([local_expert_ids[-1]] * num_redundant_experts_per_rank)
+        first_redundant_expert_id = ((rank + 1) * num_experts_per_rank) % num_logical_experts
+        local_expert_ids.extend(
+            (first_redundant_expert_id + offset) % num_logical_experts
+            for offset in range(num_redundant_experts_per_rank)
+        )
         local_expert_ids_by_rank.append(local_expert_ids)
 
     return local_expert_ids_by_rank

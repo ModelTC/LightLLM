@@ -90,14 +90,14 @@ class FusedMoeWeight(BaseWeightTpl):
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
-            self.local_expert_ids = self.fuse_moe_impl.local_logics_expert_ids_list
+            self.local_logic_expert_ids_list = self.fuse_moe_impl.local_logics_expert_ids_list
             logger.debug(
                 f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
-                f"local_logics_expert_ids_list: {self.local_expert_ids}"
+                f"local_logic_expert_ids_list: {self.local_logic_expert_ids_list}"
             )
-            self.local_n_routed_experts = len(self.local_expert_ids)
+            self.local_n_routed_experts = len(self.local_logic_expert_ids_list)
         else:
-            self.local_expert_ids = list(range(self.n_routed_experts + self.num_fused_shared_experts))
+            self.local_logic_expert_ids_list = list(range(self.n_routed_experts + self.num_fused_shared_experts))
 
     def experts(
         self,
@@ -254,7 +254,7 @@ class FusedMoeWeight(BaseWeightTpl):
         # Load bias
         self._load_e_score_correction_bias(weights)
         self._load_per_expert_scale(weights)
-        self._load_weight(self.local_expert_ids, weights)
+        self._load_weight(self.local_logic_expert_ids_list, weights)
 
     def verify_load(self):
         weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
@@ -323,8 +323,8 @@ class FusedMoeWeight(BaseWeightTpl):
             weight_list.append(expert_weight)
         return weight_list
 
-    def _load_weight(self, local_expert_ids: List[int], weights: Dict[str, torch.Tensor]):
-        for local_expert_idx, expert_idx in enumerate(local_expert_ids):
+    def _load_weight(self, local_logic_expert_ids_list: List[int], weights: Dict[str, torch.Tensor]):
+        for local_expert_idx, expert_idx in enumerate(local_logic_expert_ids_list):
             with self.lock:
                 self._load_expert(expert_idx, local_expert_idx, weights)
                 self._load_expert_scale(

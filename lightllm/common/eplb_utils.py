@@ -1,9 +1,6 @@
 """Small, dependency-free EPLB helpers shared by transfer and model profiling."""
 
 
-EPLB_MAX_STAGING_DEPTH = 8
-
-
 def extract_eplb_expert_tensors(weight):
     result = []
     for pack_name in ("w13", "w2"):
