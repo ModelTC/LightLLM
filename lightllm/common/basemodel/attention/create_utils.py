@@ -9,9 +9,11 @@ from .triton.fp import TritonAttBackend
 from .triton.int4kv import Int4kvTritonAttBackend
 from .triton.int8kv import Int8kvTritonAttBackend
 from .triton.mla import MlaTritonAttBackend
+from .triton.neo import NeoTritonAttBackend
 from .fa3.fp import Fa3AttBackend
 from .fa3.fp8 import Fp8Fa3AttBackend
 from .fa3.mla import MlaFa3AttBackend
+from .fa3.neo import NeoFa3AttBackend, HAS_FLASH_ATTN_INTERFACE
 from .flashinfer.fp8 import Fp8FlashInferAttBackend
 from .flashinfer.fp import FlashInferAttBackend
 from .flashinfer.mla import MlaFlashInferAttBackend
@@ -62,6 +64,21 @@ nsa_data_type_to_backend = {
         "flashmla_sparse": NsaFlashMlaFp8SparseAttBackend,
     },
 }
+
+neo_data_type_to_backend = (
+    {
+        "None": {
+            "triton": NeoTritonAttBackend,
+            "fa3": NeoFa3AttBackend,
+        }
+    }
+    if HAS_FLASH_ATTN_INTERFACE
+    else {
+        "None": {
+            "triton": NeoTritonAttBackend,
+        }
+    }
+)
 
 
 def _auto_select_backend(
@@ -159,3 +176,23 @@ def get_nsa_decode_att_backend_class(index=0, priority_list: list = ["flashmla_s
         return nsa_data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
+
+
+def get_neo_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "triton"]) -> BaseAttBackend:
+    args = get_env_start_args()
+    llm_dtype = args.llm_kv_type
+    backend_str = args.llm_prefill_att_backend[index]
+    if backend_str != "auto":
+        return neo_data_type_to_backend[llm_dtype][backend_str]
+    else:
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=neo_data_type_to_backend, priority_list=priority_list)
+
+
+def get_neo_decode_att_backend_class(index=0, priority_list: list = ["fa3", "triton"]) -> BaseAttBackend:
+    args = get_env_start_args()
+    llm_dtype = args.llm_kv_type
+    backend_str = args.llm_decode_att_backend[index]
+    if backend_str != "auto":
+        return neo_data_type_to_backend[llm_dtype][backend_str]
+    else:
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=neo_data_type_to_backend, priority_list=priority_list)

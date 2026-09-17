@@ -33,6 +33,7 @@ from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
 from ..models.gemma4.tokenizer import Gemma4Tokenizer
 from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
+from ..models.neo_chat_moe.model import NeoChatTokenizer
 from ..models import deepseek3_2  # noqa: F401  # registers the deepseek_v32 config with transformers
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
@@ -140,5 +141,7 @@ def get_tokenizer(
             processor = AutoProcessor.from_pretrained(tokenizer_name)
             image_processor = processor.image_processor
         tokenizer = Gemma4Tokenizer(tokenizer, model_cfg, image_processor=image_processor)
+    elif model_type == "neo_chat":
+        tokenizer = NeoChatTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
 
     return tokenizer
