@@ -5,6 +5,8 @@ from lightllm.common.basemodel.attention import (
     Fp8Fa3AttBackend,
 )
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPAttBackend
+from lightllm.utils.windowed_mtp import validate_windowed_mtp, window_capacity
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.draft_registry import DraftModelRegistry
@@ -21,6 +23,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
     is_mtp_draft_model = True
+    uses_windowed_draft_kv = False
 
     pre_and_post_weight_class = Qwen3DFlashPreAndPostLayerWeight
     transformer_weight_class = Qwen3DFlashTransformerLayerWeight
@@ -43,6 +46,9 @@ class Qwen3DFlashModel(LlamaTpPartModel):
 
         assert self.args.mtp_step <= self.config["block_size"]
         self.config["block_size"] = self.args.mtp_step
+        self.uses_windowed_draft_kv = getattr(self.args, "mtp_draft_kv_mode", "full") == "window"
+        if self.uses_windowed_draft_kv:
+            validate_windowed_mtp(self.args)
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
@@ -54,10 +60,21 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.req_manager = self.main_model.req_manager
 
     def _init_mem_manager(self):
-        # Draft KV uses target-owned cache slots.
+        # The shared manager owns target KV and, when enabled, draft window KV.
         self.mem_manager = self.main_model.mem_manager
+        if self.uses_windowed_draft_kv:
+            self.mem_manager.init_windowed_draft_kv(
+                requests=self.args.running_max_req_size + 1,
+                layers=self.config["n_layer"],
+                kv_heads=self.config["num_key_value_heads"] // self.tp_world_size_,
+                head_dim=self.config.get("head_dim", self.config["n_embed"] // self.config["num_attention_heads"]),
+                window=window_capacity(self.args),
+            )
 
     def _init_att_backend(self):
+        if self.uses_windowed_draft_kv:
+            self.prefill_att_backend = self.decode_att_backend = WindowedMTPAttBackend(model=self)
+            return
         super()._init_att_backend()
         # FA3 is currently the only backend that supports non-causal block decode.
         # TODO: Remove this restriction after Triton and FlashInfer support non-causal block decode.
@@ -87,7 +104,42 @@ class Qwen3DFlashModel(LlamaTpPartModel):
             for i in range(self.config["n_layer"])
         ]
 
+    @torch.no_grad()
+    def commit_features(self, model_input, hidden, starts=None, accept_len=None):
+        """Commit accepted target features to the bounded draft KV store."""
+        # The fused feature is transient; only its per-layer K/V is retained.
+        projected = self.pre_post_weight.fc_weight_.mm(hidden, use_custom_tensor_mananger=False)
+        projected = self.pre_post_weight.hidden_norm_weight_(projected, eps=self.pre_infer.eps_, alloc_func=torch.empty)
+        if model_input.is_prefill:
+            reqs = model_input.b_req_idx.long()
+            starts = model_input.b_prefill_start_loc
+            first = model_input.b_ready_cache_len
+            lengths = model_input.b_seq_len - first
+            max_new = model_input.max_q_seq_len
+        else:
+            reqs = model_input.b_req_idx.index_select(0, starts.long()).long()
+            first = model_input.b_seq_len.index_select(0, starts.long()) - 1
+            lengths = accept_len
+            max_new = self.args.mtp_step + 1
+        store = self.mem_manager.windowed_draft_kv
+        features, positions = store.prepare(reqs, projected, starts, first, lengths, max_new)
+        infer_state = self.infer_state_class()
+        infer_state.position_cos = self._cos_cached.index_select(0, positions.clamp_min(0))
+        infer_state.position_sin = self._sin_cached.index_select(0, positions.clamp_min(0))
+        for i, (layer, weight) in enumerate(zip(self.layers_infer, self.trans_layers_weight)):
+            kv = layer._get_context_kv(features, infer_state, weight)
+            store.write(i, reqs, positions, kv)
+
+    def _update_decode_req_to_token(self, infer_state: Qwen3DFlashInferStateInfo):
+        # Windowed draft blocks have no target-owned KV slots to record.
+        if self.uses_windowed_draft_kv:
+            return
+        return super()._update_decode_req_to_token(infer_state)
+
     def _decode(self, model_input: ModelInput) -> ModelOutput:
+        if self.uses_windowed_draft_kv:
+            assert model_input.batch_size > 0 and model_input.batch_size % self.block_size == 0
+            return super()._decode(model_input)
         if model_input.mtp_draft_input_hiddens is None:
             return super()._decode(model_input)
 

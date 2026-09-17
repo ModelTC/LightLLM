@@ -205,6 +205,8 @@ class StartArgs:
         },
     )
     mtp_draft_model_dir: Optional[List[str]] = field(default=None)
+    mtp_draft_kv_mode: str = field(default="full", metadata={"choices": ["full", "window"]})
+    mtp_draft_window_size: int = field(default=512)
     mtp_step: int = field(default=0)
     mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)

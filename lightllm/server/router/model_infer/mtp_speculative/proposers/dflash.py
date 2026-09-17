@@ -43,6 +43,9 @@ class DFlashProposer(BaseSpecProposer):
         # DFlash prefill 直接复用 target prompt 的 token 布局，并注入 target
         # hidden 初始化唯一 draft model 的 KV。使用浅副本避免在 target 输入上
         # 保留 draft 专用状态。
+        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False) is True:
+            self.backend.draft_models[0].commit_features(target_model_input, target_hidden)
+            return
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
         self.backend.draft_models[0].forward(draft_input)
@@ -82,17 +85,31 @@ class DFlashProposer(BaseSpecProposer):
 
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
 
-        # target verify 的行布局和 mem_indexes 对应本轮所有被验证 token。
-        # 附加 target hidden 后执行一次 draft forward，将这些行提交到 DFlash
-        # KV cache；浅副本保证 target_model_input 本身保持不变。
-        verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        draft_model.forward(verify_draft_input)
+        # full 模式通过 draft forward 写入 verify 行对应的 KV；windowed 模式
+        # 只将接受的 target hidden 投影并写入独立窗口，不保留被拒绝的行。
+        windowed = getattr(draft_model, "uses_windowed_draft_kv", False) is True
+        if windowed:
+            draft_model.commit_features(
+                target_model_input, target_model_output.mtp_collector.spec_hidden, b_req_mtp_start_loc, accept_len
+            )
+        else:
+            verify_draft_input = copy.copy(target_model_input)
+            verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+            draft_model.forward(verify_draft_input)
 
-        # 每个请求始终展开完整 block，未被本轮 proposal 返回的 block 尾部仍会
-        # 参与 parallel forward。所有临时 KV slot 在 verify 后通过 proposal
-        # 统一释放。
-        extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * block_size)
+        # 每个请求始终展开完整 block。full 模式分配的临时 KV slot 在 verify
+        # 后通过 proposal 释放；windowed 模式不占用 target KV slot。
+        if windowed:
+            extra_mem_indexes_cpu = None
+            scratch_indexes = torch.full(
+                (req_num * block_size,),
+                draft_model.mem_manager.HOLD_TOKEN_MEMINDEX,
+                dtype=torch.int32,
+                device=target_next_token_ids.device,
+            )
+        else:
+            extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * block_size)
+            scratch_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
         block_input_ids = target_next_token_ids.new_full(
             (req_num * block_size,),
             fill_value=draft_model.mask_token_id,
@@ -140,7 +157,7 @@ class DFlashProposer(BaseSpecProposer):
             .repeat_interleave(block_size)
             .contiguous()
         )
-        draft_input.mem_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
+        draft_input.mem_indexes = scratch_indexes
         draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         draft_output = draft_model.forward(draft_input)
@@ -160,6 +177,10 @@ class DFlashProposer(BaseSpecProposer):
             schedule_scores = block_draft_token_probs[:, :draft_step].float().contiguous()
         return DFlashSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
+            extra_mem_indexes_cpu=(
+                [MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)]
+                if extra_mem_indexes_cpu is not None
+                else []
+            ),
             schedule_scores=schedule_scores,
         )

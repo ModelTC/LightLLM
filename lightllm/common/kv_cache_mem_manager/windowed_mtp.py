@@ -1,0 +1,168 @@
+"""Bounded KV storage for parallel-block speculative decoding."""
+
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _gather_new(
+    FEATURES,
+    REQS,
+    STARTS,
+    FIRST,
+    LENGTHS,
+    OUT,
+    POS,
+    ENDS,
+    COUNTS,
+    N: tl.constexpr,
+    H: tl.constexpr,
+    C: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    batch, offset = row // N, row % N
+    req = tl.load(REQS + batch).to(tl.int64)
+    first = tl.load(FIRST + batch).to(tl.int64)
+    length = tl.load(LENGTHS + batch)
+    end = first + length
+    recent = tl.maximum(first, end - C)
+    count = end - recent
+    position = recent + offset
+    valid = offset < count
+    dim = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    source = tl.load(STARTS + batch).to(tl.int64) + position - first
+    value = tl.load(FEATURES + source * H + dim, valid & (dim < H), other=0)
+    tl.store(OUT + row * H + dim, value, dim < H)
+    if tl.program_id(1) == 0:
+        tl.store(POS + row, tl.where(valid, position, -1))
+        if offset == 0:
+            tl.store(ENDS + req, end)
+            tl.store(COUNTS + req, tl.minimum(end, C))
+
+
+@triton.jit
+def _write_ring(
+    POOL,
+    NEW,
+    REQS,
+    POS,
+    N: tl.constexpr,
+    C: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    req = tl.load(REQS + row // N).to(tl.int64)
+    position = tl.load(POS + row)
+    slot = position % C
+    dim = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    valid = (position >= 0) & (dim < WIDTH)
+    value = tl.load(NEW + row * WIDTH + dim, valid, other=0)
+    tl.store(POOL + (req * C + slot) * WIDTH + dim, value, valid)
+
+
+@triton.jit
+def _pack_ring(
+    POOL,
+    NOISE,
+    REQS,
+    ENDS,
+    OUT,
+    C: tl.constexpr,
+    B: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    batch, slot = row // (C + B), row % (C + B)
+    req = tl.load(REQS + batch).to(tl.int64)
+    end = tl.load(ENDS + req)
+    count = tl.minimum(end, C)
+    position = tl.maximum(0, end - C) + slot
+    ring_slot = position % C
+    dim = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    context = tl.load(POOL + (req * C + ring_slot) * WIDTH + dim, (slot < count) & (dim < WIDTH), other=0)
+    noise = tl.load(
+        NOISE + (batch * B + slot - count) * WIDTH + dim, (slot >= count) & (slot < count + B) & (dim < WIDTH), other=0
+    )
+    tl.store(OUT + row * WIDTH + dim, context + noise, dim < WIDTH)
+
+
+class WindowKVStore:
+    """Per-layer recent-window K/V, indexed independently of target KV.
+
+    Only newly accepted positions are projected and written. Each window slot
+    has at most one writer, including prefill chunks larger than the window.
+    On request reuse, the new end/count hides stale slots; all visible positions
+    are overwritten by the first prefill. Draft noise K/V never enters the ring.
+    """
+
+    def __init__(self, requests, layers, kv_heads, head_dim, dtype, device, window):
+        self.capacity = window
+        self.kv = torch.zeros((layers, requests, window, 2 * kv_heads, head_dim), dtype=dtype, device=device)
+        self.ends = torch.zeros(requests, dtype=torch.int64, device=device)
+        self.counts = torch.zeros(requests, dtype=torch.int32, device=device)
+
+    def reset(self):
+        """Invalidate all request windows without changing captured buffer addresses."""
+        self.ends.zero_()
+        self.counts.zero_()
+
+    def prepare(self, reqs, features, starts, first, lengths, max_new):
+        n = min(max_new, self.capacity)
+        packed = features.new_empty((reqs.numel() * n, features.shape[-1]))
+        positions = torch.empty(reqs.numel() * n, dtype=torch.int64, device=features.device)
+        _gather_new[(reqs.numel() * n, triton.cdiv(features.shape[-1], 512))](
+            features,
+            reqs,
+            starts,
+            first,
+            lengths,
+            packed,
+            positions,
+            self.ends,
+            self.counts,
+            n,
+            features.shape[-1],
+            self.capacity,
+            512,
+        )
+        return packed, positions
+
+    def write(self, layer, reqs, positions, new_kv):
+        width = new_kv.shape[-2] * new_kv.shape[-1]
+        _write_ring[(positions.numel(), triton.cdiv(width, 512))](
+            self.kv[layer],
+            new_kv,
+            reqs,
+            positions,
+            positions.numel() // reqs.numel(),
+            self.capacity,
+            width,
+            512,
+        )
+
+    def pack(self, layer, reqs, noise_kv, block):
+        heads, dim = self.kv.shape[-2:]
+        output = noise_kv.new_empty((reqs.numel(), self.capacity + block, heads, dim))
+        _pack_ring[(reqs.numel() * (self.capacity + block), triton.cdiv(heads * dim, 512))](
+            self.kv[layer],
+            noise_kv,
+            reqs,
+            self.ends,
+            output,
+            self.capacity,
+            block,
+            heads * dim,
+            512,
+        )
+        return output
+
+    def retained_positions(self, reqs):
+        """Diagnostic only: logical positions, in attention order."""
+        end = self.ends.index_select(0, reqs)[:, None]
+        slots = torch.arange(self.capacity, device=reqs.device)[None, :]
+        positions = (end - self.capacity).clamp_min(0) + slots
+        return positions.masked_fill(slots >= end.clamp_max(self.capacity), -1)

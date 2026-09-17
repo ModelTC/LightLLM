@@ -392,7 +392,7 @@ class InferenceContext:
 
     def save_hybrid_state_to_cache(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
-        if not self.is_hybrid_att_model:
+        if not self.is_hybrid_att_model or self.radix_cache is None:
             return
 
         # Request-state snapshot at a big-page boundary.

@@ -1,5 +1,7 @@
 import torch
 
+from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPDecodeAttState
+
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -26,6 +28,11 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3DFlashInferStateInfo,
         layer_weight: Qwen3DFlashTransformerLayerWeight,
     ) -> torch.Tensor:
+        cache_kv = self._get_context_kv(input_embdings, infer_state, layer_weight)
+        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        return input_embdings
+
+    def _get_context_kv(self, input_embdings, infer_state, layer_weight):
         token_num, _ = input_embdings.shape
         cache_kv = layer_weight.kv_proj.mm(input_embdings, use_custom_tensor_mananger=False)
         qk_rmsnorm_forward(
@@ -41,8 +48,24 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_sin,
             partial_rotary_factor=self.partial_rotary_factor,
         )
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        return input_embdings
+        return cache_kv
+
+    def token_attention_forward(self, input_embdings, infer_state, layer_weight):
+        att_state = infer_state.decode_att_state
+        if not isinstance(att_state, WindowedMTPDecodeAttState):
+            return super().token_attention_forward(input_embdings, infer_state, layer_weight)
+
+        q, noise_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
+        model = att_state.backend.model
+        scratch = infer_state.mem_manager.windowed_draft_kv.pack(
+            self.layer_num_ - model.draft_layer_start, att_state.b_req_idx, noise_kv, att_state.block_size
+        )
+        output = att_state.decode_att(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            scratch[:, :, : self.tp_k_head_num_],
+            scratch[:, :, self.tp_k_head_num_ :],
+        )
+        return self._get_o(output.reshape(-1, self.tp_q_head_num_ * self.head_dim_), infer_state, layer_weight)
 
     def _get_qkv(self, input, infer_state: Qwen3DFlashInferStateInfo, layer_weight: Qwen3DFlashTransformerLayerWeight):
         q = layer_weight.q_proj.mm(input, use_custom_tensor_mananger=False)

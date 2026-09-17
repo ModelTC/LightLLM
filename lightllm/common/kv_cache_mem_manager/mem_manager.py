@@ -8,6 +8,7 @@ from typing import List, Tuple, Any, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .allocator import KvCacheAllocator
+from .windowed_mtp import WindowKVStore
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.utils.dist_utils import (
     get_current_device_id,
@@ -38,6 +39,8 @@ class MemoryManager:
         self.layer_num = layer_num
         self.always_copy = always_copy
         self.dtype = dtype
+        self.windowed_draft_kv = None
+        self._windowed_draft_kv_params = None
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
@@ -112,6 +115,13 @@ class MemoryManager:
         # 等模式下 padding 一些请求，使推理过程可以正常运行采用的，其索引值为size，存储在HOLD_TOKEN_MEMINDEX
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
         self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
+        if self._windowed_draft_kv_params is not None:
+            self.init_windowed_draft_kv(**self._windowed_draft_kv_params)
+
+    def init_windowed_draft_kv(self, **cache_params):
+        """Create draft window storage from dimensions supplied by the draft model."""
+        self._windowed_draft_kv_params = cache_params
+        self.windowed_draft_kv = WindowKVStore(**cache_params, dtype=self.dtype, device=self.kv_buffer.device)
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         self.kv_move_buffer = torch.empty(
@@ -188,6 +198,7 @@ class MemoryManager:
 
     def _free_buffers(self):
         self.kv_buffer = None
+        self.windowed_draft_kv = None
 
     def alloc(self, need_size) -> torch.Tensor:
         return self.allocator.alloc(need_size)
@@ -197,6 +208,8 @@ class MemoryManager:
 
     def free_all(self):
         self.allocator.free_all()
+        if self.windowed_draft_kv is not None:
+            self.windowed_draft_kv.reset()
 
     def resize_mem(self, new_size):
         """
