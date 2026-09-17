@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
-    build_initial_redundant_expert_ids,
+    build_initial_local_expert_ids,
     build_logical_to_physical_map,
     build_logical_to_physical_maps_for_layers,
     _estimate_rank_load,
@@ -29,10 +29,6 @@ from lightllm.server.router.model_infer.mode_backend import (
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
     deepgemm_impl as deepgemm_module,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
-    EPLBState,
-    ExpertParallelState,
-)
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
     create_fuse_moe_impl,
     FuseMoeMarlin,
@@ -44,10 +40,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.base_im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
     fused_moe_weight as fused_weight_module,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
-    disable_eplb_model_init,
-    is_eplb_model_init_disabled,
-)
 from lightllm.common.eplb_utils import extract_eplb_expert_tensors
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
@@ -58,7 +50,7 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
 )
 
 
-def _test_parallel_state(
+def _test_moe_impl(
     *,
     eplb=False,
     num_logical_experts=128,
@@ -66,85 +58,89 @@ def _test_parallel_state(
     num_redundant_experts_per_rank=1,
     route_counter=None,
     recording=False,
-    recorded_sample_count=0,
 ):
-    eplb_state = None
+    logical_to_physical_map = None
     if eplb:
         if route_counter is None:
-            route_counter = torch.zeros((2, num_logical_experts), dtype=torch.int64)
-        initial_layout_world_size = max(world_size, 2)
-        eplb_state = EPLBState(
-            num_redundant_experts_per_rank=num_redundant_experts_per_rank,
-            initial_redundant_expert_ids_by_rank=build_initial_redundant_expert_ids(
-                num_logical_experts,
-                initial_layout_world_size,
-                num_redundant_experts_per_rank,
-            ),
-            logical_to_physical_map=torch.zeros((num_logical_experts, 2), dtype=torch.int32),
-            logical_replica_count=torch.ones(num_logical_experts, dtype=torch.int32),
-            route_counter=route_counter,
-            recording=recording,
-            recorded_sample_count=recorded_sample_count,
-        )
-    return ExpertParallelState(
-        num_logical_experts=num_logical_experts,
-        world_size=world_size,
-        eplb=eplb_state,
+            route_counter = torch.zeros((num_logical_experts,), dtype=torch.int64)
+        logical_to_physical_map = torch.zeros((num_logical_experts, world_size + 2), dtype=torch.int32)
+        logical_to_physical_map[:, 0] = 1
+    else:
+        num_redundant_experts_per_rank = 0
+    return SimpleNamespace(
+        n_routed_experts=num_logical_experts,
+        num_primary_experts_per_rank=num_logical_experts // world_size,
+        num_total_physical_experts=(num_logical_experts + world_size * num_redundant_experts_per_rank),
+        num_redundant_experts_per_rank=num_redundant_experts_per_rank,
+        logical_to_physical_map=logical_to_physical_map,
+        route_counter=route_counter,
+        recording=recording,
     )
 
 
-def _validated_expert_parallel_state(
-    *,
-    eplb=True,
-    n_routed_experts=4,
-    world_size=2,
-    num_redundant_experts_per_rank=1,
-    device="cpu",
-):
-    runtime = None
-    if eplb:
-        runtime = EPLBState(
-            num_redundant_experts_per_rank=num_redundant_experts_per_rank,
-            initial_redundant_expert_ids_by_rank=build_initial_redundant_expert_ids(
-                n_routed_experts,
-                world_size,
-                num_redundant_experts_per_rank,
-            ),
-            logical_to_physical_map=torch.empty((n_routed_experts, 2), dtype=torch.int32, device=device),
-            logical_replica_count=torch.ones(n_routed_experts, dtype=torch.int32, device=device),
-            route_counter=torch.zeros((2, n_routed_experts), dtype=torch.int64, device=device),
-        )
-    return ExpertParallelState(
-        num_logical_experts=n_routed_experts,
-        world_size=world_size,
-        eplb=runtime,
+def _set_deepgemm_runtime(impl, runtime):
+    for name in (
+        "num_primary_experts_per_rank",
+        "num_total_physical_experts",
+        "num_redundant_experts_per_rank",
+        "logical_to_physical_map",
+        "route_counter",
+        "recording",
+    ):
+        setattr(impl, name, getattr(runtime, name))
+
+
+def _initial_extra_expert_placement(num_logical_experts, world_size, num_redundant_experts_per_rank):
+    num_primary_experts_per_rank = num_logical_experts // world_size
+    initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
+        num_logical_experts, world_size, num_redundant_experts_per_rank
+    )
+    return torch.tensor(
+        [expert_ids[num_primary_experts_per_rank:] for expert_ids in initial_local_expert_ids_by_rank],
+        dtype=torch.int64,
     )
 
 
-def _set_expert_parallel_state(impl, state):
-    impl.expert_parallel_state = state
+def _rank_to_logic_expert_ids(redundant_placement, num_logical_experts):
+    num_ranks = len(redundant_placement)
+    num_primary_experts_per_rank = num_logical_experts // num_ranks
+    return [
+        list(
+            range(
+                rank * num_primary_experts_per_rank,
+                (rank + 1) * num_primary_experts_per_rank,
+            )
+        )
+        + list(rank_redundant_expert_ids)
+        for rank, rank_redundant_expert_ids in enumerate(redundant_placement)
+    ]
 
 
-def _manual_runtime_rank_load(source_load, placement, node_world_size, alignment):
+def _manual_runtime_rank_load(source_load, placement, alignment):
     """Reference the committed runtime logical-to-physical maps on CPU."""
-    samples, layers, nodes, num_logical_experts = source_load.shape
+    samples, layers, source_ranks, num_logical_experts = source_load.shape
     ranks, redundant = placement.shape[1:]
+    assert source_ranks == ranks
     num_experts_per_rank = num_logical_experts // ranks
     num_physical_experts_per_rank = num_experts_per_rank + redundant
     raw = torch.zeros((samples, layers, ranks, num_logical_experts), dtype=torch.float64)
     for layer in range(layers):
-        for source_node in range(nodes):
-            logical_to_physical, replica_count = build_logical_to_physical_map(
-                placement[layer],
+        for current_rank in range(ranks):
+            logical_to_physical = build_logical_to_physical_map(
+                _rank_to_logic_expert_ids(placement[layer].tolist(), num_logical_experts),
                 num_logical_experts,
-                source_rank=source_node * node_world_size,
-                node_world_size=node_world_size,
+                current_rank=current_rank,
             )
-            for expert in range(num_logical_experts):
-                count = int(replica_count[expert].item())
-                for physical_id in logical_to_physical[expert, :count].tolist():
+            for expert, packed_row in enumerate(logical_to_physical):
+                num_replicas = packed_row[0]
+                physical_expert_ids = packed_row[2 : num_replicas + 2]
+                if packed_row[1]:
+                    physical_expert_ids = physical_expert_ids[:1]
+                for physical_id in physical_expert_ids:
                     rank = physical_id // num_physical_experts_per_rank
-                    raw[:, layer, rank, expert] += source_load[:, layer, source_node, expert] / count
+                    raw[:, layer, rank, expert] += source_load[:, layer, current_rank, expert] / len(
+                        physical_expert_ids
+                    )
     return (torch.ceil(raw / alignment) * alignment).sum(dim=3)
 
 
@@ -204,27 +200,40 @@ def test_base_call_template_forwards_selection_and_capture_callback():
     assert seen["fused"]["topk_ids"] == "physical_ids"
 
 
-def test_parallel_state_derives_expert_layout():
-    state = _validated_expert_parallel_state(eplb=True)
-    assert state.num_primary_experts_per_rank == 2
-    assert state.num_total_physical_experts == 6
+def test_deepgemm_runtime_derives_expert_layout():
+    runtime = _test_moe_impl(
+        eplb=True,
+        num_logical_experts=4,
+        world_size=2,
+        num_redundant_experts_per_rank=1,
+    )
+    assert runtime.num_primary_experts_per_rank == 2
+    assert runtime.num_total_physical_experts == 6
 
 
-def test_factory_selects_all_paths_and_requires_ep_state(monkeypatch):
+def test_factory_selects_all_paths_without_ep_constructor_state(monkeypatch):
     plain_quant = SimpleNamespace(method_name="none")
     marlin_quant = SimpleNamespace(method_name="awq_marlin")
     monkeypatch.setattr(FuseMoeMarlin, "create_workspace", lambda self: None)
-    state = _validated_expert_parallel_state(eplb=False)
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_num_redundant_experts_per_rank=0),
+    )
+    monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
     ep_impl = create_fuse_moe_impl(
         n_routed_experts=4,
         num_fused_shared_experts=0,
         routed_scaling_factor=1.0,
         quant_method=plain_quant,
-        expert_parallel_state=state,
+        enable_ep_moe=True,
     )
     assert isinstance(ep_impl, deepgemm_module.FuseMoeDeepGEMM)
-    assert ep_impl.expert_parallel_state is state
-    assert state.eplb is None
+    assert ep_impl.num_total_physical_experts == 4
+    assert not hasattr(ep_impl, "num_primary_experts_per_rank")
+    assert not hasattr(ep_impl, "route_counter")
+    assert not hasattr(ep_impl, "expert_parallel_state")
     assert isinstance(
         create_fuse_moe_impl(
             n_routed_experts=4,
@@ -279,25 +288,23 @@ def test_eplb_redundant_experts_default_to_disabled():
 @pytest.mark.parametrize(
     ("num_logical_experts", "num_ranks", "num_redundant_experts_per_rank", "expected"),
     [
-        (8, 4, 2, [[2, 3], [4, 5], [6, 7], [0, 1]]),
-        (6, 3, 4, [[2, 3, 4, 5], [4, 5, 0, 1], [0, 1, 2, 3]]),
+        (8, 4, 2, [[0, 1, 1, 1], [2, 3, 3, 3], [4, 5, 5, 5], [6, 7, 7, 7]]),
+        (6, 3, 4, [[0, 1, 1, 1, 1, 1], [2, 3, 3, 3, 3, 3], [4, 5, 5, 5, 5, 5]]),
     ],
 )
-def test_build_initial_redundant_expert_ids(
+def test_build_initial_local_expert_ids(
     num_logical_experts,
     num_ranks,
     num_redundant_experts_per_rank,
     expected,
 ):
-    actual = build_initial_redundant_expert_ids(
+    actual = build_initial_local_expert_ids(
         num_logical_experts,
         num_ranks,
         num_redundant_experts_per_rank,
     )
 
-    assert actual.dtype == torch.int64
-    assert actual.shape == (num_ranks, num_redundant_experts_per_rank)
-    assert torch.equal(actual, torch.tensor(expected, dtype=torch.int64))
+    assert actual == expected
 
 
 def test_plan_redundant_experts_never_uses_owner_or_duplicate_rank():
@@ -532,7 +539,11 @@ def test_select_improving_placements_accepts_five_percent_critical_reduction():
     candidate = torch.tensor([[[2], [1]]])
 
     selected, improved, _metrics, _before_load, _after_load = select_improving_placements(
-        samples, current, candidate, rebalance_gain_threshold=0.05, expert_alignment=128
+        samples,
+        current,
+        candidate,
+        rebalance_gain_threshold=0.05,
+        expert_alignment=128,
     )
 
     assert improved.item()
@@ -569,69 +580,98 @@ def test_select_improving_placements_accepts_only_when_model_gain_reaches_thresh
     assert torch.equal(selected, candidate)
 
 
-def test_logical_to_physical_map_has_at_most_one_slot_per_rank():
-    redundant_expert_ids = torch.tensor([[2, 3], [0, 1]])
-    logical_to_physical, replica_count = build_logical_to_physical_map(redundant_expert_ids, num_logical_experts=4)
+def test_logical_to_physical_map_selects_one_physical_expert():
+    rank_to_logic_expert_ids = [[0, 1, 2, 3], [2, 3, 0, 1]]
+    logical_to_physical = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=4, current_rank=0)
 
-    assert logical_to_physical.shape == (4, 2)
-    assert torch.equal(replica_count, torch.full((4,), 2, dtype=torch.int64))
+    assert isinstance(logical_to_physical, list)
+    assert len(logical_to_physical) == 4
+    assert all(len(row) == 7 for row in logical_to_physical)
+    assert [row[0] for row in logical_to_physical] == [2, 2, 2, 2]
+    assert [row[1] for row in logical_to_physical] == [1, 1, 1, 1]
+    assert [row[2] for row in logical_to_physical] == [0, 1, 2, 3]
+    assert all(physical_id >= 0 for row in logical_to_physical for physical_id in row[2 : 2 + row[0]])
+    assert all(physical_id == -1 for row in logical_to_physical for physical_id in row[2 + row[0] :])
 
 
-def test_logical_to_physical_map_requires_expert_count_divisible_by_rank_count_without_source_rank():
-    redundant_expert_ids = torch.tensor([[0], [1]])
+def test_logical_to_physical_map_requires_expert_count_divisible_by_rank_count():
+    rank_to_logic_expert_ids = [[0, 1, 0], [2, 3, 1]]
 
     with pytest.raises(AssertionError):
-        build_logical_to_physical_map(redundant_expert_ids, num_logical_experts=5)
+        build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=5, current_rank=0)
 
 
-def test_logical_to_physical_map_prefers_source_node_replicas():
-    # Four ranks, two ranks per node, two primary experts/rank and one
-    # redundant slot/rank.  Expert 0 is primary on rank 0 and replicated on
-    # rank 2 (the other node).
-    redundant = torch.tensor([[4], [5], [0], [1]], dtype=torch.int64)
-    rank0_map, rank0_count = build_logical_to_physical_map(
-        redundant, num_logical_experts=8, source_rank=0, node_world_size=2
+def test_logical_to_physical_map_supports_all_redundant_slots_for_one_expert():
+    logical_to_physical = build_logical_to_physical_map(
+        [[0, 1, 0, 0], [2, 3, 0, 0]],
+        num_logical_experts=4,
+        current_rank=0,
     )
-    rank1_map, rank1_count = build_logical_to_physical_map(
-        redundant, num_logical_experts=8, source_rank=1, node_world_size=2
-    )
-    fallback_redundant = torch.tensor([[4], [5], [0], [1], [2], [3]], dtype=torch.int64)
-    rank4_map, rank4_count = build_logical_to_physical_map(fallback_redundant, 12, source_rank=4, node_world_size=2)
 
-    assert rank0_count[0].item() == rank1_count[0].item() == 1
-    assert torch.equal(rank0_map[0, :1], torch.tensor([0]))
-    assert torch.equal(rank1_map[0, :1], torch.tensor([0]))
-    assert rank4_count[0].item() == 2
-    assert set(rank4_map[0, :2].tolist()) == {0, 8}
+    # 1 个主副本加上 2 个 rank 的全部 4 个冗余槽。
+    assert logical_to_physical[0][0] == 5
+    assert len(logical_to_physical[0][2:]) == 5
+    assert len(set(logical_to_physical[0][2:])) == 5
 
 
-def test_source_node_local_maps_fall_back_to_global_replicas():
-    redundant = torch.tensor([[4], [5], [0], [1]], dtype=torch.int64)
-    maps = [build_logical_to_physical_map(redundant, 8, source_rank=rank, node_world_size=2) for rank in range(4)]
-    assert maps[0][1][0].item() == maps[1][1][0].item() == 1
-    assert maps[2][1][0].item() == maps[3][1][0].item() == 1
-    assert maps[0][0][0, 0].item() == maps[1][0][0, 0].item() == 0
-    assert maps[2][0][0, 0].item() == maps[3][0][0, 0].item() == 8
+def test_logical_to_physical_map_prefers_current_rank_replica():
+    redundant = [[4], [5], [0], [1]]
+    rank_to_logic_expert_ids = _rank_to_logic_expert_ids(redundant, 8)
+    rank0_map = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=8, current_rank=0)
+    rank1_map = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=8, current_rank=1)
+    fallback_redundant = [[4], [5], [0], [1], [2], [3]]
+    rank4_map = build_logical_to_physical_map(_rank_to_logic_expert_ids(fallback_redundant, 12), 12, current_rank=4)
+
+    assert rank0_map[0][0] == rank1_map[0][0] == 2
+    assert rank0_map[0][1] == 1
+    assert rank1_map[0][1] == 0
+    assert rank0_map[0][2] == 0
+    assert set(rank0_map[0][2:4]) == {0, 8}
+    assert set(rank1_map[0][2:4]) == {0, 8}
+    assert rank4_map[0][0] == 2
+    assert rank4_map[0][1] == 0
+    assert set(rank4_map[0][2:4]) == {0, 8}
 
 
-def test_source_rank_rotates_selected_replica_order_without_changing_copies():
-    # Expert 0 is primary on rank 0 and redundant on rank 1, so both ranks
-    # on node 0 have the same two local copies.  Their source-rank phases
-    # must differ while their selected set/count remain identical.
-    redundant = torch.tensor([[1], [0], [3], [2]], dtype=torch.int64)
-    rank0_map, rank0_count = build_logical_to_physical_map(redundant, 4, source_rank=0, node_world_size=2)
-    rank1_map, rank1_count = build_logical_to_physical_map(redundant, 4, source_rank=1, node_world_size=2)
+def test_nonlocal_rank_routes_across_all_replicas():
+    redundant = [[4], [5], [0], [1]]
+    rank_to_logic_expert_ids = _rank_to_logic_expert_ids(redundant, 8)
+    maps = [build_logical_to_physical_map(rank_to_logic_expert_ids, 8, current_rank=rank) for rank in range(4)]
+    assert maps[0][0][1] == 1
+    assert maps[1][0][1] == 0
+    assert maps[2][0][1] == 1
+    assert maps[3][0][1] == 0
+    assert all(set(logical_map[0][2:4]) == {0, 8} for logical_map in maps)
 
-    assert rank0_count[0].item() == rank1_count[0].item() == 2
-    assert set(rank0_map[0, :2].tolist()) == set(rank1_map[0, :2].tolist()) == {0, 3}
-    assert torch.equal(rank1_map[0, :2], torch.tensor([3, 0], dtype=torch.int32))
+
+def test_current_rank_moves_local_replica_to_front_without_changing_copies():
+    # Expert 0 is primary on rank 0 and redundant on rank 1。两个 rank 都优先
+    # 自己的本地副本，因此路由槽的起点不同，但候选集合和数量保持一致。
+    redundant = [[1], [0], [3], [2]]
+    rank_to_logic_expert_ids = _rank_to_logic_expert_ids(redundant, 4)
+    rank0_map = build_logical_to_physical_map(rank_to_logic_expert_ids, 4, current_rank=0)
+    rank1_map = build_logical_to_physical_map(rank_to_logic_expert_ids, 4, current_rank=1)
+
+    assert rank0_map[0] == [2, 1, 0, 3, -1, -1, -1]
+    assert rank1_map[0] == [2, 1, 3, 0, -1, -1, -1]
+
+
+def test_current_rank_stably_moves_all_local_physical_ids_to_front():
+    # Expert 0 在 rank 0/1/2 上依次对应 physical IDs [0, 1, 3, 5]。
+    # 对 rank 1 构建路由表时，只把本地 ID 3 移到最前面；其余远端 ID
+    # 仍保持原来的 [0, 1, 5] 顺序。
+    rank_to_logic_expert_ids = [[0, 0], [1, 0], [2, 0]]
+
+    rank1_map = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=3, current_rank=1)
+
+    assert rank1_map[0] == [4, 1, 3, 0, 1, 5]
 
 
 @pytest.mark.parametrize(
-    "source_rank,node_world_size",
-    [(None, None), (0, 2), (1, 2), (2, 2), (3, 2)],
+    "current_rank",
+    [0, 1, 2, 3],
 )
-def test_logical_to_physical_maps_for_layers_match_single_layer_api(source_rank, node_world_size):
+def test_logical_to_physical_maps_for_layers_match_single_layer_api(current_rank):
     placements_by_layer = torch.tensor(
         [
             [[4, 5], [0, 1], [0, 1], [2, 3]],
@@ -641,82 +681,76 @@ def test_logical_to_physical_maps_for_layers_match_single_layer_api(source_rank,
         dtype=torch.int64,
     )
 
-    maps_by_layer, counts_by_layer = build_logical_to_physical_maps_for_layers(
-        placements_by_layer,
+    rank_to_logic_expert_ids_by_layer = [
+        _rank_to_logic_expert_ids(placement.tolist(), 8) for placement in placements_by_layer
+    ]
+    maps_by_layer = build_logical_to_physical_maps_for_layers(
+        rank_to_logic_expert_ids_by_layer,
         num_logical_experts=8,
-        source_rank=source_rank,
-        node_world_size=node_world_size,
+        current_rank=current_rank,
     )
     expected_by_layer = [
         build_logical_to_physical_map(
-            placement,
+            rank_to_logic_expert_ids,
             num_logical_experts=8,
-            source_rank=source_rank,
-            node_world_size=node_world_size,
+            current_rank=current_rank,
         )
-        for placement in placements_by_layer
+        for rank_to_logic_expert_ids in rank_to_logic_expert_ids_by_layer
     ]
 
-    assert maps_by_layer.shape == (3, 8, 4)
-    assert counts_by_layer.shape == (3, 8)
-    assert maps_by_layer.dtype == counts_by_layer.dtype == torch.int32
-    assert torch.equal(maps_by_layer, torch.stack([item[0] for item in expected_by_layer]))
-    assert torch.equal(counts_by_layer, torch.stack([item[1] for item in expected_by_layer]))
-    if source_rank is None:
-        # expert 0 的主副本在 rank 0，且 rank 1、2 都有一个冗余副本；第 1、2
-        # 个冗余副本必须分别写入映射表的第 1、2 列，而不能互相覆盖。
-        assert torch.equal(counts_by_layer[:, 0], torch.tensor([3, 3, 3], dtype=torch.int32))
-        assert torch.equal(
-            maps_by_layer[:, 0, :3],
-            torch.tensor([[0, 6, 10], [0, 6, 10], [0, 6, 10]], dtype=torch.int32),
-        )
-    positions = torch.arange(maps_by_layer.shape[-1]).view(1, 1, -1)
-    valid = positions < counts_by_layer.unsqueeze(-1)
-    assert torch.all(maps_by_layer[valid] >= 0)
-    assert torch.all(maps_by_layer[~valid] == -1)
+    assert maps_by_layer == expected_by_layer
+    assert all(
+        physical_expert_id >= 0
+        for logical_map in maps_by_layer
+        for row in logical_map
+        for physical_expert_id in row[2 : 2 + row[0]]
+    )
+    assert all(
+        physical_expert_id == -1
+        for logical_map in maps_by_layer
+        for row in logical_map
+        for physical_expert_id in row[2 + row[0] :]
+    )
 
 
-def test_plan_redundant_experts_prefers_local_node_load_relief():
-    source_load = torch.zeros((1, 1, 2, 8), dtype=torch.int64)
-    source_load[0, 0, 0, 0] = 1024
+def test_plan_redundant_experts_prefers_current_rank_load_relief():
+    source_load = torch.zeros((1, 1, 4, 8), dtype=torch.int64)
+    source_load[0, 0, 1, 0] = 1024
     placement = plan_redundant_experts(
         source_load,
         num_ranks=4,
         num_redundant_experts_per_rank=1,
         expert_alignment=128,
-        node_world_size=2,
     )
     assert placement[0, 1, 0] == 0
-    predicted = _estimate_rank_load(source_load, placement, expert_alignment=128, node_world_size=2)
-    assert torch.equal(predicted, _manual_runtime_rank_load(source_load, placement, node_world_size=2, alignment=128))
+    predicted = _estimate_rank_load(source_load, placement, expert_alignment=128)
+    assert torch.equal(
+        predicted,
+        _manual_runtime_rank_load(source_load, placement, alignment=128),
+    )
 
 
-def test_plan_redundant_experts_single_node_matches_default_behavior():
+def test_plan_redundant_experts_accepts_aggregated_load():
     load = torch.tensor([[1000, 900, 800, 700, 600, 500, 400, 300]]).unsqueeze(0).unsqueeze(2)
-    default = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=1)
-    single_node = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=1, node_world_size=4)
-    assert torch.equal(single_node, default)
+    placement = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=1)
+    assert placement.shape == (1, 4, 1)
 
 
-def test_source_node_estimate_matches_local_first_runtime_replica_sharing():
-    # Expert 0 has a copy on each node.  Node 0 and node 1 issue unequal
-    # traffic, so collapsing them before planning produces the wrong result.
+def test_current_rank_estimate_matches_local_first_runtime_replica_sharing():
     placement = torch.tensor([[[4], [5], [0], [1]]], dtype=torch.int64)
-    source_load = torch.zeros((1, 1, 2, 8), dtype=torch.int64)
+    source_load = torch.zeros((1, 1, 4, 8), dtype=torch.int64)
     source_load[0, 0, 0, 0] = 256
-    source_load[0, 0, 1, 0] = 128
+    source_load[0, 0, 2, 0] = 128
 
-    predicted = _estimate_rank_load(source_load, placement, expert_alignment=128, node_world_size=2)
-    runtime = _manual_runtime_rank_load(source_load, placement, node_world_size=2, alignment=128)
-    collapsed_global = _estimate_rank_load(source_load.sum(dim=2, keepdim=True), placement, expert_alignment=128)
+    predicted = _estimate_rank_load(source_load, placement, expert_alignment=128)
+    runtime = _manual_runtime_rank_load(source_load, placement, alignment=128)
 
     assert torch.equal(predicted, runtime)
     assert torch.equal(predicted[0, 0], torch.tensor([256.0, 0.0, 128.0, 0.0]))
-    assert not torch.equal(predicted, collapsed_global)
 
 
-def test_source_node_planner_constraints_and_real_critical_improvement():
-    source_load = torch.tensor(
+def test_current_rank_planner_constraints_and_real_critical_improvement():
+    load_by_node = torch.tensor(
         [
             [
                 [
@@ -739,39 +773,41 @@ def test_source_node_planner_constraints_and_real_critical_improvement():
         ],
         dtype=torch.int64,
     )
-    initial = build_initial_redundant_expert_ids(8, 4, 1).unsqueeze(0)
-    planned = plan_redundant_experts(source_load, 4, 1, expert_alignment=128, node_world_size=2)
+    source_load = torch.zeros((3, 1, 4, 8), dtype=torch.int64)
+    source_load[:, :, 0] = load_by_node[:, :, 0]
+    source_load[:, :, 2] = load_by_node[:, :, 1]
+    initial = torch.tensor([[[2], [4], [6], [0]]], dtype=torch.int64)
+    planned = plan_redundant_experts(source_load, 4, 1, expert_alignment=128)
 
     for rank, experts in enumerate(planned[0].tolist()):
         assert len(experts) == len(set(experts)) == 1
         assert experts[0] // 2 != rank
 
-    before = _estimate_rank_load(source_load, initial, expert_alignment=128, node_world_size=2)
-    after = _estimate_rank_load(source_load, planned, expert_alignment=128, node_world_size=2)
-    manual_before = _manual_runtime_rank_load(source_load, initial, 2, 128)
-    manual_after = _manual_runtime_rank_load(source_load, planned, 2, 128)
+    before = _estimate_rank_load(source_load, initial, expert_alignment=128)
+    after = _estimate_rank_load(source_load, planned, expert_alignment=128)
+    manual_before = _manual_runtime_rank_load(source_load, initial, 128)
+    manual_after = _manual_runtime_rank_load(source_load, planned, 128)
     assert torch.equal(before, manual_before)
     assert torch.equal(after, manual_after)
     assert after.max(dim=2).values.sum() < before.max(dim=2).values.sum()
 
 
-def test_source_node_select_uses_the_same_runtime_critical_prediction():
-    source_load = torch.zeros((2, 1, 2, 8), dtype=torch.int64)
-    source_load[:, 0, 0, 0] = torch.tensor([1024, 768])
-    source_load[:, 0, 1, 6] = torch.tensor([896, 1024])
+def test_current_rank_select_uses_the_same_runtime_critical_prediction():
+    source_load = torch.zeros((2, 1, 4, 8), dtype=torch.int64)
+    source_load[:, 0, 1, 0] = torch.tensor([1024, 768])
+    source_load[:, 0, 0, 6] = torch.tensor([896, 1024])
     current = torch.tensor([[[2], [4], [6], [0]]], dtype=torch.int64)
-    candidate = plan_redundant_experts(source_load, 4, 1, expert_alignment=128, node_world_size=2)
+    candidate = plan_redundant_experts(source_load, 4, 1, expert_alignment=128)
     selected, _improved, _metrics, _before_load, _after_load = select_improving_placements(
         source_load,
         current,
         candidate,
         rebalance_gain_threshold=0.05,
         expert_alignment=128,
-        node_world_size=2,
     )
     assert torch.equal(
-        _estimate_rank_load(source_load, selected, 128, 2),
-        _manual_runtime_rank_load(source_load, selected, 2, 128),
+        _estimate_rank_load(source_load, selected, 128),
+        _manual_runtime_rank_load(source_load, selected, 128),
     )
 
 
@@ -863,6 +899,16 @@ def test_align_target_placement_keeps_retained_experts_in_live_slots():
     assert torch.equal(canonical, torch.tensor([[6, 5], [0, 7], [0, 1], [2, 3]]))
 
 
+def test_align_target_placement_replaces_duplicate_initial_placeholders():
+    current = torch.tensor([[1, 1], [3, 3]])
+    target = torch.tensor([[1, 2], [3, 0]])
+
+    canonical = align_target_placement(current, target)
+
+    assert torch.equal(canonical, target)
+    assert build_transfer_plan(current, target, num_logical_experts=4, world_size=2, node_world_size=2)
+
+
 def test_canonical_placement_keeps_transfer_rows_and_published_map_consistent():
     num_logical_experts = 8
     world_size = 4
@@ -885,11 +931,17 @@ def test_canonical_placement_keeps_transfer_rows_and_published_map_consistent():
     for step in plan:
         live_rows[step.dst_rank][num_experts_per_rank + step.dst_slot] = source_rows[step.src_rank][step.src_local_row]
 
-    logical_to_physical, replica_count = build_logical_to_physical_map(canonical, num_logical_experts)
-    for logical_expert, count in enumerate(replica_count.tolist()):
-        for physical_id in logical_to_physical[logical_expert, :count].tolist():
-            rank, row = divmod(physical_id, num_physical_experts_per_rank)
-            assert live_rows[rank][row] == logical_expert
+    for current_rank in range(world_size):
+        logical_to_physical = build_logical_to_physical_map(
+            _rank_to_logic_expert_ids(canonical.tolist(), num_logical_experts),
+            num_logical_experts,
+            current_rank=current_rank,
+        )
+        for logical_expert, packed_row in enumerate(logical_to_physical):
+            count = packed_row[0]
+            for physical_id in packed_row[2 : count + 2]:
+                rank, row = divmod(physical_id, num_physical_experts_per_rank)
+                assert live_rows[rank][row] == logical_expert
 
 
 def test_plan_and_broadcast_publishes_canonical_placement(monkeypatch):
@@ -931,7 +983,7 @@ def test_stickiness_zero_matches_unbiased_plan():
     generator = torch.Generator().manual_seed(17)
     load = torch.randint(1, 1000, (2, 8, 16), generator=generator).unsqueeze(2)
     unbiased = plan_redundant_experts(load, num_ranks=4, num_redundant_experts_per_rank=2)
-    unrelated = build_initial_redundant_expert_ids(16, 4, 2).unsqueeze(0).expand(8, -1, -1).clone()
+    unrelated = _initial_extra_expert_placement(16, 4, 2).unsqueeze(0).expand(8, -1, -1).clone()
 
     replanned = plan_redundant_experts(
         load,
@@ -980,17 +1032,16 @@ def test_steady_state_sparse_sampling_records_steps_sixteen_to_nineteen_and_eval
     monkeypatch,
 ):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    counter = torch.tensor([[10, 20, 30, 40], [0, 0, 0, 0]], dtype=torch.int64)
+    counter = torch.tensor([10, 20, 30, 40], dtype=torch.int64)
     manager.weights = [
         type(
             "Weight",
             (),
             {
-                "expert_parallel_state": _test_parallel_state(
+                "fuse_moe_impl": _test_moe_impl(
                     eplb=True,
                     route_counter=counter,
                     recording=False,
-                    recorded_sample_count=1,
                     num_logical_experts=4,
                     world_size=1,
                 ),
@@ -1011,7 +1062,7 @@ def test_steady_state_sparse_sampling_records_steps_sixteen_to_nineteen_and_eval
 
     recordings, resets, started = [], [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
+    manager._reset_route_counters = lambda: resets.append(True)
     monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(True))
     monkeypatch.setattr(
         manager_module.torch.cuda,
@@ -1051,7 +1102,7 @@ def test_steady_sampling_window_clamps_to_short_interval_without_moving_boundary
     manager._continuous_collection_end_step = None
     recordings, resets, started = [], [], []
     manager._set_recording = lambda enabled: recordings.append((manager.prefill_steps, enabled))
-    manager._reset_recorded_samples = lambda: resets.append(manager.prefill_steps)
+    manager._reset_route_counters = lambda: resets.append(manager.prefill_steps)
     monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(manager.prefill_steps))
 
     manager._prepare_next_sampling_window()
@@ -1068,17 +1119,16 @@ def test_steady_sampling_window_clamps_to_short_interval_without_moving_boundary
 
 def test_eplb_step_does_not_start_a_second_evaluation_while_one_is_pending(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    counter = torch.tensor([[10, 20, 30, 40], [0, 0, 0, 0]], dtype=torch.int64)
+    counter = torch.tensor([10, 20, 30, 40], dtype=torch.int64)
     manager.weights = [
         type(
             "Weight",
             (),
             {
-                "expert_parallel_state": _test_parallel_state(
+                "fuse_moe_impl": _test_moe_impl(
                     eplb=True,
                     route_counter=counter,
                     recording=False,
-                    recorded_sample_count=1,
                     num_logical_experts=4,
                     world_size=1,
                 ),
@@ -1127,7 +1177,7 @@ def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_
     manager.step_interval = 20
     manager.sampling_interval = 20
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     recordings, logs = [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
     monkeypatch.setattr(manager_module.logger, "info", lambda *args: logs.append(args))
@@ -1168,7 +1218,7 @@ def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(
     }
     manager.global_rank = 1
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     recordings, starts = [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
     manager._start_evaluation = lambda: starts.append(True)
@@ -1243,7 +1293,7 @@ def test_evaluation_state_is_cleared_before_second_round(monkeypatch):
     manager.step_interval = 1
     manager.sampling_interval = 1
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     manager._set_recording = lambda _enabled: None
     monkeypatch.setattr(manager_module.threading, "Thread", PendingThread)
     monkeypatch.setattr(manager_module.torch.cuda, "Event", Event)
@@ -1259,10 +1309,10 @@ def test_evaluation_state_is_cleared_before_second_round(monkeypatch):
     assert manager._poll_evaluation()  # New worker has not produced a result.
 
 
-def test_manager_collects_recent_ring_samples_in_chronological_order(monkeypatch):
+def test_manager_collects_aggregated_route_counters():
     counters = [
-        torch.tensor([[10, 11], [20, 21], [30, 31]], dtype=torch.int64),
-        torch.tensor([[40, 41], [50, 51], [60, 61]], dtype=torch.int64),
+        torch.tensor([10, 11], dtype=torch.int64),
+        torch.tensor([40, 41], dtype=torch.int64),
     ]
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.weights = [
@@ -1270,11 +1320,10 @@ def test_manager_collects_recent_ring_samples_in_chronological_order(monkeypatch
             "Weight",
             (),
             {
-                "expert_parallel_state": _test_parallel_state(
+                "fuse_moe_impl": _test_moe_impl(
                     eplb=True,
                     route_counter=counter,
                     recording=False,
-                    recorded_sample_count=5,
                     num_logical_experts=2,
                     world_size=1,
                 ),
@@ -1282,80 +1331,26 @@ def test_manager_collects_recent_ring_samples_in_chronological_order(monkeypatch
         )()
         for counter in counters
     ]
-    manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
-    manager.evaluation_group = object()
-    metadata_sizes = []
-
-    def all_reduce(metadata, **_kwargs):
-        metadata_sizes.append(metadata.numel())
-
-    monkeypatch.setattr(manager_module.dist, "all_reduce", all_reduce)
-
-    samples = manager._collect_local_samples()
-
-    assert metadata_sizes == [4]
-    assert torch.equal(
-        samples,
-        torch.tensor(
-            [
-                [[30, 31], [60, 61]],
-                [[10, 11], [40, 41]],
-                [[20, 21], [50, 51]],
-            ],
-            dtype=torch.int64,
-        ),
-    )
-
-
-def test_manager_collects_only_two_recent_sparse_samples(monkeypatch):
-    counters = [
-        torch.tensor([[10, 11], [20, 21], [30, 31], [40, 41]], dtype=torch.int64),
-        torch.tensor([[50, 51], [60, 61], [70, 71], [80, 81]], dtype=torch.int64),
-    ]
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.weights = [
-        type(
-            "Weight",
-            (),
-            {
-                "expert_parallel_state": _test_parallel_state(
-                    eplb=True,
-                    route_counter=counter,
-                    recording=False,
-                    recorded_sample_count=2,
-                    num_logical_experts=2,
-                    world_size=1,
-                ),
-            },
-        )()
-        for counter in counters
-    ]
-    manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
-    manager.evaluation_group = object()
-    monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **kwargs: None)
+    manager._eplb_impls = [weight.fuse_moe_impl for weight in manager.weights]
+    manager.num_logical_experts = 2
 
     samples = manager._collect_local_samples()
 
     assert torch.equal(
         samples,
-        torch.tensor([[[10, 11], [50, 51]], [[20, 21], [60, 61]]], dtype=torch.int64),
+        torch.tensor([[[10, 11], [40, 41]]], dtype=torch.int64),
     )
 
 
-def test_eplb_counter_capacity_covers_default_dense_interval(monkeypatch):
+def test_eplb_route_counter_has_one_entry_per_logical_expert(monkeypatch):
     args = type(
         "Args",
         (),
         {"eplb_num_redundant_experts_per_rank": 2},
     )()
-    weight = object.__new__(fused_weight_module.FusedMoeWeight)
-    weight.n_routed_experts = 4
-    weight.global_world_size = 2
-    weight.global_rank_ = 0
-    weight.enable_ep_moe = True
-    monkeypatch.setattr(fused_weight_module, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(fused_weight_module, "get_prefill_eplb_step_interval", lambda: 20)
-    monkeypatch.setattr(fused_weight_module, "get_node_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
     original_zeros = torch.zeros
 
@@ -1363,34 +1358,30 @@ def test_eplb_counter_capacity_covers_default_dense_interval(monkeypatch):
         kwargs.pop("device", None)
         return original_zeros(*shape, **kwargs)
 
-    monkeypatch.setattr(fused_weight_module.torch, "zeros", cpu_zeros)
+    monkeypatch.setattr(deepgemm_module.torch, "zeros", cpu_zeros)
 
-    weight._init_expert_parallel_state()
+    impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace())
 
-    assert weight.expert_parallel_state.eplb.route_counter.shape == (40, 4)
+    assert impl.route_counter.shape == (4,)
 
 
-def test_steady_sampling_resets_fixed_ring_without_retained_history():
-    counter = torch.ones((8, 4), dtype=torch.int64)
+def test_steady_sampling_resets_aggregated_route_counter():
+    counter = torch.ones((4,), dtype=torch.int64)
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    state = _test_parallel_state(
+    impl = _test_moe_impl(
         eplb=True,
         route_counter=counter,
         recording=False,
-        recorded_sample_count=99,
         num_logical_experts=4,
         world_size=1,
-    ).eplb
-    manager._eplb_states = [state]
+    )
+    manager._eplb_impls = [impl]
 
-    manager._reset_recorded_samples()
-    manager._reset_recorded_samples()
+    manager._reset_route_counters()
+    manager._reset_route_counters()
 
-    assert state.route_counter.shape == (8, 4)
-    assert torch.count_nonzero(state.route_counter) == 0
-    assert state.recorded_sample_count == 0
-    assert not hasattr(manager, "_retained_local_samples")
-    assert not hasattr(manager, "_sample_history")
+    assert impl.route_counter.shape == (4,)
+    assert torch.count_nonzero(impl.route_counter) == 0
 
 
 def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
@@ -1399,80 +1390,39 @@ def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
         (),
         {"eplb_num_redundant_experts_per_rank": 0},
     )()
-    weight = object.__new__(fused_weight_module.FusedMoeWeight)
-    weight.n_routed_experts = 4
-    weight.global_world_size = 2
-    weight.global_rank_ = 0
-    weight.enable_ep_moe = True
-    monkeypatch.setattr(fused_weight_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(deepgemm_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
 
-    weight._init_expert_parallel_state()
+    impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace())
 
-    assert weight.expert_parallel_state is not None
-    assert weight.expert_parallel_state.eplb is None
-    assert weight.expert_parallel_state.num_total_physical_experts == weight.n_routed_experts
-    assert weight._initial_redundant_expert_ids == []
-    assert not hasattr(weight, "route_counter")
-    assert not hasattr(weight, "routed_expert_counter_tensor")
-
-
-def test_disable_eplb_model_init_skips_eplb_state(monkeypatch):
-    args = type(
-        "Args",
-        (),
-        {"eplb_num_redundant_experts_per_rank": 2},
-    )()
-    weight = object.__new__(fused_weight_module.FusedMoeWeight)
-    weight.n_routed_experts = 4
-    weight.global_world_size = 2
-    weight.global_rank_ = 0
-    weight.enable_ep_moe = True
-    monkeypatch.setattr(fused_weight_module, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(
-        fused_weight_module,
-        "build_initial_redundant_expert_ids",
-        lambda *args, **kwargs: pytest.fail("disabled scope must not initialize EPLB"),
-    )
-
-    with disable_eplb_model_init():
-        weight._init_expert_parallel_state()
-
-    assert weight.expert_parallel_state.eplb is None
-    assert weight.expert_parallel_state.num_total_physical_experts == weight.n_routed_experts
-    assert weight._initial_redundant_expert_ids == []
+    assert impl.num_redundant_experts_per_rank == 0
+    assert impl.num_total_physical_experts == impl.n_routed_experts
+    assert impl.local_logics_expert_ids_list == [0, 1]
+    assert not hasattr(impl, "num_primary_experts_per_rank")
+    assert not hasattr(impl, "initial_local_expert_ids_by_rank")
+    assert not hasattr(impl, "logical_to_physical_map")
+    assert not hasattr(impl, "route_counter")
+    assert not hasattr(impl, "recording")
 
 
-def test_disable_eplb_model_init_scope_restores_after_exception():
-    assert not is_eplb_model_init_disabled()
-    with disable_eplb_model_init():
-        assert is_eplb_model_init_disabled()
-        with disable_eplb_model_init():
-            assert is_eplb_model_init_disabled()
-        assert is_eplb_model_init_disabled()
-
-    with pytest.raises(RuntimeError):
-        with disable_eplb_model_init():
-            raise RuntimeError
-    assert not is_eplb_model_init_disabled()
-
-
-def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
+def test_manager_evaluation_collective_preserves_current_rank_axis(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.weights = [
         type(
             "Weight",
             (),
             {
-                "expert_parallel_state": _test_parallel_state(
+                "fuse_moe_impl": _test_moe_impl(
                     eplb=True,
-                    route_counter=torch.zeros((1, 4), dtype=torch.int64),
+                    route_counter=torch.zeros((4,), dtype=torch.int64),
                     num_logical_experts=4,
                     world_size=1,
                 )
             },
         )()
     ]
-    manager._eplb_states = [manager.weights[0].expert_parallel_state.eplb]
+    manager._eplb_impls = [manager.weights[0].fuse_moe_impl]
     manager.global_rank = 2
     manager.world_size = 4
     manager.node_world_size = 2
@@ -1480,7 +1430,7 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     manager.sampling_interval = 20
     manager.num_logical_experts = 4
     manager.num_redundant_experts_per_rank = 1
-    manager.current_placement = build_initial_redundant_expert_ids(4, 4, 1).unsqueeze(0)
+    manager.current_placement = _initial_extra_expert_placement(4, 4, 1).unsqueeze(0)
     manager.evaluation_group = object()
     manager._evaluation_lock = threading.Lock()
     manager._evaluation_result = None
@@ -1493,7 +1443,7 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     def all_reduce(tensor, **kwargs):
         seen["before"] = tensor.clone()
         seen["group"] = kwargs["group"]
-        # Simulate source node 0's contribution from the other ranks.
+        # Simulate current rank 0's contribution from another process.
         tensor[:, :, 0].fill_(100)
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", all_reduce)
@@ -1509,26 +1459,31 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
 
     assert seen["group"] is manager.evaluation_group
     expected_local = local
-    assert seen["before"].shape == (1, 1, 2, 4)
+    assert seen["before"].shape == (1, 1, 4, 4)
     assert torch.equal(seen["before"][:, :, 0], torch.zeros_like(expected_local))
-    assert torch.equal(seen["before"][:, :, 1], expected_local)
+    assert torch.equal(seen["before"][:, :, 1], torch.zeros_like(expected_local))
+    assert torch.equal(seen["before"][:, :, 2], expected_local)
+    assert torch.equal(seen["before"][:, :, 3], torch.zeros_like(expected_local))
     assert torch.equal(seen["global_load"][:, :, 0], torch.full_like(expected_local, 100))
-    assert torch.equal(seen["global_load"][:, :, 1], expected_local)
+    assert torch.equal(seen["global_load"][:, :, 1], torch.zeros_like(expected_local))
+    assert torch.equal(seen["global_load"][:, :, 2], expected_local)
+    assert torch.equal(seen["global_load"][:, :, 3], torch.zeros_like(expected_local))
     assert manager._evaluation_error is None
-    assert manager._evaluation_result["recorded_sample_count"] == 1
     assert manager._evaluation_result["sample_window_steps"] == 4
 
 
-def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_call(monkeypatch):
+def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_call(
+    monkeypatch,
+):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.weights = [
         type(
             "Weight",
             (),
             {
-                "expert_parallel_state": _test_parallel_state(
+                "fuse_moe_impl": _test_moe_impl(
                     eplb=True,
-                    route_counter=torch.zeros((1, 4), dtype=torch.int64),
+                    route_counter=torch.zeros((4,), dtype=torch.int64),
                     num_logical_experts=4,
                     world_size=4,
                 )
@@ -1536,7 +1491,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
         )()
         for _ in range(3)
     ]
-    manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
+    manager._eplb_impls = [weight.fuse_moe_impl for weight in manager.weights]
     manager.global_rank = 1
     manager.world_size = 4
     manager.node_world_size = 2
@@ -1544,7 +1499,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager.sampling_interval = 20
     manager.num_logical_experts = 4
     manager.num_redundant_experts_per_rank = 1
-    manager.current_placement = build_initial_redundant_expert_ids(4, 4, 1).unsqueeze(0).expand(3, -1, -1).clone()
+    manager.current_placement = _initial_extra_expert_placement(4, 4, 1).unsqueeze(0).expand(3, -1, -1).clone()
     manager.evaluation_group = object()
     manager._evaluation_lock = threading.Lock()
     manager._evaluation_result = None
@@ -1578,7 +1533,8 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     original_build_maps_for_layers = manager_module.build_logical_to_physical_maps_for_layers
 
     def build_maps_for_layers(*args, **kwargs):
-        calls.append(args[0].shape)
+        placements = args[0]
+        calls.append((len(placements), len(placements[0]), len(placements[0][0])))
         return original_build_maps_for_layers(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -1590,7 +1546,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})())
 
     assert manager._evaluation_error is None
-    assert calls == [torch.Size([2, 4, 1])]
+    assert calls == [(2, 4, 2)]
     metadata = manager._evaluation_result["metadata"]
     assert metadata[1] is None
     assert [layer_index for layer_index, _plan in manager._evaluation_result["layer_plans"]] == [0, 2]
@@ -1599,13 +1555,11 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     for layer_index in (0, 2):
         item = metadata[layer_index]
         expected = build_logical_to_physical_map(
-            planned_placement[layer_index],
+            _rank_to_logic_expert_ids(planned_placement[layer_index].tolist(), 4),
             4,
-            source_rank=manager.global_rank,
-            node_world_size=manager.node_world_size,
+            current_rank=manager.global_rank,
         )
-        assert torch.equal(item[0], expected[0])
-        assert torch.equal(item[1], expected[1])
+        assert torch.equal(item, torch.tensor(expected, dtype=torch.int32))
 
 
 def test_manager_preparation_error_is_saved_as_evaluation_error(monkeypatch):
@@ -1615,23 +1569,23 @@ def test_manager_preparation_error_is_saved_as_evaluation_error(monkeypatch):
             "Weight",
             (),
             {
-                "expert_parallel_state": _test_parallel_state(
+                "fuse_moe_impl": _test_moe_impl(
                     eplb=True,
-                    route_counter=torch.zeros((1, 2), dtype=torch.int64),
+                    route_counter=torch.zeros((2,), dtype=torch.int64),
                     num_logical_experts=2,
                     world_size=1,
                 )
             },
         )()
     ]
-    manager._eplb_states = [manager.weights[0].expert_parallel_state.eplb]
+    manager._eplb_impls = [manager.weights[0].fuse_moe_impl]
     manager.global_rank = 0
     manager.world_size = 1
     manager.node_world_size = 1
     manager.step_interval = 20
     manager.sampling_interval = 20
     manager.num_logical_experts = 2
-    manager.current_placement = torch.tensor([[[0], [1]]], dtype=torch.int64)
+    manager.current_placement = torch.tensor([[[0]]], dtype=torch.int64)
     manager.evaluation_group = object()
     manager._evaluation_lock = threading.Lock()
     manager._evaluation_result = None
@@ -1640,7 +1594,7 @@ def test_manager_preparation_error_is_saved_as_evaluation_error(monkeypatch):
     manager._collect_local_samples = lambda: torch.ones((1, 1, 2), dtype=torch.int64)
     manager._plan_and_broadcast = lambda _global_load: {
         "kind": "planned",
-        "placement": torch.tensor([[[0], [1]]], dtype=torch.int64),
+        "placement": torch.tensor([[[0]]], dtype=torch.int64),
         "improved": torch.tensor([True]),
     }
 
@@ -1668,7 +1622,7 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.quant_method = type("Quant", (), {"method_name": "fp8"})()
     impl.n_routed_experts = 128
-    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
+    _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True))
     logical_ids = torch.tensor([[0, 127]], dtype=torch.int32)
     physical_ids = torch.tensor([[128, 143]], dtype=torch.int32)
     impl._select_experts = lambda **_kwargs: (
@@ -1711,7 +1665,7 @@ def test_select_returns_logical_ids_and_applies_expert_scale(monkeypatch):
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 2.0
-    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
+    _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True))
     logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
     calls = []
 
@@ -1742,7 +1696,7 @@ def test_eplb_prefill_repairs_ids_after_selection(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
     impl.quant_method = object()
-    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
+    _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True))
     logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
     physical_ids = torch.tensor([[130, 131]], dtype=torch.long)
     calls = []
@@ -1773,7 +1727,7 @@ def test_eplb_prefill_repairs_ids_after_selection(monkeypatch):
     assert topk_idx.dtype is torch.long
     assert qinput == "qinput"
     assert calls[0]["logical_topk_ids"] is logical_ids
-    assert not calls[0]["record_load"]
+    assert not calls[0]["update_logical_expert_counter"]
 
 
 def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
@@ -1791,12 +1745,12 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
     impl.quant_method = object()
-    state = _test_parallel_state(
+    runtime = _test_moe_impl(
         eplb=True,
-        route_counter=torch.zeros((3, 128), dtype=torch.int64),
+        route_counter=torch.zeros((128,), dtype=torch.int64),
         recording=True,
     )
-    _set_expert_parallel_state(impl, state)
+    _set_deepgemm_runtime(impl, runtime)
     impl.ep_balance_counters = None
     calls, repair_calls = [], []
     logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
@@ -1840,9 +1794,7 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
     assert topk_idx is physical_ids
     assert len(repair_calls) == 1
     assert repair_calls[0]["logical_topk_ids"] is logical_ids
-    assert repair_calls[0]["sample_index"] == 0
-    assert repair_calls[0]["record_load"]
-    assert state.eplb.recorded_sample_count == 1
+    assert repair_calls[0]["update_logical_expert_counter"]
     assert calls[0]["topk_idx"] is physical_ids
     assert calls[0]["topk_idx"].dtype is torch.long
     assert calls[0]["previous_event"] is caller_event
@@ -1861,7 +1813,7 @@ def test_prefill_dispatch_preserves_event(monkeypatch):
             )
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
+    _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True))
     impl.ep_balance_counters = None
     calls = []
     caller_event = object()
@@ -1884,16 +1836,38 @@ def test_prefill_dispatch_preserves_event(monkeypatch):
     assert calls[0]["topk_idx"].dtype is torch.long
 
 
-def test_deepgemm_constructor_configures_eplb():
-    state = _validated_expert_parallel_state()
-    impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), expert_parallel_state=state)
-    assert impl.expert_parallel_state is state
+def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_num_redundant_experts_per_rank=1),
+    )
+    monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
+    original_zeros = torch.zeros
+
+    def cpu_zeros(*shape, **kwargs):
+        kwargs.pop("device", None)
+        return original_zeros(*shape, **kwargs)
+
+    monkeypatch.setattr(deepgemm_module.torch, "zeros", cpu_zeros)
+    impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace())
+
+    assert impl.num_primary_experts_per_rank == 2
+    assert impl.num_redundant_experts_per_rank == 1
+    assert impl.num_total_physical_experts == 6
+    assert impl.route_counter.shape == (4,)
+    assert impl.recording
+    assert impl.local_logics_expert_ids_list == [0, 1, 1]
+    assert not hasattr(impl, "initial_local_expert_ids_by_rank")
+    assert not hasattr(impl, "expert_parallel_state")
 
 
 def test_eplb_prepare_repairs_logical_ids(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    state = _test_parallel_state(eplb=True, recording=True)
-    _set_expert_parallel_state(impl, state)
+    runtime = _test_moe_impl(eplb=True, recording=True)
+    _set_deepgemm_runtime(impl, runtime)
     logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
     physical_ids = torch.tensor([[13, 14]], dtype=torch.int32)
     calls = []
@@ -1908,14 +1882,14 @@ def test_eplb_prepare_repairs_logical_ids(monkeypatch):
     assert weights.tolist() == [[1.0, 1.0]]
     assert selected is physical_ids
     assert calls[0]["logical_topk_ids"] is logical_ids
-    assert calls[0]["record_load"]
+    assert calls[0]["update_logical_expert_counter"]
 
 
 def test_decode_masked_group_gemm_uses_all_physical_rows_when_eplb_is_enabled(
     monkeypatch,
 ):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    _set_expert_parallel_state(impl, _test_parallel_state(eplb=True, num_logical_experts=8, world_size=1))
+    _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True, num_logical_experts=8, world_size=1))
     captured = {}
 
     def masked(*args, **kwargs):
@@ -1942,9 +1916,14 @@ def test_decode_fused_experts_uses_full_weight_packs_and_physical_experts(
 ):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.n_routed_experts = 128
-    _set_expert_parallel_state(
+    _set_deepgemm_runtime(
         impl,
-        _test_parallel_state(eplb=True, num_logical_experts=128, world_size=16, num_redundant_experts_per_rank=2),
+        _test_moe_impl(
+            eplb=True,
+            num_logical_experts=128,
+            world_size=16,
+            num_redundant_experts_per_rank=2,
+        ),
     )
     impl.quant_method = object()
     impl.ep_balance_counters = None
@@ -2385,7 +2364,11 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
 
     plans = [(0, []), (1, []), (2, [])]
     prepared_batches = [(batch, None) for batch in transfer._make_batches(plans)]
-    monkeypatch.setattr(transfer, "_make_batches", lambda _plans: pytest.fail("start must reuse prepared batches"))
+    monkeypatch.setattr(
+        transfer,
+        "_make_batches",
+        lambda _plans: pytest.fail("start must reuse prepared batches"),
+    )
     transfer.start(plans, prepared_batches)
     deadline = time.monotonic() + 2
     while len(transfer.pending_layers()) < 2 and time.monotonic() < deadline:
@@ -2467,7 +2450,7 @@ def test_manager_rearms_after_rebalance_for_interval_one():
     manager._steady_collection_end_step = None
     manager._continuous_collection_start_step = 0
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     manager.target_placement = torch.zeros(1)
     manager.in_flight_started_at = 0
     manager.global_rank = 1
@@ -2499,12 +2482,12 @@ def test_manager_sparse_insufficient_schedules_bounded_fresh_window(monkeypatch)
     manager.sampling_interval = 20
     manager.prefill_steps = 37
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     manager._continuous_collection_start_step = None
     manager._continuous_collection_end_step = None
     recordings, resets, logs = [], [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
+    manager._reset_route_counters = lambda: resets.append(True)
     monkeypatch.setattr(manager_module.logger, "info", lambda *args: logs.append(args))
 
     assert not manager._poll_evaluation()
@@ -2556,12 +2539,12 @@ def test_manager_full_window_insufficient_clears_and_backs_off():
     manager.sampling_interval = 20
     manager.prefill_steps = 60
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     manager._continuous_collection_start_step = 40
     manager._continuous_collection_end_step = 60
     recordings, resets = [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
+    manager._reset_route_counters = lambda: resets.append(True)
 
     assert not manager._poll_evaluation()
     assert not hasattr(manager, "_retained_local_samples")
@@ -2582,7 +2565,7 @@ def test_begin_continuous_collection_uses_full_window_at_fixed_boundary(monkeypa
     manager._steady_collection_end_step = manager.prefill_steps + 1
     recordings, resets, starts = [], [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
+    manager._reset_route_counters = lambda: resets.append(True)
     monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(True))
 
     # The window is never truncated to the next boundary: it waits until 40,
@@ -2614,7 +2597,7 @@ def test_begin_continuous_collection_preserves_full_window_at_sparse_boundary():
     manager._steady_collection_end_step = None
     recordings = []
     manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: None
+    manager._reset_route_counters = lambda: None
 
     manager._begin_continuous_collection()
     assert manager._continuous_collection_start_step == 140
@@ -2644,7 +2627,7 @@ def test_first_no_improvement_switches_to_sparse_sampling_window(monkeypatch):
     manager.sampling_interval = 20
     manager._continuous_collection_start_step = 0
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     recordings = []
     manager._set_recording = lambda enabled: recordings.append(enabled)
 
@@ -2689,7 +2672,7 @@ def test_no_improvement_exponentially_backs_off_sampling_interval_at_cap():
     manager.step_interval = 20
     manager.sampling_interval = 20
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
 
     for expected_interval in (80, 320, 320):
         manager.evaluation_in_flight = True
@@ -2718,7 +2701,7 @@ def test_sparse_backoff_arms_and_evaluates_only_at_new_interval_boundary(monkeyp
     manager.evaluation_in_flight = False
     recordings, resets, starts = [], [], []
     manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
+    manager._reset_route_counters = lambda: resets.append(True)
     monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(True))
 
     manager.step()
@@ -2761,7 +2744,7 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
         (),
         {"start": lambda self, plans, prepared_batches: setattr(self, "started", (plans, prepared_batches))},
     )()
-    manager._reset_recorded_samples = lambda: None
+    manager._reset_route_counters = lambda: None
 
     prepared_batches = [object()]
     manager._start_rebalance(
@@ -2803,7 +2786,7 @@ def test_first_rebalance_completion_switches_to_four_step_sparse_window(monkeypa
     manager.sampling_interval = manager.step_interval
     manager._steady_collection_end_step = None
     manager.weights = []
-    manager._eplb_states = []
+    manager._eplb_impls = []
     manager.target_placement = torch.zeros(1)
     manager.in_flight_started_at = 0
     manager.global_rank = 1
@@ -2911,8 +2894,20 @@ def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
         ]
     ]
     transfer._push_staging_row_layout = {
-        1: [[("w13.weight", 4000, 32), ("w13.weight_scale", 5000, 32), ("w2.weight", 6000, 32)]],
-        2: [[("w13.weight", 7000, 32), ("w13.weight_scale", 8000, 32), ("w2.weight", 9000, 32)]],
+        1: [
+            [
+                ("w13.weight", 4000, 32),
+                ("w13.weight_scale", 5000, 32),
+                ("w2.weight", 6000, 32),
+            ]
+        ],
+        2: [
+            [
+                ("w13.weight", 7000, 32),
+                ("w13.weight_scale", 8000, 32),
+                ("w2.weight", 9000, 32),
+            ]
+        ],
     }
     transfer._get_remote_read = lambda *_args: None
     transfer._wait_xfers = lambda _xfers: None
@@ -2924,8 +2919,16 @@ def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
     staging = object()
     batch = [(0, run_a + run_b + [local_inbound, remote_inbound], 0, staging)]
     prepared = transfer._prepare_batch(batch)
-    monkeypatch.setattr(transfer, "_prepare_batch", lambda _batch: pytest.fail("hot path must not prepare descriptors"))
-    monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: pytest.fail("must not switch streams"))
+    monkeypatch.setattr(
+        transfer,
+        "_prepare_batch",
+        lambda _batch: pytest.fail("hot path must not prepare descriptors"),
+    )
+    monkeypatch.setattr(
+        transfer_module.torch.cuda,
+        "stream",
+        lambda _stream: pytest.fail("must not switch streams"),
+    )
     transfer._copy_batch(batch, prepared)
 
     expected = (
@@ -3070,7 +3073,9 @@ def test_nixl_transfer_fails_fast_without_cuda13_batch_memcpy(monkeypatch):
         raise failure
 
     monkeypatch.setattr(
-        transfer_module._EPLBTransferBase, "__init__", lambda self, *_args: setattr(self, "device", "mock")
+        transfer_module._EPLBTransferBase,
+        "__init__",
+        lambda self, *_args: setattr(self, "device", "mock"),
     )
     monkeypatch.setattr(transfer_module.torch.cuda, "Stream", lambda device: ("stream", device))
     monkeypatch.setattr(transfer_module, "_CudaBatchMemcpy", unavailable)
@@ -3392,7 +3397,11 @@ def test_nixl_copy_batch_source_pushes_local_rows_and_keeps_remote_ucx_reads(
     )
     transfer._wait_xfers = waited_xfers.extend
 
-    monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: pytest.fail("must not switch streams"))
+    monkeypatch.setattr(
+        transfer_module.torch.cuda,
+        "stream",
+        lambda _stream: pytest.fail("must not switch streams"),
+    )
     prepared_push = transfer_module.NixlEPLBTransfer._PreparedBatch({}, "push")
     transfer._copy_batch([], prepared_push)
     assert enqueued == [("push", stream.cuda_stream)]
@@ -3418,7 +3427,11 @@ def test_nixl_copy_batch_self_only_rank_pushes_and_synchronizes(monkeypatch):
     enqueued = []
     transfer._batch_memcpy = SimpleNamespace(enqueue=lambda descriptor, stream: enqueued.append((descriptor, stream)))
     transfer._wait_xfers = lambda _xfers: None
-    monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: pytest.fail("must not switch streams"))
+    monkeypatch.setattr(
+        transfer_module.torch.cuda,
+        "stream",
+        lambda _stream: pytest.fail("must not switch streams"),
+    )
 
     prepared = transfer_module.NixlEPLBTransfer._PreparedBatch({}, "push")
     transfer._copy_batch([], prepared)
@@ -3433,12 +3446,12 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
         (),
         {
             "n_routed_experts": 4,
-            "expert_parallel_state": _test_parallel_state(
+            "fuse_moe_impl": _test_moe_impl(
                 eplb=True,
                 num_logical_experts=4,
                 world_size=2,
                 num_redundant_experts_per_rank=2,
-                route_counter=torch.zeros((2, 4), dtype=torch.int64),
+                route_counter=torch.zeros((4,), dtype=torch.int64),
             ),
         },
     )()
@@ -3480,47 +3493,52 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
     assert "rebalance_gain_threshold=0.0700" in logs[0]
     assert manager._continuous_collection_start_step is None
     assert manager._continuous_collection_end_step == manager.step_interval
-    assert weight.expert_parallel_state.eplb.recording
-    assert manager._eplb_states[0] is weight.expert_parallel_state.eplb
-    assert not hasattr(weight.expert_parallel_state.eplb, "record_load")
+    assert weight.fuse_moe_impl.recording
+    assert manager._eplb_impls[0] is weight.fuse_moe_impl
+    assert not hasattr(weight.fuse_moe_impl, "update_logical_expert_counter")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-@pytest.mark.parametrize("record_load", [False, True])
+@pytest.mark.parametrize("update_logical_expert_counter", [False, True])
 @pytest.mark.parametrize("tokens", [1, 32])
-def test_eplb_repair_topk_ids_maps_and_counts(record_load, tokens):
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import eplb_repair_topk_ids
+def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tokens):
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+        eplb_repair_topk_ids,
+    )
 
     topk = 4
     experts = 64
     logical_ids = (torch.arange(tokens * topk, dtype=torch.int32, device="cuda") % experts).view(tokens, topk)
     original_logical_ids = logical_ids.clone()
+    logical_experts = torch.arange(experts, dtype=torch.int32, device="cuda")
+    replica_counts = torch.where(
+        logical_experts % 3 == 0,
+        torch.full_like(logical_experts, 2),
+        torch.ones_like(logical_experts),
+    )
+    has_local_replica = (logical_experts % 5 == 0).to(torch.int32)
     logical_to_physical = torch.stack(
         (
-            torch.arange(experts, dtype=torch.int32, device="cuda"),
-            torch.arange(experts, dtype=torch.int32, device="cuda") + experts,
+            replica_counts,
+            has_local_replica,
+            logical_experts,
+            torch.where(replica_counts == 2, logical_experts + experts, logical_experts),
         ),
         dim=1,
     )
-    logical_replica_count = torch.where(
-        torch.arange(experts, device="cuda") % 3 == 0,
-        torch.full((experts,), 2, dtype=torch.int32, device="cuda"),
-        torch.ones((experts,), dtype=torch.int32, device="cuda"),
-    )
-    counter = torch.zeros((2, experts), dtype=torch.int64, device="cuda")
+    counter = torch.zeros((experts,), dtype=torch.int64, device="cuda")
     expected_counter = torch.zeros_like(counter)
 
-    if tokens == 1:
-        replica_indices = torch.zeros_like(logical_ids)
-    else:
-        token_indices = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1)
-        replica_indices = (
-            (((token_indices * 2654435769) & 0xFFFFFFFF) + ((logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF))
-            & 0xFFFFFFFF
-        ) % logical_replica_count[logical_ids.to(torch.long)].to(torch.int64)
-    expected_ids = logical_to_physical[logical_ids.to(torch.long), replica_indices.to(torch.long)]
-    if record_load:
-        expected_counter[1].scatter_add_(
+    logical_ids_long = logical_ids.to(torch.long)
+    token_indices = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1)
+    replica_indices = (
+        (((token_indices * 2654435769) & 0xFFFFFFFF) + ((logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF))
+        & 0xFFFFFFFF
+    ) % replica_counts[logical_ids_long].to(torch.int64)
+    replica_indices = torch.where(has_local_replica[logical_ids_long] != 0, 0, replica_indices)
+    expected_ids = logical_to_physical[logical_ids_long, replica_indices + 2]
+    if update_logical_expert_counter:
+        expected_counter.scatter_add_(
             0,
             logical_ids.reshape(-1).to(torch.long),
             torch.ones(logical_ids.numel(), dtype=torch.int64, device="cuda"),
@@ -3529,10 +3547,8 @@ def test_eplb_repair_topk_ids_maps_and_counts(record_load, tokens):
     physical_ids = eplb_repair_topk_ids(
         logical_topk_ids=logical_ids,
         logical_to_physical_map=logical_to_physical,
-        logical_replica_count=logical_replica_count,
-        expert_counter=counter,
-        sample_index=1,
-        record_load=record_load,
+        logical_expert_counter=counter,
+        update_logical_expert_counter=update_logical_expert_counter,
     )
     torch.cuda.synchronize()
 
@@ -3543,18 +3559,26 @@ def test_eplb_repair_topk_ids_maps_and_counts(record_load, tokens):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
 def test_eplb_repair_topk_ids_empty_input_skips_kernel():
-    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import eplb_repair_topk_ids
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+        eplb_repair_topk_ids,
+    )
 
     experts = 64
     logical_ids = torch.empty((0, 4), dtype=torch.int32, device="cuda")
-    counter = torch.zeros((1, experts), dtype=torch.int64, device="cuda")
+    counter = torch.zeros((experts,), dtype=torch.int64, device="cuda")
+    logical_to_physical = torch.stack(
+        (
+            torch.ones((experts,), dtype=torch.int32, device="cuda"),
+            torch.ones((experts,), dtype=torch.int32, device="cuda"),
+            torch.arange(experts, dtype=torch.int32, device="cuda"),
+        ),
+        dim=1,
+    )
     physical_ids = eplb_repair_topk_ids(
         logical_topk_ids=logical_ids,
-        logical_to_physical_map=torch.zeros((experts, 1), dtype=torch.int32, device="cuda"),
-        logical_replica_count=torch.ones((experts,), dtype=torch.int32, device="cuda"),
-        expert_counter=counter,
-        sample_index=0,
-        record_load=True,
+        logical_to_physical_map=logical_to_physical,
+        logical_expert_counter=counter,
+        update_logical_expert_counter=True,
     )
 
     assert physical_ids.shape == (0, 4)

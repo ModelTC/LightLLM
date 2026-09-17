@@ -1,9 +1,11 @@
 """NIXL EPLB correctness tests and a two-GPU 512 MiB micro-performance test."""
+
 import os
 import random
 import socket
 import statistics
 import time
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -16,14 +18,21 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     build_transfer_plan,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
-    build_initial_redundant_expert_ids,
-)
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
-    EPLBState,
-    ExpertParallelState,
+    build_initial_local_expert_ids,
 )
 
 pytest.importorskip("nixl", reason="NIXL package is required")
+
+
+def _initial_extra_expert_placement(num_logical_experts, world_size, num_redundant_experts_per_rank):
+    num_primary_experts_per_rank = num_logical_experts // world_size
+    initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
+        num_logical_experts, world_size, num_redundant_experts_per_rank
+    )
+    return torch.tensor(
+        [expert_ids[num_primary_experts_per_rank:] for expert_ids in initial_local_expert_ids_by_rank],
+        dtype=torch.int64,
+    )
 
 
 class _Pack:
@@ -44,16 +53,18 @@ def _free_port():
 class _FakeWeight:
     def __init__(self, rank, layer_index, row_elements):
         self.n_routed_experts = 32
-        self.expert_parallel_state = ExpertParallelState(
-            num_logical_experts=32,
-            world_size=2,
-            eplb=EPLBState(
-                num_redundant_experts_per_rank=16,
-                initial_redundant_expert_ids_by_rank=build_initial_redundant_expert_ids(32, 2, 16),
-                logical_to_physical_map=torch.zeros((32, 2), dtype=torch.int32, device="cuda"),
-                logical_replica_count=torch.ones(32, dtype=torch.int32, device="cuda"),
-                route_counter=torch.zeros((1, 32), dtype=torch.int64, device="cuda"),
+        self.fuse_moe_impl = SimpleNamespace(
+            n_routed_experts=32,
+            num_primary_experts_per_rank=16,
+            num_redundant_experts_per_rank=16,
+            logical_to_physical_map=torch.cat(
+                (
+                    torch.ones((32, 1), dtype=torch.int32, device="cuda"),
+                    torch.zeros((32, 3), dtype=torch.int32, device="cuda"),
+                ),
+                dim=1,
             ),
+            route_counter=torch.zeros((32,), dtype=torch.int64, device="cuda"),
         )
         base = rank * 100 + layer_index * 100
         self.w13 = self._pack(base, row_elements)
@@ -183,7 +194,7 @@ def _eplb_worker(rank, port, queue):
     weights = [_FakeWeight(rank, layer_index, row_elements) for layer_index in range(layer_count)]
     transfer = NixlEPLBTransfer(weights, transfer_group, rank, world_size=2)
     assert transfer.staging_depth == 8
-    assert transfer._eplb_states[0] is weights[0].expert_parallel_state.eplb
+    assert transfer._eplb_impls[0] is weights[0].fuse_moe_impl
     assert all(tensor.is_cuda for staging in transfer.staging for _, tensor in staging)
 
     wrap_layer_plans = [(layer_index, plan) for layer_index in range(layer_count)]
@@ -235,16 +246,18 @@ def _depth_value(expert, layer_index, offset):
 class _DepthWeight:
     def __init__(self, rank, layer_index, initial_placement):
         self.n_routed_experts = 256
-        self.expert_parallel_state = ExpertParallelState(
-            num_logical_experts=256,
-            world_size=8,
-            eplb=EPLBState(
-                num_redundant_experts_per_rank=4,
-                initial_redundant_expert_ids_by_rank=initial_placement.clone(),
-                logical_to_physical_map=torch.zeros((256, 8), dtype=torch.int32, device="cuda"),
-                logical_replica_count=torch.ones(256, dtype=torch.int32, device="cuda"),
-                route_counter=torch.zeros((1, 256), dtype=torch.int64, device="cuda"),
+        self.fuse_moe_impl = SimpleNamespace(
+            n_routed_experts=256,
+            num_primary_experts_per_rank=32,
+            num_redundant_experts_per_rank=4,
+            logical_to_physical_map=torch.cat(
+                (
+                    torch.ones((256, 1), dtype=torch.int32, device="cuda"),
+                    torch.zeros((256, 9), dtype=torch.int32, device="cuda"),
+                ),
+                dim=1,
             ),
+            route_counter=torch.zeros((256,), dtype=torch.int64, device="cuda"),
         )
         logical_ids = list(range(rank * 32, (rank + 1) * 32)) + initial_placement[rank].tolist()
         self.w13 = self._pack(logical_ids, layer_index, 0)
@@ -354,7 +367,7 @@ def _depth_worker(rank, port):
     dist.init_process_group("gloo", rank=rank, world_size=8)
     control_group = dist.new_group(list(range(8)), backend="gloo")
     transfer_group = dist.new_group(list(range(8)), backend="gloo")
-    initial_placement = build_initial_redundant_expert_ids(256, 8, 4)
+    initial_placement = _initial_extra_expert_placement(256, 8, 4)
     weights = [_DepthWeight(rank, layer_index, initial_placement) for layer_index in range(9)]
     transfer = NixlEPLBTransfer(weights, transfer_group, rank, world_size=8)
     assert transfer.staging_depth == 8
@@ -367,7 +380,10 @@ def _depth_worker(rank, port):
         layer_index: align_target_placement(current, _depth_target(layer_index)) for layer_index in range(9)
     }
     first_plans = [
-        (layer_index, build_transfer_plan(current, first_targets[layer_index], 256, 8, 8))
+        (
+            layer_index,
+            build_transfer_plan(current, first_targets[layer_index], 256, 8, 8),
+        )
         for layer_index in first_order
     ]
     _assert_peer_coverage(first_plans)

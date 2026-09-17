@@ -4,7 +4,7 @@ import os
 import re
 import socket
 import threading
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -38,11 +38,19 @@ def align_target_placement(current: torch.Tensor, target: torch.Tensor) -> torch
     target_rows = target.tolist()
     aligned_target_rows = []
     for current_row, target_row in zip(current_rows, target_rows):
-        current_slots = {expert: slot for slot, expert in enumerate(current_row)}
-        target_experts = set(target_row)
+        remaining_target = Counter(target_row)
         aligned_row = list(current_row)
-        freed_slots = [slot for slot, expert in enumerate(current_row) if expert not in target_experts]
-        new_experts = [expert for expert in target_row if expert not in current_slots]
+        freed_slots = []
+        for slot, expert in enumerate(current_row):
+            if remaining_target[expert] > 0:
+                remaining_target[expert] -= 1
+            else:
+                freed_slots.append(slot)
+        new_experts = []
+        for expert in target_row:
+            if remaining_target[expert] > 0:
+                new_experts.append(expert)
+                remaining_target[expert] -= 1
         assert len(freed_slots) == len(new_experts)
         for slot, expert in zip(freed_slots, new_experts):
             aligned_row[slot] = expert
@@ -61,9 +69,8 @@ def build_transfer_plan(
     num_experts_per_rank = num_logical_experts // world_size
     current_rows = current.tolist()
     aligned_target_rows = align_target_placement(current, target).tolist()
-    # A logical expert has one primary row and at most one redundant row per
-    # rank, so this source list is already unique.  Build it once instead of
-    # allocating/sorting a set for every destination slot.
+    # 初始占位布局允许同一个 logical expert 在一个 rank 上出现多次，因此
+    # 保留所有物理来源候选，让首次迁移也可以从任意已加载的副本复制。
     candidates_by_expert = [
         [
             (
@@ -100,15 +107,15 @@ class _EPLBTransferBase:
     """Shared live/staging buffers and publish/commit lifecycle."""
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
-        self._eplb_states = [weight.expert_parallel_state.eplb for weight in weights]
+        self._eplb_impls = [weight.fuse_moe_impl for weight in weights]
         self.transfer_group = transfer_group
         self.global_rank = global_rank
         self.world_size = world_size
-        self.num_experts_per_rank = weights[0].expert_parallel_state.num_primary_experts_per_rank
+        self.num_experts_per_rank = weights[0].fuse_moe_impl.num_primary_experts_per_rank
         self.device = weights[0].w13.weight.device
         self.live = [extract_eplb_expert_tensors(weight) for weight in weights]
         self._validate_live_layout()
-        num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
+        num_redundant_slots_per_rank = self._eplb_impls[0].num_redundant_experts_per_rank
         self.staging = [
             [
                 (
@@ -137,12 +144,12 @@ class _EPLBTransferBase:
 
     def _validate_live_layout(self) -> None:
         reference = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in self.live[0]]
-        num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
-        for layer_index, (state, tensors) in enumerate(zip(self._eplb_states, self.live)):
+        num_redundant_slots_per_rank = self._eplb_impls[0].num_redundant_experts_per_rank
+        for layer_index, (impl, tensors) in enumerate(zip(self._eplb_impls, self.live)):
             layout = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in tensors]
             assert layout == reference, f"EPLB layer {layer_index} has incompatible expert tensor layout"
             assert (
-                state.num_redundant_experts_per_rank == num_redundant_slots_per_rank
+                impl.num_redundant_experts_per_rank == num_redundant_slots_per_rank
             ), "EPLB redundant slot count must match"
 
     def _make_batches(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):

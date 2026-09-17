@@ -6,8 +6,11 @@ import torch
 import torch.distributed as dist
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import (
+    FusedMoeWeight,
+)
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
+    build_initial_local_expert_ids,
     build_logical_to_physical_maps_for_layers,
     plan_redundant_experts,
     select_improving_placements,
@@ -17,7 +20,11 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     align_target_placement,
     build_transfer_plan,
 )
-from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_node_world_size
+from lightllm.utils.dist_utils import (
+    get_global_rank,
+    get_global_world_size,
+    get_node_world_size,
+)
 from lightllm.utils.envs_utils import (
     get_eplb_placement_stickiness,
     get_eplb_rebalance_gain_threshold,
@@ -41,19 +48,29 @@ class EPLBManager:
         self.global_rank = get_global_rank()
         self.world_size = get_global_world_size()
         self.node_world_size = get_node_world_size()
-        self._eplb_states = [weight.expert_parallel_state.eplb for weight in self.weights]
+        self._eplb_impls = [weight.fuse_moe_impl for weight in self.weights]
         self.step_interval = get_prefill_eplb_step_interval()
         self.rebalance_gain_threshold = get_eplb_rebalance_gain_threshold()
         self.placement_stickiness = get_eplb_placement_stickiness()
         self.sampling_interval = self.step_interval
         self.prefill_steps = 0
-        routed = {weight.expert_parallel_state.num_logical_experts for weight in self.weights}
-        redundant = {state.num_redundant_experts_per_rank for state in self._eplb_states}
+        routed = {weight.fuse_moe_impl.n_routed_experts for weight in self.weights}
+        redundant = {impl.num_redundant_experts_per_rank for impl in self._eplb_impls}
         assert len(routed) == len(redundant) == 1
         self.num_logical_experts = routed.pop()
         self.num_redundant_experts_per_rank = redundant.pop()
-        self.current_placement = torch.stack(
-            [state.initial_redundant_expert_ids_by_rank for state in self._eplb_states]
+        num_primary_experts_per_rank = self.num_logical_experts // self.world_size
+        initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
+            self.num_logical_experts,
+            self.world_size,
+            self.num_redundant_experts_per_rank,
+        )
+        initial_redundant_expert_ids_by_rank = [
+            expert_ids[num_primary_experts_per_rank:] for expert_ids in initial_local_expert_ids_by_rank
+        ]
+        self.current_placement = torch.tensor(
+            [initial_redundant_expert_ids_by_rank for _ in self.weights],
+            dtype=torch.int64,
         )
         self.in_flight = False
         self.target_placement = None
@@ -71,7 +88,7 @@ class EPLBManager:
         self._continuous_collection_start_step: Optional[int] = None
         self._continuous_collection_end_step: Optional[int] = self.step_interval
         self._steady_collection_end_step: Optional[int] = None
-        self._reset_recorded_samples()
+        self._reset_route_counters()
         self._set_recording(True)
         # Keep background evaluation collectives separate from the main-thread
         # control/poll collectives: their ordering is intentionally independent.
@@ -127,15 +144,13 @@ class EPLBManager:
             self._arm_steady_collection(self.prefill_steps + self._steady_sample_window_steps())
 
     def _set_recording(self, enabled: bool):
-        for state in self._eplb_states:
-            state.recording = enabled
+        for impl in self._eplb_impls:
+            impl.recording = enabled
 
-    def _reset_recorded_samples(self):
-        counters = [state.route_counter for state in self._eplb_states]
+    def _reset_route_counters(self):
+        counters = [impl.route_counter for impl in self._eplb_impls]
         if counters:
             torch._foreach_zero_(counters)
-        for state in self._eplb_states:
-            state.recorded_sample_count = 0
 
     def _control_count(self, value: int) -> torch.Tensor:
         """Return the main-thread-only reusable control collective scalar."""
@@ -150,14 +165,14 @@ class EPLBManager:
 
     def _arm_steady_collection(self, collection_end_step: int):
         """Start the fixed sparse window without moving its evaluation boundary."""
-        self._reset_recorded_samples()
+        self._reset_route_counters()
         self._steady_collection_end_step = collection_end_step
         self._set_recording(True)
 
     def _begin_continuous_collection(self):
         minimum_end = self.prefill_steps + self.step_interval
         collection_end = -(-minimum_end // self.sampling_interval) * self.sampling_interval
-        self._reset_recorded_samples()
+        self._reset_route_counters()
         self._steady_collection_end_step = None
         self._continuous_collection_start_step = collection_end - self.step_interval
         self._continuous_collection_end_step = collection_end
@@ -168,7 +183,7 @@ class EPLBManager:
         self._clear_continuous_collection()
         self._steady_collection_end_step = None
         if self.sampling_interval == 1:
-            self._reset_recorded_samples()
+            self._reset_route_counters()
             self._set_recording(True)
         elif self.sampling_interval <= EPLB_STEADY_SAMPLE_STEPS:
             # There is no later pre-boundary manager step at which to arm a
@@ -176,45 +191,18 @@ class EPLBManager:
             # fixed boundary.
             self._arm_steady_collection(self.prefill_steps + self.sampling_interval)
         else:
-            self._reset_recorded_samples()
+            self._reset_route_counters()
             self._set_recording(False)
 
-    @staticmethod
-    def _recent_ring_samples(counter: torch.Tensor, recorded_sample_count: int) -> torch.Tensor:
-        """Return the newest ring rows in chronological order."""
-        capacity = counter.shape[0]
-        available = min(recorded_sample_count, capacity)
-        if available == 0:
-            return counter[:0]
-        start = (recorded_sample_count - available) % capacity
-        indices = (torch.arange(available, dtype=torch.int64, device=counter.device) + start) % capacity
-        return counter.index_select(0, indices)
-
     def _collect_local_samples(self) -> torch.Tensor:
-        counters = [state.route_counter for state in self._eplb_states]
-        capacities = [counter.shape[0] for counter in counters]
-        if len(set(capacities)) != 1 or any(counter.ndim != 2 for counter in counters):
-            raise RuntimeError("EPLB sample capacities differ between layers")
-        counts = [state.recorded_sample_count for state in self._eplb_states]
-        if len(set(counts)) != 1:
-            raise RuntimeError("EPLB recorded sample counts differ between layers")
-        sample_count = counts[0]
-        # Validate the metadata before copying the newest rows to the CPU.
-        metadata = torch.tensor([sample_count, -sample_count, capacities[0], -capacities[0]], dtype=torch.int64)
-        dist.all_reduce(metadata, op=dist.ReduceOp.MIN, group=self.evaluation_group)
-        if metadata[0] != -metadata[1] or metadata[2] != -metadata[3]:
-            raise RuntimeError("EPLB recorded sample count or capacity differs between ranks")
-        # Stack the fixed-size ring buffers in one GPU launch.  Slicing each
-        # layer before stacking turns a single launch into one index_select per
-        # MoE layer and is measurably slower in the normal sparse path.
-        counter_samples = torch.stack(counters, dim=1)
-        return self._recent_ring_samples(counter_samples, sample_count).cpu()
+        counters = [impl.route_counter for impl in self._eplb_impls]
+        if any(counter.ndim != 1 or counter.shape[0] != self.num_logical_experts for counter in counters):
+            raise RuntimeError("EPLB route counter shape must be [num_logical_experts]")
+        return torch.stack(counters).unsqueeze(0).cpu()
 
     def _commit_layer_metadata(self, layer_index: int):
-        eplb_state = self._eplb_states[layer_index]
-        logical_to_physical, replica_count = self.target_metadata[layer_index]
-        eplb_state.logical_to_physical_map.copy_(logical_to_physical, non_blocking=True)
-        eplb_state.logical_replica_count.copy_(replica_count, non_blocking=True)
+        impl = self._eplb_impls[layer_index]
+        impl.logical_to_physical_map.copy_(self.target_metadata[layer_index], non_blocking=True)
 
     def _finish_rebalance(self):
         self.current_placement = self.target_placement
@@ -253,7 +241,11 @@ class EPLBManager:
                 raise RuntimeError(
                     f"EPLB pending layer {layer_index} does not match expected {self.in_flight_layers[0]}"
                 )
-            self.transfer.commit(layer_index, buffer_index, lambda: self._commit_layer_metadata(layer_index))
+            self.transfer.commit(
+                layer_index,
+                buffer_index,
+                lambda: self._commit_layer_metadata(layer_index),
+            )
             self.in_flight_layers.pop(0)
         if not self.in_flight_layers:
             self.transfer.finish()
@@ -279,7 +271,6 @@ class EPLBManager:
                         self.world_size,
                         self.num_redundant_experts_per_rank,
                         expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                        node_world_size=self.node_world_size,
                         current_placement=self.current_placement,
                         stickiness=self.placement_stickiness,
                     )
@@ -288,7 +279,6 @@ class EPLBManager:
                         self.current_placement,
                         candidate,
                         expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                        node_world_size=self.node_world_size,
                         rebalance_gain_threshold=self.rebalance_gain_threshold,
                     )
                     if bool(torch.any(improved)):
@@ -300,10 +290,11 @@ class EPLBManager:
                         placement = placement.clone()
                         for layer_index in torch.nonzero(improved, as_tuple=False).flatten().tolist():
                             placement[layer_index] = align_target_placement(
-                                self.current_placement[layer_index], placement[layer_index]
+                                self.current_placement[layer_index],
+                                placement[layer_index],
                             )
                     result = {
-                        "kind": "planned" if bool(torch.any(improved)) else "no_improvement",
+                        "kind": ("planned" if bool(torch.any(improved)) else "no_improvement"),
                         "placement": placement,
                         "improved": improved,
                         "before": _imbalance_summary(before_load),
@@ -326,42 +317,55 @@ class EPLBManager:
     def _evaluate_after_event(self, event: torch.cuda.Event):
         """Run the CPU/Gloo planning phase after the frozen CUDA counters are ready."""
         try:
-            torch.cuda.set_device(self._eplb_states[0].route_counter.device)
+            torch.cuda.set_device(self._eplb_impls[0].route_counter.device)
             event.synchronize()
             local_load = self._collect_local_samples()
-            recorded_sample_count = int(local_load.shape[0])
             sample_window_steps = (
                 self.step_interval
                 if self._continuous_collection_end_step is not None
                 else self._steady_sample_window_steps()
             )
-            num_nodes = self.world_size // self.node_world_size
-            # Preserve source nodes until physical-replica loads are combined;
-            # DeepEP applies expert alignment after traffic from all sources
-            # reaches each destination expert.
-            global_load = torch.zeros((*local_load.shape[:2], num_nodes, local_load.shape[2]), dtype=local_load.dtype)
-            global_load[:, :, self.global_rank // self.node_world_size] = local_load
+            # 保留每个当前 rank 的负载，planner 才能准确模拟“本卡优先，
+            # 否则在所有远端副本间分配”的运行时路由规则。
+            global_load = torch.zeros(
+                (*local_load.shape[:2], self.world_size, local_load.shape[2]),
+                dtype=local_load.dtype,
+            )
+            global_load[:, :, self.global_rank] = local_load
             dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.evaluation_group)
             result = self._plan_and_broadcast(global_load)
-            result["recorded_sample_count"] = recorded_sample_count
             result["sample_window_steps"] = sample_window_steps
             if result["kind"] == "planned":
                 metadata = [None] * len(self.weights)
                 layer_plans = []
                 improved_layer_indices = torch.nonzero(result["improved"], as_tuple=False).flatten()
                 if improved_layer_indices.numel():
-                    maps_for_improved_layers, counts_for_improved_layers = build_logical_to_physical_maps_for_layers(
-                        result["placement"][improved_layer_indices],
-                        self.num_logical_experts,
-                        source_rank=self.global_rank,
-                        node_world_size=self.node_world_size,
+                    redundant_placements = result["placement"][improved_layer_indices].tolist()
+                    num_primary_experts_per_rank = self.num_logical_experts // self.world_size
+                    rank_to_logic_expert_ids_by_layer = [
+                        [
+                            list(
+                                range(
+                                    rank * num_primary_experts_per_rank,
+                                    (rank + 1) * num_primary_experts_per_rank,
+                                )
+                            )
+                            + rank_redundant_expert_ids
+                            for rank, rank_redundant_expert_ids in enumerate(layer_placement)
+                        ]
+                        for layer_placement in redundant_placements
+                    ]
+                    maps_for_improved_layers = torch.tensor(
+                        build_logical_to_physical_maps_for_layers(
+                            rank_to_logic_expert_ids_by_layer,
+                            self.num_logical_experts,
+                            current_rank=self.global_rank,
+                        ),
+                        dtype=torch.int32,
                     )
                     for improved_layer_offset, layer_index in enumerate(improved_layer_indices.tolist()):
                         placement = result["placement"][layer_index]
-                        metadata[layer_index] = (
-                            maps_for_improved_layers[improved_layer_offset],
-                            counts_for_improved_layers[improved_layer_offset],
-                        )
+                        metadata[layer_index] = maps_for_improved_layers[improved_layer_offset]
                         layer_plans.append(
                             (
                                 layer_index,
@@ -424,25 +428,23 @@ class EPLBManager:
                 if from_continuous_window:
                     logger.info(
                         "eplb insufficient samples: prefill_steps=%s minimum_layer_samples=%s required=%s "
-                        "next_sampling_interval=%s recorded_sample_count=%s sample_window_steps=%s",
+                        "next_sampling_interval=%s sample_window_steps=%s",
                         self.prefill_steps,
                         result["minimum_layer_samples"],
                         result["minimum"],
                         self.sampling_interval,
-                        result.get("recorded_sample_count"),
                         result.get("sample_window_steps"),
                     )
                 else:
                     logger.info(
                         "eplb insufficient samples: prefill_steps=%s minimum_layer_samples=%s required=%s "
                         "scheduled_fresh_window_start=%s scheduled_fresh_window_end=%s "
-                        "recorded_sample_count=%s sample_window_steps=%s",
+                        "sample_window_steps=%s",
                         self.prefill_steps,
                         result["minimum_layer_samples"],
                         result["minimum"],
                         self._continuous_collection_start_step,
                         self._continuous_collection_end_step,
-                        result.get("recorded_sample_count"),
                         result.get("sample_window_steps"),
                     )
             return False
@@ -453,13 +455,12 @@ class EPLBManager:
                     "eplb skip rearrangement: no model improvement model_imbalance_ratio=%.4f "
                     "candidate_model_imbalance_ratio=%.4f candidate_rebalance_gain=%.4f "
                     "candidate_changed_layer_count=%s actual_changed_layer_count=0 next_sampling_interval=%s "
-                    "recorded_sample_count=%s sample_window_steps=%s",
+                    "sample_window_steps=%s",
                     result["model_imbalance_ratio"],
                     result["candidate_model_imbalance_ratio"],
                     result["candidate_rebalance_gain"],
                     result["candidate_changed_layer_count"],
                     self.sampling_interval,
-                    result.get("recorded_sample_count"),
                     result.get("sample_window_steps"),
                 )
             self._prepare_next_sampling_window()
@@ -486,7 +487,7 @@ class EPLBManager:
         layer_plans = result["layer_plans"]
         self.sampling_interval = self.step_interval
         self._clear_continuous_collection()
-        self._reset_recorded_samples()
+        self._reset_route_counters()
         self.target_placement = placement
         self.target_metadata = result["metadata"]
         self.in_flight_layers = [layer_index for layer_index, _ in layer_plans]
@@ -505,7 +506,7 @@ class EPLBManager:
                 "model_imbalance_ratio=%.4f candidate_model_imbalance_ratio=%.4f "
                 "candidate_rebalance_gain=%.4f candidate_changed_layer_count=%s "
                 "actual_changed_layer_count=%s actual_changed_slot_count=%s cross_node_transfer_count=%s "
-                "recorded_sample_count=%s sample_window_steps=%s",
+                "sample_window_steps=%s",
                 self.prefill_steps,
                 result["before"]["max"],
                 result["after"]["max"],
@@ -518,7 +519,6 @@ class EPLBManager:
                 len(layer_plans),
                 actual_changed_slot_count,
                 cross_node_transfer_count,
-                result.get("recorded_sample_count"),
                 result.get("sample_window_steps"),
             )
 
