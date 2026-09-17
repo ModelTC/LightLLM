@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import torch
 
+from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import (
-    Deepseek3_2TransformerLayerInfer,
-)
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
 )
@@ -21,9 +19,11 @@ from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 
 
-class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
+class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
+        self.eps_ = network_config["rms_norm_eps"]
+        self.embed_dim_ = network_config["hidden_size"]
         self.num_hidden_layers = network_config["num_hidden_layers"]
         self.autotune_layer_num = network_config.get("autotune_layer_num", self.num_hidden_layers)
         self.is_linear_attention_layer = (
@@ -34,17 +34,47 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.hc_eps = network_config.get("hc_eps", 1e-6)
         self.hc_sinkhorn_iters = network_config.get("hc_sinkhorn_iters", 20)
         self.swiglu_limit = network_config["swiglu_limit"]
+        self.is_moe = (
+            network_config["n_routed_experts"] is not None
+            and layer_num >= network_config["first_k_dense_replace"]
+            and layer_num % network_config.get("moe_layer_freq", 1) == 0
+        )
+        self.n_shared_experts = network_config["n_shared_experts"]
+        self.num_experts_per_tok = network_config["num_experts_per_tok"]
+        self.norm_topk_prob = network_config["norm_topk_prob"]
+        self.n_group = network_config["n_group"]
+        self.topk_group = network_config["topk_group"]
         linear = network_config["linear_attn_config"]
         self.linear_num_heads = linear["num_heads"]
         self.linear_head_dim = linear["head_dim"]
         self.tp_linear_num_heads = self.linear_num_heads // self.tp_world_size_
         self.tp_linear_projection_size = self.tp_linear_num_heads * self.linear_head_dim
         if not self.is_linear_attention_layer:
+            self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
+            self.qk_nope_head_dim = network_config["qk_nope_head_dim"]
+            self.q_lora_rank = network_config["q_lora_rank"]
+            self.kv_lora_rank = network_config["kv_lora_rank"]
+            self.v_head_dim = network_config["v_head_dim"]
+            self.softmax_scale = self.qk_nope_head_dim ** -0.5
             self.indexer = Glm5NextNsaInfer(
                 layer_idx=self.layer_num_,
                 network_config=self.network_config_,
                 tp_world_size=self.tp_world_size_,
             )
+
+    def _att_norm(self, input, infer_state, layer_weight):
+        return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+
+    def _ffn_norm(self, input, infer_state, layer_weight):
+        return layer_weight.ffn_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+
+    def _ffn(self, input, infer_state, layer_weight):
+        input = self._tpsp_allgather(input=input.view(-1, self.embed_dim_), infer_state=infer_state)
+        if self.is_moe:
+            output = self._moe_ffn_tp(input, infer_state, layer_weight)
+        else:
+            output = self._ffn_tp(input, infer_state, layer_weight)
+        return self._tpsp_reduce(input=output, infer_state=infer_state)
 
     def _ffn_tp(self, input, infer_state, layer_weight):
         """Dense/shared GLM FFN with the checkpoint's clamp semantics."""
@@ -112,6 +142,32 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         )
         return q, cache_kv
 
+    def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None):
+        q = layer_weight.k_b_proj_.bmm(q.transpose(0, 1)).transpose(0, 1).contiguous()
+        topk_mem_indices, topk_indices = self.indexer._get_indices(
+            hidden_states=infer_state.get_topk_indices_params["hidden_states"],
+            q_lora=infer_state.get_topk_indices_params["q_lora"],
+            infer_state=infer_state,
+            att_state=infer_state.prefill_att_state,
+            layer_weight=layer_weight,
+        )
+        del infer_state.get_topk_indices_params
+        return infer_state.prefill_att_state.prefill_att(
+            q=q,
+            k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
+            v=None,
+            att_control=AttControl(
+                nsa_prefill=True,
+                nsa_prefill_dict={
+                    "topk_mem_indices": topk_mem_indices,
+                    "topk_indices": topk_indices,
+                    "prefill_cache_kv": kv,
+                    "softmax_scale": self.softmax_scale,
+                    "kv_lora_rank": self.kv_lora_rank,
+                },
+            ),
+        )
+
     def _token_attention_kernel(self, q, infer_state, layer_weight, out=None):
         if self.is_linear_attention_layer:
             raise AssertionError("KDA uses its dedicated backend")
@@ -140,6 +196,14 @@ class Glm5NextTransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
                 },
             ),
         )
+
+    def _get_o(self, input, infer_state, layer_weight):
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_balance_get(data=input)
+        # Both sparse prefill and decode return attention in MLA latent space.
+        input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
+        output = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
+        return self._tpsp_reduce(input=output, infer_state=infer_state)
 
     def _kda_projections(self, hidden_states, infer_state, layer_weight):
         # Gather sequence-sharded tokens for each rank's KDA heads;

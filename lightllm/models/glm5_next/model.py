@@ -47,6 +47,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     def _verify_params(self):
         assert self.load_way in ("HF", "DS"), "GLM-5.3 Flash only supports HF and DS weight loading"
         assert self.config["linear_attn_config"]["num_heads"] % self.tp_world_size_ == 0
+        assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
         args = self.args
         assert args.dp == 1 and not args.enable_tpsp_mix_mode, "GLM-5.3 Flash v1 uses plain tensor parallelism"
         assert args.mtp_mode in (None, "eagle_with_att", "vanilla_with_att"), "Unsupported GLM NextN mode"
