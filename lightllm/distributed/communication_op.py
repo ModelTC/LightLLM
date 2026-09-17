@@ -242,10 +242,7 @@ class DistributeGroupManager:
             # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
             # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens,
-                self.ll_hidden,
-                global_world_size,
-                self.ll_num_experts,
+                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
             )
             microbatch_count = len(self.groups)
             min_prefill_reuse_buffer_bytes = _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
