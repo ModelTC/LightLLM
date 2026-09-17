@@ -52,8 +52,7 @@ class Glm5NextMTPModel(Glm5NextTpPartModel):
         self.mem_manager = self.main_model.mem_manager
 
     def _init_custom(self):
-        self._cos_cached = self.main_model._cos_cached
-        self._sin_cached = self.main_model._sin_cached
+        pass
 
     def _init_att_backend1(self):
         self.prefill_att_backend1 = self.decode_att_backend1 = None

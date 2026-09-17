@@ -5,12 +5,12 @@ import torch
 import triton
 
 from lightllm.common.build_utils import repair_config
+from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
 from lightllm.common.req_manager import Glm5NextReqManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
-from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.registry import ModelRegistry
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.post_layer_infer import Glm5NextPostLayerInfer
@@ -21,7 +21,7 @@ from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeig
 
 @ModelRegistry("glm5_next", is_multimodal=True)
 @ModelRegistry("glm5_next_text")
-class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
+class Glm5NextTpPartModel(TpPartBaseModel):
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextPreLayerInfer
@@ -45,7 +45,8 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
             repair_config(self.config, same_names=names)
 
     def _verify_params(self):
-        super()._verify_params()
+        assert self.load_way in ("HF", "DS"), "GLM-5.3 Flash only supports HF and DS weight loading"
+        assert self.config["linear_attn_config"]["num_heads"] % self.tp_world_size_ == 0
         args = self.args
         assert args.dp == 1 and not args.enable_tpsp_mix_mode, "GLM-5.3 Flash v1 uses plain tensor parallelism"
         assert args.mtp_mode in (None, "eagle_with_att", "vanilla_with_att"), "Unsupported GLM NextN mode"
@@ -54,6 +55,19 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
 
     def autotune_layers(self):
         return 4
+
+    def _init_some_value(self):
+        self.layers_num = self.config["n_layer"]
+        self.vocab_size = self.config["vocab_size"]
+        # MLA stores one replicated latent KV vector per token on every TP rank.
+        self.tp_k_head_num_ = 1
+        self.tp_v_head_num_ = 0
+        self.qk_nope_head_dim = self.config["qk_nope_head_dim"]
+        self.qk_rope_head_dim = self.config["qk_rope_head_dim"]
+        self.q_lora_rank = self.config["q_lora_rank"]
+        self.kv_lora_rank = self.config["kv_lora_rank"]
+        self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
+        self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
     def _init_req_manager(self):
         self.linear_config = Glm5NextCacheConfig.from_model_config(self.config, self.args)
@@ -85,5 +99,3 @@ class Glm5NextTpPartModel(Deepseek3_2TpPartModel):
 
     def _init_custom(self):
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
-        self._cos_cached = torch.empty((self.max_seq_length, 0), dtype=self.data_type, device="cuda")
-        self._sin_cached = torch.empty_like(self._cos_cached)
