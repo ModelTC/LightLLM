@@ -25,7 +25,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.expert_parallel_state = expert_parallel_state
         self.eplb = expert_parallel_state.eplb
         self.ep_balance_counters = None
-        self._primary_weight_pack_cache = {}
 
     def _select_experts(
         self,
@@ -43,10 +42,10 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
     ):
-        """选择 expert；EPLB prefill 统一由融合路径返回 physical ID。"""
+        """选择 expert；EPLB 统一由融合路径返回 physical ID。"""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         eplb = self.eplb
-        if is_prefill is True and eplb is not None:
+        if eplb is not None:
             from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
 
             group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
@@ -97,20 +96,13 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-        if is_prefill is False:
-            w13 = self._primary_weight_pack(w13)
-            w2 = self._primary_weight_pack(w2)
-            num_experts = self.n_routed_experts
-        else:
-            num_experts = self.expert_parallel_state.num_total_physical_experts
-
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
             w2=w2,
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
-            num_experts=num_experts,
+            num_experts=self.expert_parallel_state.num_total_physical_experts,
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
@@ -150,8 +142,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             topk_idx=topk_idx,
             x=hidden_states,
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
-            # decode 与 EPLB 的物理冗余行刻意隔离：DeepEP 使用原始 logical expert ID。
-            num_experts=self.n_routed_experts,
+            num_experts=self.expert_parallel_state.num_total_physical_experts,
             use_fp8=use_fp8_w8a8,
             async_finish=False,
             return_recv_hook=True,
@@ -241,7 +232,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         dtype: torch.dtype,
         expected_m: int,
     ):
-        w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         return masked_group_gemm(
@@ -339,23 +329,3 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             event.current_stream_wait()
 
         return combined_x, hook
-
-    def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
-        """返回所有 decode 路径使用的缓存本地主副本视图。"""
-        if self.eplb is None:
-            return weight_pack
-        cache = self._primary_weight_pack_cache
-        cache_key = id(weight_pack)
-        primary = cache.get(cache_key)
-        if primary is None:
-            num_primary_experts_per_rank = self.expert_parallel_state.num_primary_experts_per_rank
-            primary = WeightPack(
-                weight=weight_pack.weight[:num_primary_experts_per_rank],
-                weight_scale=(
-                    weight_pack.weight_scale[:num_primary_experts_per_rank]
-                    if weight_pack.weight_scale is not None
-                    else None
-                ),
-            )
-            cache[cache_key] = primary
-        return primary

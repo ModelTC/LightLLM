@@ -705,6 +705,32 @@ PD 分离模式参数
 
     使用 tgi 输入和输出格式
 
+专家并行与 EPLB 参数
+--------------------
+
+.. option:: --enable_ep_moe
+
+    为支持的 MoE 模型启用专家并行。使用 EPLB 时必须开启此参数。
+
+.. option:: --eplb_num_redundant_experts_per_rank
+
+    每个 MoE 层在每个 EP rank 上分配的冗余物理专家数量，默认值为 ``0``，表示关闭 EPLB。
+    设置为正数时启用 EPLB，并且必须同时设置 ``--enable_ep_moe``；负数会在启动阶段被拒绝。
+
+    每个 rank 会额外分配指定数量的专家权重行。EPLB 将逻辑专家映射到主副本或冗余物理副本，
+    统计路由负载，并可在线迁移冗余副本以改善专家负载均衡。增大此值可以提供更多布局选择，
+    但也会占用更多 GPU 显存并增加专家迁移流量。
+
+    EPLB 当前不能与 ``--enable_prefill_cudagraph`` 同时使用，也不支持 SM100 GPU。
+    同一部署中的所有 rank 和节点必须使用相同的配置值。
+
+    以下示例为每个 EP rank 配置两个冗余专家::
+
+        python -m lightllm.server.api_server \
+            --model_dir /path/to/model \
+            --enable_ep_moe \
+            --eplb_num_redundant_experts_per_rank 2
+
 MTP 多预测参数
 --------------
 

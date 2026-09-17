@@ -456,7 +456,7 @@ def triton_grouped_topk_eplb(
     return_logical_ids: bool = False,
     group_score_used_topk_num: int = 2,
 ):
-    """Fused EPLB prefill top-k returning physical IDs and optional logical IDs."""
+    """Fused EPLB top-k returning physical IDs and optional logical IDs."""
     token_num, total_expert_num = gating_output.shape
     out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device=gating_output.device)
     out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device=gating_output.device)

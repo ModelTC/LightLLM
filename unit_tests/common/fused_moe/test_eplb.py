@@ -124,7 +124,6 @@ def _validated_expert_parallel_state(
 def _set_expert_parallel_state(impl, state):
     impl.expert_parallel_state = state
     impl.eplb = state.eplb
-    impl._primary_weight_pack_cache = {}
 
 
 def _manual_runtime_rank_load(source_load, placement, node_world_size, alignment):
@@ -1661,7 +1660,7 @@ def test_manager_preparation_error_is_saved_as_evaluation_error(monkeypatch):
     assert str(manager._evaluation_error) == "prepare failed"
 
 
-def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeypatch):
+def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
     class Buffer:
         def low_latency_dispatch(self, **kwargs):
             calls.append(kwargs)
@@ -1673,7 +1672,7 @@ def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeyp
     _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     impl._select_experts = lambda **_kwargs: (
         torch.ones((1, 2)),
-        torch.tensor([[0, 127]], dtype=torch.int32),
+        torch.tensor([[128, 143]], dtype=torch.int32),
         torch.tensor([[0, 127]], dtype=torch.int32),
     )
     calls = []
@@ -1696,18 +1695,24 @@ def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeyp
         "softmax",
     )
 
-    assert result[2].tolist() == [[0, 127]]
-    assert calls[0]["num_experts"] == 128
+    assert result[2].tolist() == [[128, 143]]
+    assert calls[0]["num_experts"] == 144
 
 
-def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
-    from lightllm.common.basemodel.triton_kernel.fused_moe import topk_select
+def test_decode_select_uses_eplb_mapping(monkeypatch):
+    from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_topk
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
     _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
-    topk_ids = torch.tensor([[3, 127]], dtype=torch.int32)
-    monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), topk_ids))
+    physical_ids = torch.tensor([[130, 143]], dtype=torch.int32)
+    calls = []
+
+    def fused_topk(**kwargs):
+        calls.append(kwargs)
+        return torch.ones((1, 2)), physical_ids, None
+
+    monkeypatch.setattr(grouped_topk, "triton_grouped_topk_eplb", fused_topk)
     _, selected, origin = impl._select_experts(
         torch.empty((1, 4)),
         torch.empty((1, 128)),
@@ -1721,6 +1726,10 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
         is_prefill=False,
     )
 
+    assert len(calls) == 1
+    assert calls[0]["sample_index"] == 0
+    assert not calls[0]["record_load"]
+    assert selected is physical_ids
     assert selected.data_ptr() == origin.data_ptr()
 
 
@@ -1909,7 +1918,7 @@ def test_prefill_eplb_returns_requested_logical_ids(monkeypatch):
     assert logical_ids.tolist() == [[3, 4]]
 
 
-def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(
+def test_decode_masked_group_gemm_uses_all_physical_rows_when_eplb_is_enabled(
     monkeypatch,
 ):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
@@ -1931,11 +1940,11 @@ def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(
     )()
 
     assert impl.masked_group_gemm((torch.empty((1, 4)),), pack(), pack(), torch.empty(8), torch.float16, 1) == "out"
-    assert captured["w13"].shape[0] == captured["w2"].shape[0] == 8
-    assert captured["w13_scale"].shape[0] == captured["w2_scale"].shape[0] == 8
+    assert captured["w13"].shape[0] == captured["w2"].shape[0] == 10
+    assert captured["w13_scale"].shape[0] == captured["w2_scale"].shape[0] == 10
 
 
-def test_decode_fused_experts_uses_cached_primary_weight_packs_and_logical_experts(
+def test_decode_fused_experts_uses_full_weight_packs_and_physical_experts(
     monkeypatch,
 ):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
@@ -1977,10 +1986,8 @@ def test_decode_fused_experts_uses_cached_primary_weight_packs_and_logical_exper
             == "out"
         )
 
-    assert [call["num_experts"] for call in captured] == [128, 128]
-    assert all(call["w13"].weight.shape[0] == call["w2"].weight.shape[0] == 8 for call in captured)
-    assert captured[0]["w13"] is captured[1]["w13"]
-    assert captured[0]["w2"] is captured[1]["w2"]
+    assert [call["num_experts"] for call in captured] == [160, 160]
+    assert all(call["w13"] is w13 and call["w2"] is w2 for call in captured)
 
 
 def test_transfer_plan_uses_existing_rows_and_prefers_local_node_replicas():
