@@ -16,6 +16,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import eplb_repair_topk_ids
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
 
@@ -38,52 +39,43 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         num_expert_group: int,
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
-        preserve_logical_ids: bool = False,
     ):
-        """选择 expert；EPLB 统一由融合路径返回 physical ID。"""
+        """Select logical experts without applying the EPLB physical layout."""
+        from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=input_tensor,
+            router_logits=router_logits,
+            correction_bias=correction_bias,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            scoring_func=scoring_func,
+        )
+        if self.routed_scaling_factor != 1.0:
+            topk_weights.mul_(self.routed_scaling_factor)
+        return topk_weights, topk_ids
+
+    def _prepare_expert_execution(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_expert_gate: Optional[torch.Tensor] = None,
+    ):
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         eplb = self.eplb
         if eplb is not None:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
-
-            group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
-            topk_weights, topk_ids, logical_topk_ids = triton_grouped_topk_eplb(
-                gating_output=router_logits,
-                correction_bias=correction_bias,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
+            topk_ids = eplb_repair_topk_ids(
+                logical_topk_ids=topk_ids,
                 logical_to_physical_map=eplb.logical_to_physical_map,
                 logical_replica_count=eplb.logical_replica_count,
                 expert_counter=eplb.route_counter,
                 sample_index=eplb.next_sample_index(),
                 record_load=eplb.recording,
-                use_grouped_topk=use_grouped_topk,
-                return_logical_ids=preserve_logical_ids,
-                group_score_used_topk_num=group_score_topk_num,
             )
-            origin_topk_ids = logical_topk_ids if logical_topk_ids is not None else topk_ids
-        else:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
-
-            topk_weights, topk_ids = select_experts(
-                hidden_states=input_tensor,
-                router_logits=router_logits,
-                correction_bias=correction_bias,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                scoring_func=scoring_func,
-            )
-            origin_topk_ids = topk_ids
-        if self.routed_scaling_factor != 1.0:
-            topk_weights.mul_(self.routed_scaling_factor)
-        return topk_weights, topk_ids, origin_topk_ids
+        return topk_weights, topk_ids
 
     def _fused_experts(
         self,
@@ -121,7 +113,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -132,6 +124,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx)
 
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -160,7 +153,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -171,6 +164,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx)
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
 

@@ -17,8 +17,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         num_expert_group: int,
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
-        preserve_logical_ids: bool = False,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -38,7 +36,14 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
-        origin_topk_ids = topk_ids
+        return topk_weights, topk_ids
+
+    def _prepare_expert_execution(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_expert_gate: Optional[torch.Tensor] = None,
+    ):
         if self.num_fused_shared_experts > 0:
             from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
                 append_fused_shared_experts,
@@ -51,7 +56,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
                 num_fused_shared_experts=self.num_fused_shared_experts,
                 shared_expert_gate=shared_expert_gate,
             )
-        return topk_weights, topk_ids, origin_topk_ids
+        return topk_weights, topk_ids
 
     def _fused_experts(
         self,
