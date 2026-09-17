@@ -4,16 +4,9 @@ from lightllm.server import api_start
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
-@pytest.mark.parametrize(
-    ("redundant_experts", "message"),
-    [
-        (-1, "--eplb_num_redundant_experts_per_rank must be greater than or equal to 0"),
-        (1, "EPLB requires --enable_ep_moe"),
-    ],
-)
-def test_eplb_redundant_expert_count_validation(monkeypatch, redundant_experts, message):
+def test_eplb_redundant_expert_count_must_not_be_negative(monkeypatch):
     args = StartArgs(
-        eplb_num_redundant_experts_per_rank=redundant_experts,
+        eplb_num_redundant_experts_per_rank=-1,
         disable_vision=True,
         disable_audio=True,
         disable_shm_warning=True,
@@ -24,7 +17,28 @@ def test_eplb_redundant_expert_count_validation(monkeypatch, redundant_experts, 
     monkeypatch.setattr(api_start, "auto_set_fused_shared_experts", lambda args: None)
     monkeypatch.setattr(api_start, "set_unique_server_name", lambda args: None)
 
-    with pytest.raises(AssertionError, match=message):
+    with pytest.raises(
+        AssertionError,
+        match="--eplb_num_redundant_experts_per_rank must be greater than or equal to 0",
+    ):
+        api_start._launch_subprocesses(args)
+
+
+def test_eplb_redundant_experts_require_ep_moe(monkeypatch):
+    args = StartArgs(
+        enable_ep_moe=False,
+        eplb_num_redundant_experts_per_rank=1,
+        disable_vision=True,
+        disable_audio=True,
+        disable_shm_warning=True,
+    )
+
+    monkeypatch.setattr(api_start, "_set_envs_and_config", lambda args: None)
+    monkeypatch.setattr(api_start, "auto_set_max_req_total_len", lambda args: None)
+    monkeypatch.setattr(api_start, "auto_set_fused_shared_experts", lambda args: None)
+    monkeypatch.setattr(api_start, "set_unique_server_name", lambda args: None)
+
+    with pytest.raises(AssertionError, match="EPLB requires --enable_ep_moe"):
         api_start._launch_subprocesses(args)
 
 
