@@ -1468,6 +1468,7 @@ def test_manager_enters_evaluating_without_stopping_route_counting(monkeypatch):
     thread_args = []
     manager._eplb_impls = [impl]
     manager._snapshot_local_load = lambda: local_load
+    manager.next_evaluation_step = 20
 
     monkeypatch.setattr(manager_module.torch.cuda, "Event", lambda: event)
     monkeypatch.setattr(manager_module.torch.cuda, "current_stream", lambda: object())
@@ -1482,9 +1483,10 @@ def test_manager_enters_evaluating_without_stopping_route_counting(monkeypatch):
     assert impl.recording
     assert manager.state is manager_module.EPLBManagerState.EVALUATING
     assert thread_args[0][1] is local_load
+    assert not hasattr(manager, "next_evaluation_step")
 
 
-def test_manager_enter_collecting_clears_state_and_arms_next_window():
+def test_manager_enter_collecting_sets_state_and_arms_next_window():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.steps = 11
     manager.step_interval = 20
@@ -1560,6 +1562,35 @@ def test_manager_step_waits_for_all_evaluation_results(monkeypatch):
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **_kwargs: tensor.fill_(1))
     manager.step()
     assert calls == ["publish", "collect"]
+    assert not hasattr(manager, "_evaluation")
+
+
+def test_manager_finish_rebalance_releases_transferring_state():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    target_placement = torch.tensor([[[2], [3]]])
+    manager.global_rank = 1
+    manager.steps = 10
+    manager.step_interval = 20
+    manager.pending_transfer_infos = []
+    manager.completed_layer_transfers = []
+    manager.active_transfer = object()
+    manager.target_placement = target_placement
+    manager.target_metadata = {}
+    manager.rebalance_started_at = time.time()
+
+    manager._finish_rebalance()
+
+    assert manager.current_placement is target_placement
+    assert manager.state is manager_module.EPLBManagerState.COLLECTING
+    for attribute in (
+        "pending_transfer_infos",
+        "completed_layer_transfers",
+        "active_transfer",
+        "target_placement",
+        "target_metadata",
+        "rebalance_started_at",
+    ):
+        assert not hasattr(manager, attribute)
 
 
 def test_manager_exposes_one_lifecycle_step_entrypoint():
@@ -1773,7 +1804,9 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     logs = []
     monkeypatch.setattr(manager_module.logger, "info", lambda message: logs.append(message))
     manager = manager_module.EPLBManager(type("Model", (), {})())
-    assert manager.active_transfer is None
+    assert not hasattr(manager, "_evaluation")
+    assert not hasattr(manager, "active_transfer")
+    assert not hasattr(manager, "target_placement")
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert (
         manager.evaluation_group,
