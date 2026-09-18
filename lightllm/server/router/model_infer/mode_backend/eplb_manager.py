@@ -27,7 +27,6 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
 from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
-    get_node_world_size,
 )
 from lightllm.utils.envs_utils import (
     get_eplb_rebalance_gain_threshold,
@@ -51,7 +50,6 @@ class EPLBManager:
         self._weights: List[FusedMoeWeight] = weights
         self.global_rank: int = get_global_rank()
         self.world_size: int = get_global_world_size()
-        self.node_world_size: int = get_node_world_size()
         self._eplb_impls = [weight.fuse_moe_impl for weight in weights]
         routed = {impl.n_routed_experts for impl in self._eplb_impls}
         redundant = {impl.num_redundant_experts_per_rank for impl in self._eplb_impls}
@@ -183,16 +181,16 @@ class EPLBManager:
             dtype=torch.int32,
         )
         for changed_layer_offset, layer_index in enumerate(changed_layer_indices):
-            target_layer_placement = torch.tensor(result["placement"][layer_index], dtype=torch.int64)
+            current_layer_placement = self.current_placement[layer_index].tolist()
+            target_layer_placement = result["placement"][layer_index]
             metadata_by_layer[layer_index] = logical_to_physical_maps[changed_layer_offset]
             planned_transfers.extend(
                 build_transfer_plan(
-                    self.current_placement[layer_index],
+                    current_layer_placement,
                     target_layer_placement,
                     layer_index,
                     self.num_logical_experts,
                     self.world_size,
-                    self.node_world_size,
                 )
             )
         return metadata_by_layer, planned_transfers
@@ -324,10 +322,8 @@ class EPLBManager:
             transfer_info: EPLBTransferInfo = transfer.transfer_info
             if transfer_info.dest_rank != self.global_rank:
                 continue
-            destination_slot_index: int = target_redundant_expert_ids.index(transfer_info.source_logical_expert_id)
-            destination_local_expert_index: int = self.num_primary_experts_per_rank + destination_slot_index
             for tensor_buffer in transfer.tensor_buffers:
-                tensor_buffer.live_tensor[destination_local_expert_index].copy_(tensor_buffer.pinned_row)
+                tensor_buffer.live_tensor[transfer_info.dest_local_expert_index].copy_(tensor_buffer.pinned_row)
 
         local_expert_ids: List[int] = self._eplb_impls[layer_index].local_logics_expert_ids_list
         local_expert_ids[self.num_primary_experts_per_rank :] = target_redundant_expert_ids

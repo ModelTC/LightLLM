@@ -31,22 +31,15 @@ class EPLBTransferInfo:
     """单个逻辑专家的一次传输描述。
 
     ``layer_index`` 是专家权重在 EPLB 层列表中的下标。源 rank 使用
-    ``source_logical_expert_id`` 定位当前本地物理行，目标 rank 从
-    ``tensor_buffers`` 中读取传输完成的 pinned memory 数据。
+    ``source_logical_expert_id`` 定位当前本地物理行；目标 rank 将收到的
+    pinned memory 数据写入 ``dest_local_expert_index`` 指定的本地物理行。
     """
 
     source_rank: int
     layer_index: int
     source_logical_expert_id: int
     dest_rank: int
-
-
-@dataclass(frozen=True)
-class _ExpertSource:
-    """一个逻辑专家当前可用的物理副本位置。"""
-
-    rank: int
-    local_expert_index: int
+    dest_local_expert_index: int
 
 
 class TransferStatus(Enum):
@@ -55,82 +48,6 @@ class TransferStatus(Enum):
     IDLE = "idle"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
-
-
-def build_transfer_plan(
-    current_placement: torch.Tensor,
-    target_placement: torch.Tensor,
-    layer_index: int,
-    num_logical_experts: int,
-    world_size: int,
-    node_world_size: int,
-) -> List[EPLBTransferInfo]:
-    """根据新旧冗余专家分布生成确定性的传输计划。
-
-    ``current_placement`` 和 ``target_placement`` 只描述冗余槽位，形状均为
-    ``[world_size, num_redundant_slots]``。固定主专家不在这两个张量中，但始终
-    可以作为数据源。返回结果只包含发生变化的目标槽位所需专家，每个
-    :class:`EPLBTransferInfo` 只描述一个逻辑专家的传输。
-
-    为同一个逻辑专家选择数据源时，依次考虑：
-
-    1. 优先使用目标 rank 所在节点上的已有副本，避免跨节点传输；
-    2. 均衡各个源 rank 承担的传输次数；
-    3. 使用 rank 和本地行号做稳定排序，保证所有 rank 生成一致结果。
-    """
-    assert (
-        tuple(current_placement.shape)
-        == tuple(target_placement.shape)
-        == (
-            world_size,
-            current_placement.shape[1],
-        )
-    )
-    num_primary_experts_per_rank = num_logical_experts // world_size
-    current_placement_by_rank: List[List[int]] = current_placement.tolist()
-    target_placement_by_rank: List[List[int]] = target_placement.tolist()
-
-    # 每个逻辑专家的主专家行永远存在，因此先把它加入候选源；当前仍存在的
-    # 冗余副本也可以作为源，这样目标 rank 有机会直接使用同节点副本。
-    source_candidates_by_expert: List[List[_ExpertSource]] = []
-    for logical_expert_id in range(num_logical_experts):
-        primary_rank, primary_local_expert_index = divmod(logical_expert_id, num_primary_experts_per_rank)
-        source_candidates_by_expert.append([_ExpertSource(primary_rank, primary_local_expert_index)])
-    for rank, redundant_expert_ids in enumerate(current_placement_by_rank):
-        for redundant_slot_index, logical_expert_id in enumerate(redundant_expert_ids):
-            source_candidates_by_expert[logical_expert_id].append(
-                _ExpertSource(
-                    rank=rank,
-                    local_expert_index=num_primary_experts_per_rank + redundant_slot_index,
-                )
-            )
-
-    num_transfers_by_source_rank: List[int] = [0] * world_size
-    transfer_infos: List[EPLBTransferInfo] = []
-    for destination_rank in range(world_size):
-        for destination_slot_index, logical_expert_id in enumerate(target_placement_by_rank[destination_rank]):
-            if logical_expert_id == current_placement_by_rank[destination_rank][destination_slot_index]:
-                continue
-            source = min(
-                source_candidates_by_expert[logical_expert_id],
-                key=lambda candidate: (
-                    candidate.rank // node_world_size != destination_rank // node_world_size,
-                    num_transfers_by_source_rank[candidate.rank],
-                    candidate.rank,
-                    candidate.local_expert_index,
-                ),
-            )
-            num_transfers_by_source_rank[source.rank] += 1
-            transfer_infos.append(
-                EPLBTransferInfo(
-                    source_rank=source.rank,
-                    layer_index=layer_index,
-                    source_logical_expert_id=logical_expert_id,
-                    dest_rank=destination_rank,
-                )
-            )
-
-    return transfer_infos
 
 
 class PinnedMemoryEPLBTransfer:
@@ -265,6 +182,48 @@ class PinnedMemoryEPLBTransfer:
             f"{transfer_info.source_rank}:"
             f"{transfer_info.dest_rank}:"
             f"{transfer_info.source_logical_expert_id}:"
+            f"{transfer_info.dest_local_expert_index}:"
             f"{tensor_name}"
         )
         return zlib.crc32(message_identity.encode("utf-8")) & 0x7FFFFFFF
+
+
+def build_transfer_plan(
+    current_placement: Sequence[Sequence[int]],
+    target_placement: Sequence[Sequence[int]],
+    layer_index: int,
+    num_logical_experts: int,
+    world_size: int,
+) -> List[EPLBTransferInfo]:
+    """生成一层中所有发生变化的冗余专家传输任务。
+
+    ``current_placement`` 和 ``target_placement`` 的形状均为
+    ``[world_size, num_redundant_slots]``。每个逻辑专家按照无冗余布局连续分配
+    给各 rank；该固定主副本始终作为传输源，不再从已有冗余副本中选择数据源。
+    """
+    assert world_size > 0
+    assert num_logical_experts % world_size == 0
+    assert len(current_placement) == len(target_placement) == world_size
+    num_redundant_slots = len(current_placement[0])
+    assert all(len(row) == num_redundant_slots for row in current_placement)
+    assert all(len(row) == num_redundant_slots for row in target_placement)
+
+    num_primary_experts_per_rank = num_logical_experts // world_size
+    transfer_infos: List[EPLBTransferInfo] = []
+    for destination_rank, (current_row, target_row) in enumerate(zip(current_placement, target_placement)):
+        for destination_slot_index, (current_expert_id, target_expert_id) in enumerate(zip(current_row, target_row)):
+            if target_expert_id == current_expert_id:
+                continue
+            assert 0 <= target_expert_id < num_logical_experts
+            source_rank = target_expert_id // num_primary_experts_per_rank
+            transfer_infos.append(
+                EPLBTransferInfo(
+                    source_rank=source_rank,
+                    layer_index=layer_index,
+                    source_logical_expert_id=target_expert_id,
+                    dest_rank=destination_rank,
+                    dest_local_expert_index=num_primary_experts_per_rank + destination_slot_index,
+                )
+            )
+
+    return transfer_infos

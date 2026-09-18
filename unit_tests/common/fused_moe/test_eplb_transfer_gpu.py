@@ -75,8 +75,8 @@ def _worker(rank, port):
     transfer_group = dist.new_group([0, 1], backend="gloo")
 
     weights = [_FakeWeight(rank, layer_index) for layer_index in range(2)]
-    current = torch.tensor([[2], [0]])
-    target = torch.tensor([[3], [1]])
+    current = [[2], [0]]
+    target = [[3], [1]]
     for expected_layer in range(2):
         transfer_infos = build_transfer_plan(
             current,
@@ -84,7 +84,6 @@ def _worker(rank, port):
             expected_layer,
             num_logical_experts=4,
             world_size=2,
-            node_world_size=2,
         )
         for transfer_info in transfer_infos:
             transfer = PinnedMemoryEPLBTransfer(weights, transfer_group, rank, transfer_info)

@@ -538,14 +538,14 @@ def test_logical_to_physical_maps_for_layers_match_single_layer_api(current_rank
 
 
 def test_transfer_plan_respects_explicit_target_slots():
-    current = torch.tensor([[4, 5], [6, 7], [0, 1], [2, 3]])
-    target = torch.tensor([[5, 4], [7, 6], [1, 0], [3, 2]])
+    current = [[4, 5], [6, 7], [0, 1], [2, 3]]
+    target = [[5, 4], [7, 6], [1, 0], [3, 2]]
 
-    plan = build_transfer_plan(current, target, 3, num_logical_experts=8, world_size=4, node_world_size=2)
+    plan = build_transfer_plan(current, target, 3, num_logical_experts=8, world_size=4)
 
     assert all(info.layer_index == 3 for info in plan)
     assert {(info.dest_rank, info.source_logical_expert_id) for info in plan} == {
-        (rank, int(target[rank, slot])) for rank in range(4) for slot in range(2)
+        (rank, target[rank][slot]) for rank in range(4) for slot in range(2)
     }
 
 
@@ -724,7 +724,6 @@ def test_manager_evaluation_collective_sums_rank_loads(monkeypatch):
     manager._eplb_impls = [manager.weights[0].fuse_moe_impl]
     manager.global_rank = 2
     manager.world_size = 4
-    manager.node_world_size = 2
     manager.step_interval = 20
     manager.num_logical_experts = 4
     manager.num_redundant_experts_per_rank = 1
@@ -785,7 +784,6 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
         weight.layer_num_ = layer_num
     manager.global_rank = 1
     manager.world_size = 4
-    manager.node_world_size = 2
     manager.step_interval = 20
     manager.num_logical_experts = 4
     manager.num_redundant_experts_per_rank = 1
@@ -1185,41 +1183,39 @@ def test_decode_fused_experts_uses_full_weight_packs_and_physical_experts(
     assert all(call["w13"] is w13 and call["w2"] is w2 for call in captured)
 
 
-def test_transfer_plan_uses_existing_rows_and_prefers_local_node_replicas():
-    current = torch.tensor([[4, 5], [6, 7], [0, 1], [2, 3]])
-    target = current.clone()
-    target[0, 0] = 6  # primary r3, but r1 replica is on r0's node.
-    target[2, 1] = 4  # primary r2 is local to destination r2.
-    plan = build_transfer_plan(current, target, 5, num_logical_experts=8, world_size=4, node_world_size=2)
+def test_transfer_plan_always_uses_primary_expert_rank():
+    current = [[4, 5], [6, 7], [0, 1], [2, 3]]
+    target = [[6, 5], [6, 7], [0, 4], [2, 3]]
+    plan = build_transfer_plan(current, target, 5, num_logical_experts=8, world_size=4)
     assert plan == [
-        EPLBTransferInfo(1, 5, 6, 0),
-        EPLBTransferInfo(2, 5, 4, 2),
+        EPLBTransferInfo(3, 5, 6, 0, 2),
+        EPLBTransferInfo(2, 5, 4, 2, 3),
     ]
 
 
-def test_transfer_plan_cross_node_and_stable_source_load_tie_break():
-    current = torch.tensor([[0, 1], [2, 3], [4, 5], [4, 7]])
-    target = current.clone()
-    target[0, 0] = 4
-    target[0, 1] = 4
-    first = build_transfer_plan(current, target, 5, 8, 4, 2)
-    second = build_transfer_plan(current, target, 5, 8, 4, 2)
+def test_transfer_plan_uses_same_primary_source_for_repeated_expert():
+    current = [[0, 1], [2, 3], [4, 5], [4, 7]]
+    target = [[4, 4], [2, 3], [4, 5], [4, 7]]
+    first = build_transfer_plan(current, target, 5, 8, 4)
+    second = build_transfer_plan(current, target, 5, 8, 4)
     assert first == second
     assert first == [
-        EPLBTransferInfo(2, 5, 4, 0),
-        EPLBTransferInfo(3, 5, 4, 0),
+        EPLBTransferInfo(2, 5, 4, 0, 2),
+        EPLBTransferInfo(2, 5, 4, 0, 3),
     ]
 
 
 def test_p2p_message_tag_is_stable_and_identifies_transfer_tensor():
     transfer = object.__new__(PinnedMemoryEPLBTransfer)
-    transfer.transfer_info = EPLBTransferInfo(1, 5, 4, 0)
+    transfer.transfer_info = EPLBTransferInfo(1, 5, 4, 0, 2)
     weight_tag = transfer._build_p2p_message_tag("w13.weight")
 
     assert weight_tag == transfer._build_p2p_message_tag("w13.weight")
     assert 0 <= weight_tag <= 0x7FFFFFFF
     assert weight_tag != transfer._build_p2p_message_tag("w13.weight_scale")
-    transfer.transfer_info = EPLBTransferInfo(1, 5, 6, 0)
+    transfer.transfer_info = EPLBTransferInfo(1, 5, 6, 0, 2)
+    assert weight_tag != transfer._build_p2p_message_tag("w13.weight")
+    transfer.transfer_info = EPLBTransferInfo(1, 5, 4, 0, 3)
     assert weight_tag != transfer._build_p2p_message_tag("w13.weight")
 
 
@@ -1240,7 +1236,7 @@ def test_extract_expert_tensors_includes_quantization_metadata_in_order():
     ]
 
 
-def test_manager_commits_completed_transfer_rows_by_target_logical_expert():
+def test_manager_commits_completed_transfer_rows_by_planned_destination_index():
     live = torch.arange(20).reshape(5, 4)
     original_primary = live[:3].clone()
     local_expert_ids = [0, 1, 2, 4, 5]
@@ -1252,11 +1248,11 @@ def test_manager_commits_completed_transfer_rows_by_target_logical_expert():
     manager._commit_layer_metadata = lambda _layer: None
     manager.completed_transfers = [
         SimpleNamespace(
-            transfer_info=EPLBTransferInfo(1, 0, 7, 0),
+            transfer_info=EPLBTransferInfo(1, 0, 7, 0, 3),
             tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -7))],
         ),
         SimpleNamespace(
-            transfer_info=EPLBTransferInfo(2, 0, 6, 0),
+            transfer_info=EPLBTransferInfo(2, 0, 6, 0, 4),
             tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -6))],
         ),
     ]
@@ -1278,9 +1274,9 @@ def test_manager_inflight_ready_gate_commits_one_layer(monkeypatch):
         def is_finished(self):
             return True
 
-    info0 = EPLBTransferInfo(0, 0, 2, 1)
-    info0b = EPLBTransferInfo(1, 0, 3, 0)
-    info1 = EPLBTransferInfo(0, 1, 4, 1)
+    info0 = EPLBTransferInfo(0, 0, 2, 1, 2)
+    info0b = EPLBTransferInfo(1, 0, 3, 0, 2)
+    info1 = EPLBTransferInfo(0, 1, 4, 1, 2)
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.active_transfer = Transfer(info0)
     manager.control_group = object()
@@ -1326,9 +1322,9 @@ def test_manager_inflight_ready_gate_commits_one_layer(monkeypatch):
     assert committed == [0, 1]
     assert finished == [True]
 
-    expected = EPLBTransferInfo(0, 2, 5, 1)
+    expected = EPLBTransferInfo(0, 2, 5, 1, 2)
     manager.in_flight_transfers = [expected]
-    manager.active_transfer = Transfer(EPLBTransferInfo(1, 2, 5, 1))
+    manager.active_transfer = Transfer(EPLBTransferInfo(1, 2, 5, 1, 2))
     with pytest.raises(RuntimeError, match="does not match"):
         manager._poll_in_flight()
 
@@ -1388,7 +1384,7 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
     original_overlap_stream = g_infer_context.overlap_stream
 
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    transfer_info = EPLBTransferInfo(0, 0, 2, 0)
+    transfer_info = EPLBTransferInfo(0, 0, 2, 0, 0)
     manager.active_transfer = Transfer(live, received, transfer_info)
     manager.control_group = object()
     manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
@@ -1423,7 +1419,7 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
 
 def test_manager_inflight_step_does_not_poll():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1)]
+    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1, 2)]
     manager._evaluation = None
     calls = []
     manager._poll_in_flight = lambda: calls.append("poll")
@@ -1472,7 +1468,7 @@ def test_manager_restart_collection_resets_counters_and_arms_next_window():
 
 def test_manager_poll_advances_inflight_before_evaluation():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1)]
+    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1, 2)]
     manager._evaluation = Future()
     calls = []
     manager._poll_in_flight = lambda: calls.append("inflight")
@@ -1542,7 +1538,7 @@ def test_pinned_transfer_copies_source_row_and_sends_to_destination(monkeypatch)
     transfer._is_source_rank = True
     transfer._is_destination_rank = False
     transfer._p2p_group = object()
-    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 1)
+    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 1, 2)
     transfer._device_to_host_stream = Stream()
     transfer._local_logical_expert_ids = [4, 5]
     transfer.tensor_buffers = [
@@ -1583,7 +1579,7 @@ def test_pinned_transfer_skips_p2p_for_local_destination(monkeypatch):
     transfer._is_source_rank = True
     transfer._is_destination_rank = True
     transfer._p2p_group = object()
-    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 0)
+    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 0, 1)
     transfer._device_to_host_stream = Stream()
     transfer._local_logical_expert_ids = [5]
     transfer.tensor_buffers = [
@@ -1612,7 +1608,7 @@ def test_pinned_transfer_exits_process_on_failure(monkeypatch):
     transfer._device = "cuda:0"
     transfer._is_source_rank = False
     transfer._is_destination_rank = True
-    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0)
+    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0, 2)
     transfer._p2p_group = object()
     transfer.tensor_buffers = [
         ExpertTensorBuffer(
@@ -1649,7 +1645,7 @@ def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
     transfer._device = "cuda:0"
     transfer._is_source_rank = False
     transfer._is_destination_rank = True
-    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0)
+    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0, 2)
     transfer._p2p_group = object()
     transfer._device_to_host_stream = Stream()
     transfer.tensor_buffers = [
@@ -1708,7 +1704,6 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     monkeypatch.setattr(manager_module, "_find_fused_moe_weights", lambda model: [weight])
     monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 2)
-    monkeypatch.setattr(manager_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(manager_module, "get_prefill_eplb_step_interval", lambda: 20)
     monkeypatch.setattr(manager_module, "get_eplb_rebalance_gain_threshold", lambda: 0.07)
 
@@ -1733,7 +1728,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
         manager.transfer_group,
     ) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 3
-    transfer_info = EPLBTransferInfo(0, 0, 2, 1)
+    transfer_info = EPLBTransferInfo(0, 0, 2, 1, 2)
     manager.in_flight_transfers = [transfer_info]
     manager._start_next_transfer()
     assert transfer_calls == [([weight], groups[2], 0, transfer_info)]
