@@ -79,6 +79,10 @@ class VisualModelRpcServer(rpyc.Service):
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
                 self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
+            elif self.model_type == "glm5_next":
+                from lightllm.models.glm5_next.glm5_next_visual import Glm5NextVisionTransformer
+
+                self.model = Glm5NextVisionTransformer(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
                 self.model = (
                     Qwen2VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()

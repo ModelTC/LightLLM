@@ -76,7 +76,14 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
+        if alpha is not None or limit is not None:
+            raise NotImplementedError(
+                "FuseMoeDeepGEMM does not support clamped SwiGLU: EP activation kernels need alpha/limit support"
+            )
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,

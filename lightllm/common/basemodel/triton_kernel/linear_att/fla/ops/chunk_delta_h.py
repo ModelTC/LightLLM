@@ -24,6 +24,7 @@ NUM_WARPS = [2, 4, 8, 16]
     {
         "USE_G": lambda args: args["g"] is not None,
         "USE_GK": lambda args: args["gk"] is not None,
+        "USE_EXP2": lambda args: args["use_exp2"],
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
@@ -43,6 +44,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
+    use_exp2,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -52,11 +54,22 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    """Scan chunks to compute their residuals E and recurrent state boundaries.
+
+    In the KDA path, k=Kg, v=U, w=W, g=None, gk=G, and use_exp2=True:
+        E = U - W @ S_in                         # [BT, BV]
+        S_out = exp2(G_last)[:, None] * S_in + Kg.T @ E  # [K, BV]
+    Each program owns one (sequence, head, V tile), keeps [K, BV] state in fp32,
+    and visits that sequence's chunks in order. K is split into up to four
+    64-row tiles within the program; V tiles are independent. h stores S_in
+    before each update, v_new stores E, and ht optionally stores the final state.
+    """
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
@@ -111,7 +124,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             p_h0_4 = tl.make_block_ptr(h0, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
             b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
 
-    # main recurrence
+    # Recur across chunks inside this program; preserve each entry state for output.
     for i_t in range(NT):
         p_h1 = tl.make_block_ptr(h + i_t * stride_h, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
@@ -125,6 +138,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             p_h4 = tl.make_block_ptr(h + i_t * stride_h, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
 
+        # W @ S_in: [BT, K] @ [K, BV], reducing all K tiles before forming E.
         p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, 64), (1, 0))
         b_w = tl.load(p_w, boundary_check=(0, 1))
         b_v = tl.dot(b_w, b_h1.to(b_w.dtype))
@@ -141,7 +155,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_v += tl.dot(b_w, b_h4.to(b_w.dtype))
         p_v = tl.make_block_ptr(v, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v
+        b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v  # E = U - W @ S_in.
 
         if SAVE_NEW_VALUE:
             p_v = tl.make_block_ptr(v_new, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -163,13 +177,14 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 b_h4 = b_h4 * b_g_last
 
         if USE_GK:
+            # KDA entry-state contribution at the chunk end: exp2(G_last) * S_in.
             o_k1 = tl.arange(0, 64)
             b_gk_last1 = tl.load(
                 gk + (bos + last_idx) * H * K + i_h * K + o_k1,
                 mask=(o_k1 < K),
                 other=0.0,
             )
-            b_h1 *= exp(b_gk_last1)[:, None]
+            b_h1 *= (tl.exp2(b_gk_last1) if USE_EXP2 else exp(b_gk_last1))[:, None]
             if K > 64:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(
@@ -177,7 +192,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k2 < K),
                     other=0.0,
                 )
-                b_h2 *= exp(b_gk_last2)[:, None]
+                b_h2 *= (tl.exp2(b_gk_last2) if USE_EXP2 else exp(b_gk_last2))[:, None]
             if K > 128:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(
@@ -185,7 +200,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k3 < K),
                     other=0.0,
                 )
-                b_h3 *= exp(b_gk_last3)[:, None]
+                b_h3 *= (tl.exp2(b_gk_last3) if USE_EXP2 else exp(b_gk_last3))[:, None]
             if K > 192:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(
@@ -193,9 +208,11 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k4 < K),
                     other=0.0,
                 )
-                b_h4 *= exp(b_gk_last4)[:, None]
+                b_h4 *= (tl.exp2(b_gk_last4) if USE_EXP2 else exp(b_gk_last4))[:, None]
         b_v = b_v.to(k.dtype.element_ty)
 
+        # Add the chunk's writes. In KDA, k already holds the end-decayed Kg:
+        # [64, BT] @ [BT, BV] supplies one row tile of Kg.T @ E.
         p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_h1 += tl.dot(b_k, b_v)
@@ -265,7 +282,16 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     run_config=None,
+    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return chunk-entry states h, token residuals v_new, and optional final state.
+
+    For KDA, pass k=Kg: [B, T, H, K], w=W with the same shape, u=U: [B, T, H, V],
+    and gk=G: [B, T, H, K]. h has shape [B, NT, H, K, V], v_new has u.shape,
+    and final_state is fp32 [N, H, K, V]. Packed inputs have B=1, N requests,
+    and NT total chunks. LightLLM autotune chooses BV/warps/stages for grid
+    (ceil(V/BV), N*H); the chunk dimension is the sequential loop inside each program.
+    """
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
     B, T, Hg, K, V = *k.shape, u.shape[-1]
@@ -311,6 +337,7 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        use_exp2=use_exp2,
         T=T,
         H=H,
         Hg=Hg,

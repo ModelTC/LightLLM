@@ -56,3 +56,6 @@ from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from .draft_registry import get_draft_model_class
 from .registry import get_model, get_model_class
+
+from .glm5_next.model import Glm5NextTpPartModel
+from .glm5_next_mtp.model import Glm5NextMTPModel

@@ -400,8 +400,7 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen2_5_VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
-        elif model_type in ["qwen3_vl", "qwen3_vl_moe"]:
-            # Qwen3VisionTransformerPretrainedModel
+        elif model_type in ["qwen3_vl", "qwen3_vl_moe", "glm5_next"]:
             model_cfg["vision_config"]
             return True
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
@@ -462,7 +461,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "glm5_next", "glm5_next_text"]:
             return True
         else:
             return False
