@@ -77,8 +77,8 @@ class EPLBManager:
         self.num_redundant_experts_per_rank: int = first_impl.num_redundant_experts_per_rank
         self.num_primary_experts_per_rank: int = self.num_logical_experts // self.world_size
 
-        # 评估调度：steps 只在 COLLECTING 状态递增。route counter 不按周期
-        # 清零，让低流量服务可以跨多个评估周期积累到足够可靠的样本量。
+        # 评估调度：steps 只在 COLLECTING 状态递增。route counter 从当前
+        # 布局生效时开始累计，让低流量服务可以跨多个评估周期收集足够样本。
         self.step_interval: int = get_eplb_step_interval()
         self.steps: int = 0
 
@@ -111,6 +111,7 @@ class EPLBManager:
 
         self.state = EPLBManagerState.COLLECTING
         self.next_evaluation_step = self.step_interval
+        self._clear_route_counters()
 
         if self.global_rank == 0:
             self.metric_client: MetricClient = MetricClient(get_shm_port_args().metric_port)
@@ -162,8 +163,9 @@ class EPLBManager:
             raise RuntimeError("EPLB route counter shape must be [num_logical_experts]")
 
         # 将各层累计的路由计数复制到 CPU，后续规划统一使用这份快照。
-        # 此处有意不清零 GPU counter：下一周期继续累计，而本轮异步规划
-        # 使用独立的 CPU 快照，不会与推理线程后续的 atomic add 竞争。
+        # 此处有意不清零 GPU counter：如果样本不足或无需迁移，下一周期会
+        # 继续累计；成功切换到新布局后才重新开始统计。本轮异步规划使用独立
+        # 的 CPU 快照，不会与推理线程后续的 atomic add 竞争。
         local_load = torch.stack([counter.detach().cpu() for counter in counters])
 
         # 汇集各 rank 的 token 总数，判断当前统计量是否足以进行布局规划。
@@ -278,6 +280,7 @@ class EPLBManager:
             if not transfer_batch:
                 self.current_placement = self.target_placement
                 elapsed = time.time() - self.rebalance_started_at
+                self._clear_route_counters()
                 del self.pending_transfer_infos
                 del self.target_placement
                 del self.rebalance_started_at
@@ -398,6 +401,17 @@ class EPLBManager:
             EPLB_EXPERT_IMBALANCE_RATIO_METRIC,
             _expert_load_imbalance_ratio(global_load),
         )
+
+    def _clear_route_counters(self) -> None:
+        """在 overlap stream 上清空所有层的逻辑专家路由计数。"""
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        # route counter 由 forward 中的 Triton kernel 在 overlap stream 上更新。
+        # 将 zero_ 排到同一条 stream，可保证它位于此前 forward 之后、下一次
+        # forward 之前，无需额外 synchronize，也不会与 atomic add 并发。
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            for impl in self._eplb_impls:
+                impl.route_counter.zero_()
 
 
 def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:

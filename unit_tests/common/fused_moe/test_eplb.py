@@ -1257,7 +1257,9 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     manager.global_rank = 1
     manager.state = manager_module.EPLBManagerState.TRANSFERRING
     committed = []
+    cleared_route_counters = []
     manager._commit_transfer = committed.append
+    manager._clear_route_counters = lambda: cleared_route_counters.append(True)
     waits = []
     overlap_stream = object()
     monkeypatch.setattr(
@@ -1317,6 +1319,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     assert not hasattr(manager, "pending_transfer_infos")
     assert not hasattr(manager, "target_placement")
     assert not hasattr(manager, "rebalance_started_at")
+    assert cleared_route_counters == [True]
     assert local_states == [
         state(local_info0, False),
         state(local_info0, True),
@@ -1823,6 +1826,25 @@ def test_manager_requires_more_than_one_rank(monkeypatch):
         manager_module.EPLBManager(type("Model", (), {})())
 
 
+def test_manager_clears_all_route_counters_on_overlap_stream(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    counters = [torch.tensor([1, 2]), torch.tensor([3, 4])]
+    manager._eplb_impls = [SimpleNamespace(route_counter=counter) for counter in counters]
+    overlap_stream = object()
+    used_streams = []
+    monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: overlap_stream)
+    monkeypatch.setattr(
+        manager_module.torch.cuda,
+        "stream",
+        lambda stream: (used_streams.append(stream) or nullcontext()),
+    )
+
+    manager._clear_route_counters()
+
+    assert used_streams == [overlap_stream]
+    assert all(torch.count_nonzero(counter) == 0 for counter in counters)
+
+
 def test_manager_initializes_without_transfer_task(monkeypatch):
     weight = type(
         "Weight",
@@ -1846,6 +1868,12 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(manager_module, "get_eplb_step_interval", lambda: 20)
+    clear_calls = []
+    monkeypatch.setattr(
+        manager_module.EPLBManager,
+        "_clear_route_counters",
+        lambda manager: clear_calls.append(manager),
+    )
     monkeypatch.setattr(manager_module, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
     metric_client = SimpleNamespace()
     metric_client_ports = []
@@ -1880,6 +1908,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert manager.metric_client is metric_client
     assert metric_client_ports == [1234]
     assert manager.next_evaluation_step == manager.step_interval
+    assert clear_calls == [manager]
     assert "planner=GreedyEPLBPlanner" in logs[0]
     assert weight.fuse_moe_impl.recording
     assert manager._eplb_impls[0] is weight.fuse_moe_impl
