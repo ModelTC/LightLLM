@@ -102,7 +102,7 @@ class EPLBManager:
         # This control-group scalar is only touched from the main inference
         # thread, never by the background evaluation thread.
         self._control_ready_count = torch.empty(1, dtype=torch.int32)
-        self.transfer = PinnedMemoryEPLBTransfer(self.weights, self.transfer_group, self.global_rank, self.world_size)
+        self.transfer = PinnedMemoryEPLBTransfer(self.weights, self.transfer_group, self.global_rank)
         if self.global_rank == 0:
             logger.info(
                 "eplb enabled "
@@ -227,11 +227,13 @@ class EPLBManager:
     def _poll_in_flight(self):
         local_error = None
         try:
-            pending = self.transfer.pending_layers()
+            ready_layer = self.transfer.ready_layer()
         except BaseException as exc:
-            pending = []
+            ready_layer = None
             local_error = exc
-        ready_count = self._control_count(EPLB_CONTROL_ERROR if local_error is not None else len(pending))
+        ready_count = self._control_count(
+            EPLB_CONTROL_ERROR if local_error is not None else int(ready_layer is not None)
+        )
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=self.control_group)
         ready_count = int(ready_count.item())
         if ready_count < 0:
@@ -240,24 +242,18 @@ class EPLBManager:
             raise RuntimeError("EPLB transfer worker failed on another rank")
         if ready_count == 0:
             return
-        if ready_count > len(pending) or ready_count > len(self.in_flight_layers):
-            raise RuntimeError("EPLB global ready count exceeds the local ordered prefix")
+        if ready_layer != self.in_flight_layers[0]:
+            raise RuntimeError(f"EPLB ready layer {ready_layer} does not match expected {self.in_flight_layers[0]}")
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
         # Previous forward is queued on the shared overlap stream; order the
         # live-weight commit after it. The subsequent wait orders the next forward.
         torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
-        for layer_index, buffer_index in pending[:ready_count]:
-            if layer_index != self.in_flight_layers[0]:
-                raise RuntimeError(
-                    f"EPLB pending layer {layer_index} does not match expected {self.in_flight_layers[0]}"
-                )
-            self.transfer.commit(
-                layer_index,
-                buffer_index,
-                lambda: self._commit_layer_metadata(layer_index),
-            )
-            self.in_flight_layers.pop(0)
+        self.transfer.commit(
+            ready_layer,
+            lambda: self._commit_layer_metadata(ready_layer),
+        )
+        self.in_flight_layers.pop(0)
         if not self.in_flight_layers:
             self.transfer.finish()
             self._finish_rebalance()

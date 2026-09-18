@@ -70,7 +70,6 @@ class TpPartBaseModel:
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
-        self.eplb_manager = None
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
@@ -317,14 +316,9 @@ class TpPartBaseModel:
         assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
-            model_output = self._prefill(model_input=model_input)
-            self._after_prefill()
-            return model_output
-        return self._decode(model_input)
-
-    def _after_prefill(self):
-        if self.eplb_manager is not None:
-            self.eplb_manager.step()
+            return self._prefill(model_input=model_input)
+        else:
+            return self._decode(model_input)
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
@@ -820,7 +814,6 @@ class TpPartBaseModel:
         dist_group_manager.clear_deepep_buffer()
         model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
-        self._after_prefill()
         return model_output0, model_output1
 
     @torch.no_grad()

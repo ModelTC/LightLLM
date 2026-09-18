@@ -70,6 +70,7 @@ class ModeBackend:
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
         self.spec_engine = None
+        self.eplb_manager = None
 
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
@@ -259,8 +260,7 @@ class ModeBackend:
         if self.args.eplb_num_redundant_experts_per_rank > 0:
             from lightllm.server.router.model_infer.mode_backend.eplb_manager import EPLBManager
 
-            self.model.eplb_manager = EPLBManager(self.model)
-            dist.barrier()
+            self.eplb_manager = EPLBManager(self.model)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -302,6 +302,15 @@ class ModeBackend:
 
     def prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         raise NotImplementedError()
+
+    def _run_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
+        self.prefill(event_pack=event_pack, prefill_reqs=prefill_reqs)
+        if self.eplb_manager is not None:
+            self.eplb_manager.step()
+
+    def _poll_eplb(self):
+        if self.eplb_manager is not None:
+            self.eplb_manager.poll()
 
     def decode(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         raise NotImplementedError()

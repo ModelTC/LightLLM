@@ -122,10 +122,8 @@ class DPChunkedPrefillBackend(ModeBackend):
 
                 event_pack.wait_to_forward()
 
-                # EPLB polling performs collectives and may commit weights, so keep all ranks ordered before normal
-                # collectives/forward.
-                if self.model.eplb_manager is not None:
-                    self.model.eplb_manager.poll()
+                # Keep EPLB collectives ordered before normal collectives/forward.
+                self._poll_eplb()
 
                 self._try_read_new_reqs()
 
@@ -150,7 +148,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
-                    self.prefill(
+                    self._run_prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
                     )

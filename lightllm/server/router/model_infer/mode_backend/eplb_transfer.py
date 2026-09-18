@@ -1,7 +1,7 @@
 """Layer-by-layer expert-row migration for EPLB."""
 
 import threading
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
@@ -94,13 +94,10 @@ class PinnedMemoryEPLBTransfer:
     the staging rows and routing metadata together at a safe forward boundary.
     """
 
-    backend = "pin-memory"
-
-    def __init__(self, weights, transfer_group, global_rank, world_size):
+    def __init__(self, weights, transfer_group, global_rank):
         self._eplb_impls = [weight.fuse_moe_impl for weight in weights]
         self.transfer_group = transfer_group
         self.global_rank = global_rank
-        self.world_size = world_size
         self.num_experts_per_rank = self._eplb_impls[0].num_primary_experts_per_rank
         self.device = weights[0].w13.weight.device
         self.live = [extract_eplb_expert_tensors(weight) for weight in weights]
@@ -135,9 +132,8 @@ class PinnedMemoryEPLBTransfer:
         self._release.set()
         self._consumed_event = torch.cuda.Event()
         self._consumed_recorded = False
-        self._changed_dst_slots = ()
-        self._pending = deque()
-        self._pending_lock = threading.Lock()
+        self._ready = None
+        self._ready_lock = threading.Lock()
         self._error = None
         self._thread = None
 
@@ -180,8 +176,9 @@ class PinnedMemoryEPLBTransfer:
         if self._thread is not None:
             raise RuntimeError("EPLB transfer has not been finished")
         self._error = None
-        with self._pending_lock:
-            self._pending.clear()
+        with self._ready_lock:
+            if self._ready is not None:
+                raise RuntimeError("EPLB ready layer has not been committed")
 
         def worker() -> None:
             try:
@@ -191,32 +188,30 @@ class PinnedMemoryEPLBTransfer:
                     self._release.clear()
                     if self._consumed_recorded:
                         self._consumed_event.synchronize()
-                    self._changed_dst_slots = tuple(
+                    changed_dst_slots = tuple(
                         sorted({step.dst_slot for step in plan if step.dst_rank == self.global_rank})
                     )
                     self._copy_layer(layer_index, plan)
-                    with self._pending_lock:
-                        self._pending.append((layer_index, 0))
+                    with self._ready_lock:
+                        self._ready = (layer_index, changed_dst_slots)
             except BaseException as exc:
                 self._error = exc
 
         self._thread = threading.Thread(target=worker, name="eplb-pin-memory", daemon=True)
         self._thread.start()
 
-    def pending_layers(self):
+    def ready_layer(self):
         if self._error is not None:
             raise RuntimeError("EPLB migration worker failed") from self._error
-        with self._pending_lock:
-            return list(self._pending)
+        with self._ready_lock:
+            return None if self._ready is None else self._ready[0]
 
-    def commit(self, layer_index: int, buffer_index: int, post_copy=None) -> None:
-        if buffer_index != 0:
-            raise RuntimeError("Pinned-memory EPLB uses a single staging buffer")
-        with self._pending_lock:
-            if not self._pending or self._pending[0] != (layer_index, buffer_index):
-                raise RuntimeError("EPLB commit does not match the pending FIFO")
-            self._pending.popleft()
-            changed_dst_slots = self._changed_dst_slots
+    def commit(self, layer_index: int, post_copy=None) -> None:
+        with self._ready_lock:
+            if self._ready is None or self._ready[0] != layer_index:
+                raise RuntimeError("EPLB commit does not match the ready layer")
+            _, changed_dst_slots = self._ready
+            self._ready = None
         for (_, live), (_, staging) in zip(self.live[layer_index], self.staging):
             _commit_staging_rows(live, staging, self.num_experts_per_rank, changed_dst_slots)
         if post_copy is not None:

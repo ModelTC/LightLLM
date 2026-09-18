@@ -55,11 +55,11 @@ def _free_port():
 def _wait_for_ready_layer(transfer, control_group):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        pending = transfer.pending_layers()
-        ready_count = torch.tensor([len(pending)], dtype=torch.int32)
+        ready_layer = transfer.ready_layer()
+        ready_count = torch.tensor([int(ready_layer is not None)], dtype=torch.int32)
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=control_group)
         if int(ready_count.item()) == 1:
-            return pending[0]
+            return ready_layer
         time.sleep(0.001)
     raise TimeoutError("EPLB transfer worker did not publish a globally ready layer")
 
@@ -73,7 +73,7 @@ def _worker(rank, port):
     transfer_group = dist.new_group([0, 1], backend="gloo")
 
     weights = [_FakeWeight(rank, layer_index) for layer_index in range(2)]
-    transfer = PinnedMemoryEPLBTransfer(weights, transfer_group, rank, world_size=2)
+    transfer = PinnedMemoryEPLBTransfer(weights, transfer_group, rank)
     assert all(row.is_pinned() for _, row in transfer.pinned_rows)
     current = torch.tensor([[2], [0]])
     target = torch.tensor([[3], [1]])
@@ -82,7 +82,7 @@ def _worker(rank, port):
     transfer.start(layer_plans)
 
     for expected_layer in range(2):
-        layer_index, buffer_index = _wait_for_ready_layer(transfer, control_group)
+        layer_index = _wait_for_ready_layer(transfer, control_group)
         assert layer_index == expected_layer
         expected_expert = 3 if rank == 0 else 1
         expected_w13 = expected_layer * 100 + expected_expert
@@ -91,7 +91,7 @@ def _worker(rank, port):
         assert torch.all(transfer.staging[1][1][0] == expected_w13 + 0.5)
         assert torch.all(transfer.staging[2][1][0] == expected_w2)
         assert torch.all(transfer.staging[3][1][0] == expected_w2 + 0.5)
-        transfer.commit(layer_index, buffer_index)
+        transfer.commit(layer_index)
 
     transfer.finish()
     torch.cuda.synchronize()

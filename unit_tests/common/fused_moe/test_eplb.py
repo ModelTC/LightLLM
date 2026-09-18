@@ -23,6 +23,7 @@ from lightllm.server.router.model_infer.mode_backend import (
 from lightllm.server.router.model_infer.mode_backend import (
     eplb_transfer as transfer_module,
 )
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
     deepgemm_impl as deepgemm_module,
 )
@@ -2076,21 +2077,20 @@ def test_commit_staging_rows_merges_contiguous_changed_slots():
     assert copies == [("live", 11, 3, "staging", 1, 3)]
 
 
-def test_manager_inflight_ready_gate_commits_ordered_prefix_and_propagates_worker_error(
-    monkeypatch,
-):
+def test_manager_inflight_ready_gate_commits_one_layer_and_propagates_worker_error(monkeypatch):
     class Transfer:
         def __init__(self):
-            self.pending = [(0, 0), (1, 1), (2, 2)]
+            self.ready = 0
             self.commits = []
             self.finished = 0
 
-        def pending_layers(self):
-            return self.pending
+        def ready_layer(self):
+            return self.ready
 
-        def commit(self, layer, buffer_index, post_copy=None):
-            assert self.pending.pop(0) == (layer, buffer_index)
-            self.commits.append((layer, buffer_index))
+        def commit(self, layer, post_copy=None):
+            assert self.ready == layer
+            self.ready = None
+            self.commits.append(layer)
             if post_copy is not None:
                 post_copy()
 
@@ -2099,78 +2099,50 @@ def test_manager_inflight_ready_gate_commits_ordered_prefix_and_propagates_worke
 
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.transfer = Transfer()
-    manager.in_flight = True
-    manager.world_size = 2
     manager.control_group = object()
     manager._control_ready_count = torch.empty(1, dtype=torch.int32)
-    manager.in_flight_layers = [0, 1, 2]
-    manager._commit_layer_metadata = lambda layer: committed.append(layer)
-    manager._finish_rebalance = lambda: finished.append(True)
+    manager.in_flight_layers = [0, 1]
     committed, finished = [], []
+    manager._commit_layer_metadata = committed.append
+    manager._finish_rebalance = lambda: finished.append(True)
     operations = []
-    current_stream_calls = []
 
     class CurrentStream:
         def wait_stream(self, stream):
             operations.append(("wait", stream))
 
     overlap_stream = object()
-
-    def current_stream():
-        current_stream_calls.append(True)
-        return CurrentStream()
-
-    monkeypatch.setattr(manager_module.torch.cuda, "current_stream", current_stream)
+    monkeypatch.setattr(manager_module.torch.cuda, "current_stream", lambda: CurrentStream())
     monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: overlap_stream)
 
-    original_commit = manager.transfer.commit
-
-    def record_commit(*args, **kwargs):
-        operations.append(("commit", args[0]))
-        return original_commit(*args, **kwargs)
-
-    manager.transfer.commit = record_commit
-
     def set_global_ready(count):
-        return lambda tensor, **kwargs: tensor.fill_(count)
+        return lambda tensor, **_kwargs: tensor.fill_(count)
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(0))
     manager._poll_in_flight()
     assert manager.transfer.commits == []
-    assert operations == []
-    assert current_stream_calls == []
-
-    # Local rank has three prefetched layers, but global MIN-ready only permits two.
-    monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(2))
-    manager._poll_in_flight()
-    assert manager.transfer.commits == [(0, 0), (1, 1)]
-    assert committed == [0, 1]
-    assert not finished
-    assert manager.transfer.finished == 0
-    assert operations == [("wait", overlap_stream), ("commit", 0), ("commit", 1)]
-    assert current_stream_calls == [True]
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(1))
     manager._poll_in_flight()
+    assert manager.transfer.commits == [0]
+    assert committed == [0]
+    assert operations == [("wait", overlap_stream)]
+    assert not finished
+
+    manager.transfer.ready = 1
+    manager._poll_in_flight()
+    assert manager.transfer.commits == [0, 1]
+    assert committed == [0, 1]
     assert finished == [True]
     assert manager.transfer.finished == 1
-    assert operations == [
-        ("wait", overlap_stream),
-        ("commit", 0),
-        ("commit", 1),
-        ("wait", overlap_stream),
-        ("commit", 2),
-    ]
-    assert current_stream_calls == [True, True]
 
-    manager.in_flight_layers = [3]
-    manager.transfer.pending = [(9, 0)]
-    monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(1))
+    manager.in_flight_layers = [2]
+    manager.transfer.ready = 9
     with pytest.raises(RuntimeError, match="does not match expected"):
         manager._poll_in_flight()
 
     class BrokenTransfer:
-        def pending_layers(self):
+        def ready_layer(self):
             raise RuntimeError("boom")
 
     manager.transfer = BrokenTransfer()
@@ -2192,8 +2164,8 @@ def test_manager_inflight_remote_worker_error_does_not_commit(monkeypatch):
         def __init__(self):
             self.commits = []
 
-        def pending_layers(self):
-            return [(0, 0)]
+        def ready_layer(self):
+            return 0
 
         def commit(self, *args):
             self.commits.append(args)
@@ -2260,13 +2232,14 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
         def __init__(self, live, staging):
             self.live = live
             self.staging = staging
-            self.pending = [(0, 0)]
+            self.ready = 0
 
-        def pending_layers(self):
-            return self.pending
+        def ready_layer(self):
+            return self.ready
 
-        def commit(self, layer, buffer_index, post_copy=None):
-            assert self.pending.pop(0) == (layer, buffer_index)
+        def commit(self, layer, post_copy=None):
+            assert self.ready == layer
+            self.ready = None
             self.live.copy_(self.staging, non_blocking=True)
             if post_copy is not None:
                 post_copy()
@@ -2707,6 +2680,33 @@ def test_manager_poll_waits_for_all_evaluation_results(monkeypatch):
     assert calls == ["evaluation"]
 
 
+def test_mode_backend_owns_eplb_poll_and_prefill_step():
+    backend = object.__new__(ModeBackend)
+    calls = []
+    backend.eplb_manager = SimpleNamespace(
+        poll=lambda: calls.append("poll"),
+        step=lambda: calls.append("step"),
+    )
+    backend.prefill = lambda **_kwargs: calls.append("prefill")
+
+    backend._poll_eplb()
+    backend._run_prefill(event_pack=object(), prefill_reqs=[])
+
+    assert calls == ["poll", "prefill", "step"]
+
+
+def test_mode_backend_eplb_hooks_are_noops_when_disabled():
+    backend = object.__new__(ModeBackend)
+    backend.eplb_manager = None
+    calls = []
+    backend.prefill = lambda **_kwargs: calls.append("prefill")
+
+    backend._poll_eplb()
+    backend._run_prefill(event_pack=object(), prefill_reqs=[])
+
+    assert calls == ["prefill"]
+
+
 def test_pinned_transfer_groups_sources_in_collective_order():
     plan = [
         TransferStep(0, 2, 1, 3),
@@ -2780,9 +2780,8 @@ def test_pinned_transfer_waits_for_each_layer_commit_before_reusing_staging(monk
     transfer._release.set()
     transfer._consumed_event = Event()
     transfer._consumed_recorded = False
-    transfer._changed_dst_slots = ()
-    transfer._pending = transfer_module.deque()
-    transfer._pending_lock = threading.Lock()
+    transfer._ready = None
+    transfer._ready_lock = threading.Lock()
     transfer._error = None
     transfer._thread = None
     copied = []
@@ -2792,19 +2791,19 @@ def test_pinned_transfer_waits_for_each_layer_commit_before_reusing_staging(monk
 
     transfer.start([(0, []), (1, [])])
     deadline = time.monotonic() + 2
-    while not transfer.pending_layers() and time.monotonic() < deadline:
+    while transfer.ready_layer() is None and time.monotonic() < deadline:
         time.sleep(0.001)
-    assert transfer.pending_layers() == [(0, 0)]
+    assert transfer.ready_layer() == 0
     assert copied == [0]
 
-    transfer.commit(0, 0)
+    transfer.commit(0)
     deadline = time.monotonic() + 2
-    while not transfer.pending_layers() and time.monotonic() < deadline:
+    while transfer.ready_layer() is None and time.monotonic() < deadline:
         time.sleep(0.001)
-    assert transfer.pending_layers() == [(1, 0)]
+    assert transfer.ready_layer() == 1
     assert copied == [0, 1]
     assert transfer._consumed_event.synchronize_count == 1
-    transfer.commit(1, 0)
+    transfer.commit(1)
     transfer.finish()
 
 
@@ -2842,9 +2841,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     monkeypatch.setattr(
         manager_module,
         "PinnedMemoryEPLBTransfer",
-        lambda weights, group, rank, world_size: (
-            transfer_calls.append((weights, group, rank, world_size)) or transfer
-        ),
+        lambda weights, group, rank: (transfer_calls.append((weights, group, rank)) or transfer),
     )
     logs = []
     monkeypatch.setattr(manager_module.logger, "info", lambda message: logs.append(message))
@@ -2856,7 +2853,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
         manager.transfer_group,
     ) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 3
-    assert transfer_calls == [([weight], groups[2], 0, 2)]
+    assert transfer_calls == [([weight], groups[2], 0)]
     assert manager.rebalance_gain_threshold == 0.07
     assert "rebalance_gain_threshold=0.0700" in logs[0]
     assert manager._continuous_collection_start_step is None
