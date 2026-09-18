@@ -548,7 +548,7 @@ def test_transfer_plan_respects_explicit_target_slots():
     }
 
 
-def test_manager_collects_logical_route_counters():
+def test_manager_snapshots_and_resets_logical_route_counters():
     counters = [
         torch.tensor([10, 11], dtype=torch.int64),
         torch.tensor([40, 41], dtype=torch.int64),
@@ -576,18 +576,19 @@ def test_manager_collects_logical_route_counters():
         weight.layer_num_ = layer_num
     manager.num_logical_experts = 2
 
-    samples = manager._collect_local_load()
+    samples = manager._snapshot_local_load()
 
     assert torch.equal(
         samples,
         torch.tensor([[10, 11], [40, 41]], dtype=torch.int64),
     )
+    assert all(torch.count_nonzero(counter) == 0 for counter in counters)
 
 
-def test_manager_delegates_distribution_planning_to_planner_class():
+def test_manager_delegates_distribution_planning_to_planner_class(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.global_rank = 0
-    manager.world_size = 1
+    manager.world_size = 2
     manager.evaluation_group = object()
     manager.current_placement = torch.tensor([[[1]]])
     logical_load = torch.tensor([[10, 20]])
@@ -598,6 +599,12 @@ def test_manager_delegates_distribution_planning_to_planner_class():
             return {"kind": "no_improvement"}
 
     manager.planner = SimpleNamespace(plan=lambda load, placement: (calls.append((load, placement)) or Result()))
+    broadcasts = []
+    monkeypatch.setattr(
+        manager_module.dist,
+        "broadcast_object_list",
+        lambda values, **kwargs: broadcasts.append((values, kwargs)),
+    )
 
     result = manager._plan_and_broadcast(logical_load)
 
@@ -605,6 +612,7 @@ def test_manager_delegates_distribution_planning_to_planner_class():
     assert len(calls) == 1
     assert calls[0][0] == logical_load.tolist()
     assert calls[0][1] == manager.current_placement.tolist()
+    assert broadcasts == [([result], {"src": 0, "group": manager.evaluation_group})]
 
 
 def test_expert_load_imbalance_ratio_averages_layer_ratios():
@@ -661,13 +669,13 @@ def test_eplb_route_counter_has_one_entry_per_logical_expert(monkeypatch):
     assert impl.route_counter.shape == (4,)
 
 
-def test_steady_sampling_resets_aggregated_route_counter():
+def test_enter_collecting_keeps_counts_accumulated_during_evaluation():
     counter = torch.ones((4,), dtype=torch.int64)
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     impl = _test_moe_impl(
         eplb=True,
         route_counter=counter,
-        recording=False,
+        recording=True,
         num_logical_experts=4,
         world_size=1,
     )
@@ -675,11 +683,11 @@ def test_steady_sampling_resets_aggregated_route_counter():
     manager.steps = 0
     manager.step_interval = 20
 
-    manager._restart_collection()
-    manager._restart_collection()
+    manager._enter_collecting()
 
     assert impl.route_counter.shape == (4,)
-    assert torch.count_nonzero(impl.route_counter) == 0
+    assert torch.equal(impl.route_counter, torch.ones(4, dtype=torch.int64))
+    assert impl.recording
 
 
 def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
@@ -729,7 +737,6 @@ def test_manager_evaluation_collective_sums_rank_loads(monkeypatch):
     manager.current_placement = _initial_extra_expert_placement(4, 4, 1).unsqueeze(0)
     manager.evaluation_group = object()
     local = torch.full((1, 4), 100, dtype=torch.int64)
-    manager._collect_local_load = lambda: local.clone()
     seen = {}
 
     def all_reduce(tensor, **kwargs):
@@ -748,7 +755,11 @@ def test_manager_evaluation_collective_sums_rank_loads(monkeypatch):
     manager._plan_and_broadcast = plan_and_broadcast
 
     evaluation = Future()
-    manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})(), evaluation)
+    manager._evaluate_after_event(
+        type("Event", (), {"synchronize": lambda self: None})(),
+        local.clone(),
+        evaluation,
+    )
     result = evaluation.result()
 
     assert seen["group"] is manager.evaluation_group
@@ -788,7 +799,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager.num_redundant_experts_per_rank = 1
     manager.current_placement = _initial_extra_expert_placement(4, 4, 1).unsqueeze(0).expand(3, -1, -1).clone()
     manager.evaluation_group = object()
-    manager._collect_local_load = lambda: torch.full((3, 4), 100, dtype=torch.int64)
+    local = torch.full((3, 4), 100, dtype=torch.int64)
     planned_placement = torch.tensor(
         [
             [[3], [0], [1], [2]],
@@ -819,7 +830,11 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     )
 
     evaluation = Future()
-    manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})(), evaluation)
+    manager._evaluate_after_event(
+        type("Event", (), {"synchronize": lambda self: None})(),
+        local,
+        evaluation,
+    )
     result = evaluation.result()
 
     assert calls == [(2, 4, 2)]
@@ -1245,7 +1260,7 @@ def test_manager_commits_completed_transfer_rows_by_planned_destination_index():
     manager.target_placement = torch.tensor([[[7, 6]]])
     manager._eplb_impls = [SimpleNamespace(local_logics_expert_ids_list=local_expert_ids)]
     manager._commit_layer_metadata = lambda _layer: None
-    manager.completed_transfers = [
+    manager.completed_layer_transfers = [
         SimpleNamespace(
             transfer_info=EPLBTransferInfo(1, 0, 7, 0, 3),
             tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -7))],
@@ -1280,14 +1295,14 @@ def test_manager_inflight_ready_gate_commits_one_layer(monkeypatch):
     manager.active_transfer = Transfer(info0)
     manager.control_group = object()
     manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
-    manager.in_flight_transfers = [info0, info0b, info1]
-    manager.completed_transfers = []
+    manager.pending_transfer_infos = [info0, info0b, info1]
+    manager.completed_layer_transfers = []
     committed, finished = [], []
     manager._commit_transferred_layer = committed.append
     manager._finish_rebalance = lambda: finished.append(True)
 
     def start_next_transfer():
-        manager.active_transfer = Transfer(manager.in_flight_transfers[0])
+        manager.active_transfer = Transfer(manager.pending_transfer_infos[0])
 
     manager._start_next_transfer = start_next_transfer
     operations = []
@@ -1304,28 +1319,28 @@ def test_manager_inflight_ready_gate_commits_one_layer(monkeypatch):
         return lambda tensor, **_kwargs: tensor.fill_(count)
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(0))
-    manager._poll_in_flight()
+    manager._step_transferring()
     assert committed == []
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(1))
-    manager._poll_in_flight()
+    manager._step_transferring()
     assert committed == []
     assert operations == []
     assert not finished
 
-    manager._poll_in_flight()
+    manager._step_transferring()
     assert committed == [0]
     assert operations == [("wait", overlap_stream)]
 
-    manager._poll_in_flight()
+    manager._step_transferring()
     assert committed == [0, 1]
     assert finished == [True]
 
     expected = EPLBTransferInfo(0, 2, 5, 1, 2)
-    manager.in_flight_transfers = [expected]
+    manager.pending_transfer_infos = [expected]
     manager.active_transfer = Transfer(EPLBTransferInfo(1, 2, 5, 1, 2))
     with pytest.raises(RuntimeError, match="does not match"):
-        manager._poll_in_flight()
+        manager._step_transferring()
 
 
 def test_evaluation_ready_gate_propagates_local_and_remote_errors(monkeypatch):
@@ -1387,8 +1402,8 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
     manager.active_transfer = Transfer(live, received, transfer_info)
     manager.control_group = object()
     manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
-    manager.in_flight_transfers = [transfer_info]
-    manager.completed_transfers = []
+    manager.pending_transfer_infos = [transfer_info]
+    manager.completed_layer_transfers = []
     manager.num_primary_experts_per_rank = 0
     manager.global_rank = 0
     manager.target_placement = torch.tensor([[[2]]])
@@ -1404,7 +1419,7 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
             torch.cuda._sleep(20_000_000)
             previous_read.copy_(live, non_blocking=True)
         with torch.cuda.stream(destination_stream):
-            manager._poll_in_flight()
+            manager._step_transferring()
         with torch.cuda.stream(source_stream):
             source_stream.wait_stream(destination_stream)
             next_read.copy_(live, non_blocking=True)
@@ -1418,23 +1433,23 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
 
 def test_manager_step_advances_inflight_transfer():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1, 2)]
-    manager._evaluation = None
+    manager.state = manager_module.EPLBManagerState.TRANSFERRING
     calls = []
-    manager._poll_in_flight = lambda: calls.append("poll")
+    manager._step_transferring = lambda: calls.append("transfer")
+
     manager.step()
-    assert calls == ["poll"]
+
+    assert calls == ["transfer"]
 
 
 def test_manager_uses_one_fixed_full_sampling_window(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_transfers = []
-    manager._evaluation = None
+    manager.state = manager_module.EPLBManagerState.COLLECTING
     manager.steps = 0
     manager.step_interval = 3
     manager.next_evaluation_step = 3
     starts = []
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(manager.steps))
+    monkeypatch.setattr(manager, "_enter_evaluating", lambda: starts.append(manager.steps))
 
     manager.step()
     manager.step()
@@ -1444,7 +1459,32 @@ def test_manager_uses_one_fixed_full_sampling_window(monkeypatch):
     assert starts == [3]
 
 
-def test_manager_restart_collection_resets_counters_and_arms_next_window():
+def test_manager_enters_evaluating_without_stopping_route_counting(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    impl = SimpleNamespace(recording=True)
+    local_load = torch.tensor([[1, 2]], dtype=torch.int64)
+    event = SimpleNamespace(record=lambda stream: None)
+    worker = SimpleNamespace(start=lambda: None)
+    thread_args = []
+    manager._eplb_impls = [impl]
+    manager._snapshot_local_load = lambda: local_load
+
+    monkeypatch.setattr(manager_module.torch.cuda, "Event", lambda: event)
+    monkeypatch.setattr(manager_module.torch.cuda, "current_stream", lambda: object())
+    monkeypatch.setattr(
+        manager_module.threading,
+        "Thread",
+        lambda **kwargs: (thread_args.append(kwargs["args"]) or worker),
+    )
+
+    manager._enter_evaluating()
+
+    assert impl.recording
+    assert manager.state is manager_module.EPLBManagerState.EVALUATING
+    assert thread_args[0][1] is local_load
+
+
+def test_manager_enter_collecting_clears_state_and_arms_next_window():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.steps = 11
     manager.step_interval = 20
@@ -1452,40 +1492,65 @@ def test_manager_restart_collection_resets_counters_and_arms_next_window():
     impl = _test_moe_impl(
         eplb=True,
         route_counter=counter,
-        recording=False,
+        recording=True,
         num_logical_experts=4,
         world_size=1,
     )
     manager._eplb_impls = [impl]
 
-    manager._restart_collection()
+    manager._enter_collecting()
 
-    assert torch.count_nonzero(counter) == 0
+    assert torch.equal(counter, torch.ones(4, dtype=torch.int64))
     assert impl.recording
+    assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert manager.next_evaluation_step == 31
 
 
-def test_manager_step_advances_inflight_before_evaluation():
+def test_manager_step_uses_explicit_state_instead_of_pending_work():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1, 2)]
+    manager.state = manager_module.EPLBManagerState.TRANSFERRING
+    manager.pending_transfer_infos = [EPLBTransferInfo(0, 0, 2, 1, 2)]
     manager._evaluation = Future()
     calls = []
-    manager._poll_in_flight = lambda: calls.append("inflight")
-    manager._finish_evaluation = lambda: calls.append("evaluation")
+    manager._step_transferring = lambda: calls.append("transfer")
+    manager._step_evaluating = lambda: calls.append("evaluation")
 
     manager.step()
 
-    assert calls == ["inflight"]
+    assert calls == ["transfer"]
+
+
+def test_manager_enters_transferring_state_with_planned_work():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    transfer_info = EPLBTransferInfo(0, 0, 2, 1, 2)
+    starts = []
+    manager.global_rank = 1
+    manager._start_next_transfer = lambda: starts.append(manager.pending_transfer_infos[0])
+
+    manager._enter_transferring(
+        {
+            "placement": [[[2], [3]]],
+            "metadata": {0: torch.tensor([1])},
+            "transfer_infos": [transfer_info],
+        }
+    )
+
+    assert manager.state is manager_module.EPLBManagerState.TRANSFERRING
+    assert manager.pending_transfer_infos == [transfer_info]
+    assert manager.completed_layer_transfers == []
+    assert starts == [transfer_info]
 
 
 def test_manager_step_waits_for_all_evaluation_results(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_transfers = []
+    manager.state = manager_module.EPLBManagerState.EVALUATING
     manager._evaluation = Future()
     manager.control_group = object()
     manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
     calls = []
-    manager._finish_evaluation = lambda: calls.append("evaluation")
+    manager._publish_expert_load_metric = lambda _result: calls.append("publish")
+    manager._enter_collecting = lambda: calls.append("collect")
+    manager.global_rank = 1
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **_kwargs: tensor.fill_(0))
     manager.step()
@@ -1494,7 +1559,7 @@ def test_manager_step_waits_for_all_evaluation_results(monkeypatch):
     manager._evaluation.set_result({"kind": "no_improvement"})
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **_kwargs: tensor.fill_(1))
     manager.step()
-    assert calls == ["evaluation"]
+    assert calls == ["publish", "collect"]
 
 
 def test_manager_exposes_one_lifecycle_step_entrypoint():
@@ -1658,6 +1723,15 @@ def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
         transfer.start()
 
 
+def test_manager_requires_more_than_one_rank(monkeypatch):
+    monkeypatch.setattr(manager_module, "_find_fused_moe_weights", lambda model: [object()])
+    monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 1)
+
+    with pytest.raises(AssertionError, match="more than one rank"):
+        manager_module.EPLBManager(type("Model", (), {})())
+
+
 def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     weight = type(
         "Weight",
@@ -1667,6 +1741,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
             "layer_num_": 0,
             "fuse_moe_impl": _test_moe_impl(
                 eplb=True,
+                recording=True,
                 num_logical_experts=4,
                 world_size=2,
                 num_redundant_experts_per_rank=2,
@@ -1699,6 +1774,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     monkeypatch.setattr(manager_module.logger, "info", lambda message: logs.append(message))
     manager = manager_module.EPLBManager(type("Model", (), {})())
     assert manager.active_transfer is None
+    assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert (
         manager.evaluation_group,
         manager.control_group,
@@ -1706,7 +1782,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     ) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 3
     transfer_info = EPLBTransferInfo(0, 0, 2, 1, 2)
-    manager.in_flight_transfers = [transfer_info]
+    manager.pending_transfer_infos = [transfer_info]
     manager._start_next_transfer()
     assert transfer_calls == [([weight], groups[2], 0, transfer_info)]
     assert transfer_starts == [True]
