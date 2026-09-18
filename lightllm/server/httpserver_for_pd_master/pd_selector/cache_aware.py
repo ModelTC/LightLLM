@@ -53,8 +53,6 @@ class CacheAwareConfig:
     evict_node_batch: int = 10_000
     # 每隔 sample_stride 个字符抽 1 个作为前缀树 key，降低匹配开销与内存。
     sample_stride: int = 512
-    # 初始化前缀树时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
-    recursion_limit: int = 4000
 
 
 class BalanceRelThresholdController:
@@ -108,7 +106,6 @@ class CacheAwarePolicy:
             sample_stride=self.config.sample_stride,
             max_node_count=self.config.max_node_count,
             evict_node_batch=self.config.evict_node_batch,
-            recursion_limit=self.config.recursion_limit,
         )
         self.balance_rel_threshold_controller = BalanceRelThresholdController()
 
