@@ -9,11 +9,11 @@ import torch.distributed as dist
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
-    build_initial_local_expert_ids,
     build_logical_to_physical_maps_for_layers,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import (
     EPLBPlanner,
+    ExpertPlacement,
     GreedyEPLBPlanner,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import (
@@ -38,7 +38,7 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 EPLB_EXPERT_ALIGNMENT = 128
-EPLB_CONTROL_ERROR = -1
+EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT = 256
 EPLB_EXPERT_IMBALANCE_RATIO_METRIC = "lightllm_eplb_topk_expert_imbalance_ratio"
 
 
@@ -47,6 +47,7 @@ class EPLBManagerState(Enum):
 
     COLLECTING = "collecting"
     EVALUATING = "evaluating"
+    PLANNING = "planning"
     TRANSFERRING = "transferring"
 
 
@@ -55,11 +56,12 @@ class EPLBManager:
 
     状态循环如下：
 
-    ``COLLECTING -> EVALUATING -> TRANSFERRING -> COLLECTING``
+    ``COLLECTING -> EVALUATING -> PLANNING -> TRANSFERRING -> COLLECTING``
 
-    当规划器认为无需调整布局时，``EVALUATING`` 会直接回到
+    当收集的平均专家 token 数不足时，``EVALUATING`` 会回到
+    ``COLLECTING``；当规划器认为无需调整布局时，``PLANNING`` 会回到
     ``COLLECTING``。每次调用 :meth:`step` 最多推进一个状态，耗时的负载
-    评估和权重传输在后台执行，主推理线程只负责轮询和提交结果。
+    聚合、布局规划和权重传输在后台执行，主推理线程只负责轮询和提交结果。
     """
 
     def __init__(self, model: TpPartBaseModel) -> None:
@@ -82,31 +84,35 @@ class EPLBManager:
         self.step_interval: int = get_eplb_step_interval()
         self.steps: int = 0
 
-        # 专家布局与规划器：current_placement 只记录各层的冗余专家槽位。
-        initial_local_expert_ids = build_initial_local_expert_ids(
-            self.num_logical_experts,
-            self.world_size,
-            self.num_redundant_experts_per_rank,
-        )
-        initial_redundant_expert_ids = [
-            expert_ids[self.num_primary_experts_per_rank :] for expert_ids in initial_local_expert_ids
+        # 分布式通信：控制面与权重传输使用独立的通信组。
+        self.control_group = dist.new_group(list(range(self.world_size)), backend="gloo")
+        self.transfer_group = dist.new_group(list(range(self.world_size)), backend="gloo")
+
+        # 专家布局与规划器：直接以各层 impl 中的实际冗余专家槽位为准。
+        # 本 rank 的布局索引为 [layer][redundant_slot]。
+        local_redundant_expert_ids_by_layer = [
+            impl.local_logics_expert_ids_list[self.num_primary_experts_per_rank :] for impl in self._eplb_impls
         ]
-        self.current_placement: torch.Tensor = torch.tensor(
-            [initial_redundant_expert_ids for _ in weights],
-            dtype=torch.int64,
+
+        # all_gather 后的布局索引为 [rank][layer][redundant_slot]。
+        redundant_expert_ids_by_rank_and_layer: List[List[List[int]]] = [[] for _ in range(self.world_size)]
+        dist.all_gather_object(
+            redundant_expert_ids_by_rank_and_layer,
+            local_redundant_expert_ids_by_layer,
+            group=self.control_group,
         )
+
+        # 转置为规划器使用的 [layer][rank][redundant_slot]。
+        self.current_placement: ExpertPlacement = [
+            [redundant_expert_ids_by_rank_and_layer[rank][layer_index] for rank in range(self.world_size)]
+            for layer_index in range(len(weights))
+        ]
         self.planner: EPLBPlanner = GreedyEPLBPlanner(
             self.world_size,
             self.num_redundant_experts_per_rank,
             expert_alignment=EPLB_EXPERT_ALIGNMENT,
             rebalance_gain_threshold=get_eplb_rebalance_gain_threshold(),
         )
-
-        # 分布式通信：评估、状态同步和权重传输使用独立的通信组。
-        self.evaluation_group = dist.new_group(list(range(self.world_size)), backend="gloo")
-        self.control_group = dist.new_group(list(range(self.world_size)), backend="gloo")
-        self.transfer_group = dist.new_group(list(range(self.world_size)), backend="gloo")
-        self._control_status_buffer: torch.Tensor = torch.empty(1, dtype=torch.int32)
 
         self.state = EPLBManagerState.COLLECTING
         self.next_evaluation_step = self.step_interval
@@ -129,6 +135,10 @@ class EPLBManager:
             self._step_evaluating()
             return
 
+        if self.state is EPLBManagerState.PLANNING:
+            self._step_planning()
+            return
+
         if self.state is EPLBManagerState.TRANSFERRING:
             self._step_transferring()
             return
@@ -138,44 +148,74 @@ class EPLBManager:
     # 状态处理：与 step() 的分发顺序保持一致。
 
     def _step_collecting(self) -> None:
-        """记录一个采样步，并在采样窗口结束后开始评估。"""
+        """记录一个采样步，并在采样窗口结束后进入评估状态。"""
         self.steps += 1
         if self.steps < self.next_evaluation_step:
             return
 
-        local_load = self._snapshot_local_load()
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream())
-        evaluation = Future()
-        del self.next_evaluation_step
-        self._evaluation = evaluation
+        self.next_evaluation_step += self.step_interval
         self.state = EPLBManagerState.EVALUATING
-        threading.Thread(
-            target=self._evaluate_after_event,
-            args=(event, local_load, evaluation),
-            daemon=True,
-        ).start()
 
     def _step_evaluating(self) -> None:
-        """等待所有 rank 完成评估，然后进入采样或传输状态。"""
-        if not self._evaluation_ready_on_all_ranks():
+        """启动或等待负载聚合，并根据样本量进入采样或规划状态。"""
+        if not hasattr(self, "_evaluation"):
+            local_load = self._snapshot_local_load()
+            event = torch.cuda.Event()
+            event.record(torch.cuda.current_stream())
+            evaluation = Future()
+            self._evaluation = evaluation
+            threading.Thread(
+                target=self._evaluate_after_event,
+                args=(event, local_load, evaluation),
+                daemon=True,
+            ).start()
+            return
+
+        if not self._background_work_ready_on_all_ranks(self._evaluation, "evaluation"):
             return
 
         result = self._evaluation.result()
         del self._evaluation
         self._publish_expert_load_metric(result)
+        if result["average_tokens_per_expert"] < EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT:
+            if self.global_rank == 0:
+                logger.info(
+                    "eplb continue collecting average_tokens_per_expert=%.2f threshold=%s",
+                    result["average_tokens_per_expert"],
+                    EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT,
+                )
+            self.state = EPLBManagerState.COLLECTING
+            return
+
+        planning = Future()
+        self._planning = planning
+        self.state = EPLBManagerState.PLANNING
+        threading.Thread(
+            target=self._plan_after_evaluation,
+            args=(result["global_load"], planning),
+            daemon=True,
+        ).start()
+
+    def _step_planning(self) -> None:
+        """等待布局规划，并进入采样或传输状态。"""
+        if not self._background_work_ready_on_all_ranks(self._planning, "planning"):
+            return
+
+        result = self._planning.result()
+        del self._planning
         if result["kind"] != "planned":
             if self.global_rank == 0:
                 logger.info("eplb skip rearrangement kind=%s", result["kind"])
             self.state = EPLBManagerState.COLLECTING
-            self.next_evaluation_step = self.steps + self.step_interval
             return
 
         pending_transfer_infos = list(result["transfer_infos"])
         if not pending_transfer_infos:
             raise RuntimeError("planned EPLB rearrangement must contain at least one transfer")
 
-        self.target_placement = torch.tensor(result["placement"], dtype=torch.int64)
+        self.target_placement: ExpertPlacement = [
+            [list(expert_ids) for expert_ids in layer_placement] for layer_placement in result["placement"]
+        ]
         self.target_metadata = result["metadata"]
         self.pending_transfer_infos = pending_transfer_infos
         self.completed_layer_transfers: List[PinnedMemoryEPLBTransfer] = []
@@ -214,7 +254,6 @@ class EPLBManager:
 
         elapsed = self._complete_rebalance()
         self.state = EPLBManagerState.COLLECTING
-        self.next_evaluation_step = self.steps + self.step_interval
         if self.global_rank == 0:
             logger.info(
                 "eplb completed wall_time=%.2fs",
@@ -223,18 +262,17 @@ class EPLBManager:
 
     # 评估阶段内部实现。
 
-    def _evaluation_ready_on_all_ranks(self) -> bool:
-        ready = self._evaluation.done()
-        error = self._evaluation.exception() if ready else None
-        status = EPLB_CONTROL_ERROR if error is not None else int(ready)
-        global_evaluation_status = self._control_status_buffer.fill_(status)
-        dist.all_reduce(global_evaluation_status, op=dist.ReduceOp.MIN, group=self.control_group)
-        global_evaluation_status_value = int(global_evaluation_status.item())
-        if global_evaluation_status_value < 0:
+    def _background_work_ready_on_all_ranks(self, work: Future, phase: str) -> bool:
+        if not work.done():
+            return False
+        error = work.exception()
+        failed_by_rank = [False] * self.world_size
+        dist.all_gather_object(failed_by_rank, error is not None, group=self.control_group)
+        if any(failed_by_rank):
             if error is not None:
-                raise RuntimeError("EPLB evaluation failed on this rank") from error
-            raise RuntimeError("EPLB evaluation failed on another rank")
-        return bool(global_evaluation_status_value)
+                raise RuntimeError(f"EPLB {phase} failed on this rank") from error
+            raise RuntimeError(f"EPLB {phase} failed on another rank")
+        return True
 
     def _publish_expert_load_metric(self, result: Dict[str, Any]) -> None:
         if self.global_rank != 0:
@@ -260,14 +298,25 @@ class EPLBManager:
             torch.cuda.set_device(local_load.device)
             event.synchronize()
             global_load = local_load.cpu()
-            dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.evaluation_group)
-            result = self._plan_and_broadcast(global_load)
-            result["expert_imbalance_ratio"] = _expert_load_imbalance_ratio(global_load)
-            if result["kind"] == "planned":
-                result["metadata"], result["transfer_infos"] = self._build_rebalance_data(result)
-            evaluation.set_result(result)
+            dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.control_group)
+            evaluation.set_result(
+                {
+                    "global_load": global_load,
+                    "average_tokens_per_expert": _average_tokens_per_expert(global_load),
+                    "expert_imbalance_ratio": _expert_load_imbalance_ratio(global_load),
+                }
+            )
         except BaseException as exc:
             evaluation.set_exception(exc)
+
+    def _plan_after_evaluation(self, global_load: torch.Tensor, planning: Future) -> None:
+        try:
+            result = self._plan_and_broadcast(global_load)
+            if result["kind"] == "planned":
+                result["metadata"], result["transfer_infos"] = self._build_rebalance_data(result)
+            planning.set_result(result)
+        except BaseException as exc:
+            planning.set_exception(exc)
 
     def _plan_and_broadcast(self, global_load: torch.Tensor) -> Dict[str, Any]:
         result: Optional[Dict[str, Any]] = None
@@ -276,13 +325,13 @@ class EPLBManager:
             try:
                 result = self.planner.plan(
                     global_load.tolist(),
-                    self.current_placement.tolist(),
+                    self.current_placement,
                 ).as_dict()
             except BaseException as exc:
                 local_error = exc
                 result = {"kind": "error", "message": f"{type(exc).__name__}: {exc}"}
         values = [result]
-        dist.broadcast_object_list(values, src=0, group=self.evaluation_group)
+        dist.broadcast_object_list(values, src=0, group=self.control_group)
         result = values[0]
         if result["kind"] == "error":
             if local_error is not None:
@@ -321,7 +370,7 @@ class EPLBManager:
             dtype=torch.int32,
         )
         for changed_layer_offset, layer_index in enumerate(changed_layer_indices):
-            current_layer_placement = self.current_placement[layer_index].tolist()
+            current_layer_placement = self.current_placement[layer_index]
             target_layer_placement = result["placement"][layer_index]
             metadata_by_layer[layer_index] = logical_to_physical_maps[changed_layer_offset]
             planned_transfers.extend(
@@ -339,9 +388,13 @@ class EPLBManager:
 
     def _active_transfer_finished_on_all_ranks(self) -> bool:
         """仅当所有 rank 都完成当前传输时返回 ``True``。"""
-        all_ranks_finished = self._control_status_buffer.fill_(int(self.active_transfer.is_finished()))
-        dist.all_reduce(all_ranks_finished, op=dist.ReduceOp.MIN, group=self.control_group)
-        return bool(all_ranks_finished.item())
+        finished_by_rank = [False] * self.world_size
+        dist.all_gather_object(
+            finished_by_rank,
+            self.active_transfer.is_finished(),
+            group=self.control_group,
+        )
+        return all(finished_by_rank)
 
     def _complete_active_transfer(self) -> EPLBTransferInfo:
         """将当前传输从待处理队列移动到本层的已完成列表。"""
@@ -390,7 +443,7 @@ class EPLBManager:
 
     def _commit_transferred_layer(self, layer_index: int) -> None:
         """在主推理线程中同步发布一层权重和路由 metadata。"""
-        target_redundant_expert_ids: List[int] = self.target_placement[layer_index, self.global_rank].tolist()
+        target_redundant_expert_ids: List[int] = self.target_placement[layer_index][self.global_rank]
         for transfer in self.completed_layer_transfers:
             transfer_info: EPLBTransferInfo = transfer.transfer_info
             if transfer_info.dest_rank != self.global_rank:
@@ -417,6 +470,13 @@ def _expert_load_imbalance_ratio(global_load: torch.Tensor) -> float:
         return 0.0
     ratios = global_load.max(dim=1).values[valid_layers] / layer_means[valid_layers]
     return float(ratios.mean().item())
+
+
+def _average_tokens_per_expert(global_load: torch.Tensor) -> float:
+    """Average token count for each logical expert in each layer."""
+    if global_load.ndim != 2:
+        raise ValueError("global_load must be [layers, logical_experts]")
+    return float(global_load.to(torch.float64).mean().item())
 
 
 def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:
