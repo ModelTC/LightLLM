@@ -51,7 +51,7 @@ class ExportCalibrationMemoryManager(MemoryManager):
         if self.calibration_target not in {"kv", "q", "qkv"}:
             raise ValueError(f"unknown calibration target {self.calibration_target}")
         if self.calibration_target in {"q", "qkv"} and not self._is_per_head_quant():
-            raise ValueError("decode Q calibration requires FA3 per-head attention")
+            raise ValueError("Q calibration requires FA3 per-head attention")
         shape = (
             [self.layer_num, self.head_num]
             if self.calibration_target == "q"

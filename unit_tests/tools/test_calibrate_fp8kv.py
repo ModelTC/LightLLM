@@ -43,6 +43,43 @@ def test_merge_per_tensor_takes_each_kv_maximum():
     assert out["scales"] == [[2 / 448, 4 / 448], [6 / 448, 8 / 448]]
 
 
+def test_merge_q_marks_prefill_and_decode_and_embeds_without_changing_kv():
+    q_rows = []
+    for rank in range(2):
+        row = _snap(rank)
+        q_rows.append(
+            {
+                key: row[key]
+                for key in (
+                    "rank",
+                    "layer_num",
+                    "head_num",
+                    "counts",
+                    "observed_token_rows",
+                    "qmin",
+                    "qmax",
+                    "architecture",
+                    "num_target_layers",
+                    "num_draft_layers",
+                )
+            }
+            | {
+                "tensor": "q",
+                "per_head": True,
+                "global_head_num": 2,
+                "shape": [2, 2],
+                "abs_max": [[1 + rank, 2 + rank], [5 + rank, 6 + rank]],
+            }
+        )
+    q_cfg = tool.merge_q_rank_snapshots(q_rows, expected_ranks=2)
+    assert q_cfg["calibration_stage"] == "prefill_and_decode"
+    kv_cfg = tool.merge_rank_snapshots([_snap(0), _snap(1)], expected_ranks=2)
+    combined = tool._embed_q_calibration(kv_cfg, q_cfg)
+    assert combined["q_calibration"] == q_cfg
+    assert {key: combined[key] for key in kv_cfg} == kv_cfg
+    assert "q_calibration" not in kv_cfg
+
+
 @pytest.mark.parametrize("change", ["missing", "nan"])
 def test_merge_rejects_missing_or_nonfinite_rank_data(change):
     rows = [_snap(0), _snap(1)]
@@ -202,7 +239,7 @@ def test_main_uses_real_http_concurrency_and_cleans_child(tmp_path, monkeypatch,
     args = _fake_args()
     args.port = server.server_port
     monkeypatch.setattr(tool, "_parse", lambda: (own, []))
-    monkeypatch.setattr(tool, "_service_args", lambda argv, job: args)
+    monkeypatch.setattr(tool, "_service_args", lambda argv, job, calibration_target="kv": args)
     monkeypatch.setattr(
         tool,
         "_load_tokenizer",

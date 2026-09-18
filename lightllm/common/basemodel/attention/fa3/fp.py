@@ -126,6 +126,17 @@ class Fa3PrefillAttState(BasePrefillAttState):
         else:
             sink_weight = None
 
+        mem_manager = getattr(self.backend.model, "mem_manager", None)
+        if getattr(mem_manager, "calibration_target", None) in {"q", "qkv"}:
+            layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
+            request_mask = self.infer_state.b_req_idx != self.backend.model.req_manager.HOLD_REQUEST_ID
+            valid_rows = torch.repeat_interleave(
+                request_mask,
+                torch.diff(self.cu_seqlens_q),
+                output_size=q.shape[0],
+            )
+            mem_manager.update_q_calibration_data(q, layer_index, valid_rows)
+
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
@@ -290,7 +301,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
 
         mem_manager = getattr(self.backend.model, "mem_manager", None)
         if getattr(mem_manager, "calibration_target", None) in {"q", "qkv"}:
-            assert not getattr(self.infer_state, "is_prefill", False), "Q calibration only collects decode attention"
+            assert not getattr(self.infer_state, "is_prefill", False), "decode Q calibration received a prefill state"
             request_ids = self.infer_state.b_req_idx
             if request_ids.numel() != q.shape[0]:
                 raise ValueError("decode Q rows must align with b_req_idx before calibration collection")

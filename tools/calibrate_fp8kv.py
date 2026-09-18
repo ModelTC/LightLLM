@@ -149,7 +149,7 @@ def merge_rank_snapshots(snapshots: list[dict[str, Any]], *, expected_ranks: int
 
 
 def merge_q_rank_snapshots(snapshots: list[dict[str, Any]], *, expected_ranks: int | None = None) -> dict[str, Any]:
-    """Merge decode-Q maxima into canonical global KV-head order.
+    """Merge Q maxima into canonical global KV-head order.
 
     TP ranks can replicate a KV head when TP exceeds global KV heads; those
     copies are conservative maxima of distinct Q-head groups and must be
@@ -205,7 +205,7 @@ def merge_q_rank_snapshots(snapshots: list[dict[str, Any]], *, expected_ranks: i
             for values in (row["counts"], row["observed_token_rows"])
             for value in values
         ):
-            raise ValueError("Q rank snapshot has an unobserved decode layer")
+            raise ValueError("Q rank snapshot has an unobserved Q layer")
         if any(
             not isinstance(values, list)
             or len(values) != row["head_num"]
@@ -252,7 +252,7 @@ def merge_q_rank_snapshots(snapshots: list[dict[str, Any]], *, expected_ranks: i
     return {
         "version": "1.0",
         "tensor": "q",
-        "calibration_stage": "decode",
+        "calibration_stage": "prefill_and_decode",
         "quant_type": "per_head",
         "scale_layout": "kv_head_group",
         "architectures": first["architecture"],
@@ -718,8 +718,8 @@ def main() -> int:
         )
         report = {
             "calibration_target": calibration_target,
-            "calibration_stage": "decode" if calibration_target == "q" else "prefill_and_decode",
-            "q_calibration_stage": "decode" if calibration_target == "qkv" else None,
+            "calibration_stage": "prefill_and_decode",
+            "q_calibration_stage": "prefill_and_decode" if calibration_target == "qkv" else None,
             "random_input": own.dataset is None,
             "seed": own.seed if own.dataset is None else None,
             "dataset": str(own.dataset) if own.dataset else None,

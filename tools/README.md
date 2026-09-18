@@ -56,11 +56,14 @@ node, `dp=1`, and normal mode. JSON puts target layers before draft layers;
 target-only jobs are supported. Vision and audio are disabled for this text-only
 workflow.
 
-## Combined KV and decode-only Q calibration
+## Combined KV and Q calibration
 
-Use `--calibration_target qkv` to collect normal KV maxima and decode-only,
-post-RoPE Q maxima in one BF16 reference-service run. It writes one per-head KV
-artifact with an embedded `q_calibration` object; prefill Q remains dynamic.
+Use `--calibration_target qkv` to collect normal KV maxima and post-RoPE Q
+maxima from prefill and decode attention in one BF16 reference-service run. It
+writes one per-head KV artifact with an embedded `q_calibration` object;
+both phases share one per-layer, per-KV-head maximum. FP8 KV inference applies
+the static Q scales in both prefill and decode. DSpark prefill writes KV without
+full attention, so its draft Q observations continue to come from decode.
 
 ```bash
 python tools/calibrate_fp8kv.py --calibration_target qkv --num_samples 128 \
@@ -73,12 +76,13 @@ python tools/calibrate_fp8kv.py --calibration_target qkv --num_samples 128 \
 
 ## Add Q to an existing KV calibration
 
-Use `--calibration_target q` to add decode-only per-KV-head Q scales to a copy
+Use `--calibration_target q` to add per-KV-head Q scales to a copy
 of an existing per-head KV calibration file. The isolated service still uses
-BF16 KV storage as the reference path. It collects only post-RoPE Q in decode
-attention; prefill Q remains dynamically quantized at inference. Q calibration
-requires explicit FA3 for both full-attention prefill and decode. The source KV
-file is read before startup, never rewritten, and the output path must differ.
+BF16 KV storage as the reference path. It collects post-RoPE Q in prefill and
+decode attention; FP8 KV inference applies its static Q scales in both phases.
+Q calibration requires explicit FA3 for both full-attention prefill and decode.
+The source KV file is read before startup, never rewritten, and the output path
+must differ.
 
 ```bash
 python tools/calibrate_fp8kv.py --calibration_target q --num_samples 128 \
@@ -91,6 +95,6 @@ python tools/calibrate_fp8kv.py --calibration_target q --num_samples 128 \
 ```
 
 At FP8 KV inference, load the single merged file with
-`--kv_quant_calibration_config_path KV_with_q.json`. When its optional
-`q_calibration` object is present, it is accepted only with `--llm_kv_type
-fp8kv_sph` and FA3 decode; without it, decode Q keeps the existing dynamic path.
+`--kv_quant_calibration_config_path KV_with_q.json`. Its required
+`q_calibration` object is used only with `--llm_kv_type fp8kv_sph` and static Q
+quantization for FA3 prefill and decode.
