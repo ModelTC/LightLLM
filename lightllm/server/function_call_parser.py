@@ -1686,6 +1686,12 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     continue
 
                 if self.current_tool_name_sent and not has_new_param_end:
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            parameters="",
+                        )
+                    )
                     return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
 
                 partial_match = self.partial_invoke_regex.match(current_text)
