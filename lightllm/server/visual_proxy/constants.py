@@ -8,7 +8,7 @@ from typing import Any, Final
 
 VISION_READER_NAME: Final = "vision_reader"
 MAX_AGENT_STEPS: Final = 12
-MAX_REASONING_CONTEXT_BYTES: Final = 256 * 1024
+MAX_REASONING_CONTEXT_BYTES: Final = 2 * 1024 * 1024
 ANTHROPIC_SEQUENTIAL_TOOL_PROMPT: Final = (
     "Call builtin vision_reader by itself and wait for its structured result before issuing any external "
     "tool call. Never mix vision_reader with another tool in the same assistant turn."
@@ -56,12 +56,8 @@ BUILTIN_VISION_READER_TOOL: Final[dict[str, Any]] = {
 IMAGE_TAG_PATTERN = re.compile(r"<\s*image[_-](\d+)\s*/?\s*>", re.IGNORECASE)
 IMAGE_ALIAS_PATTERN = re.compile(r"(?:image[_\s-]*|picture\s*)(\d+)", re.IGNORECASE)
 TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
-FUNCTION_PATTERN = re.compile(
-    r"<function=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</function>", re.DOTALL
-)
-PARAMETER_PATTERN = re.compile(
-    r"<parameter=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</parameter>", re.DOTALL
-)
+FUNCTION_PATTERN = re.compile(r"<function=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</function>", re.DOTALL)
+PARAMETER_PATTERN = re.compile(r"<parameter=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
 RAW_XML_TOOL_BLOCK_PATTERN = re.compile(
     r"<tool_call\b[^>]*>.*?</tool_call\s*>|<tool_response\b[^>]*>.*?</tool_response\s*>",
     re.IGNORECASE | re.DOTALL,
@@ -77,15 +73,9 @@ RAW_FUNCTION_CALL_LINE_PATTERN = re.compile(
     r"(?:recipient|to)\s*=\s*functions\.)",
     re.IGNORECASE,
 )
-PROVIDER_CONTROL_TAG_PATTERN = re.compile(
-    r"</?pcwpd_[A-Za-z0-9_.:-]+\s*>", re.IGNORECASE
-)
-NATURAL_VISION_TRACE_PATTERN = re.compile(
-    r"^我(?:先|接着|随后)查看了图片\s+(<image_\d+/?>)，让内建读图能力完成这个任务：(.+?)(?:。)?$"
-)
-NATURAL_OBSERVATION_PATTERN = re.compile(
-    r"^我(?:先|接着|随后)仔细看了图片\s+(<image_\d+/?>)，想确认\s*"
-)
+PROVIDER_CONTROL_TAG_PATTERN = re.compile(r"</?pcwpd_[A-Za-z0-9_.:-]+\s*>", re.IGNORECASE)
+NATURAL_VISION_TRACE_PATTERN = re.compile(r"^我(?:先|接着|随后)查看了图片\s+(<image_\d+/?>)，让内建读图能力完成这个任务：(.+?)(?:。)?$")
+NATURAL_OBSERVATION_PATTERN = re.compile(r"^我(?:先|接着|随后)仔细看了图片\s+(<image_\d+/?>)，想确认\s*")
 NATURAL_OBSERVATION_RESULT_MARKER: Final = "；从画面中得到的信息是 "
 XML_BUILTIN_TRACE_PAIR_PATTERN = re.compile(
     r"(<tool_call>\s*<function=vision_reader>\s*.*?</function>\s*</tool_call>)\s*"
@@ -115,9 +105,7 @@ PRIVATE_MULTIMODAL_MECHANISM_PATTERN = re.compile(
     r"图片(?:读取器|阅读器|工具))",
     re.IGNORECASE,
 )
-PRIVATE_IMAGE_LABEL_PATTERN = re.compile(
-    r"(?:</?image_\d+\s*/?>|\bimage_\d+\b)", re.IGNORECASE
-)
+PRIVATE_IMAGE_LABEL_PATTERN = re.compile(r"(?:</?image_\d+\s*/?>|\bimage_\d+\b)", re.IGNORECASE)
 PRIVATE_EXECUTION_STATE_PATTERN = re.compile(
     r"(?:\bthere\s+(?:are|is)\s+no\s+tools?\s+with\s+results?\b|"
     r"\bno\s+tool\s+results?\s+(?:are\s+)?available\b|"
@@ -132,9 +120,7 @@ INVALID_BUILTIN_VISION_RESULT_MARKERS: Final = (
     "Builtin vision_reader requires both arguments",
     "Builtin vision_reader rejected the call",
 )
-TRUNCATED_FINISH_REASONS: Final = frozenset(
-    {"length", "max_tokens", "max_output_tokens"}
-)
+TRUNCATED_FINISH_REASONS: Final = frozenset({"length", "max_tokens", "max_output_tokens"})
 
 BUILTIN_TRACE_FORMATS: Final = frozenset({"xml", "natural"})
 THINKING_POLICIES: Final = frozenset({"request", "force_on", "force_off"})
