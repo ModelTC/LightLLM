@@ -1148,7 +1148,7 @@ def test_extract_expert_tensors_includes_quantization_metadata_in_order():
     ]
 
 
-def test_manager_commits_each_transfer_without_aggregation(monkeypatch):
+def test_manager_commits_transfer_rows_and_metadata():
     live = torch.arange(20).reshape(5, 4)
     original_primary = live[:3].clone()
     local_expert_ids = [0, 1, 2, 3, 2]
@@ -1185,92 +1185,110 @@ def test_manager_commits_each_transfer_without_aggregation(monkeypatch):
             tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -5))],
         ),
     ]
-    waits = []
-
-    class CurrentStream:
-        def wait_stream(self, stream):
-            waits.append(stream)
-
-    overlap_stream = object()
-    monkeypatch.setattr(manager_module.torch.cuda, "current_stream", lambda: CurrentStream())
-    monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: overlap_stream)
-
-    manager._synchronize_and_commit_transfer(transfers[0])
+    manager.active_transfer = transfers[0]
+    manager._commit_transfer(transfers[0].transfer_info)
     assert manager.current_placement[0][0] == [4, 2]
-    manager._synchronize_and_commit_transfer(transfers[1])
+    manager.active_transfer = transfers[1]
+    manager._commit_transfer(transfers[1].transfer_info)
 
     assert torch.equal(live[:3], original_primary)
     assert torch.equal(live[3], torch.full((4,), -4))
     assert torch.equal(live[4], torch.full((4,), -5))
     assert local_expert_ids == [0, 1, 2, 4, 5]
     assert torch.equal(logical_to_physical_map, expected_metadata)
-    assert waits == [overlap_stream, overlap_stream]
 
 
-def test_manager_transfer_task_ready_gate_commits_one_layer(monkeypatch):
+def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatch):
     class Transfer:
         def __init__(self, transfer_info):
             self.transfer_info = transfer_info
-            self.status = TransferStatus.SUCCEEDED
+            self.finished = finished_by_info[transfer_info]
 
         def start(self):
             starts.append(self.transfer_info)
 
         def is_finished(self):
-            return True
+            return self.finished
 
-    info0 = EPLBTransferInfo(0, 0, 2, 1, 2)
-    info0b = EPLBTransferInfo(1, 0, 3, 0, 2)
-    info1 = EPLBTransferInfo(0, 1, 4, 1, 2)
+    remote_info = EPLBTransferInfo(0, 0, 2, 2, 2)
+    local_info0 = EPLBTransferInfo(1, 0, 3, 3, 2)
+    local_info1 = EPLBTransferInfo(0, 1, 4, 1, 2)
+    finished_by_info = {local_info0: False, local_info1: True}
     starts = []
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.control_group = object()
     manager.transfer_group = object()
     manager._weights = [object(), object()]
-    manager.world_size = 2
-    manager.pending_transfer_infos = [info0, info0b, info1]
+    manager.world_size = 4
+    manager.pending_transfer_infos = [remote_info, local_info0, local_info1]
+    manager.target_placement = [[[2]], [[4]]]
+    manager.current_placement = [[[0]], [[3]]]
     manager.global_rank = 1
     manager.state = manager_module.EPLBManagerState.TRANSFERRING
     committed = []
-    manager._synchronize_and_commit_transfer = lambda transfer: committed.append(transfer.transfer_info)
-    manager._complete_rebalance = lambda: 0.0
+    manager._commit_transfer = committed.append
+    waits = []
+    overlap_stream = object()
+    monkeypatch.setattr(
+        manager_module.torch.cuda,
+        "current_stream",
+        lambda: SimpleNamespace(wait_stream=lambda stream: waits.append(stream)),
+    )
+    monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: overlap_stream)
     monkeypatch.setattr(
         manager_module,
         "PinnedMemoryEPLBTransfer",
         lambda _weights, _group, _rank, transfer_info: Transfer(transfer_info),
     )
 
-    def set_global_ready(ready):
-        def all_gather_object(output, _local_ready, **_kwargs):
-            output[:] = [ready] * manager.world_size
+    def state(transfer_info, finished):
+        return transfer_info, finished
 
-        return all_gather_object
+    gathered_states = [
+        [state(remote_info, True), state(local_info0, False), state(remote_info, True), state(local_info0, False)],
+        [state(remote_info, True), state(local_info0, True), state(remote_info, True), state(local_info0, True)],
+        [state(local_info1, True), state(local_info1, True), None, None],
+    ]
+    local_states = []
+
+    def all_gather_object(output, local_state, **_kwargs):
+        local_states.append(local_state)
+        output[:] = gathered_states.pop(0)
+
+    monkeypatch.setattr(manager_module.dist, "all_gather_object", all_gather_object)
 
     manager._step_transferring()
-    assert starts == [info0]
+    assert starts == [local_info0]
+    assert committed == []
+    assert manager.active_transfer_batch == [remote_info, local_info0]
+    assert manager.pending_transfer_infos == [local_info1]
 
-    monkeypatch.setattr(manager_module.dist, "all_gather_object", set_global_ready(False))
     manager._step_transferring()
     assert committed == []
 
-    monkeypatch.setattr(manager_module.dist, "all_gather_object", set_global_ready(True))
+    manager.active_transfer.finished = True
     manager._step_transferring()
-    assert committed == [info0]
-    assert starts == [info0, info0b]
+    assert committed == [remote_info, local_info0]
+    assert not hasattr(manager, "active_transfer")
 
     manager._step_transferring()
-    assert committed == [info0, info0b]
-    assert starts == [info0, info0b, info1]
+    assert starts == [local_info0, local_info1]
 
     manager._step_transferring()
-    assert committed == [info0, info0b, info1]
+    assert committed == [remote_info, local_info0, local_info1]
+
+    manager._step_transferring()
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
-
-    expected = EPLBTransferInfo(0, 2, 5, 1, 2)
-    manager.pending_transfer_infos = [expected]
-    manager.active_transfer = Transfer(EPLBTransferInfo(1, 2, 5, 1, 2))
-    with pytest.raises(RuntimeError, match="does not match"):
-        manager._step_transferring()
+    assert manager.current_placement == [[[2]], [[4]]]
+    assert not hasattr(manager, "pending_transfer_infos")
+    assert not hasattr(manager, "target_placement")
+    assert not hasattr(manager, "rebalance_started_at")
+    assert local_states == [
+        state(local_info0, False),
+        state(local_info0, True),
+        state(local_info1, True),
+    ]
+    assert waits == [overlap_stream, overlap_stream]
 
 
 def test_wait_plan_finish_broadcasts_pending_status(monkeypatch):
@@ -1319,6 +1337,7 @@ def test_manager_transfer_task_commit_orders_live_weights_between_overlap_forwar
     transfer_info = EPLBTransferInfo(0, 0, 2, 0, 0)
     transfer = Transfer(live, received, transfer_info)
     manager.active_transfer = transfer
+    manager.active_transfer_batch = [transfer_info]
     manager.control_group = object()
     manager.world_size = 1
     manager.pending_transfer_infos = [transfer_info]
@@ -1592,23 +1611,6 @@ def test_manager_planning_without_changes_returns_to_collecting(monkeypatch):
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert manager.next_evaluation_step == 31
     assert not hasattr(manager, "_plan_task")
-
-
-def test_manager_complete_rebalance_releases_transfer_info_list():
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    target_placement = [[[2], [3]]]
-    manager.global_rank = 1
-    manager.pending_transfer_infos = []
-    manager.active_transfer = object()
-    manager.target_placement = target_placement
-    manager.rebalance_started_at = time.time()
-
-    elapsed = manager._complete_rebalance()
-
-    assert manager.current_placement is target_placement
-    assert elapsed >= 0
-    assert not hasattr(manager, "pending_transfer_infos")
-    assert not hasattr(manager, "active_transfer")
 
 
 def test_manager_exposes_one_lifecycle_step_entrypoint():
