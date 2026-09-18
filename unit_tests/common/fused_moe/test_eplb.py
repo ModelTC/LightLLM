@@ -25,7 +25,6 @@ from lightllm.server.router.model_infer.mode_backend import (
 from lightllm.server.router.model_infer.mode_backend import (
     eplb_transfer as transfer_module,
 )
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
     deepgemm_impl as deepgemm_module,
 )
@@ -673,7 +672,7 @@ def test_steady_sampling_resets_aggregated_route_counter():
         world_size=1,
     )
     manager._eplb_impls = [impl]
-    manager.prefill_steps = 0
+    manager.steps = 0
     manager.step_interval = 20
 
     manager._restart_collection()
@@ -1417,25 +1416,25 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
         g_infer_context.overlap_stream = original_overlap_stream
 
 
-def test_manager_inflight_step_does_not_poll():
+def test_manager_step_advances_inflight_transfer():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1, 2)]
     manager._evaluation = None
     calls = []
     manager._poll_in_flight = lambda: calls.append("poll")
     manager.step()
-    assert calls == []
+    assert calls == ["poll"]
 
 
 def test_manager_uses_one_fixed_full_sampling_window(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.in_flight_transfers = []
     manager._evaluation = None
-    manager.prefill_steps = 0
+    manager.steps = 0
     manager.step_interval = 3
     manager.next_evaluation_step = 3
     starts = []
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(manager.prefill_steps))
+    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(manager.steps))
 
     manager.step()
     manager.step()
@@ -1447,7 +1446,7 @@ def test_manager_uses_one_fixed_full_sampling_window(monkeypatch):
 
 def test_manager_restart_collection_resets_counters_and_arms_next_window():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.prefill_steps = 11
+    manager.steps = 11
     manager.step_interval = 20
     counter = torch.ones(4, dtype=torch.int64)
     impl = _test_moe_impl(
@@ -1466,7 +1465,7 @@ def test_manager_restart_collection_resets_counters_and_arms_next_window():
     assert manager.next_evaluation_step == 31
 
 
-def test_manager_poll_advances_inflight_before_evaluation():
+def test_manager_step_advances_inflight_before_evaluation():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1, 2)]
     manager._evaluation = Future()
@@ -1474,12 +1473,12 @@ def test_manager_poll_advances_inflight_before_evaluation():
     manager._poll_in_flight = lambda: calls.append("inflight")
     manager._finish_evaluation = lambda: calls.append("evaluation")
 
-    manager.poll()
+    manager.step()
 
     assert calls == ["inflight"]
 
 
-def test_manager_poll_waits_for_all_evaluation_results(monkeypatch):
+def test_manager_step_waits_for_all_evaluation_results(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.in_flight_transfers = []
     manager._evaluation = Future()
@@ -1489,40 +1488,18 @@ def test_manager_poll_waits_for_all_evaluation_results(monkeypatch):
     manager._finish_evaluation = lambda: calls.append("evaluation")
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **_kwargs: tensor.fill_(0))
-    manager.poll()
+    manager.step()
     assert calls == []
 
     manager._evaluation.set_result({"kind": "no_improvement"})
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **_kwargs: tensor.fill_(1))
-    manager.poll()
+    manager.step()
     assert calls == ["evaluation"]
 
 
-def test_mode_backend_owns_eplb_poll_and_prefill_step():
-    backend = object.__new__(ModeBackend)
-    calls = []
-    backend.eplb_manager = SimpleNamespace(
-        poll=lambda: calls.append("poll"),
-        step=lambda: calls.append("step"),
-    )
-    backend.prefill = lambda **_kwargs: calls.append("prefill")
-
-    backend._poll_eplb()
-    backend._run_prefill(event_pack=object(), prefill_reqs=[])
-
-    assert calls == ["poll", "prefill", "step"]
-
-
-def test_mode_backend_eplb_hooks_are_noops_when_disabled():
-    backend = object.__new__(ModeBackend)
-    backend.eplb_manager = None
-    calls = []
-    backend.prefill = lambda **_kwargs: calls.append("prefill")
-
-    backend._poll_eplb()
-    backend._run_prefill(event_pack=object(), prefill_reqs=[])
-
-    assert calls == ["prefill"]
+def test_manager_exposes_one_lifecycle_step_entrypoint():
+    assert hasattr(manager_module.EPLBManager, "step")
+    assert not hasattr(manager_module.EPLBManager, "poll")
 
 
 def test_pinned_transfer_copies_source_row_and_sends_to_destination(monkeypatch):
@@ -1704,7 +1681,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     monkeypatch.setattr(manager_module, "_find_fused_moe_weights", lambda model: [weight])
     monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 2)
-    monkeypatch.setattr(manager_module, "get_prefill_eplb_step_interval", lambda: 20)
+    monkeypatch.setattr(manager_module, "get_eplb_step_interval", lambda: 20)
     monkeypatch.setattr(manager_module, "get_eplb_rebalance_gain_threshold", lambda: 0.07)
 
     def new_group(*args, **kwargs):

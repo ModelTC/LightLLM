@@ -30,7 +30,7 @@ from lightllm.utils.dist_utils import (
 )
 from lightllm.utils.envs_utils import (
     get_eplb_rebalance_gain_threshold,
-    get_prefill_eplb_step_interval,
+    get_eplb_step_interval,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -57,8 +57,8 @@ class EPLBManager:
         self.num_logical_experts: int = routed.pop()
         self.num_redundant_experts_per_rank: int = redundant.pop()
         self.num_primary_experts_per_rank: int = self.num_logical_experts // self.world_size
-        self.step_interval: int = get_prefill_eplb_step_interval()
-        self.prefill_steps: int = 0
+        self.step_interval: int = get_eplb_step_interval()
+        self.steps: int = 0
         self.next_evaluation_step: int = self.step_interval
 
         initial_local_expert_ids = build_initial_local_expert_ids(
@@ -101,18 +101,17 @@ class EPLBManager:
                 f"step_interval={self.step_interval} planner={type(self.planner).__name__}"
             )
 
-    def poll(self) -> None:
-        """在所有 rank 顺序一致的推理边界推进评估或专家传输。"""
+    def step(self) -> None:
+        """在推理边界推进评估、专家传输或负载采样。"""
         if self.in_flight_transfers:
             self._poll_in_flight()
-        elif self._evaluation is not None and self._evaluation_ready_on_all_ranks():
-            self._finish_evaluation()
-
-    def step(self) -> None:
-        if self.in_flight_transfers or self._evaluation is not None:
             return
-        self.prefill_steps += 1
-        if self.prefill_steps >= self.next_evaluation_step:
+        if self._evaluation is not None:
+            if self._evaluation_ready_on_all_ranks():
+                self._finish_evaluation()
+            return
+        self.steps += 1
+        if self.steps >= self.next_evaluation_step:
             self._start_evaluation()
 
     def _restart_collection(self) -> None:
@@ -120,7 +119,7 @@ class EPLBManager:
         torch._foreach_zero_(counters)
         for impl in self._eplb_impls:
             impl.recording = True
-        self.next_evaluation_step = self.prefill_steps + self.step_interval
+        self.next_evaluation_step = self.steps + self.step_interval
 
     def _collect_local_load(self) -> torch.Tensor:
         counters = [impl.route_counter for impl in self._eplb_impls]
@@ -262,10 +261,10 @@ class EPLBManager:
         if self.global_rank == 0:
             changed_slots = len(self.in_flight_transfers)
             logger.info(
-                "eplb started prefill_steps=%s max_before=%.4f max_after=%.4f "
+                "eplb started steps=%s max_before=%.4f max_after=%.4f "
                 "p95_before=%.4f p95_after=%.4f rebalance_gain=%.4f "
                 "changed_layer_count=%s changed_slot_count=%s",
-                self.prefill_steps,
+                self.steps,
                 result["before"]["max"],
                 result["after"]["max"],
                 result["before"]["p95"],

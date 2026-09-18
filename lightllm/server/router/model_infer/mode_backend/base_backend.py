@@ -303,15 +303,6 @@ class ModeBackend:
     def prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
         raise NotImplementedError()
 
-    def _run_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
-        self.prefill(event_pack=event_pack, prefill_reqs=prefill_reqs)
-        if self.eplb_manager is not None:
-            self.eplb_manager.step()
-
-    def _poll_eplb(self):
-        if self.eplb_manager is not None:
-            self.eplb_manager.poll()
-
     def decode(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         raise NotImplementedError()
 
