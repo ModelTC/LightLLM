@@ -525,11 +525,13 @@ def _check_and_store_int_token_ids(dst, ids: List[int], max_length: int, name: s
 
     The type check runs against the input ``ids`` (not the zero-filled destination buffer), so a non-int
     entry fails fast with a clear message instead of surfacing an opaque ctypes ``TypeError`` at the
-    assignment below.
+    assignment below. The bound check guards the same assignment: ``dst`` stores 32-bit signed ints
+    and ctypes silently wraps out-of-range values (``2**31`` would become ``-2147483648``), and a
+    negative id would later be used as a pointer offset into the logits tensor by the triton kernel.
 
     Args:
         dst: destination ctypes array, declared as ``c_int * max_length``.
-        ids: caller-supplied token ids; every element must be an ``int``.
+        ids: caller-supplied token ids; every element must be an ``int`` in ``[0, 2**31)``.
         max_length: capacity of ``dst``.
         name: field name used in the error messages.
 
@@ -539,5 +541,6 @@ def _check_and_store_int_token_ids(dst, ids: List[int], max_length: int, name: s
     size = len(ids)
     assert size <= max_length, f"Too many {name}: {size} > {max_length}."
     assert all(isinstance(e, int) for e in ids), f"all {name} must be int."
+    assert all(0 <= e < 2 ** 31 for e in ids), f"all {name} must be int in [0, 2**31)."
     dst[:size] = ids[:]
     return size
