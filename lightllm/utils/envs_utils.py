@@ -50,6 +50,16 @@ def get_env_start_args():
 
 
 @lru_cache(maxsize=None)
+def get_model_infer_recursion_limit() -> int:
+    return int(os.getenv("LIGHTLLM_MODEL_INFER_RECURSION_LIMIT", "4000"))
+
+
+@lru_cache(maxsize=None)
+def get_pd_master_recursion_limit() -> int:
+    return int(os.getenv("LIGHTLLM_PD_MASTER_RECURSION_LIMIT", "4000"))
+
+
+@lru_cache(maxsize=None)
 def get_llm_data_type() -> torch.dtype:
     data_type: str = get_env_start_args().data_type
     if data_type in ["fp16", "float16"]:

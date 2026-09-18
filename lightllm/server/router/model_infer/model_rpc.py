@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import rpyc
 import socket
@@ -31,7 +32,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from lightllm.server.io_struct import RlOpReq, RlOpRsp
 
@@ -172,6 +173,10 @@ def _init_env(
     success_event,
 ):
     import lightllm.utils.rpyc_fix_utils as _
+
+    # spawn 不继承父进程的递归上限；在启动推理线程前为每个 rank 显式设置。
+    sys.setrecursionlimit(get_model_infer_recursion_limit())
+    logger.info(f"Model inference rank {rank} Python recursion limit: {sys.getrecursionlimit()}")
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
