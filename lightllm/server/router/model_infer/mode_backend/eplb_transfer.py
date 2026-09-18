@@ -1,225 +1,270 @@
-"""Layer-by-layer expert-row migration for EPLB."""
+"""EPLB 专家权重的逐层迁移。"""
 
+import os
 import threading
-from collections import defaultdict
+import zlib
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from enum import Enum
+from typing import List, Sequence
 
 import torch
 import torch.distributed as dist
 
-from lightllm.common.eplb_utils import extract_eplb_expert_tensors
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
+from lightllm.common.eplb_utils import NamedTensor, extract_eplb_expert_tensors
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
-class TransferStep:
-    dst_rank: int
-    dst_slot: int
-    src_rank: int
-    src_local_row: int
+class ExpertTensorBuffer:
+    """一项 live 专家张量及其单专家 pinned memory 缓冲行。"""
+
+    name: str
+    live_tensor: torch.Tensor
+    pinned_row: torch.Tensor
+
+
+@dataclass(frozen=True)
+class EPLBTransferInfo:
+    """单个逻辑专家的一次传输描述。
+
+    ``layer_index`` 是专家权重在 EPLB 层列表中的下标。源 rank 使用
+    ``source_logical_expert_id`` 定位当前本地物理行，目标 rank 从
+    ``tensor_buffers`` 中读取传输完成的 pinned memory 数据。
+    """
+
+    source_rank: int
+    layer_index: int
+    source_logical_expert_id: int
+    dest_rank: int
+
+
+@dataclass(frozen=True)
+class _ExpertSource:
+    """一个逻辑专家当前可用的物理副本位置。"""
+
+    rank: int
+    local_expert_index: int
+
+
+class TransferStatus(Enum):
+    """异步传输线程的生命周期状态。"""
+
+    IDLE = "idle"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
 
 
 def build_transfer_plan(
-    current: torch.Tensor,
-    target: torch.Tensor,
+    current_placement: torch.Tensor,
+    target_placement: torch.Tensor,
+    layer_index: int,
     num_logical_experts: int,
     world_size: int,
     node_world_size: int,
-) -> List[TransferStep]:
-    assert tuple(current.shape) == tuple(target.shape) == (world_size, current.shape[1])
-    num_experts_per_rank = num_logical_experts // world_size
-    current_rows = current.tolist()
-    target_rows = target.tolist()
-    # A primary row is always a valid source. Existing replicas are also
-    # candidates so that a destination can prefer a same-node copy.
-    candidates_by_expert = [
-        [(expert // num_experts_per_rank, expert % num_experts_per_rank)] for expert in range(num_logical_experts)
-    ]
-    for rank, row in enumerate(current_rows):
-        for slot, expert in enumerate(row):
-            candidates_by_expert[expert].append((rank, num_experts_per_rank + slot))
-    source_load = [0] * world_size
-    plan = []
-    for dst_rank in range(world_size):
-        for dst_slot, expert in enumerate(target_rows[dst_rank]):
-            if expert == current_rows[dst_rank][dst_slot]:
+) -> List[EPLBTransferInfo]:
+    """根据新旧冗余专家分布生成确定性的传输计划。
+
+    ``current_placement`` 和 ``target_placement`` 只描述冗余槽位，形状均为
+    ``[world_size, num_redundant_slots]``。固定主专家不在这两个张量中，但始终
+    可以作为数据源。返回结果只包含发生变化的目标槽位所需专家，每个
+    :class:`EPLBTransferInfo` 只描述一个逻辑专家的传输。
+
+    为同一个逻辑专家选择数据源时，依次考虑：
+
+    1. 优先使用目标 rank 所在节点上的已有副本，避免跨节点传输；
+    2. 均衡各个源 rank 承担的传输次数；
+    3. 使用 rank 和本地行号做稳定排序，保证所有 rank 生成一致结果。
+    """
+    assert (
+        tuple(current_placement.shape)
+        == tuple(target_placement.shape)
+        == (
+            world_size,
+            current_placement.shape[1],
+        )
+    )
+    num_primary_experts_per_rank = num_logical_experts // world_size
+    current_placement_by_rank: List[List[int]] = current_placement.tolist()
+    target_placement_by_rank: List[List[int]] = target_placement.tolist()
+
+    # 每个逻辑专家的主专家行永远存在，因此先把它加入候选源；当前仍存在的
+    # 冗余副本也可以作为源，这样目标 rank 有机会直接使用同节点副本。
+    source_candidates_by_expert: List[List[_ExpertSource]] = []
+    for logical_expert_id in range(num_logical_experts):
+        primary_rank, primary_local_expert_index = divmod(logical_expert_id, num_primary_experts_per_rank)
+        source_candidates_by_expert.append([_ExpertSource(primary_rank, primary_local_expert_index)])
+    for rank, redundant_expert_ids in enumerate(current_placement_by_rank):
+        for redundant_slot_index, logical_expert_id in enumerate(redundant_expert_ids):
+            source_candidates_by_expert[logical_expert_id].append(
+                _ExpertSource(
+                    rank=rank,
+                    local_expert_index=num_primary_experts_per_rank + redundant_slot_index,
+                )
+            )
+
+    num_transfers_by_source_rank: List[int] = [0] * world_size
+    transfer_infos: List[EPLBTransferInfo] = []
+    for destination_rank in range(world_size):
+        for destination_slot_index, logical_expert_id in enumerate(target_placement_by_rank[destination_rank]):
+            if logical_expert_id == current_placement_by_rank[destination_rank][destination_slot_index]:
                 continue
-            src_rank, src_row = min(
-                candidates_by_expert[expert],
-                key=lambda item: (
-                    item[0] // node_world_size != dst_rank // node_world_size,
-                    source_load[item[0]],
-                    item[0],
-                    item[1],
+            source = min(
+                source_candidates_by_expert[logical_expert_id],
+                key=lambda candidate: (
+                    candidate.rank // node_world_size != destination_rank // node_world_size,
+                    num_transfers_by_source_rank[candidate.rank],
+                    candidate.rank,
+                    candidate.local_expert_index,
                 ),
             )
-            source_load[src_rank] += 1
-            plan.append(TransferStep(dst_rank, dst_slot, src_rank, src_row))
-    return plan
+            num_transfers_by_source_rank[source.rank] += 1
+            transfer_infos.append(
+                EPLBTransferInfo(
+                    source_rank=source.rank,
+                    layer_index=layer_index,
+                    source_logical_expert_id=logical_expert_id,
+                    dest_rank=destination_rank,
+                )
+            )
+
+    return transfer_infos
 
 
 class PinnedMemoryEPLBTransfer:
-    """Move one layer at a time through reusable pinned CPU row buffers.
+    """在后台线程中传输一个逻辑专家的全部权重张量。
 
-    Every rank executes the same ordered Gloo broadcasts. A source first
-    copies a live GPU row to pinned memory; destinations then copy that row
-    into a single-layer GPU staging buffer. The inference thread publishes
-    the staging rows and routing metadata together at a safe forward boundary.
+    只有源 rank 和目标 rank 参与 Gloo 点对点通信，具体的数据路径是：
+
+    ``源 GPU 权重行 -> 源 rank 的 pinned CPU 行 -> 目标 rank 的 pinned CPU 行``
+
+    如果源和目标是同一个 rank，则只执行 GPU 到 pinned CPU 的本地复制，不产生
+    网络通信。其他 rank 不分配 pinned row，也不参与该专家的数据传输。
+
+    本类只负责异步传输，不修改 live 权重，也不更新路由 metadata。传输成功后，
+    ``status`` 会变为 :attr:`TransferStatus.SUCCEEDED`，收到的数据保存在
+    ``tensor_buffers``。EPLBManager 在主循环的安全边界同步提交这些数据。
+
+    每个对象只表示构造函数中 ``transfer_info`` 指定的一次传输。逻辑专家 ID
+    在源 rank 上通过该层当前的本地专家列表解析为物理行；目标物理槽位不属于
+    传输职责，由 manager 根据目标 placement 决定。
     """
 
-    def __init__(self, weights, transfer_group, global_rank):
-        self._eplb_impls = [weight.fuse_moe_impl for weight in weights]
-        self.transfer_group = transfer_group
-        self.global_rank = global_rank
-        self.num_experts_per_rank = self._eplb_impls[0].num_primary_experts_per_rank
-        self.device = weights[0].w13.weight.device
-        self.live = [extract_eplb_expert_tensors(weight) for weight in weights]
-        self._validate_live_layout()
+    def __init__(
+        self,
+        weights: Sequence[FusedMoeWeight],
+        transfer_group: dist.ProcessGroup,
+        current_global_rank: int,
+        transfer_info: EPLBTransferInfo,
+    ) -> None:
+        self._p2p_group: dist.ProcessGroup = transfer_group
+        self._is_source_rank: bool = current_global_rank == transfer_info.source_rank
+        self._is_destination_rank: bool = current_global_rank == transfer_info.dest_rank
+        self.transfer_info: EPLBTransferInfo = transfer_info
 
-        num_redundant_slots = self._eplb_impls[0].num_redundant_experts_per_rank
-        self.staging = [
-            (
-                name,
-                torch.empty(
-                    (num_redundant_slots,) + tuple(tensor.shape[1:]),
-                    dtype=tensor.dtype,
-                    device=tensor.device,
-                ),
-            )
-            for name, tensor in self.live[0]
-        ]
-        self.pinned_rows = [
-            (
-                name,
-                torch.empty(
-                    tuple(tensor.shape[1:]),
-                    dtype=tensor.dtype,
+        layer_weight: FusedMoeWeight = weights[transfer_info.layer_index]
+        # 提取该 MoE 层实际参与推理的专家张量，包括 w13/w2 的量化后权重
+        # （或非量化权重），以及配套的 weight_scale、weight_zero_point 等量化
+        # 信息。后续会为每项张量创建对应的 pinned row，确保专家状态完整迁移。
+        named_live_tensors: List[NamedTensor] = extract_eplb_expert_tensors(layer_weight)
+        self._local_logical_expert_ids: List[int] = layer_weight.fuse_moe_impl.local_logics_expert_ids_list
+        self._device: torch.device = named_live_tensors[0][1].device
+
+        # 只有源和目标 rank 需要保存该专家的 pinned row。源 rank 用它作为
+        # send buffer，目标 rank 用它作为 recv buffer，并在传输完成后直接交给
+        # manager 提交到 live 权重，避免无关 rank 分配同样大小的 pinned memory。
+        self.tensor_buffers: List[ExpertTensorBuffer] = []
+        if self._is_source_rank or self._is_destination_rank:
+            for tensor_name, live_tensor in named_live_tensors:
+                pinned_row = torch.empty(
+                    tuple(live_tensor.shape[1:]),
+                    dtype=live_tensor.dtype,
                     device="cpu",
                     pin_memory=True,
-                ),
-            )
-            for name, tensor in self.live[0]
-        ]
-        self._copy_stream = torch.cuda.Stream(device=self.device)
-        self._release = threading.Event()
-        self._release.set()
-        self._consumed_event = torch.cuda.Event()
-        self._consumed_recorded = False
-        self._ready = None
-        self._ready_lock = threading.Lock()
-        self._error = None
-        self._thread = None
-
-    def _validate_live_layout(self) -> None:
-        reference = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in self.live[0]]
-        num_redundant_slots = self._eplb_impls[0].num_redundant_experts_per_rank
-        for layer_index, (impl, tensors) in enumerate(zip(self._eplb_impls, self.live)):
-            layout = [(name, tuple(tensor.shape[1:]), tensor.dtype, tensor.device) for name, tensor in tensors]
-            assert layout == reference, f"EPLB layer {layer_index} has incompatible expert tensor layout"
-            assert impl.num_redundant_experts_per_rank == num_redundant_slots, "EPLB redundant slot count must match"
-
-    @staticmethod
-    def _group_steps_by_source(plan: Sequence[TransferStep]):
-        grouped = defaultdict(list)
-        for step in plan:
-            grouped[(step.src_rank, step.src_local_row)].append(step)
-        return [(source, grouped[source]) for source in sorted(grouped)]
-
-    def _copy_layer(self, layer_index: int, plan: Sequence[TransferStep]) -> None:
-        live_tensors = self.live[layer_index]
-        for (src_rank, src_local_row), steps in self._group_steps_by_source(plan):
-            if self.global_rank == src_rank:
-                with torch.cuda.stream(self._copy_stream):
-                    for (_, live), (_, pinned) in zip(live_tensors, self.pinned_rows):
-                        pinned.copy_(live[src_local_row], non_blocking=True)
-            # Gloo must not read the CPU row before the device-to-host copy completes.
-            self._copy_stream.synchronize()
-            for _, pinned in self.pinned_rows:
-                dist.broadcast(pinned, src=src_rank, group=self.transfer_group)
-
-            dst_slots = sorted({step.dst_slot for step in steps if step.dst_rank == self.global_rank})
-            if dst_slots:
-                with torch.cuda.stream(self._copy_stream):
-                    for (_, staging), (_, pinned) in zip(self.staging, self.pinned_rows):
-                        for dst_slot in dst_slots:
-                            staging[dst_slot].copy_(pinned, non_blocking=True)
-        self._copy_stream.synchronize()
-
-    def start(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]) -> None:
-        if self._thread is not None:
-            raise RuntimeError("EPLB transfer has not been finished")
-        self._error = None
-        with self._ready_lock:
-            if self._ready is not None:
-                raise RuntimeError("EPLB ready layer has not been committed")
-
-        def worker() -> None:
-            try:
-                torch.cuda.set_device(self.device)
-                for layer_index, plan in layer_plans:
-                    self._release.wait()
-                    self._release.clear()
-                    if self._consumed_recorded:
-                        self._consumed_event.synchronize()
-                    changed_dst_slots = tuple(
-                        sorted({step.dst_slot for step in plan if step.dst_rank == self.global_rank})
+                )
+                self.tensor_buffers.append(
+                    ExpertTensorBuffer(
+                        name=tensor_name,
+                        live_tensor=live_tensor,
+                        pinned_row=pinned_row,
                     )
-                    self._copy_layer(layer_index, plan)
-                    with self._ready_lock:
-                        self._ready = (layer_index, changed_dst_slots)
-            except BaseException as exc:
-                self._error = exc
+                )
+        self._device_to_host_stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
 
-        self._thread = threading.Thread(target=worker, name="eplb-pin-memory", daemon=True)
-        self._thread.start()
-
-    def ready_layer(self):
-        if self._error is not None:
-            raise RuntimeError("EPLB migration worker failed") from self._error
-        with self._ready_lock:
-            return None if self._ready is None else self._ready[0]
-
-    def commit(self, layer_index: int, post_copy=None) -> None:
-        with self._ready_lock:
-            if self._ready is None or self._ready[0] != layer_index:
-                raise RuntimeError("EPLB commit does not match the ready layer")
-            _, changed_dst_slots = self._ready
-            self._ready = None
-        for (_, live), (_, staging) in zip(self.live[layer_index], self.staging):
-            _commit_staging_rows(live, staging, self.num_experts_per_rank, changed_dst_slots)
-        if post_copy is not None:
-            post_copy()
-        self._consumed_event.record(torch.cuda.current_stream())
-        self._consumed_recorded = True
-        self._release.set()
-
-    def finish(self) -> None:
-        thread = self._thread
-        if thread is None:
-            return
-        thread.join()
-        self._thread = None
-        if self._error is not None:
-            raise RuntimeError("EPLB migration worker failed") from self._error
-
-
-def _commit_staging_rows(
-    live: torch.Tensor,
-    staging: torch.Tensor,
-    num_experts_per_rank: int,
-    changed_dst_slots: Sequence[int],
-) -> None:
-    slots = sorted(set(changed_dst_slots))
-    if not slots:
-        return
-    run_start = previous = slots[0]
-    for dst_slot in (*slots[1:], None):
-        if dst_slot is not None and dst_slot == previous + 1:
-            previous = dst_slot
-            continue
-        run_length = previous - run_start + 1
-        live.narrow(0, num_experts_per_rank + run_start, run_length).copy_(
-            staging.narrow(0, run_start, run_length), non_blocking=True
+        self.status: TransferStatus = TransferStatus.IDLE
+        self._transfer_thread: threading.Thread = threading.Thread(
+            target=self._run_transfer,
+            name=f"eplb-transfer-layer-{transfer_info.layer_index}-expert-{transfer_info.source_logical_expert_id}",
+            daemon=True,
         )
-        if dst_slot is not None:
-            run_start = previous = dst_slot
+
+    def start(self) -> None:
+        """启动构造函数中 transfer_info 描述的异步传输。"""
+        assert self.status is TransferStatus.IDLE, "EPLB transfer has already been started"
+        self.status = TransferStatus.RUNNING
+        self._transfer_thread.start()
+
+    def is_finished(self) -> bool:
+        """返回后台传输是否已经成功完成。"""
+        return self.status is TransferStatus.SUCCEEDED
+
+    def _run_transfer(self) -> None:
+        """把指定专家的全部权重行传输到各 rank 的 pinned memory。"""
+        try:
+            transfer_info: EPLBTransferInfo = self.transfer_info
+            if self._is_source_rank:
+                torch.cuda.set_device(self._device)
+                source_local_expert_index: int = self._local_logical_expert_ids.index(
+                    transfer_info.source_logical_expert_id
+                )
+                with torch.cuda.stream(self._device_to_host_stream):
+                    for tensor_buffer in self.tensor_buffers:
+                        tensor_buffer.pinned_row.copy_(
+                            tensor_buffer.live_tensor[source_local_expert_index],
+                            non_blocking=True,
+                        )
+                # Gloo 读取 pinned row 前，源 rank 必须等待 GPU -> CPU 拷贝完成。
+                self._device_to_host_stream.synchronize()
+
+            if transfer_info.source_rank != transfer_info.dest_rank:
+                if self._is_source_rank:
+                    for tensor_buffer in self.tensor_buffers:
+                        message_tag = self._build_p2p_message_tag(tensor_buffer.name)
+                        dist.send(
+                            tensor_buffer.pinned_row,
+                            dst=transfer_info.dest_rank,
+                            group=self._p2p_group,
+                            tag=message_tag,
+                        )
+                elif self._is_destination_rank:
+                    for tensor_buffer in self.tensor_buffers:
+                        message_tag = self._build_p2p_message_tag(tensor_buffer.name)
+                        dist.recv(
+                            tensor_buffer.pinned_row,
+                            src=transfer_info.source_rank,
+                            group=self._p2p_group,
+                            tag=message_tag,
+                        )
+            self.status = TransferStatus.SUCCEEDED
+        except BaseException:
+            logger.exception("EPLB transfer failed")
+            os._exit(1)
+
+    def _build_p2p_message_tag(self, tensor_name: str) -> int:
+        """为当前专家张量生成 source 和 destination 一致的 Gloo 整数 tag。
+
+        Python ``hash`` 会因进程随机种子不同而产生不同结果，因此这里使用稳定的
+        CRC32，并限制到 Gloo 可安全使用的有符号 31 位整数范围。标识中包含层、
+        源 rank、目标 rank、逻辑专家和张量名称，避免依赖张量列表的隐式顺序。
+        """
+        transfer_info: EPLBTransferInfo = self.transfer_info
+        message_identity = (
+            f"{transfer_info.layer_index}:"
+            f"{transfer_info.source_rank}:"
+            f"{transfer_info.dest_rank}:"
+            f"{transfer_info.source_logical_expert_id}:"
+            f"{tensor_name}"
+        )
+        return zlib.crc32(message_identity.encode("utf-8")) & 0x7FFFFFFF

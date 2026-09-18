@@ -42,9 +42,10 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
 )
 from lightllm.common.eplb_utils import extract_eplb_expert_tensors
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
+    EPLBTransferInfo,
+    ExpertTensorBuffer,
     PinnedMemoryEPLBTransfer,
-    TransferStep,
-    _commit_staging_rows,
+    TransferStatus,
     build_transfer_plan,
 )
 
@@ -540,10 +541,12 @@ def test_transfer_plan_respects_explicit_target_slots():
     current = torch.tensor([[4, 5], [6, 7], [0, 1], [2, 3]])
     target = torch.tensor([[5, 4], [7, 6], [1, 0], [3, 2]])
 
-    plan = build_transfer_plan(current, target, num_logical_experts=8, world_size=4, node_world_size=2)
+    plan = build_transfer_plan(current, target, 3, num_logical_experts=8, world_size=4, node_world_size=2)
 
-    assert len(plan) == target.numel()
-    assert {(step.dst_rank, step.dst_slot) for step in plan} == {(rank, slot) for rank in range(4) for slot in range(2)}
+    assert all(info.layer_index == 3 for info in plan)
+    assert {(info.dest_rank, info.source_logical_expert_id) for info in plan} == {
+        (rank, int(target[rank, slot])) for rank in range(4) for slot in range(2)
+    }
 
 
 def test_manager_collects_logical_route_counters():
@@ -569,6 +572,9 @@ def test_manager_collects_logical_route_counters():
         for counter in counters
     ]
     manager._eplb_impls = [weight.fuse_moe_impl for weight in manager.weights]
+    manager._weights = manager.weights
+    for layer_num, weight in enumerate(manager._weights):
+        weight.layer_num_ = layer_num
     manager.num_logical_experts = 2
 
     samples = manager._collect_local_load()
@@ -774,6 +780,9 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
         for _ in range(3)
     ]
     manager._eplb_impls = [weight.fuse_moe_impl for weight in manager.weights]
+    manager._weights = manager.weights
+    for layer_num, weight in enumerate(manager._weights):
+        weight.layer_num_ = layer_num
     manager.global_rank = 1
     manager.world_size = 4
     manager.node_world_size = 2
@@ -787,7 +796,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
         [
             [[3], [0], [1], [2]],
             [[2], [3], [0], [1]],
-            [[1], [2], [3], [0]],
+            [[2], [3], [0], [1]],
         ],
         dtype=torch.int64,
     )
@@ -819,7 +828,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     assert calls == [(2, 4, 2)]
     metadata = result["metadata"]
     assert 1 not in metadata
-    assert [layer_index for layer_index, _plan in result["layer_plans"]] == [0, 2]
+    assert {info.layer_index for info in result["transfer_infos"]} == {0, 2}
     for layer_index in (0, 2):
         item = metadata[layer_index]
         expected = build_logical_to_physical_map(
@@ -1181,11 +1190,11 @@ def test_transfer_plan_uses_existing_rows_and_prefers_local_node_replicas():
     target = current.clone()
     target[0, 0] = 6  # primary r3, but r1 replica is on r0's node.
     target[2, 1] = 4  # primary r2 is local to destination r2.
-    plan = build_transfer_plan(current, target, num_logical_experts=8, world_size=4, node_world_size=2)
-    by_dst = {(step.dst_rank, step.dst_slot): step for step in plan}
-    assert len(by_dst) == 2
-    assert by_dst[0, 0] == TransferStep(0, 0, 1, 2)
-    assert by_dst[2, 1] == TransferStep(2, 1, 2, 0)
+    plan = build_transfer_plan(current, target, 5, num_logical_experts=8, world_size=4, node_world_size=2)
+    assert plan == [
+        EPLBTransferInfo(1, 5, 6, 0),
+        EPLBTransferInfo(2, 5, 4, 2),
+    ]
 
 
 def test_transfer_plan_cross_node_and_stable_source_load_tie_break():
@@ -1193,131 +1202,99 @@ def test_transfer_plan_cross_node_and_stable_source_load_tie_break():
     target = current.clone()
     target[0, 0] = 4
     target[0, 1] = 4
-    first = build_transfer_plan(current, target, 8, 4, 2)
-    second = build_transfer_plan(current, target, 8, 4, 2)
+    first = build_transfer_plan(current, target, 5, 8, 4, 2)
+    second = build_transfer_plan(current, target, 5, 8, 4, 2)
     assert first == second
-    selected = [step for step in first if step.dst_rank == 0]
-    assert [(step.src_rank, step.src_local_row) for step in selected] == [
-        (2, 0),
-        (3, 2),
+    assert first == [
+        EPLBTransferInfo(2, 5, 4, 0),
+        EPLBTransferInfo(3, 5, 4, 0),
     ]
 
 
-def test_extract_expert_tensors_includes_weight_and_scale_in_order():
+def test_p2p_message_tag_is_stable_and_identifies_transfer_tensor():
+    transfer = object.__new__(PinnedMemoryEPLBTransfer)
+    transfer.transfer_info = EPLBTransferInfo(1, 5, 4, 0)
+    weight_tag = transfer._build_p2p_message_tag("w13.weight")
+
+    assert weight_tag == transfer._build_p2p_message_tag("w13.weight")
+    assert 0 <= weight_tag <= 0x7FFFFFFF
+    assert weight_tag != transfer._build_p2p_message_tag("w13.weight_scale")
+    transfer.transfer_info = EPLBTransferInfo(1, 5, 6, 0)
+    assert weight_tag != transfer._build_p2p_message_tag("w13.weight")
+
+
+def test_extract_expert_tensors_includes_quantization_metadata_in_order():
     class Pack:
-        def __init__(self, offset, scale=True):
+        def __init__(self, offset, scale=True, zero_point=True):
             self.weight = torch.full((3, 2), offset)
             self.weight_scale = torch.full((3, 1), offset + 1) if scale else None
+            self.weight_zero_point = torch.full((3, 1), offset + 2) if zero_point else None
 
-    weight = type("Weight", (), {"w13": Pack(1), "w2": Pack(10, scale=False)})()
+    weight = type("Weight", (), {"w13": Pack(1), "w2": Pack(10, scale=False, zero_point=False)})()
     tensors = extract_eplb_expert_tensors(weight)
     assert [name for name, _ in tensors] == [
         "w13.weight",
         "w13.weight_scale",
+        "w13.weight_zero_point",
         "w2.weight",
     ]
 
 
-def test_commit_staging_rows_only_overwrites_redundant_rows():
+def test_manager_commits_completed_transfer_rows_by_target_logical_expert():
     live = torch.arange(20).reshape(5, 4)
-    staging = torch.full((2, 4), -1)
-    _commit_staging_rows(
-        live,
-        staging,
-        num_experts_per_rank=3,
-        changed_dst_slots=(0, 1),
-    )
-    assert torch.equal(live[:3], torch.arange(12).reshape(3, 4))
-    assert torch.equal(live[3:], staging)
-
-
-def test_commit_staging_rows_preserves_unchanged_destination_slots():
-    live = torch.arange(28).reshape(7, 4)
-    staging = torch.tensor([[-1, -1, -1, -1], [-2, -2, -2, -2], [-3, -3, -3, -3], [-4, -4, -4, -4]])
-    original = live.clone()
-
-    _commit_staging_rows(
-        live,
-        staging,
-        num_experts_per_rank=3,
-        changed_dst_slots=(3, 1),
-    )
-
-    assert torch.equal(live[:4], original[:4])
-    assert torch.equal(live[4], staging[1])
-    assert torch.equal(live[5], original[5])
-    assert torch.equal(live[6], staging[3])
-
-
-def test_commit_staging_rows_merges_contiguous_changed_slots():
-    copies = []
-
-    class View:
-        def __init__(self, owner, start, length):
-            self.owner = owner
-            self.start = start
-            self.length = length
-
-        def copy_(self, source, **_kwargs):
-            copies.append(
-                (
-                    self.owner,
-                    self.start,
-                    self.length,
-                    source.owner,
-                    source.start,
-                    source.length,
-                )
-            )
-
-    class Tensor:
-        def __init__(self, owner, rows):
-            self.owner = owner
-            self.shape = (rows,)
-
-        def narrow(self, _dim, start, length):
-            return View(self.owner, start, length)
-
-    _commit_staging_rows(
-        Tensor("live", 20),
-        Tensor("staging", 4),
-        num_experts_per_rank=10,
-        changed_dst_slots=(3, 1, 2),
-    )
-
-    assert copies == [("live", 11, 3, "staging", 1, 3)]
-
-
-def test_manager_inflight_ready_gate_commits_one_layer_and_propagates_worker_error(
-    monkeypatch,
-):
-    class Transfer:
-        def __init__(self):
-            self.ready = 0
-            self.commits = []
-            self.finished = 0
-
-        def ready_layer(self):
-            return self.ready
-
-        def commit(self, layer, post_copy=None):
-            assert self.ready == layer
-            self.ready = None
-            self.commits.append(layer)
-            if post_copy is not None:
-                post_copy()
-
-        def finish(self):
-            self.finished += 1
-
+    original_primary = live[:3].clone()
+    local_expert_ids = [0, 1, 2, 4, 5]
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.transfer = Transfer()
+    manager.global_rank = 0
+    manager.num_primary_experts_per_rank = 3
+    manager.target_placement = torch.tensor([[[7, 6]]])
+    manager._eplb_impls = [SimpleNamespace(local_logics_expert_ids_list=local_expert_ids)]
+    manager._commit_layer_metadata = lambda _layer: None
+    manager.completed_transfers = [
+        SimpleNamespace(
+            transfer_info=EPLBTransferInfo(1, 0, 7, 0),
+            tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -7))],
+        ),
+        SimpleNamespace(
+            transfer_info=EPLBTransferInfo(2, 0, 6, 0),
+            tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -6))],
+        ),
+    ]
+
+    manager._commit_transferred_layer(0)
+
+    assert torch.equal(live[:3], original_primary)
+    assert torch.equal(live[3], torch.full((4,), -7))
+    assert torch.equal(live[4], torch.full((4,), -6))
+    assert local_expert_ids == [0, 1, 2, 7, 6]
+
+
+def test_manager_inflight_ready_gate_commits_one_layer(monkeypatch):
+    class Transfer:
+        def __init__(self, transfer_info):
+            self.transfer_info = transfer_info
+            self.status = TransferStatus.SUCCEEDED
+
+        def is_finished(self):
+            return True
+
+    info0 = EPLBTransferInfo(0, 0, 2, 1)
+    info0b = EPLBTransferInfo(1, 0, 3, 0)
+    info1 = EPLBTransferInfo(0, 1, 4, 1)
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.active_transfer = Transfer(info0)
     manager.control_group = object()
-    manager._control_ready_count = torch.empty(1, dtype=torch.int32)
-    manager.in_flight_layers = [0, 1]
+    manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
+    manager.in_flight_transfers = [info0, info0b, info1]
+    manager.completed_transfers = []
     committed, finished = [], []
-    manager._commit_layer_metadata = committed.append
+    manager._commit_transferred_layer = committed.append
     manager._finish_rebalance = lambda: finished.append(True)
+
+    def start_next_transfer():
+        manager.active_transfer = Transfer(manager.in_flight_transfers[0])
+
+    manager._start_next_transfer = start_next_transfer
     operations = []
 
     class CurrentStream:
@@ -1333,81 +1310,33 @@ def test_manager_inflight_ready_gate_commits_one_layer_and_propagates_worker_err
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(0))
     manager._poll_in_flight()
-    assert manager.transfer.commits == []
+    assert committed == []
 
     monkeypatch.setattr(manager_module.dist, "all_reduce", set_global_ready(1))
     manager._poll_in_flight()
-    assert manager.transfer.commits == [0]
-    assert committed == [0]
-    assert operations == [("wait", overlap_stream)]
+    assert committed == []
+    assert operations == []
     assert not finished
 
-    manager.transfer.ready = 1
     manager._poll_in_flight()
-    assert manager.transfer.commits == [0, 1]
+    assert committed == [0]
+    assert operations == [("wait", overlap_stream)]
+
+    manager._poll_in_flight()
     assert committed == [0, 1]
     assert finished == [True]
-    assert manager.transfer.finished == 1
 
-    manager.in_flight_layers = [2]
-    manager.transfer.ready = 9
-    with pytest.raises(RuntimeError, match="does not match expected"):
+    expected = EPLBTransferInfo(0, 2, 5, 1)
+    manager.in_flight_transfers = [expected]
+    manager.active_transfer = Transfer(EPLBTransferInfo(1, 2, 5, 1))
+    with pytest.raises(RuntimeError, match="does not match"):
         manager._poll_in_flight()
-
-    class BrokenTransfer:
-        def ready_layer(self):
-            raise RuntimeError("boom")
-
-    manager.transfer = BrokenTransfer()
-    encoded_statuses = []
-
-    def retain_local_error(tensor, **_kwargs):
-        encoded_statuses.append(int(tensor.item()))
-
-    monkeypatch.setattr(manager_module.dist, "all_reduce", retain_local_error)
-    with pytest.raises(RuntimeError, match="EPLB transfer worker failed on this rank") as exc_info:
-        manager._poll_in_flight()
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert str(exc_info.value.__cause__) == "boom"
-    assert encoded_statuses == [manager_module.EPLB_CONTROL_ERROR]
-
-
-def test_manager_inflight_remote_worker_error_does_not_commit(monkeypatch):
-    class Transfer:
-        def __init__(self):
-            self.commits = []
-
-        def ready_layer(self):
-            return 0
-
-        def commit(self, *args):
-            self.commits.append(args)
-
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.transfer = Transfer()
-    manager.control_group = object()
-    manager._control_ready_count = torch.empty(1, dtype=torch.int32)
-    manager.in_flight_layers = [0]
-    manager._commit_layer_metadata = lambda _layer: None
-    manager._finish_rebalance = lambda: None
-    statuses = []
-
-    def remote_error(tensor, **_kwargs):
-        statuses.append(int(tensor.item()))
-        tensor.fill_(manager_module.EPLB_CONTROL_ERROR)
-
-    monkeypatch.setattr(manager_module.dist, "all_reduce", remote_error)
-
-    with pytest.raises(RuntimeError, match="EPLB transfer worker failed on another rank"):
-        manager._poll_in_flight()
-    assert statuses == [1]
-    assert manager.transfer.commits == []
 
 
 def test_evaluation_ready_gate_propagates_local_and_remote_errors(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.control_group = object()
-    manager._control_ready_count = torch.empty(1, dtype=torch.int32)
+    manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
     manager._evaluation = Future()
     manager._evaluation.set_exception(RuntimeError("evaluation boom"))
     statuses = []
@@ -1441,26 +1370,16 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
     monkeypatch,
 ):
     class Transfer:
-        def __init__(self, live, staging):
-            self.live = live
-            self.staging = staging
-            self.ready = 0
+        def __init__(self, live, received, transfer_info):
+            self.tensor_buffers = [ExpertTensorBuffer("weight", live, received)]
+            self.transfer_info = transfer_info
+            self.status = TransferStatus.SUCCEEDED
 
-        def ready_layer(self):
-            return self.ready
-
-        def commit(self, layer, post_copy=None):
-            assert self.ready == layer
-            self.ready = None
-            self.live.copy_(self.staging, non_blocking=True)
-            if post_copy is not None:
-                post_copy()
-
-        def finish(self):
-            pass
+        def is_finished(self):
+            return True
 
     live = torch.tensor([1.0], device="cuda")
-    staging = torch.tensor([2.0], device="cuda")
+    received = torch.tensor(2.0, pin_memory=True)
     previous_read = torch.empty_like(live)
     next_read = torch.empty_like(live)
     source_stream = torch.cuda.Stream(device=live.device)
@@ -1469,10 +1388,16 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
     original_overlap_stream = g_infer_context.overlap_stream
 
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.transfer = Transfer(live, staging)
+    transfer_info = EPLBTransferInfo(0, 0, 2, 0)
+    manager.active_transfer = Transfer(live, received, transfer_info)
     manager.control_group = object()
-    manager._control_ready_count = torch.empty(1, dtype=torch.int32)
-    manager.in_flight_layers = [0]
+    manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
+    manager.in_flight_transfers = [transfer_info]
+    manager.completed_transfers = []
+    manager.num_primary_experts_per_rank = 0
+    manager.global_rank = 0
+    manager.target_placement = torch.tensor([[[2]]])
+    manager._eplb_impls = [SimpleNamespace(local_logics_expert_ids_list=[1])]
     manager._commit_layer_metadata = lambda _layer: None
     manager._finish_rebalance = lambda: None
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **_kwargs: tensor.fill_(1))
@@ -1498,7 +1423,7 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
 
 def test_manager_inflight_step_does_not_poll():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_layers = [0]
+    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1)]
     manager._evaluation = None
     calls = []
     manager._poll_in_flight = lambda: calls.append("poll")
@@ -1508,7 +1433,7 @@ def test_manager_inflight_step_does_not_poll():
 
 def test_manager_uses_one_fixed_full_sampling_window(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_layers = []
+    manager.in_flight_transfers = []
     manager._evaluation = None
     manager.prefill_steps = 0
     manager.step_interval = 3
@@ -1547,7 +1472,7 @@ def test_manager_restart_collection_resets_counters_and_arms_next_window():
 
 def test_manager_poll_advances_inflight_before_evaluation():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_layers = [0]
+    manager.in_flight_transfers = [EPLBTransferInfo(0, 0, 2, 1)]
     manager._evaluation = Future()
     calls = []
     manager._poll_in_flight = lambda: calls.append("inflight")
@@ -1560,10 +1485,10 @@ def test_manager_poll_advances_inflight_before_evaluation():
 
 def test_manager_poll_waits_for_all_evaluation_results(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight_layers = []
+    manager.in_flight_transfers = []
     manager._evaluation = Future()
     manager.control_group = object()
-    manager._control_ready_count = torch.empty(1, dtype=torch.int32)
+    manager._control_status_buffer = torch.empty(1, dtype=torch.int32)
     calls = []
     manager._finish_evaluation = lambda: calls.append("evaluation")
 
@@ -1604,20 +1529,7 @@ def test_mode_backend_eplb_hooks_are_noops_when_disabled():
     assert calls == ["prefill"]
 
 
-def test_pinned_transfer_groups_sources_in_collective_order():
-    plan = [
-        TransferStep(0, 2, 1, 3),
-        TransferStep(0, 0, 0, 1),
-        TransferStep(1, 1, 1, 3),
-    ]
-
-    grouped = PinnedMemoryEPLBTransfer._group_steps_by_source(plan)
-
-    assert [source for source, _steps in grouped] == [(0, 1), (1, 3)]
-    assert grouped[1][1] == [plan[0], plan[2]]
-
-
-def test_pinned_transfer_copies_source_row_through_cpu_buffer(monkeypatch):
+def test_pinned_transfer_copies_source_row_and_sends_to_destination(monkeypatch):
     class Stream:
         def __init__(self):
             self.synchronize_count = 0
@@ -1626,84 +1538,151 @@ def test_pinned_transfer_copies_source_row_through_cpu_buffer(monkeypatch):
             self.synchronize_count += 1
 
     transfer = object.__new__(PinnedMemoryEPLBTransfer)
-    transfer.global_rank = 0
-    transfer.transfer_group = object()
-    transfer._copy_stream = Stream()
-    transfer.live = [[("weight", torch.tensor([[1.0, 2.0], [3.0, 4.0]]))]]
-    transfer.pinned_rows = [("weight", torch.empty(2))]
-    transfer.staging = [("weight", torch.zeros((2, 2)))]
-    broadcasts = []
+    transfer._device = "cuda:0"
+    transfer._is_source_rank = True
+    transfer._is_destination_rank = False
+    transfer._p2p_group = object()
+    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 1)
+    transfer._device_to_host_stream = Stream()
+    transfer._local_logical_expert_ids = [4, 5]
+    transfer.tensor_buffers = [
+        ExpertTensorBuffer(
+            "weight",
+            torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            torch.empty(2),
+        )
+    ]
+    transfer.status = TransferStatus.RUNNING
+    sends = []
+    monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
     monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: nullcontext())
     monkeypatch.setattr(
         transfer_module.dist,
-        "broadcast",
-        lambda tensor, src, group: broadcasts.append((tensor.clone(), src, group)),
+        "send",
+        lambda tensor, dst, group, tag: sends.append((tensor.clone(), dst, group, tag)),
     )
 
-    transfer._copy_layer(
-        0,
-        [
-            TransferStep(dst_rank=0, dst_slot=1, src_rank=0, src_local_row=1),
-            TransferStep(dst_rank=1, dst_slot=0, src_rank=0, src_local_row=1),
-        ],
-    )
+    transfer._run_transfer()
 
-    assert len(broadcasts) == 1
-    assert torch.equal(broadcasts[0][0], torch.tensor([3.0, 4.0]))
-    assert broadcasts[0][1:] == (0, transfer.transfer_group)
-    assert torch.equal(transfer.staging[0][1][1], torch.tensor([3.0, 4.0]))
-    assert torch.count_nonzero(transfer.staging[0][1][0]) == 0
-    assert transfer._copy_stream.synchronize_count == 2
+    assert transfer.status is TransferStatus.SUCCEEDED
+    assert len(sends) == 1
+    assert torch.equal(sends[0][0], torch.tensor([3.0, 4.0]))
+    expected_tag = transfer._build_p2p_message_tag("weight")
+    assert sends[0][1:] == (1, transfer._p2p_group, expected_tag)
+    assert torch.equal(transfer.tensor_buffers[0].pinned_row, torch.tensor([3.0, 4.0]))
+    assert transfer._device_to_host_stream.synchronize_count == 1
 
 
-def test_pinned_transfer_waits_for_each_layer_commit_before_reusing_staging(
-    monkeypatch,
-):
-    class Event:
-        def __init__(self):
-            self.synchronize_count = 0
-
+def test_pinned_transfer_skips_p2p_for_local_destination(monkeypatch):
+    class Stream:
         def synchronize(self):
-            self.synchronize_count += 1
-
-        def record(self, _stream):
             pass
 
     transfer = object.__new__(PinnedMemoryEPLBTransfer)
-    transfer.device = "cuda:0"
-    transfer.global_rank = 0
-    transfer.live = [[], []]
-    transfer.staging = []
-    transfer.num_experts_per_rank = 0
-    transfer._release = threading.Event()
-    transfer._release.set()
-    transfer._consumed_event = Event()
-    transfer._consumed_recorded = False
-    transfer._ready = None
-    transfer._ready_lock = threading.Lock()
-    transfer._error = None
-    transfer._thread = None
-    copied = []
-    transfer._copy_layer = lambda layer_index, _plan: copied.append(layer_index)
+    transfer._device = "cuda:0"
+    transfer._is_source_rank = True
+    transfer._is_destination_rank = True
+    transfer._p2p_group = object()
+    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 0)
+    transfer._device_to_host_stream = Stream()
+    transfer._local_logical_expert_ids = [5]
+    transfer.tensor_buffers = [
+        ExpertTensorBuffer(
+            "weight",
+            torch.tensor([[3.0, 4.0]]),
+            torch.empty(2),
+        )
+    ]
+    transfer.status = TransferStatus.RUNNING
+    p2p_calls = []
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
-    monkeypatch.setattr(transfer_module.torch.cuda, "current_stream", lambda: object())
+    monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: nullcontext())
+    monkeypatch.setattr(transfer_module.dist, "send", lambda *_args, **_kwargs: p2p_calls.append("send"))
+    monkeypatch.setattr(transfer_module.dist, "recv", lambda *_args, **_kwargs: p2p_calls.append("recv"))
 
-    transfer.start([(0, []), (1, [])])
-    deadline = time.monotonic() + 2
-    while transfer.ready_layer() is None and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert transfer.ready_layer() == 0
-    assert copied == [0]
+    transfer._run_transfer()
 
-    transfer.commit(0)
+    assert transfer.is_finished()
+    assert p2p_calls == []
+    assert torch.equal(transfer.tensor_buffers[0].pinned_row, torch.tensor([3.0, 4.0]))
+
+
+def test_pinned_transfer_exits_process_on_failure(monkeypatch):
+    transfer = object.__new__(PinnedMemoryEPLBTransfer)
+    transfer._device = "cuda:0"
+    transfer._is_source_rank = False
+    transfer._is_destination_rank = True
+    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0)
+    transfer._p2p_group = object()
+    transfer.tensor_buffers = [
+        ExpertTensorBuffer(
+            "weight",
+            torch.empty((1, 1)),
+            torch.empty(1),
+        )
+    ]
+    transfer.status = TransferStatus.RUNNING
+    logged_messages = []
+    exit_codes = []
+
+    def fail_recv(*_args, **_kwargs):
+        raise RuntimeError("recv failed")
+
+    monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(transfer_module.dist, "recv", fail_recv)
+    monkeypatch.setattr(transfer_module.logger, "exception", logged_messages.append)
+    monkeypatch.setattr(transfer_module.os, "_exit", exit_codes.append)
+
+    transfer._run_transfer()
+
+    assert logged_messages == ["EPLB transfer failed"]
+    assert exit_codes == [1]
+    assert not transfer.is_finished()
+
+
+def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
+    class Stream:
+        def synchronize(self):
+            pass
+
+    transfer = object.__new__(PinnedMemoryEPLBTransfer)
+    transfer._device = "cuda:0"
+    transfer._is_source_rank = False
+    transfer._is_destination_rank = True
+    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0)
+    transfer._p2p_group = object()
+    transfer._device_to_host_stream = Stream()
+    transfer.tensor_buffers = [
+        ExpertTensorBuffer(
+            "weight",
+            torch.empty((1, 1)),
+            torch.tensor([3.0]),
+        )
+    ]
+    transfer.status = TransferStatus.IDLE
+    transfer._transfer_thread = threading.Thread(target=transfer._run_transfer, daemon=True)
+    receives = []
+    monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(
+        transfer_module.dist,
+        "recv",
+        lambda tensor, src, group, tag: receives.append((tensor, src, group, tag)),
+    )
+
+    assert not transfer.is_finished()
+    transfer.start()
     deadline = time.monotonic() + 2
-    while transfer.ready_layer() is None and time.monotonic() < deadline:
+    while transfer.status is TransferStatus.RUNNING and time.monotonic() < deadline:
         time.sleep(0.001)
-    assert transfer.ready_layer() == 1
-    assert copied == [0, 1]
-    assert transfer._consumed_event.synchronize_count == 1
-    transfer.commit(1)
-    transfer.finish()
+    assert transfer.status is TransferStatus.SUCCEEDED
+    assert transfer.is_finished()
+    assert torch.equal(transfer.tensor_buffers[0].pinned_row, torch.tensor([3.0]))
+    assert len(receives) == 1
+    assert receives[0][0] is transfer.tensor_buffers[0].pinned_row
+    expected_tag = transfer._build_p2p_message_tag("weight")
+    assert receives[0][1:] == (1, transfer._p2p_group, expected_tag)
+    with pytest.raises(AssertionError, match="already been started"):
+        transfer.start()
 
 
 def test_manager_constructs_pinned_memory_transfer(monkeypatch):
@@ -1712,6 +1691,7 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
         (),
         {
             "n_routed_experts": 4,
+            "layer_num_": 0,
             "fuse_moe_impl": _test_moe_impl(
                 eplb=True,
                 num_logical_experts=4,
@@ -1721,7 +1701,8 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
             ),
         },
     )()
-    transfer = object()
+    transfer_starts = []
+    transfer = SimpleNamespace(start=lambda: transfer_starts.append(True))
     groups = [object(), object(), object()]
     new_group_calls = []
     monkeypatch.setattr(manager_module, "_find_fused_moe_weights", lambda model: [weight])
@@ -1740,19 +1721,23 @@ def test_manager_constructs_pinned_memory_transfer(monkeypatch):
     monkeypatch.setattr(
         manager_module,
         "PinnedMemoryEPLBTransfer",
-        lambda weights, group, rank: (transfer_calls.append((weights, group, rank)) or transfer),
+        lambda weights, group, rank, info: (transfer_calls.append((weights, group, rank, info)) or transfer),
     )
     logs = []
     monkeypatch.setattr(manager_module.logger, "info", lambda message: logs.append(message))
     manager = manager_module.EPLBManager(type("Model", (), {})())
-    assert manager.transfer is transfer
+    assert manager.active_transfer is None
     assert (
         manager.evaluation_group,
         manager.control_group,
         manager.transfer_group,
     ) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 3
-    assert transfer_calls == [([weight], groups[2], 0)]
+    transfer_info = EPLBTransferInfo(0, 0, 2, 1)
+    manager.in_flight_transfers = [transfer_info]
+    manager._start_next_transfer()
+    assert transfer_calls == [([weight], groups[2], 0, transfer_info)]
+    assert transfer_starts == [True]
     assert manager.planner.rebalance_gain_threshold == 0.07
     assert manager.next_evaluation_step == manager.step_interval
     assert "planner=GreedyEPLBPlanner" in logs[0]
