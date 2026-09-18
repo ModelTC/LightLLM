@@ -294,7 +294,6 @@ def test_eplb_planner_builds_legal_concrete_slot_layout():
         4,
         1,
         expert_alignment=1,
-        min_avg_tokens_per_expert=0,
         rebalance_gain_threshold=0.0,
     )
     current = _initial_extra_expert_placement(8, 4, 1).unsqueeze(0).tolist()
@@ -318,7 +317,6 @@ def test_eplb_planner_estimator_distributes_global_load_across_copies():
         4,
         1,
         expert_alignment=128,
-        min_avg_tokens_per_expert=0,
     )
     placement = [[[2], [4], [6], [0]]]
     load = [[100, 200, 300, 400, 500, 600, 700, 800]]
@@ -328,15 +326,13 @@ def test_eplb_planner_estimator_distributes_global_load_across_copies():
     assert predicted == [[640, 1024, 1280, 1408]]
 
 
-def test_eplb_planner_rejects_an_under_sampled_window():
-    planner = GreedyEPLBPlanner(2, 1, min_avg_tokens_per_expert=100)
-    current = [[[2], [0]]]
-    load = [[1, 1, 1, 1]]
+def test_eplb_planner_does_not_move_zero_load_experts():
+    planner = GreedyEPLBPlanner(2, 1)
+    current = [[[3], [1]]]
 
-    result = planner.plan(load, current)
+    result = planner.plan([[0, 0, 0, 0]], current)
 
-    assert result.reason == "insufficient"
-    assert not result.changed
+    assert result.reason == "no_improvement"
     assert result.placement == current
 
 
@@ -344,7 +340,6 @@ def test_eplb_planner_reserves_rank_capacity_for_remaining_copies():
     planner = GreedyEPLBPlanner(
         4,
         1,
-        min_avg_tokens_per_expert=0,
         rebalance_gain_threshold=0.0,
     )
     current = _initial_extra_expert_placement(16, 4, 1).unsqueeze(0).tolist()
@@ -364,7 +359,7 @@ def test_eplb_planner_reserves_rank_capacity_for_remaining_copies():
 
 
 def test_eplb_planner_keeps_high_redundancy_search_state_isolated():
-    planner = GreedyEPLBPlanner(4, 3, min_avg_tokens_per_expert=0)
+    planner = GreedyEPLBPlanner(4, 3)
     current = _initial_extra_expert_placement(16, 4, 3).unsqueeze(0).tolist()
     load = [
         [22613, 26852, 21852, 23480, 13270, 14695, 28735, 22303, 15324, 19604, 21492, 25458, 14120, 12130, 18620, 22888]
@@ -744,7 +739,7 @@ def test_manager_evaluation_collective_sums_rank_loads(monkeypatch):
 
     def plan_and_broadcast(global_load):
         seen["global_load"] = global_load.clone()
-        return {"kind": "insufficient"}
+        return {"kind": "no_improvement"}
 
     manager._plan_and_broadcast = plan_and_broadcast
 

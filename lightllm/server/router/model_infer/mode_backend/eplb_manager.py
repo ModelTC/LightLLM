@@ -34,7 +34,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
-EPLB_MIN_AVG_TOKENS_PER_EXPERT = 100
 EPLB_EXPERT_ALIGNMENT = 128
 EPLB_CONTROL_ERROR = -1
 EPLB_EXPERT_IMBALANCE_RATIO_METRIC = "lightllm_eplb_topk_expert_imbalance_ratio"
@@ -77,7 +76,6 @@ class EPLBManager:
             self.world_size,
             self.num_redundant_experts_per_rank,
             expert_alignment=EPLB_EXPERT_ALIGNMENT,
-            min_avg_tokens_per_expert=EPLB_MIN_AVG_TOKENS_PER_EXPERT,
             rebalance_gain_threshold=get_eplb_rebalance_gain_threshold(),
         )
 
@@ -268,12 +266,7 @@ class EPLBManager:
         self._publish_expert_load_metric(result)
         if result["kind"] != "planned":
             if self.global_rank == 0:
-                logger.info(
-                    "eplb skip rearrangement kind=%s minimum_layer_samples=%s required_layer_samples=%s",
-                    result["kind"],
-                    result["minimum_layer_samples"],
-                    result["required_layer_samples"],
-                )
+                logger.info("eplb skip rearrangement kind=%s", result["kind"])
             self._restart_collection()
             return
         self._start_rebalance(result)

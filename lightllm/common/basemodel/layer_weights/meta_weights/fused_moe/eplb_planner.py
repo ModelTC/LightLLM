@@ -28,8 +28,6 @@ class EPLBPlan:
     before_rank_load: RankLoad
     after_rank_load: RankLoad
     reason: str
-    minimum_layer_samples: float
-    required_layer_samples: float
 
     @property
     def changed(self) -> bool:
@@ -45,8 +43,6 @@ class EPLBPlan:
             "kind": self.reason,
             "placement": self.placement,
             "changed_layers": self.changed_layers,
-            "minimum_layer_samples": self.minimum_layer_samples,
-            "required_layer_samples": self.required_layer_samples,
             "before": before,
             "after": after,
             "rebalance_gain": gain,
@@ -75,7 +71,6 @@ class GreedyEPLBPlanner(EPLBPlanner):
         num_redundant_experts_per_rank: int,
         *,
         expert_alignment: int = 1,
-        min_avg_tokens_per_expert: float = 0,
         rebalance_gain_threshold: float = 0.0,
     ):
         if world_size <= 1:
@@ -84,14 +79,11 @@ class GreedyEPLBPlanner(EPLBPlanner):
             raise ValueError("num_redundant_experts_per_rank must be positive")
         if expert_alignment <= 0:
             raise ValueError("expert_alignment must be positive")
-        if min_avg_tokens_per_expert < 0:
-            raise ValueError("min_avg_tokens_per_expert must be non-negative")
         if not 0.0 <= rebalance_gain_threshold <= 1.0:
             raise ValueError("rebalance_gain_threshold must be between 0.0 and 1.0")
         self.world_size = world_size
         self.num_redundant_experts_per_rank = num_redundant_experts_per_rank
         self.expert_alignment = expert_alignment
-        self.min_avg_tokens_per_expert = min_avg_tokens_per_expert
         self.rebalance_gain_threshold = rebalance_gain_threshold
 
     def plan(
@@ -109,22 +101,8 @@ class GreedyEPLBPlanner(EPLBPlanner):
         """
         load = [[float(value) for value in layer] for layer in logical_expert_load]
         current = [[[int(expert) for expert in rank] for rank in layer] for layer in current_placement]
-        num_logical_experts = self._validate_inputs(load, current)
-        layer_samples = [sum(layer) for layer in load]
-        required_samples = self.min_avg_tokens_per_expert * num_logical_experts
-        minimum_samples = min(layer_samples)
+        self._validate_inputs(load, current)
         before_rank_load = self.estimate_rank_load(load, current)
-
-        if minimum_samples < required_samples:
-            return EPLBPlan(
-                placement=current,
-                changed_layers=[False] * len(load),
-                before_rank_load=before_rank_load,
-                after_rank_load=[layer[:] for layer in before_rank_load],
-                reason="insufficient",
-                minimum_layer_samples=minimum_samples,
-                required_layer_samples=required_samples,
-            )
 
         candidates = [self._plan_layer(layer_load, current_layer) for layer_load, current_layer in zip(load, current)]
         candidate_rank_load = self.estimate_rank_load(load, candidates)
@@ -135,7 +113,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
             before = max(before_rank_load[layer])
             after = max(candidate_rank_load[layer])
             gain = (before - after) / max(before, 1.0)
-            changed = candidate != current[layer] and gain >= self.rebalance_gain_threshold
+            changed = candidate != current[layer] and gain > self.rebalance_gain_threshold
             changed_layers.append(changed)
             placement.append(candidate if changed else current[layer])
             after_rank_load.append(candidate_rank_load[layer][:] if changed else before_rank_load[layer][:])
@@ -146,8 +124,6 @@ class GreedyEPLBPlanner(EPLBPlanner):
             before_rank_load=before_rank_load,
             after_rank_load=after_rank_load,
             reason="planned" if any(changed_layers) else "no_improvement",
-            minimum_layer_samples=minimum_samples,
-            required_layer_samples=required_samples,
         )
 
     def estimate_rank_load(
