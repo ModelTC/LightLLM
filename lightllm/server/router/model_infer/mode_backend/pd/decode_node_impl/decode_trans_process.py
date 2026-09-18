@@ -258,7 +258,7 @@ class _DecodeTransModule:
                     for notify in _notify_list:
                         try:
                             notify_obj = pickle.loads(notify)
-                        except:
+                        except Exception:
                             notify_obj = None
 
                         if not isinstance(notify_obj, PDChunckedTransTask):
