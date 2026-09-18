@@ -258,10 +258,13 @@ class EPLBManager:
             raise RuntimeError("planned EPLB rearrangement must contain at least one transfer")
         self.state = EPLBManagerState.TRANSFERRING
         if self.global_rank == 0:
+            changed_layer_count = sum(
+                current != target for current, target in zip(self.current_placement, self.target_placement)
+            )
             logger.info(
                 "eplb started steps=%s changed_layer_count=%s changed_slot_count=%s",
                 self.steps,
-                sum(current != target for current, target in zip(self.current_placement, self.target_placement)),
+                changed_layer_count,
                 len(self.pending_transfer_infos),
             )
 
@@ -272,11 +275,10 @@ class EPLBManager:
 
         # 没有活动批次时，所有 rank 根据相同的 pending 列表构造下一批任务。
         if not hasattr(self, "active_transfer_batch"):
-            self.active_transfer_batch = self._next_transfer_batch()
+            transfer_batch = self._pop_next_transfer_batch()
 
             # 空批次表示公共任务列表已经耗尽，所有 rank 可以同时结束重排。
-            if not self.active_transfer_batch:
-                del self.active_transfer_batch
+            if not transfer_batch:
                 self.current_placement = self.target_placement
                 elapsed = time.time() - self.rebalance_started_at
                 del self.pending_transfer_infos
@@ -287,12 +289,14 @@ class EPLBManager:
                     logger.info("eplb completed wall_time=%.2fs", elapsed)
                 return
 
+            self.active_transfer_batch = transfer_batch
+
             # 一个批次内每个 rank 至多参与一条任务。参与者构造并启动本地传输；
             # 其他 rank 只保存相同的批次信息，后续共同参与状态同步和 commit。
             local_transfer_info = next(
                 (
                     transfer_info
-                    for transfer_info in self.active_transfer_batch
+                    for transfer_info in transfer_batch
                     if self.global_rank in (transfer_info.source_rank, transfer_info.dest_rank)
                 ),
                 None,
@@ -309,9 +313,9 @@ class EPLBManager:
             # 已有活动批次时，本 step 只负责轮询；整批完成后才统一提交。
             self._poll_transfer_batch()
 
-    def _next_transfer_batch(self) -> List[EPLBTransferInfo]:
-        """按计划顺序选择一组 rank 互不冲突的传输任务。"""
-        available_ranks = set(range(self.world_size))
+    def _pop_next_transfer_batch(self) -> List[EPLBTransferInfo]:
+        """从 pending 中取出一组 rank 互不冲突的传输任务。"""
+        occupied_ranks = set()
         transfer_batch: List[EPLBTransferInfo] = []
         remaining_transfer_infos: List[EPLBTransferInfo] = []
 
@@ -319,9 +323,10 @@ class EPLBManager:
         # 相同的批次。每个 rank 在本批次中至多参与一条任务，可以独立启动。
         for transfer_info in self.pending_transfer_infos:
             participant_ranks = {transfer_info.source_rank, transfer_info.dest_rank}
-            if participant_ranks <= available_ranks:
+            # 与已选任务没有公共 rank 时，当前任务可以并入本批次。
+            if not participant_ranks & occupied_ranks:
                 transfer_batch.append(transfer_info)
-                available_ranks -= participant_ranks
+                occupied_ranks |= participant_ranks
             else:
                 remaining_transfer_infos.append(transfer_info)
 
@@ -331,13 +336,12 @@ class EPLBManager:
 
     def _poll_transfer_batch(self) -> None:
         """等待当前批次全部完成，随后统一提交并释放本地任务。"""
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
+        active_transfer = getattr(self, "active_transfer", None)
         local_state: Optional[Tuple[EPLBTransferInfo, bool]] = None
-        if hasattr(self, "active_transfer"):
+        if active_transfer is not None:
             local_state = (
-                self.active_transfer.transfer_info,
-                self.active_transfer.is_finished(),
+                active_transfer.transfer_info,
+                active_transfer.is_finished(),
             )
         transfer_states: List[Optional[Tuple[EPLBTransferInfo, bool]]] = [None] * self.world_size
         dist.all_gather_object(transfer_states, local_state, group=self.control_group)
@@ -349,30 +353,35 @@ class EPLBManager:
 
         # 所有 rank 使用相同的批次顺序提交，因此全局 placement 和 metadata
         # 始终一致；只有 destination rank 会额外写入实际专家权重。
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
         torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
         for transfer_info in self.active_transfer_batch:
             self._commit_transfer(transfer_info)
 
-        if hasattr(self, "active_transfer"):
+        if active_transfer is not None:
             del self.active_transfer
         del self.active_transfer_batch
 
     def _commit_transfer(self, transfer_info: EPLBTransferInfo) -> None:
         """提交一条传输，并发布更新后的路由 metadata。"""
-        if transfer_info.dest_rank == self.global_rank:
+        is_destination_rank = transfer_info.dest_rank == self.global_rank
+        if is_destination_rank:
+            active_transfer = getattr(self, "active_transfer", None)
             assert (
-                hasattr(self, "active_transfer") and self.active_transfer.transfer_info == transfer_info
+                active_transfer is not None and active_transfer.transfer_info == transfer_info
             ), "EPLB destination rank has no matching completed transfer"
-            for tensor_buffer in self.active_transfer.tensor_buffers:
+            for tensor_buffer in active_transfer.tensor_buffers:
                 tensor_buffer.live_tensor[transfer_info.dest_local_expert_index].copy_(tensor_buffer.pinned_row)
 
         layer_index = transfer_info.layer_index
+        layer_impl = self._eplb_impls[layer_index]
         redundant_slot_index = transfer_info.dest_local_expert_index - self.num_primary_experts_per_rank
         self.current_placement[layer_index][transfer_info.dest_rank][
             redundant_slot_index
         ] = transfer_info.source_logical_expert_id
-        if transfer_info.dest_rank == self.global_rank:
-            self._eplb_impls[layer_index].local_logics_expert_ids_list[
+        if is_destination_rank:
+            layer_impl.local_logics_expert_ids_list[
                 transfer_info.dest_local_expert_index
             ] = transfer_info.source_logical_expert_id
 
@@ -394,7 +403,7 @@ class EPLBManager:
             ),
             dtype=torch.int32,
         )
-        self._eplb_impls[layer_index].logical_to_physical_map.copy_(logical_to_physical_map)
+        layer_impl.logical_to_physical_map.copy_(logical_to_physical_map)
 
     def _publish_expert_load_metric(self, global_load: torch.Tensor) -> None:
         if self.global_rank != 0:
