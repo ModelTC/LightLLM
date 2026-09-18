@@ -80,10 +80,6 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
     ):
-        if alpha is not None or limit is not None:
-            raise NotImplementedError(
-                "FuseMoeDeepGEMM does not support clamped SwiGLU: EP activation kernels need alpha/limit support"
-            )
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
@@ -94,6 +90,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
         return output
 

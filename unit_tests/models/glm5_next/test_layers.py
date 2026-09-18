@@ -237,8 +237,41 @@ def test_ffn_dispatch_preserves_clamp_and_shared_expert(config, monkeypatch, mod
             coefficient = (probabilities * (ids == expert)).sum(-1, keepdim=True)
             routed += (reference_mlp(1 + expert / 4, 2 + expert / 8).float() * coefficient).bfloat16()
         expected += routed
-    actual = layer._ffn(x.clone(), SimpleNamespace(), weight)
+    actual = layer._ffn(x.clone(), SimpleNamespace(is_prefill=True), weight)
     torch.testing.assert_close(actual, expected, atol=0.25, rtol=0.015)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_ep_ffn_uses_combined_output_and_replicated_shared_expert(config, monkeypatch, is_prefill):
+    args = StartArgs(tp=2, enable_ep_moe=True, enable_fused_shared_experts=True)
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
+    monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "2")
+    monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "1")
+    monkeypatch.setenv("LIGHTLLM_GLOBAL_WORLD_SIZE", "2")
+    monkeypatch.setenv("LIGHTLLM_GLOBAL_RANK", "1")
+    get_env_start_args.cache_clear()
+    layer = Glm5NextTransformerLayerInfer(3, config)
+    weight = Glm5NextTransformerLayerWeight(3, torch.bfloat16, config, Quantcfg(config))
+    assert weight.num_fused_shared_experts == 0
+    prefix = "model.language_model.layers.3.mlp.shared_experts"
+    eye = torch.eye(128, device="cuda", dtype=torch.bfloat16)
+    weight.load_hf_weights({f"{prefix}.{name}.weight": eye for name in ("gate_proj", "up_proj", "down_proj")})
+    x = torch.linspace(-25, 25, 3 * 128, device="cuda", dtype=torch.bfloat16).view(3, 128)
+    original = x.clone()
+    monkeypatch.setattr(weight.moe_gate, "mm", lambda x: torch.zeros(3, 4, device="cuda"))
+    monkeypatch.setattr(layer, "_tpsp_reduce", lambda **kwargs: pytest.fail("EP output must not be TP-reduced again"))
+
+    def combined_output(hidden_states, **kwargs):
+        assert kwargs["is_prefill"] is is_prefill
+        assert kwargs["alpha"] == 1.0 and kwargs["limit"] == 10.0
+        assert kwargs["clamp_up_add_one"] is False
+        return torch.full_like(hidden_states, 17)
+
+    monkeypatch.setattr(weight.experts, "experts", combined_output)
+    actual = layer._ffn(x, SimpleNamespace(is_prefill=is_prefill), weight)
+    shared = (F.silu(x.float().clamp(max=10)).bfloat16().float() * x.float().clamp(-10, 10)).bfloat16()
+    torch.testing.assert_close(actual, shared + 17, atol=0.25, rtol=0.01)
+    torch.testing.assert_close(x, original, atol=0, rtol=0)
 
 
 def test_fp8_shared_expert_scales_and_bf16_kv_b_load_together(config, monkeypatch):

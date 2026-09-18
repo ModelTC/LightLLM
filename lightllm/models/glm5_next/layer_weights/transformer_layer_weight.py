@@ -83,7 +83,8 @@ class Glm5NextTransformerLayerWeight(TransformerLayerWeight):
             and self.layer_num_ % self.network_config_.get("moe_layer_freq", 1) == 0
         )
         self.num_fused_shared_experts = 0
-        if self.is_moe and get_env_start_args().enable_fused_shared_experts:
+        args = get_env_start_args()
+        if self.is_moe and args.enable_fused_shared_experts and not args.enable_ep_moe:
             self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
         self.is_linear_attention_layer = (
             self.layer_num_ < self.network_config_["num_hidden_layers"]
@@ -164,12 +165,16 @@ class Glm5NextTransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_mlp(self, prefix, intermediate_size):
+        # EP returns complete routed outputs on each rank, so shared experts
+        # must also be complete. Dense layers retain their TP weight shards.
+        tp_kwargs = {"tp_rank": 0, "tp_world_size": 1} if self.is_moe and get_env_start_args().enable_ep_moe else {}
         self.gate_up_proj = ROWMMWeight(
             in_dim=self.n_embed,
             out_dims=[intermediate_size, intermediate_size],
             weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
             data_type=self.data_type_,
             quant_method=self.get_quant_method("gate_up_proj"),
+            **tp_kwargs,
         )
         self.down_proj = COLMMWeight(
             in_dim=intermediate_size,
@@ -177,6 +182,7 @@ class Glm5NextTransformerLayerWeight(TransformerLayerWeight):
             weight_names=f"{prefix}.down_proj.weight",
             data_type=self.data_type_,
             quant_method=self.get_quant_method("down_proj"),
+            **tp_kwargs,
         )
 
     def _init_moe(self):

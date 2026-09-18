@@ -11,6 +11,7 @@ from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttB
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
 from lightllm.common.req_manager import Glm5NextReqManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
+from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.registry import ModelRegistry
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.post_layer_infer import Glm5NextPostLayerInfer
@@ -49,9 +50,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         assert self.config["linear_attn_config"]["num_heads"] % self.tp_world_size_ == 0
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
         args = self.args
-        assert args.dp == 1 and not args.enable_tpsp_mix_mode, "GLM-5.3 Flash v1 uses plain tensor parallelism"
+        assert not args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
+        assert args.dp == 1 or args.enable_ep_moe, "GLM-5.3 Flash data parallelism requires expert parallelism"
         assert args.mtp_mode in (None, "eagle_with_att", "vanilla_with_att"), "Unsupported GLM NextN mode"
-        assert not args.enable_ep_moe, "GLM-5.3 Flash v1 uses tensor-parallel MoE"
         assert not args.enable_prefill_cudagraph, "GLM-5.3 Flash v1 supports decode CUDA graphs"
 
     def autotune_layers(self):
@@ -100,3 +101,11 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
     def _init_custom(self):
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
+        if self.args.enable_ep_moe:
+            dist_group_manager.new_deepep_group(
+                n_routed_experts=self.config["n_routed_experts"],
+                hidden_size=self.config["hidden_size"],
+                expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
+                num_experts_per_tok=self.config["num_experts_per_tok"],
+                moe_intermediate_size=self.config["moe_intermediate_size"],
+            )

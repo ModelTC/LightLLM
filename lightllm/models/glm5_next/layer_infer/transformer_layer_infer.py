@@ -17,6 +17,7 @@ from lightllm.common.basemodel.triton_kernel.mhc import (
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
@@ -34,6 +35,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         self.hc_eps = network_config.get("hc_eps", 1e-6)
         self.hc_sinkhorn_iters = network_config.get("hc_sinkhorn_iters", 20)
         self.swiglu_limit = network_config["swiglu_limit"]
+        self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.is_moe = (
             network_config["n_routed_experts"] is not None
             and layer_num >= network_config["first_k_dense_replace"]
@@ -71,7 +73,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn(self, input, infer_state, layer_weight):
         input = self._tpsp_allgather(input=input.view(-1, self.embed_dim_), infer_state=infer_state)
         if self.is_moe:
-            output = self._moe_ffn_tp(input, infer_state, layer_weight)
+            output = self._moe_ffn(input, infer_state, layer_weight)
+            if self.enable_ep_moe:
+                # DeepEP combine already includes all routed experts.
+                return output
         else:
             output = self._ffn_tp(input, infer_state, layer_weight)
         return self._tpsp_reduce(input=output, infer_state=infer_state)
@@ -91,7 +96,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         return layer_weight.down_proj.mm(ffn1_out)
 
-    def _moe_ffn_tp(self, input, infer_state, layer_weight) -> torch.Tensor:
+    def _moe_ffn(self, input, infer_state, layer_weight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
@@ -101,7 +106,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
         moe_gate_dtype = layer_weight.moe_gate.data_type_
         router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
-        layer_weight.experts.experts(
+        output = layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
             top_k=self.num_experts_per_tok,
@@ -109,6 +114,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
             alpha=1.0,
             limit=self.swiglu_limit,
@@ -116,9 +122,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
 
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
-            hidden_states.add_(shared_output)
+            output.add_(shared_output)
 
-        return hidden_states.view(num_tokens, hidden_dim)
+        return output.view(num_tokens, hidden_dim)
 
     def _get_qkv(self, input, infer_state, layer_weight):
         if self.is_linear_attention_layer:

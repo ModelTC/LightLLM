@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.deepgemm_impl import FuseMoeDeepGEMM
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.marlin_impl import FuseMoeMarlin
 from lightllm.common.quantization.no_quant import NoQuantization
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -95,8 +94,8 @@ def test_call_parameters_reach_expert_activation(monkeypatch, activation):
         torch.testing.assert_close(actual_default, default_output, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("backend", [FuseMoeDeepGEMM, FuseMoeMarlin])
-def test_unsupported_backend_rejects_clamp_at_call(monkeypatch, backend):
+def test_marlin_rejects_clamp_at_call(monkeypatch):
+    backend = FuseMoeMarlin
     monkeypatch.setattr(backend, "create_workspace", lambda self: None)
     monkeypatch.setattr(backend, "_select_experts", lambda *args, **kwargs: (None, None, None))
     impl = backend(
