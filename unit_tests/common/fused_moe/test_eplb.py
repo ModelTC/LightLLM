@@ -1,5 +1,6 @@
 import threading
 import time
+from concurrent.futures import Future
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -666,9 +667,11 @@ def test_steady_sampling_resets_aggregated_route_counter():
         world_size=1,
     )
     manager._eplb_impls = [impl]
+    manager.prefill_steps = 0
+    manager.step_interval = 20
 
-    manager._reset_route_counters()
-    manager._reset_route_counters()
+    manager._restart_collection()
+    manager._restart_collection()
 
     assert impl.route_counter.shape == (4,)
     assert torch.count_nonzero(impl.route_counter) == 0
@@ -721,9 +724,6 @@ def test_manager_evaluation_collective_sums_rank_loads(monkeypatch):
     manager.num_redundant_experts_per_rank = 1
     manager.current_placement = _initial_extra_expert_placement(4, 4, 1).unsqueeze(0)
     manager.evaluation_group = object()
-    manager._evaluation_lock = threading.Lock()
-    manager._evaluation_result = None
-    manager._evaluation_error = None
     local = torch.full((1, 4), 100, dtype=torch.int64)
     manager._collect_local_load = lambda: local.clone()
     seen = {}
@@ -743,14 +743,15 @@ def test_manager_evaluation_collective_sums_rank_loads(monkeypatch):
 
     manager._plan_and_broadcast = plan_and_broadcast
 
-    manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})())
+    evaluation = Future()
+    manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})(), evaluation)
+    result = evaluation.result()
 
     assert seen["group"] is manager.evaluation_group
     assert seen["before"].shape == (1, 4)
     assert torch.equal(seen["before"], local)
     assert torch.equal(seen["global_load"], torch.full_like(local, 200))
-    assert manager._evaluation_error is None
-    assert manager._evaluation_result["expert_imbalance_ratio"] == 1.0
+    assert result["expert_imbalance_ratio"] == 1.0
 
 
 def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_call(
@@ -781,9 +782,6 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager.num_redundant_experts_per_rank = 1
     manager.current_placement = _initial_extra_expert_placement(4, 4, 1).unsqueeze(0).expand(3, -1, -1).clone()
     manager.evaluation_group = object()
-    manager._evaluation_lock = threading.Lock()
-    manager._evaluation_result = None
-    manager._evaluation_error = None
     manager._collect_local_load = lambda: torch.full((3, 4), 100, dtype=torch.int64)
     planned_placement = torch.tensor(
         [
@@ -814,13 +812,14 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
         build_maps_for_layers,
     )
 
-    manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})())
+    evaluation = Future()
+    manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})(), evaluation)
+    result = evaluation.result()
 
-    assert manager._evaluation_error is None
     assert calls == [(2, 4, 2)]
-    metadata = manager._evaluation_result["metadata"]
-    assert metadata[1] is None
-    assert [layer_index for layer_index, _plan in manager._evaluation_result["layer_plans"]] == [0, 2]
+    metadata = result["metadata"]
+    assert 1 not in metadata
+    assert [layer_index for layer_index, _plan in result["layer_plans"]] == [0, 2]
     for layer_index in (0, 2):
         item = metadata[layer_index]
         expected = build_logical_to_physical_map(
@@ -1407,11 +1406,10 @@ def test_manager_inflight_remote_worker_error_does_not_commit(monkeypatch):
 
 def test_evaluation_ready_gate_propagates_local_and_remote_errors(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager._evaluation_lock = threading.Lock()
     manager.control_group = object()
     manager._control_ready_count = torch.empty(1, dtype=torch.int32)
-    manager._evaluation_error = RuntimeError("evaluation boom")
-    manager._evaluation_result = None
+    manager._evaluation = Future()
+    manager._evaluation.set_exception(RuntimeError("evaluation boom"))
     statuses = []
 
     def retain_local_error(tensor, **_kwargs):
@@ -1424,8 +1422,8 @@ def test_evaluation_ready_gate_propagates_local_and_remote_errors(monkeypatch):
     assert str(exc_info.value.__cause__) == "evaluation boom"
     assert statuses == [manager_module.EPLB_CONTROL_ERROR]
 
-    manager._evaluation_error = None
-    manager._evaluation_result = {"kind": "no_improvement"}
+    manager._evaluation = Future()
+    manager._evaluation.set_result({"kind": "no_improvement"})
     statuses.clear()
 
     def remote_error(tensor, **_kwargs):
@@ -1500,7 +1498,8 @@ def test_manager_inflight_commit_orders_live_weights_between_overlap_forwards(
 
 def test_manager_inflight_step_does_not_poll():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = True
+    manager.in_flight_layers = [0]
+    manager._evaluation = None
     calls = []
     manager._poll_in_flight = lambda: calls.append("poll")
     manager.step()
@@ -1509,8 +1508,8 @@ def test_manager_inflight_step_does_not_poll():
 
 def test_manager_uses_one_fixed_full_sampling_window(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager.evaluation_in_flight = False
+    manager.in_flight_layers = []
+    manager._evaluation = None
     manager.prefill_steps = 0
     manager.step_interval = 3
     manager.next_evaluation_step = 3
@@ -1548,8 +1547,8 @@ def test_manager_restart_collection_resets_counters_and_arms_next_window():
 
 def test_manager_poll_advances_inflight_before_evaluation():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = True
-    manager.evaluation_in_flight = True
+    manager.in_flight_layers = [0]
+    manager._evaluation = Future()
     calls = []
     manager._poll_in_flight = lambda: calls.append("inflight")
     manager._finish_evaluation = lambda: calls.append("evaluation")
@@ -1561,11 +1560,8 @@ def test_manager_poll_advances_inflight_before_evaluation():
 
 def test_manager_poll_waits_for_all_evaluation_results(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager.evaluation_in_flight = True
-    manager._evaluation_lock = threading.Lock()
-    manager._evaluation_result = None
-    manager._evaluation_error = None
+    manager.in_flight_layers = []
+    manager._evaluation = Future()
     manager.control_group = object()
     manager._control_ready_count = torch.empty(1, dtype=torch.int32)
     calls = []
@@ -1575,7 +1571,7 @@ def test_manager_poll_waits_for_all_evaluation_results(monkeypatch):
     manager.poll()
     assert calls == []
 
-    manager._evaluation_result = {"kind": "no_improvement"}
+    manager._evaluation.set_result({"kind": "no_improvement"})
     monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **_kwargs: tensor.fill_(1))
     manager.poll()
     assert calls == ["evaluation"]

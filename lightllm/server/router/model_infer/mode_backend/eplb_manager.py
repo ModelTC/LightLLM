@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 import threading
 import time
 
@@ -43,12 +44,12 @@ class EPLBManager:
     """Collect logical load, invoke a planner, and publish migrated rows."""
 
     def __init__(self, model: TpPartBaseModel):
-        self.weights = _find_fused_moe_weights(model)
-        assert self.weights, "EPLB requires at least one EP MoE layer"
+        weights = _find_fused_moe_weights(model)
+        assert weights, "EPLB requires at least one EP MoE layer"
         self.global_rank = get_global_rank()
         self.world_size = get_global_world_size()
         self.node_world_size = get_node_world_size()
-        self._eplb_impls = [weight.fuse_moe_impl for weight in self.weights]
+        self._eplb_impls = [weight.fuse_moe_impl for weight in weights]
 
         routed = {impl.n_routed_experts for impl in self._eplb_impls}
         redundant = {impl.num_redundant_experts_per_rank for impl in self._eplb_impls}
@@ -69,7 +70,7 @@ class EPLBManager:
             expert_ids[num_primary_experts_per_rank:] for expert_ids in initial_local_expert_ids
         ]
         self.current_placement = torch.tensor(
-            [initial_redundant_expert_ids for _ in self.weights],
+            [initial_redundant_expert_ids for _ in weights],
             dtype=torch.int64,
         )
         self.planner: EPLBPlanner = GreedyEPLBPlanner(
@@ -79,58 +80,45 @@ class EPLBManager:
             rebalance_gain_threshold=get_eplb_rebalance_gain_threshold(),
         )
 
-        self.in_flight = False
         self.in_flight_layers = []
-        self.in_flight_started_at = None
         self.target_placement = None
         self.target_metadata = None
-        self.evaluation_in_flight = False
-        self._evaluation_lock = threading.Lock()
-        self._evaluation_result = None
-        self._evaluation_error = None
-        self._evaluation_thread = None
+        self._evaluation = None
         self.metric_client = None
 
         self.evaluation_group = dist.new_group(list(range(self.world_size)), backend="gloo")
         self.control_group = dist.new_group(list(range(self.world_size)), backend="gloo")
         self.transfer_group = dist.new_group(list(range(self.world_size)), backend="gloo")
         self._control_ready_count = torch.empty(1, dtype=torch.int32)
-        self.transfer = PinnedMemoryEPLBTransfer(self.weights, self.transfer_group, self.global_rank)
+        self.transfer = PinnedMemoryEPLBTransfer(weights, self.transfer_group, self.global_rank)
         self._restart_collection()
 
         if self.global_rank == 0:
             logger.info(
-                f"eplb enabled layers={len(self.weights)} num_logical_experts={self.num_logical_experts} "
+                f"eplb enabled layers={len(weights)} num_logical_experts={self.num_logical_experts} "
                 f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} planner={type(self.planner).__name__}"
             )
 
     def poll(self):
         """Advance EPLB only from a globally ordered pre-forward boundary."""
-        if self.in_flight:
+        if self.in_flight_layers:
             self._poll_in_flight()
-        elif self.evaluation_in_flight and self._evaluation_ready_on_all_ranks():
+        elif self._evaluation is not None and self._evaluation_ready_on_all_ranks():
             self._finish_evaluation()
 
     def step(self):
-        if self.in_flight or self.evaluation_in_flight:
+        if self.in_flight_layers or self._evaluation is not None:
             return
         self.prefill_steps += 1
         if self.prefill_steps >= self.next_evaluation_step:
             self._start_evaluation()
 
-    def _set_recording(self, enabled: bool):
-        for impl in self._eplb_impls:
-            impl.recording = enabled
-
-    def _reset_route_counters(self):
-        counters = [impl.route_counter for impl in self._eplb_impls]
-        if counters:
-            torch._foreach_zero_(counters)
-
     def _restart_collection(self):
-        self._reset_route_counters()
-        self._set_recording(True)
+        counters = [impl.route_counter for impl in self._eplb_impls]
+        torch._foreach_zero_(counters)
+        for impl in self._eplb_impls:
+            impl.recording = True
         self.next_evaluation_step = self.prefill_steps + self.step_interval
 
     def _collect_local_load(self) -> torch.Tensor:
@@ -138,9 +126,6 @@ class EPLBManager:
         if any(counter.ndim != 1 or counter.shape[0] != self.num_logical_experts for counter in counters):
             raise RuntimeError("EPLB route counter shape must be [num_logical_experts]")
         return torch.stack(counters).cpu()
-
-    def _control_count(self, value: int) -> torch.Tensor:
-        return self._control_ready_count.fill_(value)
 
     def _plan_and_broadcast(self, global_load: torch.Tensor):
         result = None
@@ -165,11 +150,9 @@ class EPLBManager:
         return result
 
     def _build_rebalance_data(self, result):
-        metadata = [None] * len(self.weights)
+        metadata = {}
         layer_plans = []
         changed_layer_indices = [layer_index for layer_index, changed in enumerate(result["changed_layers"]) if changed]
-        if not changed_layer_indices:
-            return metadata, layer_plans
 
         num_primary_experts_per_rank = self.num_logical_experts // self.world_size
         rank_to_logic_expert_ids_by_layer = []
@@ -211,7 +194,7 @@ class EPLBManager:
             )
         return metadata, layer_plans
 
-    def _evaluate_after_event(self, event: torch.cuda.Event):
+    def _evaluate_after_event(self, event: torch.cuda.Event, evaluation: Future):
         try:
             torch.cuda.set_device(self._eplb_impls[0].route_counter.device)
             event.synchronize()
@@ -221,29 +204,27 @@ class EPLBManager:
             result["expert_imbalance_ratio"] = _expert_load_imbalance_ratio(global_load)
             if result["kind"] == "planned":
                 result["metadata"], result["layer_plans"] = self._build_rebalance_data(result)
-            with self._evaluation_lock:
-                self._evaluation_result = result
+            evaluation.set_result(result)
         except BaseException as exc:
-            with self._evaluation_lock:
-                self._evaluation_error = exc
+            evaluation.set_exception(exc)
 
     def _start_evaluation(self):
-        with self._evaluation_lock:
-            self._evaluation_result = None
-            self._evaluation_error = None
-        self._set_recording(False)
+        for impl in self._eplb_impls:
+            impl.recording = False
         event = torch.cuda.Event()
         event.record(torch.cuda.current_stream())
-        self.evaluation_in_flight = True
-        self._evaluation_thread = threading.Thread(target=self._evaluate_after_event, args=(event,), daemon=True)
-        self._evaluation_thread.start()
+        self._evaluation = Future()
+        threading.Thread(
+            target=self._evaluate_after_event,
+            args=(event, self._evaluation),
+            daemon=True,
+        ).start()
 
     def _evaluation_ready_on_all_ranks(self) -> bool:
-        with self._evaluation_lock:
-            error = self._evaluation_error
-            result = self._evaluation_result
-        status = EPLB_CONTROL_ERROR if error is not None else int(result is not None)
-        ready_count = self._control_count(status)
+        ready = self._evaluation.done()
+        error = self._evaluation.exception() if ready else None
+        status = EPLB_CONTROL_ERROR if error is not None else int(ready)
+        ready_count = self._control_ready_count.fill_(status)
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=self.control_group)
         ready_count = int(ready_count.item())
         if ready_count < 0:
@@ -253,16 +234,8 @@ class EPLBManager:
         return bool(ready_count)
 
     def _finish_evaluation(self):
-        with self._evaluation_lock:
-            error = self._evaluation_error
-            result = self._evaluation_result
-            self._evaluation_error = None
-            self._evaluation_result = None
-        self._evaluation_thread.join()
-        self._evaluation_thread = None
-        self.evaluation_in_flight = False
-        if error is not None:
-            raise error
+        result = self._evaluation.result()
+        self._evaluation = None
         self._publish_expert_load_metric(result)
         if result["kind"] != "planned":
             if self.global_rank == 0:
@@ -282,7 +255,6 @@ class EPLBManager:
         self.target_placement = torch.tensor(result["placement"], dtype=torch.int64)
         self.target_metadata = result["metadata"]
         self.in_flight_layers = [layer_index for layer_index, _ in result["layer_plans"]]
-        self.in_flight = True
         self.in_flight_started_at = time.time()
         self.transfer.start(result["layer_plans"])
         if self.global_rank == 0:
@@ -308,7 +280,7 @@ class EPLBManager:
         except BaseException as exc:
             ready_layer = None
             local_error = exc
-        ready_count = self._control_count(
+        ready_count = self._control_ready_count.fill_(
             EPLB_CONTROL_ERROR if local_error is not None else int(ready_layer is not None)
         )
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=self.control_group)
@@ -341,7 +313,6 @@ class EPLBManager:
         self.current_placement = self.target_placement
         self.target_placement = None
         self.target_metadata = None
-        self.in_flight = False
         self._restart_collection()
         if self.global_rank == 0:
             logger.info(
