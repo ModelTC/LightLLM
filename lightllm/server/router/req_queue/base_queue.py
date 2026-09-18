@@ -3,7 +3,7 @@ from typing import List, Dict
 from lightllm.utils.infer_utils import calculate_time
 from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
-from lightllm.utils.config_utils import get_fixed_kv_len
+from lightllm.utils.config_utils import get_fixed_kv_len, get_running_max_req_size_per_dp
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_logger
 
@@ -25,7 +25,8 @@ class BaseQueue:
         self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
         assert args.batch_max_tokens is not None
         self.batch_max_tokens = args.batch_max_tokens
-        self.running_max_req_size = args.running_max_req_size  # Maximum number of concurrent requests
+        # Must match this rank's GPU request/state pool, not the global SHM pool.
+        self.running_max_req_size = get_running_max_req_size_per_dp(args)
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
 

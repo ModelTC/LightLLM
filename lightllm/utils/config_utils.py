@@ -14,6 +14,22 @@ def get_config_json(model_path: str):
     return json_obj
 
 
+def get_running_max_req_size_per_dp(args) -> int:
+    """Local GPU/scheduler capacity; the shared HTTP request pool stays global."""
+    if args.running_max_req_size < 1:
+        raise ValueError("running_max_req_size must be >= 1")
+
+    local_dp_size = max(1, getattr(args, "dp", 1) // getattr(args, "nnodes", 1))
+    # Cache fetch temporarily initializes remote DP requests on each rank; beam
+    # groups must fit on one rank in their entirety. Keep their existing capacity.
+    requires_global_capacity = getattr(args, "enable_dp_prompt_cache_fetch", False) or getattr(
+        args, "diverse_mode", False
+    )
+    if local_dp_size > 1 and not requires_global_capacity and is_hybrid_att_model(args.model_dir):
+        return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
+    return args.running_max_req_size
+
+
 def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
     """
     Derive `max_req_total_len` from model config.json.
