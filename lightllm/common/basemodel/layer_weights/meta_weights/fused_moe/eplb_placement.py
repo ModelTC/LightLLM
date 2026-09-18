@@ -1,3 +1,12 @@
+"""构建完整专家布局及其紧凑路由元数据。
+
+本模块统一使用
+``[layer][rank][local physical expert] -> logical expert`` 表示专家布局；
+处理单层布局的函数会省略 layer 维。每个 rank 的固定主专家排在前面，
+可迁移的冗余专家排在后面。
+"""
+
+
 def build_initial_local_expert_ids(
     num_logical_experts: int,
     num_ranks: int,

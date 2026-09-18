@@ -28,10 +28,7 @@ from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
 )
-from lightllm.utils.envs_utils import (
-    get_eplb_rebalance_gain_threshold,
-    get_eplb_step_interval,
-)
+from lightllm.utils.envs_utils import get_eplb_step_interval
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
 
@@ -58,7 +55,7 @@ class EPLBManager:
 
     ``COLLECTING -> EVALUATING -> PLANNING -> WAIT_PLAN_FINISH -> TRANSFERRING -> COLLECTING``
 
-    当收集的平均专家 token 数不足时，``EVALUATING`` 会回到
+    当累计的平均专家 token 数不足时，``EVALUATING`` 会回到
     ``COLLECTING``；当规划器认为无需调整布局时，``WAIT_PLAN_FINISH`` 会
     回到 ``COLLECTING``。每次调用 :meth:`step` 最多推进一个状态，布局
     规划和权重传输在后台执行，主推理线程负责评估、轮询和提交结果。
@@ -80,7 +77,8 @@ class EPLBManager:
         self.num_redundant_experts_per_rank: int = first_impl.num_redundant_experts_per_rank
         self.num_primary_experts_per_rank: int = self.num_logical_experts // self.world_size
 
-        # 评估调度：steps 只在 COLLECTING 状态递增。
+        # 评估调度：steps 只在 COLLECTING 状态递增。route counter 不按周期
+        # 清零，让低流量服务可以跨多个评估周期积累到足够可靠的样本量。
         self.step_interval: int = get_eplb_step_interval()
         self.steps: int = 0
 
@@ -109,7 +107,6 @@ class EPLBManager:
             self.world_size,
             self.num_redundant_experts_per_rank,
             expert_alignment=EPLB_EXPERT_ALIGNMENT,
-            rebalance_gain_threshold=get_eplb_rebalance_gain_threshold(),
         )
 
         self.state = EPLBManagerState.COLLECTING
@@ -150,7 +147,7 @@ class EPLBManager:
     # 状态处理：与 step() 的分发顺序保持一致。
 
     def _step_collecting(self) -> None:
-        """记录一个采样步，并在采样窗口结束后进入评估状态。"""
+        """记录一个采样步，并在当前评估周期结束后进入评估状态。"""
         self.steps += 1
         if self.steps < self.next_evaluation_step:
             return
@@ -165,6 +162,8 @@ class EPLBManager:
             raise RuntimeError("EPLB route counter shape must be [num_logical_experts]")
 
         # 将各层累计的路由计数复制到 CPU，后续规划统一使用这份快照。
+        # 此处有意不清零 GPU counter：下一周期继续累计，而本轮异步规划
+        # 使用独立的 CPU 快照，不会与推理线程后续的 atomic add 竞争。
         local_load = torch.stack([counter.detach().cpu() for counter in counters])
 
         # 汇集各 rank 的 token 总数，判断当前统计量是否足以进行布局规划。
@@ -411,7 +410,7 @@ def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:
 
 
 def _expert_load_imbalance_ratio(global_load: torch.Tensor) -> float:
-    """Average each layer's maximum-to-mean logical-expert token ratio."""
+    """计算各层逻辑专家最大 token 数与平均值之比，再对所有层取平均。"""
     if global_load.ndim != 2:
         raise ValueError("global_load must be [layers, logical_experts]")
     global_load = global_load.to(torch.float64)

@@ -63,7 +63,9 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 self._try_read_new_reqs()
 
-                # Keep EPLB collectives ordered before normal collectives/forward.
+                # EPLB step 可能发起所有 rank 都必须按相同顺序参与的控制面
+                # collective。固定放在请求读取之后、常规通信和 forward 之前，
+                # 即使本 rank 当前没有请求，也不会与后续 collective 交错。
                 if self.eplb_manager is not None:
                     self.eplb_manager.step()
 

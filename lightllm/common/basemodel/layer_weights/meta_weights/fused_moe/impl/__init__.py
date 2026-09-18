@@ -12,6 +12,11 @@ def create_fuse_moe_impl(
     quant_method: QuantizationMethod,
     enable_ep_moe: bool = False,
 ):
+    """创建持有自身路由运行态的 MoE 执行实现。
+
+    这里直接返回完成初始化的对象，而不是仅返回实现类，使 EPLB 布局、路由
+    计数器等后端专属状态与使用它们的 kernel 保持在同一个实现对象中。
+    """
     if enable_ep_moe:
         impl_cls = FuseMoeDeepGEMM
     elif quant_method.method_name == "awq_marlin":

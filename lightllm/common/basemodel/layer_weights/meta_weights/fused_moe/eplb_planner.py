@@ -1,13 +1,10 @@
-"""Pure-Python redundant-expert placement planning for EPLB.
+"""使用纯 Python 实现 EPLB 冗余专家布局规划。
 
-The planner deliberately uses nested lists instead of tensors.  Tensor
-conversion belongs to the manager's distributed-communication and migration
-boundaries; keeping it out of this module makes placement algorithms easy to
-read, test, and replace.
+规划器有意使用嵌套 list，而不是 Tensor。Tensor 转换仅发生在 manager 的
+分布式通信和迁移边界；规划模块不依赖 Tensor，更易于阅读、测试和替换算法。
 """
 
 from abc import ABC, abstractmethod
-from collections import Counter
 from math import ceil
 from typing import List
 
@@ -21,7 +18,7 @@ RankLoad = List[List[float]]
 
 
 class EPLBPlanner(ABC):
-    """Interface for planning redundant expert placement."""
+    """冗余专家布局规划接口。"""
 
     @abstractmethod
     def plan(
@@ -29,11 +26,17 @@ class EPLBPlanner(ABC):
         logical_expert_load: LogicalExpertLoad,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:
-        """Return a concrete ``[layer][rank][local physical expert]`` placement."""
+        """返回完整的 ``[layer][rank][local physical expert]`` 专家布局。"""
 
 
 class GreedyEPLBPlanner(EPLBPlanner):
-    """Greedy planner based on global logical-expert loads."""
+    """逐个填充冗余槽位，尽量降低最繁忙 rank 的负载。
+
+    主专家始终固定不动。每轮枚举所有合法的 ``(rank, logical_expert)`` 组合，
+    选择加入副本后最大 rank 负载最小的候选，直至填满全部冗余槽位。
+    新增副本只会改变对应逻辑专家的负载分摊，因此可以直接根据当前布局评估
+    每个候选，不再需要单独分配副本数量或执行回溯搜索。
+    """
 
     def __init__(
         self,
@@ -41,7 +44,6 @@ class GreedyEPLBPlanner(EPLBPlanner):
         num_redundant_experts_per_rank: int,
         *,
         expert_alignment: int = 1,
-        rebalance_gain_threshold: float = 0.0,
     ):
         if world_size <= 1:
             raise ValueError("world_size must be greater than one")
@@ -49,25 +51,21 @@ class GreedyEPLBPlanner(EPLBPlanner):
             raise ValueError("num_redundant_experts_per_rank must be positive")
         if expert_alignment <= 0:
             raise ValueError("expert_alignment must be positive")
-        if not 0.0 <= rebalance_gain_threshold <= 1.0:
-            raise ValueError("rebalance_gain_threshold must be between 0.0 and 1.0")
         self.world_size = world_size
         self.num_redundant_experts_per_rank = num_redundant_experts_per_rank
         self.expert_alignment = expert_alignment
-        self.rebalance_gain_threshold = rebalance_gain_threshold
 
     def plan(
         self,
         logical_expert_load: LogicalExpertLoad,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:
-        """Return a new concrete placement.
+        """根据全局逻辑专家负载生成新的完整布局。
 
-        ``logical_expert_load`` is ``[layer][logical_expert]`` and contains
-        the load summed across all ranks.
-        ``current_placement`` is ``[layer][rank][local_physical_expert]``.
-        Each rank row contains its fixed primary experts followed by its
-        movable redundant experts.  The returned placement has the same shape.
+        ``logical_expert_load`` 的形状为 ``[layer][logical_expert]``，保存所有
+        rank 汇总后的负载。``current_placement`` 的形状为
+        ``[layer][rank][local_physical_expert]``；每个 rank 的固定主专家在前，
+        可迁移冗余专家在后。返回布局与当前布局形状相同。
         """
         load = [[float(value) for value in layer] for layer in logical_expert_load]
         current = [[[int(expert) for expert in rank] for rank in layer] for layer in current_placement]
@@ -78,11 +76,12 @@ class GreedyEPLBPlanner(EPLBPlanner):
         candidate_rank_load = self.estimate_rank_load(load, candidates)
         placement = []
         for layer, candidate in enumerate(candidates):
+            # 每层独立决定是否采用候选布局。只有最大 rank 负载严格下降时
+            # 才迁移，避免相同负载下的无收益调整，也使零负载层保持原布局。
             before = max(before_rank_load[layer])
             after = max(candidate_rank_load[layer])
-            gain = (before - after) / max(before, 1.0)
-            changed = candidate != current[layer] and gain > self.rebalance_gain_threshold
-            placement.append(candidate if changed else current[layer])
+            improved = candidate != current[layer] and after < before
+            placement.append(candidate if improved else current[layer])
         return placement
 
     def estimate_rank_load(
@@ -90,7 +89,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
         logical_expert_load: LogicalExpertLoad,
         placement: ExpertPlacement,
     ) -> RankLoad:
-        """Estimate aligned physical-expert work for each layer and rank."""
+        """估算每层、每个 rank 上经过对齐后的物理专家工作量。"""
         load = [[float(value) for value in layer] for layer in logical_expert_load]
         normalized_placement = [[[int(expert) for expert in rank] for rank in layer] for layer in placement]
         num_logical_experts = self._validate_inputs(load, normalized_placement)
@@ -99,7 +98,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
             locations = self._expert_locations(layer_placement, num_logical_experts)
             rank_load = [0.0] * self.world_size
             for expert, expert_locations in enumerate(locations):
-                for rank, value in enumerate(self._physical_load(layer_load[expert], expert_locations)):
+                for rank, value in enumerate(self._rank_load_for_expert(layer_load[expert], expert_locations)):
                     rank_load[rank] += value
             estimated.append(rank_load)
         return estimated
@@ -110,175 +109,96 @@ class GreedyEPLBPlanner(EPLBPlanner):
         current_placement: List[List[int]],
     ) -> List[List[int]]:
         num_logical_experts = len(logical_load)
-        experts_per_rank = num_logical_experts // self.world_size
-        owner = [expert // experts_per_rank for expert in range(num_logical_experts)]
-        copy_count = self._allocate_copy_count(logical_load, owner)
-        current_redundant_placement = [row[experts_per_rank:] for row in current_placement]
+        num_primary_experts_per_rank = num_logical_experts // self.world_size
+        current_redundant_placement = [row[num_primary_experts_per_rank:] for row in current_placement]
 
-        redundant_placement = [[-1] * self.num_redundant_experts_per_rank for _ in range(self.world_size)]
-        locations = [{owner_rank} for owner_rank in owner]
-        expert_rank_load = [
-            self._physical_load(
-                logical_load[expert],
-                locations[expert],
-            )
-            for expert in range(num_logical_experts)
+        # 从不可变的主专家布局开始。只要目标 rank 尚未持有该专家副本，
+        # 对应的 (rank, expert) 组合就是合法候选。
+        redundant_placement: List[List[int]] = [[] for _ in range(self.world_size)]
+        locations = [{expert // num_primary_experts_per_rank} for expert in range(num_logical_experts)]
+        rank_load_by_expert = [
+            self._rank_load_for_expert(logical_load[expert], locations[expert]) for expert in range(num_logical_experts)
         ]
         rank_load = [
-            sum(expert_rank_load[expert][rank] for expert in range(num_logical_experts))
+            sum(rank_load_by_expert[expert][rank] for expert in range(num_logical_experts))
             for rank in range(self.world_size)
         ]
-        instances = sorted(
-            [expert for expert, copies in enumerate(copy_count) for _ in range(copies - 1)],
-            key=lambda expert: (
-                -copy_count[expert],
-                -logical_load[expert] / copy_count[expert],
-                expert,
-            ),
-        )
 
-        for index, expert in enumerate(instances):
-            best = None
+        total_redundant_experts = self.world_size * self.num_redundant_experts_per_rank
+        for _ in range(total_redundant_experts):
+            best_score = None
+            best_rank = None
+            best_expert = None
+            best_rank_load = None
+            best_expert_rank_load = None
             for rank in range(self.world_size):
-                if rank in locations[expert]:
-                    continue
-                empty_slots = [slot for slot, value in enumerate(redundant_placement[rank]) if value < 0]
-                if not empty_slots:
-                    continue
-                slot = min(
-                    empty_slots,
-                    key=lambda candidate: (
-                        current_redundant_placement[rank][candidate] != expert,
-                        candidate,
-                    ),
-                )
-                trial_redundant_placement = [row[:] for row in redundant_placement]
-                trial_redundant_placement[rank][slot] = expert
-                trial_locations = [set(ranks) for ranks in locations]
-                trial_locations[expert].add(rank)
-                if not self._can_complete(
-                    instances[index + 1 :],
-                    trial_redundant_placement,
-                    trial_locations,
-                    owner,
-                ):
+                if len(redundant_placement[rank]) == self.num_redundant_experts_per_rank:
                     continue
 
-                next_expert_load = self._physical_load(
-                    logical_load[expert],
-                    trial_locations[expert],
-                )
-                trial_rank_load = [
-                    value - expert_rank_load[expert][target_rank] + next_expert_load[target_rank]
-                    for target_rank, value in enumerate(rank_load)
-                ]
-                candidate = (
-                    max(trial_rank_load),
-                    current_redundant_placement[rank][slot] != expert,
-                    sum(trial_rank_load),
-                    rank,
-                    slot,
-                    trial_rank_load,
-                    next_expert_load,
-                )
-                if best is None or candidate[:5] < best[:5]:
-                    best = candidate
+                for expert in range(num_logical_experts):
+                    if rank in locations[expert]:
+                        continue
 
-            if best is None:
-                raise RuntimeError("EPLB planner found no valid redundant expert placement")
-            _, _, _, rank, slot, rank_load, next_expert_load = best
-            redundant_placement[rank][slot] = expert
-            locations[expert].add(rank)
-            expert_rank_load[expert] = next_expert_load
+                    next_locations = locations[expert] | {rank}
+                    next_expert_rank_load = self._rank_load_for_expert(logical_load[expert], next_locations)
+                    next_rank_load = [
+                        load - rank_load_by_expert[expert][target_rank] + next_expert_rank_load[target_rank]
+                        for target_rank, load in enumerate(rank_load)
+                    ]
+
+                    # 首先最小化最大 rank 负载；负载相同时依次选择总对齐工作量
+                    # 更小、能保留现有本地副本的候选。最后使用 rank/expert ID
+                    # 打破平局，保证相同输入始终得到相同结果。
+                    score = (
+                        max(next_rank_load),
+                        sum(next_rank_load),
+                        expert not in current_redundant_placement[rank],
+                        rank,
+                        expert,
+                    )
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        best_rank = rank
+                        best_expert = expert
+                        best_rank_load = next_rank_load
+                        best_expert_rank_load = next_expert_rank_load
+
+            # 输入校验已保证每个 rank 都有足够多且互不重复的非本地主专家，
+            # 因此所有冗余槽位一定可以填满。
+            assert best_rank is not None and best_expert is not None
+            assert best_rank_load is not None and best_expert_rank_load is not None
+            redundant_placement[best_rank].append(best_expert)
+            locations[best_expert].add(best_rank)
+            rank_load = best_rank_load
+            rank_load_by_expert[best_expert] = best_expert_rank_load
+
+        # 布局质量只取决于选中了哪些专家，与它们在本地冗余槽中的顺序无关。
+        # 已经选中的现有专家继续使用原槽位，只有新增专家才填入剩余槽位；
+        # 这样无需干扰上面的负载均衡循环，也能尽量减少权重传输。
+        for rank, selected_experts in enumerate(redundant_placement):
+            selected_set = set(selected_experts)
+            new_experts = iter(expert for expert in selected_experts if expert not in current_redundant_placement[rank])
+            redundant_placement[rank] = [
+                expert if expert in selected_set else next(new_experts) for expert in current_redundant_placement[rank]
+            ]
 
         return [
-            list(range(rank * experts_per_rank, (rank + 1) * experts_per_rank)) + redundant_experts
+            list(
+                range(
+                    rank * num_primary_experts_per_rank,
+                    (rank + 1) * num_primary_experts_per_rank,
+                )
+            )
+            + redundant_experts
             for rank, redundant_experts in enumerate(redundant_placement)
         ]
 
-    def _allocate_copy_count(self, logical_load: List[float], owner: List[int]) -> List[int]:
-        copy_count = [1] * len(logical_load)
-        replicas_by_owner = [0] * self.world_size
-        owner_capacity = self.num_redundant_experts_per_rank * (self.world_size - 1)
-        total_replicas = self.num_redundant_experts_per_rank * self.world_size
-        for _ in range(total_replicas):
-            candidates = [
-                expert
-                for expert in range(len(logical_load))
-                if copy_count[expert] < self.world_size and replicas_by_owner[owner[expert]] < owner_capacity
-            ]
-            if not candidates:
-                raise RuntimeError("EPLB planner cannot allocate all redundant copies")
-            expert = max(
-                candidates,
-                key=lambda candidate: (
-                    logical_load[candidate] / copy_count[candidate],
-                    -candidate,
-                ),
-            )
-            copy_count[expert] += 1
-            replicas_by_owner[owner[expert]] += 1
-        return copy_count
-
-    def _can_complete(
+    def _rank_load_for_expert(
         self,
-        remaining_instances: List[int],
-        redundant_placement: List[List[int]],
-        locations: List[set],
-        owner: List[int],
-    ) -> bool:
-        """Check that a greedy choice leaves a legal assignment for all slots."""
-        remaining = Counter(remaining_instances)
-        capacity = [sum(expert < 0 for expert in row) for row in redundant_placement]
-        memo = set()
-
-        def search() -> bool:
-            if not remaining:
-                return True
-            state = (
-                tuple(sorted(remaining.items())),
-                tuple(capacity),
-                tuple(tuple(sorted(ranks)) for ranks in locations),
-            )
-            if state in memo:
-                return False
-            memo.add(state)
-
-            expert = min(
-                remaining,
-                key=lambda item: (
-                    sum(capacity[rank] > 0 and rank not in locations[item] for rank in range(self.world_size))
-                    - remaining[item],
-                    -remaining[item],
-                    item,
-                ),
-            )
-            candidate_ranks = [
-                rank
-                for rank in range(self.world_size)
-                if capacity[rank] > 0 and rank not in locations[expert] and rank != owner[expert]
-            ]
-            if len(candidate_ranks) < remaining[expert]:
-                return False
-            count = remaining.pop(expert)
-            if count > 1:
-                remaining[expert] = count - 1
-            for rank in sorted(candidate_ranks, key=lambda item: (-capacity[item], item)):
-                capacity[rank] -= 1
-                locations[expert].add(rank)
-                if search():
-                    locations[expert].remove(rank)
-                    capacity[rank] += 1
-                    remaining[expert] = count
-                    return True
-                locations[expert].remove(rank)
-                capacity[rank] += 1
-            remaining[expert] = count
-            return False
-
-        return search()
-
-    def _physical_load(self, logical_expert_load: float, locations: set) -> List[float]:
+        logical_expert_load: float,
+        locations: set,
+    ) -> List[float]:
+        """返回该专家在各 rank 上经过对齐后的负载贡献。"""
         physical_expert_load = logical_expert_load / len(locations)
         aligned_load = ceil(physical_expert_load / self.expert_alignment) * self.expert_alignment
         result = [0.0] * self.world_size
@@ -291,6 +211,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
         placement: List[List[int]],
         num_logical_experts: int,
     ) -> List[set]:
+        """反转单层布局，并拒绝同一 rank 上的重复专家副本。"""
         locations = [set() for _ in range(num_logical_experts)]
         for rank, row in enumerate(placement):
             for expert in row:
@@ -304,6 +225,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
         logical_expert_load: LogicalExpertLoad,
         placement: ExpertPlacement,
     ) -> int:
+        """校验完整布局约束，并返回逻辑专家数量。"""
         if not logical_expert_load:
             raise ValueError("logical_expert_load must contain at least one layer")
         if len(placement) != len(logical_expert_load):

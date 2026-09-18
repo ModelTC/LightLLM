@@ -36,6 +36,12 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self._init_eplb_runtime()
 
     def _init_eplb_runtime(self):
+        """初始化本地物理槽位以及可更新的 EPLB 路由运行态。
+
+        ``local_logics_expert_ids_list`` 始终描述全部本地物理行：固定主专家行
+        在前，冗余专家行在后。负载均衡只允许替换冗余后缀，并在同一个安全
+        推理边界同时更新专家权重行和 ``logical_to_physical_map``。
+        """
         world_size = get_global_world_size()
         assert self.n_routed_experts % world_size == 0
         global_rank = get_global_rank()
@@ -58,6 +64,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 ),
                 dtype=torch.int32,
             ).cuda()
+            # 始终按逻辑专家统计负载，冗余副本不会拆散规划器观察到的负载信号。
             self.route_counter = torch.zeros(self.n_routed_experts, dtype=torch.int64, device="cuda")
             self.recording = True
         else:
@@ -84,7 +91,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
     ):
-        """Select logical experts without applying the EPLB physical layout."""
+        """只选择逻辑专家，不在此阶段应用 EPLB 物理布局。"""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(

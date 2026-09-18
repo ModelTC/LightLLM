@@ -298,7 +298,6 @@ def test_eplb_planner_builds_legal_concrete_slot_layout():
         4,
         1,
         expert_alignment=1,
-        rebalance_gain_threshold=0.0,
     )
     current = _initial_expert_placement(8, 4, 1).unsqueeze(0).tolist()
     load = torch.ones((1, 4, 8), dtype=torch.int64)
@@ -342,11 +341,32 @@ def test_eplb_planner_does_not_move_zero_load_experts():
     assert result == current
 
 
-def test_eplb_planner_reserves_rank_capacity_for_remaining_copies():
+def test_eplb_planner_iteratively_places_hot_expert_on_idle_rank():
+    planner = GreedyEPLBPlanner(2, 1)
+    current = [[[0, 1, 3], [2, 3, 1]]]
+
+    result = planner.plan([[1000, 1, 1, 1]], current)
+
+    assert result == [[[0, 1, 3], [2, 3, 0]]]
+    assert planner.estimate_rank_load([[1000, 1, 1, 1]], result) == [[502.0, 502.0]]
+
+
+def test_eplb_planner_keeps_selected_experts_in_their_current_slots():
+    planner = GreedyEPLBPlanner(4, 2)
+    current = _initial_expert_placement(8, 4, 2).unsqueeze(0).tolist()
+
+    result = planner.plan([[50, 98, 54, 6, 34, 66, 63, 52]], current)
+
+    # Rank 0 的专家 3 保留在原来的第二个冗余槽位，仅将第一个槽位
+    # 从专家 2 替换为专家 4。
+    assert current[0][0][2:] == [2, 3]
+    assert result[0][0][2:] == [4, 3]
+
+
+def test_eplb_planner_fills_every_rank_with_distinct_nonlocal_experts():
     planner = GreedyEPLBPlanner(
         4,
         1,
-        rebalance_gain_threshold=0.0,
     )
     current = _initial_expert_placement(16, 4, 1).unsqueeze(0).tolist()
     load = torch.randint(
@@ -365,7 +385,7 @@ def test_eplb_planner_reserves_rank_capacity_for_remaining_copies():
         assert all(expert // 4 != rank for expert in row[4:])
 
 
-def test_eplb_planner_keeps_high_redundancy_search_state_isolated():
+def test_eplb_planner_supports_multiple_redundant_experts_per_rank():
     planner = GreedyEPLBPlanner(4, 3)
     current = _initial_expert_placement(16, 4, 3).unsqueeze(0).tolist()
     load = [
@@ -1826,7 +1846,6 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(manager_module, "get_eplb_step_interval", lambda: 20)
-    monkeypatch.setattr(manager_module, "get_eplb_rebalance_gain_threshold", lambda: 0.07)
     monkeypatch.setattr(manager_module, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
     metric_client = SimpleNamespace()
     metric_client_ports = []
@@ -1857,7 +1876,6 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert (manager.control_group, manager.transfer_group) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 2
     assert all_gather_calls == [([[0, 1, 2, 3]], groups[0])]
-    assert manager.planner.rebalance_gain_threshold == 0.07
     assert manager.current_placement == [[[0, 1, 2, 3], [2, 3, 0, 1]]]
     assert manager.metric_client is metric_client
     assert metric_client_ports == [1234]

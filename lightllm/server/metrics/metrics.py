@@ -34,7 +34,7 @@ MONITOR_INFO = {
     "lightllm_num_running_reqs": "Number of running requests",
     "lightllm_eplb_topk_expert_imbalance_ratio": (
         "Maximum routed token count divided by the mean across logical experts, averaged across MoE layers in the "
-        "latest EPLB sample window"
+        "accumulated EPLB routing sample"
     ),
 }
 
