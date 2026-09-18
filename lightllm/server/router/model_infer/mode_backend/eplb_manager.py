@@ -60,8 +60,8 @@ class EPLBManager:
 
     当收集的平均专家 token 数不足时，``EVALUATING`` 会回到
     ``COLLECTING``；当规划器认为无需调整布局时，``PLANNING`` 会回到
-    ``COLLECTING``。每次调用 :meth:`step` 最多推进一个状态，耗时的负载
-    聚合、布局规划和权重传输在后台执行，主推理线程只负责轮询和提交结果。
+    ``COLLECTING``。每次调用 :meth:`step` 最多推进一个状态，布局规划和
+    权重传输在后台执行，主推理线程负责评估、轮询和提交结果。
     """
 
     def __init__(self, model: TpPartBaseModel) -> None:
@@ -157,52 +157,55 @@ class EPLBManager:
         self.state = EPLBManagerState.EVALUATING
 
     def _step_evaluating(self) -> None:
-        """启动或等待负载聚合，并根据样本量进入采样或规划状态。"""
-        if not hasattr(self, "_evaluation"):
-            local_load = self._snapshot_local_load()
-            event = torch.cuda.Event()
-            event.record(torch.cuda.current_stream())
-            evaluation = Future()
-            self._evaluation = evaluation
-            threading.Thread(
-                target=self._evaluate_after_event,
-                args=(event, local_load, evaluation),
-                daemon=True,
-            ).start()
-            return
+        """将负载复制到 CPU，并根据全局样本量进入采样或规划状态。"""
+        counters = [impl.route_counter for impl in self._eplb_impls]
+        if any(counter.ndim != 1 or counter.shape[0] != self.num_logical_experts for counter in counters):
+            raise RuntimeError("EPLB route counter shape must be [num_logical_experts]")
 
-        if not self._background_work_ready_on_all_ranks(self._evaluation, "evaluation"):
-            return
+        # 将各层累计的路由计数复制到 CPU，后续规划统一使用这份快照。
+        local_load = torch.stack([counter.detach().cpu() for counter in counters])
 
-        result = self._evaluation.result()
-        del self._evaluation
-        self._publish_expert_load_metric(result)
-        if result["average_tokens_per_expert"] < EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT:
+        # 汇集各 rank 的 token 总数，判断当前统计量是否足以进行布局规划。
+        token_count_by_rank = [0] * self.world_size
+        dist.all_gather_object(
+            token_count_by_rank,
+            int(local_load.sum().item()),
+            group=self.control_group,
+        )
+        average_tokens_per_expert = sum(token_count_by_rank) / local_load.numel()
+        if average_tokens_per_expert < EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT:
             if self.global_rank == 0:
                 logger.info(
                     "eplb continue collecting average_tokens_per_expert=%.2f threshold=%s",
-                    result["average_tokens_per_expert"],
+                    average_tokens_per_expert,
                     EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT,
                 )
             self.state = EPLBManagerState.COLLECTING
             return
 
-        planning = Future()
-        self._planning = planning
+        self._local_load = local_load
         self.state = EPLBManagerState.PLANNING
-        threading.Thread(
-            target=self._plan_after_evaluation,
-            args=(result["global_load"], planning),
-            daemon=True,
-        ).start()
 
     def _step_planning(self) -> None:
-        """等待布局规划，并进入采样或传输状态。"""
+        """启动或等待全局负载规划，并进入采样或传输状态。"""
+        if not hasattr(self, "_planning"):
+            local_load = self._local_load
+            del self._local_load
+            planning = Future()
+            self._planning = planning
+            threading.Thread(
+                target=self._plan,
+                args=(local_load, planning),
+                daemon=True,
+            ).start()
+            return
+
         if not self._background_work_ready_on_all_ranks(self._planning, "planning"):
             return
 
         result = self._planning.result()
         del self._planning
+        self._publish_expert_load_metric(result)
         if result["kind"] != "planned":
             if self.global_rank == 0:
                 logger.info("eplb skip rearrangement kind=%s", result["kind"])
@@ -279,39 +282,12 @@ class EPLBManager:
             return
         self.metric_client.gauge_set(EPLB_EXPERT_IMBALANCE_RATIO_METRIC, result["expert_imbalance_ratio"])
 
-    def _snapshot_local_load(self) -> torch.Tensor:
-        """在当前计算流中复制计数快照，并立即开始下一个统计窗口。"""
-        counters = [impl.route_counter for impl in self._eplb_impls]
-        if any(counter.ndim != 1 or counter.shape[0] != self.num_logical_experts for counter in counters):
-            raise RuntimeError("EPLB route counter shape must be [num_logical_experts]")
-        local_load = torch.stack(counters)
-        torch._foreach_zero_(counters)
-        return local_load
-
-    def _evaluate_after_event(
-        self,
-        event: torch.cuda.Event,
-        local_load: torch.Tensor,
-        evaluation: Future,
-    ) -> None:
+    def _plan(self, local_load: torch.Tensor, planning: Future) -> None:
         try:
-            torch.cuda.set_device(local_load.device)
-            event.synchronize()
-            global_load = local_load.cpu()
+            global_load = local_load.clone()
             dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.control_group)
-            evaluation.set_result(
-                {
-                    "global_load": global_load,
-                    "average_tokens_per_expert": _average_tokens_per_expert(global_load),
-                    "expert_imbalance_ratio": _expert_load_imbalance_ratio(global_load),
-                }
-            )
-        except BaseException as exc:
-            evaluation.set_exception(exc)
-
-    def _plan_after_evaluation(self, global_load: torch.Tensor, planning: Future) -> None:
-        try:
             result = self._plan_and_broadcast(global_load)
+            result["expert_imbalance_ratio"] = _expert_load_imbalance_ratio(global_load)
             if result["kind"] == "planned":
                 result["metadata"], result["transfer_infos"] = self._build_rebalance_data(result)
             planning.set_result(result)
@@ -470,13 +446,6 @@ def _expert_load_imbalance_ratio(global_load: torch.Tensor) -> float:
         return 0.0
     ratios = global_load.max(dim=1).values[valid_layers] / layer_means[valid_layers]
     return float(ratios.mean().item())
-
-
-def _average_tokens_per_expert(global_load: torch.Tensor) -> float:
-    """Average token count for each logical expert in each layer."""
-    if global_load.ndim != 2:
-        raise ValueError("global_load must be [layers, logical_experts]")
-    return float(global_load.to(torch.float64).mean().item())
 
 
 def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:
