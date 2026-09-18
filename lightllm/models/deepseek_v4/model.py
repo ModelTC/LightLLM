@@ -590,7 +590,7 @@ class DeepSeekV4Tokenizer:
         thinking_mode = "thinking" if thinking else "chat"
         effort = kwargs.get("reasoning_effort")
         if thinking and effort is None:
-            effort = "high"
+            effort = os.getenv("LIGHTLLM_DSV4_THINKING_EFFORT", "high")
         if effort not in ("max", "high", None):
             effort = None
         encoding = self._get_encoding_module()
