@@ -8,9 +8,8 @@ read, test, and replace.
 
 from abc import ABC, abstractmethod
 from collections import Counter
-from dataclasses import dataclass
 from math import ceil
-from typing import Any, Dict, List
+from typing import List
 
 
 # [layer][logical expert]
@@ -21,35 +20,6 @@ ExpertPlacement = List[List[List[int]]]
 RankLoad = List[List[float]]
 
 
-@dataclass
-class EPLBPlan:
-    placement: ExpertPlacement
-    changed_layers: List[bool]
-    before_rank_load: RankLoad
-    after_rank_load: RankLoad
-    reason: str
-
-    @property
-    def changed(self) -> bool:
-        return any(self.changed_layers)
-
-    def as_dict(self) -> Dict[str, Any]:
-        before = _imbalance_summary(self.before_rank_load)
-        after = _imbalance_summary(self.after_rank_load)
-        before_critical = sum(max(layer) for layer in self.before_rank_load)
-        after_critical = sum(max(layer) for layer in self.after_rank_load)
-        gain = (before_critical - after_critical) / max(before_critical, 1.0)
-        return {
-            "kind": self.reason,
-            "placement": self.placement,
-            "changed_layers": self.changed_layers,
-            "before": before,
-            "after": after,
-            "rebalance_gain": gain,
-            "changed_layer_count": sum(self.changed_layers),
-        }
-
-
 class EPLBPlanner(ABC):
     """Interface for planning redundant expert placement."""
 
@@ -58,8 +28,8 @@ class EPLBPlanner(ABC):
         self,
         logical_expert_load: LogicalExpertLoad,
         current_placement: ExpertPlacement,
-    ) -> EPLBPlan:
-        """Plan a concrete ``[layer][rank][redundant slot]`` placement."""
+    ) -> ExpertPlacement:
+        """Return a concrete ``[layer][rank][redundant slot]`` placement."""
 
 
 class GreedyEPLBPlanner(EPLBPlanner):
@@ -90,7 +60,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
         self,
         logical_expert_load: LogicalExpertLoad,
         current_placement: ExpertPlacement,
-    ) -> EPLBPlan:
+    ) -> ExpertPlacement:
         """Return a new concrete placement.
 
         ``logical_expert_load`` is ``[layer][logical_expert]`` and contains
@@ -106,25 +76,14 @@ class GreedyEPLBPlanner(EPLBPlanner):
 
         candidates = [self._plan_layer(layer_load, current_layer) for layer_load, current_layer in zip(load, current)]
         candidate_rank_load = self.estimate_rank_load(load, candidates)
-        changed_layers = []
         placement = []
-        after_rank_load = []
         for layer, candidate in enumerate(candidates):
             before = max(before_rank_load[layer])
             after = max(candidate_rank_load[layer])
             gain = (before - after) / max(before, 1.0)
             changed = candidate != current[layer] and gain > self.rebalance_gain_threshold
-            changed_layers.append(changed)
             placement.append(candidate if changed else current[layer])
-            after_rank_load.append(candidate_rank_load[layer][:] if changed else before_rank_load[layer][:])
-
-        return EPLBPlan(
-            placement=placement,
-            changed_layers=changed_layers,
-            before_rank_load=before_rank_load,
-            after_rank_load=after_rank_load,
-            reason="planned" if any(changed_layers) else "no_improvement",
-        )
+        return placement
 
     def estimate_rank_load(
         self,
@@ -365,17 +324,3 @@ class GreedyEPLBPlanner(EPLBPlanner):
                 raise ValueError("placement contains an invalid logical expert")
             self._expert_locations(layer_placement, num_logical_experts)
         return num_logical_experts
-
-
-def _imbalance_summary(rank_load: RankLoad) -> Dict[str, float]:
-    values = sorted(value for layer in rank_load for value in layer)
-    if not values:
-        return {"max": 0.0, "p95": 0.0, "mean": 0.0, "ratio": 0.0}
-    mean = sum(values) / len(values)
-    p95 = values[ceil(0.95 * len(values)) - 1]
-    return {
-        "max": max(values),
-        "p95": p95,
-        "mean": mean,
-        "ratio": max(values) / max(mean, 1.0),
-    }

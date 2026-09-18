@@ -3,7 +3,7 @@
 import os
 import threading
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import torch
 
@@ -37,7 +37,7 @@ class EPLBPlanTask:
         self.global_load = global_load
         self.current_placement = current_placement
         self.status = PlanTaskStatus.IDLE
-        self.result: Optional[Dict[str, Any]] = None
+        self.result: Optional[ExpertPlacement] = None
         self._thread = threading.Thread(
             target=self._run,
             name="eplb-plan",
@@ -56,26 +56,11 @@ class EPLBPlanTask:
 
     def _run(self) -> None:
         try:
-            result = self.planner.plan(
+            self.result = self.planner.plan(
                 self.global_load.tolist(),
                 self.current_placement,
-            ).as_dict()
-            result["expert_imbalance_ratio"] = _expert_load_imbalance_ratio(self.global_load)
-            self.result = result
+            )
             self.status = PlanTaskStatus.SUCCEEDED
         except BaseException:
             logger.exception("EPLB planning failed")
             os._exit(1)
-
-
-def _expert_load_imbalance_ratio(global_load: torch.Tensor) -> float:
-    """Average each layer's maximum-to-mean logical-expert token ratio."""
-    if global_load.ndim != 2:
-        raise ValueError("global_load must be [layers, logical_experts]")
-    global_load = global_load.to(torch.float64)
-    layer_means = global_load.mean(dim=1)
-    valid_layers = layer_means > 0
-    if not torch.any(valid_layers):
-        return 0.0
-    ratios = global_load.max(dim=1).values[valid_layers] / layer_means[valid_layers]
-    return float(ratios.mean().item())

@@ -1,13 +1,13 @@
 from enum import Enum
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.distributed as dist
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
-    build_logical_to_physical_maps_for_layers,
+    build_logical_to_physical_map,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import (
     EPLBPlanner,
@@ -205,6 +205,7 @@ class EPLBManager:
         load_by_rank = list(gathered_load.unbind(dim=0))
         dist.all_gather(load_by_rank, local_load, group=self.control_group)
         global_load = gathered_load.sum(dim=0)
+        self._publish_expert_load_metric(global_load)
 
         self.state = EPLBManagerState.WAIT_PLAN_FINISH
         if self.global_rank == 0:
@@ -216,68 +217,66 @@ class EPLBManager:
             self._plan_task.start()
 
     def _step_wait_plan_finish(self) -> None:
-        """等待 rank 0 完成规划并广播结果。"""
-        result: Optional[Dict[str, Any]] = None
+        """等待 rank 0 完成规划并广播目标专家排布。"""
+        placement: Optional[ExpertPlacement] = None
         if self.global_rank == 0 and self._plan_task.is_finished():
-            result = self._plan_task.result
-            assert result is not None
+            placement = self._plan_task.result
+            assert placement is not None
 
-        values = [result]
+        values = [placement]
         dist.broadcast_object_list(values, src=0, group=self.control_group)
-        result = values[0]
-        if result is None:
+        placement = values[0]
+        if placement is None:
             return
 
         if self.global_rank == 0:
             del self._plan_task
 
-        self._publish_expert_load_metric(result)
-        if result["kind"] != "planned":
+        if placement == self.current_placement:
             if self.global_rank == 0:
-                logger.info("eplb skip rearrangement kind=%s", result["kind"])
+                logger.info("eplb skip rearrangement because placement is unchanged")
             self.state = EPLBManagerState.COLLECTING
             return
 
-        result["metadata"], result["transfer_infos"] = self._build_rebalance_data(result)
-        pending_transfer_infos = list(result["transfer_infos"])
-        if not pending_transfer_infos:
-            raise RuntimeError("planned EPLB rearrangement must contain at least one transfer")
-
         self.target_placement: ExpertPlacement = [
-            [list(expert_ids) for expert_ids in layer_placement] for layer_placement in result["placement"]
+            [list(expert_ids) for expert_ids in layer_placement] for layer_placement in placement
         ]
-        self.target_metadata = result["metadata"]
-        self.pending_transfer_infos = pending_transfer_infos
-        self.completed_layer_transfers: List[PinnedMemoryEPLBTransfer] = []
-        self.rebalance_started_at = time.time()
+        self.pending_transfer_infos = [
+            transfer_info
+            for layer_index, (current_layer, target_layer) in enumerate(
+                zip(self.current_placement, self.target_placement)
+            )
+            for transfer_info in build_transfer_plan(
+                current_layer,
+                target_layer,
+                layer_index,
+                self.num_logical_experts,
+                self.world_size,
+            )
+        ]
+        if not self.pending_transfer_infos:
+            raise RuntimeError("planned EPLB rearrangement must contain at least one transfer")
         self.state = EPLBManagerState.TRANSFERRING
-        self._start_next_transfer()
         if self.global_rank == 0:
             logger.info(
-                "eplb started steps=%s max_before=%.4f max_after=%.4f "
-                "p95_before=%.4f p95_after=%.4f rebalance_gain=%.4f "
-                "changed_layer_count=%s changed_slot_count=%s",
+                "eplb started steps=%s changed_layer_count=%s changed_slot_count=%s",
                 self.steps,
-                result["before"]["max"],
-                result["after"]["max"],
-                result["before"]["p95"],
-                result["after"]["p95"],
-                result["rebalance_gain"],
-                result["changed_layer_count"],
+                sum(current != target for current, target in zip(self.current_placement, self.target_placement)),
                 len(self.pending_transfer_infos),
             )
 
     def _step_transferring(self) -> None:
-        """推进当前传输，并在一层完成后原子地发布该层。"""
-        if not self._active_transfer_finished_on_all_ranks():
-            return
-
-        completed_info = self._complete_active_transfer()
-        if self._next_transfer_is_in_layer(completed_info.layer_index):
+        """一次启动一个专家传输，并在完成后立即提交对应槽位。"""
+        if not hasattr(self, "active_transfer"):
+            self.rebalance_started_at = time.time()
             self._start_next_transfer()
             return
 
-        self._synchronize_and_commit_layer(completed_info.layer_index)
+        if not self._active_transfer_finished_on_all_ranks():
+            return
+
+        completed_transfer = self._complete_active_transfer()
+        self._synchronize_and_commit_transfer(completed_transfer)
         if self.pending_transfer_infos:
             self._start_next_transfer()
             return
@@ -290,60 +289,15 @@ class EPLBManager:
                 elapsed,
             )
 
-    def _publish_expert_load_metric(self, result: Dict[str, Any]) -> None:
+    def _publish_expert_load_metric(self, global_load: torch.Tensor) -> None:
         if self.global_rank != 0:
             return
-        self.metric_client.gauge_set(EPLB_EXPERT_IMBALANCE_RATIO_METRIC, result["expert_imbalance_ratio"])
-
-    def _build_rebalance_data(self, result: Dict[str, Any]) -> Tuple[Dict[int, torch.Tensor], List[EPLBTransferInfo]]:
-        metadata_by_layer: Dict[int, torch.Tensor] = {}
-        planned_transfers: List[EPLBTransferInfo] = []
-        changed_layer_indices: List[int] = [
-            layer_index for layer_index, changed in enumerate(result["changed_layers"]) if changed
-        ]
-
-        num_primary_experts_per_rank = self.num_logical_experts // self.world_size
-        local_expert_ids_by_rank_and_layer: List[List[List[int]]] = []
-        for layer_index in changed_layer_indices:
-            local_expert_ids_by_rank_and_layer.append(
-                [
-                    list(
-                        range(
-                            rank * num_primary_experts_per_rank,
-                            (rank + 1) * num_primary_experts_per_rank,
-                        )
-                    )
-                    + result["placement"][layer_index][rank]
-                    for rank in range(self.world_size)
-                ]
-            )
-        logical_to_physical_maps = torch.tensor(
-            build_logical_to_physical_maps_for_layers(
-                local_expert_ids_by_rank_and_layer,
-                self.num_logical_experts,
-                current_rank=self.global_rank,
-            ),
-            dtype=torch.int32,
+        self.metric_client.gauge_set(
+            EPLB_EXPERT_IMBALANCE_RATIO_METRIC,
+            _expert_load_imbalance_ratio(global_load),
         )
-        for changed_layer_offset, layer_index in enumerate(changed_layer_indices):
-            current_layer_placement = self.current_placement[layer_index]
-            target_layer_placement = result["placement"][layer_index]
-            metadata_by_layer[layer_index] = logical_to_physical_maps[changed_layer_offset]
-            planned_transfers.extend(
-                build_transfer_plan(
-                    current_layer_placement,
-                    target_layer_placement,
-                    layer_index,
-                    self.num_logical_experts,
-                    self.world_size,
-                )
-            )
-        return metadata_by_layer, planned_transfers
-
-    # 传输阶段内部实现。
 
     def _active_transfer_finished_on_all_ranks(self) -> bool:
-        """仅当所有 rank 都完成当前传输时返回 ``True``。"""
         finished_by_rank = [False] * self.world_size
         dist.all_gather_object(
             finished_by_rank,
@@ -352,67 +306,69 @@ class EPLBManager:
         )
         return all(finished_by_rank)
 
-    def _complete_active_transfer(self) -> EPLBTransferInfo:
-        """将当前传输从待处理队列移动到本层的已完成列表。"""
-        assert self.pending_transfer_infos
-
-        expected_transfer_info: EPLBTransferInfo = self.pending_transfer_infos[0]
+    def _complete_active_transfer(self) -> PinnedMemoryEPLBTransfer:
+        expected_transfer_info = self.pending_transfer_infos[0]
         if self.active_transfer.transfer_info != expected_transfer_info:
             raise RuntimeError("EPLB completed transfer does not match the expected transfer info")
-
-        self.completed_layer_transfers.append(self.active_transfer)
         self.pending_transfer_infos.pop(0)
-        return expected_transfer_info
-
-    def _next_transfer_is_in_layer(self, layer_index: int) -> bool:
-        """判断下一个待处理传输是否仍属于当前层。"""
-        return bool(self.pending_transfer_infos and self.pending_transfer_infos[0].layer_index == layer_index)
+        return self.active_transfer
 
     def _start_next_transfer(self) -> None:
-        transfer_info: EPLBTransferInfo = self.pending_transfer_infos[0]
         self.active_transfer = PinnedMemoryEPLBTransfer(
             self._weights,
             self.transfer_group,
             self.global_rank,
-            transfer_info,
+            self.pending_transfer_infos[0],
         )
         self.active_transfer.start()
 
-    def _synchronize_and_commit_layer(self, layer_index: int) -> None:
-        """等待旧权重使用完毕，然后发布一层的新权重和 metadata。"""
+    def _synchronize_and_commit_transfer(self, transfer: PinnedMemoryEPLBTransfer) -> None:
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
         torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
-        self._commit_transferred_layer(layer_index)
-        self.completed_layer_transfers.clear()
+        transfer_info = transfer.transfer_info
+        if transfer_info.dest_rank == self.global_rank:
+            for tensor_buffer in transfer.tensor_buffers:
+                tensor_buffer.live_tensor[transfer_info.dest_local_expert_index].copy_(tensor_buffer.pinned_row)
+
+        layer_index = transfer_info.layer_index
+        redundant_slot_index = transfer_info.dest_local_expert_index - self.num_primary_experts_per_rank
+        self.current_placement[layer_index][transfer_info.dest_rank][
+            redundant_slot_index
+        ] = transfer_info.source_logical_expert_id
+        if transfer_info.dest_rank == self.global_rank:
+            self._eplb_impls[layer_index].local_logics_expert_ids_list[
+                transfer_info.dest_local_expert_index
+            ] = transfer_info.source_logical_expert_id
+
+        local_expert_ids_by_rank = [
+            list(
+                range(
+                    rank * self.num_primary_experts_per_rank,
+                    (rank + 1) * self.num_primary_experts_per_rank,
+                )
+            )
+            + self.current_placement[layer_index][rank]
+            for rank in range(self.world_size)
+        ]
+        logical_to_physical_map = torch.tensor(
+            build_logical_to_physical_map(
+                local_expert_ids_by_rank,
+                self.num_logical_experts,
+                current_rank=self.global_rank,
+            ),
+            dtype=torch.int32,
+        )
+        self._eplb_impls[layer_index].logical_to_physical_map.copy_(logical_to_physical_map)
 
     def _complete_rebalance(self) -> float:
         self.current_placement = self.target_placement
         elapsed = time.time() - self.rebalance_started_at
         del self.pending_transfer_infos
-        del self.completed_layer_transfers
         del self.active_transfer
         del self.target_placement
-        del self.target_metadata
         del self.rebalance_started_at
         return elapsed
-
-    def _commit_transferred_layer(self, layer_index: int) -> None:
-        """在主推理线程中同步发布一层权重和路由 metadata。"""
-        target_redundant_expert_ids: List[int] = self.target_placement[layer_index][self.global_rank]
-        for transfer in self.completed_layer_transfers:
-            transfer_info: EPLBTransferInfo = transfer.transfer_info
-            if transfer_info.dest_rank != self.global_rank:
-                continue
-            for tensor_buffer in transfer.tensor_buffers:
-                tensor_buffer.live_tensor[transfer_info.dest_local_expert_index].copy_(tensor_buffer.pinned_row)
-
-        local_expert_ids: List[int] = self._eplb_impls[layer_index].local_logics_expert_ids_list
-        local_expert_ids[self.num_primary_experts_per_rank :] = target_redundant_expert_ids
-        self._commit_layer_metadata(layer_index)
-
-    def _commit_layer_metadata(self, layer_index: int) -> None:
-        self._eplb_impls[layer_index].logical_to_physical_map.copy_(self.target_metadata[layer_index])
 
 
 def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:
@@ -422,3 +378,16 @@ def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:
             if isinstance(value, FusedMoeWeight) and value.enable_ep_moe:
                 weights_by_id[id(value)] = value
     return sorted(weights_by_id.values(), key=lambda weight: weight.layer_num_)
+
+
+def _expert_load_imbalance_ratio(global_load: torch.Tensor) -> float:
+    """Average each layer's maximum-to-mean logical-expert token ratio."""
+    if global_load.ndim != 2:
+        raise ValueError("global_load must be [layers, logical_experts]")
+    global_load = global_load.to(torch.float64)
+    layer_means = global_load.mean(dim=1)
+    valid_layers = layer_means > 0
+    if not torch.any(valid_layers):
+        return 0.0
+    ratios = global_load.max(dim=1).values[valid_layers] / layer_means[valid_layers]
+    return float(ratios.mean().item())
