@@ -19,10 +19,11 @@ PD Master 的 cache-aware prefill 选点策略。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.utils.envs_utils import get_pd_master_recursion_limit
 from lightllm.utils.log_utils import init_logger
 
 from .pd_selector import PDSelectionExtraInfo
@@ -54,7 +55,7 @@ class CacheAwareConfig:
     # 每隔 sample_stride 个字符抽 1 个作为前缀树 key，降低匹配开销与内存。
     sample_stride: int = 512
     # 初始化前缀树时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
-    recursion_limit: int = 4000
+    recursion_limit: int = field(default_factory=get_pd_master_recursion_limit)
 
 
 class BalanceRelThresholdController:
