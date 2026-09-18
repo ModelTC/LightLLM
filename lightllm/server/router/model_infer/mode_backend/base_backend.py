@@ -356,8 +356,7 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
-            draft_model = draft_model_class(draft_model_kvargs)
-            self.draft_models.append(draft_model)
+            self.draft_models.append(draft_model_class(draft_model_kvargs))
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return
