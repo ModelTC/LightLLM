@@ -40,7 +40,7 @@ def fused_gdn_gating_kernel(
     blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
     tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
     blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
-    tl.store(beta_output + off, blk_beta_output.to(b.dtype.element_ty), mask=mask)
+    tl.store(beta_output + off, blk_beta_output, mask=mask)
 
 
 def _get_fused_gdn_gating_configs():
