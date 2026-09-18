@@ -198,20 +198,33 @@ def build_transfer_plan(
     """生成一层中所有发生变化的冗余专家传输任务。
 
     ``current_placement`` 和 ``target_placement`` 的形状均为
-    ``[world_size, num_redundant_slots]``。每个逻辑专家按照无冗余布局连续分配
-    给各 rank；该固定主副本始终作为传输源，不再从已有冗余副本中选择数据源。
+    ``[world_size, num_local_experts]``，每行固定主专家在前、冗余专家在后。
+    每个逻辑专家的固定主副本始终作为传输源，不从已有冗余副本中选择数据源。
     """
     assert world_size > 0
     assert num_logical_experts % world_size == 0
     assert len(current_placement) == len(target_placement) == world_size
-    num_redundant_slots = len(current_placement[0])
-    assert all(len(row) == num_redundant_slots for row in current_placement)
-    assert all(len(row) == num_redundant_slots for row in target_placement)
-
     num_primary_experts_per_rank = num_logical_experts // world_size
+    num_local_experts_per_rank = len(current_placement[0])
+    assert num_local_experts_per_rank >= num_primary_experts_per_rank
+    assert all(len(row) == num_local_experts_per_rank for row in current_placement)
+    assert all(len(row) == num_local_experts_per_rank for row in target_placement)
+
+    for rank, (current_row, target_row) in enumerate(zip(current_placement, target_placement)):
+        expected_primary_experts = list(
+            range(
+                rank * num_primary_experts_per_rank,
+                (rank + 1) * num_primary_experts_per_rank,
+            )
+        )
+        assert list(current_row[:num_primary_experts_per_rank]) == expected_primary_experts
+        assert list(target_row[:num_primary_experts_per_rank]) == expected_primary_experts
+
     transfer_infos: List[EPLBTransferInfo] = []
     for destination_rank, (current_row, target_row) in enumerate(zip(current_placement, target_placement)):
-        for destination_slot_index, (current_expert_id, target_expert_id) in enumerate(zip(current_row, target_row)):
+        for destination_local_expert_index in range(num_primary_experts_per_rank, num_local_experts_per_rank):
+            current_expert_id = current_row[destination_local_expert_index]
+            target_expert_id = target_row[destination_local_expert_index]
             if target_expert_id == current_expert_id:
                 continue
             assert 0 <= target_expert_id < num_logical_experts
@@ -222,7 +235,7 @@ def build_transfer_plan(
                     layer_index=layer_index,
                     source_logical_expert_id=target_expert_id,
                     dest_rank=destination_rank,
-                    dest_local_expert_index=num_primary_experts_per_rank + destination_slot_index,
+                    dest_local_expert_index=destination_local_expert_index,
                 )
             )
 

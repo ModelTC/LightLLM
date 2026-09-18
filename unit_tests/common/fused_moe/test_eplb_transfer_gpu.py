@@ -75,8 +75,8 @@ def _worker(rank, port):
     transfer_group = dist.new_group([0, 1], backend="gloo")
 
     weights = [_FakeWeight(rank, layer_index) for layer_index in range(2)]
-    current = [[2], [0]]
-    target = [[3], [1]]
+    current = [[0, 1, 2], [2, 3, 0]]
+    target = [[0, 1, 3], [2, 3, 1]]
     for expected_layer in range(2):
         transfer_infos = build_transfer_plan(
             current,

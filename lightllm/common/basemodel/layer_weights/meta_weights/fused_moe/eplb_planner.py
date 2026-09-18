@@ -14,7 +14,7 @@ from typing import List
 
 # [layer][logical expert]
 LogicalExpertLoad = List[List[float]]
-# [layer][rank][redundant slot] -> logical expert
+# [layer][rank][local physical expert] -> logical expert
 ExpertPlacement = List[List[List[int]]]
 # [layer][rank]
 RankLoad = List[List[float]]
@@ -29,7 +29,7 @@ class EPLBPlanner(ABC):
         logical_expert_load: LogicalExpertLoad,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:
-        """Return a concrete ``[layer][rank][redundant slot]`` placement."""
+        """Return a concrete ``[layer][rank][local physical expert]`` placement."""
 
 
 class GreedyEPLBPlanner(EPLBPlanner):
@@ -65,9 +65,9 @@ class GreedyEPLBPlanner(EPLBPlanner):
 
         ``logical_expert_load`` is ``[layer][logical_expert]`` and contains
         the load summed across all ranks.
-        ``current_placement`` is ``[layer][rank][redundant_slot]``.  The
-        returned placement has the same shape and already names the exact
-        physical slots that migration should update.
+        ``current_placement`` is ``[layer][rank][local_physical_expert]``.
+        Each rank row contains its fixed primary experts followed by its
+        movable redundant experts.  The returned placement has the same shape.
         """
         load = [[float(value) for value in layer] for layer in logical_expert_load]
         current = [[[int(expert) for expert in rank] for rank in layer] for layer in current_placement]
@@ -113,8 +113,9 @@ class GreedyEPLBPlanner(EPLBPlanner):
         experts_per_rank = num_logical_experts // self.world_size
         owner = [expert // experts_per_rank for expert in range(num_logical_experts)]
         copy_count = self._allocate_copy_count(logical_load, owner)
+        current_redundant_placement = [row[experts_per_rank:] for row in current_placement]
 
-        placement = [[-1] * self.num_redundant_experts_per_rank for _ in range(self.world_size)]
+        redundant_placement = [[-1] * self.num_redundant_experts_per_rank for _ in range(self.world_size)]
         locations = [{owner_rank} for owner_rank in owner]
         expert_rank_load = [
             self._physical_load(
@@ -141,23 +142,23 @@ class GreedyEPLBPlanner(EPLBPlanner):
             for rank in range(self.world_size):
                 if rank in locations[expert]:
                     continue
-                empty_slots = [slot for slot, value in enumerate(placement[rank]) if value < 0]
+                empty_slots = [slot for slot, value in enumerate(redundant_placement[rank]) if value < 0]
                 if not empty_slots:
                     continue
                 slot = min(
                     empty_slots,
                     key=lambda candidate: (
-                        current_placement[rank][candidate] != expert,
+                        current_redundant_placement[rank][candidate] != expert,
                         candidate,
                     ),
                 )
-                trial_placement = [row[:] for row in placement]
-                trial_placement[rank][slot] = expert
+                trial_redundant_placement = [row[:] for row in redundant_placement]
+                trial_redundant_placement[rank][slot] = expert
                 trial_locations = [set(ranks) for ranks in locations]
                 trial_locations[expert].add(rank)
                 if not self._can_complete(
                     instances[index + 1 :],
-                    trial_placement,
+                    trial_redundant_placement,
                     trial_locations,
                     owner,
                 ):
@@ -173,7 +174,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
                 ]
                 candidate = (
                     max(trial_rank_load),
-                    current_placement[rank][slot] != expert,
+                    current_redundant_placement[rank][slot] != expert,
                     sum(trial_rank_load),
                     rank,
                     slot,
@@ -186,11 +187,14 @@ class GreedyEPLBPlanner(EPLBPlanner):
             if best is None:
                 raise RuntimeError("EPLB planner found no valid redundant expert placement")
             _, _, _, rank, slot, rank_load, next_expert_load = best
-            placement[rank][slot] = expert
+            redundant_placement[rank][slot] = expert
             locations[expert].add(rank)
             expert_rank_load[expert] = next_expert_load
 
-        return placement
+        return [
+            list(range(rank * experts_per_rank, (rank + 1) * experts_per_rank)) + redundant_experts
+            for rank, redundant_experts in enumerate(redundant_placement)
+        ]
 
     def _allocate_copy_count(self, logical_load: List[float], owner: List[int]) -> List[int]:
         copy_count = [1] * len(logical_load)
@@ -219,13 +223,13 @@ class GreedyEPLBPlanner(EPLBPlanner):
     def _can_complete(
         self,
         remaining_instances: List[int],
-        placement: List[List[int]],
+        redundant_placement: List[List[int]],
         locations: List[set],
         owner: List[int],
     ) -> bool:
         """Check that a greedy choice leaves a legal assignment for all slots."""
         remaining = Counter(remaining_instances)
-        capacity = [sum(expert < 0 for expert in row) for row in placement]
+        capacity = [sum(expert < 0 for expert in row) for row in redundant_placement]
         memo = set()
 
         def search() -> bool:
@@ -287,8 +291,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
         placement: List[List[int]],
         num_logical_experts: int,
     ) -> List[set]:
-        experts_per_rank = num_logical_experts // self.world_size
-        locations = [{expert // experts_per_rank} for expert in range(num_logical_experts)]
+        locations = [set() for _ in range(num_logical_experts)]
         for rank, row in enumerate(placement):
             for expert in row:
                 if rank in locations[expert]:
@@ -310,6 +313,8 @@ class GreedyEPLBPlanner(EPLBPlanner):
             raise ValueError("logical expert count must be positive and divisible by world_size")
         if self.num_redundant_experts_per_rank > num_logical_experts - num_logical_experts // self.world_size:
             raise ValueError("too many redundant slots to avoid local or duplicate replicas")
+        num_primary_experts_per_rank = num_logical_experts // self.world_size
+        num_local_experts_per_rank = num_primary_experts_per_rank + self.num_redundant_experts_per_rank
 
         for layer_load, layer_placement in zip(logical_expert_load, placement):
             if len(layer_load) != num_logical_experts:
@@ -317,10 +322,19 @@ class GreedyEPLBPlanner(EPLBPlanner):
             if any(value < 0 for value in layer_load):
                 raise ValueError("logical expert load must be non-negative")
             if len(layer_placement) != self.world_size or any(
-                len(rank) != self.num_redundant_experts_per_rank for rank in layer_placement
+                len(rank) != num_local_experts_per_rank for rank in layer_placement
             ):
-                raise ValueError("each placement layer must be [world_size][redundant_slots]")
+                raise ValueError("each placement layer must be [world_size][local_experts]")
             if any(expert < 0 or expert >= num_logical_experts for rank in layer_placement for expert in rank):
                 raise ValueError("placement contains an invalid logical expert")
+            for rank, local_expert_ids in enumerate(layer_placement):
+                expected_primary_expert_ids = list(
+                    range(
+                        rank * num_primary_experts_per_rank,
+                        (rank + 1) * num_primary_experts_per_rank,
+                    )
+                )
+                if local_expert_ids[:num_primary_experts_per_rank] != expected_primary_expert_ids:
+                    raise ValueError("placement primary experts do not match their owning rank")
             self._expert_locations(layer_placement, num_logical_experts)
         return num_logical_experts

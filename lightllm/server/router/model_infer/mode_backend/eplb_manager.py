@@ -88,23 +88,21 @@ class EPLBManager:
         self.control_group = dist.new_group(list(range(self.world_size)), backend="gloo")
         self.transfer_group = dist.new_group(list(range(self.world_size)), backend="gloo")
 
-        # 专家布局与规划器：直接以各层 impl 中的实际冗余专家槽位为准。
-        # 本 rank 的布局索引为 [layer][redundant_slot]。
-        local_redundant_expert_ids_by_layer = [
-            impl.local_logics_expert_ids_list[self.num_primary_experts_per_rank :] for impl in self._eplb_impls
-        ]
+        # 每层布局都保存完整的本地专家列表：固定主专家在前，冗余专家在后。
+        # 本 rank 的布局索引为 [layer][local_expert]。
+        local_expert_ids_by_layer = [list(impl.local_logics_expert_ids_list) for impl in self._eplb_impls]
 
-        # all_gather 后的布局索引为 [rank][layer][redundant_slot]。
-        redundant_expert_ids_by_rank_and_layer: List[List[List[int]]] = [[] for _ in range(self.world_size)]
+        # all_gather 后的布局索引为 [rank][layer][local_expert]。
+        expert_ids_by_rank_and_layer: List[List[List[int]]] = [[] for _ in range(self.world_size)]
         dist.all_gather_object(
-            redundant_expert_ids_by_rank_and_layer,
-            local_redundant_expert_ids_by_layer,
+            expert_ids_by_rank_and_layer,
+            local_expert_ids_by_layer,
             group=self.control_group,
         )
 
-        # 转置为规划器使用的 [layer][rank][redundant_slot]。
+        # 转置为全局统一使用的 [layer][rank][local_expert]。
         self.current_placement: ExpertPlacement = [
-            [redundant_expert_ids_by_rank_and_layer[rank][layer_index] for rank in range(self.world_size)]
+            [expert_ids_by_rank_and_layer[rank][layer_index] for rank in range(self.world_size)]
             for layer_index in range(len(weights))
         ]
         self.planner: EPLBPlanner = GreedyEPLBPlanner(
@@ -376,28 +374,17 @@ class EPLBManager:
 
         layer_index = transfer_info.layer_index
         layer_impl = self._eplb_impls[layer_index]
-        redundant_slot_index = transfer_info.dest_local_expert_index - self.num_primary_experts_per_rank
         self.current_placement[layer_index][transfer_info.dest_rank][
-            redundant_slot_index
+            transfer_info.dest_local_expert_index
         ] = transfer_info.source_logical_expert_id
         if is_destination_rank:
             layer_impl.local_logics_expert_ids_list[
                 transfer_info.dest_local_expert_index
             ] = transfer_info.source_logical_expert_id
 
-        local_expert_ids_by_rank = [
-            list(
-                range(
-                    rank * self.num_primary_experts_per_rank,
-                    (rank + 1) * self.num_primary_experts_per_rank,
-                )
-            )
-            + self.current_placement[layer_index][rank]
-            for rank in range(self.world_size)
-        ]
         logical_to_physical_map = torch.tensor(
             build_logical_to_physical_map(
-                local_expert_ids_by_rank,
+                self.current_placement[layer_index],
                 self.num_logical_experts,
                 current_rank=self.global_rank,
             ),
