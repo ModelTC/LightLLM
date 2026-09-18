@@ -774,15 +774,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable ep moe for deepseekv3 model.""",
     )
     parser.add_argument(
-        "--ep_redundancy_expert_config_path",
-        type=str,
-        default=None,
-        help="""Path of the redundant expert config. It can be used for deepseekv3 model.""",
-    )
-    parser.add_argument(
-        "--auto_update_redundancy_expert",
-        action="store_true",
-        help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
+        "--eplb_num_redundant_experts_per_rank",
+        type=int,
+        default=0,
+        help="""Number of redundant physical experts per EP rank for each MoE layer.
+            Set to 0 to disable EPLB.""",
     )
     parser.add_argument(
         "--enable_fused_shared_experts",

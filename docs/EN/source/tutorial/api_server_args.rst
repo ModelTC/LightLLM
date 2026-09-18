@@ -721,6 +721,34 @@ Sampling and Generation Parameters
 
     Use tgi input and output format
 
+Expert Parallelism and EPLB Parameters
+--------------------------------------
+
+.. option:: --enable_ep_moe
+
+    Enable expert parallelism for supported MoE models. EPLB requires this option.
+
+.. option:: --eplb_num_redundant_experts_per_rank
+
+    Number of redundant physical experts allocated on each EP rank for every MoE layer. The default is ``0``,
+    which disables EPLB. A positive value enables EPLB and must be used together with ``--enable_ep_moe``;
+    negative values are rejected during startup.
+
+    Each rank allocates the configured number of additional expert weight rows. EPLB maps logical experts to
+    primary or redundant physical copies, records routing load, and can migrate redundant copies online to
+    improve expert load balance. Larger values provide more placement flexibility but consume more GPU memory
+    and increase expert migration traffic.
+
+    EPLB currently cannot be combined with ``--enable_prefill_cudagraph`` and is not supported on SM100 GPUs.
+    Use the same value on every rank and node in one deployment.
+
+    Example: enable EPLB with two redundant experts per EP rank::
+
+        python -m lightllm.server.api_server \
+            --model_dir /path/to/model \
+            --enable_ep_moe \
+            --eplb_num_redundant_experts_per_rank 2
+
 MTP Multi-Prediction Parameters
 -------------------------------
 
@@ -747,17 +775,6 @@ MTP Multi-Prediction Parameters
     Currently this feature only supports DeepSeekV3/R1 models.
     Increasing this value allows more predictions, but ensure the model is compatible with the specified number of steps.
     Currently deepseekv3/r1 models only support 1 step
-
-DeepSeek Redundant Expert Parameters
-------------------------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    Path to redundant expert configuration. Can be used for deepseekv3 models.
-
-.. option:: --auto_update_redundancy_expert
-
-    Whether to update redundant experts for deepseekv3 models through online expert usage counters.
 
 Monitoring and Logging Parameters
 ---------------------------------

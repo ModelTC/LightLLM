@@ -32,6 +32,10 @@ MONITOR_INFO = {
     "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
     "lightllm_gen_throughput": "Generation throughput of latest completed request (tokens/s)",
     "lightllm_num_running_reqs": "Number of running requests",
+    "lightllm_eplb_topk_expert_imbalance_ratio": (
+        "Maximum routed token count divided by the mean across logical experts, averaged across MoE layers in the "
+        "accumulated EPLB routing sample"
+    ),
 }
 
 
@@ -111,6 +115,7 @@ class Monitor:
         self.create_gauge("lightllm_cache_hit_rate")
         self.create_gauge("lightllm_gen_throughput")
         self.create_gauge("lightllm_num_running_reqs")
+        self.create_gauge("lightllm_eplb_topk_expert_imbalance_ratio")
 
     def create_histogram(self, name, buckets, labelnames=None):
         all_labels = ["model_name"] + (labelnames or [])
