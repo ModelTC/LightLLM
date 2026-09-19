@@ -271,6 +271,10 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
+        # When graph covers the configured request length, it must also cover MTP's internal token margin.
+        if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
+            self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
+
         decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
         self.graph = (
