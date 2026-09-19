@@ -1,7 +1,7 @@
 import dataclasses
 import torch
 from ..base_att import AttControl
-from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_static_fp8_quant
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
@@ -160,15 +160,19 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         static_q_scales = self.backend.model.mem_manager.q_scales
         q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales[layer_index])
         q_scale = static_q_scales[layer_index].view(1, k_head_num).expand(att_batch_size, k_head_num)
-        o = flash_attn_with_kvcache(
+        # Decode reads K/V that were written before attention.  Use the shared
+        # FA3 autotuner so FP8 decode gets the same CUDA-Graph warmup/rebuild
+        # lifecycle as BF16 decode; prefill remains on its existing path.
+        o = flash_attn_with_kvcache_autotune(
             q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,
             v_cache=cache_v,
             page_table=self.page_table,
             cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
-            cu_seqlens_k_new=self.cu_seqlens_k,
+            cu_seqlens_k_new=None,
             max_seqlen_q=self.decode_max_q_seq_len,
+            max_seqlen_k=self.decode_max_kv_seq_len,
             causal=self.causal,
             window_size=(-1, -1),
             softcap=0.0,

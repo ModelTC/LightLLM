@@ -41,8 +41,13 @@ def _flash_attn_kvcache_num_splits_configs():
     return [{"num_splits": num_splits} for num_splits in [0, 16, 32]]
 
 
-def _flash_attn_kvcache_static_key(q, k_cache, v_cache, causal, window_size, softcap, sinks, k_descale, v_descale):
-    return {
+def _flash_attn_kvcache_static_key(
+    q, k_cache, v_cache, causal, window_size, softcap, sinks, k_descale, v_descale, q_descale=None
+):
+    # Keep the v3 BF16 key byte-for-byte compatible: a Q descale discriminator is
+    # only needed for FP8-Q calls.  Existing BF16 cache files consequently remain
+    # loadable instead of being silently moved to a new static-key namespace.
+    key = {
         "qd": str(q.dtype),
         "kd": str(k_cache.dtype),
         "vd": str(v_cache.dtype),
@@ -60,6 +65,9 @@ def _flash_attn_kvcache_static_key(q, k_cache, v_cache, causal, window_size, sof
         "has_v_descale": v_descale is not None,
         "sgl": getattr(sgl_ops, "__version__", "unknown"),
     }
+    if q_descale is not None:
+        key["has_q_descale"] = True
+    return key
 
 
 def _flash_attn_kvcache_run_key(page_table, max_seqlen_q, max_seqlen_k):
@@ -165,6 +173,7 @@ def flash_attn_with_kvcache_autotune(
     softmax_scale: Optional[float] = None,
     return_softmax_lse: bool = False,
     run_config: Optional[dict] = None,
+    q_descale: Optional[torch.Tensor] = None,
 ):
     # KV 长度、页表及 query 布局由调用方显式提供；四维 batched Q 的 cu_seqlens_q 可以显式传 None。
     # max_seqlen_k 是 CPU 上已知的真实最大 KV token 数，仅用于配置查找，不传给底层 FA3 算子。
@@ -190,6 +199,7 @@ def flash_attn_with_kvcache_autotune(
         softcap=softcap,
         num_splits=num_splits,
         sinks=sinks,
+        q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
         softmax_scale=softmax_scale,
