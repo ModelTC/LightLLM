@@ -520,7 +520,9 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         return torch.stack(expected)
 
     expected = reference()
-    control = AttControl(nsa_prefill_dict={"topk_mem_indices": indexes, "softmax_scale": 0.0625})
+    control = AttControl(
+        nsa_prefill_dict={"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
+    )
     prefill_state = Glm5NextSparsePrefillState()
     prefill = prefill_state._nsa_prefill_att(q, kv, control)
     torch.testing.assert_close(prefill.float(), expected, atol=0.012, rtol=0.015)

@@ -23,7 +23,7 @@ class Glm5NextSparsePrefillState(NsaFlashMlaSparsePrefillAttState):
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
         tokens, heads, dim = q.shape
-        # FlashMLA accepts native 512-wide NoPE Q/K; head counts still use 64-head tiles.
+        # FlashMLA uses 64-head tiles.
         padded_heads = ((heads + 63) // 64) * 64
         padded_q = q
         if padded_heads != heads:
@@ -35,7 +35,7 @@ class Glm5NextSparsePrefillState(NsaFlashMlaSparsePrefillAttState):
             kv=kv,
             indices=params["topk_mem_indices"].unsqueeze(1),
             sm_scale=params["softmax_scale"],
-            d_v=512,
+            d_v=params["kv_lora_rank"],
         )
         return out[:, :heads]
 
@@ -54,15 +54,14 @@ class Glm5NextSparseDecodeState(NsaFlashMlaSparseDecodeAttState):
     def _nsa_decode_att(self, q, kv, att_control):
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
-        q_nope, _ = q
-        kv_nope = kv.view(-1, 1, 1, 512)
         params = att_control.nsa_decode_dict
-        # only_qv skips QK entirely. Reuse views for the API's required Q/K tensors
-        # so the wrapper does not allocate a dummy 64-wide query or KV cache.
+        q_nope, _ = q
+        kv_nope = kv.view(-1, 1, 1, params["kv_lora_rank"])
+        # NoPE has no RoPE Q/K tensors; only_qv uses q_nope and kv_nope directly.
         return flash_attn_with_kvcache(
-            q=q_nope[..., :64],
+            q=None,
             qv=q_nope,
-            k_cache=kv_nope[..., :64],
+            k_cache=None,
             v_cache=kv_nope,
             page_table=params["topk_mem_indices"],
             cache_seqlens=self.nsa_cache_seqlens,
