@@ -37,7 +37,11 @@ from typing import AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response, JSONResponse
+from starlette.exceptions import HTTPException
+from starlette.requests import ClientDisconnect as StarletteClientDisconnect
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
 from .multimodal_params import MultimodalParams
@@ -121,6 +125,49 @@ g_objs.app = app
 
 _ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
 _ACCESS_LOG_RESET = "\033[0m"
+_REQUEST_EXCEPTION_SCOPE_KEY = "lightllm.request_exception"
+
+
+def _format_exception_chain(exc, response_detail=""):
+    """Include exception types and messages not already covered by the response."""
+    known_messages = [response_detail]
+    # Compare decoded JSON strings so quotes, newlines and non-ASCII text in
+    # an error response match the original exception message.
+    try:
+        pending = [json.loads(response_detail)]
+    except ValueError:
+        pending = []
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str):
+            known_messages.append(value)
+        elif isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+
+    descriptions = []
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, HTTPException):
+            message = str(exc.detail)
+        elif isinstance(exc, RequestValidationError) and response_detail:
+            # Validation errors are already described by the response's detail.
+            message = ""
+        else:
+            message = str(exc)
+        description = type(exc).__name__
+        if message and not any(message in known for known in known_messages):
+            known_messages.append(message)
+            message = message.replace("\r", "\\r").replace("\n", "\\n")
+            description += f": {message}"
+        descriptions.append(description)
+        if exc.__cause__ is not None:
+            exc = exc.__cause__
+        else:
+            exc = None if exc.__suppress_context__ else exc.__context__
+    return " <- ".join(descriptions)
 
 
 class _AccessLogMiddleware:
@@ -128,34 +175,114 @@ class _AccessLogMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] not in ("http", "websocket"):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        status_holder = {"status": 0}
+        status = 0
+        error_body = bytearray()
+        request_exception = None
+        received_body_bytes = 0
+        body_complete = False
+        client_disconnected = False
+        request = Request(scope)
+
+        async def receive_wrapper():
+            nonlocal received_body_bytes, body_complete, client_disconnected
+            message = await receive()
+            if message["type"] == "http.request":
+                received_body_bytes += len(message.get("body", b""))
+                if not message.get("more_body", False):
+                    body_complete = True
+            elif message["type"] == "http.disconnect":
+                client_disconnected = True
+            return message
 
         async def send_wrapper(message):
+            nonlocal status
             if message["type"] == "http.response.start":
-                status_holder["status"] = message["status"]
+                status = message["status"]
+            elif message["type"] == "http.response.body" and status >= 400:
+                # Observe only error bodies; forward every chunk unchanged so
+                # successful generation streams are never buffered or delayed.
+                error_body.extend(message.get("body", b""))
             await send(message)
 
         try:
-            await self.app(scope, receive, send_wrapper)
+            await self.app(scope, receive_wrapper, send_wrapper)
+        except Exception as exc:
+            # Starlette's outer ServerErrorMiddleware sends the 500 response
+            # after this middleware exits. Retain the original error here,
+            # including failures after a streaming response has started.
+            if status == 0:
+                status = 500
+            request_exception = exc
+            raise
         finally:
-            if scope["type"] == "http":
-                status = status_holder["status"]
-                msg = f"{scope['method']} {scope['path']} {status}"
-                color = _ACCESS_LOG_STATUS_COLORS.get(status // 100, "")
-                if color:
-                    msg = color + msg + _ACCESS_LOG_RESET
-                logger.info(msg)
+            # FastAPI may turn a body read/decode failure into a generic 400.
+            # Its exception handler retains the exception (and its cause) in
+            # the shared scope so the response log can describe the cause.
+            handled_exception = scope.pop(_REQUEST_EXCEPTION_SCOPE_KEY, None)
+            if request_exception is None:
+                request_exception = handled_exception
+            if status >= 400 or request_exception is not None:
+                detail = error_body.decode("utf-8", errors="replace")
+                if not detail:
+                    detail = str(request_exception) if request_exception is not None else "<empty response body>"
+                # Only classify FastAPI's wrapped body-upload disconnect here;
+                # observing a disconnect alone does not explain other errors.
+                body_upload_disconnected = (
+                    status == 400
+                    and not body_complete
+                    and isinstance(request_exception, HTTPException)
+                    and isinstance(request_exception.__cause__, StarletteClientDisconnect)
+                )
+                log_request_error = logger.warning if body_upload_disconnected else logger.error
+                log_request_error(
+                    "HTTP request %s: %s %s status=%s X-Request-Id=%s client=%s "
+                    "content_type=%s content_length=%s content_encoding=%s transfer_encoding=%s "
+                    "received_body_bytes=%s body_complete=%s client_disconnected=%s exception=%s detail=%s",
+                    "disconnected before request body was fully received" if body_upload_disconnected else "failed",
+                    scope["method"],
+                    scope["path"],
+                    status,
+                    request.headers.get("X-Request-Id", ""),
+                    scope.get("client"),
+                    request.headers.get("content-type", ""),
+                    request.headers.get("content-length", ""),
+                    request.headers.get("content-encoding", ""),
+                    request.headers.get("transfer-encoding", ""),
+                    received_body_bytes,
+                    body_complete,
+                    client_disconnected,
+                    _format_exception_chain(request_exception, detail),
+                    detail,
+                )
+            msg = f"{scope['method']} {scope['path']} {status}"
+            color = _ACCESS_LOG_STATUS_COLORS.get(status // 100, "")
+            if color:
+                msg = color + msg + _ACCESS_LOG_RESET
+            logger.info(msg)
 
 
 app.add_middleware(_AccessLogMiddleware)
 
 
+@app.exception_handler(HTTPException)
+async def logged_http_exception_handler(request: Request, exc: HTTPException) -> Response:
+    request.scope[_REQUEST_EXCEPTION_SCOPE_KEY] = exc
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def logged_request_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    request.scope[_REQUEST_EXCEPTION_SCOPE_KEY] = exc
+    return await request_validation_exception_handler(request, exc)
+
+
 @app.exception_handler(ServerBusyError)
 async def server_busy_exception_handler(request: Request, exc: ServerBusyError) -> JSONResponse:
+    request.scope[_REQUEST_EXCEPTION_SCOPE_KEY] = exc
     logger.warning("Server busy detail: %s", exc.message)
 
     # Streaming responses can raise during their first body iteration, after
@@ -172,6 +299,7 @@ async def server_busy_exception_handler(request: Request, exc: ServerBusyError) 
 
 @app.exception_handler(InvalidRequestError)
 async def invalid_request_exception_handler(request: Request, exc: InvalidRequestError) -> JSONResponse:
+    request.scope[_REQUEST_EXCEPTION_SCOPE_KEY] = exc
     if request.url.path == "/v1/messages":
         from .api_anthropic import _anthropic_error_response
 

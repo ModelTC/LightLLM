@@ -63,8 +63,18 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
-async def _safe_stream_wrapper(stream_generator):
+async def _safe_stream_wrapper(stream_generator, request: Optional[Request] = None):
     """Convert generation errors to SSE events after the response has started."""
+
+    def log_stream_error(error):
+        logger.error(
+            "Streaming request failed: %s %s X-Request-Id=%s detail=%s",
+            request.method if request is not None else "",
+            request.url.path if request is not None else "",
+            request.headers.get("X-Request-Id", "") if request is not None else "",
+            error,
+        )
+
     first_chunk_sent = False
     try:
         async for item in stream_generator:
@@ -73,6 +83,7 @@ async def _safe_stream_wrapper(stream_generator):
     except InvalidRequestError as e:
         if not first_chunk_sent:
             raise
+        log_stream_error(e)
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
         yield "data: [DONE]\n\n"
@@ -83,6 +94,7 @@ async def _safe_stream_wrapper(stream_generator):
             # handler. Convert them to the dedicated request-error type so
             # the application-level handler returns HTTP 400.
             raise InvalidRequestError(str(e)) from e
+        log_stream_error(e)
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
         yield "data: [DONE]\n\n"
@@ -90,6 +102,7 @@ async def _safe_stream_wrapper(stream_generator):
         logger.debug("Server busy detail: %s", e.message)
         if not first_chunk_sent:
             raise
+        log_stream_error(e)
         error_data = json.dumps(
             {"error": {"message": SERVER_BUSY_MESSAGE, "type": "server_error", "code": "stream_error"}},
             ensure_ascii=False,
@@ -803,7 +816,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     background_tasks = BackgroundTasks()
     return CustomStreamingResponse(
-        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+        _safe_stream_wrapper(stream_results(), raw_request), media_type="text/event-stream", background=background_tasks
     )
 
 
@@ -1009,7 +1022,7 @@ async def _handle_streaming_completion(
 
     background_tasks = BackgroundTasks()
     return CustomStreamingResponse(
-        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+        _safe_stream_wrapper(stream_results(), raw_request), media_type="text/event-stream", background=background_tasks
     )
 
 
