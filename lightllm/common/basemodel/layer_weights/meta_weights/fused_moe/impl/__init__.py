@@ -23,10 +23,10 @@ def create_fuse_moe_impl(
         impl_cls = FuseMoeMarlin
     else:
         impl_cls = FuseMoeTriton
-    kwargs = dict(
+
+    return impl_cls(
         n_routed_experts=n_routed_experts,
         num_fused_shared_experts=num_fused_shared_experts,
         routed_scaling_factor=routed_scaling_factor,
         quant_method=quant_method,
     )
-    return impl_cls(**kwargs)

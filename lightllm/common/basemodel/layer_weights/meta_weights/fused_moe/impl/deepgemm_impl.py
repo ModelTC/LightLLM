@@ -48,7 +48,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.num_redundant_experts_per_rank = get_env_start_args().eplb_num_redundant_experts_per_rank
 
         if self.num_redundant_experts_per_rank > 0:
-            self.num_primary_experts_per_rank = self.n_routed_experts // world_size
             self.num_total_physical_experts = self.n_routed_experts + world_size * self.num_redundant_experts_per_rank
             initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
                 self.n_routed_experts,
@@ -66,6 +65,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             ).cuda()
             # 始终按逻辑专家统计负载，冗余副本不会拆散规划器观察到的负载信号。
             self.route_counter = torch.zeros(self.n_routed_experts, dtype=torch.int64, device="cuda")
+            # 动态 EPLB 默认采集路由负载；以后使用配置文件固定专家布局时，
+            # 可以关闭该开关，避免执行不再需要的 atomic counter 更新。
             self.recording = True
         else:
             self.num_total_physical_experts = self.n_routed_experts

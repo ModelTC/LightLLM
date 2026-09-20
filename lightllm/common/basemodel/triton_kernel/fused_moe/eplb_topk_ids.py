@@ -81,7 +81,7 @@ def eplb_repair_topk_ids(
         logical_expert_counter: 每个 logical expert 的累计路由次数，shape 为
             ``[num_logical_experts]``。
         update_logical_expert_counter: 是否将本次 logical 路由结果累计到
-            ``logical_expert_counter``。
+            ``logical_expert_counter``。固定布局不需要动态重排时可以关闭。
 
     返回:
         physical expert ID，shape 为 ``[num_tokens, top_k]``。

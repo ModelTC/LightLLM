@@ -29,7 +29,6 @@ class _FakeWeight:
         self.layer_num_ = layer_index
         logical_ids = ([0, 1, 2], [2, 3, 0])[rank]
         self.fuse_moe_impl = SimpleNamespace(
-            num_primary_experts_per_rank=2,
             num_redundant_experts_per_rank=1,
             local_logics_expert_ids_list=list(logical_ids),
         )

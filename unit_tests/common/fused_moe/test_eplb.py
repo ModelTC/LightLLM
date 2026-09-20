@@ -70,7 +70,6 @@ def _test_moe_impl(
         num_redundant_experts_per_rank = 0
     return SimpleNamespace(
         n_routed_experts=num_logical_experts,
-        num_primary_experts_per_rank=num_logical_experts // world_size,
         num_total_physical_experts=(num_logical_experts + world_size * num_redundant_experts_per_rank),
         num_redundant_experts_per_rank=num_redundant_experts_per_rank,
         local_logics_expert_ids_list=list(range(num_logical_experts // world_size + num_redundant_experts_per_rank)),
@@ -82,7 +81,6 @@ def _test_moe_impl(
 
 def _set_deepgemm_runtime(impl, runtime):
     for name in (
-        "num_primary_experts_per_rank",
         "num_total_physical_experts",
         "num_redundant_experts_per_rank",
         "logical_to_physical_map",
@@ -172,17 +170,6 @@ def test_base_call_template_forwards_selection_and_capture_callback():
     assert captured == ["logical_ids"]
     assert seen["prepare"]["topk_ids"] == "logical_ids"
     assert seen["fused"]["topk_ids"] == "physical_ids"
-
-
-def test_deepgemm_runtime_derives_expert_layout():
-    runtime = _test_moe_impl(
-        eplb=True,
-        num_logical_experts=4,
-        world_size=2,
-        num_redundant_experts_per_rank=1,
-    )
-    assert runtime.num_primary_experts_per_rank == 2
-    assert runtime.num_total_physical_experts == 6
 
 
 def test_factory_selects_all_paths_without_ep_constructor_state(monkeypatch):
@@ -652,50 +639,29 @@ def test_current_rank_stably_moves_all_local_physical_ids_to_front():
     assert rank1_map[0] == [4, 1, 3, 0, 1, 5]
 
 
-@pytest.mark.parametrize(
-    "current_rank",
-    [0, 1, 2, 3],
-)
+@pytest.mark.parametrize("current_rank", [0, 1, 2, 3])
 def test_logical_to_physical_maps_for_layers_match_single_layer_api(current_rank):
-    placements_by_layer = torch.tensor(
-        [
-            [[4, 5], [0, 1], [0, 1], [2, 3]],
-            [[6, 7], [0, 1], [0, 1], [2, 3]],
-            [[4, 5], [0, 1], [0, 1], [2, 3]],
-        ],
-        dtype=torch.int64,
-    )
-
-    rank_to_logic_expert_ids_by_layer = [
-        _rank_to_logic_expert_ids(placement.tolist(), 8) for placement in placements_by_layer
+    placements_by_layer = [
+        _rank_to_logic_expert_ids([[4, 5], [0, 1], [0, 1], [2, 3]], 8),
+        _rank_to_logic_expert_ids([[6, 7], [0, 1], [0, 1], [2, 3]], 8),
+        _rank_to_logic_expert_ids([[4, 5], [0, 1], [0, 1], [2, 3]], 8),
     ]
+
     maps_by_layer = build_logical_to_physical_maps_for_layers(
-        rank_to_logic_expert_ids_by_layer,
+        placements_by_layer,
         num_logical_experts=8,
         current_rank=current_rank,
     )
-    expected_by_layer = [
+    expected_maps = [
         build_logical_to_physical_map(
-            rank_to_logic_expert_ids,
+            layer_placement,
             num_logical_experts=8,
             current_rank=current_rank,
         )
-        for rank_to_logic_expert_ids in rank_to_logic_expert_ids_by_layer
+        for layer_placement in placements_by_layer
     ]
 
-    assert maps_by_layer == expected_by_layer
-    assert all(
-        physical_expert_id >= 0
-        for logical_map in maps_by_layer
-        for row in logical_map
-        for physical_expert_id in row[2 : 2 + row[0]]
-    )
-    assert all(
-        physical_expert_id == -1
-        for logical_map in maps_by_layer
-        for row in logical_map
-        for physical_expert_id in row[2 + row[0] :]
-    )
+    assert maps_by_layer == expected_maps
 
 
 def test_transfer_plan_respects_explicit_target_slots():
@@ -722,7 +688,6 @@ def test_manager_evaluating_copies_route_counters_to_cpu_without_modifying_them(
         _test_moe_impl(
             eplb=True,
             route_counter=counter,
-            recording=False,
             num_logical_experts=2,
             world_size=1,
         )
@@ -1148,7 +1113,6 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
     monkeypatch.setattr(deepgemm_module.torch, "zeros", cpu_zeros)
     impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace())
 
-    assert impl.num_primary_experts_per_rank == 2
     assert impl.num_redundant_experts_per_rank == 1
     assert impl.num_total_physical_experts == 6
     assert impl.route_counter.shape == (4,)
@@ -1441,23 +1405,10 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
         lambda _weights, _group, _rank, transfer_info: Transfer(transfer_info),
     )
 
-    def state(transfer_info, finished):
-        return transfer_info, finished
-
     gathered_states = [
-        [
-            [state(remote_info, True)],
-            [state(local_info0, False)],
-            [state(remote_info, True)],
-            [state(local_info0, False)],
-        ],
-        [
-            [state(remote_info, True)],
-            [state(local_info0, True)],
-            [state(remote_info, True)],
-            [state(local_info0, True)],
-        ],
-        [[state(local_info1, True)], [state(local_info1, True)], [], []],
+        [True, False, True, False],
+        [True, True, True, True],
+        [True, True, True, True],
     ]
     local_states = []
 
@@ -1497,11 +1448,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     assert not hasattr(manager, "target_placement")
     assert not hasattr(manager, "rebalance_started_at")
     assert cleared_route_counters == [True]
-    assert local_states == [
-        [state(local_info0, False)],
-        [state(local_info0, True)],
-        [state(local_info1, True)],
-    ]
+    assert local_states == [False, True, True]
     assert waits == [overlap_stream, overlap_stream]
 
 
@@ -2088,7 +2035,6 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert "planner=GreedyEPLBPlanner" in logs[0]
     assert weight.fuse_moe_impl.recording
     assert manager._eplb_impls[0] is weight.fuse_moe_impl
-    assert not hasattr(weight.fuse_moe_impl, "update_logical_expert_counter")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")

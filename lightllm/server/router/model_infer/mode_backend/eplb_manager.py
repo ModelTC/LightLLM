@@ -1,6 +1,6 @@
 from enum import Enum
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -237,22 +237,23 @@ class EPLBManager:
             self.state = EPLBManagerState.COLLECTING
             return
 
-        self.target_placement: ExpertPlacement = [
-            [list(expert_ids) for expert_ids in layer_placement] for layer_placement in placement
-        ]
-        self.pending_transfer_batches = [
-            transfer_batch
-            for layer_index, (current_layer, target_layer) in enumerate(
-                zip(self.current_placement, self.target_placement)
-            )
-            for transfer_batch in build_transfer_plan(
+        # 广播得到的 placement 已经是规划器新建的完整布局，没有外部持有者会
+        # 再修改它，因此可直接保存，不需要逐层深拷贝。
+        self.target_placement = placement
+
+        # 每层独立构建有序传输批次，再按 layer 顺序拼接。这样一个批次内只
+        # 包含同层任务，提交完成后也只需发布该层的路由 metadata。
+        self.pending_transfer_batches: List[List[EPLBTransferInfo]] = []
+        layer_placements = zip(self.current_placement, self.target_placement)
+        for layer_index, (current_layer, target_layer) in enumerate(layer_placements):
+            layer_transfer_batches = build_transfer_plan(
                 current_layer,
                 target_layer,
                 layer_index,
                 self.num_logical_experts,
                 self.world_size,
             )
-        ]
+            self.pending_transfer_batches.extend(layer_transfer_batches)
         if not self.pending_transfer_batches:
             raise RuntimeError("planned EPLB rearrangement must contain at least one transfer")
         self.state = EPLBManagerState.TRANSFERRING
@@ -291,8 +292,9 @@ class EPLBManager:
 
             self.active_transfer_batch = transfer_batch
 
-            # 普通批次只有一个任务；覆盖环批次可能要求同一 rank 同时保存
-            # 多个源/目标的 pinned row，必须等整批传输完成后再统一覆盖 live 权重。
+            # 普通批次允许多个 rank 不冲突的任务并行，但每个 rank 最多参与
+            # 一条；覆盖环批次可能要求同一 rank 同时保存多个源/目标的 pinned
+            # row，必须等整批传输完成后再统一覆盖 live 权重。
             self.active_transfers = [
                 PinnedMemoryEPLBTransfer(
                     self._weights,
@@ -311,23 +313,14 @@ class EPLBManager:
 
     def _poll_transfer_batch(self) -> None:
         """等待当前批次全部完成，随后统一提交并释放本地任务。"""
-        active_transfers = self.active_transfers
-        local_states = [(transfer.transfer_info, transfer.is_finished()) for transfer in active_transfers]
-        transfer_states: List[List[Tuple[EPLBTransferInfo, bool]]] = [[] for _ in range(self.world_size)]
-        dist.all_gather_object(transfer_states, local_states, group=self.control_group)
-
-        # 批次内任意任务只要缺少参与方状态，或任一参与方尚未完成，整批都不能
-        # commit。跨 rank 任务应收到 source/destination 两份状态，本地复制只需一份。
-        for transfer_info in self.active_transfer_batch:
-            participant_states = [
-                finished
-                for rank_states in transfer_states
-                for reported_info, finished in rank_states
-                if reported_info == transfer_info
-            ]
-            expected_participant_count = 1 if transfer_info.source_rank == transfer_info.dest_rank else 2
-            if len(participant_states) != expected_participant_count or not all(participant_states):
-                return
+        # 每个 rank 只负责自己参与的任务；不参与当前批次的 rank，其本地任务
+        # 列表为空，all([]) 自然为 True。所有 rank 汇总一个布尔值即可判断整批
+        # 是否完成，无需重复传输并逐条匹配 EPLBTransferInfo。
+        local_finished = all(transfer.is_finished() for transfer in self.active_transfers)
+        finished_by_rank = [False] * self.world_size
+        dist.all_gather_object(finished_by_rank, local_finished, group=self.control_group)
+        if not all(finished_by_rank):
+            return
 
         # 所有 rank 使用相同的批次顺序提交，因此全局 placement 和 metadata
         # 始终一致；只有 destination rank 会额外写入实际专家权重。
