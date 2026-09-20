@@ -4,10 +4,16 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.v1.attention.ops import flashmla
 
+from lightllm.utils.log_utils import init_logger
+
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+logger = init_logger(__name__)
+if not hasattr(torch.ops._flashmla_C, "sparse_decode_fwd_with_workspace"):
+    logger.warning("FlashMLA sparse_decode_fwd_with_workspace is unavailable; prefill uses flash_mla_with_kvcache")
 
 
 # The current FlashMLA MODEL1 binary only instantiates these Q-head counts.
@@ -28,12 +34,9 @@ def _view_cache(buffer: torch.Tensor, page_size: int) -> torch.Tensor:
     return buffer[:, :byte_num].view(buffer.shape[0], page_size, 1, DSV4_MLA_BYTES_PER_TOKEN)
 
 
-def _flashmla_sparse_decode_with_workspace(kwargs: dict, sched_meta, o_accum: torch.Tensor, lse_accum: torch.Tensor):
-    try:
-        op = torch.ops._flashmla_C.sparse_decode_fwd_with_workspace
-    except AttributeError as exc:
-        raise RuntimeError("DeepSeek-V4 prefill requires the workspace-enabled vllm._flashmla_C extension") from exc
-
+def _flashmla_sparse_decode_with_workspace(
+    op, kwargs: dict, sched_meta, o_accum: torch.Tensor, lse_accum: torch.Tensor
+):
     out, lse, new_tile_scheduler_metadata, new_num_splits = op(
         kwargs["q"],
         kwargs["k_cache"],
@@ -62,6 +65,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         self.real_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
         self.padded_q_head_num = get_dsv4_flashmla_padded_q_heads(self.real_q_head_num)
         self.compress_ratios = tuple(dict.fromkeys(model.config["compress_ratios"]))
+        self._flashmla_workspace_op = getattr(torch.ops._flashmla_C, "sparse_decode_fwd_with_workspace", None)
 
     def _flashmla_att(
         self,
@@ -112,10 +116,11 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         )
         if flashmla_out is not None:
             kwargs["out"] = flashmla_out
-        if flashmla_o_accum is None:
+        if flashmla_o_accum is None or self._flashmla_workspace_op is None:
             full_out, _ = flashmla.flash_mla_with_kvcache(**kwargs)
         else:
             full_out, _ = _flashmla_sparse_decode_with_workspace(
+                self._flashmla_workspace_op,
                 kwargs,
                 sched_meta,
                 flashmla_o_accum,
