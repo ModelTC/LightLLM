@@ -38,9 +38,9 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
     def _init_eplb_runtime(self):
         """初始化本地物理槽位以及可更新的 EPLB 路由运行态。
 
-        ``local_logics_expert_ids_list`` 始终描述全部本地物理行：固定主专家行
-        在前，冗余专家行在后。负载均衡只允许替换冗余后缀，并在同一个安全
-        推理边界同时更新专家权重行和 ``logical_to_physical_map``。
+        ``local_logics_expert_ids_list`` 始终描述全部本地物理行。初始化时主专家
+        在前、冗余专家在后；负载均衡运行后允许替换任意物理行，并在同一个
+        安全推理边界同时更新专家权重和 ``logical_to_physical_map``。
         """
         world_size = get_global_world_size()
         assert self.n_routed_experts % world_size == 0

@@ -2,8 +2,8 @@
 
 本模块统一使用
 ``[layer][rank][local physical expert] -> logical expert`` 表示专家布局；
-处理单层布局的函数会省略 layer 维。每个 rank 的固定主专家排在前面，
-可迁移的冗余专家排在后面。
+处理单层布局的函数会省略 layer 维。初始布局按主专家和冗余专家构建；
+EPLB 开始运行后，全部物理槽位都可以重新分配。
 """
 
 
@@ -52,7 +52,7 @@ def build_logical_to_physical_map(
 
     ``rank_to_logic_expert_ids`` 的 shape 为
     ``[num_ranks, num_physical_experts_per_rank]``，每行包含该 rank 的全部
-    主专家和冗余专家。
+    物理专家。
 
     返回值的 shape 为 ``[num_logical_experts, 2 + routing_slots]``。每一行
     对应一个 logical expert：第 0 项是有效副本数，第 1 项
@@ -72,9 +72,8 @@ def build_logical_to_physical_map(
     num_primary_experts_per_rank = num_logical_experts // num_ranks
     num_redundant_experts_per_rank = num_physical_experts_per_rank - num_primary_experts_per_rank
     assert num_redundant_experts_per_rank >= 0
-    # 阶段 2：计算固定路由槽宽度。最坏情况下，所有 rank 的全部冗余槽都
-    # 指向同一个 logical expert；再加上该 expert 固有的一个主副本，就是
-    # 任意 logical expert 可能拥有的最大物理副本数。
+    # 阶段 2：计算固定路由槽宽度。该宽度沿用初始化时“一个基础副本加上
+    # 全部冗余槽”的容量上界；动态布局不再要求基础副本位于固定槽位。
     num_routing_slots = 1 + num_ranks * num_redundant_experts_per_rank
     assert 0 <= current_rank < num_ranks
 
@@ -165,7 +164,7 @@ def _build_routing_row(
     不再依赖 ``current_rank``。列表长度就是该 logical expert 的有效物理
     副本数，无需额外传入容易失配的副本数量。
     """
-    # 阶段 1：候选列表包含一个主副本及全部冗余副本，其长度就是有效副本数。
+    # 阶段 1：候选列表包含该专家的全部物理副本，其长度就是有效副本数。
     num_valid_replicas = len(physical_expert_ids)
     assert 0 < num_valid_replicas <= num_routing_slots
 

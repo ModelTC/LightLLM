@@ -78,33 +78,53 @@ def _worker(rank, port):
     current = [[0, 1, 2], [2, 3, 0]]
     target = [[0, 1, 3], [2, 3, 1]]
     for expected_layer in range(2):
-        transfer_infos = build_transfer_plan(
+        transfer_batches = build_transfer_plan(
             current,
             target,
             expected_layer,
             num_logical_experts=4,
             world_size=2,
         )
-        for transfer_info in transfer_infos:
-            transfer = PinnedMemoryEPLBTransfer(weights, transfer_group, rank, transfer_info)
-            assert all(buffer.pinned_row.is_pinned() for buffer in transfer.tensor_buffers)
-            transfer.start()
-            _wait_for_transfer(transfer, control_group)
-            if transfer_info.dest_rank == rank:
-                expected_expert = 3 if rank == 0 else 1
-                expected_w13 = expected_layer * 100 + expected_expert
-                expected_w2 = expected_w13 + 10
-                assert [buffer.name for buffer in transfer.tensor_buffers] == [
-                    "w13.weight",
-                    "w13.weight_scale",
-                    "w2.weight",
-                    "w2.weight_scale",
-                ]
-                pinned_rows = [buffer.pinned_row for buffer in transfer.tensor_buffers]
-                assert torch.all(pinned_rows[0][0] == expected_w13)
-                assert torch.all(pinned_rows[1][0] == expected_w13 + 0.5)
-                assert torch.all(pinned_rows[2][0] == expected_w2)
-                assert torch.all(pinned_rows[3][0] == expected_w2 + 0.5)
+        for transfer_batch in transfer_batches:
+            transfers = [PinnedMemoryEPLBTransfer(weights, transfer_group, rank, info) for info in transfer_batch]
+            for transfer in transfers:
+                assert all(buffer.pinned_row.is_pinned() for buffer in transfer.tensor_buffers)
+                transfer.start()
+            for transfer in transfers:
+                _wait_for_transfer(transfer, control_group)
+                if transfer.transfer_info.dest_rank == rank:
+                    expected_expert = 3 if rank == 0 else 1
+                    expected_w13 = expected_layer * 100 + expected_expert
+                    expected_w2 = expected_w13 + 10
+                    assert [buffer.name for buffer in transfer.tensor_buffers] == [
+                        "w13.weight",
+                        "w13.weight_scale",
+                        "w2.weight",
+                        "w2.weight_scale",
+                    ]
+                    pinned_rows = [buffer.pinned_row for buffer in transfer.tensor_buffers]
+                    assert torch.all(pinned_rows[0][0] == expected_w13)
+                    assert torch.all(pinned_rows[1][0] == expected_w13 + 0.5)
+                    assert torch.all(pinned_rows[2][0] == expected_w2)
+                    assert torch.all(pinned_rows[3][0] == expected_w2 + 0.5)
+
+    # 主槽位互换会形成覆盖环。两个方向必须同时完成 GPU -> pinned memory
+    # 传输后才能 commit，验证同一 rank 上并发的 send/recv 任务可以正常结束。
+    swap_target = [[0, 3, 2], [2, 1, 0]]
+    swap_plan = build_transfer_plan(current, swap_target, 0, num_logical_experts=4, world_size=2)
+    assert len(swap_plan) == 1
+    swap_infos = swap_plan[0]
+    assert len(swap_infos) == 2
+    swap_transfers = [PinnedMemoryEPLBTransfer(weights, transfer_group, rank, info) for info in swap_infos]
+    for transfer in swap_transfers:
+        transfer.start()
+    for transfer in swap_transfers:
+        _wait_for_transfer(transfer, control_group)
+
+    for transfer in swap_transfers:
+        if transfer.transfer_info.dest_rank == rank:
+            expected_expert = transfer.transfer_info.source_logical_expert_id
+            assert torch.all(transfer.tensor_buffers[0].pinned_row[0] == expected_expert)
     dist.destroy_process_group()
 
 

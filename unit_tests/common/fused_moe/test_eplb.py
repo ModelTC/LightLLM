@@ -307,38 +307,41 @@ def test_eplb_planner_builds_legal_concrete_slot_layout():
     result = planner.plan(load.sum(dim=1).tolist(), current)
     placement = result[0]
 
-    for rank, row in enumerate(placement):
-        assert row[:2] == list(range(rank * 2, (rank + 1) * 2))
-        row = row[2:]
+    for row in placement:
+        assert len(row) == 3
         assert len(row) == len(set(row))
-        assert all(expert // 2 != rank for expert in row)
-    assert max(map(max, planner.estimate_rank_load(load.sum(dim=1).tolist(), result))) <= max(
-        map(max, planner.estimate_rank_load(load.sum(dim=1).tolist(), current))
-    )
+        assert 0 in row
+    assert set(expert for row in placement for expert in row) == set(range(8))
+    assert any(row[:2] != list(range(rank * 2, (rank + 1) * 2)) for rank, row in enumerate(placement))
     assert isinstance(result, list)
 
 
-def test_eplb_planner_estimator_distributes_global_load_across_copies():
-    planner = GreedyEPLBPlanner(
-        4,
-        1,
-        expert_alignment=128,
-    )
-    placement = [[[0, 1, 2], [2, 3, 4], [4, 5, 6], [6, 7, 0]]]
-    load = [[100, 200, 300, 400, 500, 600, 700, 800]]
-
-    predicted = planner.estimate_rank_load(load, placement)
-
-    assert predicted == [[640, 1024, 1280, 1408]]
-
-
-def test_eplb_planner_does_not_move_zero_load_experts():
+def test_eplb_planner_returns_deterministic_layout_for_zero_load_experts():
     planner = GreedyEPLBPlanner(2, 1)
     current = [[[0, 1, 3], [2, 3, 1]]]
 
     result = planner.plan([[0, 0, 0, 0]], current)
 
-    assert result == current
+    assert result == [[[0, 1, 3], [2, 0, 1]]]
+
+
+def test_eplb_planner_plans_each_layer_independently_then_combines_results():
+    planner = GreedyEPLBPlanner(2, 1)
+    current_layer = [[0, 1, 3], [2, 3, 1]]
+    current = [[row[:] for row in current_layer], [row[:] for row in current_layer]]
+
+    result = planner.plan(
+        [
+            [1000, 1, 1, 1],
+            [0, 0, 0, 0],
+        ],
+        current,
+    )
+
+    assert result == [
+        [[0, 1, 3], [2, 0, 1]],
+        [[0, 1, 3], [2, 0, 1]],
+    ]
 
 
 def test_eplb_planner_iteratively_places_hot_expert_on_idle_rank():
@@ -347,8 +350,138 @@ def test_eplb_planner_iteratively_places_hot_expert_on_idle_rank():
 
     result = planner.plan([[1000, 1, 1, 1]], current)
 
-    assert result == [[[0, 1, 3], [2, 3, 0]]]
-    assert planner.estimate_rank_load([[1000, 1, 1, 1]], result) == [[502.0, 502.0]]
+    assert result == [[[0, 1, 3], [2, 0, 1]]]
+
+
+def test_eplb_planner_repeatedly_splits_the_hottest_remaining_expert():
+    planner = GreedyEPLBPlanner(4, 3)
+    current = _initial_expert_placement(8, 4, 3).unsqueeze(0).tolist()
+
+    result = planner.plan([[1000, 900, 800, 700, 1, 1, 1, 1]], current)
+
+    replica_counts = [sum(expert in row for row in result[0]) for expert in range(8)]
+    assert replica_counts == [4, 4, 4, 4, 1, 1, 1, 1]
+
+
+def test_eplb_planner_balances_expert_groups_with_equal_replica_counts():
+    planner = GreedyEPLBPlanner(4, 1)
+
+    placement = planner._distribute_remaining_experts(
+        redundant_experts=[0],
+        expert_groups=[
+            (1, 1, 8.0),
+            (2, 1, 7.0),
+            (3, 1, 6.0),
+            (4, 1, 5.0),
+            (5, 1, 4.0),
+            (6, 1, 3.0),
+            (7, 1, 2.0),
+            (8, 1, 1.0),
+        ],
+    )
+
+    assert placement == [
+        [0, 1, 8],
+        [0, 2, 7],
+        [0, 3, 6],
+        [0, 4, 5],
+    ]
+
+
+def test_eplb_planner_places_replicas_of_one_expert_on_distinct_ranks():
+    planner = GreedyEPLBPlanner(2, 1)
+
+    placement = planner._distribute_remaining_experts(
+        redundant_experts=[0],
+        expert_groups=[
+            (1, 2, 5.0),
+            (2, 1, 8.0),
+            (3, 1, 1.0),
+        ],
+    )
+
+    assert placement == [
+        [0, 1, 2],
+        [0, 1, 3],
+    ]
+    assert all(len(row) == len(set(row)) for row in placement)
+
+
+def test_eplb_planner_places_single_replicas_by_rank_load_before_free_slots():
+    planner = GreedyEPLBPlanner(4, 1)
+
+    placement = planner._distribute_remaining_experts(
+        redundant_experts=[0],
+        expert_groups=[
+            (1, 3, 10.0),
+            (2, 2, 1.0),
+            (3, 1, 8.0),
+            (4, 1, 7.0),
+            (5, 1, 6.0),
+            (6, 1, 5.0),
+            (7, 1, 4.0),
+            (8, 1, 3.0),
+            (9, 1, 2.0),
+        ],
+    )
+
+    # 多副本专家平铺后，rank 3 的剩余槽位比 rank 1、2 少，但负载最低；
+    # 因此它仍连续取得最热的两个单副本专家，并率先填满。
+    assert placement == [
+        [0, 1, 2, 7],
+        [0, 1, 5, 9],
+        [0, 1, 6, 8],
+        [0, 2, 3, 4],
+    ]
+
+
+def test_eplb_planner_matches_documented_two_stage_distribution_example():
+    planner = GreedyEPLBPlanner(4, 1)
+    expert_groups = [
+        (1, 2, 6.0),
+        (2, 1, 9.0),
+        (3, 1, 8.0),
+        (4, 1, 7.0),
+        (5, 1, 5.0),
+        (6, 1, 4.0),
+        (7, 1, 3.0),
+    ]
+
+    placement = planner._distribute_remaining_experts(
+        redundant_experts=[0],
+        expert_groups=expert_groups,
+    )
+
+    assert placement == [
+        [0, 1, 4],
+        [0, 1, 5],
+        [0, 2, 7],
+        [0, 3, 6],
+    ]
+    load_per_replica = {expert: load for expert, _, load in expert_groups}
+    assert [sum(load_per_replica[expert] for expert in row[1:]) for row in placement] == [13.0, 11.0, 12.0, 12.0]
+
+
+def test_eplb_planner_greedily_matches_candidate_ranks_before_reusing_slots():
+    planner = GreedyEPLBPlanner(3, 1)
+    current = [
+        [0, 1, 2],
+        [3, 4, 5],
+        [6, 7, 8],
+    ]
+    candidate = [
+        [3, 4, 9],
+        [6, 7, 10],
+        [0, 1, 11],
+    ]
+
+    placement = planner._reuse_current_slots(candidate, current)
+
+    assert placement == [
+        [0, 1, 11],
+        [3, 4, 9],
+        [6, 7, 10],
+    ]
 
 
 def test_eplb_planner_keeps_selected_experts_in_their_current_slots():
@@ -357,10 +490,11 @@ def test_eplb_planner_keeps_selected_experts_in_their_current_slots():
 
     result = planner.plan([[50, 98, 54, 6, 34, 66, 63, 52]], current)
 
-    # Rank 0 的专家 3 保留在原来的第二个冗余槽位，仅将第一个槽位
-    # 从专家 2 替换为专家 4。
-    assert current[0][0][2:] == [2, 3]
-    assert result[0][0][2:] == [4, 3]
+    # 只要专家仍分配在同一个 rank，就保留其原物理槽位。
+    for current_row, target_row in zip(current[0], result[0]):
+        for slot, expert in enumerate(current_row):
+            if expert in target_row:
+                assert target_row[slot] == expert
 
 
 def test_eplb_planner_fills_every_rank_with_distinct_nonlocal_experts():
@@ -380,9 +514,9 @@ def test_eplb_planner_fills_every_rank_with_distinct_nonlocal_experts():
 
     assert len(result) == len(current)
     assert all(len(actual) == len(expected) for actual, expected in zip(result[0], current[0]))
-    for rank, row in enumerate(result[0]):
-        assert row[:4] == list(range(rank * 4, (rank + 1) * 4))
-        assert all(expert // 4 != rank for expert in row[4:])
+    for row in result[0]:
+        assert len(row) == len(set(row)) == 5
+    assert set(expert for row in result[0] for expert in row) == set(range(16))
 
 
 def test_eplb_planner_supports_multiple_redundant_experts_per_rank():
@@ -394,11 +528,11 @@ def test_eplb_planner_supports_multiple_redundant_experts_per_rank():
 
     result = planner.plan(load, current)
 
-    for rank, row in enumerate(result[0]):
-        assert row[:4] == list(range(rank * 4, (rank + 1) * 4))
-        row = row[4:]
-        assert len(row) == len(set(row)) == 3
-        assert all(expert // 4 != rank for expert in row)
+    for row in result[0]:
+        assert len(row) == len(set(row)) == 7
+    replica_counts = [sum(expert in row for row in result[0]) for expert in range(16)]
+    assert replica_counts[1] == replica_counts[6] == replica_counts[11] == 4
+    assert sum(replica_counts) == 28
 
 
 def test_fused_moe_loads_default_replicas_into_their_physical_rows():
@@ -569,9 +703,10 @@ def test_transfer_plan_respects_explicit_target_slots():
     target = [[0, 1, 5, 4], [2, 3, 7, 6], [4, 5, 1, 0], [6, 7, 3, 2]]
 
     plan = build_transfer_plan(current, target, 3, num_logical_experts=8, world_size=4)
+    transfer_infos = [transfer_info for transfer_batch in plan for transfer_info in transfer_batch]
 
-    assert all(info.layer_index == 3 for info in plan)
-    assert {(info.dest_rank, info.source_logical_expert_id) for info in plan} == {
+    assert all(info.layer_index == 3 for info in transfer_infos)
+    assert {(info.dest_rank, info.source_logical_expert_id) for info in transfer_infos} == {
         (rank, target[rank][slot]) for rank in range(4) for slot in range(2, 4)
     }
 
@@ -1120,25 +1255,56 @@ def test_decode_fused_experts_uses_full_weight_packs_and_physical_experts(
     assert all(call["w13"] is w13 and call["w2"] is w2 for call in captured)
 
 
-def test_transfer_plan_always_uses_primary_expert_rank():
+def test_transfer_plan_uses_stable_current_expert_source():
     current = [[0, 1, 4, 5], [2, 3, 6, 7], [4, 5, 0, 1], [6, 7, 2, 3]]
     target = [[0, 1, 6, 5], [2, 3, 6, 7], [4, 5, 0, 4], [6, 7, 2, 3]]
     plan = build_transfer_plan(current, target, 5, num_logical_experts=8, world_size=4)
     assert plan == [
-        EPLBTransferInfo(3, 5, 6, 0, 2),
-        EPLBTransferInfo(2, 5, 4, 2, 3),
+        [
+            EPLBTransferInfo(1, 5, 6, 0, 2),
+            EPLBTransferInfo(2, 5, 4, 2, 3),
+        ],
     ]
 
 
-def test_transfer_plan_uses_same_primary_source_for_repeated_expert():
+def test_transfer_plan_reuses_stable_source_for_repeated_expert():
     current = [[0, 1, 0, 1], [2, 3, 2, 3], [4, 5, 4, 5], [6, 7, 4, 7]]
     target = [[0, 1, 4, 4], [2, 3, 2, 3], [4, 5, 4, 5], [6, 7, 4, 7]]
     first = build_transfer_plan(current, target, 5, 8, 4)
     second = build_transfer_plan(current, target, 5, 8, 4)
     assert first == second
     assert first == [
-        EPLBTransferInfo(2, 5, 4, 0, 2),
-        EPLBTransferInfo(2, 5, 4, 0, 3),
+        [EPLBTransferInfo(2, 5, 4, 0, 2)],
+        [EPLBTransferInfo(2, 5, 4, 0, 3)],
+    ]
+
+
+def test_transfer_plan_keeps_primary_slot_swap_in_one_atomic_batch():
+    current = [[0, 1], [2, 3]]
+    target = [[2, 1], [0, 3]]
+
+    plan = build_transfer_plan(current, target, 0, num_logical_experts=4, world_size=2)
+
+    assert plan == [
+        [
+            EPLBTransferInfo(1, 0, 2, 0, 0),
+            EPLBTransferInfo(0, 0, 0, 1, 0),
+        ]
+    ]
+
+
+def test_transfer_plan_keeps_three_way_cycle_in_one_atomic_batch():
+    current = [[0], [1], [2]]
+    target = [[1], [2], [0]]
+
+    plan = build_transfer_plan(current, target, 0, num_logical_experts=3, world_size=3)
+
+    assert plan == [
+        [
+            EPLBTransferInfo(1, 0, 1, 0, 0),
+            EPLBTransferInfo(0, 0, 0, 2, 0),
+            EPLBTransferInfo(2, 0, 2, 1, 0),
+        ]
     ]
 
 
@@ -1191,7 +1357,6 @@ def test_manager_commits_transfer_rows_and_metadata():
     manager.global_rank = 0
     manager.world_size = 2
     manager.num_logical_experts = 6
-    manager.num_primary_experts_per_rank = 3
     manager.target_placement = target_placement
     manager.current_placement = [[[0, 1, 2, 3, 2], [3, 4, 5, 0, 2]]]
     manager._eplb_impls = [
@@ -1210,11 +1375,12 @@ def test_manager_commits_transfer_rows_and_metadata():
             tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -5))],
         ),
     ]
-    manager.active_transfer = transfers[0]
+    manager.active_transfers = [transfers[0]]
     manager._commit_transfer(transfers[0].transfer_info)
     assert manager.current_placement[0][0] == [0, 1, 2, 4, 2]
-    manager.active_transfer = transfers[1]
+    manager.active_transfers = [transfers[1]]
     manager._commit_transfer(transfers[1].transfer_info)
+    manager._publish_layer_metadata(0)
 
     assert torch.equal(live[:3], original_primary)
     assert torch.equal(live[3], torch.full((4,), -4))
@@ -1245,7 +1411,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     manager.transfer_group = object()
     manager._weights = [object(), object()]
     manager.world_size = 4
-    manager.pending_transfer_infos = [remote_info, local_info0, local_info1]
+    manager.pending_transfer_batches = [[remote_info, local_info0], [local_info1]]
     manager.target_placement = [
         [[0, 1, 2], [2, 3, 3], [4, 5, 2], [6, 7, 0]],
         [[0, 1, 4], [2, 3, 5], [4, 5, 6], [6, 7, 1]],
@@ -1259,6 +1425,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     committed = []
     cleared_route_counters = []
     manager._commit_transfer = committed.append
+    manager._publish_layer_metadata = lambda _layer_index: None
     manager._clear_route_counters = lambda: cleared_route_counters.append(True)
     waits = []
     overlap_stream = object()
@@ -1278,9 +1445,19 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
         return transfer_info, finished
 
     gathered_states = [
-        [state(remote_info, True), state(local_info0, False), state(remote_info, True), state(local_info0, False)],
-        [state(remote_info, True), state(local_info0, True), state(remote_info, True), state(local_info0, True)],
-        [state(local_info1, True), state(local_info1, True), None, None],
+        [
+            [state(remote_info, True)],
+            [state(local_info0, False)],
+            [state(remote_info, True)],
+            [state(local_info0, False)],
+        ],
+        [
+            [state(remote_info, True)],
+            [state(local_info0, True)],
+            [state(remote_info, True)],
+            [state(local_info0, True)],
+        ],
+        [[state(local_info1, True)], [state(local_info1, True)], [], []],
     ]
     local_states = []
 
@@ -1294,15 +1471,15 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     assert starts == [local_info0]
     assert committed == []
     assert manager.active_transfer_batch == [remote_info, local_info0]
-    assert manager.pending_transfer_infos == [local_info1]
+    assert manager.pending_transfer_batches == [[local_info1]]
 
     manager._step_transferring()
     assert committed == []
 
-    manager.active_transfer.finished = True
+    manager.active_transfers[0].finished = True
     manager._step_transferring()
     assert committed == [remote_info, local_info0]
-    assert not hasattr(manager, "active_transfer")
+    assert not hasattr(manager, "active_transfers")
 
     manager._step_transferring()
     assert starts == [local_info0, local_info1]
@@ -1316,14 +1493,14 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
         [[0, 1, 2], [2, 3, 3], [4, 5, 2], [6, 7, 0]],
         [[0, 1, 4], [2, 3, 5], [4, 5, 6], [6, 7, 1]],
     ]
-    assert not hasattr(manager, "pending_transfer_infos")
+    assert not hasattr(manager, "pending_transfer_batches")
     assert not hasattr(manager, "target_placement")
     assert not hasattr(manager, "rebalance_started_at")
     assert cleared_route_counters == [True]
     assert local_states == [
-        state(local_info0, False),
-        state(local_info0, True),
-        state(local_info1, True),
+        [state(local_info0, False)],
+        [state(local_info0, True)],
+        [state(local_info1, True)],
     ]
     assert waits == [overlap_stream, overlap_stream]
 
@@ -1373,12 +1550,11 @@ def test_manager_transfer_task_commit_orders_live_weights_between_overlap_forwar
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     transfer_info = EPLBTransferInfo(0, 0, 0, 0, 0)
     transfer = Transfer(live, received, transfer_info)
-    manager.active_transfer = transfer
+    manager.active_transfers = [transfer]
     manager.active_transfer_batch = [transfer_info]
     manager.control_group = object()
     manager.world_size = 1
-    manager.pending_transfer_infos = [transfer_info]
-    manager.num_primary_experts_per_rank = 1
+    manager.pending_transfer_batches = []
     manager.num_logical_experts = 1
     manager.global_rank = 0
     manager.target_placement = [[[0]]]
@@ -1468,7 +1644,7 @@ def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
 def test_manager_step_uses_explicit_state_instead_of_pending_work():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.state = manager_module.EPLBManagerState.TRANSFERRING
-    manager.pending_transfer_infos = [object()]
+    manager.pending_transfer_batches = [[object()]]
     manager._plan_task = object()
     calls = []
     manager._step_transferring = lambda: calls.append("transfer")
@@ -1509,7 +1685,7 @@ def test_manager_enters_transferring_state_with_planned_work(monkeypatch):
 
     def build_plan(*args):
         build_calls.append(args)
-        return [transfer_infos[args[2]]]
+        return [[transfer_infos[args[2]]]]
 
     monkeypatch.setattr(manager_module, "build_transfer_plan", build_plan)
     monkeypatch.setattr(
@@ -1521,7 +1697,7 @@ def test_manager_enters_transferring_state_with_planned_work(monkeypatch):
     manager._step_wait_plan_finish()
 
     assert manager.state is manager_module.EPLBManagerState.TRANSFERRING
-    assert manager.pending_transfer_infos == transfer_infos
+    assert manager.pending_transfer_batches == [[transfer_infos[0]], [transfer_infos[1]]]
     assert build_calls == [
         (manager.current_placement[0], placement[0], 0, manager.num_logical_experts, manager.world_size),
         (manager.current_placement[1], placement[1], 1, manager.num_logical_experts, manager.world_size),
@@ -1899,7 +2075,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     monkeypatch.setattr(manager_module.logger, "info", lambda message: logs.append(message))
     manager = manager_module.EPLBManager(type("Model", (), {})())
     assert not hasattr(manager, "_plan_task")
-    assert not hasattr(manager, "pending_transfer_infos")
+    assert not hasattr(manager, "pending_transfer_batches")
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert (manager.control_group, manager.transfer_group) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 2

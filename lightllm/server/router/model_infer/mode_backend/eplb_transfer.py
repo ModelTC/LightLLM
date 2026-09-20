@@ -194,49 +194,199 @@ def build_transfer_plan(
     layer_index: int,
     num_logical_experts: int,
     world_size: int,
-) -> List[EPLBTransferInfo]:
-    """生成一层中所有发生变化的冗余专家传输任务。
+) -> List[List[EPLBTransferInfo]]:
+    """生成一层中所有发生变化的专家传输批次。
 
     ``current_placement`` 和 ``target_placement`` 的形状均为
-    ``[world_size, num_local_experts]``，每行固定主专家在前、冗余专家在后。
-    每个逻辑专家的固定主副本始终作为传输源，不从已有冗余副本中选择数据源。
+    ``[world_size, num_local_experts]``。所有物理槽位都允许变化，因此传输源
+    必须从当前实际存在的副本中选择。
+
+    规划分为三个阶段：
+
+    1. 建立当前槽位索引，同时找出布局调整前后专家不变的稳定槽位；
+    2. 为每个变化的目标槽位绑定一个确定的源槽位。优先使用稳定副本，因为
+       这种源槽位永远不会被本轮迁移覆盖；没有稳定副本时，循环使用当前已有
+       的各个副本，避免把全部读取集中到同一个 rank；
+    3. 根据槽位覆盖依赖生成两类执行批次。目标槽位不再作为任何待处理任务源
+       的任务属于“安全任务”，彼此不要求原子提交，可以继续拆成较小批次并
+       提前 commit；若不存在安全任务，剩余依赖必然由一个或多个环组成，环内
+       任务不可拆分，必须全部传入 pinned memory 后统一 commit。
+
+    图中使用 ``[槽位:当前专家] --传输专家--> [目标槽位]`` 表示一条任务。
+
+    链式依赖示例
+    ------------
+    当前布局和目标布局分别为：
+
+    ``current: [A:e0] [B:e1] [C:e2] [D:e2]``
+    ``target:  [A:e0] [B:e0] [C:e1] [D:e2]``
+
+    需要执行的传输形成一条依赖链：
+
+    ``[A:e0] --e0--> [B:e1] --e1--> [C:e2]``
+
+    初始 ``source_slots={A, B}``，因此只有 C 可以覆盖。虽然 C 中的 e2 被
+    覆盖，但 D 中仍有稳定的 e2；第一批执行 ``B --e1--> C`` 后，e1 已经在
+    C 中建立新副本，B 才不再作为源。第二批再执行 ``A --e0--> B``，最终
+    得到目标布局。
+
+    这个过程同时保护传入和被覆盖的专家：如果 B 保存的是 e1 的最后一个在线
+    副本，而目标布局仍要求保留 e1，那么一定存在一条以 B 为源的待处理任务。
+    此时 ``B in source_slots``，任何以 B 为目标的任务都不会进入安全批次。只有
+    e1 已经存在于其他稳定槽位，或者前一批已经为 e1 建立新位置后，B 才允许
+    被覆盖。
+
+    环形依赖示例
+    ------------
+    当前布局为 ``[A:e0] [B:e1] [C:e2]``，目标布局为
+    ``[A:e1] [B:e2] [C:e0]``，依赖关系为：
+
+    ``[A:e0] --e0--> [C:e2] --e2--> [B:e1] --e1--> [A:e0]``
+
+    A、B、C 都既是源又是目标，不存在安全目标槽位。三条任务必须组成同一个
+    批次：先将 e0、e1、e2 全部传入 pinned memory，等全部传输完成后再统一
+    覆盖 A、B、C，最后发布新 metadata。
+
+    返回值按执行顺序保存最终的 commit 批次：同一安全波次会按参与 rank 拆成
+    若干小批次，每个 rank 在一个小批次中最多参与一条任务；不冲突的 rank 仍
+    可并行传输，已完成的小批次也可以立即提交。环批次则始终包含完整环。这样
+    普通批次在每个 rank 上最多缓存一个专家，只有环形依赖才需要同时缓存多个
+    专家，同时仍保证任何源专家都不会在最后一次读取之前被覆盖。
     """
     assert world_size > 0
     assert num_logical_experts % world_size == 0
     assert len(current_placement) == len(target_placement) == world_size
-    num_primary_experts_per_rank = num_logical_experts // world_size
     num_local_experts_per_rank = len(current_placement[0])
-    assert num_local_experts_per_rank >= num_primary_experts_per_rank
     assert all(len(row) == num_local_experts_per_rank for row in current_placement)
     assert all(len(row) == num_local_experts_per_rank for row in target_placement)
+    assert all(0 <= expert < num_logical_experts for row in current_placement for expert in row)
+    assert all(0 <= expert < num_logical_experts for row in target_placement for expert in row)
 
+    # 阶段 1：记录每个逻辑专家当前位于哪些物理槽位，并单独记录不会变化的
+    # 稳定槽位。槽位统一表示为 (rank, local_expert_index)。
+    Slot = tuple[int, int]
+    current_slots_by_expert: List[List[Slot]] = [[] for _ in range(num_logical_experts)]
+    stable_slots_by_expert: List[List[Slot]] = [[] for _ in range(num_logical_experts)]
     for rank, (current_row, target_row) in enumerate(zip(current_placement, target_placement)):
-        expected_primary_experts = list(
-            range(
-                rank * num_primary_experts_per_rank,
-                (rank + 1) * num_primary_experts_per_rank,
-            )
-        )
-        assert list(current_row[:num_primary_experts_per_rank]) == expected_primary_experts
-        assert list(target_row[:num_primary_experts_per_rank]) == expected_primary_experts
+        for local_expert_index, (current_expert, target_expert) in enumerate(zip(current_row, target_row)):
+            slot = (rank, local_expert_index)
+            current_slots_by_expert[current_expert].append(slot)
+            if current_expert == target_expert:
+                stable_slots_by_expert[current_expert].append(slot)
+    assert all(current_slots_by_expert), "current placement must contain every logical expert"
+    assert set(expert for row in target_placement for expert in row) == set(range(num_logical_experts))
 
-    transfer_infos: List[EPLBTransferInfo] = []
+    # 阶段 2：为每个变化的目标槽位绑定一个确定的当前源槽位。
+    #
+    # 稳定副本不会出现在任何任务的目标位置，因此可以反复读取而没有覆盖
+    # 风险。只有不存在稳定副本时，才循环使用该专家当前已有的所有副本。
+    # pending_transfers 的每一项为 (source_slot, transfer_info)。source_slot
+    # 只用于规划覆盖依赖，真正执行任务所需的信息保存在 transfer_info 中。
+    source_use_count = [0] * num_logical_experts
+    pending_transfers: List[tuple[Slot, EPLBTransferInfo]] = []
     for destination_rank, (current_row, target_row) in enumerate(zip(current_placement, target_placement)):
-        for destination_local_expert_index in range(num_primary_experts_per_rank, num_local_experts_per_rank):
+        for destination_local_expert_index in range(num_local_experts_per_rank):
             current_expert_id = current_row[destination_local_expert_index]
             target_expert_id = target_row[destination_local_expert_index]
             if target_expert_id == current_expert_id:
                 continue
-            assert 0 <= target_expert_id < num_logical_experts
-            source_rank = target_expert_id // num_primary_experts_per_rank
-            transfer_infos.append(
-                EPLBTransferInfo(
-                    source_rank=source_rank,
-                    layer_index=layer_index,
-                    source_logical_expert_id=target_expert_id,
-                    dest_rank=destination_rank,
-                    dest_local_expert_index=destination_local_expert_index,
-                )
+            source_slots = stable_slots_by_expert[target_expert_id] or current_slots_by_expert[target_expert_id]
+            source_slot = source_slots[source_use_count[target_expert_id] % len(source_slots)]
+            source_use_count[target_expert_id] += 1
+            transfer_info = EPLBTransferInfo(
+                source_rank=source_slot[0],
+                layer_index=layer_index,
+                source_logical_expert_id=target_expert_id,
+                dest_rank=destination_rank,
+                dest_local_expert_index=destination_local_expert_index,
             )
+            pending_transfers.append((source_slot, transfer_info))
 
-    return transfer_infos
+    # 阶段 3：按照槽位覆盖依赖，将任务拆成可安全提交的执行批次。
+    transfer_batches: List[List[EPLBTransferInfo]] = []
+    while pending_transfers:
+        source_slots = {source_slot for source_slot, _ in pending_transfers}
+
+        # 3.1 收集当前拓扑层次的全部安全任务。source_slots 是当前仍需保护的
+        # 槽位集合：只要某个槽位中的专家尚未完成最后一次读取，该槽位就仍在
+        # 集合中，任何以它为目标的任务都不能提交。这同时保护了目标槽位里即将
+        # 被覆盖的旧专家，避免其最后一个在线副本被提前删除。
+        #
+        # 目标槽位不在 source_slots 的任务可以并行传输，并在整批完成后统一
+        # 提交。若旧专家仍需迁往其他位置，该目标槽位必然也是相应任务的源，
+        # 因而不会在本轮被选中；若它不是源，则旧专家已经有其他可用副本。
+        #
+        # 这里不能在找到第一个任务后立即修改 source_slots。只有整批提交并从
+        # pending 中移除后，下一层目标槽位才真正变得安全。
+        safe_transfer_batch: List[EPLBTransferInfo] = []
+        remaining_transfers: List[tuple[Slot, EPLBTransferInfo]] = []
+        for source_slot, transfer_info in pending_transfers:
+            destination_slot = (transfer_info.dest_rank, transfer_info.dest_local_expert_index)
+            if destination_slot not in source_slots:
+                safe_transfer_batch.append(transfer_info)
+            else:
+                remaining_transfers.append((source_slot, transfer_info))
+
+        if safe_transfer_batch:
+            # 安全任务之间没有原子提交要求，但若同一 rank 在一个批次中参与
+            # 多条任务，就会同时创建多份专家 pinned buffer。这里按 rank 冲突
+            # 继续拆分：每个 rank 在一个小批次中最多参与一条任务，不冲突的
+            # rank 仍可并行传输，从而兼顾吞吐和 pinned memory 峰值。
+            unbatched_transfers = safe_transfer_batch
+            while unbatched_transfers:
+                current_batch: List[EPLBTransferInfo] = []
+                occupied_ranks: set[int] = set()
+                deferred_transfers: List[EPLBTransferInfo] = []
+
+                # 顺序扫描尚未分组的任务：rank 不冲突的任务进入当前批次，
+                # 冲突任务留到下一轮。每轮至少取出一个任务，因此一定结束。
+                for transfer_info in unbatched_transfers:
+                    participant_ranks = {transfer_info.source_rank, transfer_info.dest_rank}
+                    if participant_ranks & occupied_ranks:
+                        deferred_transfers.append(transfer_info)
+                    else:
+                        current_batch.append(transfer_info)
+                        occupied_ranks.update(participant_ranks)
+
+                transfer_batches.append(current_batch)
+                unbatched_transfers = deferred_transfers
+
+            pending_transfers = remaining_transfers
+        else:
+            # 3.2 没有叶子时，每个目标槽位也一定是某条任务的源槽位。每个目标
+            # 槽位只有一条写入任务，因此此时源槽位也不会重复，剩余依赖图必然
+            # 分解为若干互不相交的简单环。任选第一条任务的源槽位，沿着
+            # source_slot -> destination_slot 追踪，回到起点便得到一个完整环。
+            #
+            # 这里有 N 个互不重复的目标槽位，并且没有安全任务意味着这 N 个
+            # 目标都包含在 source_slots 中。source_slots 最多也只有 N 项，因此
+            # 它必然恰好有 N 项，即每个源槽位只对应一个目标；先显式校验这个
+            # 条件，再构造字典，不会因重复 key 丢失任务。
+            #
+            # 例如 ``S -> A、S -> B、A -> S`` 中，源集合只有 ``{S, A}``，
+            # B 不在源集合中，所以 ``S -> B`` 会先作为安全任务移除；剩余的
+            # ``S -> A、A -> S`` 才会进入这里，并且每个源都只对应一个目标。
+            assert len(source_slots) == len(pending_transfers)
+            transfer_by_source_slot = dict(pending_transfers)
+
+            cycle_start_slot = pending_transfers[0][0]
+            source_slot = cycle_start_slot
+            cycle_batch: List[EPLBTransferInfo] = []
+            cycle_source_slots: set[Slot] = set()
+
+            # 从任意源槽位出发，当前任务的目标槽位就是下一条任务的源槽位；
+            # 目标重新回到起点时，一个完整环便已经收集完成。
+            while True:
+                assert source_slot not in cycle_source_slots
+                cycle_source_slots.add(source_slot)
+                transfer_info = transfer_by_source_slot[source_slot]
+                cycle_batch.append(transfer_info)
+                destination_slot = (transfer_info.dest_rank, transfer_info.dest_local_expert_index)
+                if destination_slot == cycle_start_slot:
+                    break
+                source_slot = destination_slot
+
+            transfer_batches.append(cycle_batch)
+            pending_transfers = [transfer for transfer in pending_transfers if transfer[0] not in cycle_source_slots]
+
+    return transfer_batches
