@@ -40,6 +40,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     def _verify_params(self):
         super()._verify_params()
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
+        assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
 
     def autotune_layers(self):
         return 4

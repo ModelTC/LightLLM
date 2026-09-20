@@ -337,10 +337,22 @@ def test_mtp_pre_layer_applies_main_norm_before_hidden_fusion(config, monkeypatc
 def test_glm_weight_loading_requires_hf(config, model_class):
     model = object.__new__(model_class)
     model.config, model.tp_world_size_ = config, 1
-    model.load_way = "HF"
+    model.args, model.load_way = StartArgs(), "HF"
     model._verify_params()
     model.load_way = "DS"
     with pytest.raises(AssertionError, match="only support HF format weights"):
+        model._verify_params()
+
+
+@pytest.mark.parametrize("tp_world_size", [1, 2])
+def test_glm_rejects_tpsp(config, tp_world_size):
+    model = object.__new__(Glm5NextTpPartModel)
+    model.config, model.tp_world_size_ = config, tp_world_size
+    model.args, model.load_way = StartArgs(), "HF"
+    model._verify_params()
+
+    model.args.enable_tpsp_mix_mode = True
+    with pytest.raises(AssertionError, match="GLM-5.3 Flash does not support TP/SP mixed mode"):
         model._verify_params()
 
 
