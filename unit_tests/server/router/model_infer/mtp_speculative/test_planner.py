@@ -41,7 +41,6 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers import (
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     BaseSpecProposer,
-    MtpMemIndexesToFree,
     SpecProposal,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import (
@@ -219,7 +218,6 @@ def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
     )
     proposal = DFlashSpecProposal(
         token_ids=torch.arange(2, dtype=torch.int64).view(2, 1),
-        extra_mem_indexes_cpu=[],
         schedule_scores=torch.arange(2, dtype=torch.float32).view(2, 1),
     )
     next_token_ids = torch.tensor([10, 11], dtype=torch.int64)
@@ -259,7 +257,6 @@ def test_scatter_mtp_next_tokens_ignores_empty_schedule_scores(monkeypatch):
     )
     proposal = VanillaSpecProposal(
         token_ids=torch.empty((2, 0), dtype=torch.int64),
-        extra_mem_indexes_cpu=[],
         schedule_scores=torch.empty((2, 0), dtype=torch.float32),
     )
 
@@ -432,29 +429,6 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
     assert isinstance(proposal, EagleSpecProposal)
     assert proposal.token_ids.shape == (2, 0)
     assert proposal.schedule_scores.shape == (2, 0)
-
-
-def test_free_mem_indexes_applies_extra_masks():
-    freed = []
-    backend = SimpleNamespace(
-        model=SimpleNamespace(
-            req_manager=SimpleNamespace(mem_manager=SimpleNamespace(free=lambda indexes: freed.append(indexes.clone())))
-        )
-    )
-    mtp_utils.free_mem_indexes(
-        backend=backend,
-        extra_mem_indexes_cpu=[
-            MtpMemIndexesToFree(mem_indexes_cpu=torch.tensor([11, 12, 13])),
-            MtpMemIndexesToFree(
-                mem_indexes_cpu=torch.tensor([20, 21]),
-                free_mask_cpu=torch.tensor([True, False]),
-            ),
-            MtpMemIndexesToFree(mem_indexes_cpu=torch.tensor([22])),
-        ],
-    )
-
-    assert len(freed) == 1
-    assert freed[0].tolist() == [11, 12, 13, 20, 22]
 
 
 def test_records_request_mtp_metrics_in_one_pass():
@@ -664,21 +638,12 @@ def test_engine_lets_planner_count_requests_with_a_previous_proposal():
     assert ready_plan.all_reqs_have_proposals
 
 
-def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypatch):
+def test_dynamic_prepare_delegates_row_compaction(monkeypatch):
     from lightllm.common.basemodel.triton_kernel import dynamic_mtp_utils
-    from lightllm.server.router.model_infer import infer_batch as infer_batch_module
     from lightllm.server.router.model_infer.mtp_speculative import (
         engine as engine_module,
     )
 
-    freed = []
-    monkeypatch.setattr(
-        infer_batch_module,
-        "g_infer_context",
-        SimpleNamespace(
-            req_manager=SimpleNamespace(mem_manager=SimpleNamespace(free=lambda indexes: freed.append(indexes.clone())))
-        ),
-    )
     selected_row_mask = torch.tensor([1, 0, 1, 0], dtype=torch.int32)
     monkeypatch.setattr(
         dynamic_mtp_utils,
@@ -702,8 +667,6 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
     )
     model_input = SimpleNamespace(
         batch_size=4,
-        mem_indexes=torch.tensor([20, 21, 22, 23], dtype=torch.int32),
-        mem_indexes_cpu=torch.tensor([10, 11, 12, 13], dtype=torch.int32),
     )
     plan = SpecDecodePlan(origin_batch_size=4, dynamic_batch_size=2, draft_step=1, pre_draft_step=1)
 
@@ -715,10 +678,6 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
 
     assert compacted_input is model_input
     assert selected_mask_cpu is async_mask
-    assert model_input.mem_indexes.tolist() == [20, 21]
-    assert model_input.mem_indexes_cpu.tolist() == [10, 11]
-    assert len(freed) == 1
-    assert freed[0].tolist() == [12, 13]
 
 
 def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
@@ -925,7 +884,6 @@ def test_engine_skips_feedback_for_a_mixed_proposal_batch():
         plan=plan,
         proposal=SpecProposal(
             token_ids=torch.empty((0,), dtype=torch.int64),
-            extra_mem_indexes_cpu=[],
         ),
         req_num=2,
         accept_lengths_cpu=torch.tensor([1, 2], dtype=torch.int32),
@@ -943,7 +901,6 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
     plan = SpecDecodePlan(origin_batch_size=8, dynamic_batch_size=8, draft_step=3, pre_draft_step=3)
     proposal = DSparkSpecProposal(
         token_ids=torch.empty((0,), dtype=torch.int64),
-        extra_mem_indexes_cpu=[],
         schedule_scores_cpu=torch.from_numpy(confidence_probs),
     )
     engine = SpecEngine.__new__(SpecEngine)

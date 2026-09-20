@@ -99,7 +99,7 @@ def _validate_flashqla():
     from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
         chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
     )
-    from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+    from lightllm.common.state_cache_manager import LinearAttCacheConfig
 
     linear_config = LinearAttCacheConfig.load_from_args()
     num_k_heads = linear_config.num_linear_k_heads

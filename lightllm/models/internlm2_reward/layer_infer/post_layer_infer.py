@@ -1,4 +1,5 @@
 import torch
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from ..layer_weights.pre_and_post_layer_weight import Internlm2RewardPreAndPostLayerWeight
@@ -14,4 +15,4 @@ class Internlm2RewardPostLayerInfer(LlamaPostLayerInfer):
         last_input = self._norm(last_input, infer_state, layer_weight)
         score = layer_weight.score_head_.mm(last_input)
 
-        return score
+        return PostLayerOutput(logits=score)

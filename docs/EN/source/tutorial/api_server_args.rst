@@ -5,6 +5,50 @@ APIServer Parameter Details
 
 This document provides detailed information about all startup parameters and their usage for LightLLM APIServer.
 
+Vocabulary Parallel Sampling
+----------------------------
+
+.. option:: --target_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    Candidate count communicated by each TP rank for target-model logits. The default ``None`` disables candidate communication.
+
+.. option:: --draft_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    Output candidate count from each TP rank for the draft model. The default ``None`` disables candidate output.
+    The two options independently control the target-model and draft-model output widths.
+    When unset, the corresponding model retains full-vocabulary logits communication and sampling.
+    When set, every TP rank selects local candidates, then one all-gather returns the logits and global
+    token IDs from all TP ranks. The settings also apply at TP=1.
+
+    Fixed-step draft decoding takes argmax over the candidates. The result remains the exact
+    full-vocabulary argmax because every shard contributes its local maximum. Dynamic MTP applies
+    softmax over the gathered candidates to produce simulated scheduling confidence; this is not
+    a full-vocabulary probability and can change dynamic step selection.
+
+    The target model selects the configured candidate count from each TP vocabulary shard before temperature,
+    request top-k, and top-p processing. The output layer then creates full-vocabulary logits, fills
+    non-candidate positions with ``-10000000.0``, and scatters candidate values by global token ID.
+    Downstream code continues through the existing full-vocabulary sampling path without a candidate-ID
+    mapping; existing penalties and invalid-token masking still run after candidate reconstruction.
+    A request top-k of -1 or larger than the gathered candidate count still only covers the candidates.
+    Generated-token logprobs and top-p mass
+    are relative to the candidate set, so enabling target candidates explicitly opts into approximate sampling.
+
+    Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary
+    results. Examples include the complete token ranks required by ``--enable_rl`` or a large logit bias that
+    would have promoted a non-candidate token into the selected set.
+    ``--target_vocab_topk_sampling`` cannot be combined with ``--output_constraint_mode outlines/xgrammar``
+    or ``--first_token_constraint_mode``; inference nodes reject these combinations with a startup assertion.
+    Non-candidate scores are ``-10000000.0``, while constraint masks set forbidden-token scores to ``-1000000.0``.
+    If all allowed tokens are pruned, forbidden tokens receive higher scores. Disable target candidate pruning
+    when using these output constraints. This check does not restrict ``--draft_vocab_topk_sampling``.
+    Use matching settings on PD master, prefill, and decode services.
+
+    Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
+    ``_lm_head_and_gather`` implementations; normalization overrides are allowed.
+    Model initialization no longer checks output-layer compatibility.
+    Leave the corresponding candidate option unset for nonstandard output heads.
+
 Basic Configuration Parameters
 ------------------------------
 
@@ -95,28 +139,59 @@ PD disaggregation Mode Parameters
     the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
     ``HEALTH_TIMEOUT`` consecutive seconds.
 
-.. option:: --enable_pd_node_self_request_limit
+.. option:: --disable_pd_node_self_request_limit
 
-    Enable local request limiting on Prefill/Decode nodes. PD Master does not currently perform request admission
-    limiting. The local ``shm_req`` allocation timeout is controlled by
-    ``LIGHTLLM_PD_NODE_SHM_REQ_ALLOC_TIMEOUT_SECONDS`` (20 seconds by default), while the timeout from Router entry
-    to inference entry is controlled by ``LIGHTLLM_PD_NODE_ROUTER_WAIT_TIMEOUT_SECONDS`` (20 seconds by default).
-    A timeout reports ``Server is busy``; a request that has entered the Router but not inference is proactively
-    marked aborted, and PD Master converts this to HTTP 429. Requests continue waiting when local admission is
-    disabled. For PD high-priority requests (segmented continuation requests, or requests whose estimated input
-    cache hit rate is above 0.8 and whose cache record is still fresh), PD Master supplies a shared timeout floor through
-    ``pd_high_priority_request_time_out_seconds``. Each P/D node uses the greater of this value and its local
-    ``shm_req`` or Router timeout; zero does not extend the local timeout. The value supplied by PD Master is controlled by
-    ``LIGHTLLM_PD_HIGH_PRIORITY_REQUEST_TIMEOUT_SECONDS`` and defaults to 60 seconds. The maximum cache-record age
-    eligible for promotion is controlled by ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
-    16 seconds. Local request limiting is disabled by default.
+    P/D-node resource wait limiting is enabled by default and managed centrally by PD Master. Set this option only
+    when disabling the feature, and only when starting PD Master; it is not needed on Prefill or Decode nodes.
+    By default, PD Master supplies
+    ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
+    ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
+    or timeout settings. The first segment's timeout is
+    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
+    to -1 to wait indefinitely. Continuation segments with ``segment_index > 0`` use a separate timeout controlled by
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 60 seconds, improving the chance
+    that requests which have already produced partial results complete successfully. When set to a non-negative value,
+    a timeout reports ``Server is busy``; a request that has
+    entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
+    While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
+    The maximum probing period is controlled by ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` and defaults to
+    120 seconds. Once response tokens have been streamed to the client, the request is not restarted because doing so
+    would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
+    resource wait timeout; all P/D nodes wait indefinitely, and a ``Server is busy`` raised for another reason is
+    returned immediately without retrying.
+    In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
+    The maximum cache-record age eligible for promotion is controlled by
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
+    36 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
+    solely from a high cache-hit rate.
+
+    Startup example:
+
+    .. code-block:: bash
+
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
+            LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
+            python -m lightllm.server.api_server --run_mode pd_master ...
 
 .. option:: --disable_pd_cache_high_priority
 
-    Disable PD Master from promoting first-segment requests whose estimated input cache hit rate is high and whose
-    cache record is still fresh. This does not affect segmented continuation requests after PD Decode capacity
-    exhaustion; continuation requests remain high priority. Disabled by default, so fresh high-cache-hit requests
+    Disable PD Master from promoting sufficiently long first-segment requests whose estimated input cache hit rate
+    is high and whose cache record is still fresh. This does not affect segmented continuation requests after PD
+    Decode capacity exhaustion; continuation requests remain high priority. Disabled by default, so eligible requests
     are promoted unless this option is set.
+
+    Configure this option only on PD Master. When a Prefill node's combined GPU, CPU, and disk cache capacity is small
+    relative to its request working set, later requests can quickly evict reusable cache entries under high load.
+    Requests that could otherwise hit the cache must then repeat Prefill computation, which can significantly reduce
+    Prefill efficiency. In this situation, keep the default high-priority policy enabled so requests with a high
+    estimated cache hit rate can run earlier and reuse their cache entries before eviction.
+
+    This policy changes queue ordering and may increase time to first token (TTFT) for ordinary requests that do not
+    meet the cache-hit-rate, cache-age, or minimum-prompt-token thresholds. Consider setting
+    ``--disable_pd_cache_high_priority`` when Prefill cache capacity is sufficient and cache churn is low, or when
+    scheduling fairness and ordinary-request TTFT are more important than preserving cache-hit efficiency.
 
 .. option:: --config_server_host
 

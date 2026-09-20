@@ -42,6 +42,9 @@ class NixlKVTransporter:
         self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
         self._remote_agents_lock = threading.Lock()
         self.remote_agents: Dict[str, PDAgentMetadata] = {}
+        # Serialize complete peer add/remove operations, including native NIXL
+        # calls and descriptor cleanup, across worker threads (see GH-1470).
+        self._remote_agents_lock = threading.Lock()
         return
 
     @property
@@ -135,16 +138,20 @@ class NixlKVTransporter:
 
     def remove_remote_agent(self, peer_name: str):
         with self._remote_agents_lock:
-            if peer_name in self.remote_agents:
+            remote_agent: PDAgentMetadata = self.remote_agents.pop(peer_name, None)
+            if remote_agent is not None:
+                start_time = time.monotonic()
                 try:
-                    remote_agent: PDAgentMetadata = self.remote_agents.pop(peer_name, None)
                     assert remote_agent.agent_name == peer_name
                     self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
                     if remote_agent.page_xfer_handles is not None:
                         for handles in remote_agent.page_xfer_handles.values():
                             self.nixl_agent.release_dlist_handle(handles)
+                    logger.info(f"Removed remote agent {peer_name}, cost time: {time.monotonic() - start_time:.6f} s")
                 except BaseException as e:
-                    logger.error(f"remove remote agent {peer_name} failed")
+                    logger.error(
+                        f"remove remote agent {peer_name} failed, cost time: {time.monotonic() - start_time:.6f} s"
+                    )
                     logger.exception(str(e))
             else:
                 logger.warning(f"try to remove remote agent, but peer name {peer_name} agent did not exist")

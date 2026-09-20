@@ -20,11 +20,14 @@ class UniqueTimeIdGenerator:
 
 
 time_gen = UniqueTimeIdGenerator()
+RadixChildKey = Union[int, bytes]
 
 
 class TreeNode:
-    def __init__(self):
-        self.children: Dict[int, TreeNode] = {}  # 这里的键 为 token_id_key 的第一个元素
+    def __init__(self, page_size: int = 1):
+        self.page_size = page_size
+        # page_size=1 时 key 为首个 token id，否则将首个完整页编码为紧凑的 bytes。
+        self.children: Dict[RadixChildKey, "TreeNode"] = {}
         self.parent: TreeNode = None
         self.token_id_key: torch.Tensor = None
         self.token_mem_index_value: torch.Tensor = None  # 用于记录存储的 token_index 为每个元素在 token mem 中的index位置
@@ -38,17 +41,24 @@ class TreeNode:
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
+    def get_child_key(self, token_ids: torch.Tensor):
+        first_page = token_ids[: self.page_size]
+        if self.page_size == 1:
+            return first_page.item()
+        return first_page.numpy().tobytes()
+
     def split_node(self, prefix_len, child_key_fn=None, extra_value_ops=None):
-        split_parent_node = TreeNode()
+        assert prefix_len > 0 and prefix_len % self.page_size == 0
+        split_parent_node = TreeNode(page_size=self.page_size)
         split_parent_node.parent = self.parent
-        split_parent_node.parent.children[child_key_fn(self.token_id_key)] = split_parent_node
+        split_parent_node.parent.children[self.get_child_key(self.token_id_key)] = split_parent_node
         split_parent_node.token_id_key = self.token_id_key[0:prefix_len]
         split_parent_node.token_mem_index_value = self.token_mem_index_value[0:prefix_len]
         if self.token_extra_value is not None and extra_value_ops is not None:
             split_parent_node.token_extra_value = extra_value_ops.slice(self.token_extra_value, 0, prefix_len)
             self.token_extra_value = extra_value_ops.slice(self.token_extra_value, prefix_len, len(self.token_id_key))
         split_parent_node.children = {}
-        split_parent_node.children[child_key_fn(self.token_id_key[prefix_len:])] = self
+        split_parent_node.children[self.get_child_key(self.token_id_key[prefix_len:])] = self
         split_parent_node.ref_counter = self.ref_counter
 
         new_len = len(split_parent_node.token_mem_index_value)
@@ -64,13 +74,13 @@ class TreeNode:
         return split_parent_node
 
     def add_and_return_new_child(self, token_id_key, token_mem_index_value, token_extra_value=None, child_key=None):
-        child = TreeNode()
+        child = TreeNode(page_size=self.page_size)
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
         child.token_extra_value = token_extra_value
-        first_token_key = child.token_id_key[0].item() if child_key is None else child_key
-        assert first_token_key not in self.children.keys()
-        self.children[first_token_key] = child
+        child_key = child.get_child_key(child.token_id_key)
+        assert child_key not in self.children.keys()
+        self.children[child_key] = child
         child.parent = self
 
         new_len = len(child.token_mem_index_value)
@@ -79,17 +89,9 @@ class TreeNode:
         return child
 
     def remove_child(self, child_node: "TreeNode"):
-        child_key = child_node.token_id_key[0].item()
-        if child_key in self.children:
-            del self.children[child_key]
-            child_node.parent = None
-            return
-        for key, value in list(self.children.items()):
-            if value is child_node:
-                del self.children[key]
-                child_node.parent = None
-                return
-        raise KeyError("child node not found")
+        del self.children[child_node.get_child_key(child_node.token_id_key)]
+        child_node.parent = None
+        return
 
     def update_time(self):
         self.time_id = time_gen.generate_time_id()
@@ -115,29 +117,23 @@ def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
 
 
 class RadixCache:
-    """
-    unique_name 主要用于解决单机，多实列部署时的shm冲突
-    """
-
-    def __init__(
-        self,
-        unique_name,
-        total_token_num,
-        rank_in_node,
-        mem_manager=None,
-        page_size: int = 1,
-        extra_value_ops=None,
-    ):
+    def __init__(self, total_token_num, rank_in_node, mem_manager=None, page_size: int = 1, extra_value_ops=None):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         self.total_token_num = total_token_num
         self.mem_manager: MemoryManager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
-        self.page_size = max(1, int(page_size))
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
+        if mem_manager is not None and page_size != mem_manager.page_size:
+            raise ValueError(
+                f"RadixCache page_size {page_size} must match mem_manager page_size {mem_manager.page_size}"
+            )
+        self.page_size = page_size
         self.extra_value_ops = extra_value_ops
 
-        self.root_node = TreeNode()
+        self.root_node = TreeNode(page_size=page_size)
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
@@ -145,11 +141,9 @@ class RadixCache:
         self.evict_tree_set: Set[TreeNode] = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
         self.evict_tree_set.add(self.root_node)
 
-        self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
+        self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
-        self.tree_total_tokens_num = SharedArray(
-            f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
-        )
+        self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
         self.swa_tree_total_pages_num = 0
         self.swa_refed_pages_num = 0
@@ -194,7 +188,7 @@ class RadixCache:
     def _child_key(self, key: torch.Tensor):
         if self.page_size <= 1:
             return key[0].item()
-        return tuple(key[: self.page_size].tolist())
+        return key[: self.page_size].numpy().tobytes()
 
     def _match_len(self, key: torch.Tensor, node_key: torch.Tensor) -> int:
         prefix_len = match(key, node_key)
@@ -224,7 +218,8 @@ class RadixCache:
             extra_value = self._slice_extra(extra_value, 0, align_len)
 
         assert len(key) == len(value)  # and len(key) >= 1
-        if len(key) == 0:
+        aligned_len = len(key) // self.page_size * self.page_size
+        if aligned_len == 0:
             return 0, None
         return self._insert_helper(self.root_node, key, value, extra_value)
 
@@ -265,10 +260,12 @@ class RadixCache:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
 
-        first_key_id = self._child_key(key)
+        first_key_id = node.get_child_key(key)
         if first_key_id in node.children.keys():
             child: TreeNode = node.children[first_key_id]
-            prefix_len = self._match_len(key, child.token_id_key)
+            prefix_len = match(key, child.token_id_key)
+            prefix_len = prefix_len // self.page_size * self.page_size
+            assert prefix_len > 0
             if prefix_len == len(key):
                 if prefix_len == len(child.token_id_key):
                     if child.is_leaf():
@@ -442,12 +439,14 @@ class RadixCache:
         if len(key) == 0:
             return node
 
-        first_key_id = self._child_key(key)
+        first_key_id = node.get_child_key(key)
         if first_key_id not in node.children.keys():
             return node
         else:
             child = node.children[first_key_id]
-            prefix_len = self._match_len(key, child.token_id_key)
+            prefix_len = match(key, child.token_id_key)
+            prefix_len = prefix_len // self.page_size * self.page_size
+            assert prefix_len > 0
             if prefix_len == len(child.token_id_key):
                 ans_value_list.append(child.token_mem_index_value)
                 return (child, key[prefix_len:])
@@ -533,7 +532,7 @@ class RadixCache:
         child_node.time_id = max(parent_node.time_id, child_node.time_id)
 
         grandparent_node = parent_node.parent
-        key_in_grandparent = self._child_key(parent_node.token_id_key)
+        key_in_grandparent = parent_node.get_child_key(parent_node.token_id_key)
         grandparent_node.children[key_in_grandparent] = child_node
         child_node.parent = grandparent_node
 
@@ -824,11 +823,9 @@ class _RadixCacheReadOnlyClient:
     router 端只读用的客户端，用于从共享内存中读取树结构中的信息，用于进行prompt cache 的调度估计。
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node):
-        self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
-        self.tree_total_tokens_num = SharedArray(
-            f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
-        )
+    def __init__(self, total_token_num, rank_in_node):
+        self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
+        self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
 
     def get_refed_tokens_num(self):
         return self.refed_tokens_num.arr[0]
@@ -841,9 +838,9 @@ class _RadixCacheReadOnlyClient:
 
 
 class RadixCacheReadOnlyClient:
-    def __init__(self, unique_name, total_token_num, node_world_size, dp_world_size):
+    def __init__(self, total_token_num, node_world_size, dp_world_size):
         self.dp_rank_clients: List[_RadixCacheReadOnlyClient] = [
-            _RadixCacheReadOnlyClient(unique_name, total_token_num, rank_in_node)
+            _RadixCacheReadOnlyClient(total_token_num, rank_in_node)
             for rank_in_node in range(0, node_world_size, dp_world_size)
         ]
 

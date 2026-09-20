@@ -1,9 +1,14 @@
 import torch
 import dataclasses
 import triton
+
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+from .base import StateCacheManager
+from .layer_cache import LayerCache
+
 
 logger = init_logger(__name__)
 
@@ -123,10 +128,13 @@ class LinearAttCacheConfig:
         n_layer = llm_config["num_hidden_layers"]
 
         tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+        full_att_dtype = (
+            torch.uint8 if args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else get_torch_dtype(args.data_type)
+        )
         return LinearAttCacheConfig(
             tp_world_size=tp_world_size,
             full_att_all_num_kv_heads=llm_config["num_key_value_heads"],
-            full_att_dtype=get_torch_dtype(args.data_type),
+            full_att_dtype=full_att_dtype,
             full_att_num_kv_heads=max(1, llm_config["num_key_value_heads"] // tp_world_size),
             full_att_head_dim=llm_config["head_dim"],
             global_linear_k_heads=llm_config["linear_num_key_heads"],
@@ -143,3 +151,44 @@ class LinearAttCacheConfig:
             all_layer_num=n_layer,
             draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num(),
         )
+
+
+class LinearAttCacheManager(StateCacheManager):
+    """CPU pinned conv/SSM checkpoint，两个 buffer 均保持 size-first 布局。"""
+
+    def __init__(
+        self,
+        size: int,
+        linear_config: LinearAttCacheConfig,
+        keep_num: int = 0,  # 用于记录需要保留的缓存数量，用于支持含有 linear_att 的如qwen3.5 模型的cpu cache的碎页处理。
+    ):
+        super().__init__(size, keep_num)
+        self.linear_config = linear_config
+        # init the layer cache
+        self.conv_state_cache = LayerCache(
+            size=self.size,
+            dtype=self.linear_config.conv_state_dtype,
+            shape=self.linear_config.get_conv_state_shape(),
+            layer_num=self.linear_config.linear_layer_num,
+            device="cpu",
+            size_first=True,
+        )
+        self.ssm_state_cache = LayerCache(
+            size=self.size,
+            dtype=self.linear_config.ssm_state_dtype,
+            shape=self.linear_config.get_ssm_state_shape(),
+            layer_num=self.linear_config.linear_layer_num,
+            device="cpu",
+            size_first=True,
+        )
+        self.clear_to_init_state()
+        return
+
+    def get_state_cache(self, buffer_idx: int):
+        return self.conv_state_cache.buffer[buffer_idx, ...], self.ssm_state_cache.buffer[buffer_idx, ...]
+
+    def clear_to_init_state(self):
+        self.conv_state_cache.buffer.zero_()
+        self.ssm_state_cache.buffer.zero_()
+        super().clear_to_init_state()
+        return

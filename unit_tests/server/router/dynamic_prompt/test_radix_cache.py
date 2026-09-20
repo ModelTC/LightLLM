@@ -1,10 +1,22 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
+from lightllm.utils import shm_utils
+
+
+@pytest.fixture(scope="module", autouse=True)
+def service_name():
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_radix_cache_service_0")
+    yield
+    monkeypatch.undo()
 
 
 def test_case1():
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     assert ans == 0
     tree.print_self()
@@ -25,7 +37,7 @@ def test_case1():
 
 
 def test_case2():
-    tree = RadixCache("unique_name", 100, 1)
+    tree = RadixCache(100, 1)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
     tree.print_self()
@@ -51,7 +63,7 @@ def test_case2():
 
 
 def test_case3():
-    tree = RadixCache("unique_name", 100, 2)
+    tree = RadixCache(100, 2)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
     tree.print_self()
@@ -81,7 +93,7 @@ def test_case3():
 
 def test_case4():
 
-    tree = RadixCache("unique_name", 100, 2)
+    tree = RadixCache(100, 2)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
     tree.print_self()
@@ -96,7 +108,7 @@ def test_case5():
     测试场景：一个简单的父子节点链 (A -> B)，在 ref_counter 都为 0 时，应该成功合并。
     """
     print("\nTest Case 5: Merging simple parent-child nodes when ref_counter is 0\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     _, node_a = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
@@ -125,7 +137,7 @@ def test_case6():
     测试场景：一个长的节点链 (A -> B -> C)，在 ref_counter 都为 0 时，应该级联合并成一个节点。
     """
     print("\nTest Case 6: Merging long nodes when ref_counter is 0\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
     _, node_a = tree.insert(torch.tensor([1], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2], dtype=torch.int64))
     _, node_c = tree.insert(torch.tensor([1, 2, 3, 4], dtype=torch.int64))
@@ -149,7 +161,7 @@ def test_case7():
     测试场景：由于父节点或子节点的 ref_counter > 0，合并不应该发生。
     """
     print("\nTest Case 7: Merging when parent or child ref_counter > 0\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     _, node_a = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
@@ -173,7 +185,7 @@ def test_case8():
     测试场景：由于父节点有多个子节点，合并不应该发生。
     """
     print("\nTest Case 8: Merging when parent has multiple children\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     _, node_a = tree.insert(torch.tensor([1, 2], dtype=torch.int64))
     _, node_b = tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
@@ -199,7 +211,7 @@ def test_case9():
     测试场景：在一个复杂的树中，只有满足条件的分支被合并。
     """
     print("\nTest Case 9: Merging in a complex tree with mixed conditions\n")
-    tree = RadixCache("unique_name", 100, 0)
+    tree = RadixCache(100, 0)
 
     # 分支1: 可合并的链 A -> B
     _, node_a = tree.insert(torch.tensor([1, 2], dtype=torch.int64))
@@ -235,7 +247,12 @@ def test_case10():
     测试场景：测试 flush_cache 函数
     """
     print("\nTest Case 10: Testing flush_cache function\n")
-    tree = RadixCache("unique_name", 100, 0)
+    allocator = SimpleNamespace(can_use_mem_size=95)
+
+    def free(indexes):
+        allocator.can_use_mem_size += len(indexes)
+
+    tree = RadixCache(100, 0, mem_manager=SimpleNamespace(page_size=1, allocator=allocator, free=free))
     tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
     tree_node, size, values = tree.match_prefix(
@@ -243,7 +260,9 @@ def test_case10():
     )
     assert tree_node is not None
     assert size == 3
+    tree.dec_node_ref_counter(tree_node)
     tree.flush_cache()
+    assert allocator.can_use_mem_size == 100
     tree_node, size, values = tree.match_prefix(
         torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True
     )
@@ -255,6 +274,54 @@ def test_case10():
     assert tree.root_node.token_id_key.numel() == 0
     assert tree.root_node.token_mem_index_value.numel() == 0
     assert tree.root_node.ref_counter == 1
+
+
+def test_page_aligned_insert_and_match():
+    tree = RadixCache(100, 99, page_size=4)
+    values = torch.arange(100, 110, dtype=torch.int64)
+
+    prefix_len, _ = tree.insert(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), values)
+    assert prefix_len == 0
+    assert tree.get_tree_total_tokens_num() == 8
+
+    # A mismatch inside a page cannot produce a partial-page cache hit.
+    node, matched_len, matched_values = tree.match_prefix(torch.tensor([1, 2, 0, 4, 5, 6, 7, 8]))
+    assert node is None
+    assert matched_len == 0
+    assert matched_values is None
+
+    node, matched_len, matched_values = tree.match_prefix(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 11]))
+    assert node is not None
+    assert matched_len == 8
+    assert matched_values.tolist() == list(range(100, 108))
+
+    # The second sequence shares exactly one page and then branches by its
+    # complete second-page key.
+    prefix_len, _ = tree.insert(
+        torch.tensor([1, 2, 3, 4, 5, 6, 0, 8]),
+        torch.arange(200, 208, dtype=torch.int64),
+    )
+    assert prefix_len == 4
+    assert tree.get_tree_total_tokens_num() == 12
+
+
+def test_page_size_must_match_mem_manager():
+    mem_manager = SimpleNamespace(page_size=8)
+
+    with pytest.raises(ValueError, match="must match mem_manager page_size 8"):
+        RadixCache(100, 100, mem_manager=mem_manager, page_size=4)
+
+
+def test_page_key_bytes_does_not_share_tensor_memory():
+    token_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+    expected_key = token_ids.clone().numpy().tobytes()
+    key = TreeNode(page_size=4).get_child_key(token_ids)
+
+    token_ids[0] = 100
+
+    assert isinstance(key, bytes)
+    assert key == expected_key
+    assert key != TreeNode(page_size=4).get_child_key(token_ids)
 
 
 if __name__ == "__main__":

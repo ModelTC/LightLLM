@@ -177,7 +177,7 @@ class _DecodeTransModule:
             cur_mem.kv_move_buffer[0].zero_()
             for dp_index in range(self.args.dp // self.args.nnodes):
                 cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEX],
+                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEXES[0]],
                     page_index=0,
                     dp_index=dp_index,
                     mem_managers=self.mem_managers,

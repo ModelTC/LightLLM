@@ -25,26 +25,25 @@ class FakeSharedInt:
 def _manager() -> HttpServerManager:
     manager = HttpServerManager.__new__(HttpServerManager)
     manager.args = SimpleNamespace(run_mode="decode", running_max_req_size=64)
-    manager.pd_node_request_limit_enabled = False
+    manager.is_multinode_tp_slave = False
     manager._run_reqs_count_lock = asyncio.Lock()
     manager.run_reqs_count_mark = FakeSharedInt()
     manager.latest_success_infer_time_mark = FakeSharedInt()
-    manager.pd_node_shm_req_alloc_timeout_seconds = 20
     manager.shm_req_manager = MagicMock()
     manager.shm_req_manager.async_release_req_index = AsyncMock()
     return manager
 
 
-def test_pd_high_priority_timeout_is_internal_and_defaults_to_zero():
+def test_pd_node_resource_wait_timeout_is_internal_and_defaults_to_waiting_forever():
     sampling_params = SamplingParams()
     sampling_params.init(
         None,
         pd_high_priority_request=True,
-        pd_high_priority_request_time_out_seconds=99,
+        pd_node_resource_wait_timeout_seconds=99,
     )
 
     assert sampling_params.pd_high_priority_request is False
-    assert sampling_params.pd_high_priority_request_time_out_seconds == 0
+    assert sampling_params.pd_node_resource_wait_timeout_seconds == -1
 
 
 def test_shm_req_partial_allocations_are_released_on_failure():
@@ -60,7 +59,7 @@ def test_shm_req_partial_allocations_are_released_on_failure():
     asyncio.run(run())
 
 
-def test_shm_req_allocation_waits_forever_when_local_limit_is_disabled():
+def test_shm_req_allocation_waits_forever_when_timeout_is_negative():
     async def run():
         manager = _manager()
         manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, None, 3])
@@ -73,24 +72,44 @@ def test_shm_req_allocation_waits_forever_when_local_limit_is_disabled():
     asyncio.run(run())
 
 
+def test_multinode_tp_slave_does_not_apply_shm_req_allocation_timeout():
+    async def run():
+        manager = _manager()
+        manager.is_multinode_tp_slave = True
+        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, None, 3])
+
+        with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
+            assert await manager._alloc_shm_req_indexes(1, pd_node_resource_wait_timeout_seconds=0) == [3]
+
+        assert sleep.await_count == 2
+
+    asyncio.run(run())
+
+
 def test_high_priority_shm_req_allocation_uses_shorter_backoff_even_with_local_limit():
     async def run():
         manager = _manager()
-        manager.pd_node_request_limit_enabled = True
         manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, 3])
 
         with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
-            assert await manager._alloc_shm_req_indexes(1, pd_high_priority_request=True) == [3]
+            assert (
+                await manager._alloc_shm_req_indexes(
+                    1,
+                    pd_high_priority_request=True,
+                    pd_node_resource_wait_timeout_seconds=60,
+                )
+                == [3]
+            )
 
         assert sleep.await_args_list[0].args[0] == pytest.approx(0.1 * 0.2)
 
     asyncio.run(run())
 
 
-def test_high_priority_shm_req_allocation_uses_master_timeout_with_local_limit():
+@pytest.mark.parametrize("pd_high_priority_request", [False, True])
+def test_shm_req_allocation_uses_master_timeout_independently_of_priority(pd_high_priority_request):
     async def run():
         manager = _manager()
-        manager.pd_node_request_limit_enabled = True
         manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=None)
 
         with (
@@ -99,41 +118,27 @@ def test_high_priority_shm_req_allocation_uses_master_timeout_with_local_limit()
         ):
             await manager._alloc_shm_req_indexes(
                 1,
-                pd_high_priority_request=True,
-                pd_high_priority_request_time_out_seconds=60,
-            )
-
-    asyncio.run(run())
-
-
-def test_high_priority_shm_req_allocation_does_not_shorten_local_timeout():
-    async def run():
-        manager = _manager()
-        manager.pd_node_request_limit_enabled = True
-        manager.pd_node_shm_req_alloc_timeout_seconds = 80
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=None)
-
-        with (
-            patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[100, 181]),
-            pytest.raises(ServerBusyError, match="within 80 seconds"),
-        ):
-            await manager._alloc_shm_req_indexes(
-                1,
-                pd_high_priority_request=True,
-                pd_high_priority_request_time_out_seconds=60,
+                pd_high_priority_request=pd_high_priority_request,
+                pd_node_resource_wait_timeout_seconds=60,
             )
 
     asyncio.run(run())
 
 
 @pytest.mark.parametrize(
-    ("infer_start_time", "local_timeout_seconds", "high_priority_timeout_seconds", "expected"),
-    [(0, 20, 0, True), (0, 20, 60, True), (0, 80, 60, False), (1, 20, 60, False)],
+    ("infer_start_time", "pd_high_priority_request", "resource_wait_timeout_seconds", "expected"),
+    [
+        (0, False, -1, False),
+        (0, False, 60, True),
+        (0, True, 60, True),
+        (0, True, 80, False),
+        (1, False, 60, False),
+    ],
 )
-def test_high_priority_router_wait_uses_master_timeout(
+def test_router_wait_uses_master_timeout_independently_of_priority(
     infer_start_time,
-    local_timeout_seconds,
-    high_priority_timeout_seconds,
+    pd_high_priority_request,
+    resource_wait_timeout_seconds,
     expected,
 ):
     req_status = ReqStatus.__new__(ReqStatus)
@@ -143,15 +148,15 @@ def test_high_priority_router_wait_uses_master_timeout(
                 infer_start_time=infer_start_time,
                 router_arrival_time=100,
                 sample_params=SimpleNamespace(
-                    pd_high_priority_request=True,
-                    pd_high_priority_request_time_out_seconds=high_priority_timeout_seconds,
+                    pd_high_priority_request=pd_high_priority_request,
+                    pd_node_resource_wait_timeout_seconds=resource_wait_timeout_seconds,
                 ),
             )
         ]
     )
 
     with patch("lightllm.server.httpserver.manager.time.monotonic", return_value=161):
-        assert req_status.has_timed_out_waiting_for_inference(local_timeout_seconds) is expected
+        assert req_status.has_timed_out_waiting_for_inference() is expected
 
 
 def test_pd_high_priority_request_is_inserted_before_first_normal_request():

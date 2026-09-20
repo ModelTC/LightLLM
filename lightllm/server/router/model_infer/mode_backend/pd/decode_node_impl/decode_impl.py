@@ -109,20 +109,21 @@ class PDDecodeNode(ChunkedPrefillBackend):
                             f"(reason={req_obj.finish_status.get_finish_reason()}), kv transfer error"
                         )
 
-                # 提前释放有问题的 mem_index
+                # 提前释放有问题的 mem_index。cur_kv_len 只表示已经传输完成的
+                # 逻辑长度，hold_kv_len 还包含最后一个页面中尚未使用的预留槽位。
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
-                error_mem_len = req_obj.cur_kv_len - old_prefix_len
+                error_mem_len = req_obj.hold_kv_len - old_prefix_len
                 if error_mem_len > 0:
-                    req_obj.cur_kv_len -= error_mem_len
-
                     mem_indexes = (
                         self.model.req_manager.req_to_token_indexs[
-                            req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + error_mem_len)
+                            req_obj.req_idx, old_prefix_len : req_obj.hold_kv_len
                         ]
                         .detach()
                         .cpu()
                     )
                     self.model.mem_manager.free(mem_indexes)
+                    req_obj.cur_kv_len = old_prefix_len
+                    req_obj.hold_kv_len = old_prefix_len
                     if self.is_master_in_dp:
                         req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
@@ -137,6 +138,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             req_obj.shared_kv_node = None
         # 借用的 full slots 仍由 radix 持有；下一轮从 0 传输时会覆盖请求表。
         req_obj.cur_kv_len = 0
+        req_obj.hold_kv_len = 0
         req_obj.pd_trans_kv_start_index = 0
         req_obj.shm_req.shm_cur_kv_len = 0
         req_obj.shm_req.prompt_cache_len = 0
@@ -150,93 +152,94 @@ class PDDecodeNode(ChunkedPrefillBackend):
         input_len = req_obj.shm_req.input_len
         # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
         if input_len - req_obj.cur_kv_len > 1:
-            page_size = self.args.pd_kv_page_size
+            trans_page_size = self.args.pd_kv_page_size
+            assert trans_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
-            need_mem_size = input_len - req_obj.cur_kv_len
+            assert req_obj.hold_kv_len == req_obj.cur_kv_len
+            need_mem_size = req_obj._kv_cache_alloc_need(input_len)
 
-            if need_mem_size > 0:
-                req_manager = self.model.req_manager
-                is_dsv4_req_manager = isinstance(req_manager, DeepseekV4ReqManager)
-                if is_dsv4_req_manager:
-                    mem_manager = req_manager.mem_manager
-                    ready_len = req_obj.cur_kv_len
+            req_manager = self.model.req_manager
+            is_dsv4_req_manager = isinstance(req_manager, DeepseekV4ReqManager)
+            if is_dsv4_req_manager:
+                mem_manager = req_manager.mem_manager
+                ready_len = req_obj.cur_kv_len
 
-                    if need_mem_size > g_infer_context.get_can_alloc_token_num():
-                        return False
-                    if self.radix_cache is not None:
-                        self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
-                    if need_mem_size > mem_manager.allocator.can_use_mem_size:
-                        return False
-
-                    prompt_page = req_manager.get_prompt_cache_page_size()
-                    swa_start = max(ready_len, max(0, input_len // prompt_page * prompt_page - prompt_page))
-                    swa_page = mem_manager.swa_pool.page_size
-                    swa_need = max(0, (input_len - 1) // swa_page - (swa_start + swa_page - 1) // swa_page + 1)
-
-                    _, c4_need, c128_need = req_obj.get_dsv4_prefill_need_page_and_slot_num(is_chuncked_prefill=False)
-                    c4_allocator = mem_manager.c4_page_allocator
-                    c128_allocator = mem_manager.c128_allocator
-
-                    # D ingress 会立即分配派生槽，必须在任何分配前先兑现并检查实际容量。
-                    if self.radix_cache is not None:
-                        self.radix_cache.free_radix_cache_to_get_enough_c4_pages(c4_need)
-                        self.radix_cache.free_radix_cache_to_get_enough_c128_slots(c128_need)
-                        swa_shortage = swa_need - mem_manager.swa_page_allocator.can_use_mem_size
-                        if swa_shortage > 0:
-                            self.radix_cache.free_unreferenced_swa_pages(swa_shortage)
-
-                    if (
-                        swa_need > mem_manager.swa_page_allocator.can_use_mem_size
-                        or (c4_allocator is not None and c4_need > c4_allocator.can_use_mem_size)
-                        or (c128_allocator is not None and c128_need > c128_allocator.can_use_mem_size)
-                    ):
-                        return False
-
-                if self.radix_cache is not None and not is_dsv4_req_manager:
+                if need_mem_size > g_infer_context.get_can_alloc_token_num():
+                    return False
+                if self.radix_cache is not None:
                     self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
+                if need_mem_size > mem_manager.allocator.can_use_mem_size:
+                    return False
 
-                mem_indexes = req_manager.mem_manager.alloc(need_size=need_mem_size)
-                req_manager.req_to_token_indexs[
-                    req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + need_mem_size)
-                ] = mem_indexes
-                if is_dsv4_req_manager:
-                    req_manager.prepare_pd_decode_cache(
-                        req_list=[req_obj.req_idx],
-                        ready_list=[req_obj.cur_kv_len],
-                        seq_list=[input_len],
-                        new_full_slots=mem_indexes,
-                    )
+                prompt_page = req_manager.get_prompt_cache_page_size()
+                swa_start = max(ready_len, max(0, input_len // prompt_page * prompt_page - prompt_page))
+                swa_page = mem_manager.swa_pool.page_size
+                swa_need = max(0, (input_len - 1) // swa_page - (swa_start + swa_page - 1) // swa_page + 1)
 
-                while req_obj.pd_trans_kv_start_index < input_len:
-                    cur_page_size = min(page_size, input_len - req_obj.pd_trans_kv_start_index)
-                    # 生成页面传输任务， 放入kv move manager 的处理队列中
-                    start_index = req_obj.pd_trans_kv_start_index
-                    end_index = req_obj.pd_trans_kv_start_index + cur_page_size
-                    page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
-                    self._create_pd_trans_task(
-                        req_obj=req_obj,
-                        mem_indexes=page_mem_indexes.tolist(),
-                        kv_start_index=start_index,
-                        kv_end_index=end_index,
-                        group=group,
-                    )
-                    # update
-                    req_obj.pd_trans_kv_start_index += cur_page_size
+                _, c4_need, c128_need = req_obj.get_dsv4_prefill_need_page_and_slot_num(is_chuncked_prefill=False)
+                c4_allocator = mem_manager.c4_page_allocator
+                c128_allocator = mem_manager.c128_allocator
 
-                req_obj.cur_kv_len += len(mem_indexes)
+                # D ingress 会立即分配派生槽，必须在任何分配前先兑现并检查实际容量。
+                if self.radix_cache is not None:
+                    self.radix_cache.free_radix_cache_to_get_enough_c4_pages(c4_need)
+                    self.radix_cache.free_radix_cache_to_get_enough_c128_slots(c128_need)
+                    swa_shortage = swa_need - mem_manager.swa_page_allocator.can_use_mem_size
+                    if swa_shortage > 0:
+                        self.radix_cache.free_unreferenced_swa_pages(swa_shortage)
 
-                # 如果当前是linear att 混合模型，则需要创建一个linear att 状态的传输任务
-                if g_infer_context.is_linear_att_mixed_model:
-                    self._create_pd_trans_task(
-                        req_obj=req_obj,
-                        mem_indexes=[],
-                        kv_start_index=input_len,
-                        kv_end_index=input_len,
-                        group=group,
-                        page_kind="linear_att_state",
-                    )
-                if is_dsv4_req_manager:
-                    torch.cuda.current_stream().synchronize()
+                if (
+                    swa_need > mem_manager.swa_page_allocator.can_use_mem_size
+                    or (c4_allocator is not None and c4_need > c4_allocator.can_use_mem_size)
+                    or (c128_allocator is not None and c128_need > c128_allocator.can_use_mem_size)
+                ):
+                    return False
+
+            mem_indexes = self._alloc_req_kv_mem(req_obj, need_mem_size)
+            assert mem_indexes is not None
+            # 传输只覆盖真实 KV；最后一个模型页面中尚未使用的部分继续留在
+            # req_to_token_indexs 中，供后续 decode 直接切片使用。
+            mem_indexes = mem_indexes[: input_len - req_obj.cur_kv_len]
+
+            if is_dsv4_req_manager:
+                req_manager.prepare_pd_decode_cache(
+                    req_list=[req_obj.req_idx],
+                    ready_list=[req_obj.cur_kv_len],
+                    seq_list=[input_len],
+                    new_full_slots=mem_indexes,
+                )
+                torch.cuda.current_stream().synchronize()
+
+            while req_obj.pd_trans_kv_start_index < input_len:
+                cur_page_size = min(trans_page_size, input_len - req_obj.pd_trans_kv_start_index)
+                # 生成页面传输任务， 放入kv move manager 的处理队列中
+                start_index = req_obj.pd_trans_kv_start_index
+                end_index = req_obj.pd_trans_kv_start_index + cur_page_size
+                page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
+                self._create_pd_trans_task(
+                    req_obj=req_obj,
+                    mem_indexes=page_mem_indexes.tolist(),
+                    kv_start_index=start_index,
+                    kv_end_index=end_index,
+                    group=group,
+                )
+                # update
+                req_obj.pd_trans_kv_start_index += cur_page_size
+
+            req_obj.cur_kv_len += len(mem_indexes)
+            assert req_obj.cur_kv_len == input_len
+
+            # 混合注意力模型还需接收请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
+            # 通过本地 req_idx 定位运行态 buffer 的恢复位置。
+            if g_infer_context.is_hybrid_att_model:
+                self._create_pd_trans_task(
+                    req_obj=req_obj,
+                    mem_indexes=[],
+                    kv_start_index=input_len,
+                    kv_end_index=input_len,
+                    group=group,
+                    page_kind="att_state",
+                )
         else:
             assert req_obj.cur_kv_len == input_len - 1
 
@@ -276,7 +279,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 # only self.is_master_in_dp will be used.
                 self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
-        if page_kind not in ("kv", "linear_att_state"):
+        if page_kind not in ("kv", "att_state"):
             raise ValueError(f"unknown PD trans page kind {page_kind}")
 
         trans_task = PDChunckedTransTask(

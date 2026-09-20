@@ -154,6 +154,7 @@ def mtp_diverse_attention(
         B_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,
+        max_kv_len=int(b_seq_len.max().item()),
     )
 
 

@@ -118,8 +118,11 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
 class Int8kvTritonDecodeAttState(BaseDecodeAttState):
     b_shared_seq_len: torch.Tensor = None
     b_mark_shared_group: torch.Tensor = None
+    decode_max_kv_seq_len: int = None
 
     def init_state(self):
+        # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于普通 decode 配置查找。
+        self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
         if enable_diverse_mode_gqa_decode_fast_kernel():
             self.b_mark_shared_group = build_diverse_shared_group_markers(
                 b_shared_radix_node_id=self.infer_state.b_shared_radix_node_id,
@@ -203,5 +206,6 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
             cache_k_scale=k_scale,
             cache_v=v,
             cache_v_scale=v_scale,
+            max_len_in_batch=self.decode_max_kv_seq_len,
             alloc_tensor_func=alloc_func,
         )

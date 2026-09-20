@@ -30,14 +30,12 @@ from lightllm.models.deepseek_v4_dspark.layer_weights.pre_and_post_layer_weight 
 from lightllm.models.deepseek_v4_dspark.layer_weights.transformer_layer_weight import (
     DeepseekV4DSparkTransformerLayerWeight,
 )
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.utils.log_utils import init_logger
 
 
 logger = init_logger(__name__)
 
 
-@DraftModelRegistry(model_type="deepseek_v4", spec_modes="dspark")
 class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     """Three-stage DSpark draft model backed by target-owned DeepSeek-V4 cache layers."""
 

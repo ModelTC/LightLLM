@@ -12,7 +12,6 @@ from typing import List, Tuple
 from PIL import Image
 from lightllm.server.embed_cache.utils import create_shm, free_shm, get_shm_name_data
 from lightllm.server.multimodal_params import ImageItem
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -120,7 +119,7 @@ class VisionPeakVramHolder:
             color = (255, 255, 255) if batch_id % 2 else (0, 0, 0)
             image_bytes = self._gen_rgb_jpeg_bytes(width, height, color=color)
             item = ImageItem(type="base64", data="")
-            item.uuid = f"{get_unique_server_name()}_vision_peak_hold_dp{dp_rank_id}_{batch_id}"
+            item.uuid = f"vision_peak_hold_dp{dp_rank_id}_{batch_id}"
             item.image_w = width
             item.image_h = height
             # InternVL encode() reads image_patch_max_num from extra_params (normally set by

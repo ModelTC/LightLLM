@@ -150,7 +150,7 @@ class _PrefillTransModule:
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.write_mem_to_page_kv_move_buffer(
-                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEX],
+                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEXES[0]],
                     page_index=0,
                     dp_index=dp_index,
                     mem_managers=self.mem_managers,

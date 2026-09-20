@@ -13,6 +13,7 @@ def token_decode_attention_mtp_diverse_single_token(
     B_req_idx,
     b_seq_len,
     b_mark_shared_group,
+    max_kv_len: int,
     out=None,
     alloc_tensor_func=torch.empty,
 ):
@@ -24,8 +25,6 @@ def token_decode_attention_mtp_diverse_single_token(
         o_tensor = alloc_tensor_func(q.shape, dtype=q.dtype, device=q.device)
     else:
         o_tensor = out
-
-    max_kv_len = Req_to_tokens.shape[1]
 
     if batch_size <= 16:
         block_num = 128
@@ -57,5 +56,6 @@ def token_decode_attention_mtp_diverse_single_token(
         B_Seqlen=b_seq_len,
         out=o_tensor,
         block_n=BLOCK_N,
+        max_kv_len=max_kv_len,
     )
     return o_tensor

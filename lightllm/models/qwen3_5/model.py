@@ -1,6 +1,5 @@
 import os
 import json
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35TransformerLayerWeight,
@@ -34,7 +33,6 @@ class QWen3_5Tokenizer(QWen3VLTokenizer):
         super().__init__(tokenizer, image_processor, **kwargs)
 
 
-@ModelRegistry(["qwen3_5"], is_multimodal=True)
 class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     """
     Qwen3.5 Multimodal Model (Dense Variant)

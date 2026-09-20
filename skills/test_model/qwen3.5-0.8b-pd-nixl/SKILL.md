@@ -24,7 +24,7 @@ Qwen3.5 与 Qwen3-8B 的关键差异：
 
 | 项 | Qwen3.5-0.8B NIXL PD 要点 |
 |---|---|
-| linear-att 状态 | PD 传输除了 KV page，还会传 `linear_att_state` 特殊页 |
+| attention 状态 | PD 传输除了 KV page，还会传 `att_state` 续算状态页（本模型为 conv/SSM） |
 | NIXL page size | 建议固定 **`--pd_kv_page_size 2048`**；`1024` 可能不足以容纳 linear-att 状态 |
 | page num | 建议 **`--pd_kv_page_num 16`** 起步，避免 page 池过大导致显存压力 |
 | cache 判断 | repeated prompt 可能只在 prefill 侧命中，decode 侧不一定 decode-only 命中 |
@@ -242,7 +242,7 @@ rg -n 'flexible-extract|strict-match|exact_match|Traceback|ERROR|can not find wa
 
 - prefill 侧会按 512 token 粒度逐步命中，例如 513 的第二次可命中 512。
 - decode 侧可能仍为 `gpu cache hit: False`、`gpu_prompt_cache_len:0`。
-- 只要 decode 未全命中，仍会出现 `recv WRITE request from prefill` 和 `linear_att_state` 传输。
+- 只要 decode 未全命中，仍会出现 `recv WRITE request from prefill` 和 `att_state` 传输。
 
 ### 简单重复 prompt
 
@@ -275,7 +275,7 @@ done
 ### 判定信号
 
 ```bash
-rg -n 'gpu cache hit:|recv WRITE request from prefill|start WRITE to decode node|linear_att_state|trans task ret success' \
+rg -n 'gpu cache hit:|recv WRITE request from prefill|start WRITE to decode node|att_state|trans task ret success' \
   "${LOG_DIR}/prefill.log" "${LOG_DIR}/decode.log" \
   | tee -a "${LOG_DIR}/summary.txt"
 ```

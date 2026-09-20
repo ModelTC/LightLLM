@@ -9,7 +9,6 @@ from tqdm import tqdm
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.deepseek_v4_mtp.layer_infer.pre_layer_infer import DeepseekV4MTPPreLayerInfer
 from lightllm.models.deepseek_v4_mtp.layer_infer.transformer_layer_infer import (
     DeepseekV4MTPTransformerLayerInfer,
@@ -27,7 +26,6 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-@DraftModelRegistry(model_type="deepseek_v4", spec_modes="eagle_with_att")
 class DeepseekV4MTPModel(DeepseekV4TpPartModel):
     is_mtp_draft_model = True
 

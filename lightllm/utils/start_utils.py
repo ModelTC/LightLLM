@@ -1,5 +1,6 @@
 import os
 import shutil
+import ctypes
 import signal
 import subprocess
 import sys
@@ -8,6 +9,8 @@ import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import is_process_active
+from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_process
 
 logger = init_logger(__name__)
 
@@ -25,6 +28,7 @@ class SubmoduleManager:
         assert len(start_funcs) == len(start_args)
         pipe_readers = []
         processes = []
+        managed_processes = []
 
         try:
             for start_func, start_arg in zip(start_funcs, start_args):
@@ -39,6 +43,10 @@ class SubmoduleManager:
                     pipe_writer.close()
                 pipe_readers.append(pipe_reader)
                 processes.append(process)
+                managed_process = psutil.Process(process.pid)
+                managed_processes.append(managed_process)
+                self.processes.append(managed_process)
+                self.process_names[managed_process] = managed_process.name()
 
             # Wait for all processes to initialize
             for index, pipe_reader in enumerate(pipe_readers):
@@ -52,8 +60,6 @@ class SubmoduleManager:
                 logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
 
             assert all([proc.is_alive() for proc in processes])
-            managed_processes = [psutil.Process(proc.pid) for proc in processes]
-            managed_process_names = {process: process.name() for process in managed_processes}
         except BaseException:
             for proc in processes:
                 if proc.is_alive():
@@ -63,8 +69,6 @@ class SubmoduleManager:
             self.terminate_all_processes()
             raise
 
-        self.processes.extend(managed_processes)
-        self.process_names.update(managed_process_names)
         return managed_processes
 
     def register_process_tree(self, root_process):
@@ -93,22 +97,16 @@ class SubmoduleManager:
     def terminate_all_processes(self):
         from lightllm.utils.envs_utils import get_env_start_args
 
-        def kill_recursive(proc):
-            try:
-                parent = psutil.Process(proc.pid)
-                children = parent.children(recursive=True)
-                for child in children:
-                    logger.info(f"Killing child process {child.pid}")
-                    child.kill()
-                logger.info(f"Killing parent process {proc.pid}")
-                parent.kill()
-            except psutil.NoSuchProcess:
-                logger.warning(f"Process {proc.pid} does not exist.")
-
         for proc in self.processes:
             if proc.is_running():
                 kill_recursive(proc)
-                proc.wait()
+
+        # Signal every process before waiting. Registered router descendants may
+        # remain zombies under another parent, so bound the total wait time.
+        _, alive = psutil.wait_procs(self.processes, timeout=5)
+        alive_pids = [proc.pid for proc in alive if is_process_active(proc.pid)]
+        if alive_pids:
+            logger.warning(f"Processes still alive after SIGKILL: {alive_pids}")
 
         # LightMem owns files under this directory, so remove it only after the cache process has exited.
         if self.disk_cache_dir is not None:
@@ -126,9 +124,28 @@ class SubmoduleManager:
             from lightllm.utils.device_utils import stop_mps
 
             stop_mps()
-        logger.info("All processes terminated gracefully.")
+        if not alive_pids:
+            logger.info("All processes terminated gracefully.")
+
+    def setup_exit_controller(self):
+        """启动 launcher 的独立资源清理进程。
+
+        在 service name 和启动参数写入环境后、创建共享内存或启动子进程前调用。
+        launcher 退出后由独立进程回收资源。
+        """
+        if sys.platform == "linux":
+            # 接管 router 退出后的 model/KV 后代，使现有 wait_procs 能真正回收它们，
+            # 避免交给不执行 wait 的容器 PID 1（如 sleep infinity）。
+            prctl = ctypes.CDLL(None, use_errno=True).prctl
+            prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+            if prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                error = ctypes.get_errno()
+                raise OSError(error, f"Failed to enable child subreaper: {os.strerror(error)}")
+        start_launcher_shm_cleanup_process(get_unique_server_name())
 
     def setup_signal_handlers(self, http_server_process=None):
+        """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
+
         def signal_handler(sig, _frame):
             if sig == signal.SIGINT:
                 logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
@@ -253,13 +270,17 @@ def kill_recursive(proc):
     try:
         parent = psutil.Process(proc.pid)
         children = parent.children(recursive=True)
-        for child in children:
-            logger.info(f"Killing child process {child.pid}")
-            child.kill()
-        logger.info(f"Killing parent process {proc.pid}")
-        parent.kill()
     except psutil.NoSuchProcess:
         logger.warning(f"Process {proc.pid} does not exist.")
+        return
+
+    for process in [*reversed(children), parent]:
+        try:
+            logger.info(f"Killing process {process.pid}")
+            process.kill()
+        except psutil.NoSuchProcess:
+            # A concurrent exit must not skip the remaining children or parent.
+            logger.warning(f"Process {process.pid} does not exist.")
 
 
 process_manager = SubmoduleManager()

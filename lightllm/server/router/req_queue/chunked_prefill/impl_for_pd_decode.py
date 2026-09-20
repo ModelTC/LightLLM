@@ -5,20 +5,17 @@ from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 
 
-class PDQueue(BaseQueue):
+class PDDecodeQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
-        if self.args.run_mode == "decode":
-            estimated_output_len = min(
-                self.router.router_statics.ema_req_out_len,
-                req.sample_params.max_new_tokens,
-            )
-        else:
-            estimated_output_len = req.sample_params.max_new_tokens
-        estimated_peak_token_num += req.input_len + estimated_output_len
+        # 与 batch 中尚未进入 decode 的请求使用相同的容量估算，直接累加 a_len + b_len。
+        # get_tuple_tokens 统一处理输出长度估算，并计入分页对齐、MTP 和异步退出所需的余量，
+        # 确保新请求准入时也为这些额外的 KV 占用预留容量。
+        a_len, b_len = req.get_tuple_tokens(self.is_busy(), self.router.router_statics.ema_req_out_len)
+        estimated_peak_token_num = estimated_peak_token_num + (a_len + b_len)
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
@@ -41,20 +38,21 @@ class PDQueue(BaseQueue):
             for req in batch.reqs:
                 if req.sample_params.suggested_dp_index == self.dp_index:
                     if req.is_infer_decode():
+                        # 请求进入 decode 阶段后，可以结合已经运行的 token 数量和预计剩余输出长度，
+                        # 使用连续批处理峰值算法估算其动态 KV 占用。
                         decoding_req_list.append(
                             req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                         )
                     else:
-                        if self.args.run_mode == "decode":
-                            estimated_output_len = min(
-                                self.router.router_statics.ema_req_out_len,
-                                req.sample_params.max_new_tokens,
-                            )
-                        else:
-                            estimated_output_len = req.sample_params.max_new_tokens
-                        estimated_peak_token_num += req.input_len + estimated_output_len
+                        # 尚未进入 decode 的请求，与新请求准入一样直接累加 a_len + b_len。
+                        # 复用 get_tuple_tokens，统一计入分页对齐、两轮 MTP，以及 stop_str 等异步操作
+                        # 造成的退出延迟所需的余量，再与下方 decode 请求的动态 KV 峰值相加。
+                        a_len, b_len = req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+                        estimated_peak_token_num = estimated_peak_token_num + (a_len + b_len)
 
         if decoding_req_list:
+            # 按预计剩余输出长度排序，计算每个请求结束时仍存活请求的 KV 占用峰值，
+            # 再与未进入 decode 阶段请求的保守占用相加，得到整个 batch 的最终峰值 token 估算。
             decoding_req_list.sort(key=lambda x: -x[1])
             left_out_len_array = np.array([e[1] for e in decoding_req_list])
             has_run_len_array = np.array([e[0] for e in decoding_req_list])

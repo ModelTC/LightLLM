@@ -70,6 +70,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         assert req_obj.cur_kv_len <= req_obj.shm_req.input_len
         input_len = req_obj.shm_req.input_len
         page_size = self.args.pd_kv_page_size
+        assert page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
         prefill_finished = req_obj.cur_kv_len == input_len
         trans_task_list: List[PDChunckedTransTask] = []
         while req_obj.pd_trans_kv_start_index < req_obj.cur_kv_len:
@@ -87,13 +88,14 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 break
 
         if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
-            if g_infer_context.is_linear_att_mixed_model:
+            if g_infer_context.is_hybrid_att_model:
+                # 混合注意力模型除 KV 外，还需传输 prefill 完成时的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
                 trans_task_list.append(
                     self._create_pd_trans_task(
                         req_obj=req_obj,
                         kv_start_index=input_len,
                         kv_end_index=input_len,
-                        page_kind="linear_att_state",
+                        page_kind="att_state",
                     )
                 )
             trans_task_list[-1].first_gen_token_id = next_token_id
@@ -130,7 +132,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 .cpu()
                 .tolist()
             )
-        elif page_kind == "linear_att_state":
+        elif page_kind == "att_state":
             mem_indexes = []
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")

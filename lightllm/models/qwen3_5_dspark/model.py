@@ -1,9 +1,7 @@
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
-from lightllm.models.draft_registry import DraftModelRegistry
 
 
-@DraftModelRegistry(model_type=("qwen3_5", "qwen3_5_text"), spec_modes="dspark")
 class Qwen3_5DSparkModel(Qwen3DSparkModel):
     """Adapter for the current Qwen3 DSpark checkpoint with a Qwen3.5 target."""
 

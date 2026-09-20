@@ -35,6 +35,7 @@ def test_int8kv_decode_state_rebuilds_diverse_metadata(monkeypatch):
     monkeypatch.setattr(int8kv_module, "enable_diverse_mode_gqa_decode_fast_kernel", lambda: True)
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
     infer_state = SimpleNamespace(
+        max_kv_seq_len=8192,
         b_shared_seq_len=torch.tensor([8, 8, 5, 0], dtype=torch.int32, device="cuda"),
         b_shared_radix_node_id=torch.tensor([10, 10, 20, -1], dtype=torch.int64, device="cuda"),
     )

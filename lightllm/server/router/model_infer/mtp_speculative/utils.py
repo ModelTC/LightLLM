@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, List, Tuple
 import torch
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
-    linear_att_mtp_state_index_update,
     mtp_scatter_next_token_ids,
     mtp_verify,
 )
@@ -14,24 +13,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
-        MtpMemIndexesToFree,
-        SpecProposal,
-    )
-
-
-def alloc_mem_indexes(token_count: int) -> torch.Tensor:
-    """Allocate temporary KV slots owned by an MTP proposal."""
-
-    token_count = int(token_count)
-    if token_count == 0:
-        return torch.empty((0,), dtype=torch.int32, device="cpu")
-
-    from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-    if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_count)
-    return g_infer_context.req_manager.mem_manager.alloc(token_count)
+    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
 def verify_mtp_tokens(
@@ -49,9 +31,8 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    if backend.is_linear_att_mixed_model:
-        linear_att_mtp_state_index_update(
-            req_to_mtp_state_index=backend.model.req_manager.req_to_mtp_state_index,
+    if backend.is_hybrid_att_model:
+        backend.model.req_manager.update_mtp_state(
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,
@@ -112,35 +93,7 @@ def record_request_mtp_metrics(
             req.update_mtp_verify_step_num(verify_step_num=1)
 
 
-def free_mem_indexes(
-    backend: ModeBackend,
-    extra_mem_indexes_cpu: List[MtpMemIndexesToFree],
-) -> None:
-    """Free all KV indexes described by the unified MTP memory list."""
-
-    mem_indexes_to_free = []
-    dspark_scratch_to_free = []
-    for extra_mem_to_free in extra_mem_indexes_cpu:
-        extra_indexes_cpu = extra_mem_to_free.mem_indexes_cpu
-        if extra_mem_to_free.free_mask_cpu is not None:
-            extra_indexes_cpu = extra_indexes_cpu[extra_mem_to_free.free_mask_cpu]
-        if extra_indexes_cpu.numel() > 0:
-            if extra_mem_to_free.swa_pages_cpu is None:
-                mem_indexes_to_free.append(extra_indexes_cpu)
-            else:
-                assert extra_mem_to_free.free_mask_cpu is None
-                dspark_scratch_to_free.append((extra_indexes_cpu, extra_mem_to_free.swa_pages_cpu))
-
-    mem_manager = backend.model.req_manager.mem_manager
-    for mem_indexes_cpu, pages_cpu in dspark_scratch_to_free:
-        mem_manager.free_dspark_swa_block(mem_indexes_cpu, pages_cpu)
-    if mem_indexes_to_free:
-        mem_manager.free(torch.cat(mem_indexes_to_free, dim=0))
-
-
 __all__ = [
-    "alloc_mem_indexes",
-    "free_mem_indexes",
     "record_request_mtp_metrics",
     "scatter_mtp_next_tokens",
     "verify_mtp_tokens",

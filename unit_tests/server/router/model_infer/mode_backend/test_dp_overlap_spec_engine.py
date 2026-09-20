@@ -255,7 +255,6 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
         batch_size=0,
         b_req_idx=empty_i32,
         b_mtp_index=empty_i32,
-        mem_indexes_cpu=torch.empty((0,), dtype=torch.int32),
     )
     model_output = SimpleNamespace(logits=torch.empty((0, 8), device=device))
     calls = []
@@ -294,12 +293,6 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
         "g_infer_context",
         SimpleNamespace(get_overlap_stream=lambda: torch.cuda.current_stream()),
     )
-    monkeypatch.setattr(
-        dp_backend_impl.mtp_utils,
-        "free_mem_indexes",
-        lambda **kwargs: calls.append("free"),
-    )
-
     backend.decode_mtp(event_pack=event_pack, decode_reqs=[])
 
     assert calls == [
@@ -308,7 +301,6 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
         "propose",
         "post_wait",
         "forward_wait",
-        "free",
         "pre_post",
     ]
 
@@ -434,7 +426,7 @@ def test_dp_overlap_engine_moves_verify_rows_to_the_side_with_capacity(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch):
+def test_dp_overlap_decode_delegates_empty_layout(monkeypatch):
     device = "cuda"
     empty_i32 = torch.empty((0,), dtype=torch.int32, device=device)
     model_input0 = SimpleNamespace(batch_size=0, b_req_idx=empty_i32, b_mtp_index=empty_i32)
@@ -485,12 +477,6 @@ def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch
         "g_infer_context",
         SimpleNamespace(get_overlap_stream=lambda: torch.cuda.current_stream()),
     )
-    monkeypatch.setattr(
-        dp_backend_impl.mtp_utils,
-        "free_mem_indexes",
-        lambda **kwargs: calls.append("free"),
-    )
-
     backend.decode_overlap_mtp(event_pack=event_pack, decode_reqs=[])
 
     assert calls == [
@@ -499,6 +485,5 @@ def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch
         "propose",
         "post_wait",
         "forward_wait",
-        "free",
         "pre_post",
     ]

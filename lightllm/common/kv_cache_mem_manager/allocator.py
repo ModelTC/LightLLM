@@ -1,7 +1,6 @@
 import torch
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.dist_utils import get_current_rank_in_node
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from typing import Union, List, Optional
 
@@ -25,11 +24,9 @@ class KvCacheAllocator:
         self.can_use_mem_size = self.size
 
         rank_in_node = get_current_rank_in_node()
-        # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-        # shared_name 为 None 时使用主 kv 池的默认名(router 调度据此估算)；DeepSeek-V4 的压缩子池等
-        # 需要各自独立的计数器，传入区别于主池的唯一名，避免多个 allocator 写同一个共享计数器。
+        # SharedInt adds the service prefix; subpools retain separate counters.
         if shared_name is None:
-            shared_name = f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
+            shared_name = f"mem_manger_can_use_token_num_{rank_in_node}"
         self.shared_can_use_token_num = SharedInt(shared_name)
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return

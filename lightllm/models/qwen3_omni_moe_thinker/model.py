@@ -5,7 +5,6 @@ import copy
 from functools import lru_cache
 from io import BytesIO
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 
@@ -148,7 +147,6 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return input_ids
 
 
-@ModelRegistry(["qwen3_omni_moe"], is_multimodal=True)
 class Qwen3OmniMOETpPartModel(Qwen3VLMOETpPartModel):
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer

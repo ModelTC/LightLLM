@@ -32,13 +32,9 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputColle
 from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4MemoryManager
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
-from lightllm.models import get_model
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
-from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
-from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
+from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.api_cli import make_argument_parser
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype, get_vocab_size
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import set_env_start_args
@@ -128,6 +124,14 @@ def cpu_i32_zeros(size: int) -> torch.Tensor:
     return torch.zeros(size, dtype=torch.int32, device="cpu")
 
 
+def align_up(value: int, alignment: int) -> int:
+    return (int(value) + int(alignment) - 1) // int(alignment) * int(alignment)
+
+
+def mtp_decode_kv_reserve(args: SimpleNamespace) -> int:
+    return 2 * (int(args.mtp_step) + 1) if args.mtp_mode in MTP_MODES else 1
+
+
 def empty_multimodal_params(batch_size: int) -> List[Dict]:
     return [{"images": [], "audios": []} for _ in range(batch_size)]
 
@@ -156,6 +160,7 @@ class StaticBenchmarkExecutor:
         self.model = model
         self.draft_models = draft_models
         self.token_source = token_source
+        self._hold_kv_len_by_req: Dict[int, int] = {}
 
     def _case_iters(self, warmup: bool) -> int:
         return self.args.warmup_iters if warmup else self.args.bench_iters
@@ -295,13 +300,10 @@ class StaticBenchmarkExecutor:
         current_next_ids = first_next_ids.cuda(non_blocking=True)
         mtp_candidates = [current_next_ids.detach().cpu()]
         for draft_index in range(self._num_mtp_modules()):
-            draft_input = copy.copy(draft_input)
-            draft_input.b_is_decode_req = torch.zeros_like(draft_input.b_req_idx, dtype=torch.bool)
-            draft_input.input_ids = gen_mtp_new_input_ids(
-                input_ids=draft_input.input_ids,
+            draft_input = self._prepare_mtp_prefill_input(
+                model_input=draft_input,
                 b_next_token_ids=current_next_ids,
-                b_seq_len=draft_input.b_seq_len,
-                b_ready_cache_len=draft_input.b_ready_cache_len,
+                mtp_draft_input_hiddens=draft_output.mtp_collector.spec_hidden,
             )
             draft_input.mtp_draft_input_hiddens = draft_output.mtp_collector.spec_hidden
             draft_output = self.draft_models[draft_index].forward(draft_input)
@@ -313,6 +315,29 @@ class StaticBenchmarkExecutor:
             mtp_candidates.append(mtp_candidates[-1])
         next_ids = torch.stack(mtp_candidates[:step_width], dim=1)
         return next_ids
+
+    def _prepare_mtp_prefill_input(
+        self,
+        model_input: ModelInput,
+        b_next_token_ids: torch.Tensor,
+        mtp_draft_input_hiddens: torch.Tensor,
+    ) -> ModelInput:
+        """构造下一层 MTP draft model 使用的 prefill 输入。"""
+        new_model_input = copy.copy(model_input)
+        new_model_input.b_is_decode_req = g_pin_mem_manager.get_const_gpu_tensor(
+            key="static_benchmark_mtp_prefill_b_is_decode_req",
+            shape=model_input.b_req_idx.shape,
+            fill_value=False,
+            dtype=torch.bool,
+        )
+        new_model_input.input_ids = gen_mtp_new_input_ids(
+            input_ids=model_input.input_ids,
+            b_next_token_ids=b_next_token_ids,
+            b_seq_len=model_input.b_seq_len,
+            b_ready_cache_len=model_input.b_ready_cache_len,
+        )
+        new_model_input.mtp_draft_input_hiddens = mtp_draft_input_hiddens
+        return new_model_input
 
     def _run_plain_decode_steps(
         self,
@@ -331,7 +356,6 @@ class StaticBenchmarkExecutor:
                 seq_len=seq_len,
                 input_ids=next_ids.reshape(-1),
                 max_kv_seq_len=int(seq_len.max().item()),
-                mem_token_num=case.batch_size,
             )
             torch.cuda.synchronize()
             start = time.perf_counter()
@@ -363,6 +387,7 @@ class StaticBenchmarkExecutor:
                 current_candidates = current_candidates[:, None].repeat(1, step_width)
 
             b_seq_len = self._build_mtp_seq_len(seq_len, step_width)
+            eagle_draft_extra_kv_len = self.args.mtp_step - 1 if self.args.mtp_mode.startswith("eagle") else 0
             model_input = self._make_decode_input(
                 batch_size=case.batch_size * step_width,
                 req_idx=base_req_idx,
@@ -370,30 +395,20 @@ class StaticBenchmarkExecutor:
                 seq_len=b_seq_len,
                 input_ids=current_candidates.reshape(-1),
                 max_kv_seq_len=int(b_seq_len.max().item()),
-                mem_token_num=case.batch_size * step_width,
+                extra_kv_len=eagle_draft_extra_kv_len,
             )
 
             torch.cuda.synchronize()
             start = time.perf_counter()
             output = self.model.forward(model_input)
-            candidate_rows, temporary_mem = self._run_mtp_draft_decode(
+            candidate_rows = self._run_mtp_draft_decode(
                 model_input=model_input,
                 model_output=output,
-                real_batch_size=case.batch_size,
                 step_width=step_width,
             )
             torch.cuda.synchronize()
             elapsed += time.perf_counter() - start
             self._touch_output(output)
-            if temporary_mem is not None:
-                self.model.req_manager.mem_manager.free(temporary_mem)
-
-            self._free_rejected_mtp_mem(
-                model_input=model_input,
-                real_batch_size=case.batch_size,
-                step_width=step_width,
-                accepted_width=accepted_width,
-            )
             current_candidates = (
                 self._select_mtp_candidates(
                     candidate_rows=candidate_rows,
@@ -415,20 +430,12 @@ class StaticBenchmarkExecutor:
         self,
         model_input: ModelInput,
         model_output: ModelOutput,
-        real_batch_size: int,
         step_width: int,
     ):
         draft_input = model_input.make_mtp_draft_input()
         draft_output = model_output
         draft_next_ids = self._argmax_ids(model_output.logits).cuda(non_blocking=True)
         generated = [draft_next_ids.detach()]
-
-        temporary_mem = None
-        if self.args.mtp_mode.startswith("eagle"):
-            temporary_mem = self.model.req_manager.mem_manager.alloc(real_batch_size * self.args.mtp_step)
-            temporary_mem_gpu = temporary_mem.cuda(non_blocking=True)
-        else:
-            temporary_mem_gpu = None
 
         for step in range(self.args.mtp_step):
             draft_input.input_ids = draft_next_ids
@@ -438,12 +445,11 @@ class StaticBenchmarkExecutor:
             draft_next_ids = self._argmax_ids(draft_output.logits).cuda(non_blocking=True)
             generated.append(draft_next_ids.detach())
 
-            if self.args.mtp_mode.startswith("eagle"):
-                mem_i_cpu = temporary_mem[step * real_batch_size : (step + 1) * real_batch_size]
-                mem_i = temporary_mem_gpu[step * real_batch_size : (step + 1) * real_batch_size]
-                draft_input.advance_mtp_decode_step(mem_i_cpu, mem_i, self.args.mtp_step)
+            if self.args.mtp_mode.startswith("eagle") and step + 1 < self.args.mtp_step:
+                draft_input.b_seq_len += 1
+                draft_input.max_kv_seq_len += 1
 
-        return torch.stack(generated[:step_width], dim=1), temporary_mem
+        return torch.stack(generated[:step_width], dim=1)
 
     def _sample_mtp_accept_width(self, step_width: int, remaining_tokens: int) -> int:
         """Sample accepted MTP width outside the timed decode section."""
@@ -464,21 +470,6 @@ class StaticBenchmarkExecutor:
     ) -> torch.Tensor:
         row_ids = torch.arange(real_batch_size, device=candidate_rows.device) * step_width + accepted_width - 1
         return candidate_rows.index_select(0, row_ids)
-
-    def _free_rejected_mtp_mem(
-        self,
-        model_input: ModelInput,
-        real_batch_size: int,
-        step_width: int,
-        accepted_width: int,
-    ):
-        if accepted_width >= step_width:
-            return
-        rejected_mem = (
-            model_input.mem_indexes_cpu.view(real_batch_size, step_width)[:, accepted_width:].contiguous().reshape(-1)
-        )
-        if rejected_mem.numel() > 0:
-            self.model.req_manager.mem_manager.free(rejected_mem)
 
     def _build_prefill_inputs(
         self,
@@ -513,14 +504,9 @@ class StaticBenchmarkExecutor:
         """Allocate dummy prefix KV so cache-hit cases consume real capacity."""
         if cached_len <= 0:
             return
-        batch_size = int(req_idx.shape[0])
-        need_tokens = batch_size * cached_len
-        mem_indexes = self.model.req_manager.mem_manager.alloc(need_tokens)
-        if mem_indexes is None:
-            raise RuntimeError(f"failed to allocate cached prefix: bs={batch_size} cached_len={cached_len}")
+        self._ensure_req_kv_capacity(req_idx, cpu_i32_full((int(req_idx.shape[0]),), cached_len))
         req_idx_gpu = req_idx.cuda(non_blocking=True)
-        mem_indexes_gpu = mem_indexes.reshape(batch_size, cached_len).cuda(non_blocking=True)
-        self.model.req_manager.req_to_token_indexs[req_idx_gpu, :cached_len] = mem_indexes_gpu
+        mem_indexes_gpu = self.model.req_manager.req_to_token_indexs[req_idx_gpu, :cached_len]
         self._materialize_cached_prefix_extra_slots(req_idx, cached_len, mem_indexes_gpu)
 
     def _materialize_cached_prefix_extra_slots(
@@ -562,7 +548,7 @@ class StaticBenchmarkExecutor:
         b_q_seq_len = b_seq_len - b_ready_cache_len
         b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         input_ids = torch.from_numpy(np.ascontiguousarray(token_chunk.reshape(-1))).to(torch.int64)
-        mem_indexes = self.model.req_manager.mem_manager.alloc(input_ids.shape[0])
+        self._ensure_req_kv_capacity(req_idx, b_seq_len)
         return ModelInput(
             batch_size=batch_size,
             total_token_num=int(b_seq_len.sum().item()),
@@ -574,7 +560,6 @@ class StaticBenchmarkExecutor:
             b_mtp_index=cpu_i32_zeros(batch_size),
             b_seq_len=b_seq_len,
             b_is_decode_req=torch.zeros(batch_size, dtype=torch.bool, device="cpu"),
-            mem_indexes_cpu=mem_indexes,
             is_prefill=True,
             b_ready_cache_len=b_ready_cache_len,
             b_prefill_start_loc=b_prefill_start_loc,
@@ -590,9 +575,9 @@ class StaticBenchmarkExecutor:
         seq_len: torch.Tensor,
         input_ids: torch.Tensor,
         max_kv_seq_len: int,
-        mem_token_num: int,
+        extra_kv_len: int = 0,
     ) -> ModelInput:
-        mem_indexes = self.model.req_manager.mem_manager.alloc(mem_token_num)
+        self._ensure_req_kv_capacity(req_idx, seq_len + extra_kv_len)
         return ModelInput(
             batch_size=batch_size,
             total_token_num=int(seq_len.sum().item()),
@@ -605,10 +590,34 @@ class StaticBenchmarkExecutor:
             b_position_delta=cpu_i32_zeros(batch_size),
             b_shared_seq_len=cpu_i32_zeros(batch_size),
             b_shared_radix_node_id=torch.full((batch_size,), -1, dtype=torch.int64, device="cpu"),
-            mem_indexes_cpu=mem_indexes,
             is_prefill=False,
             multimodal_params=empty_multimodal_params(batch_size),
         )
+
+    def _ensure_req_kv_capacity(self, req_idx: torch.Tensor, target_kv_lens: torch.Tensor) -> None:
+        """按请求预分配完整 KV 页，并将物理索引写入请求索引表。"""
+        req_ids = req_idx.detach().cpu().tolist()
+        target_lens = target_kv_lens.detach().cpu().tolist()
+        assert len(req_ids) == len(target_lens)
+
+        # MTP decode 会为同一个请求展开多行，只需按其中最大的逻辑长度扩容一次。
+        max_target_len_by_req = {}
+        for req_id, target_len in zip(req_ids, target_lens):
+            req_id = int(req_id)
+            max_target_len_by_req[req_id] = max(max_target_len_by_req.get(req_id, 0), int(target_len))
+
+        mem_manager = self.model.req_manager.mem_manager
+        page_size = mem_manager.page_size
+        for req_id, target_len in max_target_len_by_req.items():
+            new_hold_kv_len = align_up(target_len, page_size)
+            old_hold_kv_len = self._hold_kv_len_by_req.get(req_id, 0)
+            if new_hold_kv_len <= old_hold_kv_len:
+                continue
+
+            alloc_token_num = new_hold_kv_len - old_hold_kv_len
+            mem_indexes = mem_manager.alloc(alloc_token_num)
+            self.model.req_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len].copy_(mem_indexes)
+            self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
         if allow_overlap and self.args.enable_prefill_microbatch_overlap and model_input.batch_size > 1:
@@ -671,10 +680,6 @@ class StaticBenchmarkExecutor:
             b_prefill_has_output_cpu=has_output[batch_start:batch_end],
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
         )
-        if model_input.mem_indexes_cpu is not None:
-            kwargs["mem_indexes_cpu"] = model_input.mem_indexes_cpu[token_start:token_end].contiguous()
-        else:
-            kwargs["mem_indexes"] = model_input.mem_indexes[token_start:token_end].contiguous()
         if model_input.mtp_draft_input_hiddens is not None:
             kwargs["mtp_draft_input_hiddens"] = model_input.mtp_draft_input_hiddens[token_start:token_end].contiguous()
         return ModelInput(**kwargs)
@@ -708,10 +713,6 @@ class StaticBenchmarkExecutor:
             is_prefill=False,
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
         )
-        if model_input.mem_indexes_cpu is not None:
-            kwargs["mem_indexes_cpu"] = model_input.mem_indexes_cpu[batch_start:batch_end].contiguous()
-        else:
-            kwargs["mem_indexes"] = model_input.mem_indexes[batch_start:batch_end].contiguous()
         if model_input.mtp_draft_input_hiddens is not None:
             kwargs["mtp_draft_input_hiddens"] = model_input.mtp_draft_input_hiddens[batch_start:batch_end].contiguous()
         return ModelInput(**kwargs)
@@ -768,6 +769,7 @@ class StaticBenchmarkExecutor:
     def _reset_model_cache(self):
         self.model.mem_manager.free_all()
         self.model.req_manager.free_all()
+        self._hold_kv_len_by_req.clear()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
@@ -1006,8 +1008,8 @@ def build_cases(args: SimpleNamespace) -> List[BenchmarkCase]:
 
 def decode_profile_batch_divisor(args: SimpleNamespace, case: BenchmarkCase) -> int:
     """Reserve KV capacity for context, generated tokens, and MTP expansion."""
-    mtp_width = int(args.mtp_step) + 1 if args.mtp_mode in MTP_MODES else 1
-    return max(1, case.context_len + case.output_len + mtp_width + 8)
+    logical_kv_len = max(1, case.context_len + case.output_len + mtp_decode_kv_reserve(args) + 8)
+    return align_up(logical_kv_len, args.page_size)
 
 
 def filter_capacity_decode_cases(
@@ -1092,7 +1094,8 @@ def resolve_batch_max_prefill_cases(
 
         if case.context_len <= 0:
             raise ValueError(f"invalid prefill context_len={case.context_len}")
-        bs_by_capacity = capacity_tokens // case.context_len
+        kv_tokens_per_req = align_up(case.context_len, args.page_size)
+        bs_by_capacity = capacity_tokens // kv_tokens_per_req
         if bs_by_capacity <= 0:
             raise ValueError(
                 "single prefill request does not fit profiled token capacity: "
@@ -1116,7 +1119,7 @@ def resolve_batch_max_prefill_cases(
                 ),
                 batch_size=batch_size,
                 profiled_max_total_token_num=int(profiled_max_total_token_num),
-                profiled_batch_divisor=case.context_len,
+                profiled_batch_divisor=kv_tokens_per_req,
             )
         )
 
@@ -1125,6 +1128,9 @@ def resolve_batch_max_prefill_cases(
 
 def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> SimpleNamespace:
     """Fill LightLLM startup args needed before model construction."""
+    if args.page_size < 1:
+        raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
+
     if args.data_type is None:
         args.data_type = get_dtype(args.model_dir)
 
@@ -1138,7 +1144,7 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
     max_context = max(case.context_len for case in cases)
     max_output = max(case.output_len for case in cases)
     mtp_width = (args.mtp_step + 1) if args.mtp_mode in MTP_MODES else 1
-    max_runtime_len = max_context + max_output + mtp_width + 2
+    max_runtime_len = max_context + max_output + mtp_decode_kv_reserve(args) + 2
 
     if args.max_req_total_len is None:
         args.max_req_total_len = max_runtime_len
@@ -1174,7 +1180,8 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
     )
 
     if args.max_total_token_num is None and not needs_profiled_batch_size:
-        args.max_total_token_num = max_batch * (args.max_req_total_len + mtp_width + 8)
+        tokens_per_req = align_up(args.max_req_total_len + mtp_width + 8, args.page_size)
+        args.max_total_token_num = max_batch * tokens_per_req
     if args.max_total_token_num is not None:
         args.max_total_token_num = max(args.max_total_token_num, args.batch_max_tokens + 1, args.max_req_total_len)
 
@@ -1254,7 +1261,6 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
     draft_models = []
     for draft_dir in args.mtp_draft_model_dir:
         mtp_cfg, _ = PretrainedConfig.get_config_dict(draft_dir)
-        model_type = mtp_cfg.get("model_type", "")
         mtp_kvargs = {
             "weight_dir": draft_dir,
             "max_total_token_num": main_model.mem_manager.size,
@@ -1276,35 +1282,8 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
             "main_model": main_model,
             "mtp_previous_draft_models": draft_models.copy(),
         }
-        if model_type == "deepseek_v3":
-            assert args.mtp_mode in {
-                "vanilla_with_att",
-                "eagle_with_att",
-            }, f"{model_type} MTP requires *_with_att mode"
-            draft_models.append(Deepseek3MTPModel(mtp_kvargs))
-        elif model_type == "deepseek_v4":
-            assert args.mtp_mode == "eagle_with_att", f"{model_type} MTP requires eagle_with_att mode"
-            draft_models.append(DeepseekV4MTPModel(mtp_kvargs))
-        elif model_type == "qwen3_moe":
-            assert args.mtp_mode in {
-                "vanilla_no_att",
-                "eagle_no_att",
-            }, f"{model_type} MTP requires *_no_att mode"
-            draft_models.append(Qwen3MOEMTPModel(mtp_kvargs))
-        elif model_type == "mistral":
-            assert args.mtp_mode in {
-                "vanilla_no_att",
-                "eagle_no_att",
-            }, f"{model_type} MTP requires *_no_att mode"
-            draft_models.append(MistralMTPModel(mtp_kvargs))
-        elif model_type == "glm4_moe_lite":
-            assert args.mtp_mode in {
-                "vanilla_with_att",
-                "eagle_with_att",
-            }, f"{model_type} MTP requires *_with_att mode"
-            draft_models.append(Glm4MoeLiteMTPModel(mtp_kvargs))
-        else:
-            raise ValueError(f"unsupported MTP draft model_type={model_type} from {draft_dir}")
+        draft_model_class = get_draft_model_class(model_cfg=mtp_cfg, spec_mode=args.mtp_mode)
+        draft_models.append(draft_model_class(mtp_kvargs))
     return draft_models
 
 

@@ -5,7 +5,7 @@ import dataclasses
 import torch
 from typing import List
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
@@ -28,7 +28,7 @@ class DPKVSharedMoudle:
 
         # 0 代表 kv_len, 1 代表 radix_cache_len
         self.shared_req_infos = ShmArray(
-            name=f"{get_unique_server_name()}_dp_shared_req_infos",
+            name="dp_shared_req_infos",
             shape=(self.max_req_num, dp_size_in_node, 2),
             dtype=np.int64,
         )
@@ -120,14 +120,21 @@ class DPKVSharedMoudle:
                     and dsv4_c128_capacity >= need_c128_slots
                 )
 
+            target_kv_len = req.cur_kv_len + trans_size
+            alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
+
             if (
                 is_current_dp_handle
                 and trans_size > 0
-                and g_infer_context.get_can_alloc_token_num() > trans_size
+                and alloc_token_num <= g_infer_context.get_can_alloc_token_num()
                 and can_alloc_dsv4_cache
             ):
-                g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(trans_size)
-                mem_indexes = self.backend.model.mem_manager.alloc(trans_size)
+                assert req.hold_kv_len == req.cur_kv_len
+                mem_indexes = self.backend._alloc_req_kv_mem(req, alloc_token_num)
+                assert mem_indexes is not None
+                # mem_indexes 只描述需要复制的逻辑 KV；页尾预留槽位已经由
+                # _alloc_req_kv_mem 写入请求表，但不参与本次跨 DP 传输。
+                mem_indexes = mem_indexes[:trans_size]
                 if self.backend.is_deepseek_v4:
                     dsv4_swa_capacity -= need_swa_pages
                     dsv4_c4_capacity -= need_c4_pages
@@ -152,8 +159,6 @@ class DPKVSharedMoudle:
         return trans_tasks
 
     def kv_trans(self, trans_tasks: List["TransTask"]):
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
         # kv 传输
         if len(trans_tasks) > 0:
             if self.backend.is_deepseek_v4:
@@ -251,12 +256,8 @@ class DPKVSharedMoudle:
             dist.barrier(group=self.backend.node_nccl_group)
 
         for trans_task in trans_tasks:
-            if not self.backend.is_deepseek_v4:
-                g_infer_context.req_manager.req_to_token_indexs[
-                    trans_task.req.req_idx,
-                    trans_task.req.cur_kv_len : (trans_task.req.cur_kv_len + len(trans_task.mem_indexes)),
-                ] = trans_task.mem_indexes
             trans_task.req.cur_kv_len += len(trans_task.mem_indexes)
+            assert trans_task.req.cur_kv_len <= trans_task.req.hold_kv_len
             if self.backend.is_master_in_dp:
                 trans_task.req.shm_req.shm_cur_kv_len = trans_task.req.cur_kv_len
 

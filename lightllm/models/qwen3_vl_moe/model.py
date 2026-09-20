@@ -1,7 +1,6 @@
 import os
 import json
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl_moe.layer_infer.transformer_layer_infer import Qwen3VLMOETransformerLayerInfer
@@ -10,7 +9,6 @@ from lightllm.models.qwen3_vl_moe.layer_weights.transformers_layer_weight import
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 
 
-@ModelRegistry(["qwen3_vl_moe"], is_multimodal=True)
 class Qwen3VLMOETpPartModel(Qwen3MOEModel):
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer

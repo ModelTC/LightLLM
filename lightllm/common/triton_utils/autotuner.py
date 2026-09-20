@@ -6,12 +6,14 @@ import torch
 import torch.distributed as dist
 import random
 import collections
+from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from tqdm import tqdm
 from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
-from typing import Callable, List
+from typing import Callable, List, Optional
 from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
@@ -30,6 +32,12 @@ class AutotuneLevel:
     CLOSE_AUTOTUNE = 3
 
 
+class AutotuneKernelType(str, Enum):
+    GENERAL = "general"
+    # Includes full-attention and linear-attention decode kernels.
+    DECODE_ATTENTION = "decode_attention"
+
+
 def autotune(
     kernel_name: str,
     configs_gen_func: Callable[[], List],
@@ -37,6 +45,9 @@ def autotune(
     run_key_func: Callable,
     run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
     mutates_args: List[str] = [],
+    kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
+    rebuild_input_func: Optional[Callable] = None,
+    warmup_all_exist_config: bool = True,
 ):
     """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
 
@@ -56,6 +67,24 @@ def autotune(
             Defaults to ``abs(int(run_key) - int(config_key))``.
         mutates_args (List[str], optional): Names of arguments that can be mutated by the kernel.
             During benchmarking, defensive clones are made to avoid side effects. Defaults to ``[]``.
+        kernel_type (AutotuneKernelType, optional): Only a matching warmup phase benchmarks this kernel.
+            Other phases still execute it using cached configurations or its default configuration.
+        rebuild_input_func (Callable, optional): 调优输入重建回调，主要供 decode attention 算子使用。
+            CUDA Graph 初始化时，输入的真实请求长度通常很短，无法代表实际 decode 场景的计算量，
+            因此需要算子通过此回调自行重建输入，例如填入目标 KV 长度并构造对应的合法页表。
+            每次实际调优搜索前调用一次，接收算子的原始参数，返回用于计时的 ``(args, kwargs)``。
+            回调不应修改原始输入；缓存键、历史配置预热及最终执行仍使用原始参数。
+        warmup_all_exist_config (bool, optional): 是否提前执行所有已有配置进行预热，默认 True。
+            设为 False 后，首次加载缓存和任何 warmup 阶段都不执行这一步，但仍正常加载、选择配置。
+            原地更新持久状态且无法低成本保存/恢复的算子应关闭，例如 MTP linear attention 的
+            SSM 递推、原地追加 KV 或累加持久统计量的算子：每次预热都会额外推进或重复写入状态，
+            可能改变后续正式计算的结果；把大型状态池加入 mutates_args 又会因 clone 增加显存占用，
+            甚至触发 OOM。仅覆盖输出缓冲区，或可通过 mutates_args 完整保护输入的算子可保持默认值。
+            当前关闭该开关的特殊算子是 ``mtp_fused_recurrent_gated_delta_rule``，对应 autotune
+            ``kernel_name`` 为 ``_mtp_fused_recurrent_gated_delta_rule_fwd_kernel:v1``，可用这两个名字
+            查询实现、调用位置和缓存配置目录。
+            此开关只控制已有配置的额外预热，不关闭新配置的搜索、benchmark 内部的预热/计时和
+            最终正式执行；实际搜索仍需由调用方保证状态可以被反复更新，或提供相应的状态保护。
 
     Returns:
         Callable: A callable object that wraps the original function and performs autotuning
@@ -71,27 +100,48 @@ def autotune(
             run_key_func=run_key_func,
             run_key_distance_func=run_key_distance_func,
             mutates_args=mutates_args,
+            kernel_type=kernel_type,
+            rebuild_input_func=rebuild_input_func,
+            warmup_all_exist_config=warmup_all_exist_config,
         )
 
     return decorator
 
 
 class Autotuner:
-    _autotune_warmup: bool = False
+    _autotune_warmup_kernel_type: Optional[AutotuneKernelType] = None
 
     @staticmethod
-    def start_autotune_warmup():
-        Autotuner._autotune_warmup = True
+    def start_autotune_warmup(kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL):
+        """Select the kernel category to tune; all distributed ranks must select the same phase."""
+        Autotuner._autotune_warmup_kernel_type = AutotuneKernelType(kernel_type)
         return
 
     @staticmethod
     def end_autotune_warmup():
-        Autotuner._autotune_warmup = False
+        Autotuner._autotune_warmup_kernel_type = None
         return
 
     @staticmethod
-    def is_autotune_warmup():
-        return Autotuner._autotune_warmup
+    def is_autotune_warmup() -> bool:
+        """Report whether any warmup phase is active."""
+        return Autotuner._autotune_warmup_kernel_type is not None
+
+    @staticmethod
+    def is_kernel_autotune_warmup(kernel_type: AutotuneKernelType) -> bool:
+        """Report whether this kernel category is selected for warmup."""
+        return Autotuner._autotune_warmup_kernel_type == AutotuneKernelType(kernel_type)
+
+    @staticmethod
+    @contextmanager
+    def autotune_warmup(kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL):
+        """Restore the previous warmup phase on exit, including nested scopes and exceptions."""
+        previous_type = Autotuner._autotune_warmup_kernel_type
+        Autotuner.start_autotune_warmup(kernel_type)
+        try:
+            yield
+        finally:
+            Autotuner._autotune_warmup_kernel_type = previous_type
 
     def __init__(
         self,
@@ -102,10 +152,16 @@ class Autotuner:
         run_key_func: Callable,
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
+        kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
+        rebuild_input_func: Optional[Callable] = None,
+        warmup_all_exist_config: bool = True,
     ):
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
+        self.kernel_type = AutotuneKernelType(kernel_type)
+        self.rebuild_input_func = rebuild_input_func
+        self.warmup_all_exist_config = warmup_all_exist_config
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -141,6 +197,18 @@ class Autotuner:
         if autotune_level == AutotuneLevel.CLOSE_AUTOTUNE:
             return self.fn(*args, **kwargs)
 
+        # decode attention 在多层中会重复调用，相同配置只需调优一次，避免强制调优拖慢启动。
+        if self.kernel_type == AutotuneKernelType.DECODE_ATTENTION and autotune_level == AutotuneLevel.FORCE_AUTOTUNE:
+            autotune_level = AutotuneLevel.ADAPTIVE_AUTOTUNE
+            if not getattr(self, "_decode_force_autotune_logged", False):
+                logger.info(
+                    f"Decode attention kernel {self.kernel_name}: FORCE_AUTOTUNE is treated as ADAPTIVE_AUTOTUNE "
+                    "to avoid repeated tuning across layers and reduce startup time. Existing configs are reused. "
+                    f"To retune, delete the cached config files in '{self.cache_dir}' before restarting "
+                    "with LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 or 2."
+                )
+                self._decode_force_autotune_logged = True
+
         rank_id = 0 if not dist.is_initialized() else get_global_rank()
         world_size = 1 if not dist.is_initialized() else get_global_world_size()
 
@@ -148,7 +216,8 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if self._try_load_cache(static_key) or Autotuner.is_autotune_warmup():
+        # 先尝试加载缓存；关闭已有配置预热时仍须正常读取配置，不能用开关短路缓存加载。
+        if (self._try_load_cache(static_key) or Autotuner.is_autotune_warmup()) and self.warmup_all_exist_config:
             all_configs = self.cached_configs.get(static_key, {})
             for run_config in all_configs.values():
                 # warmup all configs
@@ -165,10 +234,10 @@ class Autotuner:
                 )
             self.cached_configs[static_key] = {}
 
-        if (
-            autotune_level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]
-            and Autotuner.is_autotune_warmup()
-        ):
+        if Autotuner.is_kernel_autotune_warmup(self.kernel_type) and autotune_level in [
+            AutotuneLevel.ADAPTIVE_AUTOTUNE,
+            AutotuneLevel.FORCE_AUTOTUNE,
+        ]:
             need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
                 run_key not in self.cached_configs.get(static_key, {})
             )
@@ -304,6 +373,10 @@ class Autotuner:
         else:
             rank_tuning_configs = self.configs_gen_func()
 
+        # 仅为本次调优重建输入，构造开销不计入计时，最终执行仍使用调用方的原始输入。
+        if self.rebuild_input_func is not None:
+            args, kwargs = self.rebuild_input_func(*args, **kwargs)
+
         best_config = None
         best_time = float("inf")
 
@@ -352,6 +425,9 @@ class Autotuner:
                 self.cached_configs[_static_key] = {}
             for _run_key, _config in _t_dict.items():
                 self.cached_configs[_static_key][_run_key] = _config
+            # 配置更新后，清除该 static_key 下缓存的旧匹配结果，避免继续使用旧配置，使新调优配置生效。
+            # 新配置也可能改变其他 run_key 的最近邻选择，因此需要清除整个 static_key 的匹配缓存。
+            self.fast_match_configs.pop(_static_key, None)
 
         # save configs to file
         if rank_id == 0:
@@ -407,7 +483,11 @@ class Autotuner:
             if pos is not None and pos < len(args):
                 values.append(args[pos])
             else:
-                raise KeyError(f"Missing argument '{name}' required by key function")
+                # 可选参数也能参与 key；调用方省略时使用算子函数声明的默认值。
+                parameter = inspect.signature(self.fn).parameters.get(name)
+                if parameter is None or parameter.default is inspect.Parameter.empty:
+                    raise KeyError(f"Missing argument '{name}' required by key function")
+                values.append(parameter.default)
         return tuple(values)
 
     def _static_key(self, *args, **kwargs):

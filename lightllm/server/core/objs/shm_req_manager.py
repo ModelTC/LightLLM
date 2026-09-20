@@ -1,6 +1,5 @@
 import ctypes
 import numpy as np
-from lightllm.utils.envs_utils import get_unique_server_name
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
 from .req import Req, ChunkedPrefillReq
@@ -44,7 +43,7 @@ class ShmReqManager:
             self._init_reqs_shm()
 
     def _init_reqs_shm(self):
-        shm_name = f"{get_unique_server_name()}_req_shm_total"
+        shm_name = "req_shm_total"
         self.reqs_shm = create_or_link_shm(shm_name, self.req_shm_byte_size)
         return
 
@@ -56,7 +55,7 @@ class ShmReqManager:
         return
 
     def init_to_req_locks(self):
-        array_lock_name = f"{get_unique_server_name()}_array_reqs_lock"
+        array_lock_name = "array_reqs_lock"
         self.reqs_lock = AtomicShmArrayLock(array_lock_name, self.max_req_num)
         return
 
@@ -64,13 +63,13 @@ class ShmReqManager:
         return self.reqs_lock.get_lock_context(req_index_in_mem)
 
     def init_manager_lock(self):
-        lock_name = f"{get_unique_server_name()}_shm_reqs_manager_lock"
+        lock_name = "shm_reqs_manager_lock"
         self.manager_lock = AtomicShmLock(lock_name)
         return
 
     def init_alloc_state_shm(self):
-        shm_name = f"{get_unique_server_name()}_req_alloc_states"
-        req_link_list_name = f"{get_unique_server_name()}_req_linked_states"
+        shm_name = "req_alloc_states"
+        req_link_list_name = "req_linked_states"
         self.linked_req_manager = ReqLinkedListManager(req_link_list_name, self.max_req_num)
         self.alloc_state_shm = ShmArray(shm_name, (self.max_req_num,), np.int32)
         self.alloc_state_shm.create_shm()

@@ -5,7 +5,6 @@ import os
 import time
 
 import torch
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.req_manager import DeepseekV4ReqManager
@@ -54,7 +53,6 @@ from lightllm.common.eplb_utils import (
 logger = init_logger(__name__)
 
 
-@ModelRegistry("deepseek_v4")
 class DeepseekV4TpPartModel(LlamaTpPartModel):
     req_manager: DeepseekV4ReqManager
     mem_manager: DeepseekV4MemoryManager
@@ -408,11 +406,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return
 
 
-@ModelRegistry(
-    "deepseek_v4",
-    is_multimodal=True,
-    condition=lambda cfg: cfg.get("vision_n_layers", 0) > 0,
-)
 class DeepseekV4VisionTpPartModel(DeepseekV4TpPartModel):
     has_vision = True
 
