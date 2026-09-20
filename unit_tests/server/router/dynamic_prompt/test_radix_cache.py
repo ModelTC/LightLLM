@@ -2,7 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from sortedcontainers import SortedDict
 
+from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.utils import shm_utils
 
@@ -322,6 +324,52 @@ def test_page_key_bytes_does_not_share_tensor_memory():
     assert isinstance(key, bytes)
     assert key == expected_key
     assert key != TreeNode(page_size=4).get_child_key(token_ids)
+
+
+def test_hybrid_dry_match_keeps_refs_after_tail_checkpoint_eviction():
+    freed_state_ids = []
+    small_page_buffers = SimpleNamespace(
+        get_free_cache_num=lambda: 0,
+        free_state_cache=lambda free_indexes: freed_state_ids.extend(free_indexes),
+    )
+    mem_manager = SimpleNamespace(big_page_buffers=SimpleNamespace())
+    tree = HybridAttPagedRadixCache(
+        total_token_num=100,
+        rank_in_node=101,
+        hash_page_size=4,
+        big_page_num=2,
+        kv_cache_mem_manager=mem_manager,
+        small_page_buffers=small_page_buffers,
+    )
+    key = torch.arange(12, dtype=torch.int64)
+    values = torch.arange(100, 112, dtype=torch.int64)
+    tree.insert(
+        key,
+        values,
+        block_hashs=[11, 22, 33],
+        block_state_idxs=[None, None, 7],
+        len_to_big_page_id=SortedDict({8: 5}),
+    )
+
+    big_page = tree.root_node.children[22]
+    tail_page = big_page.children[33]
+    node, matched_len, _ = tree.match_prefix(key, block_hashs=[11, 22, 33], update_refs=False)
+    assert node is tail_page and matched_len == 12
+    assert tree.get_refed_tokens_num() == 0
+
+    tree.free_one_small_page_buffer()
+    assert freed_state_ids == [7]
+    node, matched_len, matched_values = tree.match_prefix(key, block_hashs=[11, 22, 33], update_refs=False)
+    assert node is big_page and matched_len == 8
+    assert matched_values.tolist() == list(range(100, 108))
+    assert big_page.ref_counter == tail_page.ref_counter == tree.get_refed_tokens_num() == 0
+
+    node, matched_len, _ = tree.match_prefix(key, block_hashs=[11, 22, 33], update_refs=True)
+    assert node is big_page and matched_len == 8
+    assert big_page.ref_counter == 1 and tail_page.ref_counter == 0
+    assert tree.get_refed_tokens_num() == 8
+    tree.dec_node_ref_counter(node)
+    assert tree.get_refed_tokens_num() == 0
 
 
 if __name__ == "__main__":
