@@ -1287,8 +1287,10 @@ class DeepseekV4MemoryManager(MemoryManager):
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         from lightllm.models.deepseek_v4.triton_kernel.pd_cache_io import pack_pd_cache_page
 
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        assert len(dp_mems) == dp_world_size
         return pack_pd_cache_page(
-            mem_managers[dp_index],
+            dp_mems[0],
             self.pd_cache_layout,
             mem_indexes_gpu,
             self.kv_move_buffer[page_index],
@@ -1315,13 +1317,16 @@ class DeepseekV4MemoryManager(MemoryManager):
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         from lightllm.models.deepseek_v4.triton_kernel.pd_cache_io import unpack_pd_cache_page
 
-        unpack_pd_cache_page(
-            mem_managers[dp_index],
-            self.pd_cache_layout,
-            mem_indexes_gpu,
-            self.kv_move_buffer[page_index],
-            start_kv_index,
-            request_kv_len,
-            req_idx,
-        )
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        assert len(dp_mems) == dp_world_size
+        for mem_manager in dp_mems:
+            unpack_pd_cache_page(
+                mem_manager,
+                self.pd_cache_layout,
+                mem_indexes_gpu,
+                self.kv_move_buffer[page_index],
+                start_kv_index,
+                request_kv_len,
+                req_idx,
+            )
         return

@@ -67,10 +67,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
-    if args.run_mode in ("prefill", "decode") and model_type == "deepseek_v4":
-        if args.tp != args.dp:
-            raise ValueError("DeepSeek-V4 PD requires one TP rank per DP replica (--tp must equal --dp)")
-
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
         if has_vision_module(args.model_dir):
