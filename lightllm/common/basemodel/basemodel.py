@@ -3,19 +3,18 @@ import os
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import gc
 import copy
-import json
 import torch
 import torch.nn.functional as F
 import triton
 from typing import final, List
 from tqdm import tqdm
 
+from lightllm.utils.model_config import load_model_config, to_model_config_dict
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
     select_kv_index_from_req_prefill,
@@ -148,13 +147,12 @@ class TpPartBaseModel:
         set_model_init_status(True)
         return
 
+    def _load_model_config_dict(self):
+        self.hf_config = load_model_config(self.weight_dir_, trust_remote_code=self.args.trust_remote_code)
+        return to_model_config_dict(self.hf_config)
+
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = self._load_model_config_dict()
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -630,7 +628,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"

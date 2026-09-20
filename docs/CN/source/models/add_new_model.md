@@ -579,3 +579,23 @@ DraftModelRegistry.register(
 exp -m "验证模型注册与兼容性" python -m pytest unit_tests/models/test_registry.py -q
 ```
 
+### (5) 读取模型配置
+
+统一调用 `lightllm.utils.model_config.load_model_config(model_dir, trust_remote_code=...)`，返回具体的 Transformers 配置类，例如 `LlavaConfig`、`Qwen3Config`。默认值、字段校验和标准组件转换由该类负责；不要重新实现 JSON 与 HF 字典的合并规则。
+
+```python
+from lightllm.utils.model_config import load_model_config, get_text_config, to_model_config_dict
+
+hf_config = load_model_config(model_dir, trust_remote_code=args.trust_remote_code)
+text_config = get_text_config(hf_config)
+hidden_size = text_config.hidden_size
+runtime_config = to_model_config_dict(text_config)  # 旧推理引擎需要字典时才转换
+```
+
+每次加载拥有独立的对象树，`get_text_config` 返回该树中的文本组件。`to_model_config_dict` 创建独立字典，并转换通用维度别名、旧引擎 RoPE 字段及周期 attention 布局。finetune、MTP、draft 等局部修改只作用于运行时字典。语言模型的 `hf_config` 保留加载对象；`config` 延续旧引擎的字典协议。
+
+`load_model_config_dict` 和 `get_config_json` 是旧 registry、tokenizer、视觉/音频包装器的兼容边界；在原 JSON 明确提供身份时，它们保留原 `model_type` 和 `architectures`，其他值采用 Config 解释结果。`read_model_config` 仅供源元数据查询和确需原始字段优先级的 draft 覆盖路径使用；所有文件/版本解析仍交给 HF。
+
+Transformers 5.8 已支持的家族使用其原生类；旧 Qwen、InternLM、MiniCPM、InternVL、Tarsier 等兼容定义位于 `lightllm/utils/hf_configs/`。新增兼容定义需给出来源和实际配置样例，未知家族不会静默退回裸字典。显式允许远程代码且 checkpoint 提供 `auto_map.AutoConfig` 时使用该自定义类；启动阶段必须传入 CLI 的 `trust_remote_code`，不能依赖尚未写入的启动环境。
+
+配置对象加载不导入 LightLLM 模型实现，但 HF 自身可能导入 torch/Triton 辅助模块。相关无权重测试位于 `unit_tests/utils/test_model_config.py`、`unit_tests/models/test_config_init.py`，使用精简的内联配置覆盖关键回归。配置测试不等于推理精度或性能验证。

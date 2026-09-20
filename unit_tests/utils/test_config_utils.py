@@ -6,7 +6,14 @@ from lightllm.utils import config_utils
 @pytest.fixture
 def fake_config(monkeypatch):
     def install(cfg_json):
-        monkeypatch.setattr(config_utils, "get_config_json", lambda model_path: cfg_json)
+        from transformers import PretrainedConfig
+
+        def typed(values):
+            return PretrainedConfig(
+                **{key: typed(value) if isinstance(value, dict) else value for key, value in values.items()}
+            )
+
+        monkeypatch.setattr(config_utils, "_load_config", lambda model_path, **kwargs: typed(cfg_json))
         return "dummy/model/dir"
 
     return install

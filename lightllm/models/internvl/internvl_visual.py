@@ -1,6 +1,4 @@
-import os
 import re
-import json
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -25,7 +23,9 @@ class InternVLVisionModel:
     def load_model(self, weight_dir):
         assert torch.cuda.is_available()
         self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-        self.config = json.load(open(os.path.join(weight_dir, "config.json")))
+        from lightllm.utils.model_config import load_model_config_dict
+
+        self.config = load_model_config_dict(weight_dir)
         # self.model = AutoModel.from_pretrained(
         #     weight_dir,
         #     torch_dtype=self.dtype,

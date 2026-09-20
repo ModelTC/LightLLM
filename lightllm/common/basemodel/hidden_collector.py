@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from lightllm.utils.model_config import load_model_config
 import copy
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
 import torch
-from transformers.configuration_utils import PretrainedConfig
 
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector
 from lightllm.utils.envs_utils import get_env_start_args
@@ -202,10 +202,12 @@ class LayerHiddenCollector(HiddenCollector):
     def _load_layer_ids(self) -> frozenset[int]:
         draft_model_dirs = get_env_start_args().mtp_draft_model_dir
         assert draft_model_dirs
-        draft_config, _ = PretrainedConfig.get_config_dict(draft_model_dirs[0])
-        layer_ids = draft_config.get("target_layer_ids")
+        draft_config = load_model_config(
+            draft_model_dirs[0], trust_remote_code=getattr(get_env_start_args(), "trust_remote_code", False)
+        )
+        layer_ids = getattr(draft_config, "target_layer_ids", None)
         if layer_ids is None:
-            layer_ids = draft_config.get("dflash_config", {}).get("target_layer_ids")
+            layer_ids = getattr(draft_config, "dflash_config", {}).get("target_layer_ids")
         assert layer_ids is not None, f"target_layer_ids is required in draft config: {draft_model_dirs[0]}"
 
         resolved_layer_ids = frozenset(int(layer_id) for layer_id in layer_ids)

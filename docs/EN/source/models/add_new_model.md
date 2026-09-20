@@ -580,3 +580,23 @@ Test config selection, conditional precedence, and real class loading with repre
 exp -m "Verify model registry compatibility" python -m pytest unit_tests/models/test_registry.py -q
 ```
 
+### (5) Read model configuration
+
+Use `lightllm.utils.model_config.load_model_config(model_dir, trust_remote_code=...)` to obtain a concrete Transformers class such as `LlavaConfig` or `Qwen3Config`. That class owns defaults, validation, and standard component conversion. Do not implement another JSON/HF dictionary merge.
+
+```python
+from lightllm.utils.model_config import load_model_config, get_text_config, to_model_config_dict
+
+hf_config = load_model_config(model_dir, trust_remote_code=args.trust_remote_code)
+text_config = get_text_config(hf_config)
+hidden_size = text_config.hidden_size
+runtime_config = to_model_config_dict(text_config)  # Only for existing dictionary consumers.
+```
+
+Each load owns a separate object tree; `get_text_config` returns its text component. `to_model_config_dict` creates an independent dictionary and converts dimension aliases, legacy engine RoPE fields, and periodic attention layouts. Keep finetuning, MTP, and draft edits in the runtime dictionary. Language models retain the loaded object as `hf_config` and the existing engine dictionary as `config`.
+
+`load_model_config_dict` and `get_config_json` are compatibility boundaries for the existing registry, tokenizers, and vision/audio wrappers. They retain explicitly supplied source `model_type` and `architectures`; other values follow Config semantics. Use `read_model_config` only for source metadata or draft overrides requiring original field precedence. HF resolves paths and versioned files for all readers.
+
+Use native Transformers 5.8 classes where available. Compatibility definitions for older Qwen, InternLM, MiniCPM, InternVL, Tarsier, and related layouts live in `lightllm/utils/hf_configs/`; add sources and representative checkpoint tests with new definitions. Unknown families fail instead of silently becoming plain dictionaries. Explicit remote-code trust plus `auto_map.AutoConfig` selects the checkpoint's custom class. Startup callers must pass the CLI trust flag before the runtime environment has been populated.
+
+Config loading does not import LightLLM model implementations, though HF itself may import torch/Triton helpers. See `unit_tests/utils/test_model_config.py` and `unit_tests/models/test_config_init.py` for focused configuration regressions using minimal inline samples. These checks load no weights and do not establish inference accuracy or performance.

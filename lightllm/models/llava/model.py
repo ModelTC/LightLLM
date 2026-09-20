@@ -1,6 +1,4 @@
-import os
 import re
-import json
 import numpy as np
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -8,8 +6,6 @@ from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalP
 from lightllm.models.llava.layer_weights.pre_and_post_layer_weight import LlavaPreAndPostLayerWeight
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
-from lightllm.common.build_utils import repair_config
-from transformers import AutoConfig
 
 
 # Warp of the origal tokenizer
@@ -53,7 +49,6 @@ class LlavaTokenizer(BaseMultiModalTokenizer):
 
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None):
-
         # split prompt by <image>, and merge parts by [pad_id] * 576
         ids_chunks = [self.tokenizer(x).input_ids for x in prompt.split(self.image_token)]
         input_ids = ids_chunks[0]
@@ -89,16 +84,10 @@ class LlavaTpPartModel(LlamaTpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
+        self.config = self._load_model_config_dict()
         # for llava-v1.5-7b-hf model, should load config from transformers
         if "text_config" in self.config:
-            config = AutoConfig.from_pretrained(self.weight_dir_, trust_remote_code=True)
-            self.config = config.text_config.to_dict()
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+            self.config = self.config["text_config"]
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return

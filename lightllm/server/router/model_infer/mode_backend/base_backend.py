@@ -1,3 +1,4 @@
+from lightllm.utils.model_config import load_model_config_dict
 import os
 
 import numpy as np
@@ -6,7 +7,6 @@ import time
 import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional, Union
-from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
@@ -125,7 +125,7 @@ class ModeBackend:
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
 
-        model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
+        model_cfg = load_model_config_dict(self.weight_dir)
 
         model_kvargs = {
             "weight_dir": self.weight_dir,
@@ -317,7 +317,7 @@ class ModeBackend:
         assert len(draft_model_dirs) >= draft_model_count
 
         for i in range(draft_model_count):
-            draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
+            draft_model_cfg = load_model_config_dict(draft_model_dirs[i])
             draft_model_kvargs = {
                 "weight_dir": draft_model_dirs[i],
                 "max_total_token_num": self.model.mem_manager.size,
@@ -724,7 +724,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -953,7 +952,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

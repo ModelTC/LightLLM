@@ -86,7 +86,7 @@ def _get_recommended_shm_size_gb(args, max_image_resolution=(3940, 2160), dtype_
     """
     获取所需的 /dev/shm 大小(以GB为单位)。
     """
-    tokenizer = get_tokenizer(args.model_dir, trust_remote_code=True)
+    tokenizer = get_tokenizer(args.model_dir, trust_remote_code=args.trust_remote_code)
 
     # 估算input_token和logprob占用shm大小，由于是double和int64，所以固定占用8个字节
     input_token_logprob_size_bytes = args.running_max_req_size * 8 * 2 * args.max_req_total_len
@@ -119,7 +119,7 @@ def _get_recommended_shm_size_gb(args, max_image_resolution=(3940, 2160), dtype_
         max_image_tokens = tokenizer.get_image_token_length(fake_image_item)
 
         # 估算图片 token 所需的资源
-        hidden_size = get_hidden_size(args.model_dir)
+        hidden_size = get_hidden_size(args.model_dir, trust_remote_code=args.trust_remote_code)
         if hidden_size is None:
             logger.warning(
                 "Model config not contain 'hidden_size', " "using 4096 by default to calculate recommended shm size."

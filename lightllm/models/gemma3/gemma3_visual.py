@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-import json
 import os
 from PIL import Image
 from typing import List, Union
@@ -10,6 +9,7 @@ from io import BytesIO
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.model_config import load_model_config_dict
 
 
 logger = init_logger(__name__)
@@ -20,8 +20,7 @@ class Gemma3VisionModel:
         pass
 
     def load_model(self, weight_dir):
-        config_file = os.path.join(weight_dir, "config.json")
-        config = json.load(open(config_file))
+        config = load_model_config_dict(weight_dir)
 
         # for llava-v1.5-7b-hf model, should load config from transformers
         if "text_config" in config:
@@ -41,9 +40,8 @@ class Gemma3VisionModel:
         assert "model.mm_projector.norm" in self.projector_weights
 
     def load_hf_model(self, config, weight_dir):
-        from transformers import AutoConfig, AutoProcessor, Gemma3ForConditionalGeneration
+        from transformers import AutoProcessor, Gemma3ForConditionalGeneration
 
-        # config = AutoConfig.from_pretrained(weight_dir, trust_remote_code=True)
         processor = AutoProcessor.from_pretrained(weight_dir)
         self.image_processor = processor.image_processor
 

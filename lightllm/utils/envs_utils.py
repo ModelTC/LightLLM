@@ -302,8 +302,10 @@ def get_mtp_weight_layer_num() -> int:
 
 
 def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
-    with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
-        draft_config = json.load(json_file)
+    from lightllm.utils.model_config import read_model_config
+
+    # Apply draft overrides before resolving aliases, preserving their precedence.
+    draft_config = read_model_config(draft_model_dir)
     # Use the effective draft backbone config when the checkpoint stores it nested.
     draft_config.update(draft_config.get("dflash_config", {}))
     # A draft model may contain multiple attention layers; each layer needs a

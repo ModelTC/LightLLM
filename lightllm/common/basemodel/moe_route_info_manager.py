@@ -61,8 +61,6 @@ API 返回。
     final_token_metadata shm  ──HTTP──►  response["routed_experts"]
 """
 
-import json
-import os
 import torch
 import numpy as np
 from typing import ClassVar, Dict, Optional, Tuple
@@ -142,9 +140,16 @@ class MoeRouteInfoManager:
 
         Caller must only use this when --enable_return_routed_experts is set on a MoE model.
         """
-        with open(os.path.join(model_dir, "config.json"), "r") as json_file:
-            config = json.load(json_file)
-            config = config.get("text_config", config)
+        from lightllm.utils.model_config import (
+            get_text_config,
+            load_model_config,
+            to_model_config_dict,
+            get_config_trust_remote_code,
+        )
+
+        config = to_model_config_dict(
+            get_text_config(load_model_config(model_dir, trust_remote_code=get_config_trust_remote_code()))
+        )
 
         layer_index_to_moe_index = MoeRouteInfoManager._get_layer_index_to_moe_index_from_config(config)
         num_moe_layers = len(layer_index_to_moe_index)

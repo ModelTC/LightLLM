@@ -28,9 +28,9 @@ def _mock_target_layer_ids(monkeypatch, layer_ids):
         lambda: SimpleNamespace(mtp_draft_model_dir=["/models/draft"]),
     )
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig,
-        "get_config_dict",
-        lambda _: ({"target_layer_ids": layer_ids}, {}),
+        hidden_collector_module,
+        "load_model_config",
+        lambda _, **kwargs: SimpleNamespace(target_layer_ids=layer_ids),
     )
 
 

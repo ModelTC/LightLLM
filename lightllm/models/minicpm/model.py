@@ -1,5 +1,3 @@
-import os
-import json
 import torch
 from lightllm.models.minicpm.layer_weights.transformer_layer_weight import MiniCPMTransformerLayerWeight
 from lightllm.models.minicpm.layer_weights.pre_and_post_layer_weight import MiniCPMPreAndPostLayerWeight

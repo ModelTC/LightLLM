@@ -1,3 +1,4 @@
+from lightllm.utils.model_config import load_model_config_dict
 import queue
 import threading
 import time
@@ -6,7 +7,6 @@ import socket
 import torch
 import torch.distributed as dist
 from typing import List
-from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
 from lightllm.models.whisper.whisper_audio import WhisperAudioModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_audio import Qwen3OmniMoeAudioEncoder
@@ -34,7 +34,7 @@ class AudioModelRpcServer(rpyc.Service):
         self.cache_port = kvargs["cache_port"]
         self.data_type = kvargs["data_type"]
 
-        model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
+        model_cfg = load_model_config_dict(weight_dir)
         if model_cfg.get("thinker_config") is not None:
             model_cfg = model_cfg["thinker_config"]
 

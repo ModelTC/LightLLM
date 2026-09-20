@@ -1,3 +1,4 @@
+from lightllm.utils.envs_utils import get_env_start_args
 import json
 import os
 from io import BytesIO
@@ -6,7 +7,7 @@ from typing import List
 import torch
 from PIL import Image
 from safetensors import safe_open
-from transformers import AutoConfig, AutoProcessor
+from transformers import AutoProcessor
 
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
@@ -52,7 +53,9 @@ class Gemma4VisionModel:
         except ImportError as e:
             raise ImportError("Gemma-4 vision requires a transformers build with Gemma4 support.") from e
 
-        config = AutoConfig.from_pretrained(weight_dir, trust_remote_code=True)
+        from lightllm.utils.model_config import load_model_config
+
+        config = load_model_config(weight_dir, trust_remote_code=get_env_start_args().trust_remote_code)
         if config.vision_config is None:
             raise ValueError("Gemma-4 checkpoint does not contain vision_config")
 

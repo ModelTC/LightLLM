@@ -1,5 +1,3 @@
-import os
-import json
 import torch
 
 from lightllm.models.internlm2.layer_weights.transformer_layer_weight import Internlm2TransformerLayerWeight

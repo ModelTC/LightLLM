@@ -104,7 +104,7 @@ def test_selected_multimodal_tokenizer_is_loaded(monkeypatch, config, module_nam
 
     config = {"architectures": ["Example"], **config}
     base_tokenizer = object()
-    monkeypatch.setattr(module.PretrainedConfig, "get_config_dict", lambda *a, **kw: (config, {}))
+    monkeypatch.setattr(module, "load_model_config_dict", lambda *a, **kw: config)
     monkeypatch.setattr(module.AutoTokenizer, "from_pretrained", lambda *a, **kw: base_tokenizer)
     processor = SimpleNamespace(image_processor=object())
     monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", lambda *a, **kw: processor)

@@ -114,9 +114,9 @@ def test_create_hidden_collector_selects_implementation(monkeypatch, spec_mode, 
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(hidden_collector_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(
-        hidden_collector_module.PretrainedConfig,
-        "get_config_dict",
-        lambda _: ({"target_layer_ids": [0]}, {}),
+        hidden_collector_module,
+        "load_model_config",
+        lambda _, **kwargs: SimpleNamespace(target_layer_ids=[0]),
     )
     model = SimpleNamespace(is_mtp_draft_model=is_draft_model, layers_num=2)
 
