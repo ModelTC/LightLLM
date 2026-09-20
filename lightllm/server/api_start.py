@@ -217,6 +217,8 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.page_size < 1:
         raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
+    if get_model_type(args.model_dir) == "deepseek_v4" and args.page_size != 256:
+        raise ValueError("DeepSeek-V4 requires --page_size 256")
     if args.run_mode in ("prefill", "decode"):
         assert args.pd_kv_page_size % args.page_size == 0, "--pd_kv_page_size must be divisible by --page_size"
 

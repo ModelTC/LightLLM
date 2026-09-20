@@ -9,7 +9,6 @@ def _build_c4_indexer_page_table_kernel(
     c4_len_ptr,  # [batch] int
     req_to_token_ptr,
     req_to_token_stride0,
-    full_to_c4_ptr,
     page_table_ptr,  # [batch, page_cap] int32
     page_cap,
     hold_req_id,
@@ -29,7 +28,7 @@ def _build_c4_indexer_page_table_kernel(
         mask=active,
         other=0,
     ).to(tl.int64)
-    c4_slot0 = tl.load(full_to_c4_ptr + full_slot0, mask=active, other=0).to(tl.int64)
+    c4_slot0 = full_slot0 // RATIO
     phys_page = c4_slot0 // PAGE_SIZE
     tl.store(page_table_ptr + r * page_cap + p, tl.where(active, phys_page, 0).to(tl.int32))
 
@@ -66,7 +65,6 @@ def build_c4_indexer_page_table(
         c4_len,
         req_to_token_indexs,
         req_to_token_indexs.stride(0),
-        mem_manager.full_to_c4_indexs,
         page_table,
         page_cap,
         int(hold_req_id),

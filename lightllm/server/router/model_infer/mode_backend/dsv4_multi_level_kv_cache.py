@@ -281,27 +281,21 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                 layout = mem_manager.cpu_cache_layout
                 requested_end = int(page_len_list[len(page_list) - 1])
                 if requested_end > gpu_kv_len:
-                    swa_capacity, c4_capacity, c128_capacity = g_infer_context.get_can_alloc_dsv4_page_and_slot_num()
+                    swa_capacity = g_infer_context.get_can_alloc_dsv4_swa_page_num()
                     loadable_end = mem_manager.get_loadable_cpu_cache_end(
                         gpu_kv_len,
                         requested_end,
                         idle_token_num,
                         swa_capacity,
-                        c4_capacity,
-                        c128_capacity,
                     )
                     loadable_end = self._get_image_safe_load_end(req, gpu_kv_len, loadable_end, layout.token_page_size)
                     if loadable_end != 0:
                         token_num = loadable_end - gpu_kv_len
                         full_need = token_num
                         swa_need = 2
-                        c4_need = token_num // 256 if mem_manager.n_c4 else 0
-                        c128_need = token_num // 128 if mem_manager.n_c128 else 0
                         if self.backend.radix_cache is not None:
                             radix_cache = self.backend.radix_cache
                             radix_cache.free_radix_cache_to_get_enough_token(full_need)
-                            radix_cache.free_radix_cache_to_get_enough_c4_pages(c4_need)
-                            radix_cache.free_radix_cache_to_get_enough_c128_slots(c128_need)
                             swa_shortage = swa_need - int(mem_manager.swa_page_allocator.can_use_mem_size)
                             if swa_shortage > 0:
                                 radix_cache.free_unreferenced_swa_pages(swa_shortage)
@@ -311,8 +305,6 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                             loadable_end,
                             int(mem_manager.allocator.can_use_mem_size),
                             int(mem_manager.swa_page_allocator.can_use_mem_size),
-                            int(mem_manager.c4_page_allocator.can_use_mem_size) if mem_manager.n_c4 else 0,
-                            int(mem_manager.c128_allocator.can_use_mem_size) if mem_manager.n_c128 else 0,
                         )
                         loadable_end = self._get_image_safe_load_end(
                             req, gpu_kv_len, loadable_end, layout.token_page_size
@@ -336,6 +328,7 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                             ] = plan.mem_indexes
                             self.backend.model.req_manager.finish_cpu_cache_load(req.req_idx, loaded_end)
                             req.cur_kv_len = loaded_end
+                            req.hold_kv_len = loaded_end
                             idle_token_num -= token_num
 
             if is_master_in_dp:

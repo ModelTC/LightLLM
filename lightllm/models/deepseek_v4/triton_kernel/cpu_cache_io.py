@@ -36,14 +36,12 @@ def _scatter_staging_to_cpu_kernel(
 @triton.jit
 def _pack_gpu_cache_to_staging_kernel(
     full_slots,
-    full_to_c4,
     c4_pool,
     c4_pool_stride0,
     c4_pool_stride1,
     c4_indexer_pool,
     c4_indexer_pool_stride0,
     c4_indexer_pool_stride1,
-    full_to_c128,
     c128_pool,
     c128_pool_stride0,
     c128_pool_stride1,
@@ -119,7 +117,7 @@ def _pack_gpu_cache_to_staging_kernel(
             full_slot = tl.load(
                 full_slots + logical_page_i64 * token_page_size + 3 + gpu_page_i64 * history_block_size
             ).to(tl.int64)
-            pool_slot = tl.load(full_to_c4 + full_slot).to(tl.int64)
+            pool_slot = full_slot // 4
             physical_page = pool_slot // c4_pool_page_size
             offsets = byte_block * BLOCK + offsets_base
             offsets_i64 = offsets.to(tl.int64)
@@ -163,7 +161,7 @@ def _pack_gpu_cache_to_staging_kernel(
             full_slot = tl.load(
                 full_slots + logical_page_i64 * token_page_size + c128_ratio - 1 + row_i64 * c128_ratio
             ).to(tl.int64)
-            pool_slot = tl.load(full_to_c128 + full_slot).to(tl.int64)
+            pool_slot = full_slot // 128
             physical_page = pool_slot // c128_pool_page_size
             token_in_page = pool_slot % c128_pool_page_size
             offsets_i64 = offsets_base.to(tl.int64)
@@ -515,14 +513,12 @@ def pack_gpu_cache_to_staging(mem_manager, source_mem_indexes: torch.Tensor, sta
 
     _pack_gpu_cache_to_staging_kernel[(page_num * programs_per_page,)](
         full_slots,
-        mem_manager.full_to_c4_indexs if has_c4 else None,
         c4_pool,
         c4_pool.stride(0) if has_c4 else 0,
         c4_pool.stride(1) if has_c4 else 0,
         c4_indexer_pool,
         c4_indexer_pool.stride(0) if has_c4 else 0,
         c4_indexer_pool.stride(1) if has_c4 else 0,
-        mem_manager.full_to_c128_indexs if has_c128 else None,
         c128_pool,
         c128_pool.stride(0) if has_c128 else 0,
         c128_pool.stride(1) if has_c128 else 0,

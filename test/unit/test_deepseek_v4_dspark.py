@@ -15,15 +15,13 @@ def test_dspark_decode_admission_reserves_one_swa_scratch_page():
     req.args = SimpleNamespace(mtp_mode="eagle")
     req.mtp_step = 1
     req.dsv4_swa_page_size = 128
-    req.dsv4_c4_page_size = 64
-    req.dsv4_has_c128 = True
     req.get_cur_total_len = lambda: 10
 
-    normal_need = req.get_dsv4_decode_need_page_and_slot_num()
+    normal_need = req.get_dsv4_decode_need_swa_page_num()
     req.args.mtp_mode = "dspark"
-    dspark_need = req.get_dsv4_decode_need_page_and_slot_num()
+    dspark_need = req.get_dsv4_decode_need_swa_page_num()
 
-    assert dspark_need == (normal_need[0] + 1, normal_need[1], normal_need[2])
+    assert dspark_need == normal_need + 1
 
 
 @pytest.mark.parametrize("mtp_step", [1, 4, 5])
@@ -107,7 +105,6 @@ def test_dspark_cuda_graph_padding_extends_only_gpu_scratch_pages():
         b_position_delta=torch.zeros(batch_size, dtype=torch.int32),
         b_shared_seq_len=torch.zeros(batch_size, dtype=torch.int32),
         b_shared_radix_node_id=torch.full((batch_size,), -1, dtype=torch.int64),
-        mem_indexes=torch.arange(batch_size, dtype=torch.int32),
         is_prefill=False,
         multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
         mtp_draft_swa_pages_cpu=pages_cpu,
@@ -143,7 +140,6 @@ def test_dspark_empty_decode_padding_builds_one_hold_block():
         b_position_delta=torch.empty((0,), dtype=torch.int32),
         b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
         b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
-        mem_indexes=torch.empty((0,), dtype=torch.int32),
         is_prefill=False,
         multimodal_params=[],
     )
@@ -156,48 +152,37 @@ def test_dspark_empty_decode_padding_builds_one_hold_block():
     assert padded_input.input_ids.tolist() == [1] * block_size
     assert padded_input.b_req_idx.tolist() == [127] * block_size
     assert padded_input.b_seq_len.tolist() == [2] * block_size
-    assert padded_input.mem_indexes.tolist() == [255] * block_size
 
 
-def test_dspark_scratch_cleanup_keeps_page_ids_on_cpu():
-    from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-    from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
-        MtpMemIndexesToFree,
+@pytest.mark.parametrize("fails", [False, True])
+def test_dspark_forward_releases_only_scratch_pages(monkeypatch, fails):
+    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    pages_cpu = torch.tensor([7], dtype=torch.int32)
+    frees = []
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.block_size = 5
+    model.mem_manager = SimpleNamespace(
+        alloc_dspark_swa_block=lambda count, width: (pages_cpu, pages_cpu.clone()),
+        free_dspark_swa_block=lambda pages: frees.append(pages),
     )
+    model_input = SimpleNamespace(is_prefill=False, mtp_draft_input_hiddens=None, batch_size=5)
 
-    class FakeMemManager:
-        def __init__(self):
-            self.scratch_frees = []
-            self.normal_frees = []
+    def forward(self, inputs):
+        assert inputs.mtp_draft_swa_pages_cpu is pages_cpu
+        if fails:
+            raise RuntimeError("draft failed")
+        return "output"
 
-        def free_dspark_swa_block(self, mem_indexes_cpu, pages_cpu):
-            self.scratch_frees.append((mem_indexes_cpu.clone(), pages_cpu.clone()))
-
-        def free(self, mem_indexes_cpu):
-            self.normal_frees.append(mem_indexes_cpu.clone())
-
-    mem_manager = FakeMemManager()
-    backend = SimpleNamespace(model=SimpleNamespace(req_manager=SimpleNamespace(mem_manager=mem_manager)))
-    scratch_full = torch.tensor([10, 11, 12, 13, 14], dtype=torch.int32)
-    scratch_pages = torch.tensor([7], dtype=torch.int32)
-    normal_full = torch.tensor([20, 21], dtype=torch.int32)
-
-    mtp_utils.free_mem_indexes(
-        backend=backend,
-        extra_mem_indexes_cpu=[
-            MtpMemIndexesToFree(
-                mem_indexes_cpu=scratch_full,
-                swa_pages_cpu=scratch_pages,
-            ),
-            MtpMemIndexesToFree(mem_indexes_cpu=normal_full),
-        ],
-    )
-
-    assert len(mem_manager.scratch_frees) == 1
-    torch.testing.assert_close(mem_manager.scratch_frees[0][0], scratch_full)
-    torch.testing.assert_close(mem_manager.scratch_frees[0][1], scratch_pages)
-    assert len(mem_manager.normal_frees) == 1
-    torch.testing.assert_close(mem_manager.normal_frees[0], normal_full)
+    monkeypatch.setattr(DeepseekV4TpPartModel, "forward", forward)
+    if fails:
+        with pytest.raises(RuntimeError, match="draft failed"):
+            model.forward(model_input)
+    else:
+        assert model.forward(model_input) == "output"
+    assert len(frees) == 1
+    assert frees[0] is pages_cpu
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -279,7 +264,7 @@ def test_dspark_swa_block_uses_one_scratch_page_per_request():
     )
     mem_indexes = torch.tensor([3, 4, 5, 8, 9, 10], dtype=torch.int64, device="cuda")
 
-    pages_cpu, pages = manager.alloc_dspark_swa_block(mem_indexes=mem_indexes, block_size=3)
+    pages_cpu, pages = manager.alloc_dspark_swa_block(token_num=mem_indexes.numel(), block_size=3)
 
     torch.testing.assert_close(
         manager.full_to_swa_indexs[mem_indexes],

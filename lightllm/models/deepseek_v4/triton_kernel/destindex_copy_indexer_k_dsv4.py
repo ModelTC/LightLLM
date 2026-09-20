@@ -9,7 +9,6 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
     K,
     Mem_index,
     Positions,
-    Full_to_c4,
     O_fp8,
     O_f32,
     stride_k_bs,
@@ -28,9 +27,7 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
         return
 
     full_slot = tl.load(Mem_index + cur_index).to(tl.int64)
-    dest_index = tl.load(Full_to_c4 + full_slot).to(tl.int64)
-    if dest_index < 0:
-        return
+    dest_index = full_slot // COMPRESS_RATIO
 
     page = dest_index // PAGE_SIZE
     token_in_page = dest_index % PAGE_SIZE
@@ -54,7 +51,6 @@ def destindex_copy_indexer_k_dsv4(
     K: torch.Tensor,
     MemIndex: torch.Tensor,
     Positions: torch.Tensor,
-    FullToC4: torch.Tensor,
     O_buffer: torch.Tensor,
     page_size: int,
 ):
@@ -63,8 +59,7 @@ def destindex_copy_indexer_k_dsv4(
     K: [T, 128] bf16 unquantized indexer keys.
     MemIndex: [T] int — full-token slots for the current rows.
     Positions: [T] int — logical token positions; only c4 group-end rows are written.
-    FullToC4: [full_pool_size + 1] int — full-token slot to c4-pool slot mapping.
-        Negative mappings are skipped.
+    C4 slots are group-end full-token slots divided by four.
     O_buffer: [num_pages, bytes_per_page] uint8 — one layer's slab from the c4 indexer
         PackedPagePool (128B fp8 data region + 4B fp32 scale tail per token).
 
@@ -89,7 +84,6 @@ def destindex_copy_indexer_k_dsv4(
         K,
         MemIndex,
         Positions,
-        FullToC4,
         flat.view(torch.float8_e4m3fn),
         flat.view(torch.float32),
         K.stride(0),

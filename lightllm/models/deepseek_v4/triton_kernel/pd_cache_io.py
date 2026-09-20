@@ -322,7 +322,6 @@ def _copy_pd_cache_page(
         copy_pool_pages(
             mode,
             full_slots=full_slots,
-            mapping=mem_manager.full_to_c4_indexs if c4_work else None,
             pool=c4_pool.buffer if c4_work else None,
             staging=staging,
             page_num=1,
@@ -338,7 +337,6 @@ def _copy_pd_cache_page(
             paired_pool=c4_indexer_pool.buffer if c4_work else None,
             paired_section_offset=layout.c4_indexer_offset,
             paired_section_layer_nbytes=layout.c4_indexer_layer_nbytes,
-            c128_mapping=mem_manager.full_to_c128_indexs if c128_work else None,
             c128_pool=c128_pool if c128_work else None,
             c128_row_num=c128_row_num,
             c128_first_full_offset=_C128_RATIO - 1,

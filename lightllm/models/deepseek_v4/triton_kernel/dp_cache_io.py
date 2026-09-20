@@ -8,8 +8,8 @@ from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_PROM
 _C4_RATIO = 4
 _C128_RATIO = 128
 _BYTE_BLOCK = 8192
-# Per-source row: c4 map/data/indexer, c128 map/data, SWA map/data, c4 state/indexer state.
-_SOURCE_POOL_PTR_COUNT = 9
+# Per-source row: c4 data/indexer, c128 data, SWA map/data, c4 state/indexer state.
+_SOURCE_POOL_PTR_COUNT = 7
 # Per-task row: source manager index, token count, source full-slot pointer, destination full-slot pointer.
 _TASK_META_WIDTH = 4
 
@@ -19,14 +19,12 @@ def _copy_dsv4_dp_caches_kernel(
     source_pool_ptrs,
     task_meta,
     history_meta,
-    dst_full_to_c4,
     dst_c4_pool,
     dst_c4_pool_stride0,
     dst_c4_pool_stride1,
     dst_c4_indexer_pool,
     dst_c4_indexer_pool_stride0,
     dst_c4_indexer_pool_stride1,
-    dst_full_to_c128,
     dst_c128_pool,
     dst_c128_pool_stride0,
     dst_c128_pool_stride1,
@@ -88,14 +86,13 @@ def _copy_dsv4_dp_caches_kernel(
 
             if HAS_C4:
                 if layer < c4_layer_num:
-                    src_full_to_c4 = tl.load(source_ptr_row).to(tl.pointer_type(tl.int32))
-                    src_c4_pool = tl.load(source_ptr_row + 1).to(tl.pointer_type(tl.uint8))
-                    src_c4_indexer_pool = tl.load(source_ptr_row + 2).to(tl.pointer_type(tl.uint8))
+                    src_c4_pool = tl.load(source_ptr_row + 0).to(tl.pointer_type(tl.uint8))
+                    src_c4_indexer_pool = tl.load(source_ptr_row + 1).to(tl.pointer_type(tl.uint8))
                     full_offset = history_block * history_block_size + c4_ratio - 1
                     src_full_slot = tl.load(src_full_slots + full_offset).to(tl.int64)
                     dst_full_slot = tl.load(dst_full_slots + full_offset).to(tl.int64)
-                    src_pool_slot = tl.load(src_full_to_c4 + src_full_slot).to(tl.int64)
-                    dst_pool_slot = tl.load(dst_full_to_c4 + dst_full_slot).to(tl.int64)
+                    src_pool_slot = src_full_slot // c4_ratio
+                    dst_pool_slot = dst_full_slot // c4_ratio
                     src_page = src_pool_slot // c4_pool_page_size
                     dst_page = dst_pool_slot // c4_pool_page_size
 
@@ -129,14 +126,13 @@ def _copy_dsv4_dp_caches_kernel(
 
             if HAS_C128:
                 if layer < c128_layer_num:
-                    src_full_to_c128 = tl.load(source_ptr_row + 3).to(tl.pointer_type(tl.int32))
-                    src_c128_pool = tl.load(source_ptr_row + 4).to(tl.pointer_type(tl.uint8))
+                    src_c128_pool = tl.load(source_ptr_row + 2).to(tl.pointer_type(tl.uint8))
                     for row in tl.static_range(0, 2):
                         full_offset = history_block * history_block_size + (row + 1) * c128_ratio - 1
                         src_full_slot = tl.load(src_full_slots + full_offset).to(tl.int64)
                         dst_full_slot = tl.load(dst_full_slots + full_offset).to(tl.int64)
-                        src_pool_slot = tl.load(src_full_to_c128 + src_full_slot).to(tl.int64)
-                        dst_pool_slot = tl.load(dst_full_to_c128 + dst_full_slot).to(tl.int64)
+                        src_pool_slot = src_full_slot // c128_ratio
+                        dst_pool_slot = dst_full_slot // c128_ratio
                         src_page = src_pool_slot // c128_pool_page_size
                         dst_page = dst_pool_slot // c128_pool_page_size
                         src_token = src_pool_slot % c128_pool_page_size
@@ -169,8 +165,8 @@ def _copy_dsv4_dp_caches_kernel(
         src_full_slots = tl.load(task_row + 2).to(tl.pointer_type(tl.int32))
         dst_full_slots = tl.load(task_row + 3).to(tl.pointer_type(tl.int32))
         source_ptr_row = source_pool_ptrs + source_manager * source_pool_ptr_count
-        src_full_to_swa = tl.load(source_ptr_row + 5).to(tl.pointer_type(tl.int32))
-        src_swa_pool = tl.load(source_ptr_row + 6).to(tl.pointer_type(tl.uint8))
+        src_full_to_swa = tl.load(source_ptr_row + 3).to(tl.pointer_type(tl.int32))
+        src_swa_pool = tl.load(source_ptr_row + 4).to(tl.pointer_type(tl.uint8))
 
         if task_pid < swa_program_num:
             page = task_pid % 2
@@ -199,8 +195,8 @@ def _copy_dsv4_dp_caches_kernel(
                 layer = state_pid // 4
                 row_i64 = row.to(tl.int64)
                 layer_i64 = layer.to(tl.int64)
-                src_c4_state = tl.load(source_ptr_row + 7).to(tl.pointer_type(tl.uint8))
-                src_c4_indexer_state = tl.load(source_ptr_row + 8).to(tl.pointer_type(tl.uint8))
+                src_c4_state = tl.load(source_ptr_row + 5).to(tl.pointer_type(tl.uint8))
+                src_c4_indexer_state = tl.load(source_ptr_row + 6).to(tl.pointer_type(tl.uint8))
                 full_offset = token_num - 4 + row_i64
                 src_full_slot = tl.load(src_full_slots + full_offset).to(tl.int64)
                 dst_full_slot = tl.load(dst_full_slots + full_offset).to(tl.int64)
@@ -274,14 +270,12 @@ def copy_dsv4_dp_caches(
         source_pool_ptrs,
         task_meta,
         history_meta,
-        dst_mem_manager.full_to_c4_indexs if has_c4 else None,
         dst_c4_pool,
         dst_c4_pool.stride(0) if has_c4 else 0,
         dst_c4_pool.stride(1) if has_c4 else 0,
         dst_c4_indexer_pool,
         dst_c4_indexer_pool.stride(0) if has_c4 else 0,
         dst_c4_indexer_pool.stride(1) if has_c4 else 0,
-        dst_mem_manager.full_to_c128_indexs if has_c128 else None,
         dst_c128_pool,
         dst_c128_pool.stride(0) if has_c128 else 0,
         dst_c128_pool.stride(1) if has_c128 else 0,

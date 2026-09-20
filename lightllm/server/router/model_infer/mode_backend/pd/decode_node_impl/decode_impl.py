@@ -176,23 +176,11 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 swa_page = mem_manager.swa_pool.page_size
                 swa_need = max(0, (input_len - 1) // swa_page - (swa_start + swa_page - 1) // swa_page + 1)
 
-                _, c4_need, c128_need = req_obj.get_dsv4_prefill_need_page_and_slot_num(is_chuncked_prefill=False)
-                c4_allocator = mem_manager.c4_page_allocator
-                c128_allocator = mem_manager.c128_allocator
-
-                # D ingress 会立即分配派生槽，必须在任何分配前先兑现并检查实际容量。
                 if self.radix_cache is not None:
-                    self.radix_cache.free_radix_cache_to_get_enough_c4_pages(c4_need)
-                    self.radix_cache.free_radix_cache_to_get_enough_c128_slots(c128_need)
                     swa_shortage = swa_need - mem_manager.swa_page_allocator.can_use_mem_size
                     if swa_shortage > 0:
                         self.radix_cache.free_unreferenced_swa_pages(swa_shortage)
-
-                if (
-                    swa_need > mem_manager.swa_page_allocator.can_use_mem_size
-                    or (c4_allocator is not None and c4_need > c4_allocator.can_use_mem_size)
-                    or (c128_allocator is not None and c128_need > c128_allocator.can_use_mem_size)
-                ):
+                if swa_need > mem_manager.swa_page_allocator.can_use_mem_size:
                     return False
 
             mem_indexes = self._alloc_req_kv_mem(req_obj, need_mem_size)

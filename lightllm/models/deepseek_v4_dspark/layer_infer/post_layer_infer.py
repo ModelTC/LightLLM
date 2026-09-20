@@ -1,5 +1,7 @@
 import torch
 
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
+
 from lightllm.models.deepseek_v4.layer_infer.hyper_connection import hc_head, hc_post
 from lightllm.models.deepseek_v4_dspark.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4DSparkPreAndPostLayerWeight,
@@ -36,7 +38,7 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
         layer_weight: DeepseekV4DSparkPreAndPostLayerWeight,
     ):
         if infer_state.is_prefill:
-            return input_embdings.new_empty((0,))
+            return PostLayerOutput(logits=input_embdings.new_empty((0,)))
 
         if isinstance(input_embdings, tuple):
             streams = hc_post(*input_embdings)
@@ -79,4 +81,4 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
             confidence_logits=confidence_logits,
         )
         # The proposer consumes token ids directly; keep only the row dimension for graph unpadding.
-        return local_logits.new_empty((token_num, 1))
+        return PostLayerOutput(logits=local_logits.new_empty((token_num, 1)))

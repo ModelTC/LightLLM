@@ -9,14 +9,12 @@ STATE_BLOCK = 256
 @triton.jit
 def _pool_pages_kernel(
     full_slots,
-    full_to_pool,
     pool,
     pool_stride0,
     pool_stride1,
     paired_pool,
     paired_pool_stride0,
     paired_pool_stride1,
-    full_to_c128,
     c128_pool,
     c128_pool_stride0,
     c128_pool_stride1,
@@ -74,7 +72,7 @@ def _pool_pages_kernel(
                 + first_full_offset
                 + gpu_page_i64 * full_offset_per_gpu_page
             ).to(tl.int64)
-            pool_slot = tl.load(full_to_pool + full_slot).to(tl.int64)
+            pool_slot = full_slot // 4
             physical_page = pool_slot // pool_page_size
             mask = offsets < gpu_page_nbytes
             pool_ptr = pool + layer_i64 * pool_stride0 + physical_page * pool_stride1 + offsets_i64
@@ -128,7 +126,7 @@ def _pool_pages_kernel(
                     + c128_first_full_offset
                     + c128_row_i64 * c128_full_offset_per_row
                 ).to(tl.int64)
-                c128_pool_slot = tl.load(full_to_c128 + c128_full_slot).to(tl.int64)
+                c128_pool_slot = c128_full_slot // 128
                 c128_physical_page = c128_pool_slot // c128_pool_page_size
                 c128_token_in_page = c128_pool_slot % c128_pool_page_size
                 c128_pool_page = c128_pool + layer_i64 * c128_pool_stride0 + c128_physical_page * c128_pool_stride1
@@ -179,7 +177,6 @@ def copy_pool_pages(
     mode,
     *,
     full_slots,
-    mapping,
     pool,
     staging,
     page_num,
@@ -196,7 +193,6 @@ def copy_pool_pages(
     paired_pool=None,
     paired_section_offset=0,
     paired_section_layer_nbytes=0,
-    c128_mapping=None,
     c128_pool=None,
     c128_row_num=0,
     c128_first_full_offset=0,
@@ -224,14 +220,12 @@ def copy_pool_pages(
     )
     _pool_pages_kernel[(page_num * grid_layer_num, grid_gpu_page_num, byte_blocks_per_gpu_page)](
         full_slots,
-        mapping,
         pool,
         pool.stride(0) if has_pool else 0,
         pool.stride(1) if has_pool else 0,
         paired_pool,
         paired_pool.stride(0) if paired_pool is not None else 0,
         paired_pool.stride(1) if paired_pool is not None else 0,
-        c128_mapping,
         c128_buffer,
         c128_buffer.stride(0) if has_c128 else 0,
         c128_buffer.stride(1) if has_c128 else 0,

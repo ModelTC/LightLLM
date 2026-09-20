@@ -752,14 +752,8 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
         is_deepseek_v4 = self.is_deepseek_v4
         can_alloc_dsv4_swa_page_num = None
-        can_alloc_dsv4_c4_page_num = None
-        can_alloc_dsv4_c128_slot_num = None
         if is_deepseek_v4:
-            (
-                can_alloc_dsv4_swa_page_num,
-                can_alloc_dsv4_c4_page_num,
-                can_alloc_dsv4_c128_slot_num,
-            ) = g_infer_context.get_can_alloc_dsv4_page_and_slot_num()
+            can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
 
         for req_obj in ready_reqs:
 
@@ -795,20 +789,14 @@ class ModeBackend:
                 _, alloc_token_num = req_obj.decode_need_token_num()
                 can_run = alloc_token_num <= can_alloc_token_num
                 if can_run and is_deepseek_v4:
-                    swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_decode_need_page_and_slot_num()
-                    can_run = (
-                        swa_page_num <= can_alloc_dsv4_swa_page_num
-                        and c4_page_num <= can_alloc_dsv4_c4_page_num
-                        and c128_slot_num <= can_alloc_dsv4_c128_slot_num
-                    )
+                    swa_page_num = req_obj.get_dsv4_decode_need_swa_page_num()
+                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
                 if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
                     if is_deepseek_v4:
                         can_alloc_dsv4_swa_page_num -= swa_page_num
-                        can_alloc_dsv4_c4_page_num -= c4_page_num
-                        can_alloc_dsv4_c128_slot_num -= c128_slot_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         if self.args.run_mode == "decode":
@@ -842,14 +830,8 @@ class ModeBackend:
                     continue
                 can_run = alloc_token_num <= can_alloc_token_num
                 if can_run and is_deepseek_v4:
-                    swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_prefill_need_page_and_slot_num(
-                        is_chuncked_prefill=is_chuncked_prefill
-                    )
-                    can_run = (
-                        swa_page_num <= can_alloc_dsv4_swa_page_num
-                        and c4_page_num <= can_alloc_dsv4_c4_page_num
-                        and c128_slot_num <= can_alloc_dsv4_c128_slot_num
-                    )
+                    swa_page_num = req_obj.get_dsv4_prefill_need_swa_page_num(is_chuncked_prefill=is_chuncked_prefill)
+                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
                 if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     prefill_tokens += token_num
@@ -857,8 +839,6 @@ class ModeBackend:
                     can_alloc_token_num -= alloc_token_num
                     if is_deepseek_v4:
                         can_alloc_dsv4_swa_page_num -= swa_page_num
-                        can_alloc_dsv4_c4_page_num -= c4_page_num
-                        can_alloc_dsv4_c128_slot_num -= c128_slot_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True

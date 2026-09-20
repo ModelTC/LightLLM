@@ -112,7 +112,6 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         ):
             model_input.input_ids = token_ids
             model_input.mtp_draft_input_hiddens = model_output.mtp_collector.spec_hidden
-            model_input.mtp_decode_slot_prepare_indices = ()
 
         proposal_token_ids = target_next_token_ids0.new_empty((req_num, draft_step))
         schedule_scores = (
@@ -204,8 +203,6 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
             )
             model_input.b_shared_seq_len = draft_shared_seq_lens_by_batch[batch_index]
             model_input.b_shared_radix_node_id = draft_shared_radix_node_ids_by_batch[batch_index]
-            model_input.mem_indexes_cpu = None
-            model_input.mtp_decode_slot_prepare_indices = None
             if self.backend.is_deepseek_v4 and req_num > 0:
                 accepted_tail_rows_cpu = accepted_tail_rows_cpu_by_batch[batch_index]
                 model_input.b_req_idx_cpu = model_input.b_req_idx_cpu.index_select(0, accepted_tail_rows_cpu)

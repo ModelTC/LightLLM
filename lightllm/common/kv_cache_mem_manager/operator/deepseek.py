@@ -85,6 +85,18 @@ class FP8PerTokenGroupQuantDeepseek3_2MemOperator(BaseMemManagerOperator):
 
 
 class DeepseekV4MemOperator(BaseMemManagerOperator):
+    def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
+        """Copy packed history pages; continuation is restored by the request manager."""
+        manager = self.mem_manager
+        src, dst = src_mem_index, dst_mem_index
+        page_size = manager.page_size
+        assert src.numel() == dst.numel() and src.numel() % page_size == 0
+        src_pages = (src.reshape(-1, page_size)[:, 0] // page_size).to(device="cuda", dtype=torch.int64)
+        dst_pages = (dst.reshape(-1, page_size)[:, 0] // page_size).to(device="cuda", dtype=torch.int64)
+        for pool in (manager.c4_pool, manager.c4_indexer_pool, manager.c128_pool):
+            if pool is not None:
+                pool.buffer.index_copy_(1, dst_pages, pool.buffer.index_select(1, src_pages))
+
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
             DeepseekV4MemoryManager,

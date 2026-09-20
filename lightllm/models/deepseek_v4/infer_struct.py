@@ -113,7 +113,6 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             self.dsv4_sparse_req_idx,
             self.position_ids,
             self.req_manager.req_to_token_indexs,
-            self.mem_manager.full_to_c128_indexs,
             128,
             self.dsv4_c128_indices,
             self.dsv4_c128_lengths,

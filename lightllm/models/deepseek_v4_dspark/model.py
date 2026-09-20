@@ -183,25 +183,21 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             layer.sin_compress_table = self._sin_cached_compress
         self.layers_infer[0].context_wkv_weight = self.context_wkv_weight
 
-    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
-        if not model_input.is_prefill:
-            if model_input.mtp_draft_input_hiddens is not None:
-                # Target verify already prepared these shared full/SWA slots.
-                # This pass only commits target hiddens into the draft layers.
-                model_input.mtp_decode_slot_prepare_indices = ()
-            elif model_input.mem_indexes_cpu is not None:
-                # Proposal-owned full slots live only until the next verify.
-                # Put each request's complete block in a private scratch page;
-                # this needs neither accepted-length D2H nor host seq metadata.
-                (
-                    model_input.mtp_draft_swa_pages_cpu,
-                    model_input.mtp_draft_swa_pages,
-                ) = self.mem_manager.alloc_dspark_swa_block(
-                    mem_indexes=model_input.mem_indexes,
-                    block_size=self.block_size,
-                )
-                model_input.mtp_decode_slot_prepare_indices = ()
-        return super()._prepare_dsv4_slots(model_input)
+    def _prepare_dsv4_slots(self, model_input: ModelInput, mem_indexes: torch.Tensor) -> None:
+        # Target-hidden commits use target SWA; proposal blocks own separate scratch pages.
+        return
+
+    @torch.no_grad()
+    def forward(self, model_input: ModelInput):
+        if model_input.is_prefill or model_input.mtp_draft_input_hiddens is not None:
+            return super().forward(model_input)
+        pages_cpu, pages = self.mem_manager.alloc_dspark_swa_block(model_input.batch_size, self.block_size)
+        model_input.mtp_draft_swa_pages_cpu = pages_cpu
+        model_input.mtp_draft_swa_pages = pages
+        try:
+            return super().forward(model_input)
+        finally:
+            self.mem_manager.free_dspark_swa_block(pages_cpu)
 
     def _decode(self, model_input: ModelInput) -> ModelOutput:
         if model_input.mtp_draft_input_hiddens is None:

@@ -414,13 +414,7 @@ class InferenceContext:
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
             can_alloc_token_num = self.get_can_alloc_token_num()
-            can_alloc_dsv4_swa_page_num = can_alloc_dsv4_c4_page_num = can_alloc_dsv4_c128_slot_num = None
-            if self.is_deepseek_v4:
-                (
-                    can_alloc_dsv4_swa_page_num,
-                    can_alloc_dsv4_c4_page_num,
-                    can_alloc_dsv4_c128_slot_num,
-                ) = self.get_can_alloc_dsv4_page_and_slot_num()
+            can_alloc_dsv4_swa_page_num = self.get_can_alloc_dsv4_swa_page_num() if self.is_deepseek_v4 else None
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
@@ -429,18 +423,9 @@ class InferenceContext:
                 if alloc_token_num > can_alloc_token_num:
                     break
 
-                swa_page_num = c4_page_num = c128_slot_num = 0
-                if (
-                    can_alloc_dsv4_swa_page_num is not None
-                    or can_alloc_dsv4_c4_page_num is not None
-                    or can_alloc_dsv4_c128_slot_num is not None
-                ):
-                    swa_page_num, c4_page_num, c128_slot_num = req.get_dsv4_recover_need_page_and_slot_num()
-                    if can_alloc_dsv4_swa_page_num is not None and swa_page_num > can_alloc_dsv4_swa_page_num:
-                        break
-                    if can_alloc_dsv4_c4_page_num is not None and c4_page_num > can_alloc_dsv4_c4_page_num:
-                        break
-                    if can_alloc_dsv4_c128_slot_num is not None and c128_slot_num > can_alloc_dsv4_c128_slot_num:
+                if self.is_deepseek_v4:
+                    swa_page_num = req.get_dsv4_recover_need_swa_page_num()
+                    if swa_page_num > can_alloc_dsv4_swa_page_num:
                         break
 
                 if g_infer_context.is_hybrid_att_model:
@@ -456,10 +441,6 @@ class InferenceContext:
                 can_alloc_token_num -= alloc_token_num
                 if can_alloc_dsv4_swa_page_num is not None:
                     can_alloc_dsv4_swa_page_num -= swa_page_num
-                if can_alloc_dsv4_c4_page_num is not None:
-                    can_alloc_dsv4_c4_page_num -= c4_page_num
-                if can_alloc_dsv4_c128_slot_num is not None:
-                    can_alloc_dsv4_c128_slot_num -= c128_slot_num
         return
 
     def get_can_alloc_token_num(self):
@@ -470,28 +451,11 @@ class InferenceContext:
             )
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
-    def get_can_alloc_dsv4_page_and_slot_num(self):
-        self.req_manager: DeepseekV4ReqManager
-        mem_manager = self.req_manager.mem_manager
-        radix_cache_unref_page_num = 0
-        radix_cache_unref_token_num = 0
+    def get_can_alloc_dsv4_swa_page_num(self):
+        pages = int(self.req_manager.mem_manager.swa_page_allocator.can_use_mem_size)
         if self.radix_cache is not None:
-            radix_cache_unref_page_num = self.radix_cache.get_unrefed_swa_pages_num()
-            radix_cache_unref_token_num = (
-                self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
-            )
-        swa_page_num = int(mem_manager.swa_page_allocator.can_use_mem_size) + radix_cache_unref_page_num
-
-        c4_page_num = 0
-        if mem_manager.c4_page_allocator is not None:
-            c4_page_num = int(mem_manager.c4_page_allocator.can_use_mem_size) + int(
-                radix_cache_unref_token_num // self.req_manager.get_prompt_cache_page_size()
-            )
-
-        c128_slot_num = 0
-        if mem_manager.c128_allocator is not None:
-            c128_slot_num = int(mem_manager.c128_allocator.can_use_mem_size) + int(radix_cache_unref_token_num // 128)
-        return swa_page_num, c4_page_num, c128_slot_num
+            pages += self.radix_cache.get_unrefed_swa_pages_num()
+        return pages
 
     def save_hybrid_state_to_cache(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
@@ -689,10 +653,6 @@ class InferReq:
         if g_infer_context.is_deepseek_v4:
             mem_manager = g_infer_context.req_manager.mem_manager
             self.dsv4_swa_page_size: int = mem_manager.swa_pool.page_size
-            self.dsv4_c4_page_size: int = (
-                mem_manager.c4_pool.page_size if mem_manager.c4_page_allocator is not None else 0
-            )
-            self.dsv4_has_c128: bool = mem_manager.c128_allocator is not None
 
         self._init_all_state()
 
@@ -1094,31 +1054,22 @@ class InferReq:
         assert alloc_token_num % page_size == 0
         return alloc_token_num
 
-    def get_dsv4_prefill_need_page_and_slot_num(self, is_chuncked_prefill: bool) -> Tuple[int, int, int]:
+    def get_dsv4_prefill_need_swa_page_num(self, is_chuncked_prefill: bool) -> int:
         start = self.cur_kv_len
         end = self.get_chuncked_input_token_len() if is_chuncked_prefill else self.get_cur_total_len()
         if end <= start:
-            return 0, 0, 0
+            return 0
 
         first_new_page = (start + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
         last_page = (end - 1) // self.dsv4_swa_page_size
         swa_page_num = last_page - first_new_page + 1
 
-        c4_page_num = 0
-        first, last = start // 4, end // 4
-        if last > first:
-            # Safe upper bound: touched c4 pages, including a possible already-allocated continuation page.
-            c4_page_num = (last - 1) // self.dsv4_c4_page_size - first // self.dsv4_c4_page_size + 1
+        return swa_page_num
 
-        c128_slot_num = max(0, end // 128 - start // 128) if self.dsv4_has_c128 else 0
-        return swa_page_num, c4_page_num, c128_slot_num
-
-    def get_dsv4_recover_need_page_and_slot_num(self) -> Tuple[int, int, int]:
-        swa_page_num, c4_page_num, c128_slot_num = self.get_dsv4_prefill_need_page_and_slot_num(
-            is_chuncked_prefill=False
-        )
+    def get_dsv4_recover_need_swa_page_num(self) -> int:
+        swa_page_num = self.get_dsv4_prefill_need_swa_page_num(is_chuncked_prefill=False)
         if swa_page_num == 0 or self.args.disable_chunked_prefill:
-            return swa_page_num, c4_page_num, c128_slot_num
+            return swa_page_num
 
         # C4/C128 accumulate across recovery chunks; only SWA is evicted chunk by chunk.
         req_manager: DeepseekV4ReqManager = g_infer_context.req_manager
@@ -1132,28 +1083,19 @@ class InferReq:
             max_prefill_token_num + int(req_manager.sliding_window) + 2 * prompt_cache_page_size,
         )
         swa_page_num = (peak_token_num + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
-        return swa_page_num, c4_page_num, c128_slot_num
+        return swa_page_num
 
-    def get_dsv4_decode_need_page_and_slot_num(self) -> Tuple[int, int, int]:
+    def get_dsv4_decode_need_swa_page_num(self) -> int:
         seq_len = self.get_cur_total_len()
         if seq_len <= 0:
-            return 0, 0, 0
+            return 0
 
         swa_page_num = 0
-        c4_page_num = 0
-        c128_slot_num = 0
         # Main model prepares current token plus draft-verify rows: SWA + compressed slots.
         for step in range(self.mtp_step + 1):
             cur_seq_len = seq_len + step
             if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
                 swa_page_num += 1
-            if cur_seq_len % 4 == 0:
-                entry = cur_seq_len // 4 - 1
-                if entry % self.dsv4_c4_page_size == 0:
-                    c4_page_num += 1
-            if self.dsv4_has_c128 and cur_seq_len % 128 == 0:
-                c128_slot_num += 1
-
         if self.args.mtp_mode == "dspark":
             # DSpark proposal allocates one private SWA scratch page per request.
             swa_page_num += 1
@@ -1164,7 +1106,7 @@ class InferReq:
                 cur_seq_len = seq_len + step
                 if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
                     swa_page_num += 1
-        return swa_page_num, c4_page_num, c128_slot_num
+        return swa_page_num
 
 
 class InferReqUpdatePack:

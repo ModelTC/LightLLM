@@ -905,7 +905,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 infer_state.dsv4_sparse_req_idx,
                 positions,
                 infer_state.req_manager.req_to_token_indexs,
-                mem_manager.full_to_c4_indexs,
                 4,
                 slots,
                 lengths,

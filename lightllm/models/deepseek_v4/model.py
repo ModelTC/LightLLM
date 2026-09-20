@@ -118,7 +118,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             mem_fraction=self.mem_fraction,
             memory_reservations=reservations,
         )
-        self.req_manager.mem_manager = self.mem_manager
+        self.req_manager.bind_mem_manager(self.mem_manager)
         return
 
     def _get_post_profile_memory_reservations(self):
@@ -293,59 +293,31 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
         return streams.mean(dim=1)
 
-    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
-        """Commit DSV4 derived slots before BaseModel pads or scatters the generic input."""
-        if model_input.batch_size == 0:
+    def _prepare_dsv4_slots(self, model_input: ModelInput, mem_indexes: torch.Tensor) -> None:
+        if model_input.batch_size == 0 or (model_input.is_prefill and self.is_mtp_draft_model):
             return
-        if model_input.is_prefill and self.is_mtp_draft_model:
-            return
-        if model_input.mem_indexes is None:
-            model_input.mem_indexes = model_input.mem_indexes_cpu.cuda(non_blocking=True)
-
+        # Runtime inputs retain CPU mirrors. Synthetic warmup inputs are created on GPU.
+        req_ids = model_input.b_req_idx_cpu
+        seq_lens = model_input.b_seq_len_cpu
+        if req_ids is None:
+            req_ids = model_input.b_req_idx.cpu()
+            seq_lens = model_input.b_seq_len.cpu()
         if model_input.is_prefill:
-            if model_input.mem_indexes_cpu is None:
-                model_input.b_req_idx_cpu = model_input.b_req_idx.detach().cpu()
-                model_input.b_seq_len_cpu = model_input.b_seq_len.detach().cpu()
-            self.req_manager.prepare_prefill(
-                b_req_idx_cpu=model_input.b_req_idx_cpu,
-                b_ready_cache_len_cpu=model_input.b_ready_cache_len,
-                b_seq_len_cpu=model_input.b_seq_len_cpu,
-                mem_indexes=model_input.mem_indexes,
-            )
-            return
+            ready_lens = model_input.b_ready_cache_len_cpu
+            if ready_lens is None:
+                ready_lens = model_input.b_ready_cache_len.cpu()
+            token_num = int((seq_lens - ready_lens).sum())
+            self.req_manager.prepare_prefill(req_ids, ready_lens, seq_lens, mem_indexes[:token_num])
+        else:
+            mtp_indices = model_input.b_mtp_index_cpu
+            if mtp_indices is None:
+                mtp_indices = model_input.b_mtp_index.cpu()
+            self.req_manager.prepare_decode(req_ids, seq_lens, mtp_indices, mem_indexes[: len(req_ids)])
 
-        if model_input.mtp_decode_slot_prepare_indices == ():
-            return
-        # GPU-only decode inputs are CUDA Graph warmup/HOLD layouts. Runtime
-        # DSV4 draft inputs carry CPU mirrors from the proposer and prepare slots here.
-        if model_input.mem_indexes_cpu is None:
-            return
-        self.req_manager.prepare_decode(
-            model_input.b_req_idx_cpu,
-            model_input.b_seq_len_cpu,
-            model_input.b_mtp_index_cpu,
-            model_input.mem_indexes,
-            model_input.mtp_decode_slot_prepare_indices,
-            prepare_compress_slots=not self.is_mtp_draft_model,
-        )
-        return
-
-    @torch.no_grad()
-    def forward(self, model_input: ModelInput):
-        self._prepare_dsv4_slots(model_input)
-        return super().forward(model_input)
-
-    @torch.no_grad()
-    def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
-        self._prepare_dsv4_slots(model_input0)
-        self._prepare_dsv4_slots(model_input1)
-        return super().microbatch_overlap_prefill(model_input0, model_input1)
-
-    @torch.no_grad()
-    def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
-        self._prepare_dsv4_slots(model_input0)
-        self._prepare_dsv4_slots(model_input1)
-        return super().microbatch_overlap_decode(model_input0, model_input1)
+    def _select_mem_indexes(self, model_input: ModelInput):
+        mem_indexes = super()._select_mem_indexes(model_input)
+        self._prepare_dsv4_slots(model_input, mem_indexes)
+        return mem_indexes
 
     def _init_to_get_rotary(self):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the

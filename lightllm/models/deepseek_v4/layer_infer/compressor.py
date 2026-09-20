@@ -319,9 +319,14 @@ def fused_compress(
     out_buffer: torch.Tensor = None,
 ):
     mem_manager = infer_state.mem_manager
+    out_slots = torch.where(
+        (infer_state.position_ids + 1) % compress_ratio == 0,
+        infer_state.mem_index.reshape(-1) // compress_ratio,
+        -1,
+    )
     if is_in_indexer:
         assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
-        out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
+
         state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
         state_ring = mem_manager.c4_state_ring
         if out_buffer is None:
@@ -333,12 +338,12 @@ def fused_compress(
         out_page_size = 1
     else:
         if compress_ratio == 4:
-            out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
+
             state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
             state_ring = mem_manager.c4_state_ring
             out_page_size = mem_manager.c4_pool.page_size
         elif compress_ratio == 128:
-            out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.reshape(-1)]
+
             state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
             state_ring = mem_manager.c128_state_ring
             out_page_size = mem_manager.c128_pool.page_size

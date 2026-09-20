@@ -48,10 +48,8 @@ class DPKVSharedMoudle:
             has_c128 = mem_manager.c128_pool is not None
             pointer_rows.append(
                 [
-                    mem_manager.full_to_c4_indexs.data_ptr() if has_c4 else 0,
                     mem_manager.c4_pool.buffer.data_ptr() if has_c4 else 0,
                     mem_manager.c4_indexer_pool.buffer.data_ptr() if has_c4 else 0,
-                    mem_manager.full_to_c128_indexs.data_ptr() if has_c128 else 0,
                     mem_manager.c128_pool.buffer.data_ptr() if has_c128 else 0,
                     mem_manager.full_to_swa_indexs.data_ptr(),
                     mem_manager.swa_pool.buffer.data_ptr(),
@@ -90,11 +88,7 @@ class DPKVSharedMoudle:
         trans_tasks: List[TransTask] = []
         if self.backend.is_deepseek_v4:
             dsv4_mem_manager = self.backend.model.mem_manager
-            (
-                dsv4_swa_capacity,
-                dsv4_c4_capacity,
-                dsv4_c128_capacity,
-            ) = g_infer_context.get_can_alloc_dsv4_page_and_slot_num()
+            dsv4_swa_capacity = g_infer_context.get_can_alloc_dsv4_swa_page_num()
             dsv4_prompt_page_size = self.backend.model.req_manager.get_prompt_cache_page_size()
 
         rank_max_radix_cache_lens = np.max(
@@ -112,13 +106,7 @@ class DPKVSharedMoudle:
             can_alloc_dsv4_cache = True
             if self.backend.is_deepseek_v4 and trans_size > 0:
                 need_swa_pages = dsv4_prompt_page_size // dsv4_mem_manager.swa_pool.page_size
-                need_c4_pages = trans_size // dsv4_prompt_page_size if dsv4_mem_manager.c4_pool is not None else 0
-                need_c128_slots = trans_size // 128 if dsv4_mem_manager.c128_pool is not None else 0
-                can_alloc_dsv4_cache = (
-                    dsv4_swa_capacity >= need_swa_pages
-                    and dsv4_c4_capacity >= need_c4_pages
-                    and dsv4_c128_capacity >= need_c128_slots
-                )
+                can_alloc_dsv4_cache = dsv4_swa_capacity >= need_swa_pages
 
             target_kv_len = req.cur_kv_len + trans_size
             alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
@@ -137,8 +125,6 @@ class DPKVSharedMoudle:
                 mem_indexes = mem_indexes[:trans_size]
                 if self.backend.is_deepseek_v4:
                     dsv4_swa_capacity -= need_swa_pages
-                    dsv4_c4_capacity -= need_c4_pages
-                    dsv4_c128_capacity -= need_c128_slots
                 max_kv_len_dp_rank = self.shared_req_infos.arr[req_index, :, self._KV_LEN_INDEX].argmax()
                 max_kv_len_req_idx = int(self.shared_req_infos.arr[req_index, max_kv_len_dp_rank, self._REQ_IDX_INDEX])
                 max_kv_len_mem_manager_index = max_kv_len_dp_rank * self.backend.dp_world_size + self.backend.rank_in_dp

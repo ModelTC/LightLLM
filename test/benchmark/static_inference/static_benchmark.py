@@ -432,7 +432,9 @@ class StaticBenchmarkExecutor:
         model_output: ModelOutput,
         step_width: int,
     ):
-        draft_input = model_input.make_mtp_draft_input()
+        draft_input = copy.copy(model_input)
+        draft_input.b_seq_len = model_input.b_seq_len.clone()
+        draft_input.b_seq_len_cpu = model_input.b_seq_len_cpu.clone()
         draft_output = model_output
         draft_next_ids = self._argmax_ids(model_output.logits).cuda(non_blocking=True)
         generated = [draft_next_ids.detach()]
@@ -447,6 +449,7 @@ class StaticBenchmarkExecutor:
 
             if self.args.mtp_mode.startswith("eagle") and step + 1 < self.args.mtp_step:
                 draft_input.b_seq_len += 1
+                draft_input.b_seq_len_cpu += 1
                 draft_input.max_kv_seq_len += 1
 
         return torch.stack(generated[:step_width], dim=1)
@@ -525,12 +528,6 @@ class StaticBenchmarkExecutor:
             ready_list=[swa_ready_len] * batch_size,
             seq_list=seq_list,
             mem_indexes=mem_indexes_gpu[:, swa_ready_len:].contiguous(),
-        )
-        req_manager.prepare_prefill_compress_slots(
-            req_list=req_list,
-            ready_list=[0] * batch_size,
-            seq_list=seq_list,
-            mem_indexes=mem_indexes_gpu,
         )
 
     def _cached_prefix_swa_ready_len(self, cached_len: int) -> int:
