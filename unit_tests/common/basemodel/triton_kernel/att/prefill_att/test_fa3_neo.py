@@ -1,20 +1,16 @@
 """Unit test for the FA3-based prefill path with image-token support.
 
-This test pre-wires a call to ``flash_attn_with_kvcache`` with an
-``image_token_tag`` keyword argument. The expectation is that ``fa3-neo``'s
-``flash_attn_with_kvcache`` will be extended with an optional
-``image_token_tag`` parameter that, for queries flagged as image tokens,
-relaxes the causal mask so they can attend bidirectionally to every real key
-in the request.
+Neo FA3's ``flash_attn_with_kvcache`` accepts an ``image_token_end`` tensor
+of exclusive KV end positions. Image queries can see their entire image span
+and preceding tokens, while text queries retain the causal mask.
 
 Torch reference expresses the *semantics* of the attention, not FA3's internal
 tiling — it has no notion of BLOCK_N / BLOCK_M. For each batch element we
 gather K/V for the whole request (prompt + new tokens) and apply::
 
-    allow[m, k] = (k <= q_pos[m]) OR image_tag[m]          for k in [0, total)
+    allow[m, k] = (k <= q_pos[m]) OR (k < image_end[m])
 
-i.e. normal queries are causal, image-token queries can see every real key in
-the request. If FA3 disagrees with this reference, the kernel is wrong.
+i.e. image queries cannot see subsequent text or later images.
 
 Run directly for quick debugging:
 
@@ -31,7 +27,7 @@ import math
 import pytest
 import torch
 
-from flash_attn_interface import flash_attn_with_kvcache
+from lightllm.common.basemodel.attention.fa3.neo import flash_attn_with_kvcache_neo as flash_attn_with_kvcache
 
 try:
     import triton
@@ -57,7 +53,7 @@ def torch_reference_context_attention_neo(
     b_seq_len: torch.Tensor,
     b_prompt_cache_len: torch.Tensor,
     req_to_token_indexs: torch.Tensor,
-    b_image_token_tag: torch.Tensor,
+    b_image_token_end: torch.Tensor,
 ) -> torch.Tensor:
     device = q.device
     dtype = q.dtype
@@ -78,7 +74,7 @@ def torch_reference_context_attention_neo(
 
         q_start = int(b_q_start_loc[b].item())
         q_blk = q[q_start : q_start + q_seq_len]  # [M, Hq, D]
-        image_tag = b_image_token_tag[q_start : q_start + q_seq_len].to(torch.bool)
+        image_end = b_image_token_end[q_start : q_start + q_seq_len].to(torch.int64)
 
         token_locs = req_to_token_indexs[req_idx, :seq_len].to(torch.int64)
         k_blk = k[token_locs]  # [seq_len, Hk, D]
@@ -87,7 +83,7 @@ def torch_reference_context_attention_neo(
         q_pos = torch.arange(prompt_cache_len, seq_len, device=device, dtype=torch.int64)  # [M]
         k_pos = torch.arange(0, seq_len, device=device, dtype=torch.int64)  # [seq_len]
         causal = k_pos[None, :] <= q_pos[:, None]
-        allow = causal | image_tag[:, None]
+        allow = causal | (k_pos[None, :] < image_end[:, None])
 
         out_blk = torch.empty_like(q_blk)
         for h in range(Hq):
@@ -162,7 +158,7 @@ def _build_inputs(
         p += L
 
     # Randomly place contiguous image-token spans inside each batch's new-Q region.
-    b_image_token_tag = torch.zeros(sum_q, dtype=torch.bool)
+    b_image_token_end = torch.zeros(sum_q, dtype=torch.int32)
     for i in range(batch):
         M = int(q_seq_lens[i].item())
         if M < 2:
@@ -175,7 +171,10 @@ def _build_inputs(
             span_len = int(torch.randint(1, max(2, image_span_len_max) + 1, (1,), generator=g).item())
             span_len = min(span_len, M)
             s_rel = int(torch.randint(0, M - span_len + 1, (1,), generator=g).item())
-            b_image_token_tag[start_pack + s_rel : start_pack + s_rel + span_len] = True
+            image_span = b_image_token_end[start_pack + s_rel : start_pack + s_rel + span_len]
+            if (image_span > 0).any():
+                continue
+            image_span.fill_(int(prompt_cache_lens[i].item()) + s_rel + span_len)
 
     b_seq_len = seq_lens.to(torch.int32)
     b_prompt_cache_len = prompt_cache_lens.to(torch.int32)
@@ -195,16 +194,16 @@ def _build_inputs(
         max_seq_len_in_batch=max_seq_len_in_batch,
         max_q_seq_len_in_batch=max_q_seq_len_in_batch,
         req_to_token_indexs=req_to_token_indexs.to(device),
-        b_image_token_tag=b_image_token_tag.to(device),
+        b_image_token_end=b_image_token_end.to(device),
         q_seq_lens=q_seq_lens,
         prompt_cache_lens=prompt_cache_lens,
     )
 
 
-def _fa3_prefill_with_image_tag(inputs: dict) -> torch.Tensor:
+def _fa3_prefill_with_image_end(inputs: dict) -> torch.Tensor:
     """Drive ``flash_attn_with_kvcache`` with the same prefill semantics as
     ``Fa3PrefillAttState._nomarl_prefill_att`` plus an optional
-    ``image_token_tag`` kwarg for image-token bidirectional attention.
+    ``image_token_end`` kwarg for image-token bidirectional attention.
     """
     q = inputs["q"]
     k = inputs["k"]
@@ -246,17 +245,14 @@ def _fa3_prefill_with_image_tag(inputs: dict) -> torch.Tensor:
         k_descale=None,
         v_descale=None,
         return_softmax_lse=False,
-        # image-token bidirectional attention. Packed like q (shape [sum_q],
-        # bool). Rows where the tag is True are allowed to attend to every
-        # real key in the request (not just the causal prefix).
-        # The kernel uses warp OR reduce to detect image tokens per M-block
-        # and extends n_block_max for full attention automatically.
-        image_token_tag=inputs["b_image_token_tag"],
+        # Packed like q: int32 exclusive KV end for each image query;
+        # zero means ordinary causal attention.
+        image_token_end=inputs["b_image_token_end"],
     )
     return o
 
 
-def _report_per_batch_error(out_fa3, out_ref, q_seq_lens, b_q_start_loc, image_tag, tag=""):
+def _report_per_batch_error(out_fa3, out_ref, q_seq_lens, b_q_start_loc, image_end, tag=""):
     print(f"\n[{tag}] per-batch error breakdown (abs / rel / cos):")
     for i in range(q_seq_lens.shape[0]):
         s = int(b_q_start_loc[i].item())
@@ -269,7 +265,7 @@ def _report_per_batch_error(out_fa3, out_ref, q_seq_lens, b_q_start_loc, image_t
         denom = b.abs().max().item() + 1e-6
         rel_err = abs_err / denom
         cos = torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
-        n_img = int(image_tag[s : s + m].sum().item())
+        n_img = int((image_end[s : s + m] > 0).sum().item())
         print(
             f"  batch {i:02d} | M={m:4d} | image_tokens={n_img:4d} | "
             f"max_abs={abs_err:.4e} | max_rel={rel_err:.4e} | cos={cos:.6f}"
@@ -305,7 +301,7 @@ def _run_case(
         seed=seed,
     )
 
-    out_fa3 = _fa3_prefill_with_image_tag(inputs)
+    out_fa3 = _fa3_prefill_with_image_end(inputs)
 
     out_ref = torch_reference_context_attention_neo(
         inputs["q"],
@@ -316,7 +312,7 @@ def _run_case(
         inputs["b_seq_len"],
         inputs["b_prompt_cache_len"],
         inputs["req_to_token_indexs"],
-        inputs["b_image_token_tag"],
+        inputs["b_image_token_end"],
     )
 
     a = out_fa3.float().reshape_as(out_ref.float())
@@ -326,8 +322,8 @@ def _run_case(
     rel_err = abs_err / denom
     cos = torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
 
-    n_image = int(inputs["b_image_token_tag"].sum().item())
-    n_tokens = int(inputs["b_image_token_tag"].numel())
+    n_image = int((inputs["b_image_token_end"] > 0).sum().item())
+    n_tokens = int(inputs["b_image_token_end"].numel())
     if verbose:
         print(
             f"\ncase: batch={batch} Hq={Hq} Hk={Hk} D={D} dtype={dtype} "
@@ -343,7 +339,7 @@ def _run_case(
             out_ref,
             inputs["q_seq_lens"],
             inputs["b_q_start_loc"],
-            inputs["b_image_token_tag"],
+            inputs["b_image_token_end"],
             tag=f"seed={seed}",
         )
 
@@ -364,7 +360,7 @@ def _run_case(
         (3, 8, 2, 128, torch.bfloat16, 6, 8, 1024),
     ],
 )
-def test_fa3_neo_prefill_with_image_tag(batch, Hq, Hk, D, dtype, seed, max_q_seq_len, max_prompt_cache_len):
+def test_fa3_neo_prefill_with_image_end(batch, Hq, Hk, D, dtype, seed, max_q_seq_len, max_prompt_cache_len):
     abs_err, rel_err, cos = _run_case(
         batch=batch,
         Hq=Hq,
@@ -380,6 +376,53 @@ def test_fa3_neo_prefill_with_image_tag(batch, Hq, Hk, D, dtype, seed, max_q_seq
     assert rel_err < 5e-2, f"max relative error too large: {rel_err}"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
+@pytest.mark.parametrize("backend", ["triton", "fa3"])
+def test_image_queries_stop_at_their_own_image_end(backend):
+    if backend == "fa3" and flash_attn_with_kvcache is None:
+        pytest.skip("Neo FA3 with image_token_end support is not available")
+    if backend == "triton" and context_attention_fwd_neo is None:
+        pytest.skip("Triton attention is not available")
+
+    def indices(values):
+        return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+    # Two cached text tokens, then text / image / text / image / text.
+    # Zero Q/K make each output the mean of its visible V values.
+    inputs = dict(
+        q=torch.zeros((8, 2, 64), dtype=torch.float16, device="cuda"),
+        k=torch.zeros((10, 1, 64), dtype=torch.float16, device="cuda"),
+        v=torch.arange(10, dtype=torch.float16, device="cuda").view(10, 1, 1).expand(10, 1, 64).contiguous(),
+        b_req_idx=indices([0]),
+        b_q_start_loc=indices([0]),
+        b_seq_len=indices([10]),
+        b_prompt_cache_len=indices([2]),
+        req_to_token_indexs=indices([list(range(10))]),
+        b_image_token_end=indices([0, 5, 5, 0, 8, 8, 0, 0]),
+        max_seq_len_in_batch=10,
+        max_q_seq_len_in_batch=8,
+    )
+    if backend == "fa3":
+        output = _fa3_prefill_with_image_end(inputs)
+    else:
+        output = torch.empty_like(inputs["q"])
+        context_attention_fwd_neo(
+            inputs["q"],
+            inputs["k"],
+            inputs["v"],
+            output,
+            inputs["b_req_idx"],
+            inputs["b_q_start_loc"],
+            inputs["b_seq_len"],
+            inputs["b_prompt_cache_len"],
+            inputs["max_q_seq_len_in_batch"],
+            inputs["req_to_token_indexs"],
+            inputs["b_image_token_end"],
+        )
+    expected = torch.tensor([1, 2, 2, 2.5, 3.5, 3.5, 4, 4.5], dtype=output.dtype, device="cuda")
+    torch.testing.assert_close(output, expected[:, None, None].expand_as(output), rtol=1e-3, atol=1e-3)
+
+
 def _bench_case(
     batch: int,
     Hq: int,
@@ -392,7 +435,7 @@ def _bench_case(
     rep_ms: int = 100,
     warmup_iters: int = 3,
 ):
-    """Compare FA3 (with image_token_tag) vs the original Triton
+    """Compare FA3 (with image_token_end) vs the original Triton
     ``context_attention_fwd_neo`` using ``triton.testing.do_bench_cudagraph``.
 
     Both kernels are captured into a CUDA graph so scheduling/launch overhead
@@ -415,14 +458,10 @@ def _bench_case(
 
     # --- fa3 runner: output tensor is allocated inside flash_attn_with_kvcache.
     def fa3_run():
-        return _fa3_prefill_with_image_tag(inputs)
+        return _fa3_prefill_with_image_end(inputs)
 
-    # --- triton runner: pre-allocate o & position_ids so the graph captures
-    # only the kernel launch.
+    # --- triton runner: pre-allocate o so the graph captures only the kernel launch.
     o_triton = torch.empty_like(inputs["q"])
-    # Kernel signature requires position_ids but the current masking path does
-    # not read it; zeros are fine for perf measurement.
-    position_ids_0 = torch.zeros(inputs["q"].shape[0], dtype=torch.int32, device=inputs["q"].device)
 
     def triton_run():
         context_attention_fwd_neo(
@@ -430,14 +469,13 @@ def _bench_case(
             inputs["k"],
             inputs["v"],
             o_triton,
-            position_ids_0,
             inputs["b_req_idx"],
             inputs["b_q_start_loc"],
             inputs["b_seq_len"],
             inputs["b_prompt_cache_len"],
             inputs["max_q_seq_len_in_batch"],
             inputs["req_to_token_indexs"],
-            inputs["b_image_token_tag"],
+            inputs["b_image_token_end"],
         )
 
     # Warm up outside the graph capture so lazy allocations / autotune happen.
@@ -449,8 +487,8 @@ def _bench_case(
     fa3_ms = triton_testing.do_bench_cudagraph(fa3_run, rep=rep_ms)
     triton_ms = triton_testing.do_bench_cudagraph(triton_run, rep=rep_ms)
 
-    n_image = int(inputs["b_image_token_tag"].sum().item())
-    n_tokens = int(inputs["b_image_token_tag"].numel())
+    n_image = int((inputs["b_image_token_end"] > 0).sum().item())
+    n_tokens = int(inputs["b_image_token_end"].numel())
     sum_kv = int(inputs["b_seq_len"].sum().item())
     speedup = triton_ms / fa3_ms if fa3_ms > 0 else float("inf")
 
@@ -470,7 +508,7 @@ if __name__ == "__main__":
         print("No CUDA available.")
         raise SystemExit(0)
     if flash_attn_with_kvcache is None:
-        print("fa3 flash_attn_with_kvcache not available (sgl_kernel missing?).")
+        print("Neo FA3 flash_attn_with_kvcache with image_token_end support is not available.")
         raise SystemExit(0)
 
     torch.manual_seed(0)

@@ -24,5 +24,4 @@ from .create_utils import (
     get_nsa_prefill_att_backend_class,
     get_nsa_decode_att_backend_class,
     get_neo_prefill_att_backend_class,
-    get_neo_decode_att_backend_class,
 )
