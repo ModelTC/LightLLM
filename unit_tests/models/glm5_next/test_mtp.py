@@ -1,12 +1,8 @@
-import dataclasses
-
 import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
-from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.envs_utils import set_env_start_args
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -123,30 +119,6 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
         closing = torch.arange(start, start + count, device="cuda")
         closing = closing[(closing + 1) % 4 == 0]
         assert torch.equal(packed[closing], expected[closing])
-
-
-def test_glm_post_layer_exposes_normalized_hidden_without_double_norm(monkeypatch):
-    from lightllm.models.glm5_next.layer_infer.post_layer_infer import Glm5NextPostLayerInfer
-    from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
-    from unittest.mock import patch
-    from types import SimpleNamespace
-
-    set_env_start_args(dataclasses.asdict(StartArgs(mtp_mode="eagle_with_att", mtp_step=2)))
-    monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
-    monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
-    layer = Glm5NextPostLayerInfer({"rms_norm_eps": 1e-5, "vocab_size": 32, "n_embed": 16})
-    hidden = torch.randn(5, 16, device="cuda")
-    expected = hidden * torch.rsqrt(hidden.square().mean(-1, keepdim=True) + 1e-5)
-
-    def norm(input, eps, out):
-        out.copy_(input * torch.rsqrt(input.square().mean(-1, keepdim=True) + eps))
-        return out
-
-    weight = SimpleNamespace(final_norm_weight_=norm)
-    with patch.object(LlamaPostLayerInfer, "token_forward", lambda self, x, state, w: self._norm(x, state, w)):
-        result = layer.token_forward(hidden, None, weight)
-    torch.testing.assert_close(hidden, expected)
-    assert result is hidden
 
 
 @pytest.mark.parametrize("dynamic", [False, True])

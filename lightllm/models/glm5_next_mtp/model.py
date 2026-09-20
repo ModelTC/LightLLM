@@ -2,9 +2,9 @@ from copy import deepcopy
 
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.models.glm5_next.layer_infer.post_layer_infer import Glm5NextPostLayerInfer
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
+from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerWeight
 
@@ -14,7 +14,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextMTPPreLayerInfer
-    post_layer_infer_class = Glm5NextPostLayerInfer
+    post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
 
     def __init__(self, kvargs):
@@ -28,14 +28,12 @@ class Glm5NextMTPModel(TpPartBaseModel):
         assert self.config.get("num_nextn_predict_layers") == 1, "GLM NextN requires one native MTP block"
         self.config["mhc"] = False
 
-    def _verify_params(self):
-        assert self.load_way in ("HF", "DS"), "GLM-5.3 Flash only supports HF and DS weight loading"
-
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, self.config, self.quant_cfg)
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
+        self.pre_post_weight.main_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         self.trans_layers_weight = [
             self.transformer_weight_class(self.config["num_hidden_layers"], self.data_type, self.config, self.quant_cfg)
         ]

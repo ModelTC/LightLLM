@@ -108,10 +108,15 @@ def test_target_and_mtp_prefill_embed_images_before_hidden_fusion(monkeypatch):
         return out
 
     state.mtp_draft_input_hiddens = torch.randn(4, hidden, device="cuda")
+    main_norm_weight = torch.randn(hidden, device="cuda")
     old_hidden = state.mtp_draft_input_hiddens.clone()
     projection = torch.randn(2 * hidden, hidden, device="cuda") * 0.1
     weight.enorm_weight_ = weight.hnorm_weight_ = norm
+    weight.main_norm_weight_ = lambda input, eps, out: out.copy_(
+        torch.nn.functional.rms_norm(input, (hidden,), main_norm_weight, eps)
+    )
     weight.eh_proj_weight_ = SimpleNamespace(mm=lambda x: x @ projection)
     actual = Glm5NextMTPPreLayerInfer(config).context_forward(ids, state, weight)
+    old_hidden = torch.nn.functional.rms_norm(old_hidden, (hidden,), main_norm_weight, 1e-5)
     normalized = [x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-5) for x in (expected, old_hidden)]
     torch.testing.assert_close(actual, torch.cat(normalized, -1) @ projection)

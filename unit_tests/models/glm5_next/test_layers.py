@@ -279,7 +279,7 @@ def test_fp8_shared_expert_scales_and_bf16_kv_b_load_together(config, monkeypatc
         "LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(StartArgs(enable_fused_shared_experts=True)))
     )
     get_env_start_args.cache_clear()
-    config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"}
+    config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128]}
     weight = Glm5NextTransformerLayerWeight(3, torch.bfloat16, config, Quantcfg(config))
     prefix = "model.language_model.layers.3"
     tensors = {}
@@ -301,24 +301,65 @@ def test_fp8_shared_expert_scales_and_bf16_kv_b_load_together(config, monkeypatc
     torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("method", ["context_forward", "token_forward"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_mtp_pre_layer_applies_main_norm_before_hidden_fusion(config, monkeypatch, method, dtype):
+    from lightllm.common.basemodel.layer_weights.meta_weights import RMSNormWeight
+    from lightllm.models.glm5_next_mtp.layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
+    from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
+
+    hidden_size, eps = config["hidden_size"], config["rms_norm_eps"]
+    norms = [RMSNormWeight(hidden_size, name, dtype) for name in ("main_norm", "enorm", "hnorm")]
+    for norm in norms:
+        norm.weight.copy_(torch.randn_like(norm.weight))
+    embeddings = torch.randn(5, hidden_size, device="cuda", dtype=dtype)
+    hidden = torch.randn_like(embeddings)
+    projection = torch.randn(2 * hidden_size, hidden_size, device="cuda", dtype=dtype) * 0.1
+    weight = SimpleNamespace(
+        main_norm_weight_=norms[0],
+        enorm_weight_=norms[1],
+        hnorm_weight_=norms[2],
+        eh_proj_weight_=SimpleNamespace(mm=lambda x: x @ projection),
+    )
+    state = SimpleNamespace(mtp_draft_input_hiddens=hidden.clone())
+    monkeypatch.setattr(LlamaMultimodalPreLayerInfer, method, lambda self, ids, state, weight: embeddings.clone())
+    actual = getattr(Glm5NextMTPPreLayerInfer(config), method)(None, state, weight)
+
+    def reference_norm(value, norm):
+        return F.rms_norm(value.float(), (hidden_size,), norm.weight.float(), eps).to(dtype)
+
+    normalized_hidden = reference_norm(reference_norm(hidden, norms[0]), norms[2])
+    expected = torch.cat((reference_norm(embeddings, norms[1]), normalized_hidden), dim=-1) @ projection
+    torch.testing.assert_close(actual, expected, atol=0.015 if dtype == torch.bfloat16 else 1e-5, rtol=0.015)
+
+
+@pytest.mark.parametrize("model_class", [Glm5NextTpPartModel, Glm5NextMTPModel])
+def test_glm_weight_loading_requires_hf(config, model_class):
+    model = object.__new__(model_class)
+    model.config, model.tp_world_size_ = config, 1
+    model.load_way = "HF"
+    model._verify_params()
+    model.load_way = "DS"
+    with pytest.raises(AssertionError, match="only support HF format weights"):
+        model._verify_params()
+
+
 def test_native_drafts_share_caches_but_keep_config_and_layer_indices(config):
-    # Replicated MLA latents do not depend on a Llama-style KV head count.
-    del config["num_key_value_heads"]
     main = object.__new__(Glm5NextTpPartModel)
     main.config = dict(config, mhc=True)
     main.tp_world_size_ = 1
-    main.args, main.load_way = StartArgs(), "DS"
+    main.args, main.load_way = StartArgs(), "HF"
     main._verify_params()
     main._init_some_value()
     main.layers_infer = [object() for _ in range(config["num_hidden_layers"])]
-    main.pre_post_weight = SimpleNamespace(wte_weight_=object(), lm_head_weight_=object())
+    main.pre_post_weight = SimpleNamespace(wte_weight_=object(), lm_head_weight_=object(), final_norm_weight_=object())
     main.req_manager, main.mem_manager, main.linear_config = object(), object(), object()
     drafts = []
     for step in range(2):
         draft = object.__new__(Glm5NextMTPModel)
         draft.main_model, draft.mtp_previous_draft_models = main, list(drafts)
         draft.tp_world_size_, draft.data_type = 1, torch.bfloat16
-        draft.load_way = "DS"
+        draft.load_way = "HF"
         draft._init_config()
         draft._verify_params()
         draft.quant_cfg = Quantcfg(draft.config)
@@ -335,6 +376,7 @@ def test_native_drafts_share_caches_but_keep_config_and_layer_indices(config):
         assert draft.trans_layers_weight[0].layer_num_ == 4
         assert draft.pre_post_weight.wte_weight_ is main.pre_post_weight.wte_weight_
         assert draft.pre_post_weight.lm_head_weight_ is main.pre_post_weight.lm_head_weight_
+        assert draft.pre_post_weight.main_norm_weight_ is main.pre_post_weight.final_norm_weight_
         assert draft.req_manager is main.req_manager and draft.mem_manager is main.mem_manager
         assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
         drafts.append(draft)

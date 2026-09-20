@@ -24,6 +24,8 @@ class Glm5NextMTPPreAndPostLayerWeight(PreAndPostLayerWeight):
         )
         self.wte_weight_ = None
         self.lm_head_weight_ = None
+        # Shared with the target model and injected by the draft model.
+        self.main_norm_weight_: RMSNormWeight = None
 
     def load_hf_weights(self, weights):
         add_language_model_aliases(weights)

@@ -12,8 +12,8 @@ from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
 from lightllm.common.req_manager import Glm5NextReqManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
-from .layer_infer.post_layer_infer import Glm5NextPostLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -23,7 +23,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextPreLayerInfer
-    post_layer_infer_class = Glm5NextPostLayerInfer
+    post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
 
     def _init_config(self):
@@ -32,25 +32,14 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.config = dict(outer_config.get("text_config", outer_config))
         if "quantization_config" in outer_config:
             self.config["quantization_config"] = dict(outer_config["quantization_config"])
-        if "quantization_config" in self.config:
-            self.config["quantization_config"].setdefault("scale_fmt", "ue8m0")
         self.config["autotune_layer_num"] = 4
-        for names in (
-            ["num_attention_heads", "n_head"],
-            ["hidden_size", "n_embd", "n_embed"],
-            ["num_hidden_layers", "n_layer"],
-        ):
-            repair_config(self.config, same_names=names)
+        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
+        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
+        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
 
     def _verify_params(self):
-        assert self.load_way in ("HF", "DS"), "GLM-5.3 Flash only supports HF and DS weight loading"
-        assert self.config["linear_attn_config"]["num_heads"] % self.tp_world_size_ == 0
+        super()._verify_params()
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
-        args = self.args
-        assert not args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
-        assert args.dp == 1 or args.enable_ep_moe, "GLM-5.3 Flash data parallelism requires expert parallelism"
-        assert args.mtp_mode in (None, "eagle_with_att", "vanilla_with_att"), "Unsupported GLM NextN mode"
-        assert not args.enable_prefill_cudagraph, "GLM-5.3 Flash v1 supports decode CUDA graphs"
 
     def autotune_layers(self):
         return 4
