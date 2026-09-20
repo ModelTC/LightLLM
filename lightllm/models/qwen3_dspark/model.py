@@ -1,10 +1,8 @@
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import Qwen3DSparkPreAndPostLayerWeight
 
 
-@DraftModelRegistry(model_type="qwen3", spec_modes="dspark")
 class Qwen3DSparkModel(Qwen3DFlashModel):
     """Qwen3 DSpark draft model.
 

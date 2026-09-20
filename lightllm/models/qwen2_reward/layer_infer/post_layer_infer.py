@@ -1,4 +1,5 @@
 import torch
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -18,4 +19,4 @@ class Qwen2RewardPostLayerInfer(LlamaPostLayerInfer):
         last_input = torch.nn.functional.relu(last_input)
         score = layer_weight.score_down_weight_.mm(last_input)
 
-        return score
+        return PostLayerOutput(logits=score)

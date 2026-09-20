@@ -12,7 +12,6 @@ from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
 from lightllm.common.req_manager import Glm5NextReqManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.models.registry import ModelRegistry
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.post_layer_infer import Glm5NextPostLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
@@ -20,8 +19,6 @@ from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeig
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 
 
-@ModelRegistry("glm5_next", is_multimodal=True)
-@ModelRegistry("glm5_next_text")
 class Glm5NextTpPartModel(TpPartBaseModel):
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight

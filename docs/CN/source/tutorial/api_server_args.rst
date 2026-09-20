@@ -5,6 +5,46 @@ APIServer 参数详解
 
 本文档详细介绍了 LightLLM APIServer 的所有启动参数及其用法。
 
+词表并行采样
+------------
+
+.. option:: --target_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    主模型 target 每个 TP rank 的 logits 通信候选数，默认 ``None``，即关闭候选通信。
+
+.. option:: --draft_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    draft 模型每个 TP rank 的输出候选数，默认 ``None``，即关闭候选输出。
+    两个参数分别控制主模型 target 和 draft 模型的输出候选数。
+    未设置时，对应模型保持完整词表 logits 通信和原采样路径；设置后，每个 TP rank 先选取
+    本地候选，经一次 all-gather 后输出所有 TP rank 的 logits 和全局 token ID。
+    两个参数相互独立，也适用于 TP=1。
+
+    draft 的固定步数路径在候选中取 argmax；由于每个分片的最大值都包含在候选中，最终 token
+    仍是完整词表上的精确 argmax。动态 MTP 在收集到的候选上做 softmax，生成供调度使用的
+    模拟概率；它不是全词表概率，可能改变动态步数选择。模型不计算或输出完整词表 token 概率。
+
+    target 在温度、请求 top-k 和 top-p 处理之前，先从每个 TP 词表分片选取配置数量的候选。
+    输出层随后创建完整词表 logits，将非候选位置填为 ``-10000000.0``，并按全局 token ID
+    回填候选值。下游继续使用原有完整词表采样路径，无需处理候选 token ID 映射；已有的
+    penalty 和 invalid-token 屏蔽仍会在候选回填后执行。请求 top-k=-1 或大于 all-gather 后的
+    候选总数时，仍只能覆盖候选集合。
+    生成 token 的 logprob 是候选集合上的归一化概率对应的对数，不是完整词表上的 logprob；
+    top-p 也不代表完整词表累计概率。启用 target 候选是显式的近似采样。
+
+    依赖非候选原始分数的功能无法恢复完整词表的精确结果，例如 ``--enable_rl`` 所需的完整
+    token rank，或通过较大 logit bias 将非候选 token 提升到候选范围内的场景。
+    ``--target_vocab_topk_sampling`` 不能与 ``--output_constraint_mode outlines/xgrammar``
+    或 ``--first_token_constraint_mode`` 同时启用，推理节点启动时会触发断言。
+    原因是非候选分数为 ``-10000000.0``，约束屏蔽分数为 ``-1000000.0``；
+    若合法 token 全部被裁掉，禁止的 token 反而会得分更高。使用这些输出约束时请关闭 target 候选裁剪。
+    ``--draft_vocab_topk_sampling`` 不受此项检查限制。
+    PD 部署应在 master、prefill 和 decode 上使用相同配置。
+
+    仅支持使用 Llama 标准 ``token_forward``、``_token_forward`` 和 ``_lm_head_and_gather``
+    实现的输出层；允许模型覆盖归一化实现。模型初始化不再检查输出层兼容性，
+    特殊输出层不要设置对应的候选参数。
+
 基础配置参数
 ------------
 

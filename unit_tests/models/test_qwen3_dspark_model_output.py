@@ -53,6 +53,7 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
 
     target_hiddens = torch.arange(6, dtype=torch.float32).view(2, 3)
     mem_indexes = torch.tensor([7, 11])
+    model._select_mem_indexes = lambda _: mem_indexes
     observed_states = []
 
     class PreInfer:
@@ -78,7 +79,6 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model_input = SimpleNamespace(
         batch_size=2,
         b_seq_len=torch.tensor([3, 5]),
-        mem_indexes=mem_indexes,
         mtp_draft_input_hiddens=target_hiddens,
     )
 
@@ -174,15 +174,52 @@ def test_dspark_post_layer_publishes_head_results_through_collector():
     )
     layer_weight = SimpleNamespace(lm_head_weight_=LMHead())
 
-    logits = post_infer.token_forward(
+    output = post_infer.token_forward(
         input_embdings=torch.randn(4, 3),
         infer_state=infer_state,
         layer_weight=layer_weight,
     )
 
-    assert logits.shape == (4, 1)
+    assert output.logits.shape == (4, 1)
+    assert output.logits_token_ids is None
     assert torch.equal(collector.outputs["draft_token_ids"], torch.tensor([1, 2, 3, 4]))
     assert collector.outputs["confidence_logits"] is confidence_logits
+
+
+def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids():
+    post_infer = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
+    post_infer.block_size_ = 2
+    post_infer.markov_rank_ = 0
+    post_infer._slice_get_last_input = lambda input_embeddings, infer_state: (input_embeddings, 4)
+    candidate_output = batch_objs.PostLayerOutput(
+        logits=torch.randn(4, 2),
+        logits_token_ids=torch.tensor([[10, 20], [30, 40], [50, 60], [70, 80]]),
+    )
+    post_infer._draft_lm_head_and_gather = lambda *args: candidate_output
+    observed = {}
+
+    def predict_confidence_logits(*args, sampled_tokens, **kwargs):
+        observed["sampled_tokens"] = sampled_tokens
+        return None
+
+    post_infer.predict_confidence_logits = predict_confidence_logits
+
+    class RecordingCollector:
+        def add_mtp_outputs(self, **kwargs):
+            self.outputs = kwargs
+
+    collector = RecordingCollector()
+    infer_state = SimpleNamespace(
+        is_prefill=False,
+        input_ids=torch.tensor([10, 0, 20, 0]),
+        hidden_collector=collector,
+    )
+
+    output = post_infer.token_forward(torch.randn(4, 3), infer_state, object())
+
+    assert output is candidate_output
+    assert observed["sampled_tokens"] is None
+    assert collector.outputs["draft_token_ids"] is None
 
 
 @pytest.mark.parametrize(

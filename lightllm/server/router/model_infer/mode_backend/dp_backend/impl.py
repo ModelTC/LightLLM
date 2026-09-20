@@ -19,7 +19,6 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from .control_state import DPControlState
 
 
@@ -604,13 +603,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 verify_run_reqs=run_reqs,
             )
 
-            proposal.extra_mem_indexes_cpu.append(
-                MtpMemIndexesToFree(
-                    mem_indexes_cpu=model_input.mem_indexes_cpu,
-                    free_mask_cpu=accepted_index_cpu == 0,
-                ),
-            )
-
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
                 run_reqs=verify_ok_reqs,
@@ -620,10 +612,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -631,10 +619,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
             event_pack.notify_pre_post_handle()
         return
 
@@ -889,19 +873,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 req_num=req_num,
                 accept_lengths_cpu=mtp_accept_len_cpu,
             )
-            proposal.extra_mem_indexes_cpu.extend(
-                (
-                    MtpMemIndexesToFree(
-                        mem_indexes_cpu=model_input0.mem_indexes_cpu,
-                        free_mask_cpu=accepted_index_cpu0 == 0,
-                    ),
-                    MtpMemIndexesToFree(
-                        mem_indexes_cpu=model_input1.mem_indexes_cpu,
-                        free_mask_cpu=accepted_index_cpu1 == 0,
-                    ),
-                )
-            )
-
             select_mask = accepted_index_cpu.to(dtype=torch.bool)
             self._post_handle(
                 run_reqs=verify_ok_reqs,
@@ -911,18 +882,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
             event_pack.notify_pre_post_handle()
         else:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
-            mtp_utils.free_mem_indexes(
-                backend=self,
-                extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
-            )
             event_pack.notify_pre_post_handle()
         return

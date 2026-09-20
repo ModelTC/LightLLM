@@ -1,4 +1,8 @@
+from typing import Optional
+
 import torch
+
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 
 from lightllm.distributed.communication_op import all_gather_into_tensor
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
@@ -62,7 +66,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         self,
         block_hidden: torch.Tensor,
         anchor_token_ids: torch.Tensor,
-        sampled_tokens: torch.Tensor,
+        sampled_tokens: Optional[torch.Tensor],
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
     ):
         if not self.enable_confidence_head_:
@@ -70,6 +74,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
 
         features = block_hidden
         if self.confidence_head_with_markov_:
+            assert sampled_tokens is not None
             prev_token_ids = torch.cat(
                 [anchor_token_ids.view(-1, 1), sampled_tokens[:, :-1]],
                 dim=1,
@@ -177,19 +182,17 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
                 confidence_logits=confidence_logits,
             )
             # Graph unpadding still uses the leading logits dimension when token ids are returned directly.
-            return local_logits.new_empty((token_num, 1))
+            return PostLayerOutput(logits=local_logits.new_empty((token_num, 1)))
 
-        logits = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
-        block_logits = logits.reshape(num_reqs, self.block_size_, -1)
-        sampled_tokens = torch.argmax(block_logits, dim=-1)
+        post_output = self._draft_lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
         confidence_logits = self.predict_confidence_logits(
             block_hidden,
             anchor_token_ids=anchor_token_ids,
-            sampled_tokens=sampled_tokens,
+            sampled_tokens=None,
             layer_weight=layer_weight,
         )
         infer_state.hidden_collector.add_mtp_outputs(
             draft_token_ids=None,
             confidence_logits=confidence_logits,
         )
-        return logits
+        return post_output

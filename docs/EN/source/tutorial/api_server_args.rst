@@ -5,6 +5,50 @@ APIServer Parameter Details
 
 This document provides detailed information about all startup parameters and their usage for LightLLM APIServer.
 
+Vocabulary Parallel Sampling
+----------------------------
+
+.. option:: --target_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    Candidate count communicated by each TP rank for target-model logits. The default ``None`` disables candidate communication.
+
+.. option:: --draft_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    Output candidate count from each TP rank for the draft model. The default ``None`` disables candidate output.
+    The two options independently control the target-model and draft-model output widths.
+    When unset, the corresponding model retains full-vocabulary logits communication and sampling.
+    When set, every TP rank selects local candidates, then one all-gather returns the logits and global
+    token IDs from all TP ranks. The settings also apply at TP=1.
+
+    Fixed-step draft decoding takes argmax over the candidates. The result remains the exact
+    full-vocabulary argmax because every shard contributes its local maximum. Dynamic MTP applies
+    softmax over the gathered candidates to produce simulated scheduling confidence; this is not
+    a full-vocabulary probability and can change dynamic step selection.
+
+    The target model selects the configured candidate count from each TP vocabulary shard before temperature,
+    request top-k, and top-p processing. The output layer then creates full-vocabulary logits, fills
+    non-candidate positions with ``-10000000.0``, and scatters candidate values by global token ID.
+    Downstream code continues through the existing full-vocabulary sampling path without a candidate-ID
+    mapping; existing penalties and invalid-token masking still run after candidate reconstruction.
+    A request top-k of -1 or larger than the gathered candidate count still only covers the candidates.
+    Generated-token logprobs and top-p mass
+    are relative to the candidate set, so enabling target candidates explicitly opts into approximate sampling.
+
+    Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary
+    results. Examples include the complete token ranks required by ``--enable_rl`` or a large logit bias that
+    would have promoted a non-candidate token into the selected set.
+    ``--target_vocab_topk_sampling`` cannot be combined with ``--output_constraint_mode outlines/xgrammar``
+    or ``--first_token_constraint_mode``; inference nodes reject these combinations with a startup assertion.
+    Non-candidate scores are ``-10000000.0``, while constraint masks set forbidden-token scores to ``-1000000.0``.
+    If all allowed tokens are pruned, forbidden tokens receive higher scores. Disable target candidate pruning
+    when using these output constraints. This check does not restrict ``--draft_vocab_topk_sampling``.
+    Use matching settings on PD master, prefill, and decode services.
+
+    Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
+    ``_lm_head_and_gather`` implementations; normalization overrides are allowed.
+    Model initialization no longer checks output-layer compatibility.
+    Leave the corresponding candidate option unset for nonstandard output heads.
+
 Basic Configuration Parameters
 ------------------------------
 

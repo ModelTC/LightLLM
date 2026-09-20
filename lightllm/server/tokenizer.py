@@ -16,24 +16,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple, Union
+from typing import Union
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from transformers.convert_slow_tokenizer import convert_slow_tokenizer
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.log_utils import init_logger
-from ..models.tarsier2.model import Tarsier2Tokenizer
 
 logger = init_logger(__name__)
-from ..models.llava.model import LlavaTokenizer
-from ..models.qwen_vl.model import QWenVLTokenizer
-from ..models.qwen2_vl.model import QWen2VLTokenizer
-from ..models.qwen3_vl.model import QWen3VLTokenizer
-from ..models.internvl.model import InternvlTokenizer
-from ..models.gemma3.model import Gemma3Tokenizer
-from ..models.gemma4.tokenizer import Gemma4Tokenizer
-from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
-from ..models import deepseek3_2  # noqa: F401  # registers the deepseek_v32 config with transformers
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
@@ -63,6 +52,12 @@ def get_tokenizer(
         # tokenizer = convert_slow_tokenizer(tokenizer)
         # return tokenizer
 
+    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
+    model_type = model_cfg.get("model_type", "")
+    if model_type == "deepseek_v32":
+        # Register the custom config before AutoTokenizer tries to resolve it.
+        from ..models import deepseek3_2  # noqa: F401
+
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
     except TypeError as e:
@@ -78,8 +73,6 @@ def get_tokenizer(
             "slowdown. Consider using a fast tokenizer instead."
         )
 
-    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
-    model_type = model_cfg.get("model_type", "")
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.
     if model_type == "deepseek_v32":
@@ -92,6 +85,7 @@ def get_tokenizer(
         return DeepSeekV32Tokenizer(hf_tokenizer)
 
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+        from ..models.tarsier2.model import Tarsier2Tokenizer
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 
         image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)
@@ -101,10 +95,15 @@ def get_tokenizer(
 
         tokenizer = Glm5NextTokenizer(tokenizer, model_cfg, tokenizer_name)
     elif model_type == "llava" or model_type == "internlmxcomposer2":
+        from ..models.llava.model import LlavaTokenizer
+
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
     elif model_type == "qwen" and "visual" in model_cfg:
+        from ..models.qwen_vl.model import QWenVLTokenizer
+
         tokenizer = QWenVLTokenizer(tokenizer, model_cfg)
     elif model_type in ["qwen2_vl", "qwen2_5_vl"] and "vision_config" in model_cfg:
+        from ..models.qwen2_vl.model import QWen2VLTokenizer
         from transformers import AutoProcessor
 
         processor = AutoProcessor.from_pretrained(tokenizer_name)
@@ -112,6 +111,7 @@ def get_tokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
     elif model_type in ["qwen3_vl", "qwen3_vl_moe"] and "vision_config" in model_cfg:
+        from ..models.qwen3_vl.model import QWen3VLTokenizer
         from transformers import AutoProcessor
 
         processor = AutoProcessor.from_pretrained(tokenizer_name)
@@ -127,16 +127,23 @@ def get_tokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
     elif model_cfg.get("thinker_config") is not None:
+        from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
         from transformers import AutoProcessor
 
         model_cfg = model_cfg["thinker_config"]
         processor = AutoProcessor.from_pretrained(tokenizer_name)
         tokenizer = QWen3OmniTokenizer(tokenizer, processor=processor, model_cfg=model_cfg)
     elif model_type == "internvl_chat":
+        from ..models.internvl.model import InternvlTokenizer
+
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
     elif model_type == "gemma3":
+        from ..models.gemma3.model import Gemma3Tokenizer
+
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
     elif model_type == "gemma4":
+        from ..models.gemma4.tokenizer import Gemma4Tokenizer
+
         image_processor = None
         if "vision_config" in model_cfg and model_cfg["vision_config"] is not None:
             from transformers import AutoProcessor

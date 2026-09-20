@@ -37,6 +37,15 @@ def _set_envs_and_config(args: StartArgs):
 def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
+    if args.target_vocab_topk_sampling is not None:
+        # 在加载模型和启动子进程前拒绝该组合，避免候选裁剪使输出约束失效。
+        # 数值冲突与后续兼容方案见 LlamaPostLayerInfer._target_lm_head_and_gather。
+        assert args.output_constraint_mode == "none" and not args.first_token_constraint_mode, (
+            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode outlines/xgrammar "
+            "or --first_token_constraint_mode: candidate pruning can cause forbidden tokens to be selected. "
+            "Disable --target_vocab_topk_sampling when using output constraints."
+        )
+
     if args.mtp_mode is not None:
         assert (
             not args.disable_cudagraph or args.run_mode == "prefill"
@@ -93,6 +102,7 @@ def _launch_subprocesses(args: StartArgs):
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+        assert args.page_size == 1, "diverse mode only supports page_size == 1"
 
     # performance_mode 参数处理
     if args.performance_mode == "personal":
@@ -164,6 +174,19 @@ def _launch_subprocesses(args: StartArgs):
                 f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
             )
 
+    if args.page_size < 1:
+        raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
+    if args.run_mode in ("prefill", "decode"):
+        assert args.pd_kv_page_size % args.page_size == 0, "--pd_kv_page_size must be divisible by --page_size"
+
+    if args.page_size > 1:
+        # hybrid radix cache 的共享边界按 linear_att_hash_page_size 划分。只有该
+        # 边界同时落在模型 KV 页面边界上，hold_kv_len 才能保持统一的分页语义。
+        is_hybrid_model = is_hybrid_att_model(args.model_dir)
+        if is_hybrid_model and args.linear_att_hash_page_size % args.page_size != 0:
+            raise ValueError(
+                "--linear_att_hash_page_size must be divisible by --page_size when paged KV cache is enabled"
+            )
     # mtp params check
     if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:
@@ -274,6 +297,10 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    if args.enable_cpu_cache:
+        assert (
+            args.cpu_cache_token_page_size % args.page_size == 0
+        ), "--cpu_cache_token_page_size must be divisible by --page_size"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:

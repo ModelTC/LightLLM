@@ -438,12 +438,6 @@ class Req(ctypes.Structure):
     def get_tuple_tokens(self, is_busy, ema_req_out_len):
         raise NotImplementedError("Subclasses should implement this method")
 
-    def get_decode_need_tokens(self):
-        raise NotImplementedError("Subclasses should implement this method")
-
-    def get_first_router_need_tokens(self):
-        raise NotImplementedError("Subclasses should implement this method")
-
     def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
         token_id = int(self.shm_prompt_ids.arr[src_index])
         rank = int(self.shm_logprobs.arr["rank"][src_index])
@@ -471,26 +465,11 @@ class Req(ctypes.Structure):
         return
 
 
-# 由于目前加入了很多异步调度的方法，为了缓解异步调度带来的很多
-# 估计不准确的问题，通过加长输出的长度，进行偏向保守一些的调度
-# 理论上不会多估计太多的 token 占用量, 同时得到较高的token显存
-# 使用率
-ADDED_OUTPUT_LEN = 16
-
-
 class ChunkedPrefillReq(Req):
     _pack_ = 4
 
     def get_tuple_tokens(self, is_busy, ema_req_out_len):
         args = get_env_start_args()
-        # chuncked prefill 推理的过程中，存在很多模式的延迟 step 推理的控制， 用于
-        # 保证更好的包间数据或者是提升 dp 模式下prefill 的效率，但是在估计 token 显存
-        # 占用量的过程中，分chuncked 需要考虑其因为分 chuncked带来的生命期的延长，具体
-        # 体现就是在 b_len 的计算中，xxx * (max_waiting_token + 1) 的部分，这部分
-        # 就是通过模拟加长其输出token长度，来延长其在估计阶段的生命周期。max_waiting_token
-        # 的计算是保守的，每次chuncked prefill 延迟的最大步数为两种模式之合，因为
-        # 这个并不会导致预估的token占用量大幅增加，所以可以放心使用。
-        max_waiting_token = args.router_max_wait_tokens
         has_out_len = self.shm_cur_output_len
         if self.sample_params.ignore_eos:
             cur_max_new_token_len = self.sample_params.max_new_tokens
@@ -500,33 +479,15 @@ class ChunkedPrefillReq(Req):
             cur_max_new_token_len = min(self.sample_params.max_new_tokens, max(int(1.1 * has_out_len), ema_req_out_len))
 
         a_len = max(self.input_len + has_out_len + 1, self.shm_cur_kv_len + 1)
-        b_len = (
-            (self.input_len + has_out_len - self.shm_cur_kv_len + self.chunked_prefill_size - 1)
-            // self.chunked_prefill_size
-            * (max_waiting_token + 1)
-            + cur_max_new_token_len
-            - has_out_len
-            - 1
-        )
-        b_len = max(0, b_len) + ADDED_OUTPUT_LEN
+        # b_len 用于调度时估算请求后续需要的 token 容量，各项含义如下：
+        # 1. 预计生成总量减去已输出的 has_out_len，以及 a_len 已预留的 1 个 token；用 max(0, ...) 避免负数。
+        # 2. page_size：KV cache 按页分配，预留一页以覆盖逻辑 token 长度与实际分配容量之间的对齐开销。
+        # 3. 2 * (mtp_step + 1)：按每轮最多推进 mtp_step + 1 个 token，预留两轮推理的容量，
+        #    为 MTP 和 overlap 执行留出空间；mtp_step 为 0 时仍保留两个普通 decode token 的余量。
+        # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。例如 stop_str 需要先由 detokenization
+        #    进程匹配，再由 router 通知推理端停止请求；在状态传播、停止处理及 KV 释放完成之前，
+        #    请求仍可能继续推进推理或占用 KV。这 16 个 token 是吸收此类延迟的保守余量，
+        #    避免调度时过早将这部分容量分配给其他请求；它不表示固定的等待时间或异步延迟上限。
+        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
 
         return (a_len, b_len)
-
-    def get_decode_need_tokens(self):
-        """
-        chunkedprefill 调度模式的实现
-        """
-        # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
-        need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
-        if need_tokens == 1 and self._mtp_step > 0:
-            # self._mtp_step > 0 时，说明开启了mtp 模式，每次decode需要额外的mem token 资源
-            # "vanilla_with_att" 模式需要的 mem 用量为 self._mtp_step + 1
-            # "eagle_with_att" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
-            # 为了简化统一 返回 （self._mtp_step + 1）* 2
-            need_tokens = (self._mtp_step + 1) * 2
-
-        return need_tokens
-
-    def get_first_router_need_tokens(self):
-
-        return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
