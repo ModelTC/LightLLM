@@ -10,6 +10,7 @@ from tqdm import tqdm
 import lightllm.utils.petrel_helper as utils
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4_dspark.infer_struct import (
     DeepseekV4DSparkInferStateInfo,
@@ -110,6 +111,15 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             )
             for stage_id in range(self.config["dspark_layer_num"])
         ]
+        self.context_wkv_weight = ROWMMWeight(
+            in_dim=self.config["hidden_size"],
+            out_dims=[layer.head_dim for layer in self.trans_layers_weight],
+            weight_names=[layer.wq_a_wkv_.weight_names[1] for layer in self.trans_layers_weight],
+            data_type=self.data_type,
+            quant_method=self.trans_layers_weight[0].get_quant_method("wq_a"),
+            tp_rank=0,
+            tp_world_size=1,
+        )
 
     def _init_req_manager(self):
         self.req_manager = self.main_model.req_manager
@@ -173,6 +183,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             layer.freqs_cis = self._freqs_cis_sliding
             layer.cos_compress_table = self._cos_cached_compress
             layer.sin_compress_table = self._sin_cached_compress
+        self.layers_infer[0].context_wkv_weight = self.context_wkv_weight
 
     def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
         if not model_input.is_prefill:
@@ -228,7 +239,9 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
 
     def load_weights(self, weight_dict: dict):
         if weight_dict:
-            return super().load_weights(weight_dict)
+            super().load_weights(weight_dict)
+            self._load_context_wkv_weights()
+            return
 
         index_file = os.path.join(self.weight_dir_, "model.safetensors.index.json")
         assert utils.PetrelHelper.exists(index_file), "DeepSeek-V4 DSpark requires model.safetensors.index.json"
@@ -254,4 +267,15 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
 
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
+        self._load_context_wkv_weights()
         logger.info("loaded DeepSeek-V4 DSpark weights: %d tensors", loaded_key_count)
+
+    def _load_context_wkv_weights(self):
+        for layer, dest in zip(self.trans_layers_weight, self.context_wkv_weight.mm_param_list):
+            source = layer.wq_a_wkv_.mm_param_list[1]
+            for name in ("weight", "weight_scale", "weight_zero_point"):
+                dest_tensor = getattr(dest, name)
+                if dest_tensor is not None:
+                    dest_tensor.copy_(getattr(source, name))
+            dest.load_ok[:] = source.load_ok
+        assert self.context_wkv_weight.verify_load(), "Loading DSpark context WKV projection failed"

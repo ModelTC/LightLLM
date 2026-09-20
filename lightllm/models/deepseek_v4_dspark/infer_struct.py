@@ -10,6 +10,9 @@ from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_index import (
 class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
     """DeepSeek-V4 metadata with non-causal visibility across one DSpark block."""
 
+    # Produced by the first context layer after DP rebalance, consumed per stage.
+    context_kv: tuple
+
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
         if self.is_prefill or self.mtp_draft_swa_pages is None:

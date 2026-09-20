@@ -1,6 +1,6 @@
 import torch
 
-from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
@@ -15,22 +15,24 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         final_layer = network_config["n_layer"] + network_config["dspark_layer_num"] - 1
+        self.stage_id = layer_num - network_config["n_layer"]
         self.is_last_layer = layer_num == final_layer
         assert self.compress_ratio == 0, "DeepSeek-V4 DSpark draft layers must be SWA-only"
 
     def context_forward(
         self,
         input_embdings: torch.Tensor,
-        infer_state: DeepseekV4InferStateInfo,
+        infer_state: DeepseekV4DSparkInferStateInfo,
         layer_weight: DeepseekV4DSparkTransformerLayerWeight,
     ) -> torch.Tensor:
         """Write target hidden rows into this stage without running draft attention/FFN."""
-        full_input = self._tpsp_allgather(input=input_embdings, infer_state=infer_state)
-        qkv = layer_weight.wq_a_wkv_.mm(full_input, use_custom_tensor_mananger=False)
+        if self.stage_id == 0:
+            all_kv = self.context_wkv_weight.mm(input_embdings, use_custom_tensor_mananger=False)
+            infer_state.context_kv = all_kv.split(self.head_dim_, dim=-1)
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
             mem_index=infer_state.mem_index,
-            kv=qkv[:, -self.head_dim_ :],
+            kv=infer_state.context_kv[self.stage_id],
             kv_weight=layer_weight.kv_norm_.weight,
             eps=self.eps_,
             freqs_cis=self.freqs_cis,
