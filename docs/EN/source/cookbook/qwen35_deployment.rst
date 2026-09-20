@@ -108,8 +108,8 @@ To skip loading the vision encoder and reduce memory usage:
 
 The only difference is ``--disable_vision``, which prevents the vision encoder from being loaded. The model will only accept text input in this mode.
 
-Running without SGL Kernel or vLLM
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Triton Backend Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For dense Qwen3.5 BF16 text-only deployment, select Triton for both full and linear attention:
 
@@ -119,7 +119,7 @@ For dense Qwen3.5 BF16 text-only deployment, select Triton for both full and lin
     --llm_prefill_att_backend triton triton \
     --llm_decode_att_backend triton triton
 
-Conv1d retains the existing CUDA implementation when ``sgl_kernel`` can be imported. Otherwise, it automatically uses the local Triton implementation, including chunked prefill and prefix caching. This configuration was validated with Qwen3.5-4B BF16 while blocking imports of both ``sgl_kernel`` and ``vllm``, covering generation, prefix cache reuse, and decode CUDA graphs.
+Conv1d uses the CUDA implementation when available. Otherwise, it automatically uses LightLLM's Triton implementation, including chunked prefill and prefix caching. This configuration was validated with Qwen3.5-4B BF16 on the Triton path, covering generation, prefix cache reuse, and decode CUDA graphs.
 
 The Triton Conv1d path uses LightLLM autotune. Set ``LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1`` to search and cache tile sizes and warp counts during startup warmup; the default level ``0`` reuses saved configurations. Tuning uses a separate convolution state buffer so benchmark repetitions do not advance live request state.
 

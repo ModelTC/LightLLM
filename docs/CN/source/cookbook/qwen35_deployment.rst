@@ -108,8 +108,8 @@ Qwen3.5 使用混合注意力架构，在涉及线性注意力缓存复用时，
 
 唯一区别是 ``--disable_vision``，阻止加载视觉编码器。此模式下模型仅接受文本输入。
 
-不安装 SGL Kernel 或 vLLM
-~~~~~~~~~~~~~~~~~~~~~~~~
+Triton 后端配置
+~~~~~~~~~~~~~~~
 
 对于稠密 Qwen3.5 的 BF16 纯文本部署，可将全注意力和线性注意力均设为 Triton 后端：
 
@@ -119,7 +119,7 @@ Qwen3.5 使用混合注意力架构，在涉及线性注意力缓存复用时，
     --llm_prefill_att_backend triton triton \
     --llm_decode_att_backend triton triton
 
-Conv1d 在可导入 ``sgl_kernel`` 时继续使用原有 CUDA 实现；导入失败时自动使用本地 Triton 实现，支持分块 prefill 和前缀缓存。以上配置已在屏蔽 ``sgl_kernel`` 和 ``vllm`` 导入的环境中，用 Qwen3.5-4B BF16 验证生成、前缀缓存复用及 decode CUDA graph。
+Conv1d 在 CUDA 实现可用时优先使用该实现，否则自动使用 LightLLM 的 Triton 实现，支持分块 prefill 和前缀缓存。以上配置已使用 Qwen3.5-4B BF16 验证 Triton 路径的生成、前缀缓存复用及 decode CUDA graph。
 
 新增 Triton Conv1d 路径接入 LightLLM autotune。设置环境变量 ``LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1`` 可在启动预热时搜索并缓存 tile 大小和 warp 数；默认的 ``0`` 级别复用历史配置。调优使用独立的卷积状态副本，避免反复更新真实请求的缓存。
 
