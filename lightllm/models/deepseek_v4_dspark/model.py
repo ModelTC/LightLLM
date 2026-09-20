@@ -205,7 +205,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
 
         assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
         infer_state = self._create_inferstate(model_input)
-        infer_state.position_ids = model_input.b_seq_len - 1
+        infer_state.init_some_extra_state(self)
 
         hidden = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
         for layer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
