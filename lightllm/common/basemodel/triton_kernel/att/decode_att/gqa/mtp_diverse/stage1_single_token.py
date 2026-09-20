@@ -16,8 +16,9 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType, AutotuneLevel
 from lightllm.utils.device_utils import is_hopper
+from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len, get_triton_autotune_level
 
 
 def get_test_configs():
@@ -50,7 +51,94 @@ def get_static_key(q, k, block_batch):
 
 def get_run_key(q, max_kv_len):
     batch_size = q.shape[0]
+    # 正常查找使用调用方在 Graph 改写长度上限前保存的真实 KV 长度，不读取 GPU 张量或请求表容量。
+    max_kv_len = int(max_kv_len)
+    if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION) and get_triton_autotune_level() in [
+        AutotuneLevel.ADAPTIVE_AUTOTUNE,
+        AutotuneLevel.FORCE_AUTOTUNE,
+    ]:
+        max_kv_len = get_decode_attn_autotune_seq_len()
+    # 调优和正常查找统一按 512 token 向上分桶；实际 benchmark 保留环境变量指定的精确长度。
+    max_kv_len = (max_kv_len + 511) // 512 * 512
     return batch_size * 1000 * 1000 * 1000 + max_kv_len
+
+
+def rebuild_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    Req_to_tokens: torch.Tensor,
+    B_req_idx: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    b_mark_shared_group: torch.Tensor,
+    max_kv_len: int,
+    mid_out: torch.Tensor,
+    mid_out_logsumexp: torch.Tensor,
+    block_batch: int,
+    **kwargs,
+):
+    # Graph 初始化输入只有很短的 HOLD 请求，且每行独立成组，不能代表 MTP 的长 KV 共享计算。
+    # 仅在实际搜索前构造一次调优输入，开销不计入 benchmark；正式执行和捕获仍使用原始输入。
+    batch_size = q.shape[0]
+    max_kv_len = get_decode_attn_autotune_seq_len()
+    assert k.shape[0] == v.shape[0], "K/V caches must have the same number of tokens"
+    num_tokens = k.shape[0]
+    if num_tokens == 0:
+        raise ValueError("MTP decode autotuning requires a non-empty KV cache")
+    assert block_batch > 0, "block_batch must be positive"
+
+    # 以 block_batch 为代表性共享组大小，尾组允许不足；KV 长度不改变分组方式。
+    # 调优使用固定代表性分组，不从 HOLD 标记推断真实组大小，也不改动正常请求的动态分组。
+    group_size = block_batch
+    # 组内长度递增且组末长度等于目标长度，目标长度必须能保证组首至少有一个可见 KV。
+    if max_kv_len < min(batch_size, group_size):
+        raise ValueError("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN must be at least the largest MTP group size")
+    num_groups = (batch_size + group_size - 1) // group_size
+
+    # 按每组实际行数生成列表，再构造 CPU tensor 并转回原设备；尾组可能不足 group_size。
+    group_sizes = [min(group_size, batch_size - start) for start in range(0, batch_size, group_size)]
+    cpu_req_idx = torch.tensor(
+        [group_idx for group_idx, size in enumerate(group_sizes) for _ in range(size)],
+        dtype=B_req_idx.dtype,
+        device="cpu",
+    )
+    # 同组请求共享同一行 KV 映射；例如目标长度 16384、组大小 3，长度为 [16382, 16383, 16384]。
+    cpu_seq_len = torch.tensor(
+        [length for size in group_sizes for length in range(max_kv_len - size + 1, max_kv_len + 1)],
+        dtype=b_seq_len.dtype,
+        device="cpu",
+    )
+    # 只有组末行标记组大小并启动计算；其他行保持 0，由组末行一次处理整组 Q。
+    cpu_mark_shared_group = torch.tensor(
+        [size if offset == size - 1 else 0 for size in group_sizes for offset in range(size)],
+        dtype=b_mark_shared_group.dtype,
+        device="cpu",
+    )
+    B_req_idx = cpu_req_idx.to(device=B_req_idx.device)
+    b_seq_len = cpu_seq_len.to(device=b_seq_len.device)
+    b_mark_shared_group = cpu_mark_shared_group.to(device=b_mark_shared_group.device)
+
+    # 每组只需要一行已初始化的映射，不能扩展长度后读取原请求表中的未初始化条目。
+    # 取模将所有物理索引限制在已有 K/V 池内，避免为长请求重新分配完整缓存；物理容量不足时，
+    # 不同位置会复用 K/V，可能提高 GPU 缓存命中率，因此调优的访存特征仍受现有缓存容量影响。
+    Req_to_tokens = torch.arange(num_groups * max_kv_len, dtype=Req_to_tokens.dtype, device=Req_to_tokens.device)
+    Req_to_tokens = Req_to_tokens.remainder_(num_tokens).view(num_groups, max_kv_len)
+
+    # 保留 Q/K/V、block_batch 和中间缓冲区布局；stage1 的每个 program 可循环处理多个 KV 块。
+    # 选好配置后使用原始输入重新覆盖有效中间块，并返回对应的 BLOCK_N 供 stage2 归约。
+    return (
+        q,
+        k,
+        v,
+        Req_to_tokens,
+        B_req_idx,
+        b_seq_len,
+        b_mark_shared_group,
+        max_kv_len,
+        mid_out,
+        mid_out_logsumexp,
+        block_batch,
+    ), kwargs
 
 
 @triton.jit
@@ -174,11 +262,15 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
 
 
 @autotune(
-    kernel_name="_fwd_kernel_mtp_diverse_stage1_single_token:v2",
+    kernel_name="_fwd_kernel_mtp_diverse_stage1_single_token:v3",
+    kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
-    mutates_args=["mid_out", "mid_out_logsumexp"],
+    rebuild_input_func=rebuild_inputs,
+    # stage1 对有效中间块执行覆盖写，候选配置不会读取已有输出，正式执行也会重新覆盖真实请求的有效块。
+    # 不标记这两个大缓冲区，避免每个候选配置 benchmark 时反复 clone，增加显存峰值和拷贝开销。
+    # mutates_args=["mid_out", "mid_out_logsumexp"],
 )
 def mtp_diverse_stage1_single_token(
     q: torch.Tensor,
@@ -272,8 +364,6 @@ def mtp_diverse_stage1_single_token(
 
 
 if __name__ == "__main__":
-    from lightllm.utils.envs_utils import get_triton_autotune_level
-
     if get_triton_autotune_level() != 2:
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
@@ -283,7 +373,7 @@ if __name__ == "__main__":
     out_dtype = torch.bfloat16
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
-    decode_lengths = [32, 64, 128, 256, 512, 1024, 2048]
+    decode_lengths = [get_decode_attn_autotune_seq_len()]
 
     tp_world_size = 2
     q_head_num = 64 // tp_world_size
@@ -291,7 +381,7 @@ if __name__ == "__main__":
 
     gqa_group_size = q_head_num // k_head_num
 
-    Autotuner.start_autotune_warmup()
+    Autotuner.start_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
     # autotuing kernel
     for batch_size in batch_sizes:
         for length in decode_lengths:

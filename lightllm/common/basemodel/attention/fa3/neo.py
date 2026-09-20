@@ -61,8 +61,8 @@ class NeoFa3PrefillAttState(Fa3PrefillAttState):
             raise ValueError("Neo prefill requires b_image_token_end to describe image attention spans")
         o = flash_attn_with_kvcache_neo(
             q=q,
-            k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
-            v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
+            k_cache=k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
+            v_cache=v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.infer_state.b_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,

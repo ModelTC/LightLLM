@@ -24,7 +24,7 @@ LightLLM 启动时有两类端口：
 --------
 使用 ShmPortArgs 之前，必须先初始化以下环境信息（否则会直接抛错）：
   1. `set_unique_server_name(args)`
-     → 写入 `LIGHTLLM_UNIQUE_SERVICE_NAME_ID`，供 `get_unique_server_name()` 使用，用于拼 shm 名。
+     → 写入 `LIGHTLLM_UNIQUE_SERVICE_NAME_ID`，共享内存基础层会统一添加该服务前缀。
   2. `set_env_start_args(args)`
      → 写入 `LIGHTLLM_START_ARGS`，供 `get_env_start_args()` 使用，用于读取用户已设置端口、
        以及 visual_dp / audio_dp 等分配参数。
@@ -56,9 +56,9 @@ from typing import Dict, List, Set, Union
 
 from filelock import FileLock
 
-from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.shm_utils import create_or_link_shm
+from lightllm.utils.shm_utils import create_or_link_shm, get_service_shm_name
 
 logger = init_logger(__name__)
 
@@ -71,21 +71,15 @@ class ShmPortArgs:
     _instance: "ShmPortArgs | None" = None
 
     def __init__(self, create: bool = False):
-        uni = get_unique_server_name()
-        if not uni:
-            raise RuntimeError(
-                "LIGHTLLM_UNIQUE_SERVICE_NAME_ID is unset; " "call set_unique_server_name(args) before ShmPortArgs"
-            )
         if "LIGHTLLM_START_ARGS" not in os.environ:
             raise RuntimeError("LIGHTLLM_START_ARGS is unset; call set_env_start_args(args) before ShmPortArgs")
 
-        self._shm_name = f"{uni}_shm_port_args"
-        self._lock = FileLock(f"/tmp/{self._shm_name}.lock")
+        self._shm_name = "shm_port_args"
+        self._lock = FileLock(f"/tmp/{get_service_shm_name(self._shm_name)}.lock")
         self.shm = create_or_link_shm(
             self._shm_name,
             self._SHM_SIZE,
             force_mode="create" if create else "link",
-            auto_cleanup=create,
         )
         if create:
             self._save({})

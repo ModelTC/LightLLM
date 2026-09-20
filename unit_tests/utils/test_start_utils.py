@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from lightllm.utils import start_utils
@@ -48,6 +50,8 @@ class FakeProcess:
 def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypatch):
     class FakePipeReader:
         def recv(self):
+            # 子进程应在等待初始化结果之前就进入 manager，保证此时 Ctrl-C 可以清理它们。
+            assert len(process_manager.processes) == 2
             return "init ok"
 
     class FakeMpProcess:
@@ -85,7 +89,7 @@ def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypa
     }
 
 
-def test_register_process_tree_adds_recursive_descendants():
+def test_register_process_tree_adds_recursive_descendants(monkeypatch):
     descendants = [
         FakeProcess(pid=1001, name="lightllm::model_infer"),
         FakeProcess(pid=1002, name="lightllm::pd_manager"),
@@ -93,6 +97,7 @@ def test_register_process_tree_adds_recursive_descendants():
     ]
     router_process = FakeProcess(pid=1000, children=descendants)
     process_manager = start_utils.SubmoduleManager()
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
 
     process_manager.register_process_tree(router_process)
 
@@ -104,12 +109,13 @@ def test_register_process_tree_adds_recursive_descendants():
     }
 
 
-def test_register_process_tree_filters_short_lived_helper_processes():
+def test_register_process_tree_filters_short_lived_helper_processes(monkeypatch):
     model_process = FakeProcess(pid=1001, name="lightllm::model_infer")
     compile_worker = FakeProcess(pid=1002, name="python")
     pd_process = FakeProcess(pid=1003, name="lightllm::decode_trans")
     router_process = FakeProcess(pid=1000, children=[model_process, compile_worker, pd_process])
     process_manager = start_utils.SubmoduleManager()
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
 
     process_manager.register_process_tree(router_process)
 
@@ -161,6 +167,28 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     assert http_server_process.sent_signals == [start_utils.signal.SIGTERM]
     assert http_server_process.wait_timeouts == [60]
     assert terminate_calls == [True]
+
+
+def test_setup_exit_controller_starts_cleanup_process_without_registering_signals(monkeypatch):
+    process_manager = start_utils.SubmoduleManager()
+    cleanup_process_calls = []
+    registered_handlers = {}
+    monkeypatch.setattr(start_utils, "get_unique_server_name", lambda: "service_0")
+    monkeypatch.setattr(
+        start_utils,
+        "start_launcher_shm_cleanup_process",
+        lambda service_name: cleanup_process_calls.append(service_name),
+    )
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: registered_handlers.__setitem__(sig, handler),
+    )
+
+    process_manager.setup_exit_controller()
+
+    assert cleanup_process_calls == ["service_0"]
+    assert registered_handlers == {}
 
 
 def test_supervisor_fails_when_http_server_exits(monkeypatch):

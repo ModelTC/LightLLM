@@ -50,7 +50,12 @@ class TensorMetadata(TypedDict):
 
 
 def create_shared_memory(size: int, name: str):
-    """Create shared memory for weight transfer. If already exists, attach to it."""
+    """Create shared memory for weight transfer. If already exists, attach to it.
+
+    ``name`` is part of the sender/receiver transfer protocol and may be created
+    by an external RL process, so it is already a complete name rather than a
+    LightLLM service-local logical name.
+    """
     try:
         shm = shared_memory.SharedMemory(name=name, create=True, size=size)
     except FileExistsError:
@@ -60,7 +65,7 @@ def create_shared_memory(size: int, name: str):
 
 
 def rebuild_shared_memory(name: str, size: int, dtype=torch.uint8):
-    """Rebuild tensor from shared memory."""
+    """Rebuild tensor from an external sender's complete shared-memory name."""
     shm = shared_memory.SharedMemory(name=name)
     tensor = torch.frombuffer(shm.buf[:size], dtype=dtype)
 

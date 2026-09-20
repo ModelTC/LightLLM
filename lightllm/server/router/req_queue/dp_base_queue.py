@@ -18,10 +18,6 @@ class DpQueue:
         self.inner_queues: List[BaseQueue] = [
             base_queue_class(args, router, dp_index, dp_size_in_node) for dp_index in range(self.dp_size_in_node)
         ]
-        # 在调度这放松，在推理时约束。
-        # 避免prefill 模式下的情况下，推理完成了，调度没及时获取信息，导致调度bs 过小
-        for queue in self.inner_queues:
-            queue.batch_max_tokens = int(args.batch_max_tokens * 2)
         self.dp_balancer = get_dp_balancer(args, dp_size_in_node, self.inner_queues)
         self.reqs_waiting_for_dp_index: List[List[Req]] = []
         return
@@ -60,7 +56,16 @@ class DpQueue:
         suggested_dp_index = req_group[0].sample_params.suggested_dp_index
         if suggested_dp_index >= self.dp_size_in_node or suggested_dp_index < 0:
             # 同一个组的，要分配在同一个 dp 上
-            self.reqs_waiting_for_dp_index.append(req_group)
+            if req_group[0].sample_params.pd_high_priority_request:
+                # 高优先级请求组插在第一个普通请求组之前，同时保持高优先级组之间的 FIFO 顺序。
+                first_normal_group_index = len(self.reqs_waiting_for_dp_index)
+                for index, waiting_group in enumerate(self.reqs_waiting_for_dp_index):
+                    if not waiting_group[0].sample_params.pd_high_priority_request:
+                        first_normal_group_index = index
+                        break
+                self.reqs_waiting_for_dp_index.insert(first_normal_group_index, req_group)
+            else:
+                self.reqs_waiting_for_dp_index.append(req_group)
         else:
             self.inner_queues[suggested_dp_index].extend(req_group)
         return

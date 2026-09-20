@@ -1,12 +1,10 @@
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_5_dflash.layer_weights.pre_and_post_layer_weight import (
     Qwen35DFlashPreAndPostLayerWeight,
 )
 
 
-@DraftModelRegistry(model_type=("qwen3_5", "qwen3_5_text"), spec_modes="dflash")
 class Qwen3_5DFlashModel(Qwen3DFlashModel):
     """Adapter for a Qwen3 DFlash checkpoint paired with a Qwen3.5 target."""
 

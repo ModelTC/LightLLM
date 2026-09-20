@@ -64,7 +64,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.load_way = args.load_way
         self.max_total_token_num = args.max_total_token_num
         # 存储在共享内存中的真实token容量数据
-        self.shm_max_total_token_num = SharedInt(f"{get_unique_server_name()}_shm_max_total_token_num")
+        self.shm_max_total_token_num = SharedInt("shm_max_total_token_num")
         self.shm_req_manager = ShmReqManager()
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
@@ -72,7 +72,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.radix_cache_client = None
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
-        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
+        self.shared_token_load = TokenLoad("shared_token_load", self.dp_size_in_node)
         for dp_index in range(self.dp_size_in_node):
             self.shared_token_load.set_estimated_peak_token_count(0, dp_index)
             self.shared_token_load.set_current_load(0.0, dp_index)
@@ -197,7 +197,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
         if not self.args.disable_dynamic_prompt_cache:
             self.radix_cache_client = RadixCacheReadOnlyClient(
-                get_unique_server_name(),
                 self.max_total_token_num,
                 node_world_size=self.node_world_size,
                 dp_world_size=self.dp_world_size,
@@ -314,6 +313,11 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
     async def _add_batch(self, batch: Batch):
         # 添加新请求
+        # 请求被 Router 调度为新 batch 并准备下发到推理系统时记录时间，HTTP server
+        # 以此判断请求是否在 Router 队列中等待过久；不需要推理进程额外写共享字段。
+        infer_start_time = time.monotonic()
+        for req in batch.reqs:
+            req.infer_start_time = infer_start_time
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.001)
@@ -416,10 +420,12 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
 
     def _add_req(self, group_req_indexes: GroupReqIndexes):
         req_group = []
+        router_arrival_time = time.monotonic()
         for req_index in group_req_indexes.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.multimodal_params = group_req_indexes.multimodal_params
             req.start_time = group_req_indexes.time_mark
+            req.router_arrival_time = router_arrival_time
             # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
             # 防止反复发送abort命令给推理进程
             req._router_aborted = False

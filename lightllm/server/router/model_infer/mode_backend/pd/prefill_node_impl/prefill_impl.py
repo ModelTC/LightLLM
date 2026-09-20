@@ -2,7 +2,7 @@ import torch.multiprocessing as mp
 import random
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.pd_io_struct import PDChunckedTransTask
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -32,6 +32,19 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         ans_list: List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
+
+            # P 节点的推理请求收到 abort 后，主动通知 KV 传输层停止该请求
+            # 尚未完成的传输任务，避免只能等待 D 节点上报错误或传输超时。
+            pd_abort_req_send_count = getattr(req_obj, "pd_abort_req_send_count", 0)
+            if (
+                self.is_master_in_dp
+                and req_obj.infer_aborted
+                and req_obj.pd_task_num != 0
+                and pd_abort_req_send_count < 6
+            ):
+                self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
+                req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
+
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
             if prefill_finished:
                 # 等待所有传输任务都已经完成。
@@ -57,6 +70,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         assert req_obj.cur_kv_len <= req_obj.shm_req.input_len
         input_len = req_obj.shm_req.input_len
         page_size = self.args.pd_kv_page_size
+        assert page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
         prefill_finished = req_obj.cur_kv_len == input_len
         trans_task_list: List[PDChunckedTransTask] = []
         while req_obj.pd_trans_kv_start_index < req_obj.cur_kv_len:
@@ -74,13 +88,14 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 break
 
         if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
-            if g_infer_context.is_linear_att_mixed_model:
+            if g_infer_context.is_hybrid_att_model:
+                # 混合注意力模型除 KV 外，还需传输 prefill 完成时的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
                 trans_task_list.append(
                     self._create_pd_trans_task(
                         req_obj=req_obj,
                         kv_start_index=input_len,
                         kv_end_index=input_len,
-                        page_kind="linear_att_state",
+                        page_kind="att_state",
                     )
                 )
             trans_task_list[-1].first_gen_token_id = next_token_id
@@ -114,7 +129,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 .tolist()
             )
             req_idx = None
-        elif page_kind == "linear_att_state":
+        elif page_kind == "att_state":
             mem_indexes = []
             req_idx = req_obj.req_idx
         else:

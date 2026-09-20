@@ -20,7 +20,7 @@ from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
-from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
+from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
@@ -247,6 +247,13 @@ async def _pd_process_generate(
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
+    except ServerBusyError as e:
+        group_request_id = sampling_params.group_request_id
+        logger.warning(f"pd node rejected request {group_request_id}: {e.message}")
+        try:
+            await pd_upload_websocket.send(pickle.dumps((ObjType.PD_UPLOAD_SERVER_BUSY, group_request_id, e.message)))
+        except Exception:
+            logger.exception(f"report pd node request rejection failed, group_request_id: {group_request_id}")
     except asyncio.CancelledError:
         # PD master 主动 abort 或连接断开清理任务时会走取消路径，不需要反向重复上报。
         pass

@@ -23,8 +23,6 @@ class BaseQueue:
         # 在极端情况下减少，在非特定模式下，get_fixed_kv_len() 返回的都是
         # 0， 不会有任何影响。
         self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
-        assert args.batch_max_tokens is not None
-        self.batch_max_tokens = args.batch_max_tokens
         self.running_max_req_size = args.running_max_req_size  # Maximum number of concurrent requests
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
@@ -83,7 +81,22 @@ class BaseQueue:
     def extend(self, req_group: List[Req]):
         for req in req_group:
             req.sample_params.suggested_dp_index = self.dp_index
-        self.waiting_req_list.extend(req_group)
+        # PD 高优先级请求应排在普通请求之前，但高优先级请求之间仍按到达顺序排队，
+        # 避免后到请求反复插到队头而阻塞先到的高优先级请求。
+        if req_group and req_group[0].sample_params.pd_high_priority_request:
+            first_normal_req_index = len(self.waiting_req_list)
+            for index, waiting_req in enumerate(self.waiting_req_list):
+                if not waiting_req.sample_params.pd_high_priority_request:
+                    first_normal_req_index = index
+                    break
+            # req_group 可能包含同一请求组的多个 Req，整体插入可以保持组内顺序。
+            self.waiting_req_list = (
+                self.waiting_req_list[:first_normal_req_index]
+                + req_group
+                + self.waiting_req_list[first_normal_req_index:]
+            )
+        else:
+            self.waiting_req_list.extend(req_group)
         return
 
     def get_wait_req_num(self):

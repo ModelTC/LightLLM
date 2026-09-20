@@ -5,7 +5,6 @@ from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalP
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
@@ -99,7 +98,6 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry(["qwen2_vl", "qwen2_5_vl"], is_multimodal=True)
 class Qwen2VLTpPartModel(Qwen2TpPartModel):
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer

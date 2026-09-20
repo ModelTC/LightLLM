@@ -19,7 +19,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.config_utils import (
     has_audio_module,
     has_vision_module,
-    is_linear_att_mixed_model,
+    is_hybrid_att_model,
     auto_set_max_req_total_len,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
@@ -35,6 +35,15 @@ def _set_envs_and_config(args: StartArgs):
 
 def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
+
+    if args.target_vocab_topk_sampling is not None:
+        # 在加载模型和启动子进程前拒绝该组合，避免候选裁剪使输出约束失效。
+        # 数值冲突与后续兼容方案见 LlamaPostLayerInfer._target_lm_head_and_gather。
+        assert args.output_constraint_mode == "none" and not args.first_token_constraint_mode, (
+            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode outlines/xgrammar "
+            "or --first_token_constraint_mode: candidate pruning can cause forbidden tokens to be selected. "
+            "Disable --target_vocab_topk_sampling when using output constraints."
+        )
 
     if args.mtp_mode is not None:
         assert (
@@ -84,14 +93,15 @@ def _launch_subprocesses(args: StartArgs):
 
     # 调度参数的自动设置, 人工设置则听人工的
     if args.router_token_ratio is None:
-        if args.run_mode in ["normal"]:
+        if args.run_mode in ["normal", "decode"]:
             args.router_token_ratio = 0.85
         else:
-            # pd 分离模式下，不开启高级调度
+            # PD 分离模式下，prefill 节点不开启高级调度
             args.router_token_ratio = 0.0
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+        assert args.page_size == 1, "diverse mode only supports page_size == 1"
 
     # performance_mode 参数处理
     if args.performance_mode == "personal":
@@ -163,6 +173,19 @@ def _launch_subprocesses(args: StartArgs):
                 f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
             )
 
+    if args.page_size < 1:
+        raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
+    if args.run_mode in ("prefill", "decode"):
+        assert args.pd_kv_page_size % args.page_size == 0, "--pd_kv_page_size must be divisible by --page_size"
+
+    if args.page_size > 1:
+        # hybrid radix cache 的共享边界按 linear_att_hash_page_size 划分。只有该
+        # 边界同时落在模型 KV 页面边界上，hold_kv_len 才能保持统一的分页语义。
+        is_hybrid_model = is_hybrid_att_model(args.model_dir)
+        if is_hybrid_model and args.linear_att_hash_page_size % args.page_size != 0:
+            raise ValueError(
+                "--linear_att_hash_page_size must be divisible by --page_size when paged KV cache is enabled"
+            )
     # mtp params check
     if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:
@@ -256,23 +279,27 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
-    # linear att cache 参数自动设置
+    # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
-        # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
+        # 小页池大小只对 hybrid 模型生效。
         default_cache_size = args.running_max_req_size * 2
         dp_size_in_node = max(1, args.dp // args.nnodes)
         per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
         args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
 
     if args.run_mode == "decode":
-        # PD Decode 节点只接收 prompt 末尾位置的 linear attention state，不具备
+        # PD Decode 节点只接收 prompt 末尾位置的 hybrid checkpoint，不具备
         # 中间大页边界对应的 state。因此 Decode 节点必须使用默认值关闭大页功能，
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
+    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    if args.enable_cpu_cache:
+        assert (
+            args.cpu_cache_token_page_size % args.page_size == 0
+        ), "--cpu_cache_token_page_size must be divisible by --page_size"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -319,6 +346,16 @@ def _launch_subprocesses(args: StartArgs):
 
     auto_configure_allreduce_flags_from_args(args)
 
+    # CUDA Graph 只需要覆盖调度器允许同时运行的请求数。配置得更大不会被真实请求使用，
+    # 反而会捕获无效的大 batch Graph 并额外占用显存，因此在全部参数调整完成后收敛到合法上限。
+    # 关闭 CUDA Graph 时该参数不生效，保留用户原值。
+    if not args.disable_cudagraph and args.graph_max_batch_size > args.running_max_req_size:
+        logger.warning(
+            f"graph_max_batch_size {args.graph_max_batch_size} exceeds running_max_req_size "
+            f"{args.running_max_req_size}; set graph_max_batch_size to {args.running_max_req_size}."
+        )
+        args.graph_max_batch_size = args.running_max_req_size
+
     # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
     ports_to_check = [args.port]
     if args.dp == 1 and args.nnodes > 1:
@@ -328,6 +365,7 @@ def _launch_subprocesses(args: StartArgs):
     validate_ports(ports_to_check)
 
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
     send_and_receive_node_ip(args)
@@ -470,6 +508,7 @@ def pd_master_start(args: StartArgs):
 
     validate_ports([args.port])
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -535,6 +574,7 @@ def visual_only_start(args):
         ports_to_check.append(args.visual_rpyc_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
@@ -562,6 +602,7 @@ def config_server_start(args):
         ports_to_check.append(args.config_server_visual_redis_port)
     validate_ports(ports_to_check)
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 

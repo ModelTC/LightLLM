@@ -56,37 +56,51 @@ def test_unavailable_neo_interface_provides_source_install_instructions(monkeypa
     assert "--llm_prefill_att_backend triton" in message
 
 
-def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypatch):
-    image_ends = torch.tensor([4, 4, 0], dtype=torch.int32)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
+@pytest.mark.parametrize("page_size", [1, 16, 64])
+def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypatch, page_size):
+    def indices(values):
+        return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+    image_ends = indices([2 * page_size, 2 * page_size, 0])
+    # Each request uses two nonadjacent physical pages, in a different order.
+    req_to_token_indexs = indices(
+        [
+            list(range(2 * page_size, 3 * page_size)) + list(range(page_size)),
+            list(range(3 * page_size, 4 * page_size)) + list(range(page_size, 2 * page_size)),
+        ]
+    )
     infer_state = SimpleNamespace(
         batch_size=2,
-        max_kv_seq_len=4,
+        max_kv_seq_len=2 * page_size,
         max_q_seq_len=2,
-        input_ids=torch.zeros(3, dtype=torch.int64),
-        b_req_idx=torch.tensor([1, 0], dtype=torch.int32),
-        b_seq_len=torch.tensor([4, 3], dtype=torch.int32),
-        b1_cu_q_seq_len=torch.tensor([0, 2, 3], dtype=torch.int64),
-        b1_cu_kv_seq_len=torch.tensor([0, 4, 7], dtype=torch.int64),
+        input_ids=torch.zeros(3, dtype=torch.int64, device="cuda"),
+        b_req_idx=indices([1, 0]),
+        b_seq_len=indices([2 * page_size, 2 * page_size - 1]),
+        b1_cu_q_seq_len=indices([0, 2, 3]).long(),
+        b1_cu_kv_seq_len=indices([0, 2 * page_size, 4 * page_size - 1]).long(),
         b_image_token_end=image_ends,
-        req_manager=SimpleNamespace(req_to_token_indexs=torch.tensor([[5, 1, 7, 0], [2, 6, 3, 4]], dtype=torch.int32)),
+        req_manager=SimpleNamespace(req_to_token_indexs=req_to_token_indexs),
     )
-    backend = SimpleNamespace(uses_causal_attention=lambda: True)
+    backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
     state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
     state.init_state()
 
-    q = torch.randn(3, 2, 16)
-    k = torch.randn(8, 1, 16)
+    q = torch.randn(3, 2, 16, device="cuda")
+    k = torch.randn(4 * page_size, 1, 16, device="cuda")
     v = torch.randn_like(k)
     output = torch.empty_like(q)
 
     def neo_attention(*, image_token_end, **kwargs):
         assert image_token_end is image_ends
         assert kwargs["q"] is q
-        torch.testing.assert_close(kwargs["k_cache"], k.unsqueeze(1))
-        torch.testing.assert_close(kwargs["v_cache"], v.unsqueeze(1))
-        torch.testing.assert_close(kwargs["page_table"], torch.tensor([[2, 6, 3, 4], [5, 1, 7, 0]], dtype=torch.int32))
-        torch.testing.assert_close(kwargs["cu_seqlens_q"], torch.tensor([0, 2, 3], dtype=torch.int32))
-        torch.testing.assert_close(kwargs["cu_seqlens_k_new"], torch.tensor([0, 4, 7], dtype=torch.int32))
+        assert kwargs["k_cache"].shape == kwargs["v_cache"].shape == (4, page_size, 1, 16)
+        torch.testing.assert_close(kwargs["page_table"], indices([[3, 1], [2, 0]]))
+        token_indices = req_to_token_indexs[infer_state.b_req_idx]
+        torch.testing.assert_close(kwargs["k_cache"][kwargs["page_table"]].flatten(1, 2), k[token_indices])
+        torch.testing.assert_close(kwargs["v_cache"][kwargs["page_table"]].flatten(1, 2), v[token_indices])
+        torch.testing.assert_close(kwargs["cu_seqlens_q"], indices([0, 2, 3]))
+        torch.testing.assert_close(kwargs["cu_seqlens_k_new"], indices([0, 2 * page_size, 4 * page_size - 1]))
         assert kwargs["cache_seqlens"] is infer_state.b_seq_len
         assert kwargs["max_seqlen_q"] == 2
         assert kwargs["causal"] is True

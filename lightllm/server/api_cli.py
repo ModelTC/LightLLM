@@ -35,6 +35,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
+        "--disable_delay_response_start",
+        action="store_true",
+        help=(
+            "Send streaming response status and headers immediately instead of waiting until the first "
+            "response chunk is ready."
+        ),
+    )
+    parser.add_argument(
         "--hypercorn_config",
         type=str,
         default=None,
@@ -69,9 +77,27 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--disable_pd_master_decode_capacity_limit",
+        "--disable_pd_node_self_request_limit",
         action="store_true",
-        help="Disable PD master admission control based on the total capacity of registered decode nodes.",
+        help=(
+            "Disable PD Master-managed resource wait limiting and retries for requests rejected as server busy. "
+            "Configure this option only on PD Master. By default, PD Master sends timeout details to P/D nodes, "
+            "which only enforce the received values, and retries busy requests."
+        ),
+    )
+    parser.add_argument(
+        "--disable_pd_cache_high_priority",
+        action="store_true",
+        help=(
+            "Disable PD Master's high-priority scheduling for first-segment requests with a fresh, high "
+            "cache-hit estimate. Keep this policy enabled when a Prefill node's combined GPU, CPU, and disk "
+            "cache is small relative to its workload: under high load, ordinary scheduling can evict reusable "
+            "cache entries before they are consumed and significantly reduce Prefill efficiency. The policy "
+            "lets eligible cache-hit requests run earlier, but may increase TTFT for ordinary requests. "
+            "Consider disabling it only when scheduling fairness or ordinary-request latency is more important, "
+            "or when cache capacity is sufficient and cache churn is low. Segmented continuation requests remain "
+            "high priority. Configure this option only on PD Master. The policy is enabled by default."
+        ),
     )
     parser.add_argument(
         "--pd_trans_mode",
@@ -352,6 +378,21 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
+    vocab_topk_choices = [2, 8, 16, 32, 64, 128, 256, 512]
+    parser.add_argument(
+        "--target_vocab_topk_sampling",
+        type=int,
+        choices=vocab_topk_choices,
+        default=None,
+        help="Top-k communication width per TP rank for target-model logits; disabled by default.",
+    )
+    parser.add_argument(
+        "--draft_vocab_topk_sampling",
+        type=int,
+        choices=vocab_topk_choices,
+        default=None,
+        help="Top-k candidate count per TP rank for draft-model output; disabled by default.",
+    )
 
     parser.add_argument(
         "--output_constraint_mode",
@@ -443,6 +484,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 otherwise: flashinfer > fa3 > triton)
                 for hybrid linear-attention models, the second value selects the linear-attention backend
                 (currently triton only); when omitted, it defaults to auto""",
+    )
+    parser.add_argument(
+        "--page_size",
+        type=int,
+        default=1,
+        help="""KV cache page size in tokens. Values greater than 1 make each request reserve
+        page-aligned contiguous KV slots and make paged attention/cache reuse operate on full pages.""",
     )
     parser.add_argument(
         "--vit_att_backend",

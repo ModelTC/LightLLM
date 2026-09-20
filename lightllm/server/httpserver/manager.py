@@ -36,9 +36,13 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
-from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    InvalidRequestError,
+    PDPrefillNodeStopGenToken,
+    ServerBusyError,
+)
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -57,7 +61,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
-        self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 2)
+        self._shm_lock_pool = AtomicShmArrayLock("lightllm_resource_lock", 2)
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
         self._run_reqs_count_lock = AsyncLock(self._shm_lock_pool.get_lock_context(1))
         self.node_rank = args.node_rank
@@ -124,19 +128,19 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
 
         # Timemark of the latest successful inference, used by passive /health checks.
-        self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
+        self.latest_success_infer_time_mark = SharedInt("latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
 
         self.rl_controller: Optional[HttpRlController] = HttpRlController(self) if args.enable_rl else None
 
-        self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
+        self.run_reqs_count_mark = SharedInt("run_reqs_count_mark")
         self.run_reqs_count_mark.set_value(0)
 
         # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
         # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
         # 会触发整个系统崩溃，所以httpserver需要知道真实的 max_total_token_num的数据，用于提前拦截非法请求等参数。
         # router 进程会在启动后向这个共享内存写入正确的max_total_token_num 参数，用于后续的请求控制。
-        self.shm_max_total_token_num = SharedInt(f"{get_unique_server_name()}_shm_max_total_token_num")
+        self.shm_max_total_token_num = SharedInt("shm_max_total_token_num")
         return
 
     def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
@@ -422,22 +426,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 #
                 # 这样会缩小 Prefill 节点自身健康检查的覆盖范围：prompt encode、资源上报及 Decode
                 # 资源等待阶段不再计入本地推理健康状态。资源分配异常应由 PD master 侧的运行请求计数、
-                # Decode 节点健康检查和等待资源的超时逻辑负责监控，不能依赖 Prefill 推理计数判断。
+                # Decode 节点健康检查和本地 shm_req 等待超时负责监控，不能依赖 Prefill 推理计数判断。
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储
-            alloced_req_indexes = []
-            while len(alloced_req_indexes) < sampling_params.n:
-                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                sleep_time = 0.1
-                while alloc_req_index is None:
-                    await asyncio.sleep(sleep_time)
-                    sleep_time *= 1.1
-                    sleep_time = min(1, sleep_time)
-
-                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                alloced_req_indexes.append(alloc_req_index)
+            # 申请资源并存储。PD 高优先级请求仍以更短的间隔重试；资源等待上限
+            # 完全由 PD Master 下发，与请求优先级无关。
+            alloced_req_indexes = await self._alloc_shm_req_indexes(
+                sampling_params.n,
+                pd_high_priority_request=sampling_params.pd_high_priority_request,
+                pd_node_resource_wait_timeout_seconds=sampling_params.pd_node_resource_wait_timeout_seconds,
+            )
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
                 req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
@@ -543,6 +542,52 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         return image_tokens, audio_tokens
 
+    async def _alloc_shm_req_indexes(
+        self,
+        req_num: int,
+        pd_high_priority_request: bool = False,
+        pd_node_resource_wait_timeout_seconds: int = -1,
+    ) -> List[int]:
+        """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
+
+        PD Master 下发非负值时启用资源等待超时，负数表示无限等待。多机 TP slave
+        不独立限流，由 master 节点统一判断。请求优先级只影响重试间隔，不影响超时值。
+        """
+        alloced_req_indexes = []
+        alloc_timeout_seconds = None
+        # 多机 TP 各 rank 必须保持请求执行一致；slave 若按本地计时独立超时退出，可能导致
+        # master/其他 rank 继续进入 collective 而发生状态不一致或阻塞，因此超时由 master 统一决策。
+        if not self.is_multinode_tp_slave and pd_node_resource_wait_timeout_seconds >= 0:
+            alloc_timeout_seconds = pd_node_resource_wait_timeout_seconds
+        alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
+
+        try:
+            while len(alloced_req_indexes) < req_num:
+                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
+                sleep_time_factor = 0.2 if pd_high_priority_request else 1
+                sleep_time = 0.1
+                while alloc_req_index is None:
+                    if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
+                        logger.warning(
+                            f"{self.args.run_mode} node shm_req allocation timed out after "
+                            f"{alloc_timeout_seconds} seconds"
+                        )
+                        raise ServerBusyError(
+                            f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
+                            f"within {alloc_timeout_seconds} seconds"
+                        )
+                    await asyncio.sleep(sleep_time * sleep_time_factor)
+                    sleep_time = min(1, sleep_time * 1.1)
+                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                alloced_req_indexes.append(alloc_req_index)
+            return alloced_req_indexes
+        except BaseException:
+            # 批量申请中途失败时，释放已申请的索引，避免 shm_req 资源泄漏。
+            for req_index in alloced_req_indexes:
+                await self.shm_req_manager.async_release_req_index(req_index)
+            raise
+
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
@@ -564,10 +609,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # TODO: automatically calculate the average character length per token
             max_prompt_chars = self.max_req_total_len * 8
             if len(prompt) > max_prompt_chars:
-                raise ValueError(
+                raise InvalidRequestError(
                     f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
                     f"the request is rejected before tokenization."
                 )
+
             if self.enable_multimodal:
                 multimodal_params.verify_resource_limits()
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
@@ -598,7 +644,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
-                    raise ValueError("prompt List[int] format contain id > vocab_size")
+                    raise InvalidRequestError("The input contains token IDs outside the model vocabulary.")
             else:
                 if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
                     multimodal_params.verify_resource_limits()
@@ -614,18 +660,28 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     )
                 return prompt
         else:
-            raise ValueError(f"prompt format error, get type{type(prompt)}")
+            raise InvalidRequestError("The input prompt must be a string or a list of token IDs.")
         return
 
     def get_real_supported_max_req_total_len(self):
         # 得到系统真正能支持的最大长度，同时收到启动参数中模型支持长度的限制，也收到token容量的限制。
-        return min(self.shm_max_total_token_num.get_value() - 36, self.max_req_total_len)
+        # MTP overlap 模式下，达到最大输出长度时，可能仍有部分 accepted token 已提交但停止状态尚未生效；
+        # 同时下一轮 overlap 还需要为 target verify 和 draft token 保留 KV 位置。因此按三倍
+        # (mtp_step + 1) 预留额外 token，避免请求逻辑长度贴近总容量时发生 KV 申请失败。
+        mtp_overlap_token_reserve = 3 * (self.args.mtp_step + 1)
+        # 调度器会把单请求的 KV 资源向上扩展到 page_size 的整数倍。额外预留一个页面，
+        # 可以在输入阶段截断物理容量不足的请求，避免请求进入等待队列后始终无法被调度。
+        return min(
+            self.shm_max_total_token_num.get_value() - 36 - mtp_overlap_token_reserve - self.args.page_size,
+            self.max_req_total_len,
+        )
 
     async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
         if not prompt_ids:
-            raise ValueError("prompt_ids is empty")
+            raise InvalidRequestError("The input prompt must not be empty.")
         prompt_tokens = len(prompt_ids)
-        # 这里 -36 是保留一些不可预知的边界余量，防止系统出错
+        # -36 用于保留通用边界余量，MTP overlap 所需的额外 KV 窗口由
+        # get_real_supported_max_req_total_len 单独扣除。
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
         if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:
@@ -640,16 +696,22 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 )
                 sampling_params.max_new_tokens = new_max_new_tokens
             else:
-                raise ValueError(
-                    f"the input prompt token len {prompt_tokens} + max_new_tokens \
-                        {sampling_params.max_new_tokens} > {real_supported_max_req_total_len}"
+                raise InvalidRequestError(
+                    f"This model's maximum context length is {real_supported_max_req_total_len} tokens. "
+                    f"However, you requested {sampling_params.max_new_tokens} output tokens and your prompt "
+                    f"contains {prompt_tokens} input tokens, for a total of "
+                    f"{prompt_tokens + sampling_params.max_new_tokens} tokens. Please reduce the length of "
+                    f"the input prompt or the number of requested output tokens."
                 )
 
         # last repaired
         req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
-            raise ValueError(
-                f"the req total len (input len + output len) is too long > max_req_total_len:{self.max_req_total_len}"
+            raise InvalidRequestError(
+                f"This model's maximum context length is {self.max_req_total_len} tokens. "
+                f"However, you requested {sampling_params.max_new_tokens} output tokens and your prompt "
+                f"contains {prompt_tokens} input tokens, for a total of {req_total_len} tokens. "
+                f"Please reduce the length of the input prompt or the number of requested output tokens."
             )
 
         return prompt_ids
@@ -735,6 +797,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await asyncio.wait_for(event.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
+
+            # 多机 TP slave 只跟随 master 执行，不能独立判定超时并中止请求。
+            if is_first_token and not self.is_multinode_tp_slave and req_status.has_timed_out_waiting_for_inference():
+                resource_wait_timeout_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
+                raise ServerBusyError(
+                    f"PD {self.args.run_mode} node is busy: request did not enter inference "
+                    f"within {resource_wait_timeout_seconds} seconds"
+                )
 
             if request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
@@ -1042,6 +1112,22 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+
+    def has_timed_out_waiting_for_inference(self) -> bool:
+        """按 PD Master 下发的资源等待上限判断请求是否在 Router 中超时。"""
+        current_time = time.monotonic()
+        reqs = self.group_req_objs.shm_req_objs
+        # 组内任一请求已经进入新 batch，说明整个请求组已经开始执行，不能再按 Router 等待超时清理。
+        if any(req.infer_start_time > 0 for req in reqs):
+            return False
+        timeout_seconds = reqs[0].sample_params.pd_node_resource_wait_timeout_seconds
+        if timeout_seconds < 0:
+            return False
+
+        for req in reqs:
+            if req.router_arrival_time > 0 and current_time - req.router_arrival_time >= timeout_seconds:
+                return True
+        return False
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:

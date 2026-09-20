@@ -50,6 +50,16 @@ def get_env_start_args():
 
 
 @lru_cache(maxsize=None)
+def get_model_infer_recursion_limit() -> int:
+    return int(os.getenv("LIGHTLLM_MODEL_INFER_RECURSION_LIMIT", "4000"))
+
+
+@lru_cache(maxsize=None)
+def get_pd_master_recursion_limit() -> int:
+    return int(os.getenv("LIGHTLLM_PD_MASTER_RECURSION_LIMIT", "4000"))
+
+
+@lru_cache(maxsize=None)
 def get_llm_data_type() -> torch.dtype:
     data_type: str = get_env_start_args().data_type
     if data_type in ["fp16", "float16"]:
@@ -162,15 +172,12 @@ def get_triton_autotune_level():
 
 
 @lru_cache(maxsize=None)
-def enable_full_att_decode_tune() -> bool:
-    """
-    Whether to run FA3 full-attention decode num_splits warmup/autotune at model init.
-
-    Env: ENABLE_FULL_ATT_DECODE_TUNE
-      - ON / TRUE / 1: enable
-      - otherwise (default False): skip this operator-specific tuning
-    """
-    return enable_env_vars("ENABLE_FULL_ATT_DECODE_TUNE")
+def get_decode_attn_autotune_seq_len() -> int:
+    """Decode attention 调优的代表性 KV 长度（token），默认 32768；调优时的 run key 按该长度分桶。"""
+    seq_len = int(os.getenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", "32768"))
+    if seq_len <= 0:
+        raise ValueError("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN must be positive")
+    return seq_len
 
 
 g_model_init_done = False
@@ -307,8 +314,33 @@ def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
 
 
 @lru_cache(maxsize=None)
-def get_pd_split_max_new_tokens() -> int:
-    return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))
+def get_pd_node_resource_wait_timeout_seconds() -> int:
+    """P/D 节点的资源等待超时，单位为秒；负数表示永久等待。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS", 20))
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
+    """P/D 节点处理续跑分段时的资源等待超时，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", 60)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_busy_retry_timeout_seconds() -> int:
+    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 120)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_cache_high_priority_max_age_seconds() -> int:
+    """cache 命中请求提升为 PD 高优先级时允许的最大缓存年龄，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 180)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_cache_high_priority_min_prompt_tokens() -> int:
+    """cache 命中请求提升为 PD 高优先级时要求的最小 prompt token 数。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", 2048)))
 
 
 @lru_cache(maxsize=None)

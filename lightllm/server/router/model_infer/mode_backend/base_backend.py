@@ -15,13 +15,11 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
-from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
+from lightllm.common.req_manager import HybridAttentionReqManager
+from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -122,7 +120,7 @@ class ModeBackend:
         )
         dist_group_manager.create_groups(group_size=group_size)  # set the default group
 
-        self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
+        self.shared_token_load = TokenLoad("shared_token_load", self.dp_size_in_node)
 
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
@@ -151,35 +149,33 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
-        self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
+        self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
 
-        if self.is_linear_att_mixed_model:
-            self.linear_att_cache_manager = LinearAttCacheManager(
+        if self.is_hybrid_att_model:
+            self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
                 size=self.args.linear_att_cache_size,
-                linear_config=self.model.req_manager.linear_config,
             )
         else:
-            self.linear_att_cache_manager = None
+            self.small_page_buffers = None
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
-            if self.is_linear_att_mixed_model:
-                self.radix_cache = LinearAttPagedRadixCache(
-                    unique_name=get_unique_server_name(),
+            if self.is_hybrid_att_model:
+                self.radix_cache = HybridAttPagedRadixCache(
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
-                    linear_att_small_page_buffers=self.linear_att_cache_manager,
+                    small_page_buffers=self.small_page_buffers,
                 )
             else:
                 self.radix_cache = RadixCache(
-                    unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
+                    page_size=self.args.page_size,
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:
@@ -232,7 +228,8 @@ class ModeBackend:
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.is_master_in_dp:
-            kv_cache_size = self.model.mem_manager.size + 1
+            # Capture 只保存 allocator 管理的真实 KV 槽位，HOLD 页对应的 padding 写入由 kernel 过滤。
+            kv_cache_size = self.model.mem_manager.size
             if self.args.enable_prompt_logprobs:
                 mgr = PromptLogprobsCaptureManager.get_instance()
                 if mgr is not None:
@@ -414,10 +411,11 @@ class ModeBackend:
             return
 
         mgr = PromptLogprobsCaptureManager.get_instance()
+        mem_indexes = self.model._select_mem_indexes(model_input)
 
         start_loc = 0
         for req_obj in run_reqs:
-            q_len = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+            q_len, _ = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
             topk = req_obj.sampling_param.shm_param.prompt_logprobs
             capture_count = min(q_len, req_obj.shm_req.input_len - req_obj.cur_kv_len - 1)
             if capture_count > 0 and topk == 0 and self.is_master_in_dp:
@@ -447,7 +445,7 @@ class ModeBackend:
                     top_token_ids = torch.nn.functional.pad(top_token_ids, padding, value=-1)
                     top_logprobs = torch.nn.functional.pad(top_logprobs, padding, value=float("-inf"))
                 mgr.capture(
-                    mem_indexes=model_input.mem_indexes[start_loc : start_loc + capture_count],
+                    mem_indexes=mem_indexes[start_loc : start_loc + capture_count],
                     top_token_ids=top_token_ids,
                     top_logprobs=top_logprobs,
                 )
@@ -616,6 +614,14 @@ class ModeBackend:
             )
         return
 
+    def _reorder_pd_high_priority_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
+        """将 PD 分段续跑的高优先级请求前置，普通请求保持在其后。"""
+        # PD 分段续跑请求已经完成前一段推理，需要优先进入本轮调度；将请求拆分后再拼接，
+        # 保持各自原有顺序，并确保高优先级请求位于普通请求之前。
+        high_priority_reqs = [req for req in ready_reqs if req.shm_req.sample_params.pd_high_priority_request]
+        normal_reqs = [req for req in ready_reqs if not req.shm_req.sample_params.pd_high_priority_request]
+        return high_priority_reqs + normal_reqs
+
     def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
         """
         提升一个短 prefill 请求的优先级。
@@ -638,6 +644,29 @@ class ModeBackend:
         return ready_reqs
 
     # 一些可以复用的通用功能函数
+    def _alloc_req_kv_mem(
+        self,
+        req_obj: InferReq,
+        alloc_token_num: int,
+        no_blcoking_copy: bool = False,
+    ) -> Optional[torch.Tensor]:
+        if alloc_token_num == 0:
+            return None
+
+        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
+
+        old_hold_kv_len = req_obj.hold_kv_len
+        new_hold_kv_len = old_hold_kv_len + alloc_token_num
+        mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
+        # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
+        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
+            mem_indexes, non_blocking=no_blcoking_copy
+        )
+        req_obj.hold_kv_len = new_hold_kv_len
+        return mem_indexes
+
     def _get_classed_reqs(
         self,
         req_ids: List[int] = None,
@@ -677,6 +706,7 @@ class ModeBackend:
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
+        ready_reqs = self._reorder_pd_high_priority_reqs(ready_reqs)
         ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
 
         wait_pause_reqs = []
@@ -685,10 +715,8 @@ class ModeBackend:
         prefill_reqs = []
         decode_reqs = []
 
-        # 一次性最多暂停请求的数量, 防止盲目暂停大量请求
-        # 因为部分请求释放占用的token容量后，就会使推理可以正常进行。
-        # 如果因为一次推理容量不足，就以当前token容量的判断暂停了大量
-        # 请求，其逻辑是不适合的。
+        # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
+        # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
@@ -726,14 +754,32 @@ class ModeBackend:
                     is_decode = False
 
             if is_decode:
-                token_num = req_obj.decode_need_token_num()
-                if token_num <= can_alloc_token_num:
+                # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
+                _, alloc_token_num = req_obj.decode_need_token_num()
+                if alloc_token_num <= can_alloc_token_num:
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     decode_reqs.append(req_obj)
-                    can_alloc_token_num -= token_num
+                    can_alloc_token_num -= alloc_token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+                        if self.args.run_mode == "decode":
+                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
+                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
+                            wait_pause_count += 1
+                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
+                            if support_overlap:
+                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
+                                req_obj.filter_mark = True
+                            else:
+                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
+                                finished_reqs.append(req_obj)
+                            self.logger.info(
+                                f"force early finish for PD decode req_id={req_obj.req_id} "
+                                f"because token capacity is insufficient"
+                            )
+                        else:
+                            req_obj.wait_pause = True
+                            wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -741,13 +787,17 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
-                token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+                # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
+                token_num, alloc_token_num = req_obj.prefill_need_token_num(
+                    is_chuncked_prefill=not self.disable_chunked_prefill
+                )
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                if token_num <= can_alloc_token_num:
+                if alloc_token_num <= can_alloc_token_num:
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
-                    can_alloc_token_num -= token_num
+                    can_alloc_token_num -= alloc_token_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
@@ -779,7 +829,8 @@ class ModeBackend:
 
         if recover_paused:
             g_infer_context.recover_paused_reqs(
-                paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp, can_alloc_token_num=can_alloc_token_num
+                paused_reqs=paused_reqs,
+                is_master_in_dp=self.is_master_in_dp,
             )
 
         # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，
@@ -875,10 +926,18 @@ class ModeBackend:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
-        logits = model_output.logits
-        return torch.argmax(logits, dim=-1)
+        token_indices = torch.argmax(model_output.logits, dim=-1)
+        if model_output.logits_token_ids is not None:
+            # 候选排列保证分数相同时优先选择最小的全局 token ID。
+            # gather 将选中的 ID 写入独立张量，避免后续 graph replay 覆盖结果。
+            return model_output.logits_token_ids.gather(1, token_indices.view(-1, 1)).view(-1)
+        return token_indices
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        if model_output.logits_token_ids is not None:
+            # 在候选集合上归一化，得到用于调度的近似置信度。
+            probs = torch.softmax(model_output.logits, dim=-1)
+            return self._gen_argmax_token_ids(model_output), probs.amax(dim=-1)
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
@@ -964,17 +1023,20 @@ class ModeBackend:
         prompt_cache_kv_buffer_path = os.path.join(
             self.weight_dir, model_cfg["prompt_cache_kv_buffer"][f"rank_{cur_rank}"]
         )
+        page_size = self.args.page_size
+        intact_kv_len = len(model_cfg["prompt_cache_token_ids"]) // page_size * page_size
+        if intact_kv_len == 0:
+            return
+
         prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
-        intact_kv_len = len(model_cfg["prompt_cache_token_ids"])
+        prompt_cache_kv_buffer = {name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()}
         intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
         self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
-        self.radix_cache.insert(
-            torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"),
-            intact_kv_index,
+        intact_token_ids = torch.tensor(
+            model_cfg["prompt_cache_token_ids"][:intact_kv_len], dtype=torch.int64, device="cpu"
         )
-        self.radix_cache.match_prefix(
-            torch.tensor(model_cfg["prompt_cache_token_ids"], dtype=torch.int64, device="cpu"), update_refs=True
-        )
+        self.radix_cache.insert(intact_token_ids, intact_kv_index)
+        self.radix_cache.match_prefix(intact_token_ids, update_refs=True)
 
     def init_rank_infos(self):
         self.node_world_size = get_node_world_size()

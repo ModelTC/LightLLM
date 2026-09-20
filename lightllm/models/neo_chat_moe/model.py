@@ -1,7 +1,6 @@
 import os
 import json
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry, llm_model_type_is
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
@@ -166,7 +165,6 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         return query_condition, query_uncondition
 
 
-@ModelRegistry(["neo_chat"], is_multimodal=True, condition=llm_model_type_is("qwen3_moe"))
 class NeoTpMOEPartModel(NeoModelBase, Qwen3MOEModel):
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer

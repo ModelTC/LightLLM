@@ -13,10 +13,10 @@ class Gemma4PostLayerInfer(LlamaPostLayerInfer):
         self.final_logit_softcapping = float(network_config.get("final_logit_softcapping"))
 
     def token_forward(self, input_embdings, infer_state, layer_weight):
-        logits = super().token_forward(input_embdings, infer_state, layer_weight)
+        post_output = super().token_forward(input_embdings, infer_state, layer_weight)
         if self.final_logit_softcapping is not None and self.final_logit_softcapping > 0:
             cap = self.final_logit_softcapping
-            logits = torch.tanh(logits / cap) * cap
+            post_output.logits = torch.tanh(post_output.logits / cap) * cap
             if infer_state.prompt_logics is not None:
                 infer_state.prompt_logics = torch.tanh(infer_state.prompt_logics / cap) * cap
-        return logits
+        return post_output

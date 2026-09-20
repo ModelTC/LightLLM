@@ -5,7 +5,10 @@ from typing import Any, Mapping
 
 from fastapi.responses import JSONResponse
 
-from lightllm.utils.error_utils import ServerBusyError
+from lightllm.utils.error_utils import SERVER_BUSY_MESSAGE, ServerBusyError
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 _RATE_LIMIT_ERROR_TYPES = {"RateLimitError", "rate_limit_error"}
 
@@ -37,4 +40,5 @@ def create_error_response(
 
 
 def create_server_busy_response(exc: ServerBusyError) -> JSONResponse:
-    return create_error_response(HTTPStatus(exc.status_code), str(exc))
+    logger.debug("Server busy detail: %s", exc.message)
+    return create_error_response(HTTPStatus(exc.status_code), SERVER_BUSY_MESSAGE)

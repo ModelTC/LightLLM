@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_unique_server_name
 
 if TYPE_CHECKING:
     from lightllm.server.core.objs.shm_req_manager import ShmReqManager
@@ -18,9 +17,8 @@ class HealthObj:
     grace_timeout: int = int(os.getenv("HEALTH_TIMEOUT", "200"))
 
     def __post_init__(self):
-        uid = get_unique_server_name()
-        self.latest_success_infer_time_mark = SharedInt(f"{uid}_latest_success_infer_time_mark")
-        self.run_reqs_count_mark = SharedInt(f"{uid}_run_reqs_count_mark")
+        self.latest_success_infer_time_mark = SharedInt("latest_success_infer_time_mark")
+        self.run_reqs_count_mark = SharedInt("run_reqs_count_mark")
 
     def check(self, shm_req_manager: "ShmReqManager") -> bool:
         """On-the-fly health check: recent success is ok; otherwise require no in-flight shm requests."""

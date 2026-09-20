@@ -30,7 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -70,18 +70,32 @@ async def _safe_stream_wrapper(stream_generator):
         async for item in stream_generator:
             first_chunk_sent = True
             yield item
-    except ValueError as e:
-        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
-        yield f"data: {error_data}\n\n"
-    except ServerBusyError as e:
+    except InvalidRequestError as e:
         if not first_chunk_sent:
             raise
-        logger.error("Generation interrupted after the stream started: %s", e.message)
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except ValueError as e:
+        if not first_chunk_sent:
+            # Request setup is lazy for streaming responses, so validation
+            # errors raised here bypass the endpoint's normal ValueError
+            # handler. Convert them to the dedicated request-error type so
+            # the application-level handler returns HTTP 400.
+            raise InvalidRequestError(str(e)) from e
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except ServerBusyError as e:
+        logger.debug("Server busy detail: %s", e.message)
+        if not first_chunk_sent:
+            raise
         error_data = json.dumps(
-            {"error": {"message": e.message, "type": "server_error", "code": "stream_error"}},
+            {"error": {"message": SERVER_BUSY_MESSAGE, "type": "server_error", "code": "stream_error"}},
             ensure_ascii=False,
         )
         yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
     except ClientDisconnected as e:
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.

@@ -5,6 +5,46 @@ APIServer 参数详解
 
 本文档详细介绍了 LightLLM APIServer 的所有启动参数及其用法。
 
+词表并行采样
+------------
+
+.. option:: --target_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    主模型 target 每个 TP rank 的 logits 通信候选数，默认 ``None``，即关闭候选通信。
+
+.. option:: --draft_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    draft 模型每个 TP rank 的输出候选数，默认 ``None``，即关闭候选输出。
+    两个参数分别控制主模型 target 和 draft 模型的输出候选数。
+    未设置时，对应模型保持完整词表 logits 通信和原采样路径；设置后，每个 TP rank 先选取
+    本地候选，经一次 all-gather 后输出所有 TP rank 的 logits 和全局 token ID。
+    两个参数相互独立，也适用于 TP=1。
+
+    draft 的固定步数路径在候选中取 argmax；由于每个分片的最大值都包含在候选中，最终 token
+    仍是完整词表上的精确 argmax。动态 MTP 在收集到的候选上做 softmax，生成供调度使用的
+    模拟概率；它不是全词表概率，可能改变动态步数选择。模型不计算或输出完整词表 token 概率。
+
+    target 在温度、请求 top-k 和 top-p 处理之前，先从每个 TP 词表分片选取配置数量的候选。
+    输出层随后创建完整词表 logits，将非候选位置填为 ``-10000000.0``，并按全局 token ID
+    回填候选值。下游继续使用原有完整词表采样路径，无需处理候选 token ID 映射；已有的
+    penalty 和 invalid-token 屏蔽仍会在候选回填后执行。请求 top-k=-1 或大于 all-gather 后的
+    候选总数时，仍只能覆盖候选集合。
+    生成 token 的 logprob 是候选集合上的归一化概率对应的对数，不是完整词表上的 logprob；
+    top-p 也不代表完整词表累计概率。启用 target 候选是显式的近似采样。
+
+    依赖非候选原始分数的功能无法恢复完整词表的精确结果，例如 ``--enable_rl`` 所需的完整
+    token rank，或通过较大 logit bias 将非候选 token 提升到候选范围内的场景。
+    ``--target_vocab_topk_sampling`` 不能与 ``--output_constraint_mode outlines/xgrammar``
+    或 ``--first_token_constraint_mode`` 同时启用，推理节点启动时会触发断言。
+    原因是非候选分数为 ``-10000000.0``，约束屏蔽分数为 ``-1000000.0``；
+    若合法 token 全部被裁掉，禁止的 token 反而会得分更高。使用这些输出约束时请关闭 target 候选裁剪。
+    ``--draft_vocab_topk_sampling`` 不受此项检查限制。
+    PD 部署应在 master、prefill 和 decode 上使用相同配置。
+
+    仅支持使用 Llama 标准 ``token_forward``、``_token_forward`` 和 ``_lm_head_and_gather``
+    实现的输出层；允许模型覆盖归一化实现。模型初始化不再检查输出层兼容性，
+    特殊输出层不要设置对应的候选参数。
+
 基础配置参数
 ------------
 
@@ -39,6 +79,11 @@ APIServer 参数详解
 .. option:: --httpserver_workers
 
     HTTP 服务器工作进程数，默认为 ``1``
+
+.. option:: --disable_delay_response_start
+
+    立即发送流式响应的状态码和响应头，不再等待首个响应 chunk 就绪。默认情况下，LightLLM 会延迟发送
+    响应起始事件，使首个 chunk 产生前抛出的异常仍能返回正确的 HTTP 状态码。
 
 .. option:: --hypercorn_config
 
@@ -86,6 +131,52 @@ PD 分离模式参数
     PD Master 的健康接口都会返回 HTTP 503。无论使用哪种拓扑模式，PD Master 都会同时执行与普通节点类似的
     推理进度健康检查：当仍有在途请求，且整个 PD Master 连续 ``HEALTH_TIMEOUT`` 秒
     没有任何请求成功返回 token 时，接口将返回 HTTP 503。
+
+.. option:: --disable_pd_node_self_request_limit
+
+    P/D 节点资源等待限流默认启用，并由 PD Master 统一管理。该参数只在需要关闭此功能时设置，且只需添加到
+    PD Master 的启动参数中，不需要在 Prefill/Decode 节点上设置。默认情况下，PD Master 通过
+    ``pd_node_resource_wait_timeout_seconds`` 为所有请求下发统一的资源等待上限；P/D 节点只负责按下发值
+    控制本地 ``shm_req`` 申请和 Router 等待进入推理系统，不读取本地限流开关或超时配置。首段的等待上限由
+    PD Master 上的
+    ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 10 秒；设置为 -1 表示永久等待。
+    ``segment_index > 0`` 的续跑分段使用独立的等待上限，该值由
+    ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 60 秒，以提高已产生部分结果的
+    请求最终完成的成功率。
+    设置为非负数时，超时会导致 ``Server is busy``；
+    其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，由 PD Master 转换为 HTTP 429。
+    本功能启用时，PD Master 收到 ``Server is busy`` 会重新选择 P/D 节点并重试；最长探测周期由
+    ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` 控制，默认 120 秒。若请求已经向客户端输出 token，
+    则不再从头重试，以免产生重复内容。设置 ``--disable_pd_node_self_request_limit`` 后，PD Master 不再下发
+    有限的资源等待时间；P/D 节点永久等待，其他原因产生的 ``Server is busy`` 也会直接返回，不触发重试。
+    多机 TP 场景仅由 master 节点执行超时判断，slave 节点永久等待。cache 命中记录允许提升优先级的最大年龄由
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 36 秒。cache 命中提权还要求输入
+    token 数达到 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` 配置的门槛（默认 4096），避免短请求仅因
+    cache 命中率高而提升优先级。
+
+    启动示例：
+
+    .. code-block:: bash
+
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+            LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
+            LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
+            python -m lightllm.server.api_server --run_mode pd_master ...
+
+.. option:: --disable_pd_cache_high_priority
+
+    禁止 PD Master 将输入足够长、预计输入 cache 命中率高且命中记录仍然新鲜的首段请求提升为高优先级。
+    该参数不影响 PD Decode 容量不足后的分段续跑请求；续跑请求仍保持高优先级。默认不启用，
+    即默认允许新鲜高 cache 命中请求提升优先级。
+
+    建议只在 PD Master 上配置该参数。当单个 P 节点的 GPU cache、CPU cache 和 disk cache 总容量相对于
+    请求工作集较小时，高负载下后到的请求容易快速淘汰已有 cache，使原本可以命中 cache 的请求退化为
+    重新执行 Prefill，进而显著降低 Prefill 效率。此时建议保留默认的高优先级策略，让预计 cache 命中率高的
+    请求提前进入推理，尽量在 cache 被淘汰前完成复用。
+
+    该策略会改变排队顺序，因此普通请求（未达到 cache 命中率、cache 年龄或最小 prompt token 数门槛的请求）
+    的首字延迟可能升高。如果 P 节点 cache 容量充足、系统负载较低，或者业务更重视调度公平性和普通请求的
+    首字延迟，可以设置 ``--disable_pd_cache_high_priority`` 关闭该策略。
 
 .. option:: --config_server_host
 

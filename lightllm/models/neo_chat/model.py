@@ -2,7 +2,6 @@ import os
 import json
 import torch
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry, llm_model_type_is
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
@@ -123,7 +122,6 @@ class NeoModelBase:
         return
 
 
-@ModelRegistry(["neo_chat"], is_multimodal=True, condition=llm_model_type_is("qwen3"))
 class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer

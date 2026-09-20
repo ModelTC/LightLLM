@@ -4,6 +4,7 @@ from .pd_selector import (
     RoundRobinSelector,
     AdaptiveLoadSelector,
     LoadBalancedCacheAwareSelector,
+    PDSelectionExtraInfo,
 )
 
 

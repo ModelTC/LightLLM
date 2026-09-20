@@ -15,7 +15,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.common.triton_utils.autotuner import Autotuner
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 
 
@@ -250,7 +250,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             # A rank may receive no tokens during autotune warmup. Run one dummy token through
             # silu_and_mul_fwd so the empty rank matches the first kernel call made by non-empty ranks.
             # This branch does not synchronize additional calls caused by different positive chunk counts.
-            if Autotuner.is_autotune_warmup():
+            if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL):
                 N = w13_weight.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=recv_x[0].device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
