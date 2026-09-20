@@ -17,21 +17,34 @@ def causal_conv1d_fn(
     pad_slot_id: int = -1,
     **kwargs,
 ):
-    """Run causal depthwise convolution with SGL Kernel or a local Triton fallback.
+    """
+    x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
+        sequences are concatenated from left to right for varlen
+    weight: (dim, width)
+    bias: (dim,)
+    query_start_loc: (batch + 1) int32
+        The cumulative sequence lengths of the sequences in
+        the batch, used to index into sequence. prepended by 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]),
+        x.shape=(dim,17)
+    cache_indices: (batch)  int32
+        indicates the corresponding state index,
+        like so: conv_state = conv_states[cache_indices[batch_id]]
+    has_initial_state: (batch) bool
+        indicates whether should the kernel take the current state as initial
+        state for the calculations
+    conv_states: (...,dim,width - 1) itype
+        updated inplace if provided
+    activation: either None or "silu" or "swish"
+    pad_slot_id: int
+            if cache_indices is passed, lets the kernel identify padded
+            entries that will not be processed,
+            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
+            in this case, the kernel will not process entries at
+            indices 0 and 3
 
-    x is [batch, channels, tokens] or packed [channels, total_tokens]. The Triton
-    path requires packed inputs and all four request/state tensors below.
-    weight is [channels, width]; optional bias is [channels].
 
-    query_start_loc: cumulative token offsets [batch + 1], starting at zero.
-    cache_indices: maps each request to a slot in conv_states; pad_slot_id
-        entries keep their input and state unchanged.
-    has_initial_state: one bool per request; false means a zero-filled prefix.
-    conv_states: [slots, channels, width - 1], updated in place with input tails.
-
-    activation is None, "silu" or "swish". The optional max_seqlen keyword bounds
-    the longest packed query for Triton without reading GPU lengths on the CPU.
-    Returns the same shape as x. SGL may overwrite x; Triton allocates an output.
+    out: (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
@@ -81,20 +94,27 @@ def causal_conv1d_update(
     conv_state_indices: Optional[torch.Tensor] = None,
     pad_slot_id: int = -1,
 ):
-    """Decode with SGL Kernel when available, otherwise the local Triton kernel.
-
-    x is [batch, channels] or [batch, channels, tokens]. conv_state is
-    [slots, channels, state_len], where state_len >= width - 1, and is updated
-    in place. weight is [channels, width]; optional bias is [channels].
-
-    cache_seqlens supplies one cursor per request for circular state buffers;
-    new tokens are written starting at cursor % state_len. Without cursors,
-    states shift left and append the new tokens.
-    conv_state_indices optionally maps requests to cache slots. Entries equal
-    to pad_slot_id keep their input and state unchanged.
-
-    activation is None, "silu" or "swish". Returns the same shape as x.
-    SGL updates x in place; Triton allocates an output.
+    """
+    x: (batch, dim) or (batch, dim, seqlen)
+    conv_state: (batch, dim, state_len), where state_len >= width - 1
+    weight: (dim, width)
+    bias: (dim,)
+    cache_seqlens: (batch,), dtype int32.
+        If not None, the conv_state is treated as a circular buffer.
+        The conv_state will be updated by copying x to the conv_state
+        starting at the index
+        @cache_seqlens % state_len.
+    conv_state_indices: (batch,), dtype int32
+        If not None, the conv_state is a larger tensor along the batch dim,
+        and we are selecting the batch coords specified by conv_state_indices.
+        Useful for a continuous batching scenario.
+    pad_slot_id: int
+            if cache_indices is passed, lets the kernel identify padded
+            entries that will not be processed,
+            for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
+            in this case, the kernel will not process entries at
+            indices 0 and 3
+    out: (batch, dim) or (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError(f"activation must be None, silu, or swish, actual: {activation}")
