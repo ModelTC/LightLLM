@@ -183,7 +183,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             layer.sin_compress_table = self._sin_cached_compress
         self.layers_infer[0].context_wkv_weight = self.context_wkv_weight
 
-    def _prepare_dsv4_slots(self, model_input: ModelInput, mem_indexes: torch.Tensor) -> None:
+    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
         # Target-hidden commits use target SWA; proposal blocks own separate scratch pages.
         return
 

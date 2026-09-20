@@ -94,13 +94,14 @@ class DeepseekV4InferStateInfo(InferStateInfo):
                     image_left=self.dsv4_image_left,
                     image_right=self.dsv4_image_right,
                 )
+        self.dsv4_swa_write_slots = torch.empty_like(pos, dtype=torch.int32)
         self.dsv4_swa_indices, self.dsv4_swa_lengths = build_swa_index(
             req_idx=self.dsv4_sparse_req_idx,
             positions=self.position_ids,
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            full_to_swa_indexs=self.mem_manager.full_to_swa_indexs,
+            req_to_swa_pages=self.req_manager.req_to_swa_pages,
             swa_index=self.dsv4_swa_indices,
             swa_length=self.dsv4_swa_lengths,
+            swa_write_slots=self.dsv4_swa_write_slots,
             window=workspace.sliding_window,
             image_left=self.dsv4_image_left,
             image_right=self.dsv4_image_right,

@@ -55,14 +55,15 @@ def build_image_visibility(
 def _build_swa_index_kernel(
     req_idx_ptr,
     pos_ptr,
-    req_to_token_ptr,
-    req_to_token_stride0,
-    full_to_swa_ptr,
+    req_to_swa_pages,
+    req_to_swa_stride0,
     image_left_ptr,
     image_right_ptr,
     swa_index_ptr,
     swa_index_stride0,
     swa_length_ptr,
+    swa_write_slots,
+    PAGE_SIZE: tl.constexpr,
     WINDOW: tl.constexpr,
     WIDTH: tl.constexpr,
     HAS_IMAGE: tl.constexpr,
@@ -87,34 +88,28 @@ def _build_swa_index_kernel(
         valid = tl.where(is_image, w < image_length, valid)
         length = tl.where(is_image, image_length, length)
     safe_offset = tl.where(valid, offset, 0)
-    full_slot = tl.load(req_to_token_ptr + req * req_to_token_stride0 + safe_offset, mask=valid, other=0).to(tl.int64)
-    swa_slot = tl.load(full_to_swa_ptr + full_slot, mask=valid, other=-1)
+    page = tl.load(req_to_swa_pages + req * req_to_swa_stride0 + safe_offset // PAGE_SIZE, mask=valid, other=-1)
+    swa_slot = page * PAGE_SIZE + safe_offset % PAGE_SIZE
     out = tl.where(valid, swa_slot, -1).to(tl.int32)
     tl.store(swa_index_ptr + token_idx * swa_index_stride0 + w, out, mask=w_mask)
 
     tl.store(swa_length_ptr + token_idx, length.to(tl.int32))
+    write_page = tl.load(req_to_swa_pages + req * req_to_swa_stride0 + pos // PAGE_SIZE)
+    tl.store(swa_write_slots + token_idx, write_page * PAGE_SIZE + pos % PAGE_SIZE)
 
 
 def build_swa_index(
     req_idx: torch.Tensor,
     positions: torch.Tensor,
-    req_to_token_indexs: torch.Tensor,
-    full_to_swa_indexs: torch.Tensor,
+    req_to_swa_pages: torch.Tensor,
     swa_index: torch.Tensor,
     swa_length: torch.Tensor,
+    swa_write_slots: torch.Tensor,
     window: int = None,
     image_left: torch.Tensor = None,
     image_right: torch.Tensor = None,
 ):
-    """Per-token sliding-window FlashMLA index table, built ONCE per forward (layer-independent:
-    full_to_swa is a single global map and the window is a model constant, so every layer's swa
-    indices are identical). Replaces DeepseekV4IndexInfer._swa_indices: for token t at
-    (req_idx, position) gather the last `window` tokens' full slots via req_to_token, then map
-    full -> swa; out-of-range positions store -1.
-
-    Writes (swa_index [T, window] int32, swa_length [T] int32). The caller owns the output storage;
-    the reader adds the s_q axis via unsqueeze(1).
-    """
+    """Build layer-independent SWA read/write slots from the request page table."""
     T = positions.shape[0]
     width = swa_index.shape[1]
     window = width if window is None else int(window)
@@ -127,14 +122,15 @@ def build_swa_index(
     _build_swa_index_kernel[(T,)](
         req_idx,
         positions,
-        req_to_token_indexs,
-        req_to_token_indexs.stride(0),
-        full_to_swa_indexs,
+        req_to_swa_pages,
+        req_to_swa_pages.stride(0),
         image_left_arg,
         image_right_arg,
         swa_index,
         swa_index.stride(0),
         swa_length,
+        swa_write_slots,
+        PAGE_SIZE=128,
         WINDOW=window,
         WIDTH=width,
         HAS_IMAGE=image_left is not None,

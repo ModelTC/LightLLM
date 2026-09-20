@@ -132,21 +132,16 @@ class InferenceContext:
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.hold_kv_len])
-            if self.is_deepseek_v4:
-                # 槽位随 full 槽经 mem_manager.free 级联回收。pause 路径不释放 req_idx，
-                # 这里只复位出窗水位线；恢复从 0 重算，c128 request ring 会在读取前覆写。
-                self.req_manager.init_compress_state(req.req_idx)
         elif CacheTier.GPU not in req.cache_tiers:
             self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
         else:
             if not self.is_hybrid_att_model:
-                if self.is_deepseek_v4:
-                    self._dsv4_full_att_free_req(free_token_index=free_token_index, req=req)
-                else:
-                    self._full_att_free_req(free_token_index=free_token_index, req=req)
+                self._full_att_free_req(free_token_index=free_token_index, req=req)
             else:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
+        if self.is_deepseek_v4:
+            self.req_manager.clear_runtime_state(req.req_idx)
         req.cur_kv_len = 0
         req.hold_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -188,40 +183,6 @@ class InferenceContext:
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            req.shared_kv_node = None
-        return
-
-    def _dsv4_full_att_free_req(self, free_token_index: List, req: "InferReq"):
-        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        inserted_len = old_prefix_len
-        duplicate_prefix_len = old_prefix_len
-
-        cache_len = self.radix_cache.align_len(req.cur_kv_len)
-        self.req_manager: DeepseekV4ReqManager
-        if cache_len > old_prefix_len:
-            payload = self.req_manager.build_prompt_cache_payload(cache_len)
-            value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
-
-            payload.swa_page_valid = self.req_manager.swa_page_valid_from_watermark(req.req_idx, cache_len)
-            payload.refresh_swa_last_valid_page()
-
-            key = torch.tensor(req.get_input_token_ids()[0:cache_len], dtype=torch.int64, device="cpu")
-            duplicate_prefix_len, _ = self.radix_cache.insert(key, value[:cache_len], extra_value=payload)
-            inserted_len = cache_len
-
-        dense_row = self.req_manager.req_to_token_indexs[req.req_idx]
-        if duplicate_prefix_len > old_prefix_len:
-            free_token_index.append(dense_row[old_prefix_len:duplicate_prefix_len])
-        if req.hold_kv_len > inserted_len:
-            free_token_index.append(dense_row[inserted_len : req.hold_kv_len])
-        if len(free_token_index) == 0:
-            free_token_index.append(dense_row[0:0])
-
-        self.req_manager.init_compress_state(req.req_idx)
-
-        if req.shared_kv_node is not None:
-            assert req.shared_kv_node.node_prefix_total_len <= max(inserted_len, old_prefix_len)
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
         return
@@ -452,44 +413,47 @@ class InferenceContext:
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
     def get_can_alloc_dsv4_swa_page_num(self):
-        pages = int(self.req_manager.mem_manager.swa_page_allocator.can_use_mem_size)
-        if self.radix_cache is not None:
-            pages += self.radix_cache.get_unrefed_swa_pages_num()
-        return pages
+        return int(self.req_manager.mem_manager.swa_page_allocator.can_use_mem_size)
 
     def save_hybrid_state_to_cache(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
-        if not self.is_hybrid_att_model:
+        if not self.is_hybrid_att_model or self.radix_cache is None:
             return
 
         # Request-state snapshot at a big-page boundary.
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_buffer_ids = []
-        for req in reqs:
-            cur_input_len = req.get_chuncked_input_token_len()
-            if cur_input_len % big_page_token_num == 0 and cur_input_len <= req.hybrid_cache_len:
+        checkpoint_lens = []
+        req_rows = []
+        for row, req in enumerate(reqs):
+            chunk_end = req.get_chuncked_input_token_len()
+            first_boundary = (req.cur_kv_len // big_page_token_num + 1) * big_page_token_num
+            for length in range(first_boundary, min(chunk_end, req.hybrid_cache_len) + 1, big_page_token_num):
                 big_page_id = self.radix_cache.big_page_buffers.alloc_one_state_cache()
                 assert big_page_id is not None
+                assert length not in req.hybrid_len_to_big_page_id
+                req.hybrid_len_to_big_page_id[length] = big_page_id
                 big_page_buffer_ids.append(big_page_id)
-                assert cur_input_len not in req.hybrid_len_to_big_page_id
-                req.hybrid_len_to_big_page_id[cur_input_len] = big_page_id
-            else:
-                big_page_buffer_ids.append(-1)
+                checkpoint_lens.append(length)
+                req_rows.append(row)
 
-        assert len(b_req_idx) == len(big_page_buffer_ids)
-        if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
+        if big_page_buffer_ids:
+            selected_rows = torch.tensor(req_rows, dtype=torch.int64, device=b_req_idx.device)
             self.req_manager.save_big_page_states(
-                b_req_idx=b_req_idx,
-                req_indexes=[req.req_idx for req in reqs],
+                b_req_idx=b_req_idx[selected_rows],
+                req_indexes=[reqs[row].req_idx for row in req_rows],
                 buffer_indexes=big_page_buffer_ids,
+                checkpoint_lens=checkpoint_lens,
             )
 
-        assert not self.args.disable_chunked_prefill, "chunked prefill must be enabled for hybrid attention models"
+        assert (
+            self.is_deepseek_v4 or not self.args.disable_chunked_prefill
+        ), "chunked prefill must be enabled for linear attention models"
 
         # Request-state snapshot at the final small-page boundary.
         for req in reqs:
             # 判断本次prefill 完以后 kv 的长度是否到达 hybrid checkpoint 的存储边界。
-            if req.get_chuncked_input_token_len() == req.hybrid_cache_len:
+            if req.cur_kv_len < req.hybrid_cache_len <= req.get_chuncked_input_token_len():
                 assert req.tail_small_page_buffer_id is None
                 if req.hybrid_cache_len % big_page_token_num != 0:
                     self.radix_cache.free_one_small_page_buffer()
@@ -500,6 +464,7 @@ class InferenceContext:
                             req_idx=req.req_idx,
                             buffer_idx=dst_buffer_idx,
                             state_cache_manager=self.radix_cache.small_page_buffers,
+                            checkpoint_len=req.hybrid_cache_len,
                         )
         return
 
@@ -684,8 +649,6 @@ class InferReq:
         self.final_token_metadata = FinalTokenMetadataExt(self)
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
-        if hasattr(g_infer_context.req_manager, "init_compress_state"):
-            g_infer_context.req_manager.init_compress_state(req_idx=self.req_idx)
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
         self.multimodal_params = self.multimodal_params.to_dict()
@@ -702,6 +665,11 @@ class InferReq:
         if g_infer_context.is_hybrid_att_model:
             block_num = self.shm_req.hybrid_token_hash_list.size
             self.hybrid_cache_len = block_num * self.args.linear_att_hash_page_size
+            for image_start, image_end in reversed(self.image_block_spans):
+                if image_start < self.hybrid_cache_len < image_end:
+                    self.hybrid_cache_len = (
+                        image_start // self.args.linear_att_hash_page_size * self.args.linear_att_hash_page_size
+                    )
             self.hybrid_len_to_big_page_id = SortedDict()
 
         return
@@ -715,25 +683,12 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            # DSV4 prompt cache may reclaim earlier SWA pages, so an image-internal hit must be recomputed.
-            if g_infer_context.is_deepseek_v4 and self.image_block_spans:
-                while True:
-                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
-                    for image_start, image_end in self.image_block_spans:
-                        if image_start < matched_len < image_end:
-                            key = key[:image_start]
-                            break
-                    else:
-                        break
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                # DeepSeek-V4 命中无需恢复 compressor 状态: 槽位由 full_to_* 映射键控(radix
-                # 持有 full 槽即有效),c4 状态随 swa 页常驻；命中点按 256 token 对齐，c128
-                # request ring 的下一组会在首次读取前完整覆写。
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.hold_kv_len = self.cur_kv_len
                 assert self.hold_kv_len % self.args.page_size == 0
@@ -747,6 +702,8 @@ class InferReq:
             g_infer_context.is_hybrid_att_model is True
         ), "current _hybrid_match_radix_cache only supports hybrid attention models, to do..."
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
+        if g_infer_context.is_deepseek_v4:
+            enable_prompt_cache = enable_prompt_cache and g_infer_context.get_can_alloc_dsv4_swa_page_num() >= 2
         block_hashs = self.shm_req.hybrid_token_hash_list.get_all()
         hash_page_size = self.args.linear_att_hash_page_size
         match_tokens = min(len(block_hashs) * hash_page_size, self.get_cur_total_len() - 1)
@@ -761,6 +718,18 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(block_hashs) * hash_page_size
+            if self.image_block_spans:
+                while True:
+                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(
+                        key, block_hashs=block_hashs, update_refs=False
+                    )
+                    for image_start, image_end in self.image_block_spans:
+                        if image_start < matched_len < image_end:
+                            limit = image_start // hash_page_size * hash_page_size
+                            key, block_hashs = key[:limit], block_hashs[: limit // hash_page_size]
+                            break
+                    else:
+                        break
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
                 key, block_hashs=block_hashs, update_refs=True
             )
@@ -777,7 +746,7 @@ class InferReq:
                     assert self.tail_small_page_buffer_id is None
                     # 恢复 hybrid checkpoint
                     g_infer_context.req_manager.restore_big_page_state(
-                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
+                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self, checkpoint_len=ready_cache_len
                     )
                 else:
                     # 小页匹配
@@ -793,6 +762,7 @@ class InferReq:
                         # 恢复 hybrid checkpoint
                         g_infer_context.req_manager.restore_small_page_state(
                             req=self,
+                            checkpoint_len=ready_cache_len,
                         )
                     else:
                         # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
@@ -827,6 +797,7 @@ class InferReq:
                             self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
                             g_infer_context.req_manager.restore_small_page_state(
                                 req=self,
+                                checkpoint_len=shared_kv_len,
                             )
                             self.shared_kv_node = None
 
@@ -851,7 +822,9 @@ class InferReq:
                                 assert self.tail_small_page_buffer_id is None
                                 # 恢复 hybrid checkpoint
                                 g_infer_context.req_manager.restore_big_page_state(
-                                    big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
+                                    big_page_buffer_idx=share_node.big_page_buffer_idx,
+                                    req=self,
+                                    checkpoint_len=ready_cache_len,
                                 )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
@@ -923,32 +896,26 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0 : self._get_chunked_input_end()]
 
     def get_chuncked_input_token_ids_for_hybrid_att(self):
-        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
-
-        chunked_start = self.cur_kv_len
-        chunked_end = chunked_start + self.args.chunked_prefill_size
-        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
-        total_end = self.get_cur_total_len()
-        end = min(total_end, chunked_end, big_page_end)
-
-        if chunked_start < self.hybrid_cache_len < end:
-            # hybrid checkpoint 对应需要存储的部分。
-            end = self.hybrid_cache_len
-
-        return self.shm_req.shm_prompt_ids.arr[0:end]
+        return self.shm_req.shm_prompt_ids.arr[0 : self.get_chuncked_input_token_len_for_hybrid_att()]
 
     def get_chuncked_input_token_len(self):
         return self._get_chunked_input_end()
 
     def get_chuncked_input_token_len_for_hybrid_att(self):
+        end = self._get_chunked_input_end()
+        if g_infer_context.is_deepseek_v4 and self.args.disable_chunked_prefill:
+            return end
+        if g_infer_context.radix_cache is None:
+            return end
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
-        chunked_start = self.cur_kv_len
-        chunked_end = chunked_start + self.args.chunked_prefill_size
-        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
-        total_end = self.get_cur_total_len()
-        end = min(total_end, chunked_end, big_page_end)
-        if chunked_start < self.hybrid_cache_len < end:
+        big_page_end = (self.cur_kv_len // big_page_token_num + 1) * big_page_token_num
+        end = min(end, big_page_end)
+        if self.cur_kv_len < self.hybrid_cache_len < end:
             end = self.hybrid_cache_len
+        for image_start, image_end in self.image_block_spans:
+            if image_start < end < image_end:
+                end = image_start if self.cur_kv_len < image_start else image_end
+                break
         return end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank: int = -1):
@@ -1060,11 +1027,7 @@ class InferReq:
         if end <= start:
             return 0
 
-        first_new_page = (start + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
-        last_page = (end - 1) // self.dsv4_swa_page_size
-        swa_page_num = last_page - first_new_page + 1
-
-        return swa_page_num
+        return g_infer_context.req_manager.get_swa_page_need(self.req_idx, start, end)
 
     def get_dsv4_recover_need_swa_page_num(self) -> int:
         swa_page_num = self.get_dsv4_prefill_need_swa_page_num(is_chuncked_prefill=False)
@@ -1090,23 +1053,9 @@ class InferReq:
         if seq_len <= 0:
             return 0
 
-        swa_page_num = 0
-        # Main model prepares current token plus draft-verify rows: SWA + compressed slots.
-        for step in range(self.mtp_step + 1):
-            cur_seq_len = seq_len + step
-            if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
-                swa_page_num += 1
-        if self.args.mtp_mode == "dspark":
-            # DSpark proposal allocates one private SWA scratch page per request.
-            swa_page_num += 1
-        else:
-            # EAGLE draft forwards after the first one consume newly appended draft-only rows.
-            # The DeepSeek-V4 MTP draft layer is compress_ratio=0, so these rows need only SWA.
-            for step in range(self.mtp_step + 1, self.mtp_step * 2):
-                cur_seq_len = seq_len + step
-                if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
-                    swa_page_num += 1
-        return swa_page_num
+        width = self.mtp_step + 1 if self.args.mtp_mode == "dspark" else max(self.mtp_step + 1, self.mtp_step * 2)
+        need = g_infer_context.req_manager.get_swa_page_need(self.req_idx, seq_len - 1, seq_len - 1 + width)
+        return need + int(self.args.mtp_mode == "dspark")
 
 
 class InferReqUpdatePack:

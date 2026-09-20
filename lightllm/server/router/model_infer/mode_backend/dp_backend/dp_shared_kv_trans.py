@@ -51,7 +51,7 @@ class DPKVSharedMoudle:
                     mem_manager.c4_pool.buffer.data_ptr() if has_c4 else 0,
                     mem_manager.c4_indexer_pool.buffer.data_ptr() if has_c4 else 0,
                     mem_manager.c128_pool.buffer.data_ptr() if has_c128 else 0,
-                    mem_manager.full_to_swa_indexs.data_ptr(),
+                    mem_manager.req_to_swa_pages.data_ptr(),
                     mem_manager.swa_pool.buffer.data_ptr(),
                     mem_manager.c4_state_buffer.data_ptr() if has_c4 else 0,
                     mem_manager.c4_indexer_state_buffer.data_ptr() if has_c4 else 0,
@@ -139,10 +139,63 @@ class DPKVSharedMoudle:
                         max_kv_len_dp_rank=int(max_kv_len_dp_rank),
                         max_kv_len_mem_manager_index=int(max_kv_len_mem_manager_index),
                         max_kv_len_mem_indexes=max_kv_len_mem_indexes,
+                        source_req_idx=max_kv_len_req_idx,
                     )
                 )
 
         return trans_tasks
+
+    def _transfer_dsv4_checkpoints(self, trans_tasks):
+        """Transfer CPU snapshots for the history fetched from another DP rank.
+
+        CUDA IPC exports the packed history and private runtime only. NCCL moves
+        the checkpoint bytes through temporary GPU tensors so pinned host pools
+        keep their process-local ownership and registration.
+        """
+        args = self.backend.args
+        big_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        if big_tokens > args.max_req_total_len:
+            return
+        group = self.backend.node_nccl_group
+        rank = dist.get_rank(group=group)
+        local_tasks = [
+            (
+                task.max_kv_len_mem_manager_index,
+                task.req.req_id,
+                task.req.cur_kv_len,
+                task.req.cur_kv_len + len(task.mem_indexes),
+            )
+            for task in trans_tasks
+        ]
+        all_tasks = [None for _ in range(dist.get_world_size(group=group))]
+        dist.all_gather_object(all_tasks, local_tasks, group=group)
+        buffers = self.backend.model.mem_manager.big_page_buffers
+        for destination, tasks in enumerate(all_tasks):
+            for source, req_id, start, end in tasks:
+                first = (start // big_tokens + 1) * big_tokens
+                lengths = list(range(first, end + 1, big_tokens))
+                if not lengths or rank not in (source, destination):
+                    continue
+                req = g_infer_context.requests_mapping[req_id]
+                if rank == source:
+                    shared_ids = self.backend.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
+                    indexes = [
+                        req.hybrid_len_to_big_page_id[length]
+                        if length in req.hybrid_len_to_big_page_id
+                        else shared_ids[length // big_tokens - 1]
+                        for length in lengths
+                    ]
+                    for index in indexes:
+                        staging = buffers.buffer[index].cuda(non_blocking=True)
+                        dist.send(staging, dst=dist.get_global_rank(group, destination), group=group)
+                else:
+                    staging = torch.empty((buffers.buffer.shape[1],), dtype=torch.uint8, device="cuda")
+                    for length in lengths:
+                        index = buffers.alloc_one_state_cache()
+                        assert index is not None
+                        dist.recv(staging, src=dist.get_global_rank(group, source), group=group)
+                        buffers.buffer[index].copy_(staging, non_blocking=True)
+                        req.hybrid_len_to_big_page_id[length] = index
 
     def kv_trans(self, trans_tasks: List["TransTask"]):
         # kv 传输
@@ -151,9 +204,7 @@ class DPKVSharedMoudle:
                 req_manager = g_infer_context.req_manager
                 prompt_cache_page_size = req_manager.get_prompt_cache_page_size()
                 req_list = []
-                ready_list = []
                 seq_list = []
-                dst_full_slot_views = []
                 task_meta_data = []
                 history_block_nums = []
                 for trans_task in trans_tasks:
@@ -162,29 +213,21 @@ class DPKVSharedMoudle:
                     dst_full_slots = req_manager.req_to_token_indexs[trans_task.req.req_idx, start:end]
                     dst_full_slots.copy_(trans_task.mem_indexes, non_blocking=True)
                     req_list.append(trans_task.req.req_idx)
-                    ready_list.append(start)
                     seq_list.append(end)
-                    dst_full_slot_views.append(dst_full_slots)
                     task_meta_data.extend(
                         [
                             trans_task.max_kv_len_mem_manager_index,
-                            end - start,
                             trans_task.max_kv_len_mem_indexes.data_ptr(),
                             dst_full_slots.data_ptr(),
+                            trans_task.source_req_idx,
+                            trans_task.req.req_idx,
+                            end,
                         ]
                     )
                     history_block_nums.append((end - start) // prompt_cache_page_size)
 
-                # Keep full slots in the same request-major order as req_list.
-                new_full_slots = (
-                    dst_full_slot_views[0] if len(dst_full_slot_views) == 1 else torch.cat(dst_full_slot_views)
-                )
-                req_manager.prepare_pd_decode_cache(
-                    req_list=req_list,
-                    ready_list=ready_list,
-                    seq_list=seq_list,
-                    new_full_slots=new_full_slots,
-                )
+                for req_idx, end in zip(req_list, seq_list):
+                    req_manager.prepare_swa(req_idx, end - prompt_cache_page_size, end)
 
                 # The history kernel consumes (task index, block index) pairs in block-major order.
                 history_meta_data = []
@@ -194,7 +237,8 @@ class DPKVSharedMoudle:
                             history_meta_data.extend([task_index, block_index])
 
                 # transfer_meta packs two flat uint64 tables into one H2D copy:
-                #   task_meta:    (source manager, token count, source slots pointer, destination slots pointer)
+                #   task_meta:    (source manager, source/destination slots pointers,
+                #                  source/destination request IDs, logical end)
                 #   history_meta: (task index, block index)
                 # For two tasks with 2 and 1 history blocks, the layout is:
                 #   [task0 fields, task1 fields, (0, 0), (1, 0), (0, 1)]
@@ -237,6 +281,24 @@ class DPKVSharedMoudle:
             transfer_token_num = sum(len(trans_task.mem_indexes) for trans_task in trans_tasks)
             self.backend.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {transfer_token_num}")
 
+        if self.backend.is_deepseek_v4:
+            self._transfer_dsv4_checkpoints(trans_tasks)
+            args = self.backend.args
+            big_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+            for task in trans_tasks:
+                req = task.req
+                end = req.cur_kv_len + len(task.mem_indexes)
+                if end == req.hybrid_cache_len and end % big_tokens and self.backend.radix_cache is not None:
+                    self.backend.radix_cache.free_one_small_page_buffer()
+                    req.tail_small_page_buffer_id = self.backend.small_page_buffers.alloc_one_state_cache()
+                    if req.tail_small_page_buffer_id is not None:
+                        g_infer_context.req_manager.save_state(
+                            req.req_idx,
+                            req.tail_small_page_buffer_id,
+                            self.backend.small_page_buffers,
+                            checkpoint_len=end,
+                        )
+
         if self.backend.is_deepseek_v4 and self.backend.args.enable_cpu_cache:
             # CPU-cache restore can evict source radix pages before the scheduler all-gather fences this stream.
             dist.barrier(group=self.backend.node_nccl_group)
@@ -255,3 +317,4 @@ class TransTask:
     max_kv_len_dp_rank: int
     max_kv_len_mem_manager_index: int
     max_kv_len_mem_indexes: torch.Tensor
+    source_req_idx: int

@@ -366,8 +366,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         # kv: rmsnorm + rope + fp8 pack + scatter 进 swa 池,一个 DSV4 CUDA kernel 完成，
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
-            mem_index=infer_state.mem_index,
-            swa_slots=getattr(infer_state, "dsv4_swa_write_slots", None),
+            swa_slots=infer_state.dsv4_swa_write_slots,
             kv=qkv[:, -self.head_dim_ :],
             kv_weight=layer_weight.kv_norm_.weight,
             eps=self.eps_,
@@ -395,7 +394,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
         # _get_qkv writes the chunk's packed latent into the swa pool (fused kernel) before
-        # attention reads it back via full_to_swa indices (this custom forward bypasses the
+        # attention reads it back via request-owned SWA indices (this custom forward bypasses the
         # tpl _post_cache_kv path).
         q, q_lora, full_x = self._get_qkv(x, infer_state, layer_weight)
         o = self._context_attention_wrapper_run(q, q_lora, full_x, infer_state, layer_weight)

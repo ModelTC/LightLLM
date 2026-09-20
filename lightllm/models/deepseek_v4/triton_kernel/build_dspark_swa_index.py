@@ -7,16 +7,14 @@ import triton.language as tl
 def _build_dspark_swa_index_kernel(
     req_idx_ptr,
     pos_ptr,
-    req_to_token_ptr,
-    req_to_token_stride0,
-    full_to_swa_ptr,
+    req_to_swa_pages,
+    req_to_swa_stride0,
     scratch_pages_ptr,
     swa_index_ptr,
     swa_index_stride0,
     swa_length_ptr,
     swa_write_slot_ptr,
     HOLD_REQ_ID: tl.constexpr,
-    HOLD_FULL_SLOT: tl.constexpr,
     HOLD_SWA_SLOT: tl.constexpr,
     WINDOW: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -42,16 +40,12 @@ def _build_dspark_swa_index_kernel(
     source_position = tl.where(is_history, history_position, block_position)
     source_position = tl.where(is_hold | ~(is_history | is_block), 0, source_position)
 
-    history_full_slot = tl.load(
-        req_to_token_ptr + req_idx * req_to_token_stride0 + source_position,
+    history_page = tl.load(
+        req_to_swa_pages + req_idx * req_to_swa_stride0 + source_position // PAGE_SIZE,
         mask=in_width & is_history & ~is_hold,
-        other=HOLD_FULL_SLOT,
-    ).to(tl.int64)
-    history_swa_slot = tl.load(
-        full_to_swa_ptr + history_full_slot,
-        mask=in_width & is_history & ~is_hold,
-        other=HOLD_SWA_SLOT,
+        other=0,
     )
+    history_swa_slot = history_page * PAGE_SIZE + source_position % PAGE_SIZE
     scratch_page = tl.load(
         scratch_pages_ptr + token_idx // BLOCK_SIZE,
         mask=~is_hold,
@@ -74,8 +68,7 @@ def _build_dspark_swa_index_kernel(
 def build_dspark_swa_index(
     req_idx: torch.Tensor,
     positions: torch.Tensor,
-    req_to_token_indexs: torch.Tensor,
-    full_to_swa_indexs: torch.Tensor,
+    req_to_swa_pages: torch.Tensor,
     scratch_pages: torch.Tensor,
     swa_index: torch.Tensor,
     swa_length: torch.Tensor,
@@ -84,7 +77,6 @@ def build_dspark_swa_index(
     block_size: int,
     page_size: int,
     hold_req_id: int,
-    hold_full_slot: int,
     hold_swa_slot: int,
 ):
     """Build ``history SWA + complete draft block`` indices for every DSpark query row."""
@@ -100,16 +92,14 @@ def build_dspark_swa_index(
     _build_dspark_swa_index_kernel[(token_num,)](
         req_idx,
         positions,
-        req_to_token_indexs,
-        req_to_token_indexs.stride(0),
-        full_to_swa_indexs,
+        req_to_swa_pages,
+        req_to_swa_pages.stride(0),
         scratch_pages,
         swa_index,
         swa_index.stride(0),
         swa_length,
         swa_write_slots,
         HOLD_REQ_ID=hold_req_id,
-        HOLD_FULL_SLOT=hold_full_slot,
         HOLD_SWA_SLOT=hold_swa_slot,
         WINDOW=window,
         BLOCK_SIZE=block_size,

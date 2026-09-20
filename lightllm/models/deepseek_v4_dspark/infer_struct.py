@@ -28,8 +28,7 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
         build_dspark_swa_index(
             req_idx=self.dsv4_sparse_req_idx,
             positions=self.position_ids,
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            full_to_swa_indexs=self.mem_manager.full_to_swa_indexs,
+            req_to_swa_pages=self.req_manager.req_to_swa_pages,
             scratch_pages=self.mtp_draft_swa_pages,
             swa_index=self.dsv4_swa_indices,
             swa_length=self.dsv4_swa_lengths,
@@ -38,6 +37,5 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
             block_size=model.block_size,
             page_size=DSV4_SWA_PAGE_SIZE,
             hold_req_id=self.req_manager.HOLD_REQUEST_ID,
-            hold_full_slot=self.mem_manager.HOLD_TOKEN_MEMINDEX,
             hold_swa_slot=self.mem_manager.swa_pool.HOLD_TOKEN_MEMINDEX,
         )

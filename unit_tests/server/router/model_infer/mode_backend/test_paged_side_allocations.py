@@ -39,6 +39,7 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     next_index = [4]
     tasks = []
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
+    backend.is_deepseek_v4 = False
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
     backend.is_master_in_dp = False
@@ -85,6 +86,7 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
 
 def test_pd_decode_rejects_unaligned_transfer_page_size():
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
+    backend.is_deepseek_v4 = False
     backend.args = SimpleNamespace(pd_kv_page_size=3, page_size=4)
     req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
 

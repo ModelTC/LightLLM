@@ -17,8 +17,9 @@ _SWA_PAGE_SIZE = 128
 
 @triton.jit
 def _pd_tail_kernel(
-    full_slots,
-    full_to_swa,
+    req_to_swa_pages,
+    req_to_swa_stride0,
+    start_kv_index,
     swa_pool,
     swa_pool_stride0,
     swa_pool_stride1,
@@ -39,8 +40,7 @@ def _pd_tail_kernel(
     swa_first_full_offset,
     swa_section_gpu_page_start,
     c4_row_num,
-    c4_first_full_offset,
-    c4_section_row_start,
+    c4_rows,
     c128_row_num,
     c128_first_position,
     c128_section_row_start,
@@ -77,9 +77,10 @@ def _pd_tail_kernel(
         layer = job // swa_page_num
         gpu_page_i64 = gpu_page.to(tl.int64)
         layer_i64 = layer.to(tl.int64)
-        full_slot = tl.load(full_slots + swa_first_full_offset + gpu_page_i64 * swa_page_size).to(tl.int64)
-        swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
-        physical_page = swa_slot // swa_page_size
+        position = start_kv_index + swa_first_full_offset + gpu_page_i64 * swa_page_size
+        physical_page = tl.load(req_to_swa_pages + req_idx * req_to_swa_stride0 + position // swa_page_size).to(
+            tl.int64
+        )
         offsets = byte_block * BYTE_BLOCK + tl.arange(0, BYTE_BLOCK)
         offsets_i64 = offsets.to(tl.int64)
         mask = offsets < swa_page_nbytes
@@ -105,8 +106,10 @@ def _pd_tail_kernel(
                 layer = job // c4_row_num
                 row_i64 = row.to(tl.int64)
                 layer_i64 = layer.to(tl.int64)
-                full_slot = tl.load(full_slots + c4_first_full_offset + row_i64).to(tl.int64)
-                swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
+                position = tl.load(c4_rows + row_i64 * 2).to(tl.int64)
+                section_row = tl.load(c4_rows + row_i64 * 2 + 1).to(tl.int64)
+                page = tl.load(req_to_swa_pages + req_idx * req_to_swa_stride0 + position // swa_page_size).to(tl.int64)
+                swa_slot = page * swa_page_size + position % swa_page_size
                 state_row = (swa_slot // swa_page_size) * c4_state_ring + swa_slot % c4_state_ring
                 offsets = state_block * STATE_BLOCK + tl.arange(0, STATE_BLOCK)
                 offsets_i64 = offsets.to(tl.int64)
@@ -116,7 +119,7 @@ def _pd_tail_kernel(
                     staging_f32
                     + c4_state_section_offset_f32
                     + layer_i64 * c4_state_section_layer_elems
-                    + (c4_section_row_start + row_i64) * c4_state_width
+                    + section_row * c4_state_width
                     + offsets_i64
                 )
                 indexer_mask = offsets < c4_indexer_state_width
@@ -130,7 +133,7 @@ def _pd_tail_kernel(
                     staging_f32
                     + c4_indexer_state_section_offset_f32
                     + layer_i64 * c4_indexer_state_section_layer_elems
-                    + (c4_section_row_start + row_i64) * c4_indexer_state_width
+                    + section_row * c4_indexer_state_width
                     + offsets_i64
                 )
                 if MODE == 0:
@@ -179,7 +182,6 @@ def _copy_pd_tail(
     mode,
     mem_manager,
     layout,
-    full_slots,
     staging,
     start_kv_index,
     end_kv_index,
@@ -196,20 +198,25 @@ def _copy_pd_tail(
     c4_state = None
     c4_indexer_state = None
     c4_row_num = 0
-    c4_first_full_offset = 0
-    c4_section_row_start = 0
+    c4_rows = None
     if mem_manager.c4_pool is not None:
+        checkpoint_len = (request_kv_len - 1) // _C4_TOKEN_BLOCK * _C4_TOKEN_BLOCK
+        checkpoint_positions = list(range(checkpoint_len - 4, checkpoint_len)) if checkpoint_len else []
         c4_remainder = request_kv_len % _C4_RATIO
-        c4_required_rows = _C4_RATIO if c4_remainder == 0 else _C4_RATIO + c4_remainder
+        c4_required_rows = _C4_RATIO + c4_remainder
         c4_state_start = max(0, request_kv_len - c4_required_rows)
-        c4_intersection_start = max(start_kv_index, c4_state_start)
-        c4_intersection_end = min(end_kv_index, request_kv_len)
-        if c4_intersection_start < c4_intersection_end:
+        rows = [(position, row) for row, position in enumerate(checkpoint_positions)]
+        rows.extend(
+            (position, 4 + row)
+            for row, position in enumerate(range(c4_state_start, request_kv_len))
+            if position not in checkpoint_positions
+        )
+        rows = [(position, row) for position, row in rows if start_kv_index <= position < end_kv_index]
+        if rows:
             c4_state = mem_manager.c4_state_buffer
             c4_indexer_state = mem_manager.c4_indexer_state_buffer
-            c4_row_num = c4_intersection_end - c4_intersection_start
-            c4_first_full_offset = c4_intersection_start - start_kv_index
-            c4_section_row_start = c4_intersection_start - c4_state_start
+            c4_row_num = len(rows)
+            c4_rows = torch.tensor(rows, dtype=torch.int64, device="cuda")
 
     c128_state = None
     c128_row_num = 0
@@ -242,8 +249,9 @@ def _copy_pd_tail(
     c128_program_num = c128_state.shape[0] * c128_row_num * c128_blocks_per_row if c128_state is not None else 0
 
     _pd_tail_kernel[(swa_program_num + c4_program_num + c128_program_num,)](
-        full_slots,
-        mem_manager.full_to_swa_indexs,
+        mem_manager.req_to_swa_pages,
+        mem_manager.req_to_swa_pages.stride(0),
+        start_kv_index,
         swa_pool,
         swa_pool.stride(0),
         swa_pool.stride(1),
@@ -264,8 +272,7 @@ def _copy_pd_tail(
         swa_page_start - start_kv_index,
         (swa_page_start - swa_tail_start) // _SWA_PAGE_SIZE,
         c4_row_num,
-        c4_first_full_offset,
-        c4_section_row_start,
+        c4_rows,
         c128_row_num,
         c128_first_position,
         c128_section_row_start,
@@ -346,7 +353,7 @@ def _copy_pd_cache_page(
             c128_section_layer_nbytes=layout.c128_layer_nbytes,
         )
 
-    swa_tail_start = max(0, request_kv_len // _C4_TOKEN_BLOCK * _C4_TOKEN_BLOCK - _C4_TOKEN_BLOCK)
+    swa_tail_start = max(0, (request_kv_len - 1) // _C4_TOKEN_BLOCK * _C4_TOKEN_BLOCK - _C4_TOKEN_BLOCK)
     if end_kv_index <= swa_tail_start:
         return layout.swa_offset
 
@@ -354,7 +361,6 @@ def _copy_pd_cache_page(
         mode,
         mem_manager,
         layout,
-        full_slots,
         staging,
         start_kv_index,
         end_kv_index,

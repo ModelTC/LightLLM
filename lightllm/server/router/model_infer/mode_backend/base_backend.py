@@ -16,7 +16,7 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
     disable_eplb_model_init,
 )
-from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManagerForMamba
+from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.req_manager import HybridAttentionReqManager
@@ -174,26 +174,12 @@ class ModeBackend:
                     small_page_buffers=self.small_page_buffers,
                 )
             else:
-                radix_page_size = self.args.page_size
-                radix_extra_value_ops = None
-                if self.is_deepseek_v4:
-                    radix_page_size = self.model.req_manager.get_prompt_cache_page_size()
-                    radix_extra_value_ops = self.model.req_manager.get_prompt_cache_value_ops()
                 self.radix_cache = RadixCache(
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
-                    page_size=radix_page_size,
-                    extra_value_ops=radix_extra_value_ops,
+                    page_size=self.args.page_size,
                 )
-                if self.is_deepseek_v4:
-                    self.model.mem_manager.register_swa_free_hook(self.radix_cache.free_unreferenced_swa_pages)
-
-                if not self.disable_chunked_prefill and radix_page_size > 1:
-                    assert self.args.chunked_prefill_size % radix_page_size == 0, (
-                        f"chunked_prefill_size={self.args.chunked_prefill_size} must be divisible by "
-                        f"prompt-cache page_size={radix_page_size}"
-                    )
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache

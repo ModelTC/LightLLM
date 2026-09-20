@@ -17,12 +17,11 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import (
-    get_deepseek_v4_compress_rates,
-    get_config_json,
     get_num_key_value_heads,
     get_head_dim,
     get_layer_num,
     is_hybrid_att_model,
+    get_model_type,
 )
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
@@ -70,7 +69,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    is_hybrid_model = is_hybrid_att_model(args.model_dir) and get_model_type(args.model_dir) != "deepseek_v4"
     mem_manager_class = None if is_hybrid_model else select_mem_manager_class()
     if is_hybrid_model:
         hybrid_config = get_hybrid_cache_config()
@@ -118,16 +117,8 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             scale_data_type=get_llm_data_type(),
         )
     elif mem_manager_class is DeepseekV4MemoryManager:
-        from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4CpuCacheLayout
-
-        config = get_config_json(args.model_dir)
-        layer_num = get_layer_num(args.model_dir) + get_added_mtp_kv_layer_num()
-        layout = DeepseekV4CpuCacheLayout.from_compress_rates(
-            compress_rates=get_deepseek_v4_compress_rates(config, layer_num),
-            token_page_size=args.cpu_cache_token_page_size,
-            head_dim=get_head_dim(args.model_dir),
-            indexer_head_dim=config["index_head_dim"],
-        )
+        layout = get_hybrid_cache_config()
+        layer_num = layout.layer_num
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=args.cpu_cache_token_page_size,

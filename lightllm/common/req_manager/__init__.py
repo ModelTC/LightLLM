@@ -5,4 +5,4 @@ from .req_sampling_params import ReqSamplingParamsManager
 
 __all__ = ["ReqManager", "HybridAttentionReqManager", "ReqManagerForMamba", "ReqSamplingParamsManager"]
 
-from .deepseek4 import DeepseekV4ReqManager, DeepseekV4PromptCachePayload, DeepseekV4PromptCacheValueOps
+from .deepseek4 import DeepseekV4ReqManager

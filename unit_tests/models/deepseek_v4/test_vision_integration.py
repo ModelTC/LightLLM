@@ -116,48 +116,98 @@ def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypa
         def __init__(self):
             self.calls = []
 
-        def match_prefix(self, key, update_refs=False):
+        def match_prefix(self, key, block_hashs, update_refs=False):
             self.calls.append((len(key), update_refs))
             matched_len = min(len(key) // 256 * 256, 768)
             if update_refs:
-                node = SimpleNamespace(node_prefix_total_len=matched_len)
+                node = SimpleNamespace(node_prefix_total_len=matched_len, is_big_page_node=lambda: False)
                 return node, matched_len, torch.arange(matched_len)
             return None, matched_len, None
 
     radix_cache = FakeRadixCache()
-    monkeypatch.setattr(g_infer_context, "is_linear_att_mixed_model", False)
+    monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
+    monkeypatch.setattr(g_infer_context, "get_can_alloc_dsv4_swa_page_num", lambda: 2)
     monkeypatch.setattr(g_infer_context, "is_deepseek_v4", True)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
     monkeypatch.setattr(
         g_infer_context,
         "req_manager",
-        SimpleNamespace(req_to_token_indexs=torch.empty((1, 1025), dtype=torch.int64)),
+        SimpleNamespace(
+            req_to_token_indexs=torch.empty((1, 1025), dtype=torch.int64),
+            restore_small_page_state=lambda **kwargs: None,
+        ),
     )
 
     req = InferReq.__new__(InferReq)
+    req.args = SimpleNamespace(
+        page_size=256, linear_att_hash_page_size=256, linear_att_page_block_num=8, max_req_total_len=1025
+    )
     req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
     req.cur_kv_len = 0
     req.cur_output_len = 0
     req.req_idx = 0
     req.image_block_spans = [(450, 600), (700, 900)]
     req.shared_kv_node = None
+    req.tail_small_page_buffer_id = None
     req.shm_req = SimpleNamespace(
         input_len=1025,
+        hybrid_token_hash_list=SimpleNamespace(size=4, get_all=lambda: [1, 2, 3, 4]),
         shm_prompt_ids=SimpleNamespace(arr=list(range(1025))),
         prompt_cache_len=0,
         shm_cur_kv_len=0,
     )
 
-    req._match_radix_cache()
+    req._hybrid_match_radix_cache()
 
     assert radix_cache.calls == [
         (1024, False),
-        (700, False),
-        (450, False),
-        (450, True),
+        (512, False),
+        (256, False),
+        (256, True),
     ]
     assert req.cur_kv_len == 256
     assert req.shm_req.prompt_cache_len == 256
+
+
+def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
+    from lightllm.server.router.model_infer import infer_batch
+
+    shm_req = SimpleNamespace(
+        link_prompt_ids_shm_array=lambda: None,
+        link_logprobs_shm_array=lambda: None,
+        hybrid_token_hash_list=SimpleNamespace(size=3),
+    )
+    monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
+    monkeypatch.setattr(
+        infer_batch.g_infer_context, "shm_req_manager", SimpleNamespace(get_req_obj_by_index=lambda index: shm_req)
+    )
+    monkeypatch.setattr(
+        infer_batch.g_infer_context,
+        "req_manager",
+        SimpleNamespace(req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None)),
+    )
+    monkeypatch.setattr(
+        infer_batch,
+        "InferSamplingParams",
+        lambda *args: SimpleNamespace(
+            pd_decode_node=None, shm_param=SimpleNamespace(stop_sequences=SimpleNamespace(to_list=lambda: []))
+        ),
+    )
+    monkeypatch.setattr(infer_batch, "PromptSelectedLogprobsExt", lambda req: None)
+    monkeypatch.setattr(infer_batch, "FinalTokenMetadataExt", lambda req: None)
+    req = infer_batch.InferReq.__new__(infer_batch.InferReq)
+    req.args = SimpleNamespace(linear_att_hash_page_size=256)
+    req.shm_index, req.vocab_size = 0, 100
+    req.multimodal_params = SimpleNamespace(
+        to_dict=lambda: {
+            "images": [
+                {"block_start_idx": 450, "block_end_idx": 600},
+                {"block_start_idx": 700, "block_end_idx": 900},
+            ]
+        }
+    )
+    req._init_all_state()
+    assert req.hybrid_cache_len == 256
 
 
 def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
@@ -166,7 +216,9 @@ def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
     monkeypatch.setattr(
         g_infer_context,
         "req_manager",
-        SimpleNamespace(sliding_window=128, get_prompt_cache_page_size=lambda: 256),
+        SimpleNamespace(
+            sliding_window=128, get_prompt_cache_page_size=lambda: 256, get_swa_page_need=lambda req, start, end: 16
+        ),
     )
 
     req = InferReq.__new__(InferReq)
@@ -176,10 +228,9 @@ def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
     req.shm_req = SimpleNamespace(input_len=2000)
     req.image_block_spans = [(500, 884)]
     req.dsv4_swa_page_size = 128
-    req.dsv4_c4_page_size = 64
-    req.dsv4_has_c128 = False
+    req.req_idx = 0
 
-    assert req.get_dsv4_recover_need_page_and_slot_num() == (8, 8, 0)
+    assert req.get_dsv4_recover_need_swa_page_num() == 8
 
 
 @pytest.mark.parametrize(
@@ -218,7 +269,7 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         capacity_calls.append(args)
         return next(capacity_results)
 
-    def prepare_cpu_cache_load(*, token_num, loaded_end):
+    def prepare_cpu_cache_load(*, token_num, loaded_end, resume_swa_slots):
         prepare_calls.append((token_num, loaded_end))
         return SimpleNamespace(mem_indexes=torch.arange(token_num, dtype=torch.int32))
 
@@ -228,7 +279,8 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
     req_to_token_indexs = torch.full((1, 6144), -1, dtype=torch.int32)
     req_manager = SimpleNamespace(
         req_to_token_indexs=req_to_token_indexs,
-        finish_cpu_cache_load=lambda req_idx, loaded_end: finish_calls.append((req_idx, loaded_end)),
+        prepare_swa=lambda req_idx, start, end: finish_calls.append((req_idx, start, end)),
+        get_swa_slots=lambda req_idx, positions: positions,
     )
     mem_manager = SimpleNamespace(
         cpu_cache_layout=SimpleNamespace(token_page_size=2048),
@@ -239,7 +291,6 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         get_loadable_cpu_cache_end=get_loadable_cpu_cache_end,
         prepare_cpu_cache_load=prepare_cpu_cache_load,
         operator=SimpleNamespace(load_cpu_cache_pages=load_cpu_cache_pages),
-        commit_cpu_cache_load_plan=lambda plan: None,
     )
     module = object.__new__(cache_module.Dsv4MultiLevelKvCacheModule)
     module.backend = SimpleNamespace(
@@ -276,8 +327,8 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
     monkeypatch.setattr(cache_module.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
     monkeypatch.setattr(
         cache_module.g_infer_context,
-        "get_can_alloc_dsv4_page_and_slot_num",
-        lambda: (2, 0, 0),
+        "get_can_alloc_dsv4_swa_page_num",
+        lambda: 2,
     )
 
     module.load_cpu_cache_to_reqs([req])
@@ -285,7 +336,7 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
     assert len(capacity_calls) == 2
     assert prepare_calls == [(2048, 2048)]
     assert loaded_pages == [[10]]
-    assert finish_calls == [(0, 2048)]
+    assert finish_calls == [(0, 1792, 2048)]
     assert req.cur_kv_len == 2048
     assert req.shm_req.shm_cur_kv_len == 2048
     assert req.shm_req.cpu_prompt_cache_len == 2048
@@ -401,8 +452,8 @@ def test_swa_index_adds_bidirectional_image_visibility():
 
     positions = torch.tensor([5, 8, 10], dtype=torch.int32, device="cuda")
     req_idx = torch.zeros(3, dtype=torch.int32, device="cuda")
-    req_to_token = torch.arange(20, dtype=torch.int32, device="cuda").unsqueeze(0)
-    full_to_swa = torch.arange(100, 120, dtype=torch.int32, device="cuda")
+    req_to_swa_pages = torch.tensor([[1]], dtype=torch.int32, device="cuda")
+    write_slots = torch.empty_like(positions)
     output = torch.empty((3, 8), dtype=torch.int32, device="cuda")
     lengths = torch.empty(3, dtype=torch.int32, device="cuda")
     image_left = torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda")
@@ -411,18 +462,18 @@ def test_swa_index_adds_bidirectional_image_visibility():
     build_swa_index(
         req_idx,
         positions,
-        req_to_token,
-        full_to_swa,
+        req_to_swa_pages,
         output,
         lengths,
+        write_slots,
         window=4,
         image_left=image_left,
         image_right=image_right,
     )
 
     assert output.cpu().tolist() == [
-        [105, 104, 103, 102, -1, -1, -1, -1],
-        [105, 106, 107, 108, 109, 110, -1, -1],
-        [106, 107, 108, 109, 110, -1, -1, -1],
+        [133, 132, 131, 130, -1, -1, -1, -1],
+        [133, 134, 135, 136, 137, 138, -1, -1],
+        [134, 135, 136, 137, 138, -1, -1, -1],
     ]
     assert lengths.cpu().tolist() == [4, 6, 5]

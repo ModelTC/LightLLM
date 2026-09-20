@@ -2,12 +2,9 @@
 import torch
 import numpy as np
 import collections
-from typing import Any, Tuple, Dict, Set, List, Optional, Union
+from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class UniqueTimeIdGenerator:
@@ -31,7 +28,6 @@ class TreeNode:
         self.parent: TreeNode = None
         self.token_id_key: torch.Tensor = None
         self.token_mem_index_value: torch.Tensor = None  # 用于记录存储的 token_index 为每个元素在 token mem 中的index位置
-        self.token_extra_value: Any = None
         self.ref_counter = 0
         self.time_id = time_gen.generate_time_id()  # 用于标识时间周期
 
@@ -47,16 +43,13 @@ class TreeNode:
             return first_page.item()
         return first_page.numpy().tobytes()
 
-    def split_node(self, prefix_len, child_key_fn=None, extra_value_ops=None):
+    def split_node(self, prefix_len):
         assert prefix_len > 0 and prefix_len % self.page_size == 0
         split_parent_node = TreeNode(page_size=self.page_size)
         split_parent_node.parent = self.parent
         split_parent_node.parent.children[self.get_child_key(self.token_id_key)] = split_parent_node
         split_parent_node.token_id_key = self.token_id_key[0:prefix_len]
         split_parent_node.token_mem_index_value = self.token_mem_index_value[0:prefix_len]
-        if self.token_extra_value is not None and extra_value_ops is not None:
-            split_parent_node.token_extra_value = extra_value_ops.slice(self.token_extra_value, 0, prefix_len)
-            self.token_extra_value = extra_value_ops.slice(self.token_extra_value, prefix_len, len(self.token_id_key))
         split_parent_node.children = {}
         split_parent_node.children[self.get_child_key(self.token_id_key[prefix_len:])] = self
         split_parent_node.ref_counter = self.ref_counter
@@ -73,11 +66,10 @@ class TreeNode:
         self.node_prefix_total_len = self.parent.node_prefix_total_len + new_len
         return split_parent_node
 
-    def add_and_return_new_child(self, token_id_key, token_mem_index_value, token_extra_value=None, child_key=None):
+    def add_and_return_new_child(self, token_id_key, token_mem_index_value):
         child = TreeNode(page_size=self.page_size)
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
-        child.token_extra_value = token_extra_value
         child_key = child.get_child_key(child.token_id_key)
         assert child_key not in self.children.keys()
         self.children[child_key] = child
@@ -117,7 +109,7 @@ def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
 
 
 class RadixCache:
-    def __init__(self, total_token_num, rank_in_node, mem_manager=None, page_size: int = 1, extra_value_ops=None):
+    def __init__(self, total_token_num, rank_in_node, mem_manager=None, page_size: int = 1):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         self.total_token_num = total_token_num
@@ -131,7 +123,6 @@ class RadixCache:
                 f"RadixCache page_size {page_size} must match mem_manager page_size {mem_manager.page_size}"
             )
         self.page_size = page_size
-        self.extra_value_ops = extra_value_ops
 
         self.root_node = TreeNode(page_size=page_size)
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
@@ -145,99 +136,34 @@ class RadixCache:
         self.refed_tokens_num.arr[0] = 0
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
-        self.swa_tree_total_pages_num = 0
-        self.swa_refed_pages_num = 0
-        # 每个 prompt-cache 页折算多少 swa 页(DSV4 为 256/128=2);非 swa 场景为 0,_node_swa_pages_num 退化为常数 0。
-        self._swa_pages_per_prompt_page = self._probe_swa_pages_per_prompt_page()
 
-    def _probe_swa_pages_per_prompt_page(self) -> int:
-        """构造期探测一次 mem_manager 是否带 swa_pool,缓存折算系数,避免热路径反复 getattr。"""
-        if self.mem_manager is None or self.extra_value_ops is None:
-            return 0
-        swa_pool = getattr(self.mem_manager, "swa_pool", None)
-        swa_page_size = getattr(swa_pool, "page_size", None)
-        if swa_page_size is None:
-            return 0
-        return (self.page_size + int(swa_page_size) - 1) // int(swa_page_size)
-
-    def _node_swa_pages_num(self, node: TreeNode) -> int:
-        if self._swa_pages_per_prompt_page == 0 or node.token_extra_value is None:
-            return 0
-        valid = node.token_extra_value.swa_page_valid
-        if valid is None:
-            return 0
-        return int(valid.sum().item()) * self._swa_pages_per_prompt_page
-
-    def _node_direct_ref_num(self, node: TreeNode) -> int:
-        # 子树引用同时计入父子节点，差值就是直接命中本节点的请求数。
-        return node.ref_counter - sum(child.ref_counter for child in node.children.values())
-
-    def _node_last_valid_swa_pages_num(self, node: TreeNode) -> int:
-        if node.token_extra_value is None:
-            return 0
-        return self._swa_pages_per_prompt_page if node.token_extra_value.swa_last_valid_page >= 0 else 0
-
-    def _align_len(self, length: int) -> int:
-        if self.page_size <= 1:
-            return int(length)
-        return int(length) // self.page_size * self.page_size
-
-    def align_len(self, length: int) -> int:
-        return self._align_len(length)
-
-    def _child_key(self, key: torch.Tensor):
-        if self.page_size <= 1:
-            return key[0].item()
-        return key[: self.page_size].numpy().tobytes()
-
-    def _match_len(self, key: torch.Tensor, node_key: torch.Tensor) -> int:
-        prefix_len = match(key, node_key)
-        return self._align_len(prefix_len)
-
-    def _slice_extra(self, extra_value, start: int, end: int):
-        if extra_value is None:
-            return None
-        assert self.extra_value_ops is not None
-        return self.extra_value_ops.slice(extra_value, start, end)
-
-    def _concat_extra(self, values: list):
-        values = [v for v in values if v is not None]
-        if len(values) == 0:
-            return None
-        assert self.extra_value_ops is not None
-        return self.extra_value_ops.concat(values)
-
-    def insert(self, key, value=None, extra_value=None) -> Tuple[int, Optional[TreeNode]]:
+    def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:
             value = key
-
-        align_len = self._align_len(len(key))
-        key = key[:align_len]
-        value = value[:align_len]
-        if extra_value is not None:
-            extra_value = self._slice_extra(extra_value, 0, align_len)
 
         assert len(key) == len(value)  # and len(key) >= 1
         aligned_len = len(key) // self.page_size * self.page_size
         if aligned_len == 0:
             return 0, None
-        return self._insert_helper(self.root_node, key, value, extra_value)
+        key = key[:aligned_len]
+        value = value[:aligned_len]
+        return self._insert_helper(self.root_node, key, value)
 
-    def _insert_helper(self, node: TreeNode, key, value, extra_value) -> Tuple[int, Optional[TreeNode]]:
+    def _insert_helper(self, node: TreeNode, key, value) -> Tuple[int, Optional[TreeNode]]:
         handle_stack = collections.deque()
         update_list = collections.deque()
-        handle_stack.append((node, key, value, extra_value))
+        handle_stack.append((node, key, value))
 
         ans_prefix_len = 0
         ans_node = None
 
         while len(handle_stack) != 0:
-            node, key, value, extra_value = handle_stack.popleft()
-            ans_tuple = self._insert_helper_no_recursion(node=node, key=key, value=value, extra_value=extra_value)
-            if len(ans_tuple) == 5:
-                (_prefix_len, new_node, new_key, new_value, new_extra_value) = ans_tuple
+            node, key, value = handle_stack.popleft()
+            ans_tuple = self._insert_helper_no_recursion(node=node, key=key, value=value)
+            if len(ans_tuple) == 4:
+                (_prefix_len, new_node, new_key, new_value) = ans_tuple
                 ans_prefix_len += _prefix_len
-                handle_stack.append((new_node, new_key, new_value, new_extra_value))
+                handle_stack.append((new_node, new_key, new_value))
             else:
                 _prefix_len, ans_node = ans_tuple
                 ans_prefix_len += _prefix_len
@@ -255,8 +181,8 @@ class RadixCache:
         return ans_prefix_len, ans_node
 
     def _insert_helper_no_recursion(
-        self, node: TreeNode, key: torch.Tensor, value: torch.Tensor, extra_value=None
-    ) -> Union[Tuple[int, Optional[TreeNode]], Tuple[int, TreeNode, torch.Tensor, torch.Tensor, Any]]:
+        self, node: TreeNode, key: torch.Tensor, value: torch.Tensor
+    ) -> Union[Tuple[int, Optional[TreeNode]], Tuple[int, TreeNode, torch.Tensor, torch.Tensor]]:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
 
@@ -275,14 +201,10 @@ class RadixCache:
                         self.evict_tree_set.add(child)
                     return prefix_len, child
                 elif prefix_len < len(child.token_id_key):
-                    if prefix_len == 0:
-                        return 0, node
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
 
-                    split_parent_node = child.split_node(
-                        prefix_len, child_key_fn=self._child_key, extra_value_ops=self.extra_value_ops
-                    )
+                    split_parent_node = child.split_node(prefix_len)
 
                     if split_parent_node.is_leaf():
                         self.evict_tree_set.add(split_parent_node)
@@ -294,26 +216,15 @@ class RadixCache:
                     assert False, "can not run to here"
 
             elif prefix_len < len(key) and prefix_len < len(child.token_id_key):
-                if prefix_len == 0:
-                    return 0, node
                 if child.is_leaf():
                     self.evict_tree_set.discard(child)
 
-                new_extra_value = self._slice_extra(extra_value, prefix_len, len(key))
                 key = key[prefix_len:]
                 value = value[prefix_len:]
-                split_parent_node = child.split_node(
-                    prefix_len, child_key_fn=self._child_key, extra_value_ops=self.extra_value_ops
-                )
-                new_node = split_parent_node.add_and_return_new_child(
-                    key,
-                    value,
-                    token_extra_value=new_extra_value,
-                    child_key=self._child_key(key),
-                )
+                split_parent_node = child.split_node(prefix_len)
+                new_node = split_parent_node.add_and_return_new_child(key, value)
                 # update total token num
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
-                self.swa_tree_total_pages_num += self._node_swa_pages_num(new_node)
 
                 if split_parent_node.is_leaf():
                     self.evict_tree_set.add(split_parent_node)
@@ -324,42 +235,26 @@ class RadixCache:
                     self.evict_tree_set.add(child)
                 return prefix_len, new_node
             elif prefix_len < len(key) and prefix_len == len(child.token_id_key):
-                return (
-                    prefix_len,
-                    child,
-                    key[prefix_len:],
-                    value[prefix_len:],
-                    self._slice_extra(extra_value, prefix_len, len(key)),
-                )
+                return (prefix_len, child, key[prefix_len:], value[prefix_len:])
             else:
                 assert False, "can not run to here"
 
         else:
-            new_node = node.add_and_return_new_child(
-                key,
-                value,
-                token_extra_value=extra_value,
-                child_key=first_key_id,
-            )
+            new_node = node.add_and_return_new_child(key, value)
             # update total token num
             self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
-            self.swa_tree_total_pages_num += self._node_swa_pages_num(new_node)
             if new_node.is_leaf():
                 self.evict_tree_set.add(new_node)
             return 0, new_node
 
     def match_prefix(self, key, update_refs=False):
-        key = key[: self._align_len(len(key))]
-        if len(key) == 0:
+        aligned_len = len(key) // self.page_size * self.page_size
+        if aligned_len == 0:
             return None, 0, None
-        key = self._trim_key_by_extra_value_validity(key)
-        if len(key) == 0:
-            return None, 0, None
+        key = key[:aligned_len]
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         if tree_node != self.root_node:
-            if update_refs and self._swa_pages_per_prompt_page > 0 and self._node_direct_ref_num(tree_node) == 1:
-                self.swa_refed_pages_num += self._node_last_valid_swa_pages_num(tree_node)
             if len(ans_value_list) != 0:
                 value = torch.concat(ans_value_list)
             else:
@@ -369,30 +264,6 @@ class RadixCache:
             if update_refs:
                 self.dec_node_ref_counter(self.root_node)
             return None, 0, None
-
-    def _trim_key_by_extra_value_validity(self, key: torch.Tensor) -> torch.Tensor:
-        """命中有效性裁剪(extra_value_ops 提供 valid_match_length 时启用,如 DeepSeek-V4 的
-        swa 按页 bitmap): 先做一次只读探测遍历得到自然命中与沿路 extra_value,按其有效边界截短
-        key,随后的正常遍历(加引用/分裂)只走截短后的前缀 —— 引用计数与最终返回值在同一次遍历
-        内保持一致,不存在事后裁剪导致的漏减/多减。
-
-        探测遍历可能分裂部分命中的节点(与正常遍历同语义,树不变式不受影响)。裁剪只会缩短命中,
-        没有任何失败路径。"""
-        if self.extra_value_ops is None:
-            return key
-        valid_match_length = getattr(self.extra_value_ops, "valid_match_length", None)
-        if valid_match_length is None:
-            return key
-        probe_values = []
-        probe_node = self._match_prefix_helper(self.root_node, key, probe_values, update_refs=False)
-        if probe_node == self.root_node or len(probe_values) == 0:
-            return key
-        natural_len = sum(len(v) for v in probe_values)
-        extra_value = self.get_extra_value_by_node(probe_node)
-        valid_len = int(valid_match_length(extra_value, natural_len))
-        if valid_len < natural_len:
-            return key[:valid_len]
-        return key
 
     def _match_prefix_helper(
         self, node: TreeNode, key: torch.Tensor, ans_value_list: list, update_refs=False
@@ -451,14 +322,10 @@ class RadixCache:
                 ans_value_list.append(child.token_mem_index_value)
                 return (child, key[prefix_len:])
             elif prefix_len < len(child.token_id_key):
-                if prefix_len == 0:
-                    return node
                 if child.is_leaf():
                     self.evict_tree_set.discard(child)
 
-                split_parent_node = child.split_node(
-                    prefix_len, child_key_fn=self._child_key, extra_value_ops=self.extra_value_ops
-                )
+                split_parent_node = child.split_node(prefix_len)
                 ans_value_list.append(split_parent_node.token_mem_index_value)
 
                 if update_refs:
@@ -489,11 +356,8 @@ class RadixCache:
             ), "error evict tree node state"
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
-            if self.extra_value_ops is not None and node.token_extra_value is not None:
-                self.extra_value_ops.free(node.token_extra_value)
             # update total token num
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
-            self.swa_tree_total_pages_num -= self._node_swa_pages_num(node)
             parent_node: TreeNode = node.parent
             parent_node.remove_child(node)
             if parent_node.is_leaf():
@@ -527,7 +391,6 @@ class RadixCache:
         child_node.token_mem_index_value = torch.cat(
             [parent_node.token_mem_index_value, child_node.token_mem_index_value]
         )
-        child_node.token_extra_value = self._concat_extra([parent_node.token_extra_value, child_node.token_extra_value])
         child_node.node_value_len = len(child_node.token_mem_index_value)
         child_node.time_id = max(parent_node.time_id, child_node.time_id)
 
@@ -576,8 +439,6 @@ class RadixCache:
 
         self.tree_total_tokens_num.arr[0] = 0
         self.refed_tokens_num.arr[0] = 0
-        self.swa_tree_total_pages_num = 0
-        self.swa_refed_pages_num = 0
         return
 
     def flush_cache(self):
@@ -589,12 +450,6 @@ class RadixCache:
             return
         # 如果减引用的是叶节点，需要先从 evict_tree_set 中移除
         old_node = node
-        if (
-            self._swa_pages_per_prompt_page > 0
-            and old_node is not self.root_node
-            and self._node_direct_ref_num(old_node) == 1
-        ):
-            self.swa_refed_pages_num -= self._node_last_valid_swa_pages_num(old_node)
         if old_node.is_leaf():
             self.evict_tree_set.discard(old_node)
 
@@ -614,12 +469,6 @@ class RadixCache:
             return
         # 如果减引用的是叶节点，需要先从 evict_tree_set 中移除
         old_node = node
-        if (
-            self._swa_pages_per_prompt_page > 0
-            and old_node is not self.root_node
-            and self._node_direct_ref_num(old_node) == 0
-        ):
-            self.swa_refed_pages_num += self._node_last_valid_swa_pages_num(old_node)
         if old_node.is_leaf():
             self.evict_tree_set.discard(old_node)
 
@@ -646,27 +495,11 @@ class RadixCache:
         ans_list.reverse()
         return torch.concat(ans_list, dim=0)
 
-    def get_extra_value_by_node(self, node: TreeNode):
-        if node is None or self.extra_value_ops is None:
-            return None
-
-        ans_list = []
-        while node is not None:
-            if node.token_extra_value is not None:
-                ans_list.append(node.token_extra_value)
-            node = node.parent
-
-        ans_list.reverse()
-        return self._concat_extra(ans_list)
-
     def get_refed_tokens_num(self):
         return self.refed_tokens_num.arr[0]
 
     def get_tree_total_tokens_num(self):
         return self.tree_total_tokens_num.arr[0]
-
-    def get_unrefed_swa_pages_num(self):
-        return self.swa_tree_total_pages_num - self.swa_refed_pages_num
 
     def print_self(self, indent=0):
         self._print_helper(self.root_node, indent)
@@ -680,88 +513,6 @@ class RadixCache:
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)
-        return
-
-    def free_unreferenced_swa_pages(self, need_pages: int) -> None:
-        """DeepSeek-V4 swa free hook: 页 allocator 触底时回收未被命中终点保护的 swa 页。"""
-        if self.mem_manager is None or self.extra_value_ops is None:
-            return
-        allocator = self.mem_manager.swa_page_allocator
-        target = allocator.can_use_mem_size + int(need_pages)
-        planned_reclaim_pages = 0
-        actual_reclaim_pages = 0
-        while allocator.can_use_mem_size < target:
-            evict_slots = []
-            invalidate_payloads = []
-            evict_swa_pages = 0
-            for free_last in (False, True):
-                visited = set()
-                for leaf in self.evict_tree_set:
-                    if allocator.can_use_mem_size + evict_swa_pages >= target:
-                        break
-                    node = leaf
-                    while node is not None and node is not self.root_node:
-                        node_id = id(node)
-                        if node_id in visited:
-                            node = node.parent
-                            continue
-                        visited.add(node_id)
-
-                        has_direct_ref = self._node_direct_ref_num(node) > 0
-
-                        payload = node.token_extra_value
-                        if (
-                            len(node.token_mem_index_value) > 0
-                            and payload is not None
-                            and payload.swa_page_valid is not None
-                        ):
-                            last_page = int(payload.swa_last_valid_page)
-                            if last_page >= 0:
-                                if free_last:
-                                    if has_direct_ref:
-                                        # 活跃请求恰好命中该节点时，最后一页仍需保留。
-                                        node = node.parent
-                                        continue
-                                    page_slice = slice(last_page, last_page + 1)
-                                else:
-                                    page_slice = slice(0, last_page)
-                                valid_pages = int(payload.swa_page_valid[page_slice].sum().item())
-                                if valid_pages > 0:
-                                    start = page_slice.start * self.page_size
-                                    end = min(page_slice.stop * self.page_size, len(node.token_mem_index_value))
-                                    if end > start:
-                                        evict_slots.append(node.token_mem_index_value[start:end])
-                                        invalidate_payloads.append((payload, page_slice, free_last))
-                                        evict_swa_pages += valid_pages * self._swa_pages_per_prompt_page
-                                        if allocator.can_use_mem_size + evict_swa_pages >= target:
-                                            break
-                        node = node.parent
-                if allocator.can_use_mem_size + evict_swa_pages >= target:
-                    break
-            if len(evict_slots) == 0:
-                break
-            free_pages_before = allocator.can_use_mem_size
-            self.mem_manager.evict_swa(torch.cat(evict_slots))
-            for payload, page_slice, free_last in invalidate_payloads:
-                payload.swa_page_valid[page_slice] = False
-                if free_last:
-                    payload.swa_last_valid_page = -1
-            self.swa_tree_total_pages_num -= evict_swa_pages
-            planned_reclaim_pages += evict_swa_pages
-            actual_reclaim_pages += allocator.can_use_mem_size - free_pages_before
-
-        # bitmap 是候选页账本，最终能否继续分配必须以物理 allocator 的真实水位为准。
-        if allocator.can_use_mem_size < target or actual_reclaim_pages < planned_reclaim_pages:
-            logger.warning(
-                "DSV4 SWA reclaim mismatch: target_free_pages=%d actual_free_pages=%d "
-                "planned_reclaim_pages=%d actual_reclaim_pages=%d tree_pages=%d protected_pages=%d",
-                target,
-                allocator.can_use_mem_size,
-                planned_reclaim_pages,
-                actual_reclaim_pages,
-                self.swa_tree_total_pages_num,
-                self.swa_refed_pages_num,
-            )
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):

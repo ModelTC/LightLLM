@@ -28,7 +28,6 @@ from lightllm.utils.config_utils import (
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 from lightllm.utils.device_utils import is_sm100_gpu, is_sm90_gpu
-from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 
 logger = init_logger(__name__)
 
@@ -101,7 +100,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
-        register_sysv_shm_for_cleanup(args.cpu_kv_cache_shm_id)
 
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
@@ -217,8 +215,9 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.page_size < 1:
         raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
-    if get_model_type(args.model_dir) == "deepseek_v4" and args.page_size != 256:
-        raise ValueError("DeepSeek-V4 requires --page_size 256")
+    if get_model_type(args.model_dir) == "deepseek_v4":
+        if args.page_size != 256 or args.linear_att_hash_page_size != 256:
+            raise ValueError("DeepSeek-V4 requires --page_size 256 --linear_att_hash_page_size 256")
     if args.run_mode in ("prefill", "decode"):
         assert args.pd_kv_page_size % args.page_size == 0, "--pd_kv_page_size must be divisible by --page_size"
 
@@ -337,9 +336,22 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
+    if (
+        args.enable_cpu_cache
+        and is_hybrid_att_model(args.model_dir)
+        and get_model_type(args.model_dir) != "deepseek_v4"
+    ):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    elif args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4":
+        big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        if big_page_tokens <= args.max_req_total_len:
+            if args.cpu_cache_token_page_size is None:
+                args.cpu_cache_token_page_size = big_page_tokens
+            if args.cpu_cache_token_page_size != big_page_tokens:
+                raise ValueError("DeepSeek-V4 CPU cache pages must match the hybrid big-page checkpoint interval")
+        elif args.cpu_cache_token_page_size is None:
+            args.cpu_cache_token_page_size = 2048
     elif args.enable_cpu_cache and args.cpu_cache_token_page_size is None:
         args.cpu_cache_token_page_size = 2048 if get_model_type(args.model_dir) == "deepseek_v4" else 256
     if args.enable_cpu_cache:

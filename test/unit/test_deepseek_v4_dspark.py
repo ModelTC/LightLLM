@@ -8,10 +8,12 @@ from lightllm.utils.envs_utils import _get_mtp_draft_backbone_layer_num
 from lightllm.utils.config_utils import get_deepseek_v4_compress_rates
 
 
-def test_dspark_decode_admission_reserves_one_swa_scratch_page():
-    from lightllm.server.router.model_infer.infer_batch import InferReq
+def test_dspark_decode_admission_reserves_one_swa_scratch_page(monkeypatch):
+    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 
     req = InferReq.__new__(InferReq)
+    req.req_idx = 0
+    monkeypatch.setattr(g_infer_context, "req_manager", SimpleNamespace(get_swa_page_need=lambda req, start, end: 0))
     req.args = SimpleNamespace(mtp_mode="eagle")
     req.mtp_step = 1
     req.dsv4_swa_page_size = 128
@@ -193,16 +195,7 @@ def test_build_dspark_swa_index_exposes_history_and_complete_block():
 
     block_size = 3
     window = 4
-    req_to_token = torch.tensor(
-        [
-            list(range(0, 10)),
-            list(range(10, 20)),
-            [20] * 10,
-        ],
-        dtype=torch.int32,
-        device="cuda",
-    )
-    full_to_swa = torch.arange(21, dtype=torch.int32, device="cuda") + 100
+    req_to_swa_pages = torch.tensor([[1], [2], [3]], dtype=torch.int32, device="cuda")
     req_idx = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device="cuda")
     positions = torch.tensor([4, 5, 6, 2, 3, 4], dtype=torch.int32, device="cuda")
     padded_width = 8
@@ -214,8 +207,7 @@ def test_build_dspark_swa_index_exposes_history_and_complete_block():
     build_dspark_swa_index(
         req_idx=req_idx,
         positions=positions,
-        req_to_token_indexs=req_to_token,
-        full_to_swa_indexs=full_to_swa,
+        req_to_swa_pages=req_to_swa_pages,
         scratch_pages=scratch_pages,
         swa_index=indices,
         swa_length=lengths,
@@ -224,18 +216,17 @@ def test_build_dspark_swa_index_exposes_history_and_complete_block():
         block_size=block_size,
         page_size=128,
         hold_req_id=2,
-        hold_full_slot=20,
         hold_swa_slot=120,
     )
 
     expected_indices = torch.tensor(
         [
-            [103, 102, 101, 100, 256, 257, 258, -1],
-            [103, 102, 101, 100, 256, 257, 258, -1],
-            [103, 102, 101, 100, 256, 257, 258, -1],
-            [111, 110, 384, 385, 386, -1, -1, -1],
-            [111, 110, 384, 385, 386, -1, -1, -1],
-            [111, 110, 384, 385, 386, -1, -1, -1],
+            [131, 130, 129, 128, 256, 257, 258, -1],
+            [131, 130, 129, 128, 256, 257, 258, -1],
+            [131, 130, 129, 128, 256, 257, 258, -1],
+            [257, 256, 384, 385, 386, -1, -1, -1],
+            [257, 256, 384, 385, 386, -1, -1, -1],
+            [257, 256, 384, 385, 386, -1, -1, -1],
         ],
         dtype=torch.int32,
         device="cuda",
@@ -255,23 +246,12 @@ def test_dspark_swa_block_uses_one_scratch_page_per_request():
     )
 
     manager = DeepseekV4MemoryManager.__new__(DeepseekV4MemoryManager)
-    manager.full_to_swa_indexs = torch.full((32,), -1, dtype=torch.int32, device="cuda")
-    manager.swa_page_live_count = torch.zeros((4,), dtype=torch.int32, device="cuda")
-    manager._alloc_swa_pages = lambda count: torch.tensor(
-        [2, 0],
-        dtype=torch.int32,
-        pin_memory=True,
+    manager.swa_pool = SimpleNamespace(buffer=torch.empty(0, device="cuda"))
+    manager.swa_page_allocator = SimpleNamespace(
+        alloc=lambda count: torch.tensor([2, 0], dtype=torch.int32, pin_memory=True)
     )
     mem_indexes = torch.tensor([3, 4, 5, 8, 9, 10], dtype=torch.int64, device="cuda")
 
     pages_cpu, pages = manager.alloc_dspark_swa_block(token_num=mem_indexes.numel(), block_size=3)
 
-    torch.testing.assert_close(
-        manager.full_to_swa_indexs[mem_indexes],
-        torch.full((6,), -1, dtype=torch.int32, device="cuda"),
-    )
-    torch.testing.assert_close(
-        manager.swa_page_live_count,
-        torch.zeros((4,), dtype=torch.int32, device="cuda"),
-    )
     torch.testing.assert_close(pages_cpu, torch.tensor([2, 0], dtype=torch.int32))

@@ -293,7 +293,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
         return streams.mean(dim=1)
 
-    def _prepare_dsv4_slots(self, model_input: ModelInput, mem_indexes: torch.Tensor) -> None:
+    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
         if model_input.batch_size == 0 or (model_input.is_prefill and self.is_mtp_draft_model):
             return
         # Runtime inputs retain CPU mirrors. Synthetic warmup inputs are created on GPU.
@@ -302,21 +302,22 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if req_ids is None:
             req_ids = model_input.b_req_idx.cpu()
             seq_lens = model_input.b_seq_len.cpu()
+        if req_ids.numel() == 0:
+            return
         if model_input.is_prefill:
             ready_lens = model_input.b_ready_cache_len_cpu
             if ready_lens is None:
                 ready_lens = model_input.b_ready_cache_len.cpu()
-            token_num = int((seq_lens - ready_lens).sum())
-            self.req_manager.prepare_prefill(req_ids, ready_lens, seq_lens, mem_indexes[:token_num])
+            self.req_manager.prepare_prefill(req_ids, ready_lens, seq_lens)
         else:
             mtp_indices = model_input.b_mtp_index_cpu
             if mtp_indices is None:
                 mtp_indices = model_input.b_mtp_index.cpu()
-            self.req_manager.prepare_decode(req_ids, seq_lens, mtp_indices, mem_indexes[: len(req_ids)])
+            self.req_manager.prepare_decode(req_ids, seq_lens, mtp_indices)
 
     def _select_mem_indexes(self, model_input: ModelInput):
         mem_indexes = super()._select_mem_indexes(model_input)
-        self._prepare_dsv4_slots(model_input, mem_indexes)
+        self._prepare_dsv4_slots(model_input)
         return mem_indexes
 
     def _init_to_get_rotary(self):

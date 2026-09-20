@@ -43,8 +43,7 @@ def _save_partial_states_kernel(
     token_to_batch_idx,
     b_req_idx,
     b_seq_len,
-    mem_index,
-    full_to_swa,
+    swa_write_slots,
     state_buffer,
     STATE_WIDTH: tl.constexpr,
     STATE_LAST_DIM: tl.constexpr,
@@ -69,8 +68,7 @@ def _save_partial_states_kernel(
             return
 
     if IS_C4:
-        full_slot = tl.load(mem_index + token_idx).to(tl.int64)
-        swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
+        swa_slot = tl.load(swa_write_slots + token_idx).to(tl.int64)
         if swa_slot < 0:
             return
         state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
@@ -101,9 +99,8 @@ def _fused_compress_norm_rope_insert_kernel(
     b_seq_len,
     b_ready_cache_len,
     b_q_start_loc,
-    req_to_token,
-    req_to_token_stride0,
-    full_to_swa,
+    req_to_swa_pages,
+    req_to_swa_stride0,
     out_slots,
     norm_weight,
     rms_eps,
@@ -170,12 +167,12 @@ def _fused_compress_norm_rope_insert_kernel(
     cache_pos = valid_pos
 
     if IS_C4:
-        full_slot = tl.load(
-            req_to_token + req_idx * req_to_token_stride0 + gather_pos,
+        swa_page = tl.load(
+            req_to_swa_pages + req_idx * req_to_swa_stride0 + gather_pos // SWA_PAGE_SIZE,
             mask=cache_pos,
-            other=0,
+            other=-1,
         ).to(tl.int64)
-        swa_slot = tl.load(full_to_swa + full_slot, mask=cache_pos, other=-1).to(tl.int64)
+        swa_slot = swa_page * SWA_PAGE_SIZE + gather_pos % SWA_PAGE_SIZE
         state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
         state_valid = cache_pos & (swa_slot >= 0)
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
@@ -362,7 +359,7 @@ def fused_compress(
         infer_state.b_ready_cache_len if infer_state.b_ready_cache_len is not None else infer_state.b_seq_len
     )
     q_start_loc = infer_state.b_q_start_loc if infer_state.b_q_start_loc is not None else infer_state.b_seq_len
-    req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
+    req_to_swa_pages = infer_state.req_manager.req_to_swa_pages
 
     _fused_compress_norm_rope_insert_kernel[(kv_score.shape[0],)](
         kv_score,
@@ -376,9 +373,8 @@ def fused_compress(
         infer_state.b_seq_len,
         ready_cache_len,
         q_start_loc,
-        req_to_token_indexs,
-        req_to_token_indexs.stride(0),
-        mem_manager.full_to_swa_indexs,
+        req_to_swa_pages,
+        req_to_swa_pages.stride(0),
         out_slots,
         norm_weight,
         eps,
@@ -419,8 +415,7 @@ def fused_compress(
         token_to_batch_idx,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
-        infer_state.mem_index,
-        mem_manager.full_to_swa_indexs,
+        infer_state.dsv4_swa_write_slots,
         state_buffer,
         STATE_WIDTH=state_width,
         STATE_LAST_DIM=state_last_dim,

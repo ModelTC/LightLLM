@@ -10,8 +10,9 @@ _C128_RATIO = 128
 _BYTE_BLOCK = 8192
 # Per-source row: c4 data/indexer, c128 data, SWA map/data, c4 state/indexer state.
 _SOURCE_POOL_PTR_COUNT = 7
-# Per-task row: source manager index, token count, source full-slot pointer, destination full-slot pointer.
-_TASK_META_WIDTH = 4
+# Per-task row: source manager index, source/destination full-slot pointers,
+# source/destination request IDs, logical end.
+_TASK_META_WIDTH = 6
 
 
 @triton.jit
@@ -28,7 +29,8 @@ def _copy_dsv4_dp_caches_kernel(
     dst_c128_pool,
     dst_c128_pool_stride0,
     dst_c128_pool_stride1,
-    dst_full_to_swa,
+    dst_req_to_swa,
+    req_swa_stride0,
     dst_swa_pool,
     dst_swa_pool_stride0,
     dst_swa_pool_stride1,
@@ -79,8 +81,8 @@ def _copy_dsv4_dp_caches_kernel(
             history_block = tl.load(history_meta + history_index * 2 + 1).to(tl.int64)
             task_row = task_meta + task * task_meta_width
             source_manager = tl.load(task_row).to(tl.int64)
-            src_full_slots = tl.load(task_row + 2).to(tl.pointer_type(tl.int32))
-            dst_full_slots = tl.load(task_row + 3).to(tl.pointer_type(tl.int32))
+            src_full_slots = tl.load(task_row + 1).to(tl.pointer_type(tl.int32))
+            dst_full_slots = tl.load(task_row + 2).to(tl.pointer_type(tl.int32))
             source_ptr_row = source_pool_ptrs + source_manager * source_pool_ptr_count
             layer_i64 = layer.to(tl.int64)
 
@@ -161,11 +163,11 @@ def _copy_dsv4_dp_caches_kernel(
         task_pid = tail_pid // task_num
         task_row = task_meta + task * task_meta_width
         source_manager = tl.load(task_row).to(tl.int64)
-        token_num = tl.load(task_row + 1).to(tl.int64)
-        src_full_slots = tl.load(task_row + 2).to(tl.pointer_type(tl.int32))
-        dst_full_slots = tl.load(task_row + 3).to(tl.pointer_type(tl.int32))
         source_ptr_row = source_pool_ptrs + source_manager * source_pool_ptr_count
-        src_full_to_swa = tl.load(source_ptr_row + 3).to(tl.pointer_type(tl.int32))
+        src_req_to_swa = tl.load(source_ptr_row + 3).to(tl.pointer_type(tl.int32))
+        src_req = tl.load(task_row + 3).to(tl.int64)
+        dst_req = tl.load(task_row + 4).to(tl.int64)
+        end = tl.load(task_row + 5).to(tl.int64)
         src_swa_pool = tl.load(source_ptr_row + 4).to(tl.pointer_type(tl.uint8))
 
         if task_pid < swa_program_num:
@@ -173,13 +175,9 @@ def _copy_dsv4_dp_caches_kernel(
             layer = task_pid // 2
             page_i64 = page.to(tl.int64)
             layer_i64 = layer.to(tl.int64)
-            full_offset = token_num - history_block_size + page_i64 * swa_pool_page_size
-            src_full_slot = tl.load(src_full_slots + full_offset).to(tl.int64)
-            dst_full_slot = tl.load(dst_full_slots + full_offset).to(tl.int64)
-            src_pool_slot = tl.load(src_full_to_swa + src_full_slot).to(tl.int64)
-            dst_pool_slot = tl.load(dst_full_to_swa + dst_full_slot).to(tl.int64)
-            src_page = src_pool_slot // swa_pool_page_size
-            dst_page = dst_pool_slot // swa_pool_page_size
+            position = end - history_block_size + page_i64 * swa_pool_page_size
+            src_page = tl.load(src_req_to_swa + src_req * req_swa_stride0 + position // swa_pool_page_size).to(tl.int64)
+            dst_page = tl.load(dst_req_to_swa + dst_req * req_swa_stride0 + position // swa_pool_page_size).to(tl.int64)
             src_page_ptr = src_swa_pool + layer_i64 * dst_swa_pool_stride0 + src_page * dst_swa_pool_stride1
             dst_page_ptr = dst_swa_pool + layer_i64 * dst_swa_pool_stride0 + dst_page * dst_swa_pool_stride1
             for byte_start in tl.range(0, swa_pool_page_nbytes, BLOCK):
@@ -197,11 +195,15 @@ def _copy_dsv4_dp_caches_kernel(
                 layer_i64 = layer.to(tl.int64)
                 src_c4_state = tl.load(source_ptr_row + 5).to(tl.pointer_type(tl.uint8))
                 src_c4_indexer_state = tl.load(source_ptr_row + 6).to(tl.pointer_type(tl.uint8))
-                full_offset = token_num - 4 + row_i64
-                src_full_slot = tl.load(src_full_slots + full_offset).to(tl.int64)
-                dst_full_slot = tl.load(dst_full_slots + full_offset).to(tl.int64)
-                src_swa_slot = tl.load(src_full_to_swa + src_full_slot).to(tl.int64)
-                dst_swa_slot = tl.load(dst_full_to_swa + dst_full_slot).to(tl.int64)
+                position = end - 4 + row_i64
+                src_page = tl.load(src_req_to_swa + src_req * req_swa_stride0 + position // swa_pool_page_size).to(
+                    tl.int64
+                )
+                dst_page = tl.load(dst_req_to_swa + dst_req * req_swa_stride0 + position // swa_pool_page_size).to(
+                    tl.int64
+                )
+                src_swa_slot = src_page * swa_pool_page_size + position % swa_pool_page_size
+                dst_swa_slot = dst_page * swa_pool_page_size + position % swa_pool_page_size
                 src_state_row = (src_swa_slot // swa_pool_page_size) * c4_state_ring + src_swa_slot % c4_state_ring
                 dst_state_row = (dst_swa_slot // swa_pool_page_size) * c4_state_ring + dst_swa_slot % c4_state_ring
 
@@ -279,7 +281,8 @@ def copy_dsv4_dp_caches(
         dst_c128_pool,
         dst_c128_pool.stride(0) if has_c128 else 0,
         dst_c128_pool.stride(1) if has_c128 else 0,
-        dst_mem_manager.full_to_swa_indexs,
+        dst_mem_manager.req_to_swa_pages,
+        dst_mem_manager.req_to_swa_pages.stride(0),
         dst_swa_pool,
         dst_swa_pool.stride(0),
         dst_swa_pool.stride(1),

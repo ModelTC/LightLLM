@@ -45,7 +45,9 @@ def _pack_gpu_cache_to_staging_kernel(
     c128_pool,
     c128_pool_stride0,
     c128_pool_stride1,
-    full_to_swa,
+    req_to_swa_pages,
+    req_to_swa_stride0,
+    source_req_meta,
     swa_pool,
     swa_pool_stride0,
     swa_pool_stride1,
@@ -191,15 +193,12 @@ def _pack_gpu_cache_to_staging_kernel(
         layer = job // swa_gpu_page_num
         layer_i64 = layer.to(tl.int64)
         gpu_page_i64 = gpu_page.to(tl.int64)
-        full_slot = tl.load(
-            full_slots
-            + logical_page_i64 * token_page_size
-            + token_page_size
-            - history_block_size
-            + gpu_page_i64 * swa_pool_page_size
-        ).to(tl.int64)
-        pool_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
-        physical_page = pool_slot // swa_pool_page_size
+        req_idx = tl.load(source_req_meta + logical_page_i64 * 2).to(tl.int64)
+        checkpoint_len = tl.load(source_req_meta + logical_page_i64 * 2 + 1).to(tl.int64)
+        position = checkpoint_len - history_block_size + gpu_page_i64 * swa_pool_page_size
+        physical_page = tl.load(req_to_swa_pages + req_idx * req_to_swa_stride0 + position // swa_pool_page_size).to(
+            tl.int64
+        )
         offsets = byte_block * BLOCK + offsets_base
         offsets_i64 = offsets.to(tl.int64)
         mask = offsets < swa_gpu_page_nbytes
@@ -223,10 +222,12 @@ def _pack_gpu_cache_to_staging_kernel(
             layer = job // 4
             row_i64 = row.to(tl.int64)
             layer_i64 = layer.to(tl.int64)
-            full_slot = tl.load(full_slots + logical_page_i64 * token_page_size + token_page_size - 4 + row_i64).to(
+            req_idx = tl.load(source_req_meta + logical_page_i64 * 2).to(tl.int64)
+            position = tl.load(source_req_meta + logical_page_i64 * 2 + 1).to(tl.int64) - 4 + row_i64
+            page = tl.load(req_to_swa_pages + req_idx * req_to_swa_stride0 + position // swa_pool_page_size).to(
                 tl.int64
             )
-            swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
+            swa_slot = page * swa_pool_page_size + position % swa_pool_page_size
             state_row = (swa_slot // swa_pool_page_size) * c4_state_ring + swa_slot % c4_state_ring
             offsets = byte_block * BLOCK + offsets_base
             offsets_i64 = offsets.to(tl.int64)
@@ -479,13 +480,16 @@ def _unpack_cpu_cache_to_gpu_kernel(
             tl.store(indexer_target, tl.load(indexer_source, mask=indexer_mask), mask=indexer_mask)
 
 
-def pack_gpu_cache_to_staging(mem_manager, source_mem_indexes: torch.Tensor, staging: torch.Tensor) -> None:
+def pack_gpu_cache_to_staging(
+    mem_manager, source_mem_indexes: torch.Tensor, source_req_meta: torch.Tensor, staging: torch.Tensor
+) -> None:
     """Pack a compact batch of complete CPU checkpoint pages into caller-owned CUDA staging."""
     layout = mem_manager.cpu_cache_layout
     assert source_mem_indexes.is_cuda and staging.is_cuda
     assert source_mem_indexes.ndim == 2 and source_mem_indexes.shape[1] == layout.token_page_size
     assert staging.dtype == torch.uint8 and staging.is_contiguous()
     page_num = source_mem_indexes.shape[0]
+    assert source_req_meta.shape == (page_num, 2) and source_req_meta.is_cuda
     assert staging.shape == (page_num, layout.page_nbytes)
 
     full_slots = source_mem_indexes.reshape(-1)
@@ -522,7 +526,9 @@ def pack_gpu_cache_to_staging(mem_manager, source_mem_indexes: torch.Tensor, sta
         c128_pool,
         c128_pool.stride(0) if has_c128 else 0,
         c128_pool.stride(1) if has_c128 else 0,
-        mem_manager.full_to_swa_indexs,
+        mem_manager.req_to_swa_pages,
+        mem_manager.req_to_swa_pages.stride(0),
+        source_req_meta,
         swa_pool,
         swa_pool.stride(0),
         swa_pool.stride(1),

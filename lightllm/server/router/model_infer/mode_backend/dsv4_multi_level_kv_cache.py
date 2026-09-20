@@ -150,7 +150,10 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
             source_mem_indexes = slot.source_mem_indexes[:page_num]
             torch.stack([item.source_mem_indexes for item in store_pages], out=source_mem_indexes)
             staging = slot.buffer[:page_num]
-            operator.pack_cpu_cache_pages(source_mem_indexes, staging)
+            source_req_meta = torch.tensor(
+                [[item.req_idx, item.checkpoint_len] for item in store_pages], dtype=torch.int32, device="cuda"
+            )
+            operator.pack_cpu_cache_pages(source_mem_indexes, source_req_meta, staging)
             pack_event = torch.cuda.Event()
             pack_event.record()
 
@@ -227,6 +230,8 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                                 session=session,
                                 cpu_page_index=cpu_page_index,
                                 source_mem_indexes=source_mem_indexes,
+                                req_idx=req.req_idx,
+                                checkpoint_len=token_start + token_page_size,
                             )
                         )
                 if session.disabled or session.next_page_index >= len(token_hashes):
@@ -292,13 +297,9 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                     if loadable_end != 0:
                         token_num = loadable_end - gpu_kv_len
                         full_need = token_num
-                        swa_need = 2
                         if self.backend.radix_cache is not None:
                             radix_cache = self.backend.radix_cache
                             radix_cache.free_radix_cache_to_get_enough_token(full_need)
-                            swa_shortage = swa_need - int(mem_manager.swa_page_allocator.can_use_mem_size)
-                            if swa_shortage > 0:
-                                radix_cache.free_unreferenced_swa_pages(swa_shortage)
 
                         loadable_end = mem_manager.get_loadable_cpu_cache_end(
                             gpu_kv_len,
@@ -315,20 +316,55 @@ class Dsv4MultiLevelKvCacheModule(MultiLevelKvCacheModule):
                             first_page_index = gpu_kv_len // layout.token_page_size
                             cpu_pages = page_list[first_page_index : loaded_end // layout.token_page_size]
                             page_indexes_cuda = torch.tensor(cpu_pages, dtype=torch.int32, device="cuda")
-                            plan = mem_manager.prepare_cpu_cache_load(token_num=token_num, loaded_end=loaded_end)
-                            mem_manager.operator.load_cpu_cache_pages(
-                                plan=plan,
-                                page_indexes=page_indexes_cuda,
-                                cpu_cache_client=self.cpu_cache_client,
-                                first_page_history_offset_tokens=gpu_kv_len % layout.token_page_size,
+                            req_manager = self.backend.model.req_manager
+                            req_manager.prepare_swa(req.req_idx, loaded_end - 256, loaded_end)
+                            resume_slots = req_manager.get_swa_slots(
+                                req.req_idx, torch.arange(loaded_end - 256, loaded_end, device="cuda")
                             )
-                            mem_manager.commit_cpu_cache_load_plan(plan)
+                            plan = mem_manager.prepare_cpu_cache_load(
+                                token_num=token_num, loaded_end=loaded_end, resume_swa_slots=resume_slots
+                            )
+                            try:
+                                mem_manager.operator.load_cpu_cache_pages(
+                                    plan=plan,
+                                    page_indexes=page_indexes_cuda,
+                                    cpu_cache_client=self.cpu_cache_client,
+                                    first_page_history_offset_tokens=gpu_kv_len % layout.token_page_size,
+                                )
+                            except Exception:
+                                mem_manager.free(plan.mem_indexes)
+                                req_manager.clear_runtime_state(req.req_idx)
+                                raise
                             self.backend.model.req_manager.req_to_token_indexs[
                                 req.req_idx, gpu_kv_len:loaded_end
                             ] = plan.mem_indexes
-                            self.backend.model.req_manager.finish_cpu_cache_load(req.req_idx, loaded_end)
                             req.cur_kv_len = loaded_end
                             req.hold_kv_len = loaded_end
+                            if self.backend.radix_cache is not None:
+                                big_page_tokens = (
+                                    self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+                                )
+                                first_boundary = (gpu_kv_len // big_page_tokens + 1) * big_page_tokens
+                                for boundary in range(first_boundary, loaded_end + 1, big_page_tokens):
+                                    buffer_idx = mem_manager.big_page_buffers.alloc_one_state_cache()
+                                    assert buffer_idx is not None
+                                    page_idx = page_list[boundary // layout.token_page_size - 1]
+                                    mem_manager.big_page_buffers.buffer[buffer_idx].copy_(
+                                        self.cpu_cache_client.cpu_kv_cache_tensor[page_idx, layout.swa_offset :]
+                                    )
+                                    req.hybrid_len_to_big_page_id[boundary] = buffer_idx
+                                if loaded_end == req.hybrid_cache_len and loaded_end % big_page_tokens:
+                                    self.backend.radix_cache.free_one_small_page_buffer()
+                                    req.tail_small_page_buffer_id = (
+                                        req_manager.small_page_buffers.alloc_one_state_cache()
+                                    )
+                                    if req.tail_small_page_buffer_id is not None:
+                                        req_manager.save_state(
+                                            req.req_idx,
+                                            req.tail_small_page_buffer_id,
+                                            req_manager.small_page_buffers,
+                                            checkpoint_len=loaded_end,
+                                        )
                             idle_token_num -= token_num
 
             if is_master_in_dp:
@@ -400,6 +436,8 @@ class Dsv4StorePage:
     cpu_page_index: int
     # 该 checkpoint page 对应的 GPU KV slot 编号。
     source_mem_indexes: torch.Tensor
+    req_idx: int
+    checkpoint_len: int
 
 
 @dataclasses.dataclass

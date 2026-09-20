@@ -88,7 +88,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 break
 
         if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
-            if g_infer_context.is_hybrid_att_model:
+            if g_infer_context.is_hybrid_att_model and not self.is_deepseek_v4:
                 # 混合注意力模型除 KV 外，还需传输 prefill 完成时的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
                 trans_task_list.append(
                     self._create_pd_trans_task(

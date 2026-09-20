@@ -98,19 +98,15 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
                 pool.buffer.index_copy_(1, dst_pages, pool.buffer.index_select(1, src_pages))
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
-            DeepseekV4MemoryManager,
-        )
+        raise NotImplementedError("DeepSeek-V4 writes packed KV using request-owned SWA slots")
 
-        mem_manager: DeepseekV4MemoryManager = self.mem_manager
-        mem_manager.pack_mla_kv_to_cache(layer_index, mem_index, kv)
-        return
-
-    def pack_cpu_cache_pages(self, source_mem_indexes: torch.Tensor, staging: torch.Tensor) -> None:
+    def pack_cpu_cache_pages(
+        self, source_mem_indexes: torch.Tensor, source_req_meta: torch.Tensor, staging: torch.Tensor
+    ) -> None:
         """Pack complete DS4 checkpoints into caller-owned CUDA staging."""
         from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import pack_gpu_cache_to_staging
 
-        pack_gpu_cache_to_staging(self.mem_manager, source_mem_indexes, staging)
+        pack_gpu_cache_to_staging(self.mem_manager, source_mem_indexes, source_req_meta, staging)
         return
 
     def scatter_packed_cpu_cache_pages(
