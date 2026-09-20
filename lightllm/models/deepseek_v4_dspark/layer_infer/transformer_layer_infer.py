@@ -31,7 +31,7 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             infer_state.context_kv = all_kv.split(self.head_dim_, dim=-1)
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
-            mem_index=infer_state.mem_index,
+            swa_slots=infer_state.dsv4_swa_write_slots,
             kv=infer_state.context_kv[self.stage_id],
             kv_weight=layer_weight.kv_norm_.weight,
             eps=self.eps_,
