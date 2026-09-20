@@ -14,6 +14,19 @@ def get_config_json(model_path: str):
     return json_obj
 
 
+def get_running_max_req_size_per_dp(args) -> int:
+    """Return the request capacity for one local DP rank."""
+    if args.running_max_req_size < 1:
+        raise ValueError("running_max_req_size must be >= 1")
+
+    local_dp_size = max(1, args.dp // args.nnodes)
+    # Cache fetch and beam groups need the full capacity.
+    requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
+    if local_dp_size > 1 and not requires_global_capacity:
+        return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
+    return args.running_max_req_size
+
+
 def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
     """
     Derive `max_req_total_len` from model config.json.

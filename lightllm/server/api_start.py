@@ -23,6 +23,7 @@ from lightllm.utils.config_utils import (
     auto_set_max_req_total_len,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
+    get_running_max_req_size_per_dp,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -345,16 +346,15 @@ def _launch_subprocesses(args: StartArgs):
         )
 
     auto_configure_allreduce_flags_from_args(args)
+    local_request_capacity = get_running_max_req_size_per_dp(args)
 
-    # CUDA Graph 只需要覆盖调度器允许同时运行的请求数。配置得更大不会被真实请求使用，
-    # 反而会捕获无效的大 batch Graph 并额外占用显存，因此在全部参数调整完成后收敛到合法上限。
-    # 关闭 CUDA Graph 时该参数不生效，保留用户原值。
-    if not args.disable_cudagraph and args.graph_max_batch_size > args.running_max_req_size:
+    # Limit CUDA Graph batches to the local request capacity.
+    if not args.disable_cudagraph and args.graph_max_batch_size > local_request_capacity:
         logger.warning(
-            f"graph_max_batch_size {args.graph_max_batch_size} exceeds running_max_req_size "
-            f"{args.running_max_req_size}; set graph_max_batch_size to {args.running_max_req_size}."
+            f"graph_max_batch_size {args.graph_max_batch_size} exceeds per-DP request capacity "
+            f"{local_request_capacity}; set graph_max_batch_size to {local_request_capacity}."
         )
-        args.graph_max_batch_size = args.running_max_req_size
+        args.graph_max_batch_size = local_request_capacity
 
     # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
     ports_to_check = [args.port]
