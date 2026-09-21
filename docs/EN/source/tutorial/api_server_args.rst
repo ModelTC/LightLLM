@@ -253,7 +253,10 @@ Memory and Batch Processing Parameters
 
 .. option:: --running_max_req_size
 
-    Maximum number of requests for simultaneous forward inference, default is ``1000``
+    Total shared request slots on the local node, default is ``256``.
+    DP mode allocates ``ceil(running_max_req_size / local DP rank count)``
+    request-state slots per rank, which also limits scheduling concurrency and CUDA Graph batches.
+    Diverse mode and DP prompt cache fetch keep the original capacity.
 
 .. option:: --max_req_total_len
 
