@@ -9,7 +9,7 @@ import torch
 
 from lightllm.utils.log_utils import init_logger
 
-from .planner import EPLBPlanner, ExpertPlacement
+from .placement_planner import EPLBPlanner, ExpertPlacement
 
 logger = init_logger(__name__)
 

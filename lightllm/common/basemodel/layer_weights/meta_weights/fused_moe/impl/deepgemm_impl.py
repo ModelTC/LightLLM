@@ -1,7 +1,7 @@
 import torch
 from typing import Optional, Tuple, Any
 from .base_impl import FuseMoeBaseImpl
-from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
+from lightllm.server.router.model_infer.mode_backend.eplb.expert_placement import (
     build_initial_local_expert_ids,
     build_logical_to_physical_map,
 )
