@@ -701,6 +701,8 @@ def test_manager_evaluating_copies_route_counters_to_cpu_without_modifying_them(
     manager.global_rank = 1
     manager.world_size = 1
     manager.control_group = object()
+    manager.max_rebalance_count = -1
+    manager.completed_rebalance_count = 0
     local_token_counts = []
 
     def all_gather_object(output, local_token_count, **_kwargs):
@@ -858,6 +860,8 @@ def test_manager_evaluation_gathers_token_counts_from_all_ranks(monkeypatch):
     manager.num_redundant_experts_per_rank = 1
     manager.current_placement = _initial_expert_placement(4, 4, 1).unsqueeze(0).tolist()
     manager.control_group = object()
+    manager.max_rebalance_count = -1
+    manager.completed_rebalance_count = 0
     local = torch.full((4,), 100, dtype=torch.int64)
     manager._eplb_impls[0].route_counter = local
     manager.state = manager_module.EPLBManagerState.EVALUATING
@@ -1482,7 +1486,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     assert waits == [overlap_stream, overlap_stream]
 
 
-def test_manager_finishes_after_reaching_rebalance_limit():
+def test_manager_returns_to_collecting_after_reaching_rebalance_limit():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     impls = [SimpleNamespace(recording=True), SimpleNamespace(recording=True)]
     target_placement = [[[0, 1], [1, 0]]]
@@ -1500,7 +1504,7 @@ def test_manager_finishes_after_reaching_rebalance_limit():
 
     assert manager.current_placement is target_placement
     assert manager.completed_rebalance_count == 1
-    assert manager.state is manager_module.EPLBManagerState.FINISHED
+    assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert all(impl.recording for impl in impls)
 
 
@@ -1603,15 +1607,6 @@ def test_manager_step_advances_inflight_transfer():
     assert calls == ["transfer"]
 
 
-def test_finished_manager_step_is_a_noop():
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.state = manager_module.EPLBManagerState.FINISHED
-
-    manager.step()
-
-    assert manager.state is manager_module.EPLBManagerState.FINISHED
-
-
 def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     route_counter = torch.tensor([1, 2], dtype=torch.int64)
@@ -1625,6 +1620,8 @@ def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
     manager._eplb_impls = [SimpleNamespace(route_counter=route_counter)]
     manager.world_size = 1
     manager.control_group = object()
+    manager.max_rebalance_count = -1
+    manager.completed_rebalance_count = 0
 
     def all_gather_object(output, local_token_count, **_kwargs):
         local_token_counts.append(local_token_count)
@@ -1725,6 +1722,8 @@ def test_manager_evaluation_with_insufficient_tokens_returns_to_collecting(monke
     manager.global_rank = 1
     manager.world_size = 1
     manager.control_group = object()
+    manager.max_rebalance_count = -1
+    manager.completed_rebalance_count = 0
     monkeypatch.setattr(
         manager_module.dist,
         "all_gather_object",
@@ -1741,12 +1740,15 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     local_load = torch.full((1, 4), 256, dtype=torch.int64)
     plan_tasks = []
+    published_loads = []
     manager.state = manager_module.EPLBManagerState.EVALUATING
     manager.global_rank = 0
     manager.num_logical_experts = 4
     manager._eplb_impls = [SimpleNamespace(route_counter=local_load[0])]
     manager.world_size = 1
     manager.control_group = object()
+    manager.max_rebalance_count = -1
+    manager.completed_rebalance_count = 0
     monkeypatch.setattr(
         manager_module.dist,
         "all_gather_object",
@@ -1771,13 +1773,15 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     manager.planner = object()
     manager.current_placement = [[[0, 1, 2, 3]]]
-    manager._publish_expert_load_metric = lambda _global_load: None
+    manager._publish_expert_load_metric = lambda load: published_loads.append(load)
     monkeypatch.setattr(manager_module, "EPLBPlanTask", PlanTask)
 
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.PLANNING
     assert torch.equal(manager._local_load, local_load)
+    assert len(published_loads) == 1
+    assert torch.equal(published_loads[0], local_load)
     assert plan_tasks == []
     assert not hasattr(manager, "_plan_task")
 
@@ -1790,6 +1794,34 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     assert plan_tasks[0].started
     assert manager._plan_task is plan_tasks[0]
     assert not hasattr(manager, "_local_load")
+    assert len(published_loads) == 1
+
+
+def test_manager_keeps_reporting_after_reaching_rebalance_limit(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    local_load = torch.tensor([[10, 20, 30, 40]], dtype=torch.int64)
+    published_loads = []
+    cleared_counters = []
+    manager.state = manager_module.EPLBManagerState.EVALUATING
+    manager.global_rank = 0
+    manager.num_logical_experts = 4
+    manager._eplb_impls = [SimpleNamespace(route_counter=local_load[0])]
+    manager.max_rebalance_count = 1
+    manager.completed_rebalance_count = 1
+    manager._publish_expert_load_metric = lambda load: published_loads.append(load)
+    manager._clear_route_counters = lambda: cleared_counters.append(True)
+    monkeypatch.setattr(
+        manager_module.dist,
+        "all_gather_object",
+        lambda *_args, **_kwargs: pytest.fail("rebalancing must stop after reaching the limit"),
+    )
+
+    manager.step()
+
+    assert manager.state is manager_module.EPLBManagerState.COLLECTING
+    assert len(published_loads) == 1
+    assert torch.equal(published_loads[0], local_load)
+    assert cleared_counters == [True]
 
 
 def test_nonzero_rank_waits_without_starting_planner(monkeypatch):

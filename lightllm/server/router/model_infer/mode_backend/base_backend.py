@@ -257,7 +257,7 @@ class ModeBackend:
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
-        if self.args.eplb_num_redundant_experts_per_rank > 0 and self.args.eplb_rebalance_count != 0:
+        if self.args.eplb_num_redundant_experts_per_rank > 0:
             from lightllm.server.router.model_infer.mode_backend.eplb_manager import EPLBManager
 
             self.eplb_manager = EPLBManager(self.model, self.args.eplb_rebalance_count)
