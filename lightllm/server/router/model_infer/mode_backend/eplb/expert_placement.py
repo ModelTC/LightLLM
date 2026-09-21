@@ -1,9 +1,9 @@
-"""构建完整专家布局及其紧凑路由元数据。
+"""构建单层专家布局及其紧凑路由元数据。
 
-本模块统一使用
-``[layer][rank][local physical expert] -> logical expert`` 表示专家布局；
-处理单层布局的函数会省略 layer 维。初始布局按主专家和冗余专家构建；
-EPLB 开始运行后，全部物理槽位都可以重新分配。
+本模块统一使用 ``[rank][local physical expert] -> logical expert`` 表示一层
+完整的专家布局。初始布局按主专家和冗余专家构建；EPLB 开始运行后，全部
+物理槽位都可以重新分配。多层调用方应逐层调用这里的单层函数，避免维护
+语义重复的批量封装。
 """
 
 
@@ -177,42 +177,3 @@ def _build_routing_row(
     # 阶段 3：第 0 列保存 kernel 参与 hash 的有效副本数；第 1 列标记是否
     # 存在本地副本；后续列保存按本地优先顺序排列的 physical IDs 和 -1 padding。
     return [num_valid_replicas, int(has_local_replica), *routing_slots]
-
-
-def build_logical_to_physical_maps_for_layers(
-    rank_to_logic_expert_ids_by_layer: list[list[list[int]]],
-    num_logical_experts: int,
-    current_rank: int,
-) -> list[list[list[int]]]:
-    """逐层构建完整布局对应的 logical-to-physical 路由表。
-
-    ``rank_to_logic_expert_ids_by_layer`` 使用 EPLB 的完整布局格式：
-    ``[layer][rank][local physical expert] -> logical expert``。其中每个 layer
-    必须包含相同数量的 rank，同一层内每个 rank 必须具有相同数量的物理
-    专家槽位；布局同时包含初始主专家和全部冗余专家。
-
-    返回值的 shape 为 ``[layer][logical expert][metadata]``。每个 logical
-    expert 的 metadata 行格式与 :func:`build_logical_to_physical_map` 一致：
-
-    * 第 0 项是该逻辑专家当前有效的物理副本数；
-    * 第 1 项标记 ``current_rank`` 是否持有本地副本；
-    * 第 2 项起保存可参与路由的全局 physical expert ID；
-    * 如果存在本地副本，本地 physical ID 固定排在第一个路由槽；
-    * 有效副本之后的固定宽度空槽使用 ``-1`` 填充。
-
-    各层相互独立，并按输入中的 layer 顺序逐层调用单层构建函数。这样初始化、
-    在线重排和批量 metadata 发布共享完全相同的副本排序及打包规则，不会出现
-    单层接口和多层接口语义偏差。
-
-    本函数只构建普通 CPU list，不创建或搬运 Tensor。调用方需要更新 GPU
-    路由 metadata 时，应在通信或提交边界统一转换为对应 dtype/device 的
-    ``torch.Tensor``。
-    """
-    return [
-        build_logical_to_physical_map(
-            layer_placement,
-            num_logical_experts,
-            current_rank=current_rank,
-        )
-        for layer_placement in rank_to_logic_expert_ids_by_layer
-    ]

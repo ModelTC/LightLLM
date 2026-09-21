@@ -9,7 +9,6 @@ import torch
 from lightllm.server.router.model_infer.mode_backend.eplb.expert_placement import (
     build_initial_local_expert_ids,
     build_logical_to_physical_map,
-    build_logical_to_physical_maps_for_layers,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb.placement_planner import (
     EPLBPlanner,
@@ -644,31 +643,6 @@ def test_current_rank_stably_moves_all_local_physical_ids_to_front():
     rank1_map = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=3, current_rank=1)
 
     assert rank1_map[0] == [4, 1, 3, 0, 1, 5]
-
-
-@pytest.mark.parametrize("current_rank", [0, 1, 2, 3])
-def test_logical_to_physical_maps_for_layers_match_single_layer_api(current_rank):
-    placements_by_layer = [
-        _rank_to_logic_expert_ids([[4, 5], [0, 1], [0, 1], [2, 3]], 8),
-        _rank_to_logic_expert_ids([[6, 7], [0, 1], [0, 1], [2, 3]], 8),
-        _rank_to_logic_expert_ids([[4, 5], [0, 1], [0, 1], [2, 3]], 8),
-    ]
-
-    maps_by_layer = build_logical_to_physical_maps_for_layers(
-        placements_by_layer,
-        num_logical_experts=8,
-        current_rank=current_rank,
-    )
-    expected_maps = [
-        build_logical_to_physical_map(
-            layer_placement,
-            num_logical_experts=8,
-            current_rank=current_rank,
-        )
-        for layer_placement in placements_by_layer
-    ]
-
-    assert maps_by_layer == expected_maps
 
 
 def test_transfer_plan_respects_explicit_target_slots():
