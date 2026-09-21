@@ -1,53 +1,19 @@
-"""构建单层专家布局及其紧凑路由元数据。
+"""Build compact logical-to-physical routing metadata for one MoE layer.
 
-本模块统一使用 ``[rank][local physical expert] -> logical expert`` 表示一层
-完整的专家布局。初始布局按主专家和冗余专家构建；EPLB 开始运行后，全部
-物理槽位都可以重新分配。多层调用方应逐层调用这里的单层函数，避免维护
-语义重复的批量封装。
+The input layout uses ``[rank][local physical expert] -> logical expert``.
+Initial placement construction lives in :mod:`.initial`; this module only
+inverts an existing placement into the fixed-width rows consumed by the
+EPLB routing kernel.
 """
 
-
-def build_initial_local_expert_ids(
-    num_logical_experts: int,
-    num_ranks: int,
-    num_redundant_experts_per_rank: int,
-) -> list[list[int]]:
-    """构建每个 rank 初始持有的完整 logical expert ID 列表。
-
-    每个 rank 先持有连续划分得到的主专家，再按 rank 顺序选择不属于
-    本 rank 的专家作为默认冗余副本。这里仅负责生成 Python 列表；调用方如果要参与 tensor
-    运算，需要自行转换为 ``torch.Tensor``。
-
-    例如 ``num_logical_experts=8``、``num_ranks=4``、每个 rank 有 2 个
-    额外槽时，每个 rank 分到 2 个主专家，结果为：
-
-    ``[[0, 1, 2, 3], [2, 3, 4, 5], [4, 5, 6, 7], [6, 7, 0, 1]]``
-
-    其中每行前两个值是主专家，后两个值是已在初始加载阶段就可用的冗余副本。
-    """
-    assert num_logical_experts % num_ranks == 0
-    num_experts_per_rank = num_logical_experts // num_ranks
-    assert 0 <= num_redundant_experts_per_rank <= num_logical_experts - num_experts_per_rank
-
-    local_expert_ids_by_rank = []
-    for rank in range(num_ranks):
-        first_expert_id = rank * num_experts_per_rank
-        local_expert_ids = list(range(first_expert_id, first_expert_id + num_experts_per_rank))
-        first_redundant_expert_id = ((rank + 1) * num_experts_per_rank) % num_logical_experts
-        local_expert_ids.extend(
-            (first_redundant_expert_id + offset) % num_logical_experts
-            for offset in range(num_redundant_experts_per_rank)
-        )
-        local_expert_ids_by_rank.append(local_expert_ids)
-
-    return local_expert_ids_by_rank
+from .types import LayerPlacement, LogicalToPhysicalMap
 
 
 def build_logical_to_physical_map(
-    rank_to_logic_expert_ids: list[list[int]],
+    rank_to_logic_expert_ids: LayerPlacement,
     num_logical_experts: int,
     current_rank: int,
-) -> list[list[int]]:
+) -> LogicalToPhysicalMap:
     """使用普通 CPU list 构建单层 logical 到 physical expert 的路由表。
 
     ``rank_to_logic_expert_ids`` 的 shape 为
@@ -110,7 +76,7 @@ def build_logical_to_physical_map(
 
 
 def _collect_physical_ids_by_logical_expert(
-    rank_to_logic_expert_ids: list[list[int]],
+    rank_to_logic_expert_ids: LayerPlacement,
     num_logical_experts: int,
 ) -> list[list[int]]:
     """将完整物理布局反转为每个 logical expert 对应的物理槽位。

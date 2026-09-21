@@ -19,13 +19,17 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 from .async_transfer_planner import EPLBTransferPlanner
-from .expert_placement import build_logical_to_physical_map
 from .expert_transfer import (
     EPLBTransferInfo,
     PinnedMemoryEPLBTransfer,
 )
+from .placement import (
+    EPLBPlanner,
+    ExpertPlacement,
+    GreedyEPLBPlanner,
+    build_logical_to_physical_map,
+)
 from .placement_plan_task import EPLBPlanTask
-from .placement_planner import EPLBPlanner, ExpertPlacement, GreedyEPLBPlanner
 
 logger = init_logger(__name__)
 EPLB_EXPERT_ALIGNMENT = 128

@@ -6,13 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.server.router.model_infer.mode_backend.eplb.expert_placement import (
-    build_initial_local_expert_ids,
-    build_logical_to_physical_map,
-)
-from lightllm.server.router.model_infer.mode_backend.eplb.placement_planner import (
+from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
     EPLBPlanner,
     GreedyEPLBPlanner,
+    build_initial_local_expert_ids,
+    build_logical_to_physical_map,
 )
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs

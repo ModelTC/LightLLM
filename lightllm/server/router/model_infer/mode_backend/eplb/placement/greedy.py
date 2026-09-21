@@ -1,33 +1,15 @@
-"""使用纯 Python 实现 EPLB 专家布局规划。
+"""使用纯 Python 实现贪心 EPLB 专家布局规划。
 
 规划器有意使用嵌套 list，而不是 Tensor。Tensor 转换仅发生在 manager 的
 分布式通信和迁移边界；规划模块不依赖 Tensor，更易于阅读、测试和替换算法。
 """
 
 import heapq
-from abc import ABC, abstractmethod
 from math import ceil
-from typing import List, Tuple
+from typing import List
 
-
-# [layer][logical expert]
-LogicalExpertLoad = List[List[float]]
-# [layer][rank][local physical expert] -> logical expert
-ExpertPlacement = List[List[List[int]]]
-# (logical expert, replica count, aligned load per replica)
-ExpertReplicaGroup = Tuple[int, int, float]
-
-
-class EPLBPlanner(ABC):
-    """专家布局规划接口。"""
-
-    @abstractmethod
-    def plan(
-        self,
-        logical_expert_load: LogicalExpertLoad,
-        current_placement: ExpertPlacement,
-    ) -> ExpertPlacement:
-        """返回完整的 ``[layer][rank][local physical expert]`` 专家布局。"""
+from .planner import EPLBPlanner
+from .types import ExpertPlacement, ExpertReplicaGroup, LayerPlacement, LogicalExpertLoad
 
 
 class GreedyEPLBPlanner(EPLBPlanner):
@@ -180,8 +162,8 @@ class GreedyEPLBPlanner(EPLBPlanner):
     def _plan_layer(
         self,
         logical_load: List[float],
-        current_placement: List[List[int]],
-    ) -> List[List[int]]:
+        current_placement: LayerPlacement,
+    ) -> LayerPlacement:
         """完成单层副本分配、rank 排布和物理槽位复用。"""
         # 阶段 1：选出最热的 R 个专家，并为每个 rank 固定预留它们的副本。
         redundant_experts = self._select_redundant_experts(logical_load)
@@ -219,7 +201,10 @@ class GreedyEPLBPlanner(EPLBPlanner):
         for _ in range(self.num_redundant_experts_per_rank):
             expert = min(
                 (expert for expert in remaining_experts if replica_counts[expert] < self.world_size),
-                key=lambda expert: (-logical_load[expert] / replica_counts[expert], expert),
+                key=lambda expert: (
+                    -logical_load[expert] / replica_counts[expert],
+                    expert,
+                ),
             )
             replica_counts[expert] += 1
 
@@ -241,7 +226,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
         self,
         redundant_experts: List[int],
         expert_groups: List[ExpertReplicaGroup],
-    ) -> List[List[int]]:
+    ) -> LayerPlacement:
         """先平铺多副本专家，再按当前 rank 负载分配单副本专家。"""
         placement = [list(redundant_experts) for _ in range(self.world_size)]
 
@@ -293,9 +278,9 @@ class GreedyEPLBPlanner(EPLBPlanner):
 
     def _reuse_current_slots(
         self,
-        candidate_placement: List[List[int]],
-        current_placement: List[List[int]],
-    ) -> List[List[int]]:
+        candidate_placement: LayerPlacement,
+        current_placement: LayerPlacement,
+    ) -> LayerPlacement:
         """贪心匹配候选 rank，并让共同专家尽量复用当前物理槽位。"""
         # 步骤 1：准备所有尚未匹配的候选行。
         #

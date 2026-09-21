@@ -8,7 +8,7 @@ from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
 
 from .expert_transfer import EPLBTransferInfo, build_transfer_plan
-from .placement_planner import ExpertPlacement
+from .placement import ExpertPlacement
 
 logger = init_logger(__name__)
 
