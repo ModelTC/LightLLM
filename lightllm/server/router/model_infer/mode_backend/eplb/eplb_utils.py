@@ -1,4 +1,4 @@
-"""传输与模型分析共用的轻量 EPLB 工具。"""
+"""EPLB 专家权重提取工具。"""
 
 from typing import List, Optional, Protocol, Tuple
 

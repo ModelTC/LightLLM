@@ -11,8 +11,9 @@ import torch
 import torch.distributed as dist
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
-from lightllm.common.eplb_utils import NamedTensor, extract_eplb_expert_tensors
 from lightllm.utils.log_utils import init_logger
+
+from .eplb_utils import NamedTensor, extract_eplb_expert_tensors
 
 logger = init_logger(__name__)
 

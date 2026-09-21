@@ -41,7 +41,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.base_im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
     fused_moe_weight as fused_weight_module,
 )
-from lightllm.common.eplb_utils import extract_eplb_expert_tensors
+from lightllm.server.router.model_infer.mode_backend.eplb.eplb_utils import extract_eplb_expert_tensors
 from lightllm.server.router.model_infer.mode_backend.eplb.expert_transfer import (
     EPLBTransferInfo,
     ExpertTensorBuffer,
