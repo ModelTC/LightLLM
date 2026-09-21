@@ -170,6 +170,7 @@ class DPKVSharedMoudle:
         all_tasks = [None for _ in range(dist.get_world_size(group=group))]
         dist.all_gather_object(all_tasks, local_tasks, group=group)
         buffers = self.backend.model.mem_manager.big_page_buffers
+        staging = None
         for destination, tasks in enumerate(all_tasks):
             for source, req_id, start, end in tasks:
                 first = (start // big_tokens + 1) * big_tokens
@@ -177,6 +178,8 @@ class DPKVSharedMoudle:
                 if not lengths or rank not in (source, destination):
                     continue
                 req = g_infer_context.requests_mapping[req_id]
+                if staging is None:
+                    staging = torch.empty((buffers.buffer.shape[1],), dtype=torch.uint8, device="cuda")
                 if rank == source:
                     shared_ids = self.backend.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
                     indexes = [
@@ -186,10 +189,9 @@ class DPKVSharedMoudle:
                         for length in lengths
                     ]
                     for index in indexes:
-                        staging = buffers.buffer[index].cuda(non_blocking=True)
+                        staging.copy_(buffers.buffer[index], non_blocking=True)
                         dist.send(staging, dst=dist.get_global_rank(group, destination), group=group)
                 else:
-                    staging = torch.empty((buffers.buffer.shape[1],), dtype=torch.uint8, device="cuda")
                     for length in lengths:
                         index = buffers.alloc_one_state_cache()
                         assert index is not None
