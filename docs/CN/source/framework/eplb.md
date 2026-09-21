@@ -1,0 +1,404 @@
+# EPLB 专家负载均衡实现
+
+本文介绍 LightLLM 中 Expert Parallelism Load Balancer（EPLB）的完整实现，包括物理专家槽位、在线路由、负载采集、布局规划、权重迁移、运行时状态机、布局持久化，以及如何扩展新的规划算法。
+
+EPLB 的目标是在不改变模型逻辑专家语义的前提下，利用额外的物理专家副本缓解热点专家造成的 EP rank 负载不均。它把“模型选择了哪个逻辑专家”和“本次由哪个物理副本执行”分成两个阶段，并允许服务运行期间重新安排物理副本。
+
+## 1. 核心概念
+
+设：
+
+- `E`：模型每层的逻辑专家数；
+- `W`：EP world size；
+- `R`：每个 rank 配置的冗余专家数；
+- `E / W`：每个 rank 原本持有的专家数；
+- `E / W + R`：每个 rank 实际分配的物理专家槽位数；
+- `E + W * R`：一个 MoE 层在整个 EP world 中的物理槽位总数。
+
+逻辑专家 ID 来自模型路由器，范围固定为 `[0, E)`。物理专家 ID 标识实际执行权重所在的槽位：
+
+```text
+physical_expert_id = rank * num_physical_experts_per_rank + local_slot
+```
+
+一个逻辑专家可以拥有多个物理副本，但同一个 rank 上不会重复放置同一个逻辑专家。任意合法布局还必须满足：
+
+1. 每个 rank 的物理槽位数相同；
+2. 所有逻辑专家至少有一个物理副本；
+3. 所有逻辑专家 ID 都在 `[0, E)` 范围内；
+4. 同一 rank 内的逻辑专家 ID 不重复。
+
+## 2. 启用方式
+
+EPLB 通过冗余专家数量开启：
+
+```bash
+python -m lightllm.server.api_server \
+    --model_dir /path/to/model \
+    --enable_ep_moe \
+    --eplb_num_redundant_experts_per_rank 2 \
+    --eplb_plan_mode greedy \
+    --eplb_rebalance_count 1 \
+    --eplb_config_path /path/to/eplb-placement.json
+```
+
+主要参数如下：
+
+| 参数 | 默认值 | 作用 |
+| --- | --- | --- |
+| `--enable_ep_moe` | 关闭 | 启用专家并行；EPLB 的前置条件 |
+| `--eplb_num_redundant_experts_per_rank` | `0` | 每个 rank 的额外物理专家槽位数；大于 0 时启用 EPLB |
+| `--eplb_plan_mode` | `greedy` | 选择动态布局规划算法；当前支持 `greedy` |
+| `--eplb_rebalance_count` | `1` | 最多完成的动态重排次数；`-1` 表示不限次数，`0` 表示不动态重排 |
+| `--eplb_config_path` | `None` | 可选的布局加载与回写路径 |
+
+完整命令行说明见 {doc}`../tutorial/api_server_args`。
+
+在 PD 分离部署中，prefill 和 decode 进程各自拥有独立的 EPLB manager，可以分别设置 `--eplb_plan_mode`。同一个 EP 通信组内的所有 rank 必须使用相同配置。非 PD 部署只有一个 manager，它根据该进程采集到的全部路由负载生成统一布局。
+
+## 3. 总体架构
+
+```text
+模型路由器
+  │
+  │ logical top-k IDs
+  v
+EPLB 路由 kernel
+  ├── 按 logical expert 累计 route_counter
+  ├── 查询 logical_to_physical_map
+  └── 为每个 token 选择 physical expert ID
+          │
+          v
+      MoE 执行 kernel
+
+周期性控制面：
+
+route_counter
+  -> 全局负载汇总
+  -> placement planner
+  -> target placement
+  -> transfer planner
+  -> 后台权重传输
+  -> 安全边界提交权重和路由 metadata
+```
+
+主要实现位置：
+
+| 模块 | 职责 |
+| --- | --- |
+| `fused_moe/impl/deepgemm_impl.py` | 初始化 EPLB 运行态，在 MoE 执行前修复 logical top-k IDs |
+| `triton_kernel/fused_moe/eplb_topk_ids.py` | 统计逻辑专家负载，并把 logical ID 映射为 physical ID |
+| `eplb/placement/initial.py` | 构建确定性的初始专家布局 |
+| `eplb/placement/routing.py` | 根据完整布局构建紧凑路由表 |
+| `eplb/placement/planner.py` | 布局规划器抽象接口 |
+| `eplb/placement/factory.py` | 根据 `eplb_plan_mode` 创建具体规划器 |
+| `eplb/placement/greedy.py` | 默认的贪心布局算法 |
+| `eplb/async_transfer_planner.py` | 在后台生成跨层传输批次 |
+| `eplb/expert_transfer.py` | 规划槽位依赖并执行专家权重传输 |
+| `eplb/runtime_manager.py` | 驱动状态机，协调采集、规划、传输和提交 |
+
+## 4. 初始化布局与权重加载
+
+### 4.1 默认布局
+
+启动时首先把逻辑专家连续划分到各 rank，然后从下一个 rank 的主专家区间开始循环选择冗余副本。例如 `E=8`、`W=4`、`R=2` 时：
+
+```text
+rank 0: [0, 1, 2, 3]
+rank 1: [2, 3, 4, 5]
+rank 2: [4, 5, 6, 7]
+rank 3: [6, 7, 0, 1]
+```
+
+每行前两个槽位来自原始连续划分，后两个槽位是启动时已经加载完成的冗余副本。运行期允许重新分配所有物理槽位，不再区分不可移动的“主槽位”和只能替换的“冗余槽位”。
+
+### 4.2 从历史布局启动
+
+指定 `--eplb_config_path` 后，每个 MoE 层会尝试加载历史布局。配置必须同时匹配：
+
+- 配置版本；
+- 逻辑专家数；
+- world size；
+- 每个 rank 的冗余专家数；
+- 模型层号；
+- 每层布局形状、专家 ID 范围、rank 内唯一性和全专家覆盖关系。
+
+任意校验失败都会记录 warning，并仅对受影响的层回退到默认布局。校验通过时，专家权重会直接按照历史布局加载，不需要服务启动后再执行一次恢复迁移。
+
+### 4.3 本地运行态
+
+每个 MoE 实现对象持有：
+
+- `local_logics_expert_ids_list`：本 rank 每个物理槽对应的逻辑专家；
+- `logical_to_physical_map`：logical ID 到可用 physical IDs 的设备路由表；
+- `route_counter`：长度为 `E` 的 `int64` GPU 计数器；
+- `num_redundant_experts_per_rank`：本 rank 的额外槽位数。
+
+目前启用 EP MoE 时使用 `FuseMoeDeepGEMM` 实现。EPLB manager 只收集启用了 EP 的 `layer.experts`，并保留模型中的层顺序。
+
+## 5. 在线路由与负载采集
+
+### 5.1 logical ID 与 physical ID 分离
+
+MoE 路由器首先只在模型的逻辑专家空间中计算 top-k：
+
+```text
+_select_experts
+  -> topk_weights + logical_topk_ids
+  -> capture callback
+  -> _prepare_expert_execution
+       -> EPLB logical-to-physical 映射
+  -> _fused_experts
+```
+
+逻辑 ID tensor 不会被原地修改。监控和 capture callback 始终看到模型语义上的 logical expert；只有实际执行 MoE kernel 前才生成新的 physical ID tensor。
+
+### 5.2 路由表布局
+
+每个 logical expert 对应一行固定宽度 metadata：
+
+```text
+[global_count, node_count, current_gpu_count,
+ physical_ids..., -1 padding...]
+```
+
+- `global_count`：整个 EP world 中的有效副本数；
+- `node_count`：当前节点内的有效副本数，包含本卡；
+- `current_gpu_count`：当前 GPU 上的有效副本数；
+- `physical_ids`：按“本卡、本节点其他卡、其他节点”的顺序稳定排列；
+- `padding`：未使用槽位填 `-1`，kernel 不会读取。
+
+路由槽位上限等于整个 world 的物理槽位总数，因此布局变化不会改变 tensor 的 shape。
+
+### 5.3 副本分发模式
+
+路由算子要求调用方显式指定分发模式：
+
+| 模式 | 候选副本 |
+| --- | --- |
+| `current_gpu_first` | 本卡存在副本时只在本卡副本间选择，否则回退到全局副本 |
+| `current_node_first` | 本节点存在副本时在节点内选择，否则回退到全局副本 |
+| `global_first` | 直接在全局全部有效副本间选择 |
+
+当前 DeepGEMM EPLB 路径使用 `current_gpu_first`。未来如果要支持“本卡 -> 本节点 -> 全局”的三级回退，需要布局规划算法同时具备节点拓扑感知能力。
+
+### 5.4 副本哈希
+
+同一候选集合内使用 `(token_index, logical_expert_id)` 生成 32 位哈希，再对有效副本数取模。实现先用 logical expert ID 给 token index 加盐，然后执行 32 位 avalanche finalizer。
+
+该变换由奇数乘法和可逆的异或移位组成，可以显著降低规律性 token 间隔与副本数之间的低位相关性。例如同一专家每隔 4 个 token 出现且有 4 个副本时，简单线性哈希可能退化到单一副本，avalanche mix 能将流量重新打散。
+
+### 5.5 负载统计
+
+路由 kernel 在 physical ID 映射前，按 logical expert 对 `route_counter` 执行原子累加。这样同一逻辑专家的多个物理副本不会拆散规划器观察到的负载信号。
+
+计数器与 MoE forward 位于同一条 overlap stream。清零操作也提交到该 stream，从而自然排在此前 forward 之后、后续 forward 之前，无需额外的全设备同步。
+
+## 6. EPLB 状态机
+
+`EPLBManager.step()` 在安全的推理边界被调用，每次最多处理一个状态：
+
+```text
+[COLLECTING]
+  累计 logical route counter，等待评估周期
+        |
+        v
+[EVALUATING]
+  CPU 快照、指标上报、样本量与重排次数检查
+        |
+        v
+[PLAN_PLACEMENT]
+  汇集全局负载，rank 0 启动后台布局规划
+        |
+        v
+[WAIT_PLAN_PLACEMENT_FINISHED]
+  轮询规划结果，并广播目标布局
+        |
+        v
+[PLAN_TRANSFER]
+  各 rank 根据相同布局启动后台传输规划
+        |
+        v
+[WAIT_PLAN_TRANSFER_FINISHED]
+  等待所有 rank 生成一致的传输批次
+        |
+        v
+[TRANSFERRING]
+  分批启动/轮询权重传输，在安全边界统一提交
+        |
+        `-------------------------------> COLLECTING
+```
+
+提前返回 `COLLECTING` 的分支：
+
+```text
+EVALUATING
+  |-- 平均 token 数不足 ----------> 保留 counter，继续累计
+  `-- 达到重排次数上限 ----------> 清空 counter，只做周期性指标上报
+
+WAIT_PLAN_PLACEMENT_FINISHED
+  `-- 目标布局与当前布局相同 -----> 保留 counter，等待下次评估
+```
+
+默认每 20 个采样 step 评估一次，可以通过环境变量 `LIGHTLLM_EPLB_STEP_INTERVAL` 调整。该值必须大于 0。
+
+只有当整个 world 的平均样本量达到每个“层 × 逻辑专家”256 个 token 时才开始规划。样本不足不会清空 counter，低流量服务可以跨多个评估周期累计数据。
+
+## 7. 布局规划
+
+### 7.1 规划器接口与选择
+
+所有布局算法实现统一的 `EPLBPlanner.plan(logical_expert_load, current_placement)` 接口，返回：
+
+```text
+[layer][rank][local physical slot] -> logical expert ID
+```
+
+`--eplb_plan_mode` 只负责选择布局算法。`create_eplb_planner` 将字符串模式转换成具体实例，使状态机不依赖某个算法类。当前唯一模式为 `greedy`。
+
+规划只在 rank 0 的后台线程执行。完成后，目标布局通过控制通信组广播给所有 rank。相同输入必须产生确定结果，便于所有 rank 生成一致的传输计划。
+
+### 7.2 Greedy 规划算法
+
+默认算法按层独立规划，主要步骤如下：
+
+1. **选择全卡冗余专家**：选取负载最高的 `R` 个逻辑专家，在每个 rank 上各放置一份；
+2. **确定额外副本数**：其余专家先各保留一个副本，再把剩余 `R` 个副本逐次分给当前 `load / replica_count` 最大的专家；
+3. **平铺多副本专家**：使用循环 rank 游标，把同一专家的副本放到不同 rank；
+4. **放置单副本专家**：按专家负载从高到低处理，每次放到当前估算负载最低且仍有空槽的 rank；
+5. **复用当前布局**：先把候选 rank 行匹配到共同专家最多的当前 rank，再让共同专家尽量保留原物理槽位，以减少跨 rank 传输和 rank 内覆盖。
+
+规划负载按 128 token 对齐，降低很小的计数波动对布局的影响。专家 ID 和 rank ID 用作稳定的平局规则，因此结果是确定性的。
+
+## 8. 权重迁移与安全提交
+
+### 8.1 传输计划
+
+传输规划器逐层比较当前布局和目标布局，为每个变化的目标槽绑定一个确定的源槽。选择源槽时优先使用不会被覆盖的稳定副本；没有稳定副本时，循环使用当前已有副本，避免把读取集中在同一个 rank。
+
+随后根据“目标槽是否仍是其他任务的源槽”建立覆盖依赖：
+
+- **安全任务**：目标槽不再承担待处理任务的源，可以先传输并提交；
+- **依赖环**：所有目标槽同时也是源槽，必须先把整个环的权重读入 pinned memory，再统一覆盖；
+- **rank 冲突拆批**：普通批次中每个 rank 最多参与一条任务，在限制 pinned memory 峰值的同时保留跨 rank 并行性。
+
+每层单独生成批次，再按层顺序拼接。这样完成一层的提交后就能立即发布该层的新路由 metadata。
+
+### 8.2 数据路径
+
+远程专家的传输路径为：
+
+```text
+源 GPU 权重行
+  -> 源 rank pinned CPU row
+  -> Gloo point-to-point
+  -> 目标 rank pinned CPU row
+  -> 目标 GPU live 权重行
+```
+
+如果源和目标属于同一个 rank，则只执行 GPU 到 pinned CPU 的本地暂存，不经过网络。一次专家传输会覆盖实际推理需要的全部张量，包括量化权重及其 scale、zero point 等配套状态。
+
+控制面和权重传输分别使用独立的 Gloo process group，避免两类通信相互干扰。后台线程只负责把数据传入 pinned memory，不直接修改 live 权重。
+
+### 8.3 提交边界
+
+只有当所有 rank 都确认当前批次传输完成后，主推理线程才会在 overlap stream 上统一：
+
+1. 把目标 rank 的 pinned row 写入 live GPU 权重槽；
+2. 更新 `current_placement` 和本地槽位的 logical expert ID；
+3. 为发生变化的层重建 `logical_to_physical_map`；
+4. 将新 metadata 异步复制到 GPU。
+
+权重和路由 metadata 在同一条 stream 上更新，后续 forward 只能看到完整提交后的状态，不会观察到“新路由指向旧权重”或“旧路由指向新权重”的中间状态。
+
+全部批次完成后，manager 发布目标布局、清空 route counter、增加完成次数，并回到 `COLLECTING`。
+
+## 9. 布局持久化
+
+成功完成重排后，rank 0 会把最新完整布局写回 `--eplb_config_path`。配置内容包括：
+
+```json
+{
+  "version": 1,
+  "num_logical_experts": 8,
+  "world_size": 4,
+  "num_redundant_experts_per_rank": 2,
+  "layers": {
+    "3": [[0, 1, 2, 3], [2, 3, 4, 5], [4, 5, 6, 7], [6, 7, 0, 1]]
+  }
+}
+```
+
+写入前会再次校验全部层。实现使用独占创建的 `.lock` 文件避免多个服务同时写同一路径，并在成功写入后清除读取缓存。保存失败只记录 warning，不会中断在线推理。
+
+## 10. 指标与运行行为
+
+rank 0 周期性上报：
+
+```text
+lightllm_eplb_topk_expert_imbalance_ratio
+```
+
+该指标先计算每层 `max(expert_load) / mean(expert_load)`，再对有效层求平均。值越接近 1，表示观测窗口内的逻辑专家负载越均衡。
+
+`--eplb_rebalance_count` 的行为如下：
+
+- `-1`：持续允许动态规划和重排；
+- `0`：使用初始或配置文件布局，不进行动态重排；
+- 正整数：只统计实际完成且发生布局变化的重排；样本不足和布局不变不计数。
+
+达到次数上限后，manager 仍会周期性采集和上报负载指标，但不再执行全局负载汇总和布局规划。
+
+## 11. 当前限制
+
+启用 EPLB 时需要满足：
+
+- 同时设置 `--enable_ep_moe`；
+- `world_size > 1`；
+- 逻辑专家数可以被 world size 整除；
+- 冗余专家数大于 0，且不能超过本 rank 之外可复制的逻辑专家数；
+- 同一 EP 通信组使用一致的 EPLB 参数；
+- 不能与 `--enable_prefill_cudagraph` 同时使用；
+- 当前不支持 `--enable_rl` 组合；
+- 当前不支持 SM100 GPU；
+- 当前动态 EPLB 执行路径依赖 EP DeepGEMM MoE 实现。
+
+这些限制会在参数校验或 EPLB 初始化阶段尽早失败，避免服务带着不一致的布局进入推理。
+
+## 12. 扩展新的规划算法
+
+新增 planner 时建议遵循以下步骤：
+
+1. 在 `eplb/placement/` 中实现 `EPLBPlanner`；
+2. 接收逻辑专家负载和当前完整布局，返回同 shape 的合法目标布局；
+3. 在 `placement/factory.py` 的 builder 表中注册新的 `plan_mode`；
+4. 在 CLI 和 `StartArgs` 的 `eplb_plan_mode` choices 中加入新名称；
+5. 更新中英文参数文档；
+6. 增加布局合法性、确定性、热点负载和迁移量测试；
+7. 分别评估 prefill、decode 和混合流量，不要假设一种算法对所有部署形态都最优。
+
+规划器必须保持以下边界：
+
+- 不直接修改 GPU 权重或路由 metadata；
+- 不执行分布式通信；
+- 不改变每个 rank 的物理槽位数；
+- 不遗漏逻辑专家，不在同一 rank 重复放置同一专家；
+- 相同输入返回确定结果；
+- 尽量复用当前 rank 和物理槽位，避免均衡收益被迁移成本抵消。
+
+`EPLBManager`、传输规划器和提交逻辑只依赖抽象的完整布局，因此新增算法不需要修改状态机。
+
+## 13. 测试覆盖
+
+EPLB 单元测试主要位于 `unit_tests/common/fused_moe/test_eplb.py`，覆盖：
+
+- 初始布局、路由 metadata 和拓扑排序；
+- planner 输入校验、布局合法性、负载均衡和槽位复用；
+- 状态机各分支及后台任务轮询；
+- 链式依赖、环形依赖和并发传输批次；
+- 权重与 metadata 的安全提交；
+- 配置文件加载、校验和持久化；
+- logical-to-physical kernel 的精确映射；
+- token index `0..4096`、expert ID `0..255`，以及 `2、3、4、5、101、127、128、251` 个副本时的哈希分布。
+
+多 GPU pinned-memory 传输测试位于 `unit_tests/common/fused_moe/test_eplb_transfer_gpu.py`。
