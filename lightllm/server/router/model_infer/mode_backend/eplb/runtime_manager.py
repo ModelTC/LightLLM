@@ -14,6 +14,7 @@ from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
 )
+from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.envs_utils import get_eplb_step_interval
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -67,6 +68,12 @@ class EPLBManager:
     """
 
     def __init__(self, model: TpPartBaseModel, max_rebalance_count: int = 1) -> None:
+        # SM100 FP4 Mega-MoE 会将在线专家权重转换为独立的 kernel 布局，并使用源 tensor 的 data_ptr
+        # 作为 key 缓存这些转换后的副本。EPLB 通过原地 copy_ 替换专家行，只改变权重内容而不会改变
+        # data_ptr，因此重平衡后 Mega-MoE 仍会读取旧的转换权重。在 EPLB 能够失效或更新该缓存前，
+        # 暂不支持 SM100。
+        assert not is_sm100_gpu(), "EPLB does not support SM100"
+
         weights: List[FusedMoeWeight] = _find_fused_moe_weights(model)
         assert weights, "EPLB requires at least one EP MoE layer"
         assert max_rebalance_count >= -1

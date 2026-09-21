@@ -128,7 +128,6 @@ def test_eplb_mtp_combination_is_not_rejected_before_starting_subprocesses(monke
     monkeypatch.setattr(api_start, "auto_set_max_req_total_len", lambda args: None)
     monkeypatch.setattr(api_start, "auto_set_fused_shared_experts", lambda args: None)
     monkeypatch.setattr(api_start, "set_unique_server_name", lambda args: None)
-    monkeypatch.setattr(api_start, "is_sm100_gpu", lambda: False)
     monkeypatch.setattr(api_start, "auto_set_response_parsers", lambda args: None)
     monkeypatch.setattr(api_start, "auto_configure_allreduce_flags_from_args", lambda args: None)
     monkeypatch.setattr(api_start, "validate_ports", lambda ports: None)

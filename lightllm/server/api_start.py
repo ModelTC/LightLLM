@@ -25,7 +25,6 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
-from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 
@@ -168,8 +167,6 @@ def _launch_subprocesses(args: StartArgs):
         assert not args.enable_prefill_cudagraph, "EPLB does not support --enable_prefill_cudagraph"
         # TODO: Support EPLB redundant experts together with RL after their runtime state updates are coordinated.
         assert not args.enable_rl, "EPLB redundant experts do not support --enable_rl"
-        # EPLB updates expert weights in place, but SM100 Mega-MoE caches transformed weights by tensor data_ptr.
-        assert not is_sm100_gpu(), "EPLB does not support SM100"
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}

@@ -2136,11 +2136,19 @@ def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
 
 
 def test_manager_requires_more_than_one_rank(monkeypatch):
+    monkeypatch.setattr(manager_module, "is_sm100_gpu", lambda: False)
     monkeypatch.setattr(manager_module, "_find_fused_moe_weights", lambda model: [object()])
     monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 1)
 
     with pytest.raises(AssertionError, match="more than one rank"):
+        manager_module.EPLBManager(type("Model", (), {})())
+
+
+def test_manager_rejects_sm100_before_initialization(monkeypatch):
+    monkeypatch.setattr(manager_module, "is_sm100_gpu", lambda: True)
+
+    with pytest.raises(AssertionError, match="EPLB does not support SM100"):
         manager_module.EPLBManager(type("Model", (), {})())
 
 
@@ -2182,6 +2190,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     )()
     groups = [object(), object()]
     new_group_calls = []
+    monkeypatch.setattr(manager_module, "is_sm100_gpu", lambda: False)
     monkeypatch.setattr(manager_module, "_find_fused_moe_weights", lambda model: [weight])
     monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 2)
