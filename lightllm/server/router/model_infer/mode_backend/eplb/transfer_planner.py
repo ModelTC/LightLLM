@@ -5,9 +5,10 @@ import threading
 from enum import Enum
 from typing import List, Optional
 
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import ExpertPlacement
-from .transfer import EPLBTransferInfo, build_transfer_plan
 from lightllm.utils.log_utils import init_logger
+
+from .planner import ExpertPlacement
+from .transfer import EPLBTransferInfo, build_transfer_plan
 
 logger = init_logger(__name__)
 

@@ -7,11 +7,9 @@ from typing import Optional
 
 import torch
 
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import (
-    EPLBPlanner,
-    ExpertPlacement,
-)
 from lightllm.utils.log_utils import init_logger
+
+from .planner import EPLBPlanner, ExpertPlacement
 
 logger = init_logger(__name__)
 

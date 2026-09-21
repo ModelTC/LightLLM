@@ -6,24 +6,10 @@ import torch
 import torch.distributed as dist
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
-    build_logical_to_physical_map,
-)
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import (
-    EPLBPlanner,
-    ExpertPlacement,
-    GreedyEPLBPlanner,
-)
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import (
     FusedMoeWeight,
 )
 from lightllm.server.metrics.manager import MetricClient
-from .plan import EPLBPlanTask
-from .transfer import (
-    EPLBTransferInfo,
-    PinnedMemoryEPLBTransfer,
-)
-from .transfer_planner import EPLBTransferPlanner
 from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
@@ -31,6 +17,15 @@ from lightllm.utils.dist_utils import (
 from lightllm.utils.envs_utils import get_eplb_step_interval
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
+
+from .placement import build_logical_to_physical_map
+from .plan import EPLBPlanTask
+from .planner import EPLBPlanner, ExpertPlacement, GreedyEPLBPlanner
+from .transfer import (
+    EPLBTransferInfo,
+    PinnedMemoryEPLBTransfer,
+)
+from .transfer_planner import EPLBTransferPlanner
 
 logger = init_logger(__name__)
 EPLB_EXPERT_ALIGNMENT = 128
