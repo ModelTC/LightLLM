@@ -158,9 +158,9 @@ class EPLBManager:
         self.steps += 1
         if self.steps < self.next_evaluation_step:
             return
-
-        self.next_evaluation_step += self.step_interval
-        self.state = EPLBManagerState.EVALUATING
+        else:
+            self.next_evaluation_step += self.step_interval
+            self.state = EPLBManagerState.EVALUATING
 
     def _step_evaluating(self) -> None:
         """发布本地负载指标，并在次数允许时根据全局样本量决定是否规划。"""
@@ -183,28 +183,26 @@ class EPLBManager:
         if reached_rebalance_limit:
             self._clear_route_counters()
             self.state = EPLBManagerState.COLLECTING
-            return
-
-        # 汇集各 rank 的 token 总数，判断当前统计量是否足以进行布局规划。
-        token_count_by_rank = [0] * self.world_size
-        dist.all_gather_object(
-            token_count_by_rank,
-            int(local_load.sum().item()),
-            group=self.control_group,
-        )
-        average_tokens_per_expert = sum(token_count_by_rank) / local_load.numel()
-        if average_tokens_per_expert < EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT:
-            if self.global_rank == 0:
-                logger.info(
-                    "eplb continue collecting average_tokens_per_expert=%.2f threshold=%s",
-                    average_tokens_per_expert,
-                    EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT,
-                )
-            self.state = EPLBManagerState.COLLECTING
-            return
-
-        self._local_load = local_load
-        self.state = EPLBManagerState.PLANNING
+        else:
+            # 汇集各 rank 的 token 总数，判断当前统计量是否足以进行布局规划。
+            token_count_by_rank = [0] * self.world_size
+            dist.all_gather_object(
+                token_count_by_rank,
+                int(local_load.sum().item()),
+                group=self.control_group,
+            )
+            average_tokens_per_expert = sum(token_count_by_rank) / local_load.numel()
+            if average_tokens_per_expert < EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT:
+                if self.global_rank == 0:
+                    logger.info(
+                        "eplb continue collecting average_tokens_per_expert=%.2f threshold=%s",
+                        average_tokens_per_expert,
+                        EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT,
+                    )
+                self.state = EPLBManagerState.COLLECTING
+            else:
+                self._local_load = local_load
+                self.state = EPLBManagerState.PLANNING
 
     def _step_planning(self) -> None:
         """汇集全局负载，并由 rank 0 启动异步规划。"""
@@ -310,25 +308,24 @@ class EPLBManager:
                         self.completed_rebalance_count,
                         self.max_rebalance_count,
                     )
-                return
+            else:
+                self.active_transfer_batch = transfer_batch
 
-            self.active_transfer_batch = transfer_batch
-
-            # 普通批次允许多个 rank 不冲突的任务并行，但每个 rank 最多参与
-            # 一条；覆盖环批次可能要求同一 rank 同时保存多个源/目标的 pinned
-            # row，必须等整批传输完成后再统一覆盖 live 权重。
-            self.active_transfers = [
-                PinnedMemoryEPLBTransfer(
-                    self._weights,
-                    self.transfer_group,
-                    self.global_rank,
-                    transfer_info,
-                )
-                for transfer_info in transfer_batch
-                if self.global_rank in (transfer_info.source_rank, transfer_info.dest_rank)
-            ]
-            for transfer in self.active_transfers:
-                transfer.start()
+                # 普通批次允许多个 rank 不冲突的任务并行，但每个 rank 最多参与
+                # 一条；覆盖环批次可能要求同一 rank 同时保存多个源/目标的 pinned
+                # row，必须等整批传输完成后再统一覆盖 live 权重。
+                self.active_transfers = [
+                    PinnedMemoryEPLBTransfer(
+                        self._weights,
+                        self.transfer_group,
+                        self.global_rank,
+                        transfer_info,
+                    )
+                    for transfer_info in transfer_batch
+                    if self.global_rank in (transfer_info.source_rank, transfer_info.dest_rank)
+                ]
+                for transfer in self.active_transfers:
+                    transfer.start()
         else:
             # 已有活动批次时，本 step 只负责轮询；整批完成后才统一提交。
             self._poll_transfer_batch()
@@ -343,19 +340,19 @@ class EPLBManager:
         dist.all_gather_object(finished_by_rank, local_finished, group=self.control_group)
         if not all(finished_by_rank):
             return
+        else:
+            # 所有 rank 使用相同的批次顺序提交，因此全局 placement 和 metadata
+            # 始终一致；只有 destination rank 会额外写入实际专家权重。
+            from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        # 所有 rank 使用相同的批次顺序提交，因此全局 placement 和 metadata
-        # 始终一致；只有 destination rank 会额外写入实际专家权重。
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+            torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
+            for transfer_info in self.active_transfer_batch:
+                self._commit_transfer(transfer_info)
+            for layer_index in {transfer_info.layer_index for transfer_info in self.active_transfer_batch}:
+                self._publish_layer_metadata(layer_index)
 
-        torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
-        for transfer_info in self.active_transfer_batch:
-            self._commit_transfer(transfer_info)
-        for layer_index in {transfer_info.layer_index for transfer_info in self.active_transfer_batch}:
-            self._publish_layer_metadata(layer_index)
-
-        del self.active_transfers
-        del self.active_transfer_batch
+            del self.active_transfers
+            del self.active_transfer_batch
 
     def _commit_transfer(self, transfer_info: EPLBTransferInfo) -> None:
         """把一条已完成传输提交到 live 权重和完整布局。"""
