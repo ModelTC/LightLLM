@@ -1390,7 +1390,17 @@ def test_extract_expert_tensors_includes_quantization_metadata_in_order():
     ]
 
 
-def test_manager_commits_transfer_rows_and_metadata():
+def test_manager_commits_transfer_rows_and_metadata(monkeypatch):
+    original_copy = torch.Tensor.copy_
+    non_blocking_values = []
+    copy_sources = []
+
+    def record_copy(tensor, source, non_blocking=False):
+        non_blocking_values.append(non_blocking)
+        copy_sources.append(source)
+        return original_copy(tensor, source, non_blocking=non_blocking)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", record_copy)
     live = torch.arange(20).reshape(5, 4)
     original_primary = live[:3].clone()
     local_expert_ids = [0, 1, 2, 3, 2]
@@ -1438,6 +1448,8 @@ def test_manager_commits_transfer_rows_and_metadata():
     assert torch.equal(live[4], torch.full((4,), -5))
     assert local_expert_ids == [0, 1, 2, 4, 5]
     assert torch.equal(logical_to_physical_map, expected_metadata)
+    assert non_blocking_values == [True, True, True]
+    assert copy_sources[-1].is_pinned()
 
 
 def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatch):
@@ -1476,16 +1488,37 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     manager.max_rebalance_count = -1
     manager.completed_rebalance_count = 0
     committed = []
+    active_streams = []
     cleared_route_counters = []
-    manager._commit_transfer = committed.append
-    manager._publish_layer_metadata = lambda _layer_index: None
+
+    def commit_transfer(transfer_info):
+        assert active_streams == [overlap_stream]
+        committed.append(transfer_info)
+
+    def publish_layer_metadata(_layer_index):
+        assert active_streams == [overlap_stream]
+
+    manager._commit_transfer = commit_transfer
+    manager._publish_layer_metadata = publish_layer_metadata
     manager._clear_route_counters = lambda: cleared_route_counters.append(True)
-    waits = []
+    used_streams = []
     overlap_stream = object()
+
+    class StreamContext:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            used_streams.append(self.stream)
+            active_streams.append(self.stream)
+
+        def __exit__(self, *_args):
+            active_streams.pop()
+
     monkeypatch.setattr(
         manager_module.torch.cuda,
-        "current_stream",
-        lambda: SimpleNamespace(wait_stream=lambda stream: waits.append(stream)),
+        "stream",
+        StreamContext,
     )
     monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: overlap_stream)
     monkeypatch.setattr(
@@ -1539,7 +1572,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     assert not hasattr(manager, "rebalance_started_at")
     assert cleared_route_counters == [True]
     assert local_states == [False, True, True]
-    assert waits == [overlap_stream, overlap_stream]
+    assert used_streams == [overlap_stream, overlap_stream]
 
 
 def test_manager_returns_to_collecting_after_reaching_rebalance_limit():

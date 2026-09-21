@@ -370,11 +370,14 @@ class EPLBManager:
             # 始终一致；只有 destination rank 会额外写入实际专家权重。
             from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-            torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
-            for transfer_info in self.active_transfer_batch:
-                self._commit_transfer(transfer_info)
-            for layer_index in {transfer_info.layer_index for transfer_info in self.active_transfer_batch}:
-                self._publish_layer_metadata(layer_index)
+            # 专家权重和路由 metadata 都由 overlap stream 上的 MoE forward
+            # 读取。将整批写操作排到同一条 stream，便可自然等待此前的 forward，
+            # 并保证后续 forward 只能看到完整提交后的权重与 metadata。
+            with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+                for transfer_info in self.active_transfer_batch:
+                    self._commit_transfer(transfer_info)
+                for layer_index in {transfer_info.layer_index for transfer_info in self.active_transfer_batch}:
+                    self._publish_layer_metadata(layer_index)
 
             del self.active_transfers
             del self.active_transfer_batch
@@ -389,7 +392,10 @@ class EPLBManager:
             )
             assert active_transfer is not None, "EPLB destination rank has no matching completed transfer"
             for tensor_buffer in active_transfer.tensor_buffers:
-                tensor_buffer.live_tensor[transfer_info.dest_local_expert_index].copy_(tensor_buffer.pinned_row)
+                tensor_buffer.live_tensor[transfer_info.dest_local_expert_index].copy_(
+                    tensor_buffer.pinned_row,
+                    non_blocking=True,
+                )
 
         layer_index = transfer_info.layer_index
         layer_impl = self._eplb_impls[layer_index]
@@ -411,8 +417,9 @@ class EPLBManager:
                 current_rank=self.global_rank,
             ),
             dtype=torch.int32,
+            pin_memory=True,
         )
-        layer_impl.logical_to_physical_map.copy_(logical_to_physical_map)
+        layer_impl.logical_to_physical_map.copy_(logical_to_physical_map, non_blocking=True)
 
     def _publish_expert_load_metric(self, local_load: torch.Tensor) -> None:
         if self.global_rank != 0:

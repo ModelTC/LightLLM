@@ -12,6 +12,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from lightllm.server.router.model_infer.mode_backend.eplb.expert_transfer import (
+    EPLBTransferInfo,
     PinnedMemoryEPLBTransfer,
     TransferStatus,
     build_transfer_plan,
@@ -47,6 +48,29 @@ class _FakeWeight:
         return _Pack(values, scales)
 
 
+class _StressFakeWeight:
+    """为并发传输压力测试生成可识别 source rank 的专家权重。"""
+
+    def __init__(self, rank, layer_index, num_logical_experts):
+        self.layer_num_ = layer_index
+        logical_ids = list(range(num_logical_experts))
+        self.fuse_moe_impl = SimpleNamespace(local_logics_expert_ids_list=logical_ids)
+        self.w13 = self._pack(rank, logical_ids, layer_index, 0)
+        self.w2 = self._pack(rank, logical_ids, layer_index, 100)
+
+    @staticmethod
+    def _pack(rank, logical_ids, layer_index, offset):
+        # rank、layer、expert 和 tensor 类型都编码进数值；任何 recv 串包都会
+        # 在目标 rank 的逐任务校验中表现为数值不一致。
+        values = torch.tensor(
+            [[rank * 100_000 + layer_index * 1_000 + expert + offset] for expert in logical_ids],
+            dtype=torch.float32,
+            device="cuda",
+        )
+        scales = values + 0.5
+        return _Pack(values, scales)
+
+
 def _free_port():
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -64,6 +88,19 @@ def _wait_for_transfer(transfer, control_group):
             return
         time.sleep(0.001)
     raise TimeoutError("EPLB transfer worker did not finish globally")
+
+
+def _wait_for_all_transfers(transfers, control_group):
+    """等待每个 rank 参与的全部并发传输完成。"""
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        local_finished = all(transfer.status is TransferStatus.SUCCEEDED for transfer in transfers)
+        globally_finished = torch.tensor([int(local_finished)], dtype=torch.int32)
+        dist.all_reduce(globally_finished, op=dist.ReduceOp.MIN, group=control_group)
+        if int(globally_finished.item()) == 1:
+            return
+        time.sleep(0.001)
+    raise TimeoutError("concurrent EPLB transfer workers did not finish globally")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -177,3 +214,106 @@ def _worker(rank, port):
 )
 def test_eplb_pinned_memory_transfer_two_gpu_correctness():
     mp.spawn(_worker, args=(_free_port(),), nprocs=2, join=True)
+
+
+def _many_concurrent_p2p_worker(rank, port):
+    """同时运行大量、重复 rank 对的 PinnedMemoryEPLBTransfer。"""
+    world_size = 4
+    num_layers = 8
+    num_logical_experts = 32
+    transfers_per_rank_pair_per_layer = 8
+
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    control_group = dist.new_group(list(range(world_size)), backend="gloo")
+    transfer_group = dist.new_group(list(range(world_size)), backend="gloo")
+
+    try:
+        weights = [_StressFakeWeight(rank, layer_index, num_logical_experts) for layer_index in range(num_layers)]
+
+        # 每层覆盖全部 12 个有向 rank 对，每个 rank 对重复 8 次。任务 identity
+        # 中的 layer、expert 和目标槽位不同，因此应该获得独立的 Gloo tag；
+        # source/destination rank 对则会被大量重复使用。
+        transfer_infos = []
+        for layer_index in range(num_layers):
+            for source_rank in range(world_size):
+                for dest_rank in range(world_size):
+                    if source_rank == dest_rank:
+                        continue
+                    source_peers = [peer_rank for peer_rank in range(world_size) if peer_rank != dest_rank]
+                    source_peer_index = source_peers.index(source_rank)
+                    for repeat_index in range(transfers_per_rank_pair_per_layer):
+                        expert_id = source_rank * transfers_per_rank_pair_per_layer + repeat_index
+                        dest_local_expert_index = source_peer_index * transfers_per_rank_pair_per_layer + repeat_index
+                        transfer_infos.append(
+                            EPLBTransferInfo(
+                                source_rank=source_rank,
+                                layer_index=layer_index,
+                                source_logical_expert_id=expert_id,
+                                dest_rank=dest_rank,
+                                dest_local_expert_index=dest_local_expert_index,
+                            )
+                        )
+
+        local_transfer_infos = [
+            transfer_info
+            for transfer_info in transfer_infos
+            if rank in (transfer_info.source_rank, transfer_info.dest_rank)
+        ]
+        transfers = [
+            PinnedMemoryEPLBTransfer(weights, transfer_group, rank, transfer_info)
+            for transfer_info in local_transfer_infos
+        ]
+        assert len(transfer_infos) == 768
+        assert len(transfers) == 384
+
+        # 同一个 source/destination 对上的并发消息必须具有不同 tag，否则不同
+        # 专家或张量可能被错误匹配。不同 rank 对可以安全复用相同整数 tag。
+        message_keys = []
+        for transfer in transfers:
+            transfer_info = transfer.transfer_info
+            for tensor_buffer in transfer.tensor_buffers:
+                message_keys.append(
+                    (
+                        transfer_info.source_rank,
+                        transfer_info.dest_rank,
+                        transfer._build_p2p_message_tag(tensor_buffer.name),
+                    )
+                )
+        assert len(message_keys) == len(set(message_keys))
+
+        dist.barrier(group=control_group)
+        for transfer in transfers:
+            transfer.start()
+        _wait_for_all_transfers(transfers, control_group)
+
+        destination_transfers = [transfer for transfer in transfers if transfer.transfer_info.dest_rank == rank]
+        assert len(destination_transfers) == 192
+        for transfer in destination_transfers:
+            transfer_info = transfer.transfer_info
+            expected_w13 = (
+                transfer_info.source_rank * 100_000
+                + transfer_info.layer_index * 1_000
+                + transfer_info.source_logical_expert_id
+            )
+            expected_values = [expected_w13, expected_w13 + 0.5, expected_w13 + 100, expected_w13 + 100.5]
+            assert [buffer.name for buffer in transfer.tensor_buffers] == [
+                "w13.weight",
+                "w13.weight_scale",
+                "w2.weight",
+                "w2.weight_scale",
+            ]
+            for tensor_buffer, expected_value in zip(transfer.tensor_buffers, expected_values):
+                assert torch.all(tensor_buffer.pinned_row == expected_value)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 4,
+    reason="requires four CUDA GPUs",
+)
+def test_eplb_pinned_memory_transfer_four_gpu_many_concurrent_p2p():
+    mp.spawn(_many_concurrent_p2p_worker, args=(_free_port(),), nprocs=4, join=True)
