@@ -162,6 +162,7 @@ def _launch_subprocesses(args: StartArgs):
     assert (
         args.eplb_num_redundant_experts_per_rank >= 0
     ), "--eplb_num_redundant_experts_per_rank must be greater than or equal to 0"
+    assert args.eplb_rebalance_count >= -1, "--eplb_rebalance_count must be greater than or equal to -1"
     if args.eplb_num_redundant_experts_per_rank > 0:
         assert args.enable_ep_moe, "EPLB requires --enable_ep_moe"
         assert not args.enable_prefill_cudagraph, "EPLB does not support --enable_prefill_cudagraph"

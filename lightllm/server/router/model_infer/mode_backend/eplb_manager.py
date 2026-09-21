@@ -46,6 +46,7 @@ class EPLBManagerState(Enum):
     PLANNING = "planning"
     WAIT_PLAN_FINISH = "wait_plan_finish"
     TRANSFERRING = "transferring"
+    FINISHED = "finished"
 
 
 class EPLBManager:
@@ -53,17 +54,20 @@ class EPLBManager:
 
     状态循环如下：
 
-    ``COLLECTING -> EVALUATING -> PLANNING -> WAIT_PLAN_FINISH -> TRANSFERRING -> COLLECTING``
+    ``COLLECTING -> EVALUATING -> PLANNING -> WAIT_PLAN_FINISH -> TRANSFERRING``
 
     当累计的平均专家 token 数不足时，``EVALUATING`` 会回到
     ``COLLECTING``；当规划器认为无需调整布局时，``WAIT_PLAN_FINISH`` 会
-    回到 ``COLLECTING``。每次调用 :meth:`step` 最多推进一个状态，布局
-    规划和权重传输在后台执行，主推理线程负责评估、轮询和提交结果。
+    回到 ``COLLECTING``。完成一次重排后，未达到次数上限则重新进入
+    ``COLLECTING``，否则进入不再采样和规划的 ``FINISHED``。每次调用
+    :meth:`step` 最多推进一个状态，布局规划和权重传输在后台执行，主推理
+    线程负责评估、轮询和提交结果。
     """
 
-    def __init__(self, model: TpPartBaseModel) -> None:
+    def __init__(self, model: TpPartBaseModel, max_rebalance_count: int = 1) -> None:
         weights: List[FusedMoeWeight] = _find_fused_moe_weights(model)
         assert weights, "EPLB requires at least one EP MoE layer"
+        assert max_rebalance_count == -1 or max_rebalance_count > 0
 
         # 模型与专家拓扑：初始化后保持不变。
         self._weights: List[FusedMoeWeight] = weights
@@ -80,6 +84,8 @@ class EPLBManager:
         # 布局生效时开始累计，让低流量服务可以跨多个评估周期收集足够样本。
         self.step_interval: int = get_eplb_step_interval()
         self.steps: int = 0
+        self.max_rebalance_count: int = max_rebalance_count
+        self.completed_rebalance_count: int = 0
 
         # 分布式通信：控制面与权重传输使用独立的通信组。
         self.control_group = dist.new_group(list(range(self.world_size)), backend="gloo")
@@ -118,11 +124,15 @@ class EPLBManager:
             logger.info(
                 f"eplb enabled layers={len(weights)} num_logical_experts={self.num_logical_experts} "
                 f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
-                f"step_interval={self.step_interval} planner={type(self.planner).__name__}"
+                f"step_interval={self.step_interval} max_rebalance_count={self.max_rebalance_count} "
+                f"planner={type(self.planner).__name__}"
             )
 
     def step(self) -> None:
         """在一个安全的推理边界推进一次状态机。"""
+        if self.state is EPLBManagerState.FINISHED:
+            return
+
         if self.state is EPLBManagerState.COLLECTING:
             self._step_collecting()
             return
@@ -282,12 +292,21 @@ class EPLBManager:
                 self.current_placement = self.target_placement
                 elapsed = time.time() - self.rebalance_started_at
                 self._clear_route_counters()
+                self.completed_rebalance_count += 1
+                reached_rebalance_limit = (
+                    self.max_rebalance_count != -1 and self.completed_rebalance_count >= self.max_rebalance_count
+                )
                 del self.pending_transfer_batches
                 del self.target_placement
                 del self.rebalance_started_at
-                self.state = EPLBManagerState.COLLECTING
+                self.state = EPLBManagerState.FINISHED if reached_rebalance_limit else EPLBManagerState.COLLECTING
                 if self.global_rank == 0:
-                    logger.info("eplb completed wall_time=%.2fs", elapsed)
+                    logger.info(
+                        "eplb completed wall_time=%.2fs completed_rebalance_count=%s max_rebalance_count=%s",
+                        elapsed,
+                        self.completed_rebalance_count,
+                        self.max_rebalance_count,
+                    )
                 return
 
             self.active_transfer_batch = transfer_batch

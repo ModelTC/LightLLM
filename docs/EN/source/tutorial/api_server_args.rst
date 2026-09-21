@@ -742,12 +742,23 @@ Expert Parallelism and EPLB Parameters
     EPLB currently cannot be combined with ``--enable_prefill_cudagraph`` and is not supported on SM100 GPUs.
     Use the same value on every rank and node in one deployment.
 
+.. option:: --eplb_rebalance_count
+
+    Maximum number of successfully completed dynamic EPLB rebalances. The default is ``1``. A count is consumed
+    only after a new placement has transferred and committed its expert weights; insufficient samples and unchanged
+    placements do not consume the limit.
+
+    * ``-1`` keeps dynamic rebalancing enabled indefinitely.
+    * ``0`` disables dynamic rebalancing, leaving only the initial redundant placement active.
+    * A positive value stops planning after that many completed rebalances.
+
     Example: enable EPLB with two redundant experts per EP rank::
 
         python -m lightllm.server.api_server \
             --model_dir /path/to/model \
             --enable_ep_moe \
-            --eplb_num_redundant_experts_per_rank 2
+            --eplb_num_redundant_experts_per_rank 2 \
+            --eplb_rebalance_count 1
 
 MTP Multi-Prediction Parameters
 -------------------------------

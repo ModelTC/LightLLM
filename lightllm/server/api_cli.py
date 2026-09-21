@@ -774,6 +774,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             Set to 0 to disable EPLB.""",
     )
     parser.add_argument(
+        "--eplb_rebalance_count",
+        type=int,
+        default=1,
+        help="""Maximum number of completed EPLB rebalances. -1 means unlimited,
+            0 disables dynamic rebalancing, and the default is 1.""",
+    )
+    parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
         help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",

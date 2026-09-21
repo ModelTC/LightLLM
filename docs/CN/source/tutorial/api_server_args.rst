@@ -724,12 +724,22 @@ PD 分离模式参数
     EPLB 当前不能与 ``--enable_prefill_cudagraph`` 同时使用，也不支持 SM100 GPU。
     同一部署中的所有 rank 和节点必须使用相同的配置值。
 
+.. option:: --eplb_rebalance_count
+
+    动态 EPLB 最多成功执行的重排次数，默认值为 ``1``。只有新布局实际发生
+    专家权重迁移并完成提交后才计数；样本不足或规划布局不变不会消耗次数。
+
+    * ``-1``：不限制次数，持续进行动态重排；
+    * ``0``：不进行动态重排，仅使用初始化时的冗余布局；
+    * 正整数：完成指定次数的重排后停止规划。
+
     以下示例为每个 EP rank 配置两个冗余专家::
 
         python -m lightllm.server.api_server \
             --model_dir /path/to/model \
             --enable_ep_moe \
-            --eplb_num_redundant_experts_per_rank 2
+            --eplb_num_redundant_experts_per_rank 2 \
+            --eplb_rebalance_count 1
 
 MTP 多预测参数
 --------------

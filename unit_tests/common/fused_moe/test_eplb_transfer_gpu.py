@@ -1,5 +1,6 @@
 """Multi-GPU correctness test for pinned-memory EPLB transfers."""
 
+import gc
 import os
 import socket
 import time
@@ -63,6 +64,49 @@ def _wait_for_transfer(transfer, control_group):
             return
         time.sleep(0.001)
     raise TimeoutError("EPLB transfer worker did not finish globally")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_pytorch_keeps_unreferenced_pinned_source_alive_until_async_copy_finishes():
+    """验证 pinned allocator 不会提前复用仍被异步 H2D 读取的内存。
+
+    copy stream 中先排入一个长任务，确保 H2D copy 在 Python 引用释放时仍未
+    完成。随后删除 pinned tensor 的唯一引用，并立刻申请同尺寸 pinned 内存：
+
+    * 如果旧地址尚未复用，新 buffer 可以立即覆盖而不影响 H2D；
+    * 如果 allocator 返回了旧地址，对应 copy event 必须已经完成；
+    * 最终 GPU 数据必须保持为源 buffer 的原始内容。
+
+    该测试验证当前 PyTorch/CUDA 组合的运行时行为；allocator 的正确性契约
+    仍由 PyTorch ``copy_`` 中的 host ``record_event`` 实现提供。
+    """
+    torch.cuda.synchronize()
+    num_elements = 8 * 1024 * 1024
+    source = torch.full((num_elements,), 7, dtype=torch.int32, pin_memory=True)
+    source_ptr = source.data_ptr()
+    destination = torch.empty_like(source, device="cuda")
+
+    copy_stream = torch.cuda.Stream()
+    copy_finished = torch.cuda.Event()
+    with torch.cuda.stream(copy_stream):
+        # copy 与 sleep 位于同一 stream，必须等 sleep 完成后才能开始。
+        torch.cuda._sleep(1_000_000_000)
+        destination.copy_(source, non_blocking=True)
+        copy_finished.record()
+
+    assert not copy_finished.query(), "test setup failed to leave the H2D copy pending"
+
+    del source
+    gc.collect()
+
+    replacement = torch.empty((num_elements,), dtype=torch.int32, pin_memory=True)
+    if replacement.data_ptr() == source_ptr:
+        # 相同地址只有在原 copy 已经结束、allocator 确认可以复用后才合法。
+        assert copy_finished.query()
+    replacement.fill_(-3)
+
+    copy_finished.synchronize()
+    assert torch.all(destination == 7)
 
 
 def _worker(rank, port):

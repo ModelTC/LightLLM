@@ -244,6 +244,10 @@ def test_eplb_redundant_experts_default_to_disabled():
     assert parser.parse_args([]).eplb_num_redundant_experts_per_rank == 0
     assert parser.parse_args(["--eplb_num_redundant_experts_per_rank", "3"]).eplb_num_redundant_experts_per_rank == 3
     assert StartArgs().eplb_num_redundant_experts_per_rank == 0
+    assert parser.parse_args([]).eplb_rebalance_count == 1
+    assert parser.parse_args(["--eplb_rebalance_count", "-1"]).eplb_rebalance_count == -1
+    assert parser.parse_args(["--eplb_rebalance_count", "0"]).eplb_rebalance_count == 0
+    assert StartArgs().eplb_rebalance_count == 1
 
 
 @pytest.mark.parametrize(
@@ -1122,6 +1126,29 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
     assert not hasattr(impl, "expert_parallel_state")
 
 
+def test_deepgemm_keeps_route_recording_when_rebalance_count_is_zero(monkeypatch):
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(
+            eplb_num_redundant_experts_per_rank=1,
+            eplb_rebalance_count=0,
+        ),
+    )
+    monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
+    monkeypatch.setattr(
+        deepgemm_module.torch,
+        "zeros",
+        lambda *shape, **kwargs: torch.full(shape, 0, dtype=kwargs.get("dtype")),
+    )
+
+    impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace())
+
+    assert impl.recording
+
+
 def test_eplb_prepare_repairs_logical_ids(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     runtime = _test_moe_impl(eplb=True, recording=True)
@@ -1386,6 +1413,8 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     ]
     manager.global_rank = 1
     manager.state = manager_module.EPLBManagerState.TRANSFERRING
+    manager.max_rebalance_count = -1
+    manager.completed_rebalance_count = 0
     committed = []
     cleared_route_counters = []
     manager._commit_transfer = committed.append
@@ -1440,6 +1469,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
 
     manager._step_transferring()
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
+    assert manager.completed_rebalance_count == 1
     assert manager.current_placement == [
         [[0, 1, 2], [2, 3, 3], [4, 5, 2], [6, 7, 0]],
         [[0, 1, 4], [2, 3, 5], [4, 5, 6], [6, 7, 1]],
@@ -1450,6 +1480,28 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     assert cleared_route_counters == [True]
     assert local_states == [False, True, True]
     assert waits == [overlap_stream, overlap_stream]
+
+
+def test_manager_finishes_after_reaching_rebalance_limit():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    impls = [SimpleNamespace(recording=True), SimpleNamespace(recording=True)]
+    target_placement = [[[0, 1], [1, 0]]]
+    manager.state = manager_module.EPLBManagerState.TRANSFERRING
+    manager.global_rank = 1
+    manager._eplb_impls = impls
+    manager.current_placement = [[[0, 1], [0, 1]]]
+    manager.target_placement = target_placement
+    manager.pending_transfer_batches = []
+    manager.max_rebalance_count = 1
+    manager.completed_rebalance_count = 0
+    manager._clear_route_counters = lambda: None
+
+    manager._step_transferring()
+
+    assert manager.current_placement is target_placement
+    assert manager.completed_rebalance_count == 1
+    assert manager.state is manager_module.EPLBManagerState.FINISHED
+    assert all(impl.recording for impl in impls)
 
 
 def test_wait_plan_finish_broadcasts_pending_status(monkeypatch):
@@ -1549,6 +1601,15 @@ def test_manager_step_advances_inflight_transfer():
     manager.step()
 
     assert calls == ["transfer"]
+
+
+def test_finished_manager_step_is_a_noop():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.state = manager_module.EPLBManagerState.FINISHED
+
+    manager.step()
+
+    assert manager.state is manager_module.EPLBManagerState.FINISHED
 
 
 def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
@@ -2031,6 +2092,8 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert manager.metric_client is metric_client
     assert metric_client_ports == [1234]
     assert manager.next_evaluation_step == manager.step_interval
+    assert manager.max_rebalance_count == 1
+    assert manager.completed_rebalance_count == 0
     assert clear_calls == [manager]
     assert "planner=GreedyEPLBPlanner" in logs[0]
     assert weight.fuse_moe_impl.recording

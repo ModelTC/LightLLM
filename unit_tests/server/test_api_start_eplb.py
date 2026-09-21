@@ -24,6 +24,26 @@ def test_eplb_redundant_expert_count_must_not_be_negative(monkeypatch):
         api_start._launch_subprocesses(args)
 
 
+def test_eplb_rebalance_count_must_not_be_less_than_negative_one(monkeypatch):
+    args = StartArgs(
+        eplb_rebalance_count=-2,
+        disable_vision=True,
+        disable_audio=True,
+        disable_shm_warning=True,
+    )
+
+    monkeypatch.setattr(api_start, "_set_envs_and_config", lambda args: None)
+    monkeypatch.setattr(api_start, "auto_set_max_req_total_len", lambda args: None)
+    monkeypatch.setattr(api_start, "auto_set_fused_shared_experts", lambda args: None)
+    monkeypatch.setattr(api_start, "set_unique_server_name", lambda args: None)
+
+    with pytest.raises(
+        AssertionError,
+        match="--eplb_rebalance_count must be greater than or equal to -1",
+    ):
+        api_start._launch_subprocesses(args)
+
+
 def test_eplb_redundant_experts_require_ep_moe(monkeypatch):
     args = StartArgs(
         enable_ep_moe=False,
