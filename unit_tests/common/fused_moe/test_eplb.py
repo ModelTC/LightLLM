@@ -27,6 +27,9 @@ from lightllm.server.router.model_infer.mode_backend import (
 from lightllm.server.router.model_infer.mode_backend import (
     eplb_transfer as transfer_module,
 )
+from lightllm.server.router.model_infer.mode_backend import (
+    eplb_transfer_planner as transfer_planner_module,
+)
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
     deepgemm_impl as deepgemm_module,
 )
@@ -753,6 +756,59 @@ def test_plan_task_exits_process_on_failure(monkeypatch):
 
     assert exits == [1]
     assert logs == ["EPLB planning failed"]
+
+
+def test_transfer_planner_combines_all_layer_batches(monkeypatch):
+    current_placement = [[[0, 1], [2, 3]], [[0, 2], [1, 3]]]
+    target_placement = [[[2, 1], [0, 3]], [[0, 3], [1, 2]]]
+    transfer_infos = [
+        EPLBTransferInfo(1, 0, 2, 0, 0),
+        EPLBTransferInfo(1, 1, 3, 0, 1),
+    ]
+    calls = []
+
+    def build_plan(*args):
+        calls.append(args)
+        return [[transfer_infos[args[2]]]]
+
+    monkeypatch.setattr(transfer_planner_module, "build_transfer_plan", build_plan)
+    planner = transfer_planner_module.EPLBTransferPlanner(
+        current_placement,
+        target_placement,
+        num_logical_experts=4,
+        world_size=2,
+    )
+
+    planner._run()
+
+    assert planner.status is transfer_planner_module.TransferPlanStatus.SUCCEEDED
+    assert planner.result == [[transfer_infos[0]], [transfer_infos[1]]]
+    assert calls == [
+        (current_placement[0], target_placement[0], 0, 4, 2),
+        (current_placement[1], target_placement[1], 1, 4, 2),
+    ]
+
+
+def test_transfer_planner_exits_process_on_failure(monkeypatch):
+    def fail(*_args):
+        raise RuntimeError("transfer planning boom")
+
+    planner = transfer_planner_module.EPLBTransferPlanner(
+        [[[0], [1]]],
+        [[[1], [0]]],
+        num_logical_experts=2,
+        world_size=2,
+    )
+    exits = []
+    logs = []
+    monkeypatch.setattr(transfer_planner_module, "build_transfer_plan", fail)
+    monkeypatch.setattr(transfer_planner_module.os, "_exit", exits.append)
+    monkeypatch.setattr(transfer_planner_module.logger, "exception", logs.append)
+
+    planner._run()
+
+    assert exits == [1]
+    assert logs == ["EPLB transfer planning failed"]
 
 
 def test_expert_load_imbalance_ratio_averages_layer_ratios():
@@ -1510,7 +1566,7 @@ def test_manager_returns_to_collecting_after_reaching_rebalance_limit():
 
 def test_wait_plan_finish_broadcasts_pending_status(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_FINISH
+    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
     manager.global_rank = 0
     manager.control_group = object()
     manager._plan_task = SimpleNamespace(
@@ -1523,9 +1579,9 @@ def test_wait_plan_finish_broadcasts_pending_status(monkeypatch):
         broadcasts.append(values[0])
 
     monkeypatch.setattr(manager_module.dist, "broadcast_object_list", broadcast)
-    manager._step_wait_plan_finish()
+    manager._step_wait_plan_placement_finished()
     assert broadcasts == [None]
-    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_FINISH
+    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -1660,9 +1716,9 @@ def test_manager_step_uses_explicit_state_instead_of_pending_work():
     assert calls == ["transfer"]
 
 
-def test_manager_enters_transferring_state_with_planned_work(monkeypatch):
+def test_manager_plans_transfers_asynchronously_before_entering_transferring(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_FINISH
+    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
     manager.global_rank = 1
     manager.control_group = object()
     manager.transfer_group = object()
@@ -1686,27 +1742,68 @@ def test_manager_enters_transferring_state_with_planned_work(monkeypatch):
         EPLBTransferInfo(0, 0, 2, 1, 2),
         EPLBTransferInfo(0, 1, 0, 1, 2),
     ]
-    build_calls = []
+    transfer_planners = []
 
-    def build_plan(*args):
-        build_calls.append(args)
-        return [[transfer_infos[args[2]]]]
+    class TransferPlanner:
+        def __init__(self, current, target, num_logical_experts, world_size):
+            self.current = current
+            self.target = target
+            self.num_logical_experts = num_logical_experts
+            self.world_size = world_size
+            self.result = [[transfer_infos[0]], [transfer_infos[1]]]
+            self.started = False
+            self.finished = False
+            transfer_planners.append(self)
 
-    monkeypatch.setattr(manager_module, "build_transfer_plan", build_plan)
+        def start(self):
+            self.started = True
+
+        def is_finished(self):
+            return self.finished
+
+    monkeypatch.setattr(manager_module, "EPLBTransferPlanner", TransferPlanner)
     monkeypatch.setattr(
         manager_module,
         "PinnedMemoryEPLBTransfer",
-        lambda *_args: pytest.fail("transfer object must not be built while entering TRANSFERRING"),
+        lambda *_args: pytest.fail("transfer object must not be built while planning transfers"),
     )
 
-    manager._step_wait_plan_finish()
+    manager._step_wait_plan_placement_finished()
+
+    assert manager.state is manager_module.EPLBManagerState.PLAN_TRANSFER
+    assert manager.target_placement is placement
+    assert transfer_planners == []
+    assert not hasattr(manager, "pending_transfer_batches")
+
+    manager.step()
+
+    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_TRANSFER_FINISHED
+    assert len(transfer_planners) == 1
+    transfer_planner = transfer_planners[0]
+    assert transfer_planner.current is manager.current_placement
+    assert transfer_planner.target is placement
+    assert transfer_planner.num_logical_experts == manager.num_logical_experts
+    assert transfer_planner.world_size == manager.world_size
+    assert transfer_planner.started
+
+    remote_finished = False
+
+    def gather_finished(output, local_finished, **_kwargs):
+        output[:] = [local_finished, remote_finished]
+
+    monkeypatch.setattr(manager_module.dist, "all_gather_object", gather_finished)
+    transfer_planner.finished = True
+    manager.step()
+
+    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_TRANSFER_FINISHED
+    assert not hasattr(manager, "pending_transfer_batches")
+
+    remote_finished = True
+    manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.TRANSFERRING
     assert manager.pending_transfer_batches == [[transfer_infos[0]], [transfer_infos[1]]]
-    assert build_calls == [
-        (manager.current_placement[0], placement[0], 0, manager.num_logical_experts, manager.world_size),
-        (manager.current_placement[1], placement[1], 1, manager.num_logical_experts, manager.world_size),
-    ]
+    assert not hasattr(manager, "_transfer_planner")
     assert not hasattr(manager, "active_transfer")
     assert not hasattr(manager, "target_metadata")
 
@@ -1778,7 +1875,7 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     manager.step()
 
-    assert manager.state is manager_module.EPLBManagerState.PLANNING
+    assert manager.state is manager_module.EPLBManagerState.PLAN_PLACEMENT
     assert torch.equal(manager._local_load, local_load)
     assert len(published_loads) == 1
     assert torch.equal(published_loads[0], local_load)
@@ -1787,7 +1884,7 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     manager.step()
 
-    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_FINISH
+    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
     assert torch.equal(plan_tasks[0].global_load, local_load)
     assert plan_tasks[0].planner is manager.planner
     assert plan_tasks[0].current_placement is manager.current_placement
@@ -1826,7 +1923,7 @@ def test_manager_keeps_reporting_after_reaching_rebalance_limit(monkeypatch):
 
 def test_nonzero_rank_waits_without_starting_planner(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.state = manager_module.EPLBManagerState.PLANNING
+    manager.state = manager_module.EPLBManagerState.PLAN_PLACEMENT
     manager.global_rank = 1
     manager.world_size = 2
     manager.control_group = object()
@@ -1840,14 +1937,14 @@ def test_nonzero_rank_waits_without_starting_planner(monkeypatch):
 
     manager.step()
 
-    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_FINISH
+    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
     assert not hasattr(manager, "_plan_task")
     assert not hasattr(manager, "_local_load")
 
 
 def test_manager_planning_without_changes_returns_to_collecting(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_FINISH
+    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
     manager.global_rank = 1
     manager.control_group = object()
     manager.steps = 11
@@ -1862,7 +1959,7 @@ def test_manager_planning_without_changes_returns_to_collecting(monkeypatch):
     monkeypatch.setattr(manager_module.dist, "broadcast_object_list", broadcast)
 
     manager.step()
-    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_FINISH
+    assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
 
     result = [[[0, 1], [1, 0]]]
     manager.step()
