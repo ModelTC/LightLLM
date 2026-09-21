@@ -260,7 +260,11 @@ class ModeBackend:
         if self.args.eplb_num_redundant_experts_per_rank > 0:
             from lightllm.server.router.model_infer.mode_backend.eplb.runtime_manager import EPLBManager
 
-            self.eplb_manager = EPLBManager(self.model, self.args.eplb_rebalance_count)
+            self.eplb_manager = EPLBManager(
+                self.model,
+                max_rebalance_count=self.args.eplb_rebalance_count,
+                config_path=self.args.eplb_config_path,
+            )
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。

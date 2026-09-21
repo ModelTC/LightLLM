@@ -62,6 +62,7 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
             enable_ep_moe=self.enable_ep_moe,
+            layer_index=self.layer_num_,
         )
         self._init_weight_partition()
         self.lock = threading.Lock()

@@ -781,6 +781,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             0 disables dynamic rebalancing, and the default is 1.""",
     )
     parser.add_argument(
+        "--eplb_config_path",
+        type=str,
+        default=None,
+        help="""Path to an EPLB placement JSON file. A valid saved layout is loaded during weight
+            initialization, and the latest runtime layout is written back to the same path.""",
+    )
+    parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
         help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",

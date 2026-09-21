@@ -248,6 +248,9 @@ def test_eplb_redundant_experts_default_to_disabled():
     assert parser.parse_args(["--eplb_rebalance_count", "-1"]).eplb_rebalance_count == -1
     assert parser.parse_args(["--eplb_rebalance_count", "0"]).eplb_rebalance_count == 0
     assert StartArgs().eplb_rebalance_count == 1
+    assert parser.parse_args([]).eplb_config_path is None
+    assert parser.parse_args(["--eplb_config_path", "/tmp/eplb.json"]).eplb_config_path == "/tmp/eplb.json"
+    assert StartArgs().eplb_config_path is None
 
 
 @pytest.mark.parametrize(
@@ -823,7 +826,10 @@ def test_eplb_route_counter_has_one_entry_per_logical_expert(monkeypatch):
     args = type(
         "Args",
         (),
-        {"eplb_num_redundant_experts_per_rank": 2},
+        {
+            "eplb_num_redundant_experts_per_rank": 2,
+            "eplb_config_path": None,
+        },
     )()
     monkeypatch.setattr(deepgemm_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
@@ -1135,7 +1141,10 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
     monkeypatch.setattr(
         deepgemm_module,
         "get_env_start_args",
-        lambda: SimpleNamespace(eplb_num_redundant_experts_per_rank=1),
+        lambda: SimpleNamespace(
+            eplb_num_redundant_experts_per_rank=1,
+            eplb_config_path=None,
+        ),
     )
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
@@ -1158,6 +1167,49 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
     assert not hasattr(impl, "expert_parallel_state")
 
 
+def test_deepgemm_constructor_loads_saved_layout_before_weight_initialization(monkeypatch):
+    saved_placement = [[1, 0, 3], [2, 3, 1]]
+    monkeypatch.setattr(
+        deepgemm_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(
+            eplb_num_redundant_experts_per_rank=1,
+            eplb_config_path="/tmp/eplb.json",
+        ),
+    )
+    monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
+    monkeypatch.setattr(
+        deepgemm_module,
+        "load_layer_placement",
+        lambda path, **kwargs: (
+            saved_placement
+            if path == "/tmp/eplb.json"
+            and kwargs
+            == {
+                "layer_index": 7,
+                "num_logical_experts": 4,
+                "world_size": 2,
+                "num_redundant_experts_per_rank": 1,
+            }
+            else None
+        ),
+    )
+    original_zeros = torch.zeros
+    monkeypatch.setattr(
+        deepgemm_module.torch,
+        "zeros",
+        lambda *shape, **kwargs: original_zeros(*shape, dtype=kwargs.get("dtype")),
+    )
+
+    impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), layer_index=7)
+
+    assert impl.local_logics_expert_ids_list == saved_placement[0]
+    expected_map = build_logical_to_physical_map(saved_placement, 4, current_rank=0)
+    assert impl.logical_to_physical_map.tolist() == expected_map
+
+
 def test_deepgemm_keeps_route_recording_when_rebalance_count_is_zero(monkeypatch):
     monkeypatch.setattr(
         deepgemm_module,
@@ -1165,6 +1217,7 @@ def test_deepgemm_keeps_route_recording_when_rebalance_count_is_zero(monkeypatch
         lambda: SimpleNamespace(
             eplb_num_redundant_experts_per_rank=1,
             eplb_rebalance_count=0,
+            eplb_config_path=None,
         ),
     )
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
@@ -1552,7 +1605,7 @@ def test_manager_returns_to_collecting_after_reaching_rebalance_limit():
     impls = [SimpleNamespace(recording=True), SimpleNamespace(recording=True)]
     target_placement = [[[0, 1], [1, 0]]]
     manager.state = manager_module.EPLBManagerState.TRANSFERRING
-    manager.global_rank = 1
+    manager.global_rank = 0
     manager._eplb_impls = impls
     manager.current_placement = [[[0, 1], [0, 1]]]
     manager.target_placement = target_placement
@@ -1560,12 +1613,15 @@ def test_manager_returns_to_collecting_after_reaching_rebalance_limit():
     manager.max_rebalance_count = 1
     manager.completed_rebalance_count = 0
     manager._clear_route_counters = lambda: None
+    persisted_placements = []
+    manager._persist_current_placement = lambda: persisted_placements.append(manager.current_placement)
 
     manager._step_transferring()
 
     assert manager.current_placement is target_placement
     assert manager.completed_rebalance_count == 1
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
+    assert persisted_placements == [target_placement]
     assert all(impl.recording for impl in impls)
 
 
@@ -2224,7 +2280,12 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     monkeypatch.setattr(manager_module.dist, "all_gather_object", all_gather_object)
     logs = []
     monkeypatch.setattr(manager_module.logger, "info", lambda message: logs.append(message))
-    manager = manager_module.EPLBManager(type("Model", (), {})())
+    monkeypatch.setattr(
+        manager_module,
+        "save_placement_config",
+        lambda *_args, **_kwargs: pytest.fail("manager initialization must not save the placement"),
+    )
+    manager = manager_module.EPLBManager(type("Model", (), {})(), config_path="/tmp/eplb.json")
     assert not hasattr(manager, "_plan_task")
     assert not hasattr(manager, "pending_transfer_batches")
     assert manager.state is manager_module.EPLBManagerState.COLLECTING

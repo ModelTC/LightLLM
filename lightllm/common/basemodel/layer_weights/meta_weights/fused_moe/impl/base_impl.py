@@ -40,11 +40,13 @@ class FuseMoeBaseImpl(ABC):
         num_fused_shared_experts: int,
         routed_scaling_factor: float,
         quant_method: QuantizationMethod,
+        layer_index: Optional[int] = None,
     ):
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self.routed_scaling_factor = routed_scaling_factor
         self.quant_method = quant_method
+        self.layer_index = layer_index
 
     def __call__(
         self,

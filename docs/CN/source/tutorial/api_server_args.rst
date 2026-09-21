@@ -733,13 +733,24 @@ PD 分离模式参数
     * ``0``：不进行动态重排，仅使用初始化时的冗余布局；
     * 正整数：完成指定次数的重排后停止规划。
 
+.. option:: --eplb_config_path
+
+    EPLB 布局 JSON 文件路径，默认值为 ``None``。指定后，LightLLM 会在初始化专家权重之前校验并
+    读取各层保存的布局，使服务启动后立即使用上一次优化得到的专家分配。同一个文件也作为输出：
+    每次成功完成动态重排后，rank 0 会写回当前最新布局。
+
+    如果文件不存在、JSON 无法解析、缺少模型层，或保存的专家拓扑与当前部署不匹配，LightLLM 会
+    记录 warning，并对受影响的层使用默认初始化布局。只有后续动态重排成功完成时，rank 0 才会把
+    新布局写入该路径。
+
     以下示例为每个 EP rank 配置两个冗余专家::
 
         python -m lightllm.server.api_server \
             --model_dir /path/to/model \
             --enable_ep_moe \
             --eplb_num_redundant_experts_per_rank 2 \
-            --eplb_rebalance_count 1
+            --eplb_rebalance_count 1 \
+            --eplb_config_path /path/to/eplb-placement.json
 
 MTP 多预测参数
 --------------

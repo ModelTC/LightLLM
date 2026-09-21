@@ -752,13 +752,25 @@ Expert Parallelism and EPLB Parameters
     * ``0`` disables dynamic rebalancing, leaving only the initial redundant placement active.
     * A positive value stops planning after that many completed rebalances.
 
+.. option:: --eplb_config_path
+
+    Path to an EPLB placement JSON file. The default is ``None``. When specified, LightLLM validates and loads
+    the saved per-layer placement before expert weights are initialized, so the service starts directly with the
+    previous optimized layout. The same file is updated with the latest layout after every successfully completed
+    rebalance.
+
+    If the file does not exist, cannot be decoded, is missing a model layer, or does not match the current expert
+    topology, LightLLM logs a warning and uses the default initial placement for the affected layer. Rank 0 writes
+    a new layout to this path only after a dynamic rebalance completes successfully.
+
     Example: enable EPLB with two redundant experts per EP rank::
 
         python -m lightllm.server.api_server \
             --model_dir /path/to/model \
             --enable_ep_moe \
             --eplb_num_redundant_experts_per_rank 2 \
-            --eplb_rebalance_count 1
+            --eplb_rebalance_count 1 \
+            --eplb_config_path /path/to/eplb-placement.json
 
 MTP Multi-Prediction Parameters
 -------------------------------

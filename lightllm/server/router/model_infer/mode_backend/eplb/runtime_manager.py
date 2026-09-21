@@ -29,6 +29,7 @@ from .placement import (
     ExpertPlacement,
     GreedyEPLBPlanner,
     build_logical_to_physical_map,
+    save_placement_config,
 )
 from .placement_plan_task import EPLBPlanTask
 
@@ -67,7 +68,12 @@ class EPLBManager:
     执行，主推理线程负责评估、轮询和提交结果。
     """
 
-    def __init__(self, model: TpPartBaseModel, max_rebalance_count: int = 1) -> None:
+    def __init__(
+        self,
+        model: TpPartBaseModel,
+        max_rebalance_count: int = 1,
+        config_path: Optional[str] = None,
+    ) -> None:
         # SM100 FP4 Mega-MoE 会将在线专家权重转换为独立的 kernel 布局，并使用源 tensor 的 data_ptr
         # 作为 key 缓存这些转换后的副本。EPLB 通过原地 copy_ 替换专家行，只改变权重内容而不会改变
         # data_ptr，因此重平衡后 Mega-MoE 仍会读取旧的转换权重。在 EPLB 能够失效或更新该缓存前，
@@ -80,9 +86,11 @@ class EPLBManager:
 
         # 模型与专家拓扑：初始化后保持不变。
         self._weights: List[FusedMoeWeight] = weights
+        self.config_path = config_path
         self.global_rank: int = get_global_rank()
         self.world_size: int = get_global_world_size()
         assert self.world_size > 1, "EPLB requires more than one rank"
+        self.layer_indexes = [weight.layer_num_ for weight in weights]
         self._eplb_impls = [weight.fuse_moe_impl for weight in weights]
 
         first_impl = self._eplb_impls[0]
@@ -331,6 +339,8 @@ class EPLBManager:
             if not transfer_batch:
                 self.current_placement = self.target_placement
                 elapsed = time.time() - self.rebalance_started_at
+                if self.global_rank == 0:
+                    self._persist_current_placement()
                 self._clear_route_counters()
                 self.completed_rebalance_count += 1
                 del self.pending_transfer_batches
@@ -450,6 +460,19 @@ class EPLBManager:
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             for impl in self._eplb_impls:
                 impl.route_counter.zero_()
+
+    def _persist_current_placement(self) -> None:
+        """由 rank 0 将当前完整布局写回启动时指定的输入/输出文件。"""
+        if self.config_path is None:
+            return
+        save_placement_config(
+            self.config_path,
+            layer_indexes=self.layer_indexes,
+            placement=self.current_placement,
+            num_logical_experts=self.num_logical_experts,
+            world_size=self.world_size,
+            num_redundant_experts_per_rank=self.num_redundant_experts_per_rank,
+        )
 
 
 def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:

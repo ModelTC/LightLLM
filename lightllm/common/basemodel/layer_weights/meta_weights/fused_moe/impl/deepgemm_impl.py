@@ -4,6 +4,7 @@ from .base_impl import FuseMoeBaseImpl
 from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
     build_initial_local_expert_ids,
     build_logical_to_physical_map,
+    load_layer_placement,
 )
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.quantize_method import WeightPack
@@ -45,15 +46,36 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         world_size = get_global_world_size()
         assert self.n_routed_experts % world_size == 0
         global_rank = get_global_rank()
-        self.num_redundant_experts_per_rank = get_env_start_args().eplb_num_redundant_experts_per_rank
+        start_args = get_env_start_args()
+        self.num_redundant_experts_per_rank = start_args.eplb_num_redundant_experts_per_rank
 
         if self.num_redundant_experts_per_rank > 0:
             self.num_total_physical_experts = self.n_routed_experts + world_size * self.num_redundant_experts_per_rank
+
+            # 阶段 1：先构造确定性的默认布局。未指定配置文件，或配置读取、校验失败时，
+            # 后续权重初始化会继续使用这份布局。
             initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
                 self.n_routed_experts,
                 world_size,
                 self.num_redundant_experts_per_rank,
             )
+
+            # 阶段 2：如果指定了配置文件，尝试读取与当前层及部署拓扑匹配的历史布局。
+            # load_layer_placement 会负责记录 warning，并在任何异常或配置无效时返回 None。
+            config_path = start_args.eplb_config_path
+            if config_path is not None:
+                saved_placement = load_layer_placement(
+                    config_path,
+                    layer_index=self.layer_index,
+                    num_logical_experts=self.n_routed_experts,
+                    world_size=world_size,
+                    num_redundant_experts_per_rank=self.num_redundant_experts_per_rank,
+                )
+
+                # 阶段 3：只有完整校验通过的历史布局才会替换默认布局，使专家权重在
+                # 初始化时直接加载到上一次优化后的物理槽位中。
+                if saved_placement is not None:
+                    initial_local_expert_ids_by_rank = saved_placement
             self.local_logics_expert_ids_list = initial_local_expert_ids_by_rank[global_rank]
             self.logical_to_physical_map = torch.tensor(
                 build_logical_to_physical_map(
