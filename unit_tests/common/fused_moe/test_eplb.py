@@ -215,27 +215,26 @@ def test_factory_selects_all_paths_without_ep_constructor_state(monkeypatch):
     )
 
 
-def test_find_fused_moe_weights_discovers_direct_layer_attributes(monkeypatch):
+def test_find_fused_moe_weights_uses_layer_experts_in_model_order(monkeypatch):
     class FakeFusedMoeWeight:
         def __init__(self, layer_num, enable_ep_moe=True):
             self.layer_num_ = layer_num
             self.enable_ep_moe = enable_ep_moe
 
     monkeypatch.setattr(manager_module, "FusedMoeWeight", FakeFusedMoeWeight)
-    first = FakeFusedMoeWeight(3)
-    alternate = FakeFusedMoeWeight(1)
-    aliased = FakeFusedMoeWeight(2)
-    disabled = FakeFusedMoeWeight(0, enable_ep_moe=False)
+    first = FakeFusedMoeWeight(1)
+    second = FakeFusedMoeWeight(3)
+    disabled = FakeFusedMoeWeight(2, enable_ep_moe=False)
     model = SimpleNamespace(
         trans_layers_weight=[
-            SimpleNamespace(moe_weight=first),
-            SimpleNamespace(alternate_moe_weight=alternate),
-            SimpleNamespace(moe_weight=aliased, alternate_moe_weight=aliased),
-            SimpleNamespace(moe_weight=disabled),
+            SimpleNamespace(experts=first),
+            SimpleNamespace(),
+            SimpleNamespace(experts=disabled),
+            SimpleNamespace(experts=second),
         ]
     )
 
-    assert manager_module._find_fused_moe_weights(model) == [alternate, aliased, first]
+    assert manager_module._find_fused_moe_weights(model) == [first, second]
 
 
 def test_eplb_redundant_experts_default_to_disabled():

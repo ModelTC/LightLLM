@@ -1,6 +1,6 @@
 from enum import Enum
 import time
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist
@@ -479,12 +479,12 @@ class EPLBManager:
 
 
 def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:
-    weights_by_id: Dict[int, FusedMoeWeight] = {}
+    weights: List[FusedMoeWeight] = []
     for layer in model.trans_layers_weight:
-        for value in getattr(layer, "__dict__", {}).values():
-            if isinstance(value, FusedMoeWeight) and value.enable_ep_moe:
-                weights_by_id[id(value)] = value
-    return sorted(weights_by_id.values(), key=lambda weight: weight.layer_num_)
+        weight = getattr(layer, "experts", None)
+        if isinstance(weight, FusedMoeWeight) and weight.enable_ep_moe:
+            weights.append(weight)
+    return weights
 
 
 def _expert_load_imbalance_ratio(expert_load: torch.Tensor) -> float:
