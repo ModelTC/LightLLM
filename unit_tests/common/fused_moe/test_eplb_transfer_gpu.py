@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
+from lightllm.server.router.model_infer.mode_backend.eplb.transfer import (
     PinnedMemoryEPLBTransfer,
     TransferStatus,
     build_transfer_plan,

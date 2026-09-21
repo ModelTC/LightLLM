@@ -18,12 +18,12 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_we
     FusedMoeWeight,
 )
 from lightllm.server.metrics.manager import MetricClient
-from lightllm.server.router.model_infer.mode_backend.eplb_plan import EPLBPlanTask
-from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
+from .plan import EPLBPlanTask
+from .transfer import (
     EPLBTransferInfo,
     PinnedMemoryEPLBTransfer,
 )
-from lightllm.server.router.model_infer.mode_backend.eplb_transfer_planner import EPLBTransferPlanner
+from .transfer_planner import EPLBTransferPlanner
 from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,

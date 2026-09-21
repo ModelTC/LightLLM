@@ -6,7 +6,7 @@ from enum import Enum
 from typing import List, Optional
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import ExpertPlacement
-from lightllm.server.router.model_infer.mode_backend.eplb_transfer import EPLBTransferInfo, build_transfer_plan
+from .transfer import EPLBTransferInfo, build_transfer_plan
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

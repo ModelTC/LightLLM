@@ -18,17 +18,17 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.mode_backend import (
-    eplb_manager as manager_module,
+from lightllm.server.router.model_infer.mode_backend.eplb import (
+    manager as manager_module,
 )
-from lightllm.server.router.model_infer.mode_backend import (
-    eplb_plan as plan_module,
+from lightllm.server.router.model_infer.mode_backend.eplb import (
+    plan as plan_module,
 )
-from lightllm.server.router.model_infer.mode_backend import (
-    eplb_transfer as transfer_module,
+from lightllm.server.router.model_infer.mode_backend.eplb import (
+    transfer as transfer_module,
 )
-from lightllm.server.router.model_infer.mode_backend import (
-    eplb_transfer_planner as transfer_planner_module,
+from lightllm.server.router.model_infer.mode_backend.eplb import (
+    transfer_planner as transfer_planner_module,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import (
     deepgemm_impl as deepgemm_module,
@@ -45,7 +45,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
     fused_moe_weight as fused_weight_module,
 )
 from lightllm.common.eplb_utils import extract_eplb_expert_tensors
-from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
+from lightllm.server.router.model_infer.mode_backend.eplb.transfer import (
     EPLBTransferInfo,
     ExpertTensorBuffer,
     PinnedMemoryEPLBTransfer,
