@@ -11,6 +11,7 @@ from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
     GreedyEPLBPlanner,
     build_initial_local_expert_ids,
     build_logical_to_physical_map,
+    create_eplb_planner,
 )
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -243,6 +244,9 @@ def test_eplb_redundant_experts_default_to_disabled():
     assert parser.parse_args([]).eplb_num_redundant_experts_per_rank == 0
     assert parser.parse_args(["--eplb_num_redundant_experts_per_rank", "3"]).eplb_num_redundant_experts_per_rank == 3
     assert StartArgs().eplb_num_redundant_experts_per_rank == 0
+    assert parser.parse_args([]).eplb_plan_mode == "greedy"
+    assert parser.parse_args(["--eplb_plan_mode", "greedy"]).eplb_plan_mode == "greedy"
+    assert StartArgs().eplb_plan_mode == "greedy"
     assert parser.parse_args([]).eplb_rebalance_count == 1
     assert parser.parse_args(["--eplb_rebalance_count", "-1"]).eplb_rebalance_count == -1
     assert parser.parse_args(["--eplb_rebalance_count", "0"]).eplb_rebalance_count == 0
@@ -284,6 +288,25 @@ def test_eplb_planner_defines_an_abstract_planning_interface():
         EPLBPlanner()
 
     assert isinstance(GreedyEPLBPlanner(2, 1), EPLBPlanner)
+
+
+def test_create_eplb_planner_selects_requested_algorithm():
+    planner = create_eplb_planner(
+        "greedy",
+        2,
+        1,
+        expert_alignment=1,
+    )
+
+    assert isinstance(planner, GreedyEPLBPlanner)
+
+    with pytest.raises(ValueError, match="unsupported EPLB plan mode"):
+        create_eplb_planner(
+            "unknown",
+            2,
+            1,
+            expert_alignment=1,
+        )
 
 
 def test_eplb_planner_builds_legal_concrete_slot_layout():
@@ -2386,7 +2409,10 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert manager.next_evaluation_step == manager.step_interval
     assert manager.max_rebalance_count == 1
     assert manager.completed_rebalance_count == 0
+    assert manager.plan_mode == "greedy"
     assert clear_calls == [manager]
+    assert isinstance(manager.planner, GreedyEPLBPlanner)
+    assert "plan_mode=greedy" in logs[0]
     assert "planner=GreedyEPLBPlanner" in logs[0]
     assert weight.fuse_moe_impl.recording
     assert manager._eplb_impls[0] is weight.fuse_moe_impl

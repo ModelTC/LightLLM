@@ -774,6 +774,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             Set to 0 to disable EPLB.""",
     )
     parser.add_argument(
+        "--eplb_plan_mode",
+        type=str,
+        choices=["greedy"],
+        default="greedy",
+        help="""EPLB placement planning algorithm used by this inference process.
+            Prefill and decode processes may select their planner independently in PD deployments.""",
+    )
+    parser.add_argument(
         "--eplb_rebalance_count",
         type=int,
         default=1,

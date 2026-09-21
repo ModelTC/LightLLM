@@ -742,6 +742,19 @@ Expert Parallelism and EPLB Parameters
     EPLB currently cannot be combined with ``--enable_prefill_cudagraph`` and is not supported on SM100 GPUs.
     Use the same value on every rank and node in one deployment.
 
+.. option:: --eplb_plan_mode
+
+    Expert placement planning algorithm used for dynamic EPLB rebalances. The default is ``greedy``. The
+    currently supported value is:
+
+    * ``greedy``: builds an approximately balanced full placement from the global logical-expert load of each
+      layer and attempts to reuse the current ranks and physical slots to reduce expert migration.
+
+    This option selects the placement planner; it does not change how tokens are dispatched among replicas in
+    an existing placement. Every rank in one EP communication group must use the same value. Prefill and decode
+    processes in a PD-disaggregated deployment have independent EPLB managers and may select planners suited to
+    their respective traffic. A non-PD process uses one planner for all routing load collected by that process.
+
 .. option:: --eplb_rebalance_count
 
     Maximum number of successfully completed dynamic EPLB rebalances. The default is ``1``. A count is consumed
@@ -769,6 +782,7 @@ Expert Parallelism and EPLB Parameters
             --model_dir /path/to/model \
             --enable_ep_moe \
             --eplb_num_redundant_experts_per_rank 2 \
+            --eplb_plan_mode greedy \
             --eplb_rebalance_count 1 \
             --eplb_config_path /path/to/eplb-placement.json
 

@@ -724,6 +724,18 @@ PD 分离模式参数
     EPLB 当前不能与 ``--enable_prefill_cudagraph`` 同时使用，也不支持 SM100 GPU。
     同一部署中的所有 rank 和节点必须使用相同的配置值。
 
+.. option:: --eplb_plan_mode
+
+    EPLB 动态重排使用的专家布局规划算法，默认值为 ``greedy``。当前支持：
+
+    * ``greedy``：根据各层逻辑专家的全局路由负载生成近似均衡的完整布局，
+      并尽量复用当前 rank 和物理槽位以减少专家迁移。
+
+    此参数只选择布局规划算法，不改变 token 到已有专家副本的运行时分发策略。
+    同一个 EP 通信组内的所有 rank 必须使用相同的值。PD 分离部署中的 prefill
+    和 decode 进程拥有各自独立的 EPLB manager，因此可以分别设置适合各自流量
+    特征的规划算法；非 PD 部署则使用一个算法处理该进程采集到的全部路由负载。
+
 .. option:: --eplb_rebalance_count
 
     动态 EPLB 最多成功执行的重排次数，默认值为 ``1``。只有新布局实际发生
@@ -749,6 +761,7 @@ PD 分离模式参数
             --model_dir /path/to/model \
             --enable_ep_moe \
             --eplb_num_redundant_experts_per_rank 2 \
+            --eplb_plan_mode greedy \
             --eplb_rebalance_count 1 \
             --eplb_config_path /path/to/eplb-placement.json
 

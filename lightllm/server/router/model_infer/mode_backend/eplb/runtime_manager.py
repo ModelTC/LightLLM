@@ -28,8 +28,8 @@ from .expert_transfer import (
 from .placement import (
     EPLBPlanner,
     ExpertPlacement,
-    GreedyEPLBPlanner,
     build_logical_to_physical_map,
+    create_eplb_planner,
     save_placement_config,
 )
 from .placement_plan_task import EPLBPlanTask
@@ -55,18 +55,53 @@ class EPLBManagerState(Enum):
 class EPLBManager:
     """由 :meth:`step` 驱动的 EPLB 状态机。
 
-    状态循环如下：
+    每次调用 :meth:`step` 最多处理一个状态。主路径及各状态的职责如下::
 
-    ``COLLECTING -> EVALUATING -> PLAN_PLACEMENT -> WAIT_PLAN_PLACEMENT_FINISHED``
-    ``-> PLAN_TRANSFER -> WAIT_PLAN_TRANSFER_FINISHED -> TRANSFERRING``
+        [COLLECTING]
+          推理 kernel 持续累计各层 logical expert 的 route counter；
+          manager 只记录采样 step，等待下一个评估周期。
+                |
+                | 评估周期到达
+                v
+        [EVALUATING]
+          将本地 counter 快照到 CPU 并上报负载指标；汇总各 rank 的
+          token 总数，判断样本量和剩余重排次数。
+                |
+                | 样本充足且仍允许重排
+                v
+        [PLAN_PLACEMENT]
+          汇集完整的全局专家负载；rank 0 启动后台布局规划任务。
+                |
+                v
+        [WAIT_PLAN_PLACEMENT_FINISHED]
+          轮询 rank 0 的规划任务，并向所有 rank 广播目标布局。
+                |
+                | 目标布局发生变化
+                v
+        [PLAN_TRANSFER]
+          每个 rank 根据相同的当前/目标布局启动后台传输规划任务。
+                |
+                v
+        [WAIT_PLAN_TRANSFER_FINISHED]
+          等待所有 rank 生成一致的、按依赖关系分批的传输任务。
+                |
+                v
+        [TRANSFERRING]
+          分批启动并轮询后台权重传输；整批完成后，主推理线程在安全
+          边界统一提交权重和路由 metadata。全部批次完成后发布新布局、
+          清空 counter 并回到 COLLECTING。
 
-    当累计的平均专家 token 数不足时，``EVALUATING`` 会回到
-    ``COLLECTING``；当规划器认为无需调整布局时，
-    ``WAIT_PLAN_PLACEMENT_FINISHED`` 会
-    回到 ``COLLECTING``。达到重排次数上限后，manager 仍会周期性采集并
-    上报本地负载指标，但不再进入全局负载汇总和布局规划。每次调用
-    :meth:`step` 最多推进一个状态，布局规划、传输规划和权重传输都在后台
-    执行，主推理线程负责评估、轮询和提交结果。
+    以下分支会提前回到 ``COLLECTING``::
+
+        EVALUATING
+          |-- 平均 token 数不足 --------> 保留 counter，继续累计样本
+          `-- 已达到重排次数上限 ------> 清空 counter，仅周期性上报指标
+
+        WAIT_PLAN_PLACEMENT_FINISHED
+          `-- 目标布局与当前布局相同 ---> 保留 counter，等待下次评估
+
+    布局规划、传输规划和权重传输在后台执行；主推理线程只负责创建任务、
+    轮询状态，以及在安全边界提交已经完成的结果。
     """
 
     def __init__(
@@ -74,6 +109,7 @@ class EPLBManager:
         model: TpPartBaseModel,
         max_rebalance_count: int = 1,
         config_path: Optional[str] = None,
+        plan_mode: str = "greedy",
     ) -> None:
         # SM100 FP4 Mega-MoE 会将在线专家权重转换为独立的 kernel 布局，并使用源 tensor 的 data_ptr
         # 作为 key 缓存这些转换后的副本。EPLB 通过原地 copy_ 替换专家行，只改变权重内容而不会改变
@@ -98,6 +134,13 @@ class EPLBManager:
         first_impl = self._eplb_impls[0]
         self.num_logical_experts: int = first_impl.n_routed_experts
         self.num_redundant_experts_per_rank: int = first_impl.num_redundant_experts_per_rank
+        self.plan_mode: str = plan_mode
+        self.planner: EPLBPlanner = create_eplb_planner(
+            self.plan_mode,
+            self.world_size,
+            self.num_redundant_experts_per_rank,
+            expert_alignment=EPLB_EXPERT_ALIGNMENT,
+        )
 
         # 评估调度：steps 只在 COLLECTING 状态递增。route counter 从当前
         # 布局生效时开始累计，让低流量服务可以跨多个评估周期收集足够样本。
@@ -128,11 +171,6 @@ class EPLBManager:
             [expert_ids_by_rank_and_layer[rank][layer_index] for rank in range(self.world_size)]
             for layer_index in range(len(weights))
         ]
-        self.planner: EPLBPlanner = GreedyEPLBPlanner(
-            self.world_size,
-            self.num_redundant_experts_per_rank,
-            expert_alignment=EPLB_EXPERT_ALIGNMENT,
-        )
 
         self.state = EPLBManagerState.COLLECTING
         self.next_evaluation_step = self.step_interval
@@ -144,7 +182,7 @@ class EPLBManager:
                 f"eplb enabled layers={len(weights)} num_logical_experts={self.num_logical_experts} "
                 f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} max_rebalance_count={self.max_rebalance_count} "
-                f"planner={type(self.planner).__name__}"
+                f"plan_mode={self.plan_mode} planner={type(self.planner).__name__}"
             )
 
     def step(self) -> None:

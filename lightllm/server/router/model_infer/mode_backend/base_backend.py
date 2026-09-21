@@ -264,6 +264,7 @@ class ModeBackend:
                 self.model,
                 max_rebalance_count=self.args.eplb_rebalance_count,
                 config_path=self.args.eplb_config_path,
+                plan_mode=self.args.eplb_plan_mode,
             )
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
