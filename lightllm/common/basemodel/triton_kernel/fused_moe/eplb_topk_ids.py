@@ -5,9 +5,17 @@ import triton.language as tl
 
 @triton.jit
 def _replica_index(token_index, logical_expert_id, num_valid_replicas):
-    token_hash = token_index.to(tl.uint32) * 2654435769
-    expert_hash = logical_expert_id.to(tl.uint32) * 2246822519
-    return (token_hash + expert_hash) % num_valid_replicas.to(tl.uint32)
+    # 先用 logical expert ID 给 token index 加盐，再用 32-bit avalanche
+    # finalizer 打散规律性 token 间隔，避免低位周期与副本数产生相关性。
+    value = token_index.to(tl.uint32)
+    value ^= (logical_expert_id.to(tl.uint32) + 1) * 0x9E3779B9
+    value ^= value >> 16
+    value *= 0x7FEB352D
+    value ^= value >> 15
+    value *= 0x846CA68B
+    value ^= value >> 16
+    value = value.to(tl.uint32)
+    return value % num_valid_replicas.to(tl.uint32)
 
 
 @triton.jit

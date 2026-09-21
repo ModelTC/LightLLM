@@ -2456,10 +2456,14 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
         num_preferred_replicas = torch.where(num_node_replicas > 0, num_node_replicas, replica_counts)
     else:
         num_preferred_replicas = replica_counts
-    replica_indices = (
-        (((token_indices * 2654435769) & 0xFFFFFFFF) + ((logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF))
-        & 0xFFFFFFFF
-    ) % num_preferred_replicas[logical_ids_long].to(torch.int64)
+    hash_values = token_indices ^ ((logical_ids.to(torch.int64) + 1) * 0x9E3779B9)
+    hash_values &= 0xFFFFFFFF
+    hash_values ^= hash_values >> 16
+    hash_values = (hash_values * 0x7FEB352D) & 0xFFFFFFFF
+    hash_values ^= hash_values >> 15
+    hash_values = (hash_values * 0x846CA68B) & 0xFFFFFFFF
+    hash_values ^= hash_values >> 16
+    replica_indices = hash_values % num_preferred_replicas[logical_ids_long].to(torch.int64)
     expected_ids = logical_to_physical[logical_ids_long, replica_indices + 3]
     if update_logical_expert_counter:
         expected_counter.scatter_add_(
@@ -2480,6 +2484,91 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
     assert torch.equal(logical_ids, original_logical_ids)
     assert torch.equal(physical_ids, expected_ids)
     assert torch.equal(counter, expected_counter)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+def test_eplb_repair_topk_ids_spreads_strided_expert_tokens():
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+        eplb_repair_topk_ids,
+    )
+
+    num_tokens = 4096
+    token_indices = torch.arange(num_tokens, dtype=torch.int32, device="cuda")
+    logical_ids = torch.where(token_indices % 4 == 0, 0, 1).view(-1, 1)
+    logical_to_physical = torch.tensor(
+        [
+            [4, 4, 4, 0, 2, 3, 4],
+            [1, 1, 1, 1, -1, -1, -1],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    counter = torch.zeros((2,), dtype=torch.int64, device="cuda")
+
+    physical_ids = eplb_repair_topk_ids(
+        logical_topk_ids=logical_ids,
+        logical_to_physical_map=logical_to_physical,
+        logical_expert_counter=counter,
+        update_logical_expert_counter=False,
+        mode="global_first",
+    )
+    torch.cuda.synchronize()
+
+    strided_token_outputs = physical_ids[token_indices % 4 == 0, 0]
+    replica_counts = torch.stack([(strided_token_outputs == physical_id).sum() for physical_id in (0, 2, 3, 4)])
+    assert torch.all(replica_counts > strided_token_outputs.numel() * 0.2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+@pytest.mark.parametrize("num_replicas", [2, 3, 4, 5, 101, 127, 128, 251])
+def test_eplb_replica_hash_is_uniform_across_tokens_and_experts(num_replicas):
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+        eplb_repair_topk_ids,
+    )
+
+    num_tokens = 4097
+    num_experts = 256
+    expert_ids = torch.arange(num_experts, dtype=torch.int32, device="cuda")
+    logical_ids = expert_ids.expand(num_tokens, -1).contiguous()
+    replica_counts = torch.full((num_experts, 3), num_replicas, dtype=torch.int32, device="cuda")
+    physical_ids = expert_ids.unsqueeze(1) + num_experts * torch.arange(
+        num_replicas,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    logical_to_physical = torch.cat((replica_counts, physical_ids), dim=1)
+    counter = torch.zeros((num_experts,), dtype=torch.int64, device="cuda")
+
+    routed_physical_ids = eplb_repair_topk_ids(
+        logical_topk_ids=logical_ids,
+        logical_to_physical_map=logical_to_physical,
+        logical_expert_counter=counter,
+        update_logical_expert_counter=False,
+        mode="global_first",
+    )
+    torch.cuda.synchronize()
+
+    routed_replica_indices = routed_physical_ids // num_experts
+    observed_counts = torch.stack(
+        [(routed_replica_indices == replica_index).sum(dim=0) for replica_index in range(num_replicas)],
+        dim=1,
+    )
+    expected_count = num_tokens / num_replicas
+    deviations = observed_counts - expected_count
+    if num_replicas <= 5:
+        max_relative_deviation = (deviations.abs() / expected_count).max().item()
+        assert max_relative_deviation < 0.12
+    else:
+        # 副本很多时单槽期望样本较少，使用每个 expert 的归一化卡方值
+        # 检查整体形状，并额外检查跨 expert 汇总后的单槽最大偏差。
+        normalized_chi_square = (deviations.square() / expected_count).sum(dim=1) / (num_replicas - 1)
+        assert normalized_chi_square.max().item() < 1.75
+
+        aggregate_expected_count = num_tokens * num_experts / num_replicas
+        aggregate_max_relative_deviation = (
+            (observed_counts.sum(dim=0) - aggregate_expected_count).abs() / aggregate_expected_count
+        ).max()
+        assert aggregate_max_relative_deviation.item() < 0.06
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
