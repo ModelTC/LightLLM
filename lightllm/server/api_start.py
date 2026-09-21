@@ -166,6 +166,8 @@ def _launch_subprocesses(args: StartArgs):
     if args.eplb_num_redundant_experts_per_rank > 0:
         assert args.enable_ep_moe, "EPLB requires --enable_ep_moe"
         assert not args.enable_prefill_cudagraph, "EPLB does not support --enable_prefill_cudagraph"
+        # TODO: Support EPLB redundant experts together with RL after their runtime state updates are coordinated.
+        assert not args.enable_rl, "EPLB redundant experts do not support --enable_rl"
         # EPLB updates expert weights in place, but SM100 Mega-MoE caches transformed weights by tensor data_ptr.
         assert not is_sm100_gpu(), "EPLB does not support SM100"
 
