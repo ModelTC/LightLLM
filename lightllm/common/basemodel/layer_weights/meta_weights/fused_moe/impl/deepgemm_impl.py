@@ -16,6 +16,7 @@ from lightllm.utils.envs_utils import (
 from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
+    get_node_world_size,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
@@ -82,6 +83,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                     initial_local_expert_ids_by_rank,
                     self.n_routed_experts,
                     current_rank=global_rank,
+                    node_world_size=get_node_world_size(),
                 ),
                 dtype=torch.int32,
             ).cuda()
@@ -147,6 +149,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_expert_counter=self.route_counter,
                 update_logical_expert_counter=self.recording,
+                mode="current_gpu_first",
             )
         return topk_weights, topk_ids
 

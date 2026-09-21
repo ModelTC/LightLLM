@@ -13,6 +13,7 @@ def build_logical_to_physical_map(
     rank_to_logic_expert_ids: LayerPlacement,
     num_logical_experts: int,
     current_rank: int,
+    node_world_size: int,
 ) -> LogicalToPhysicalMap:
     """使用普通 CPU list 构建单层 logical 到 physical expert 的路由表。
 
@@ -20,11 +21,19 @@ def build_logical_to_physical_map(
     ``[num_ranks, num_physical_experts_per_rank]``，每行包含该 rank 的全部
     物理专家。
 
-    返回值的 shape 为 ``[num_logical_experts, 2 + routing_slots]``。每一行
-    对应一个 logical expert：第 0 项是有效副本数，第 1 项
-    标记 ``current_rank`` 是否持有本地副本，第 2 项起是 physical expert ID。
-    如果本 rank 持有副本，该副本固定放在第一个路由槽；有效副本之后未使用
-    的固定宽度 padding 槽位填充为 ``-1``。
+    返回值的 shape 为 ``[num_logical_experts, 3 + routing_slots]``。每一行的
+    可视化结构如下：
+
+    ``[global_count, node_count, current_gpu_count, physical_ids..., -1 padding...]``
+
+    * ``global_count``：所有 rank 上的有效副本总数；
+    * ``node_count``：当前节点上的有效副本数，包含本卡副本；
+    * ``current_gpu_count``：当前 GPU 上的有效副本数；
+    * ``physical_ids``：依次按本卡、本节点其他卡、其他节点排列的副本 ID。
+
+    路由时优先使用最靠近当前 GPU 的非空候选集合：先使用本卡副本，其次使用
+    本节点副本，当前节点没有副本时才使用所有 rank 的副本。有效副本之后未
+    使用的固定宽度槽位填充为 ``-1``。
 
     本函数只负责 CPU 元数据计算。调用方需要设备 Tensor 时，应在函数外
     显式执行 ``torch.tensor(...)``。
@@ -38,10 +47,12 @@ def build_logical_to_physical_map(
     num_primary_experts_per_rank = num_logical_experts // num_ranks
     num_redundant_experts_per_rank = num_physical_experts_per_rank - num_primary_experts_per_rank
     assert num_redundant_experts_per_rank >= 0
-    # 阶段 2：计算固定路由槽宽度。该宽度沿用初始化时“一个基础副本加上
-    # 全部冗余槽”的容量上界；动态布局不再要求基础副本位于固定槽位。
-    num_routing_slots = 1 + num_ranks * num_redundant_experts_per_rank
+    # 阶段 2：使用整个 world 的物理槽位总数作为固定路由槽宽度。实际候选
+    # 仍只写入有效副本，其余槽位统一 padding 为 -1。
+    num_routing_slots = num_ranks * num_physical_experts_per_rank
     assert 0 <= current_rank < num_ranks
+    assert 0 < node_world_size <= num_ranks
+    assert num_ranks % node_world_size == 0
 
     # 阶段 3：把“物理槽 -> logical expert”的完整布局反转为
     # “logical expert -> 全部物理槽”，得到每个专家的候选副本列表。
@@ -50,25 +61,33 @@ def build_logical_to_physical_map(
         num_logical_experts,
     )
 
-    # 阶段 4：对每个候选列表做稳定排序。本 rank 的 physical ID 排在前面，
-    # 因而后续只需查看第一个候选，就能判断和选择本地副本。
+    # 阶段 4：对每个候选列表做稳定排序。当前 rank 的 physical ID 排在最前，
+    # 同节点其他 rank 次之，跨节点副本最后。
     _sort_physical_ids_by_locality(
         physical_ids_by_logical_expert,
         current_rank,
         num_physical_experts_per_rank,
+        node_world_size,
     )
-    local_physical_id_start = current_rank * num_physical_experts_per_rank
-    local_physical_id_end = local_physical_id_start + num_physical_experts_per_rank
-
     # 阶段 5：逐个 logical expert 打包固定宽度的路由行。实际副本不足固定
     # 宽度时，剩余槽位使用 -1 padding；kernel 只会索引有效副本范围。
     logical_to_physical_map = []
+    current_node = current_rank // node_world_size
+    current_node_rank_start = current_node * node_world_size
+    current_node_rank_end = current_node_rank_start + node_world_size
     for physical_expert_ids in physical_ids_by_logical_expert:
-        has_local_replica = local_physical_id_start <= physical_expert_ids[0] < local_physical_id_end
+        replica_ranks = [
+            physical_expert_id // num_physical_experts_per_rank for physical_expert_id in physical_expert_ids
+        ]
+        num_node_replicas = sum(
+            current_node_rank_start <= replica_rank < current_node_rank_end for replica_rank in replica_ranks
+        )
+        num_current_gpu_replicas = sum(replica_rank == current_rank for replica_rank in replica_ranks)
         logical_to_physical_map.append(
             _build_routing_row(
                 physical_expert_ids=physical_expert_ids,
-                has_local_replica=has_local_replica,
+                num_node_replicas=num_node_replicas,
+                num_current_gpu_replicas=num_current_gpu_replicas,
                 num_routing_slots=num_routing_slots,
             )
         )
@@ -100,46 +119,53 @@ def _sort_physical_ids_by_locality(
     physical_ids_by_logical_expert: list[list[int]],
     current_rank: int,
     num_physical_experts_per_rank: int,
+    node_world_size: int,
 ) -> None:
-    """按照 physical ID 是否属于当前 rank，对每个副本列表稳定排序。
+    """按当前 rank、当前节点、其他节点的优先级稳定排序副本。
 
-    本地 physical ID 的排序键为 0，其他 physical ID 的排序键为 1。因此
-    当前 rank 持有的副本会移动到列表前面，同时本地副本之间、远端副本
-    之间的原始顺序保持不变。当前 rank 没有副本的列表顺序不会发生变化。
+    当前 rank 的排序键为 0，同节点其他 rank 为 1，其他节点为 2。同一优先级
+    内保持原 physical ID 顺序不变。
     """
-    local_physical_id_start = current_rank * num_physical_experts_per_rank
-    local_physical_id_end = local_physical_id_start + num_physical_experts_per_rank
+    current_node = current_rank // node_world_size
+
+    def locality_priority(physical_expert_id: int) -> int:
+        physical_rank = physical_expert_id // num_physical_experts_per_rank
+        if physical_rank == current_rank:
+            return 0
+        if physical_rank // node_world_size == current_node:
+            return 1
+        return 2
 
     for physical_expert_ids in physical_ids_by_logical_expert:
         # list.sort 是稳定排序：排序键相同时，physical ID 的原始顺序不变。
-        physical_expert_ids.sort(
-            key=lambda physical_expert_id: (
-                0 if local_physical_id_start <= physical_expert_id < local_physical_id_end else 1
-            )
-        )
+        physical_expert_ids.sort(key=locality_priority)
 
 
 def _build_routing_row(
     physical_expert_ids: list[int],
-    has_local_replica: bool,
+    num_node_replicas: int,
+    num_current_gpu_replicas: int,
     num_routing_slots: int,
 ) -> list[int]:
     """将一个 logical expert 的候选 physical IDs 打包为固定宽度路由行。
 
-    ``physical_expert_ids`` 已由调用方完成本地优先的稳定排序，所以本函数
+    ``physical_expert_ids`` 已由调用方完成拓扑优先的稳定排序，所以本函数
     不再依赖 ``current_rank``。列表长度就是该 logical expert 的有效物理
     副本数，无需额外传入容易失配的副本数量。
     """
     # 阶段 1：候选列表包含该专家的全部物理副本，其长度就是有效副本数。
-    num_valid_replicas = len(physical_expert_ids)
-    assert 0 < num_valid_replicas <= num_routing_slots
+    num_global_replicas = len(physical_expert_ids)
+    assert 0 < num_global_replicas <= num_routing_slots
+    assert 0 <= num_current_gpu_replicas <= num_node_replicas <= num_global_replicas
 
     # 阶段 2：有效槽位直接保存稳定排序后的候选；固定宽度中未使用的尾部
-    # 槽位统一填充 -1。kernel 的副本索引严格小于 num_valid_replicas，
+    # 槽位统一填充 -1。kernel 的副本索引严格小于 num_global_replicas，
     # 因而不会读取 padding。
-    num_padding_slots = num_routing_slots - num_valid_replicas
+    num_padding_slots = num_routing_slots - num_global_replicas
     routing_slots = physical_expert_ids + [-1] * num_padding_slots
 
-    # 阶段 3：第 0 列保存 kernel 参与 hash 的有效副本数；第 1 列标记是否
-    # 存在本地副本；后续列保存按本地优先顺序排列的 physical IDs 和 -1 padding。
-    return [num_valid_replicas, int(has_local_replica), *routing_slots]
+    # 阶段 3：将三层有效副本计数放在固定头部，后面拼接按拓扑优先级排序的
+    # physical IDs 和 -1 padding：
+    #
+    # [global_count, node_count, current_gpu_count, physical_ids..., -1 padding...]
+    return [num_global_replicas, num_node_replicas, num_current_gpu_replicas, *routing_slots]

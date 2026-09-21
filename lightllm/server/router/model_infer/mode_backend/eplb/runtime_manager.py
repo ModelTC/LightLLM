@@ -13,6 +13,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
+    get_node_world_size,
 )
 from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.envs_utils import get_eplb_step_interval
@@ -90,6 +91,7 @@ class EPLBManager:
         self.global_rank: int = get_global_rank()
         self.world_size: int = get_global_world_size()
         assert self.world_size > 1, "EPLB requires more than one rank"
+        self.node_world_size: int = get_node_world_size()
         self.layer_indexes = [weight.layer_num_ for weight in weights]
         self._eplb_impls = [weight.fuse_moe_impl for weight in weights]
 
@@ -436,6 +438,7 @@ class EPLBManager:
                 self.current_placement[layer_index],
                 self.num_logical_experts,
                 current_rank=self.global_rank,
+                node_world_size=self.node_world_size,
             ),
             dtype=torch.int32,
             pin_memory=True,

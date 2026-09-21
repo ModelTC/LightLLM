@@ -64,8 +64,8 @@ def _test_moe_impl(
     if eplb:
         if route_counter is None:
             route_counter = torch.zeros((num_logical_experts,), dtype=torch.int64)
-        logical_to_physical_map = torch.zeros((num_logical_experts, world_size + 2), dtype=torch.int32)
-        logical_to_physical_map[:, 0] = 1
+        logical_to_physical_map = torch.zeros((num_logical_experts, world_size + 3), dtype=torch.int32)
+        logical_to_physical_map[:, :3] = 1
     else:
         num_redundant_experts_per_rank = 0
     return SimpleNamespace(
@@ -561,23 +561,34 @@ def test_fused_moe_loads_default_replicas_into_their_physical_rows():
 
 def test_logical_to_physical_map_selects_one_physical_expert():
     rank_to_logic_expert_ids = [[0, 1, 2, 3], [2, 3, 0, 1]]
-    logical_to_physical = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=4, current_rank=0)
+    logical_to_physical = build_logical_to_physical_map(
+        rank_to_logic_expert_ids,
+        num_logical_experts=4,
+        current_rank=0,
+        node_world_size=2,
+    )
 
     assert isinstance(logical_to_physical, list)
     assert len(logical_to_physical) == 4
-    assert all(len(row) == 7 for row in logical_to_physical)
+    assert all(len(row) == 11 for row in logical_to_physical)
     assert [row[0] for row in logical_to_physical] == [2, 2, 2, 2]
-    assert [row[1] for row in logical_to_physical] == [1, 1, 1, 1]
-    assert [row[2] for row in logical_to_physical] == [0, 1, 2, 3]
-    assert all(physical_id >= 0 for row in logical_to_physical for physical_id in row[2 : 2 + row[0]])
-    assert all(physical_id == -1 for row in logical_to_physical for physical_id in row[2 + row[0] :])
+    assert [row[1] for row in logical_to_physical] == [2, 2, 2, 2]
+    assert [row[2] for row in logical_to_physical] == [1, 1, 1, 1]
+    assert [row[3] for row in logical_to_physical] == [0, 1, 2, 3]
+    assert all(physical_id >= 0 for row in logical_to_physical for physical_id in row[3 : 3 + row[0]])
+    assert all(physical_id == -1 for row in logical_to_physical for physical_id in row[3 + row[0] :])
 
 
 def test_logical_to_physical_map_requires_expert_count_divisible_by_rank_count():
     rank_to_logic_expert_ids = [[0, 1, 0], [2, 3, 1]]
 
     with pytest.raises(AssertionError):
-        build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=5, current_rank=0)
+        build_logical_to_physical_map(
+            rank_to_logic_expert_ids,
+            num_logical_experts=5,
+            current_rank=0,
+            node_world_size=2,
+        )
 
 
 def test_logical_to_physical_map_supports_all_redundant_slots_for_one_expert():
@@ -585,42 +596,89 @@ def test_logical_to_physical_map_supports_all_redundant_slots_for_one_expert():
         [[0, 1, 0, 0], [2, 3, 0, 0]],
         num_logical_experts=4,
         current_rank=0,
+        node_world_size=2,
     )
 
     # 1 个主副本加上 2 个 rank 的全部 4 个冗余槽。
-    assert logical_to_physical[0][0] == 5
-    assert len(logical_to_physical[0][2:]) == 5
-    assert len(set(logical_to_physical[0][2:])) == 5
+    assert logical_to_physical[0][:3] == [5, 5, 3]
+    assert len(logical_to_physical[0][3:]) == 8
+    assert len(set(logical_to_physical[0][3:8])) == 5
+    assert logical_to_physical[0][8:] == [-1, -1, -1]
 
 
 def test_logical_to_physical_map_prefers_current_rank_replica():
     redundant = [[4], [5], [0], [1]]
     rank_to_logic_expert_ids = _rank_to_logic_expert_ids(redundant, 8)
-    rank0_map = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=8, current_rank=0)
-    rank1_map = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=8, current_rank=1)
+    rank0_map = build_logical_to_physical_map(
+        rank_to_logic_expert_ids,
+        num_logical_experts=8,
+        current_rank=0,
+        node_world_size=2,
+    )
+    rank1_map = build_logical_to_physical_map(
+        rank_to_logic_expert_ids,
+        num_logical_experts=8,
+        current_rank=1,
+        node_world_size=2,
+    )
     fallback_redundant = [[4], [5], [0], [1], [2], [3]]
-    rank4_map = build_logical_to_physical_map(_rank_to_logic_expert_ids(fallback_redundant, 12), 12, current_rank=4)
+    rank4_map = build_logical_to_physical_map(
+        _rank_to_logic_expert_ids(fallback_redundant, 12),
+        12,
+        current_rank=4,
+        node_world_size=2,
+    )
 
-    assert rank0_map[0][0] == rank1_map[0][0] == 2
-    assert rank0_map[0][1] == 1
-    assert rank1_map[0][1] == 0
-    assert rank0_map[0][2] == 0
-    assert set(rank0_map[0][2:4]) == {0, 8}
-    assert set(rank1_map[0][2:4]) == {0, 8}
-    assert rank4_map[0][0] == 2
-    assert rank4_map[0][1] == 0
-    assert set(rank4_map[0][2:4]) == {0, 8}
+    assert rank0_map[0][:3] == [2, 1, 1]
+    assert rank1_map[0][:3] == [2, 1, 0]
+    assert rank0_map[0][3] == 0
+    assert set(rank0_map[0][3:5]) == {0, 8}
+    assert set(rank1_map[0][3:5]) == {0, 8}
+    assert rank4_map[0][:3] == [2, 0, 0]
+    assert set(rank4_map[0][3:5]) == {0, 8}
 
 
-def test_nonlocal_rank_routes_across_all_replicas():
+def test_nonlocal_rank_without_same_node_replica_routes_across_all_replicas():
     redundant = [[4], [5], [0], [1]]
     rank_to_logic_expert_ids = _rank_to_logic_expert_ids(redundant, 8)
-    maps = [build_logical_to_physical_map(rank_to_logic_expert_ids, 8, current_rank=rank) for rank in range(4)]
-    assert maps[0][0][1] == 1
-    assert maps[1][0][1] == 0
-    assert maps[2][0][1] == 1
-    assert maps[3][0][1] == 0
-    assert all(set(logical_map[0][2:4]) == {0, 8} for logical_map in maps)
+    maps = [
+        build_logical_to_physical_map(
+            rank_to_logic_expert_ids,
+            8,
+            current_rank=rank,
+            node_world_size=1,
+        )
+        for rank in range(4)
+    ]
+    assert maps[0][0][:3] == [2, 1, 1]
+    assert maps[1][0][:3] == [2, 0, 0]
+    assert maps[2][0][:3] == [2, 1, 1]
+    assert maps[3][0][:3] == [2, 0, 0]
+    assert all(set(logical_map[0][3:5]) == {0, 8} for logical_map in maps)
+
+
+def test_nonlocal_rank_prefers_same_node_replica():
+    rank_to_logic_expert_ids = [
+        [1, 2],
+        [0, 3],
+        [0, 4],
+        [5, 6],
+        [0, 7],
+        [1, 2],
+        [3, 4],
+        [5, 6],
+    ]
+
+    rank0_map = build_logical_to_physical_map(
+        rank_to_logic_expert_ids,
+        num_logical_experts=8,
+        current_rank=0,
+        node_world_size=4,
+    )
+
+    # Expert 0 is on same-node ranks 1 and 2 (physical IDs 2 and 4), plus
+    # remote rank 4 (physical ID 8). Hash routing only uses the first two.
+    assert rank0_map[0][:6] == [3, 2, 0, 2, 4, 8]
 
 
 def test_current_rank_moves_local_replica_to_front_without_changing_copies():
@@ -628,11 +686,21 @@ def test_current_rank_moves_local_replica_to_front_without_changing_copies():
     # 自己的本地副本，因此路由槽的起点不同，但候选集合和数量保持一致。
     redundant = [[1], [0], [3], [2]]
     rank_to_logic_expert_ids = _rank_to_logic_expert_ids(redundant, 4)
-    rank0_map = build_logical_to_physical_map(rank_to_logic_expert_ids, 4, current_rank=0)
-    rank1_map = build_logical_to_physical_map(rank_to_logic_expert_ids, 4, current_rank=1)
+    rank0_map = build_logical_to_physical_map(
+        rank_to_logic_expert_ids,
+        4,
+        current_rank=0,
+        node_world_size=1,
+    )
+    rank1_map = build_logical_to_physical_map(
+        rank_to_logic_expert_ids,
+        4,
+        current_rank=1,
+        node_world_size=1,
+    )
 
-    assert rank0_map[0] == [2, 1, 0, 3, -1, -1, -1]
-    assert rank1_map[0] == [2, 1, 3, 0, -1, -1, -1]
+    assert rank0_map[0] == [2, 1, 1, 0, 3, -1, -1, -1, -1, -1, -1]
+    assert rank1_map[0] == [2, 1, 1, 3, 0, -1, -1, -1, -1, -1, -1]
 
 
 def test_current_rank_stably_moves_all_local_physical_ids_to_front():
@@ -641,9 +709,14 @@ def test_current_rank_stably_moves_all_local_physical_ids_to_front():
     # 仍保持原来的 [0, 1, 5] 顺序。
     rank_to_logic_expert_ids = [[0, 0], [1, 0], [2, 0]]
 
-    rank1_map = build_logical_to_physical_map(rank_to_logic_expert_ids, num_logical_experts=3, current_rank=1)
+    rank1_map = build_logical_to_physical_map(
+        rank_to_logic_expert_ids,
+        num_logical_experts=3,
+        current_rank=1,
+        node_world_size=1,
+    )
 
-    assert rank1_map[0] == [4, 1, 3, 0, 1, 5]
+    assert rank1_map[0] == [4, 1, 1, 3, 0, 1, 5, -1, -1]
 
 
 def test_transfer_plan_respects_explicit_target_slots():
@@ -838,6 +911,7 @@ def test_eplb_route_counter_has_one_entry_per_logical_expert(monkeypatch):
     monkeypatch.setattr(deepgemm_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(deepgemm_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
     original_zeros = torch.zeros
 
@@ -964,6 +1038,7 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
 
     assert result[2].tolist() == [[128, 143]]
     assert repairs[0]["logical_topk_ids"] is logical_ids
+    assert repairs[0]["mode"] == "current_gpu_first"
     assert calls[0]["num_experts"] == 144
 
 
@@ -1035,6 +1110,7 @@ def test_eplb_prefill_repairs_ids_after_selection(monkeypatch):
     assert qinput == "qinput"
     assert calls[0]["logical_topk_ids"] is logical_ids
     assert not calls[0]["update_logical_expert_counter"]
+    assert calls[0]["mode"] == "current_gpu_first"
 
 
 def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
@@ -1101,6 +1177,7 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
     assert len(repair_calls) == 1
     assert repair_calls[0]["logical_topk_ids"] is logical_ids
     assert repair_calls[0]["update_logical_expert_counter"]
+    assert repair_calls[0]["mode"] == "current_gpu_first"
     assert calls[0]["topk_idx"] is physical_ids
     assert calls[0]["topk_idx"].dtype is torch.long
     assert calls[0]["previous_event"] is caller_event
@@ -1152,6 +1229,7 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
     )
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(deepgemm_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
     original_zeros = torch.zeros
 
@@ -1183,6 +1261,7 @@ def test_deepgemm_constructor_loads_saved_layout_before_weight_initialization(mo
     )
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(deepgemm_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
     monkeypatch.setattr(
         deepgemm_module,
@@ -1210,7 +1289,7 @@ def test_deepgemm_constructor_loads_saved_layout_before_weight_initialization(mo
     impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace(), layer_index=7)
 
     assert impl.local_logics_expert_ids_list == saved_placement[0]
-    expected_map = build_logical_to_physical_map(saved_placement, 4, current_rank=0)
+    expected_map = build_logical_to_physical_map(saved_placement, 4, current_rank=0, node_world_size=2)
     assert impl.logical_to_physical_map.tolist() == expected_map
 
 
@@ -1226,6 +1305,7 @@ def test_deepgemm_keeps_route_recording_when_rebalance_count_is_zero(monkeypatch
     )
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(deepgemm_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(deepgemm_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
     monkeypatch.setattr(
         deepgemm_module.torch,
@@ -1257,6 +1337,7 @@ def test_eplb_prepare_repairs_logical_ids(monkeypatch):
     assert selected is physical_ids
     assert calls[0]["logical_topk_ids"] is logical_ids
     assert calls[0]["update_logical_expert_counter"]
+    assert calls[0]["mode"] == "current_gpu_first"
 
 
 def test_decode_masked_group_gemm_uses_all_physical_rows_when_eplb_is_enabled(
@@ -1441,6 +1522,7 @@ def test_manager_commits_transfer_rows_and_metadata(monkeypatch):
             target_placement[0],
             6,
             current_rank=0,
+            node_world_size=2,
         ),
         dtype=torch.int32,
     )
@@ -1448,6 +1530,7 @@ def test_manager_commits_transfer_rows_and_metadata(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.global_rank = 0
     manager.world_size = 2
+    manager.node_world_size = 2
     manager.num_logical_experts = 6
     manager.target_placement = target_placement
     manager.current_placement = [[[0, 1, 2, 3, 2], [3, 4, 5, 0, 2]]]
@@ -1680,6 +1763,7 @@ def test_manager_transfer_task_commit_orders_live_weights_between_overlap_forwar
     manager.active_transfer_batch = [transfer_info]
     manager.control_group = object()
     manager.world_size = 1
+    manager.node_world_size = 1
     manager.pending_transfer_batches = []
     manager.num_logical_experts = 1
     manager.global_rank = 0
@@ -2254,6 +2338,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     monkeypatch.setattr(manager_module, "_find_fused_moe_weights", lambda model: [weight])
     monkeypatch.setattr(manager_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(manager_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(manager_module, "get_eplb_step_interval", lambda: 20)
     clear_calls = []
     monkeypatch.setattr(
@@ -2311,7 +2396,8 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
 @pytest.mark.parametrize("update_logical_expert_counter", [False, True])
 @pytest.mark.parametrize("tokens", [1, 32])
-def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tokens):
+@pytest.mark.parametrize("mode", ["current_gpu_first", "current_node_first", "global_first"])
+def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tokens, mode):
     from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
         eplb_repair_topk_ids,
     )
@@ -2323,16 +2409,35 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
     logical_experts = torch.arange(experts, dtype=torch.int32, device="cuda")
     replica_counts = torch.where(
         logical_experts % 3 == 0,
-        torch.full_like(logical_experts, 2),
+        torch.full_like(logical_experts, 3),
         torch.ones_like(logical_experts),
     )
-    has_local_replica = (logical_experts % 5 == 0).to(torch.int32)
+    num_current_gpu_replicas = torch.where(
+        logical_experts % 5 == 0,
+        torch.ones_like(logical_experts),
+        torch.zeros_like(logical_experts),
+    )
+    num_node_replicas = torch.where(
+        num_current_gpu_replicas > 0,
+        torch.where(
+            replica_counts >= 2,
+            torch.full_like(logical_experts, 2),
+            num_current_gpu_replicas,
+        ),
+        torch.where(
+            (logical_experts % 7 == 0) & (replica_counts == 3),
+            torch.full_like(logical_experts, 2),
+            torch.zeros_like(logical_experts),
+        ),
+    )
     logical_to_physical = torch.stack(
         (
             replica_counts,
-            has_local_replica,
+            num_node_replicas,
+            num_current_gpu_replicas,
             logical_experts,
-            torch.where(replica_counts == 2, logical_experts + experts, logical_experts),
+            torch.where(replica_counts >= 2, logical_experts + experts, logical_experts),
+            torch.where(replica_counts == 3, logical_experts + 2 * experts, logical_experts),
         ),
         dim=1,
     )
@@ -2341,12 +2446,21 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
 
     logical_ids_long = logical_ids.to(torch.long)
     token_indices = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1)
+    if mode == "current_gpu_first":
+        num_preferred_replicas = torch.where(
+            num_current_gpu_replicas > 0,
+            num_current_gpu_replicas,
+            replica_counts,
+        )
+    elif mode == "current_node_first":
+        num_preferred_replicas = torch.where(num_node_replicas > 0, num_node_replicas, replica_counts)
+    else:
+        num_preferred_replicas = replica_counts
     replica_indices = (
         (((token_indices * 2654435769) & 0xFFFFFFFF) + ((logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF))
         & 0xFFFFFFFF
-    ) % replica_counts[logical_ids_long].to(torch.int64)
-    replica_indices = torch.where(has_local_replica[logical_ids_long] != 0, 0, replica_indices)
-    expected_ids = logical_to_physical[logical_ids_long, replica_indices + 2]
+    ) % num_preferred_replicas[logical_ids_long].to(torch.int64)
+    expected_ids = logical_to_physical[logical_ids_long, replica_indices + 3]
     if update_logical_expert_counter:
         expected_counter.scatter_add_(
             0,
@@ -2359,6 +2473,7 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
         logical_to_physical_map=logical_to_physical,
         logical_expert_counter=counter,
         update_logical_expert_counter=update_logical_expert_counter,
+        mode=mode,
     )
     torch.cuda.synchronize()
 
@@ -2380,6 +2495,7 @@ def test_eplb_repair_topk_ids_empty_input_skips_kernel():
         (
             torch.ones((experts,), dtype=torch.int32, device="cuda"),
             torch.ones((experts,), dtype=torch.int32, device="cuda"),
+            torch.ones((experts,), dtype=torch.int32, device="cuda"),
             torch.arange(experts, dtype=torch.int32, device="cuda"),
         ),
         dim=1,
@@ -2389,8 +2505,29 @@ def test_eplb_repair_topk_ids_empty_input_skips_kernel():
         logical_to_physical_map=logical_to_physical,
         logical_expert_counter=counter,
         update_logical_expert_counter=True,
+        mode="current_gpu_first",
     )
 
     assert physical_ids.shape == (0, 4)
     assert physical_ids.dtype is torch.int32
     assert torch.equal(counter, torch.zeros_like(counter))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+def test_eplb_repair_topk_ids_rejects_unknown_dispatch_mode():
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+        eplb_repair_topk_ids,
+    )
+
+    logical_ids = torch.empty((0, 1), dtype=torch.int32, device="cuda")
+    logical_to_physical = torch.tensor([[1, 1, 1, 0]], dtype=torch.int32, device="cuda")
+    counter = torch.zeros((1,), dtype=torch.int64, device="cuda")
+
+    with pytest.raises(AssertionError, match="unsupported EPLB dispatch mode"):
+        eplb_repair_topk_ids(
+            logical_topk_ids=logical_ids,
+            logical_to_physical_map=logical_to_physical,
+            logical_expert_counter=counter,
+            update_logical_expert_counter=False,
+            mode="unknown",
+        )
