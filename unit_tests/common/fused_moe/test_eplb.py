@@ -654,6 +654,10 @@ def test_transfer_plan_respects_explicit_target_slots():
     transfer_infos = [transfer_info for transfer_batch in plan for transfer_info in transfer_batch]
 
     assert all(info.layer_index == 3 for info in transfer_infos)
+    assert all(
+        current[info.source_rank][info.source_local_expert_index] == info.source_logical_expert_id
+        for info in transfer_infos
+    )
     assert {(info.dest_rank, info.source_logical_expert_id) for info in transfer_infos} == {
         (rank, target[rank][slot]) for rank in range(4) for slot in range(2, 4)
     }
@@ -737,8 +741,8 @@ def test_transfer_planner_combines_all_layer_batches(monkeypatch):
     current_placement = [[[0, 1], [2, 3]], [[0, 2], [1, 3]]]
     target_placement = [[[2, 1], [0, 3]], [[0, 3], [1, 2]]]
     transfer_infos = [
-        EPLBTransferInfo(1, 0, 2, 0, 0),
-        EPLBTransferInfo(1, 1, 3, 0, 1),
+        EPLBTransferInfo(0, 2, 1, 0, 0, 0),
+        EPLBTransferInfo(1, 3, 1, 1, 0, 1),
     ]
     calls = []
 
@@ -1337,8 +1341,8 @@ def test_transfer_plan_uses_stable_current_expert_source():
     plan = build_transfer_plan(current, target, 5, num_logical_experts=8, world_size=4)
     assert plan == [
         [
-            EPLBTransferInfo(1, 5, 6, 0, 2),
-            EPLBTransferInfo(2, 5, 4, 2, 3),
+            EPLBTransferInfo(5, 6, 1, 2, 0, 2),
+            EPLBTransferInfo(5, 4, 2, 0, 2, 3),
         ],
     ]
 
@@ -1350,8 +1354,8 @@ def test_transfer_plan_reuses_stable_source_for_repeated_expert():
     second = build_transfer_plan(current, target, 5, 8, 4)
     assert first == second
     assert first == [
-        [EPLBTransferInfo(2, 5, 4, 0, 2)],
-        [EPLBTransferInfo(2, 5, 4, 0, 3)],
+        [EPLBTransferInfo(5, 4, 2, 0, 0, 2)],
+        [EPLBTransferInfo(5, 4, 2, 2, 0, 3)],
     ]
 
 
@@ -1363,8 +1367,8 @@ def test_transfer_plan_keeps_primary_slot_swap_in_one_atomic_batch():
 
     assert plan == [
         [
-            EPLBTransferInfo(1, 0, 2, 0, 0),
-            EPLBTransferInfo(0, 0, 0, 1, 0),
+            EPLBTransferInfo(0, 2, 1, 0, 0, 0),
+            EPLBTransferInfo(0, 0, 0, 0, 1, 0),
         ]
     ]
 
@@ -1377,24 +1381,26 @@ def test_transfer_plan_keeps_three_way_cycle_in_one_atomic_batch():
 
     assert plan == [
         [
-            EPLBTransferInfo(1, 0, 1, 0, 0),
-            EPLBTransferInfo(0, 0, 0, 2, 0),
-            EPLBTransferInfo(2, 0, 2, 1, 0),
+            EPLBTransferInfo(0, 1, 1, 0, 0, 0),
+            EPLBTransferInfo(0, 0, 0, 0, 2, 0),
+            EPLBTransferInfo(0, 2, 2, 0, 1, 0),
         ]
     ]
 
 
 def test_p2p_message_tag_is_stable_and_identifies_transfer_tensor():
     transfer = object.__new__(PinnedMemoryEPLBTransfer)
-    transfer.transfer_info = EPLBTransferInfo(1, 5, 4, 0, 2)
+    transfer.transfer_info = EPLBTransferInfo(5, 4, 1, 0, 0, 2)
     weight_tag = transfer._build_p2p_message_tag("w13.weight")
 
     assert weight_tag == transfer._build_p2p_message_tag("w13.weight")
     assert 0 <= weight_tag <= 0x7FFFFFFF
     assert weight_tag != transfer._build_p2p_message_tag("w13.weight_scale")
-    transfer.transfer_info = EPLBTransferInfo(1, 5, 6, 0, 2)
+    transfer.transfer_info = EPLBTransferInfo(5, 6, 1, 0, 0, 2)
     assert weight_tag != transfer._build_p2p_message_tag("w13.weight")
-    transfer.transfer_info = EPLBTransferInfo(1, 5, 4, 0, 3)
+    transfer.transfer_info = EPLBTransferInfo(5, 4, 1, 1, 0, 2)
+    assert weight_tag != transfer._build_p2p_message_tag("w13.weight")
+    transfer.transfer_info = EPLBTransferInfo(5, 4, 1, 0, 0, 3)
     assert weight_tag != transfer._build_p2p_message_tag("w13.weight")
 
 
@@ -1453,11 +1459,11 @@ def test_manager_commits_transfer_rows_and_metadata(monkeypatch):
     ]
     transfers = [
         SimpleNamespace(
-            transfer_info=EPLBTransferInfo(1, 0, 4, 0, 3),
+            transfer_info=EPLBTransferInfo(0, 4, 1, 1, 0, 3),
             tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -4))],
         ),
         SimpleNamespace(
-            transfer_info=EPLBTransferInfo(1, 0, 5, 0, 4),
+            transfer_info=EPLBTransferInfo(0, 5, 1, 2, 0, 4),
             tensor_buffers=[ExpertTensorBuffer("weight", live, torch.full((4,), -5))],
         ),
     ]
@@ -1489,9 +1495,9 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
         def is_finished(self):
             return self.finished
 
-    remote_info = EPLBTransferInfo(0, 0, 2, 2, 2)
-    local_info0 = EPLBTransferInfo(1, 0, 3, 3, 2)
-    local_info1 = EPLBTransferInfo(0, 1, 4, 1, 2)
+    remote_info = EPLBTransferInfo(0, 2, 0, 0, 2, 2)
+    local_info0 = EPLBTransferInfo(0, 3, 1, 1, 3, 2)
+    local_info1 = EPLBTransferInfo(1, 4, 0, 0, 1, 2)
     finished_by_info = {local_info0: False, local_info1: True}
     starts = []
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
@@ -1668,7 +1674,7 @@ def test_manager_transfer_task_commit_orders_live_weights_between_overlap_forwar
     original_overlap_stream = g_infer_context.overlap_stream
 
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    transfer_info = EPLBTransferInfo(0, 0, 0, 0, 0)
+    transfer_info = EPLBTransferInfo(0, 0, 0, 0, 0, 0)
     transfer = Transfer(live, received, transfer_info)
     manager.active_transfers = [transfer]
     manager.active_transfer_batch = [transfer_info]
@@ -1800,8 +1806,8 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     )
 
     transfer_infos = [
-        EPLBTransferInfo(0, 0, 2, 1, 2),
-        EPLBTransferInfo(0, 1, 0, 1, 2),
+        EPLBTransferInfo(0, 2, 0, 0, 1, 2),
+        EPLBTransferInfo(1, 0, 0, 0, 1, 2),
     ]
     transfer_planners = []
 
@@ -2048,9 +2054,8 @@ def test_pinned_transfer_copies_source_row_and_sends_to_destination(monkeypatch)
     transfer._is_source_rank = True
     transfer._is_destination_rank = False
     transfer._p2p_group = object()
-    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 1, 2)
+    transfer.transfer_info = EPLBTransferInfo(0, 5, 0, 1, 1, 2)
     transfer._device_to_host_stream = Stream()
-    transfer._local_logical_expert_ids = [4, 5]
     transfer.tensor_buffers = [
         ExpertTensorBuffer(
             "weight",
@@ -2089,9 +2094,8 @@ def test_pinned_transfer_skips_p2p_for_local_destination(monkeypatch):
     transfer._is_source_rank = True
     transfer._is_destination_rank = True
     transfer._p2p_group = object()
-    transfer.transfer_info = EPLBTransferInfo(0, 0, 5, 0, 1)
+    transfer.transfer_info = EPLBTransferInfo(0, 5, 0, 0, 0, 1)
     transfer._device_to_host_stream = Stream()
-    transfer._local_logical_expert_ids = [5]
     transfer.tensor_buffers = [
         ExpertTensorBuffer(
             "weight",
@@ -2118,7 +2122,7 @@ def test_pinned_transfer_exits_process_on_failure(monkeypatch):
     transfer._device = "cuda:0"
     transfer._is_source_rank = False
     transfer._is_destination_rank = True
-    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0, 2)
+    transfer.transfer_info = EPLBTransferInfo(0, 3, 1, 0, 0, 2)
     transfer._p2p_group = object()
     transfer.tensor_buffers = [
         ExpertTensorBuffer(
@@ -2155,7 +2159,7 @@ def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
     transfer._device = "cuda:0"
     transfer._is_source_rank = False
     transfer._is_destination_rank = True
-    transfer.transfer_info = EPLBTransferInfo(1, 0, 3, 0, 2)
+    transfer.transfer_info = EPLBTransferInfo(0, 3, 1, 0, 0, 2)
     transfer._p2p_group = object()
     transfer._device_to_host_stream = Stream()
     transfer.tensor_buffers = [

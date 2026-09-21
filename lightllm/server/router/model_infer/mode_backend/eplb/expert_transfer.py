@@ -31,14 +31,15 @@ class ExpertTensorBuffer:
 class EPLBTransferInfo:
     """单个逻辑专家的一次传输描述。
 
-    ``layer_index`` 是专家权重在 EPLB 层列表中的下标。源 rank 使用
-    ``source_logical_expert_id`` 定位当前本地物理行；目标 rank 将收到的
-    pinned memory 数据写入 ``dest_local_expert_index`` 指定的本地物理行。
+    ``layer_index`` 和 ``source_logical_expert_id`` 标识需要传输的专家；
+    ``source_rank``、``source_local_expert_index`` 描述当前物理槽，
+    ``dest_rank``、``dest_local_expert_index`` 描述目标物理槽。
     """
 
-    source_rank: int
     layer_index: int
     source_logical_expert_id: int
+    source_rank: int
+    source_local_expert_index: int
     dest_rank: int
     dest_local_expert_index: int
 
@@ -65,9 +66,9 @@ class PinnedMemoryEPLBTransfer:
     ``status`` 会变为 :attr:`TransferStatus.SUCCEEDED`，收到的数据保存在
     ``tensor_buffers``。EPLBManager 在主循环的安全边界同步提交这些数据。
 
-    每个对象只表示构造函数中 ``transfer_info`` 指定的一次传输。逻辑专家 ID
-    在源 rank 上通过该层当前的本地专家列表解析为物理行；目标物理槽位不属于
-    传输职责，由 manager 根据目标 placement 决定。
+    每个对象只表示构造函数中 ``transfer_info`` 指定的一次传输。源 rank 直接
+    读取 ``source_local_expert_index`` 指定的物理行；目标物理槽位不属于传输
+    职责，由 manager 根据目标 placement 决定。
     """
 
     def __init__(
@@ -87,7 +88,6 @@ class PinnedMemoryEPLBTransfer:
         # （或非量化权重），以及配套的 weight_scale、weight_zero_point 等量化
         # 信息。后续会为每项张量创建对应的 pinned row，确保专家状态完整迁移。
         named_live_tensors: List[NamedTensor] = extract_eplb_expert_tensors(layer_weight)
-        self._local_logical_expert_ids: List[int] = layer_weight.fuse_moe_impl.local_logics_expert_ids_list
         self._device: torch.device = named_live_tensors[0][1].device
 
         # 只有源和目标 rank 需要保存该专家的 pinned row。源 rank 用它作为
@@ -134,13 +134,10 @@ class PinnedMemoryEPLBTransfer:
             transfer_info: EPLBTransferInfo = self.transfer_info
             if self._is_source_rank:
                 torch.cuda.set_device(self._device)
-                source_local_expert_index: int = self._local_logical_expert_ids.index(
-                    transfer_info.source_logical_expert_id
-                )
                 with torch.cuda.stream(self._device_to_host_stream):
                     for tensor_buffer in self.tensor_buffers:
                         tensor_buffer.pinned_row.copy_(
-                            tensor_buffer.live_tensor[source_local_expert_index],
+                            tensor_buffer.live_tensor[transfer_info.source_local_expert_index],
                             non_blocking=True,
                         )
                 # Gloo 读取 pinned row 前，源 rank 必须等待 GPU -> CPU 拷贝完成。
@@ -175,14 +172,15 @@ class PinnedMemoryEPLBTransfer:
 
         Python ``hash`` 会因进程随机种子不同而产生不同结果，因此这里使用稳定的
         CRC32，并限制到 Gloo 可安全使用的有符号 31 位整数范围。标识中包含层、
-        源 rank、目标 rank、逻辑专家和张量名称，避免依赖张量列表的隐式顺序。
+        逻辑专家、源物理槽、目标物理槽和张量名称，避免依赖张量列表的隐式顺序。
         """
         transfer_info: EPLBTransferInfo = self.transfer_info
         message_identity = (
             f"{transfer_info.layer_index}:"
-            f"{transfer_info.source_rank}:"
-            f"{transfer_info.dest_rank}:"
             f"{transfer_info.source_logical_expert_id}:"
+            f"{transfer_info.source_rank}:"
+            f"{transfer_info.source_local_expert_index}:"
+            f"{transfer_info.dest_rank}:"
             f"{transfer_info.dest_local_expert_index}:"
             f"{tensor_name}"
         )
@@ -281,10 +279,9 @@ def build_transfer_plan(
     #
     # 稳定副本不会出现在任何任务的目标位置，因此可以反复读取而没有覆盖
     # 风险。只有不存在稳定副本时，才循环使用该专家当前已有的所有副本。
-    # pending_transfers 的每一项为 (source_slot, transfer_info)。source_slot
-    # 只用于规划覆盖依赖，真正执行任务所需的信息保存在 transfer_info 中。
+    # 源槽位完整保存在 transfer_info 中，后续依赖分析和实际传输共用同一份信息。
     source_use_count = [0] * num_logical_experts
-    pending_transfers: List[tuple[Slot, EPLBTransferInfo]] = []
+    pending_transfers: List[EPLBTransferInfo] = []
     for destination_rank, (current_row, target_row) in enumerate(zip(current_placement, target_placement)):
         for destination_local_expert_index in range(num_local_experts_per_rank):
             current_expert_id = current_row[destination_local_expert_index]
@@ -295,18 +292,21 @@ def build_transfer_plan(
             source_slot = source_slots[source_use_count[target_expert_id] % len(source_slots)]
             source_use_count[target_expert_id] += 1
             transfer_info = EPLBTransferInfo(
-                source_rank=source_slot[0],
                 layer_index=layer_index,
                 source_logical_expert_id=target_expert_id,
+                source_rank=source_slot[0],
+                source_local_expert_index=source_slot[1],
                 dest_rank=destination_rank,
                 dest_local_expert_index=destination_local_expert_index,
             )
-            pending_transfers.append((source_slot, transfer_info))
+            pending_transfers.append(transfer_info)
 
     # 阶段 3：按照槽位覆盖依赖，将任务拆成可安全提交的执行批次。
     transfer_batches: List[List[EPLBTransferInfo]] = []
     while pending_transfers:
-        source_slots = {source_slot for source_slot, _ in pending_transfers}
+        source_slots = {
+            (transfer_info.source_rank, transfer_info.source_local_expert_index) for transfer_info in pending_transfers
+        }
 
         # 3.1 收集当前拓扑层次的全部安全任务。source_slots 是当前仍需保护的
         # 槽位集合：只要某个槽位中的专家尚未完成最后一次读取，该槽位就仍在
@@ -320,13 +320,13 @@ def build_transfer_plan(
         # 这里不能在找到第一个任务后立即修改 source_slots。只有整批提交并从
         # pending 中移除后，下一层目标槽位才真正变得安全。
         safe_transfer_batch: List[EPLBTransferInfo] = []
-        remaining_transfers: List[tuple[Slot, EPLBTransferInfo]] = []
-        for source_slot, transfer_info in pending_transfers:
+        remaining_transfers: List[EPLBTransferInfo] = []
+        for transfer_info in pending_transfers:
             destination_slot = (transfer_info.dest_rank, transfer_info.dest_local_expert_index)
             if destination_slot not in source_slots:
                 safe_transfer_batch.append(transfer_info)
             else:
-                remaining_transfers.append((source_slot, transfer_info))
+                remaining_transfers.append(transfer_info)
 
         if safe_transfer_batch:
             # 安全任务之间没有原子提交要求，但若同一 rank 在一个批次中参与
@@ -368,9 +368,13 @@ def build_transfer_plan(
             # B 不在源集合中，所以 ``S -> B`` 会先作为安全任务移除；剩余的
             # ``S -> A、A -> S`` 才会进入这里，并且每个源都只对应一个目标。
             assert len(source_slots) == len(pending_transfers)
-            transfer_by_source_slot = dict(pending_transfers)
+            transfer_by_source_slot = {
+                (transfer_info.source_rank, transfer_info.source_local_expert_index): transfer_info
+                for transfer_info in pending_transfers
+            }
 
-            cycle_start_slot = pending_transfers[0][0]
+            first_transfer = pending_transfers[0]
+            cycle_start_slot = (first_transfer.source_rank, first_transfer.source_local_expert_index)
             source_slot = cycle_start_slot
             cycle_batch: List[EPLBTransferInfo] = []
             cycle_source_slots: set[Slot] = set()
@@ -388,6 +392,10 @@ def build_transfer_plan(
                 source_slot = destination_slot
 
             transfer_batches.append(cycle_batch)
-            pending_transfers = [transfer for transfer in pending_transfers if transfer[0] not in cycle_source_slots]
+            pending_transfers = [
+                transfer_info
+                for transfer_info in pending_transfers
+                if (transfer_info.source_rank, transfer_info.source_local_expert_index) not in cycle_source_slots
+            ]
 
     return transfer_batches
