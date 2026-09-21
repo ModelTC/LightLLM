@@ -190,12 +190,14 @@ class DPKVSharedMoudle:
                     ]
                     for index in indexes:
                         staging.copy_(buffers.buffer[index], non_blocking=True)
-                        dist.send(staging, dst=dist.get_global_rank(group, destination), group=group)
+                        send_op = dist.P2POp(dist.isend, staging, group=group, group_peer=destination)
+                        dist.batch_isend_irecv([send_op])[0].wait()
                 else:
                     for length in lengths:
                         index = buffers.alloc_one_state_cache()
                         assert index is not None
-                        dist.recv(staging, src=dist.get_global_rank(group, source), group=group)
+                        recv_op = dist.P2POp(dist.irecv, staging, group=group, group_peer=source)
+                        dist.batch_isend_irecv([recv_op])[0].wait()
                         buffers.buffer[index].copy_(staging, non_blocking=True)
                         req.hybrid_len_to_big_page_id[length] = index
 
