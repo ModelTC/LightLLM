@@ -148,15 +148,15 @@ class DPKVSharedMoudle:
     def _transfer_dsv4_checkpoints(self, trans_tasks):
         """Transfer CPU snapshots for the history fetched from another DP rank.
 
-        CUDA IPC exports the packed history and private runtime only. NCCL moves
-        the checkpoint bytes through temporary GPU tensors so pinned host pools
-        keep their process-local ownership and registration.
+        CUDA IPC exports the packed history and private runtime only. The
+        checkpoint pools are process-local pinned CPU memory, so move their
+        bytes through the node's CPU process group.
         """
         args = self.backend.args
         big_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
         if big_tokens > args.max_req_total_len:
             return
-        group = self.backend.node_nccl_group
+        group = self.backend.node_gloo_group
         rank = dist.get_rank(group=group)
         local_tasks = [
             (
@@ -170,7 +170,6 @@ class DPKVSharedMoudle:
         all_tasks = [None for _ in range(dist.get_world_size(group=group))]
         dist.all_gather_object(all_tasks, local_tasks, group=group)
         buffers = self.backend.model.mem_manager.big_page_buffers
-        staging = None
         for destination, tasks in enumerate(all_tasks):
             for source, req_id, start, end in tasks:
                 first = (start // big_tokens + 1) * big_tokens
@@ -178,9 +177,8 @@ class DPKVSharedMoudle:
                 if not lengths or rank not in (source, destination):
                     continue
                 req = g_infer_context.requests_mapping[req_id]
-                if staging is None:
-                    staging = torch.empty((buffers.buffer.shape[1],), dtype=torch.uint8, device="cuda")
                 if rank == source:
+                    peer = dist.get_global_rank(group, destination)
                     shared_ids = self.backend.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
                     indexes = [
                         req.hybrid_len_to_big_page_id[length]
@@ -189,16 +187,13 @@ class DPKVSharedMoudle:
                         for length in lengths
                     ]
                     for index in indexes:
-                        staging.copy_(buffers.buffer[index], non_blocking=True)
-                        send_op = dist.P2POp(dist.isend, staging, group=group, group_peer=destination)
-                        dist.batch_isend_irecv([send_op])[0].wait()
+                        dist.send(buffers.buffer[index], dst=peer, group=group)
                 else:
+                    peer = dist.get_global_rank(group, source)
                     for length in lengths:
                         index = buffers.alloc_one_state_cache()
                         assert index is not None
-                        recv_op = dist.P2POp(dist.irecv, staging, group=group, group_peer=source)
-                        dist.batch_isend_irecv([recv_op])[0].wait()
-                        buffers.buffer[index].copy_(staging, non_blocking=True)
+                        dist.recv(buffers.buffer[index], src=peer, group=group)
                         req.hybrid_len_to_big_page_id[length] = index
 
     def kv_trans(self, trans_tasks: List["TransTask"]):
