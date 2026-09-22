@@ -151,7 +151,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_expert_counter=self.route_counter,
                 update_logical_expert_counter=self.recording,
-                mode="current_gpu_first",
+                mode="global_first",
             )
         return topk_weights, topk_ids
 

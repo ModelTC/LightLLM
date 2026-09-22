@@ -36,7 +36,7 @@ from .placement_plan_task import EPLBPlanTask
 
 logger = init_logger(__name__)
 EPLB_EXPERT_ALIGNMENT = 128
-EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT = 256
+EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT = 128
 EPLB_EXPERT_IMBALANCE_RATIO_METRIC = "lightllm_eplb_topk_expert_imbalance_ratio"
 
 
