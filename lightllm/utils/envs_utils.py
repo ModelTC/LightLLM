@@ -37,6 +37,31 @@ def set_env_start_args(args):
     if not isinstance(args, dict):
         args = vars(args)
     os.environ["LIGHTLLM_START_ARGS"] = json.dumps(args)
+    if args["enable_ep_moe"]:
+        if args["run_mode"] == "prefill":
+            decode_capacity = args["running_max_req_size"] * (args["mtp_step"] + 1)
+            decode_capacity = ((decode_capacity + 7) // 8) * 8
+            configured_decode_capacity = int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", decode_capacity))
+            if configured_decode_capacity != decode_capacity:
+                logger.warning(
+                    "NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=%d differs from the automatically derived value %d.",
+                    configured_decode_capacity,
+                    decode_capacity,
+                )
+            decode_capacity = max(configured_decode_capacity, decode_capacity)
+        else:
+            decode_capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+        min_qp_depth = 2 * (decode_capacity + 1)
+        # NVSHMEM IBGDA rejects QP depths below NVSHMEMI_IBGDA_MIN_QP_DEPTH.
+        derived_qp_depth = max(128, 1 << (min_qp_depth - 1).bit_length())
+        configured_qp_depth = int(os.getenv("NVSHMEM_QP_DEPTH", derived_qp_depth))
+        if configured_qp_depth < derived_qp_depth:
+            logger.warning(
+                "NVSHMEM_QP_DEPTH=%d is below the required minimum; using %d instead.",
+                configured_qp_depth,
+                derived_qp_depth,
+            )
+        os.environ["NVSHMEM_QP_DEPTH"] = str(max(configured_qp_depth, derived_qp_depth))
     return
 
 
@@ -93,8 +118,27 @@ def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_decode():
-    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
+    args = get_env_start_args()
+    per_dp_running_max_req_size = getattr(args, "per_dp_running_max_req_size", None)
+    if per_dp_running_max_req_size is None:
+        per_dp_running_max_req_size = args.running_max_req_size
+
+    graph_max_batch_size = 0
+    if not args.disable_cudagraph:
+        graph_max_batch_size = args.graph_max_batch_size
+        if args.enable_decode_microbatch_overlap:
+            graph_max_batch_size //= 2
+
+    required = max(per_dp_running_max_req_size, graph_max_batch_size) * (args.mtp_step + 1)
+    required = ((required + 7) // 8) * 8
+    configured = int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", required))
+    if configured != required:
+        logger.warning(
+            "NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=%d differs from the automatically derived value %d.",
+            configured,
+            required,
+        )
+    return max(configured, required)
 
 
 @lru_cache(maxsize=None)
@@ -106,64 +150,35 @@ def get_lightllm_websocket_max_message_size():
     return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 128 * 1024 * 1024))
 
 
-# get_redundancy_expert_ids and get_redundancy_expert_num are primarily
-# used to obtain the IDs and number of redundant experts during inference.
-# They depend on a configuration file specified by ep_redundancy_expert_config_path,
-# which is a JSON formatted text file.
-# The content format is as follows:
-# {
-#   "redundancy_expert_num": 1,  # Number of redundant experts per rank
-#   "0": [0],                    # Key: layer_index (string),
-#                                # Value: list of original expert IDs that are redundant for this layer
-#   "1": [0],
-#   "default": [0]               # Default list of redundant expert IDs if layer-specific entry is not found
-# }
+@lru_cache(maxsize=None)
+def get_prefill_eplb_step_interval():
+    """Return the number of prefill forwards between EPLB attempts."""
+    interval = int(os.getenv("LIGHTLLM_PREFILL_EPLB_STEP_INTERVAL", 20))
+    if interval <= 0:
+        raise ValueError("LIGHTLLM_PREFILL_EPLB_STEP_INTERVAL must be greater than 0")
+    return interval
 
 
 @lru_cache(maxsize=None)
-def get_redundancy_expert_ids(layer_index: int):
-    """
-    Get the redundancy expert ids from the environment variable.
-    :return: List of redundancy expert ids.
-    """
-    args = get_env_start_args()
-    if args.ep_redundancy_expert_config_path is None:
-        return []
-
-    with open(args.ep_redundancy_expert_config_path, "r") as f:
-        config = json.load(f)
-    if str(layer_index) in config:
-        return config[str(layer_index)]
-    else:
-        return config.get("default", [])
+def get_eplb_rebalance_gain_threshold() -> float:
+    """Return the EPLB gain threshold: estimated critical-load reduction ratio; 0.05 means 5%."""
+    env_name = "LIGHTLLM_EPLB_REBALANCE_GAIN_THRESHOLD"
+    raw_value = os.getenv(env_name, "0.05")
+    value = float(raw_value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{env_name} must be a ratio between 0.0 and 1.0, got {raw_value!r}")
+    return value
 
 
 @lru_cache(maxsize=None)
-def get_redundancy_expert_num():
-    """
-    Get the number of redundancy experts from the environment variable.
-    :return: Number of redundancy experts.
-    """
-    args = get_env_start_args()
-    if args.ep_redundancy_expert_config_path is None:
-        return 0
-
-    with open(args.ep_redundancy_expert_config_path, "r") as f:
-        config = json.load(f)
-    if "redundancy_expert_num" in config:
-        return config["redundancy_expert_num"]
-    else:
-        return 0
-
-
-@lru_cache(maxsize=None)
-def get_redundancy_expert_update_interval():
-    return int(os.getenv("LIGHTLLM_REDUNDANCY_EXPERT_UPDATE_INTERVAL", 30 * 60))
-
-
-@lru_cache(maxsize=None)
-def get_redundancy_expert_update_max_load_count():
-    return int(os.getenv("LIGHTLLM_REDUNDANCY_EXPERT_UPDATE_MAX_LOAD_COUNT", 1))
+def get_eplb_placement_stickiness() -> float:
+    """Return the EPLB placement stickiness: a keep-bonus, as a fraction of the mean per-layer expert load."""
+    env_name = "LIGHTLLM_EPLB_PLACEMENT_STICKINESS"
+    raw_value = os.getenv(env_name, "0.1")
+    value = float(raw_value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{env_name} must be a ratio between 0.0 and 1.0, got {raw_value!r}")
+    return value
 
 
 @lru_cache(maxsize=None)
@@ -245,6 +260,11 @@ def get_cache_placement_gpu_capacity_ratio() -> float:
 
 
 @lru_cache(maxsize=None)
+def get_dsv4_cpu_cache_max_pages_per_task() -> int:
+    return int(os.getenv("LIGHTLLM_DSV4_CPU_CACHE_MAX_PAGES_PER_TASK", 4))
+
+
+@lru_cache(maxsize=None)
 def enable_huge_page():
     """
     大页模式：启动后可大幅缩短cpu kv cache加载时间
@@ -304,6 +324,25 @@ def get_mtp_weight_layer_num() -> int:
 def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
+
+    if draft_config.get("model_type") == "deepseek_v4" and draft_config.get("dspark_block_size"):
+        target_layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
+        compress_ratios = draft_config.get("compress_ratios")
+        if target_layer_num is not None and isinstance(compress_ratios, list):
+            draft_layer_num = len(compress_ratios) - int(target_layer_num)
+            if draft_layer_num > 0:
+                draft_ratios = compress_ratios[-draft_layer_num:]
+                assert all(
+                    int(ratio) == 0 for ratio in draft_ratios
+                ), f"DeepSeek-V4 DSpark draft layers must be SWA-only, got {draft_ratios}"
+                target_layer_ids = draft_config.get("dspark_target_layer_ids")
+                if target_layer_ids is not None:
+                    assert len(target_layer_ids) == draft_layer_num, (
+                        f"DeepSeek-V4 DSpark target layer count {len(target_layer_ids)} does not match "
+                        f"draft layer count {draft_layer_num}"
+                    )
+                return draft_layer_num
+
     # Use the effective draft backbone config when the checkpoint stores it nested.
     draft_config.update(draft_config.get("dflash_config", {}))
     # A draft model may contain multiple attention layers; each layer needs a

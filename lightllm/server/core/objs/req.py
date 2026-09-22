@@ -10,7 +10,7 @@ from .shm_array import ShmArray
 from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLenList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.config_utils import is_hybrid_att_model
+from lightllm.utils.config_utils import is_hybrid_att_model, get_model_type
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import Any, Dict, List, Union
 from lightllm.utils.log_utils import init_logger
@@ -217,6 +217,7 @@ class Req(ctypes.Structure):
         args = get_env_start_args()
         if is_hybrid_att_model(args.model_dir):
             self._fill_hybrid_token_hash()
+        if is_hybrid_att_model(args.model_dir) and get_model_type(args.model_dir) != "deepseek_v4":
             if args.enable_cpu_cache:
                 cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_hybrid_cpu_cache_page_len_list()
                 self.token_hash_list = TokenHashList()

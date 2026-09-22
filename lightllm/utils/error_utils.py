@@ -10,6 +10,10 @@ class InvalidRequestError(ValueError):
     """Request validation failed before generation started."""
 
 
+class GenerationError(Exception):
+    """Generation stopped because of an internal server failure."""
+
+
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 

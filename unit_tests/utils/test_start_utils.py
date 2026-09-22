@@ -49,6 +49,9 @@ class FakeProcess:
 
 def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypatch):
     class FakePipeReader:
+        def close(self):
+            pass
+
         def recv(self):
             # 子进程应在等待初始化结果之前就进入 manager，保证此时 Ctrl-C 可以清理它们。
             assert len(process_manager.processes) == 2
@@ -67,7 +70,7 @@ def test_start_submodule_processes_returns_and_manages_psutil_processes(monkeypa
         def is_alive(self):
             return True
 
-    monkeypatch.setattr(start_utils.mp, "Pipe", lambda duplex: (FakePipeReader(), object()))
+    monkeypatch.setattr(start_utils.mp, "Pipe", lambda duplex: (FakePipeReader(), SimpleNamespace(close=lambda: None)))
     monkeypatch.setattr(start_utils.mp, "Process", FakeMpProcess)
     monkeypatch.setattr(
         start_utils.psutil,

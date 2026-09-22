@@ -34,11 +34,11 @@ class DSparkProposer(BaseSpecProposer):
         target_hidden = target_model_output.mtp_collector.spec_hidden
         assert target_hidden is not None
         assert target_hidden.shape[0] == target_model_input.input_ids.shape[0]
-        if target_hidden.numel() == 0:
-            return
 
         # DSpark prefill 直接使用 target prompt 的 token 布局和 hidden，将 prompt
-        # KV 写入唯一的 parallel-block draft model。使用浅副本，避免把 draft
+        # KV 写入唯一的 parallel-block draft model。空 DP rank 也必须进入
+        # draft forward，由通用 HOLD padding 补出 dummy token，保证各 rank
+        # 执行相同次数的 DeepEP collective。使用浅副本，避免把 draft
         # 专用 hidden 挂到后续流程仍可能读取的 target ModelInput 上。
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
@@ -53,6 +53,8 @@ class DSparkProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
+        accept_len_cpu: torch.Tensor | None = None,
+        accept_len_ready_event: torch.cuda.Event | None = None,
     ) -> DSparkSpecProposal:
         """提交 target verify KV，并生成下一轮 DSpark block proposal。
 
@@ -84,9 +86,10 @@ class DSparkProposer(BaseSpecProposer):
         # target verify 的行布局和 mem_indexes 已经对应本轮所有被验证 token。
         # 仅附加 target hidden 后执行一次 draft forward，即可把这些行提交到
         # DSpark KV cache；浅副本保证 target_model_input 本身不被修改。
-        verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        draft_model.forward(verify_draft_input)
+        if req_num > 0:
+            verify_draft_input = copy.copy(target_model_input)
+            verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+            draft_model.forward(verify_draft_input)
 
         # DSpark 每个请求固定展开一个完整 block。block 第一行是
         # accepted-tail anchor，其余行使用 mask token，由 parallel backbone
@@ -139,6 +142,7 @@ class DSparkProposer(BaseSpecProposer):
             .contiguous()
         )
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
+
         draft_output = draft_model.forward(draft_input)
 
         if draft_output.mtp_collector.draft_token_ids is None:

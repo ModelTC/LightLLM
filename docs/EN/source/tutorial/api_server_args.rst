@@ -147,7 +147,7 @@ PD disaggregation Mode Parameters
     ``pd_node_resource_wait_timeout_seconds`` for every request. P/D nodes only enforce the received value for local
     ``shm_req`` allocation and the wait from Router entry to inference entry; they do not read local limiting switches
     or timeout settings. The first segment's timeout is
-    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 10 seconds; set it
+    controlled on PD Master by ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 20 seconds; set it
     to -1 to wait indefinitely. Continuation segments with ``segment_index > 0`` use a separate timeout controlled by
     ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` and defaults to 60 seconds, improving the chance
     that requests which have already produced partial results complete successfully. When set to a non-negative value,
@@ -162,15 +162,15 @@ PD disaggregation Mode Parameters
     In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
     The maximum cache-record age eligible for promotion is controlled by
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` and defaults to
-    36 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
-    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
+    180 seconds. Cache-hit promotion also requires at least the number of input tokens configured by
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (2048 by default), so short requests do not gain priority
     solely from a high cache-hit rate.
 
     Startup example:
 
     .. code-block:: bash
 
-        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=20 \
             LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
             LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
             python -m lightllm.server.api_server --run_mode pd_master ...
@@ -253,10 +253,11 @@ Memory and Batch Processing Parameters
 
 .. option:: --running_max_req_size
 
-    Total shared request slots on the local node, default is ``256``.
-    DP mode allocates ``ceil(running_max_req_size / local DP rank count)``
-    request-state slots per rank, which also limits scheduling concurrency and CUDA Graph batches.
-    Diverse mode and DP prompt cache fetch keep the original capacity.
+    Total shared request slots on the local node, default ``256``. In DP mode,
+    each rank's scheduling concurrency and CUDA Graph batch limit use this value
+    divided by the local DP rank count, rounded down. With DP prompt cache fetch,
+    Normal and Prefill model request slots retain the global capacity for cross-rank
+    prefix matching. PD Master does not currently use this parameter for admission limiting.
 
 .. option:: --max_req_total_len
 
@@ -750,17 +751,6 @@ MTP Multi-Prediction Parameters
     Currently this feature only supports DeepSeekV3/R1 models.
     Increasing this value allows more predictions, but ensure the model is compatible with the specified number of steps.
     Currently deepseekv3/r1 models only support 1 step
-
-DeepSeek Redundant Expert Parameters
-------------------------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    Path to redundant expert configuration. Can be used for deepseekv3 models.
-
-.. option:: --auto_update_redundancy_expert
-
-    Whether to update redundant experts for deepseekv3 models through online expert usage counters.
 
 Monitoring and Logging Parameters
 ---------------------------------

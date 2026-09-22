@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import time
 from dataclasses import dataclass, field
 from threading import Lock, RLock
@@ -39,8 +38,7 @@ class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    prompt 先按 sample_stride 抽稀成 key，再递归按单字符建树/匹配。
-    recursion_limit 在初始化时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
+    prompt 先按 sample_stride 抽稀成 key，再按单字符建树/匹配。
     整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
     """
 
@@ -49,14 +47,12 @@ class PromptCacheTree:
         sample_stride: int = 512,
         max_node_count: int = 1_000_000,
         evict_node_batch: int = 10_000,
-        recursion_limit: int = 4000,
     ) -> None:
         """
         Args:
             sample_stride: 每隔多少个字符抽 1 个作为 trie key。
             max_node_count: 树中允许的最大节点数（不含 root）；超限时触发 LRU 驱逐。
             evict_node_batch: 每次驱逐时在超出量基础上额外腾出的节点缓冲数。
-            recursion_limit: 初始化时通过 sys.setrecursionlimit 设置的调用栈深度上限。
         """
         if sample_stride < 1:
             raise ValueError(f"sample_stride must be >= 1, got {sample_stride}")
@@ -64,14 +60,9 @@ class PromptCacheTree:
             raise ValueError(f"max_node_count must be >= 0, got {max_node_count}")
         if evict_node_batch < 1:
             raise ValueError(f"evict_node_batch must be >= 1, got {evict_node_batch}")
-        if recursion_limit < 1:
-            raise ValueError(f"recursion_limit must be >= 1, got {recursion_limit}")
         self.sample_stride = sample_stride
         self.max_node_count = max_node_count
         self.evict_node_batch = evict_node_batch
-        self.recursion_limit = recursion_limit
-        if recursion_limit > sys.getrecursionlimit():
-            sys.setrecursionlimit(recursion_limit)
         self.root = _PromptCacheNode()
         self._node_count = 0
         self._leaf_lru: SortedDict[int, _PromptCacheNode] = SortedDict()
@@ -105,32 +96,37 @@ class PromptCacheTree:
             self._evict_if_needed()
 
     def _insert_at(self, node: _PromptCacheNode, key: str, depth: int, prefill_node: str) -> None:
+        path = []
         try:
-            if depth >= len(key):
-                return
+            while True:
+                path.append(node)
+                if depth >= len(key):
+                    break
 
-            ch = key[depth]
-            child = node.children.get(ch)
-            if child is None:
-                child = _PromptCacheNode(
-                    parent=node,
-                    edge_char=ch,
-                    last_insert_time=time.monotonic(),
-                )
-                child.last_time_mark = self._gen_time_mark()
-                node.children[ch] = child
-                self._node_count += 1
+                ch = key[depth]
+                child = node.children.get(ch)
+                if child is None:
+                    child = _PromptCacheNode(
+                        parent=node,
+                        edge_char=ch,
+                        last_insert_time=time.monotonic(),
+                    )
+                    child.last_time_mark = self._gen_time_mark()
+                    node.children[ch] = child
+                    self._node_count += 1
 
-            self._insert_at(child, key, depth + 1, prefill_node)
+                node = child
+                depth += 1
         finally:
-            if node is not self.root:
-                node.last_prefill_node = prefill_node
-                node.last_insert_time = time.monotonic()
-            if node.last_time_mark in self._leaf_lru:
-                self._leaf_lru.pop(node.last_time_mark, None)
-            node.last_time_mark = self._gen_time_mark()
-            if self._is_leaf(node):
-                self._leaf_lru[node.last_time_mark] = node
+            for path_node in reversed(path):
+                if path_node is not self.root:
+                    path_node.last_prefill_node = prefill_node
+                    path_node.last_insert_time = time.monotonic()
+                if path_node.last_time_mark in self._leaf_lru:
+                    self._leaf_lru.pop(path_node.last_time_mark, None)
+                path_node.last_time_mark = self._gen_time_mark()
+                if self._is_leaf(path_node):
+                    self._leaf_lru[path_node.last_time_mark] = path_node
 
     def _gen_time_mark(self) -> int:
         with self._time_mark_lock:
@@ -178,14 +174,13 @@ class PromptCacheTree:
             )
 
     def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:
-        if depth >= len(key):
-            return node, depth
-
-        child = node.children.get(key[depth])
-        if child is None:
-            return node, depth
-
-        return self._match_at(child, key, depth + 1)
+        while depth < len(key):
+            child = node.children.get(key[depth])
+            if child is None:
+                break
+            node = child
+            depth += 1
+        return node, depth
 
     def evict_lru_nodes(self) -> int:
         """节点数超上限时，按 LRU 从叶节点批量删除。

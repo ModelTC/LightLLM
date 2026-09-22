@@ -40,6 +40,11 @@ class ModelInput:
     b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
+    # cpu 变量
+    b_req_idx_cpu: torch.Tensor = None
+    b_mtp_index_cpu: torch.Tensor = None
+    b_seq_len_cpu: torch.Tensor = None
+    b_ready_cache_len_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
     # 标记 prefill 请求是否会在本轮产生输出。Prefill 必填（空 batch 使用空 list），decode 不使用。
@@ -51,6 +56,23 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    # DSpark draft block 的临时 SWA page 所有权。CPU tensor 用于无 D2H
+    # 回收；GPU tensor 供 attention 直接计算 block 的物理 SWA 槽。
+    mtp_draft_swa_pages_cpu: Optional[torch.Tensor] = None
+    mtp_draft_swa_pages: Optional[torch.Tensor] = None
+
+    def _capture_cpu_mirror(self, tensor_name: str, mirror_name: str):
+        tensor = getattr(self, tensor_name)
+        if tensor is not None and not tensor.is_cuda:
+            setattr(self, mirror_name, tensor)
+        return
+
+    def capture_cpu_mirrors(self):
+        self._capture_cpu_mirror("b_req_idx", "b_req_idx_cpu")
+        self._capture_cpu_mirror("b_mtp_index", "b_mtp_index_cpu")
+        self._capture_cpu_mirror("b_seq_len", "b_seq_len_cpu")
+        self._capture_cpu_mirror("b_ready_cache_len", "b_ready_cache_len_cpu")
+        return
 
     def to_cuda(self):
         self.check_input()
@@ -77,6 +99,7 @@ class ModelInput:
                 self.input_ids = self.input_ids.cuda(non_blocking=True)
 
     def __post_init__(self):
+        self.capture_cpu_mirrors()
         self.check_input()
 
     def check_input(self):

@@ -78,7 +78,9 @@ class Gemma4Tokenizer(BaseMultiModalTokenizer):
             if not input_ids or input_ids[-1] != self.boi_token_index:
                 input_ids.append(self.boi_token_index)
             img.start_idx = len(input_ids)
+            img.block_start_idx = img.start_idx
             input_ids.extend(range(img.token_id, img.token_id + img.token_num))
+            img.block_end_idx = len(input_ids)
             input_ids.append(self.eoi_token_index)
 
             if image_end < len(origin_ids) and origin_ids[image_end] == self.eoi_token_index:

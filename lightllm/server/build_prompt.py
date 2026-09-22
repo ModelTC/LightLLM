@@ -53,6 +53,13 @@ def tokenizer_supports_force_thinking() -> bool:
 
     assert tokenizer is not None
 
+    # Tokenizers that encode prompts in Python (e.g. DeepSeek-V4) have no Jinja
+    # chat_template string to inspect, so advertise thinking support via an
+    # explicit attribute instead.
+    if getattr(tokenizer, "supports_thinking", False):
+        logger.info("tokenizer_supports_force_thinking : True (explicit attribute)")
+        return True
+
     try:
         ans = "thinking" in tokenizer.chat_template or "enable_thinking" in tokenizer.chat_template
         logger.debug(f"chat_template: {tokenizer.chat_template}")
@@ -126,6 +133,23 @@ def _normalize_multimodal_content_types(messages: list) -> None:
                 part["type"] = "audio"
 
 
+def _redact_message_image_data_in_place(messages: list) -> None:
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for part in content:
+            image_url = part.get("image_url")
+            if not image_url:
+                continue
+
+            url = image_url["url"]
+            if url.startswith("data:image"):
+                media_type, separator, _ = url.partition(",")
+                image_url["url"] = f"{media_type}{separator}<redacted>" if separator else "<redacted>"
+
+
 async def build_prompt(request, tools) -> str:
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
@@ -141,12 +165,11 @@ async def build_prompt(request, tools) -> str:
     if request.role_settings:
         kwargs["role_setting"] = request.role_settings
 
-    if request.reasoning_effort is not None:
-        kwargs["reasoning_effort"] = request.reasoning_effort
-
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
 
+    if request.reasoning_effort is not None and "reasoning_effort" not in kwargs:
+        kwargs["reasoning_effort"] = request.reasoning_effort
     # 修复一些parser类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
     # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
     from .api_openai import _is_force_thinking_mode
@@ -163,5 +186,14 @@ async def build_prompt(request, tools) -> str:
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except Exception as e:
-        raise ValueError(f"Failed to build prompt: {e}") from None
+        request_dump = request.model_dump(by_alias=True, exclude_none=True)
+        _redact_message_image_data_in_place(request_dump["messages"])
+        _redact_message_image_data_in_place(kwargs["conversation"])
+        logger.exception(
+            "Failed to build prompt. request=%s tools=%s template_kwargs=%s",
+            json.dumps(request_dump, ensure_ascii=False, default=str),
+            json.dumps(tools, ensure_ascii=False, default=str),
+            json.dumps(kwargs, ensure_ascii=False, default=str),
+        )
+        raise ValueError(f"Failed to build prompt: {e}") from e
     return input_str

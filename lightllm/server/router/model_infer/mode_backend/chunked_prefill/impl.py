@@ -60,6 +60,11 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 event_pack.wait_to_forward()
 
+                # EPLB polling performs collectives and may commit weights, so keep all ranks ordered before normal
+                # collectives/forward.
+                if self.model.eplb_manager is not None:
+                    self.model.eplb_manager.poll()
+
                 self._try_read_new_reqs()
 
                 prefill_reqs, decode_reqs = self._get_classed_reqs(
@@ -310,6 +315,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
+                accept_len_cpu=mtp_accept_len_cpu,
+                accept_len_ready_event=verify_event,
             )
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,

@@ -26,12 +26,15 @@ from lightllm.server.router.model_infer.mode_backend import (
     PDDecodeNode,
     PDDPForDecodeNode,
 )
-from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
+from lightllm.server.router.model_infer.mode_backend.ep_balance_monitor import (
+    EPBalanceMonitor,
+    should_enable_ep_balance_monitor,
+)
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from lightllm.server.io_struct import RlOpReq, RlOpRsp
@@ -99,12 +102,10 @@ class ModelRpcServer(rpyc.Service):
         self.backend.init_model(kvargs)
         self.rl_backend_ops = RlBackendOps(self.backend) if self.args.enable_rl else None
 
-        # only deepseekv3 can support auto_update_redundancy_expert
-        if self.args.auto_update_redundancy_expert:
-            self.redundancy_expert_manager = RedundancyExpertManager(self.backend.model)
-            logger.info("init redundancy_expert_manager")
-        else:
-            self.redundancy_expert_manager = None
+        if should_enable_ep_balance_monitor(self.args):
+            monitor = EPBalanceMonitor(self.backend.model)
+            if monitor.enabled:
+                self.backend.model.ep_balance_monitor = monitor
         return
 
     def exposed_get_max_total_token_num(self):
@@ -172,6 +173,7 @@ def _init_env(
     socket_path,
     success_event,
 ):
+    install_fatal_thread_excepthook()
     import lightllm.utils.rpyc_fix_utils as _
 
     # spawn 不继承父进程的递归上限；在启动推理线程前为每个 rank 显式设置。

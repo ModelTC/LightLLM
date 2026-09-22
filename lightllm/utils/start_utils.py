@@ -1,4 +1,5 @@
 import os
+import shutil
 import ctypes
 import signal
 import subprocess
@@ -18,6 +19,10 @@ class SubmoduleManager:
     def __init__(self):
         self.processes = []
         self.process_names = {}
+        self.disk_cache_dir = None
+
+    def register_disk_cache_dir(self, cache_dir):
+        self.disk_cache_dir = cache_dir
 
     def start_submodule_processes(self, start_funcs=[], start_args=[]):
         assert len(start_funcs) == len(start_args)
@@ -25,33 +30,45 @@ class SubmoduleManager:
         processes = []
         managed_processes = []
 
-        for start_func, start_arg in zip(start_funcs, start_args):
-            pipe_reader, pipe_writer = mp.Pipe(duplex=False)
-            process = mp.Process(
-                target=start_func,
-                args=start_arg + (pipe_writer,),
-            )
-            process.start()
-            pipe_readers.append(pipe_reader)
-            processes.append(process)
-            # 初始化完成前也可能收到退出信号，因此子进程启动后立即纳入管理。
-            managed_process = psutil.Process(process.pid)
-            managed_processes.append(managed_process)
-            self.processes.append(managed_process)
-            self.process_names[managed_process] = managed_process.name()
+        try:
+            for start_func, start_arg in zip(start_funcs, start_args):
+                pipe_reader, pipe_writer = mp.Pipe(duplex=False)
+                process = mp.Process(
+                    target=start_func,
+                    args=start_arg + (pipe_writer,),
+                )
+                try:
+                    process.start()
+                finally:
+                    pipe_writer.close()
+                pipe_readers.append(pipe_reader)
+                processes.append(process)
+                managed_process = psutil.Process(process.pid)
+                managed_processes.append(managed_process)
+                self.processes.append(managed_process)
+                self.process_names[managed_process] = managed_process.name()
 
-        # Wait for all processes to initialize
-        for index, pipe_reader in enumerate(pipe_readers):
-            init_state = pipe_reader.recv()
-            if init_state != "init ok":
-                logger.error(f"init func {start_funcs[index].__name__} : {str(init_state)}")
-                for proc in processes:
-                    proc.kill()
-                sys.exit(1)
-            else:
+            # Wait for all processes to initialize
+            for index, pipe_reader in enumerate(pipe_readers):
+                try:
+                    init_state = pipe_reader.recv()
+                finally:
+                    pipe_reader.close()
+                if init_state != "init ok":
+                    logger.error(f"init func {start_funcs[index].__name__} : {str(init_state)}")
+                    raise SystemExit(1)
                 logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
 
-        assert all([proc.is_alive() for proc in processes])
+            assert all([proc.is_alive() for proc in processes])
+        except BaseException:
+            for proc in processes:
+                if proc.is_alive():
+                    proc.kill()
+            for proc in processes:
+                proc.join()
+            self.terminate_all_processes()
+            raise
+
         return managed_processes
 
     def register_process_tree(self, root_process):
@@ -91,9 +108,19 @@ class SubmoduleManager:
         if alive_pids:
             logger.warning(f"Processes still alive after SIGKILL: {alive_pids}")
 
+        # LightMem owns files under this directory, so remove it only after the cache process has exited.
+        if self.disk_cache_dir is not None:
+            try:
+                shutil.rmtree(self.disk_cache_dir)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to remove disk cache directory {self.disk_cache_dir}: {e}")
+            else:
+                logger.info(f"Removed disk cache directory {self.disk_cache_dir}")
+
         # recover the gpu compute mode
-        is_enable_mps = get_env_start_args().enable_mps
-        if is_enable_mps:
+        if get_env_start_args().enable_mps:
             from lightllm.utils.device_utils import stop_mps
 
             stop_mps()
@@ -122,10 +149,11 @@ class SubmoduleManager:
         def signal_handler(sig, _frame):
             if sig == signal.SIGINT:
                 logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
-                if http_server_process is not None:
-                    kill_recursive(http_server_process)
-
-                self.terminate_all_processes()
+                try:
+                    if http_server_process is not None:
+                        kill_recursive(http_server_process)
+                finally:
+                    self.terminate_all_processes()
                 logger.info("All processes have been forcefully terminated.")
                 sys.exit(0)
 
@@ -134,16 +162,17 @@ class SubmoduleManager:
             else:
                 logger.info("Received SIGHUP (terminal closed), shutting down gracefully...")
 
-            if http_server_process is not None and http_server_process.poll() is None:
-                http_server_process.send_signal(signal.SIGTERM)
-                try:
-                    http_server_process.wait(timeout=60)
-                    logger.info("HTTP server exited gracefully")
-                except subprocess.TimeoutExpired:
-                    logger.warning("HTTP server did not exit in time, killing it...")
-                    kill_recursive(http_server_process)
-
-            self.terminate_all_processes()
+            try:
+                if http_server_process is not None and http_server_process.poll() is None:
+                    http_server_process.send_signal(signal.SIGTERM)
+                    try:
+                        http_server_process.wait(timeout=60)
+                        logger.info("HTTP server exited gracefully")
+                    except subprocess.TimeoutExpired:
+                        logger.warning("HTTP server did not exit in time, killing it...")
+                        kill_recursive(http_server_process)
+            finally:
+                self.terminate_all_processes()
             logger.info("All processes have been terminated gracefully.")
             sys.exit(0)
 

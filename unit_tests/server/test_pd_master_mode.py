@@ -8,6 +8,7 @@ from easydict import EasyDict
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+from lightllm.utils.error_utils import ServerBusyError
 
 
 def test_pd_node_self_request_limit_cli_defaults_to_enabled_and_can_be_disabled():
@@ -205,6 +206,22 @@ def test_pd_manager_checks_all_connected_node_health(monkeypatch):
 def test_pd_manager_without_connected_nodes_is_healthy():
     manager = PDManager(StartArgs())
     assert asyncio.run(manager.check_pd_nodes_health()) is True
+
+
+@pytest.mark.parametrize(
+    ("prefill_nodes", "decode_nodes"),
+    [([], [object()]), ([object()], [])],
+)
+def test_pd_manager_returns_service_unavailable_when_a_node_role_is_empty(prefill_nodes, decode_nodes):
+    manager = PDManager(StartArgs())
+    manager.prefill_nodes = prefill_nodes
+    manager.decode_nodes = decode_nodes
+
+    with pytest.raises(ServerBusyError) as exc_info:
+        manager.select_p_d_node("prompt", None, None)
+
+    assert exc_info.value.status_code == 503
+    assert "PD nodes unavailable" in exc_info.value.message
 
 
 def test_prefill_registration_preserves_existing_inflight_prompt_chars():

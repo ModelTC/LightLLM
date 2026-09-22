@@ -32,8 +32,12 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
-            if spec_mode in ("dspark", "dflash"):
-                raise NotImplementedError("DP backend does not support DFlash/DSpark parallel block drafting yet.")
+            if spec_mode == "dflash":
+                raise NotImplementedError("DP backend does not support DFlash parallel block drafting yet.")
+            if spec_mode == "dspark" and (
+                self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap
+            ):
+                raise NotImplementedError("DP DSpark does not support prefill/decode microbatch overlap yet.")
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
             else:
@@ -69,10 +73,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
         )
 
-        self.dp_overlap_spec_engine = DPOverlapSpecEngine(
-            **engine_kwargs,
-            common_engine=self.spec_engine,
-        )
+        self.dp_overlap_spec_engine = None
+        if self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap:
+            self.dp_overlap_spec_engine = DPOverlapSpecEngine(
+                **engine_kwargs,
+                common_engine=self.spec_engine,
+            )
         self.prefill_draft_engine = (
             self.dp_overlap_spec_engine if self.enable_prefill_microbatch_overlap else self.spec_engine
         )
@@ -121,6 +127,11 @@ class DPChunkedPrefillBackend(ModeBackend):
 
                 event_pack.wait_to_forward()
 
+                # EPLB polling performs collectives and may commit weights, so keep all ranks ordered before normal
+                # collectives/forward.
+                if self.model.eplb_manager is not None:
+                    self.model.eplb_manager.poll()
+
                 self._try_read_new_reqs()
 
                 prefill_reqs, decode_reqs = self._get_classed_reqs(
@@ -129,15 +140,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                     recover_paused=self.control_state_machine.try_recover_paused_reqs(),
                 )
 
-                dp_prefill_req_nums, dp_decode_req_nums = self._dp_all_gather_prefill_and_decode_req_num(
+                has_prefill, has_decode = self._dp_all_reduce_req_presence(
                     prefill_reqs=prefill_reqs, decode_reqs=decode_reqs
                 )
 
                 run_way = self.control_state_machine.select_run_way(
-                    dp_prefill_req_nums=dp_prefill_req_nums,
-                    dp_decode_req_nums=dp_decode_req_nums,
-                    prefill_reqs=prefill_reqs,
-                    decode_reqs=decode_reqs,
+                    has_prefill=has_prefill,
+                    has_decode=has_decode,
                 )
 
                 if run_way.is_prefill():
@@ -496,6 +505,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
 
+            mtp_accept_len_cpu = None
             if req_num > 0:
                 next_token_ids, next_token_logprobs = sample(
                     model_output.logits,
@@ -552,6 +562,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
+                accept_len_cpu=mtp_accept_len_cpu,
+                accept_len_ready_event=verify_event,
             )
             if req_num > 0:
                 mtp_utils.scatter_mtp_next_tokens(
@@ -756,6 +768,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             logits0 = model_output0.logits
             logits1 = model_output1.logits
             run_reqs = run_reqs0 + run_reqs1
+            mtp_accept_len_cpu0 = None
+            mtp_accept_len_cpu1 = None
             if req_num > 0:
                 assert len(run_reqs) == verify_row_num
                 logits = torch.empty(
@@ -820,10 +834,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                 target_model_output0=model_output0,
                 target_next_token_ids0=target_next_token_ids0,
                 accept_len0=mtp_accept_len0,
+                accept_len_cpu0=mtp_accept_len_cpu0,
                 target_model_input1=model_input1,
                 target_model_output1=model_output1,
                 target_next_token_ids1=target_next_token_ids1,
                 accept_len1=mtp_accept_len1,
+                accept_len_cpu1=mtp_accept_len_cpu1,
+                accept_len_ready_event=verify_event,
                 draft_step=spec_plan.draft_step,
             )
             if req_num > 0:

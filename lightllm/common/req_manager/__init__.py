@@ -4,3 +4,5 @@ from .hybrid_base import HybridAttentionReqManager
 from .req_sampling_params import ReqSamplingParamsManager
 
 __all__ = ["ReqManager", "HybridAttentionReqManager", "ReqManagerForMamba", "ReqSamplingParamsManager"]
+
+from .deepseek4 import DeepseekV4ReqManager

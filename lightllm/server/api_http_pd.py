@@ -8,10 +8,10 @@
 ``g_objs`` 在 handler 内懒导入，避免与 api_http 循环依赖。
 """
 
-import asyncio
 import pickle
 
 import ujson as json
+from anyio import fail_after
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from lightllm.server.pd_io_struct import ObjType
@@ -33,18 +33,21 @@ async def register_and_keep_alive(websocket: WebSocket):
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
     regist_json = json.loads(await websocket.receive_text())
     logger.info(f"received regist_json {regist_json}")
-    await g_objs.httpserver_manager.register_pd(regist_json, websocket)
+    pd_client = await g_objs.httpserver_manager.register_pd(regist_json, websocket)
 
     try:
         heartbeat_timeout_seconds = 30
         while True:
-            data = await asyncio.wait_for(websocket.receive_bytes(), timeout=heartbeat_timeout_seconds)
+            # Avoid creating a new Task per message so queued PD token packs
+            # can be drained without extra event-loop scheduling.
+            with fail_after(heartbeat_timeout_seconds):
+                data = await websocket.receive_bytes()
             obj = pickle.loads(data)
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
                 continue
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(f"client {regist_json} heartbeat timed out after {heartbeat_timeout_seconds} seconds")
         try:
             await websocket.close(code=1011, reason="PD heartbeat timed out")
@@ -57,7 +60,7 @@ async def register_and_keep_alive(websocket: WebSocket):
         logger.exception(str(e))
     finally:
         logger.error(f"client {regist_json} removed")
-        await g_objs.httpserver_manager.remove_pd(regist_json)
+        await g_objs.httpserver_manager.remove_pd(pd_client)
     return
 
 

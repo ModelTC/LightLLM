@@ -139,7 +139,7 @@ PD 分离模式参数
     ``pd_node_resource_wait_timeout_seconds`` 为所有请求下发统一的资源等待上限；P/D 节点只负责按下发值
     控制本地 ``shm_req`` 申请和 Router 等待进入推理系统，不读取本地限流开关或超时配置。首段的等待上限由
     PD Master 上的
-    ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 10 秒；设置为 -1 表示永久等待。
+    ``LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 20 秒；设置为 -1 表示永久等待。
     ``segment_index > 0`` 的续跑分段使用独立的等待上限，该值由
     ``LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS`` 控制，默认 60 秒，以提高已产生部分结果的
     请求最终完成的成功率。
@@ -150,15 +150,15 @@ PD 分离模式参数
     则不再从头重试，以免产生重复内容。设置 ``--disable_pd_node_self_request_limit`` 后，PD Master 不再下发
     有限的资源等待时间；P/D 节点永久等待，其他原因产生的 ``Server is busy`` 也会直接返回，不触发重试。
     多机 TP 场景仅由 master 节点执行超时判断，slave 节点永久等待。cache 命中记录允许提升优先级的最大年龄由
-    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 36 秒。cache 命中提权还要求输入
-    token 数达到 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` 配置的门槛（默认 4096），避免短请求仅因
+    ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 180 秒。cache 命中提权还要求输入
+    token 数达到 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` 配置的门槛（默认 2048），避免短请求仅因
     cache 命中率高而提升优先级。
 
     启动示例：
 
     .. code-block:: bash
 
-        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=10 \
+        LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS=20 \
             LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS=60 \
             LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120 \
             python -m lightllm.server.api_server --run_mode pd_master ...
@@ -238,10 +238,10 @@ PD 分离模式参数
 
 .. option:: --running_max_req_size
 
-    本机共享请求槽总数，默认为 ``256``。
-    DP 模式按 ``ceil(running_max_req_size / 本机 DP rank 数)``
-    分配每个 rank 的请求状态槽，调度并发和 CUDA Graph batch 上限也受此限制。
-    diverse 模式及 DP prompt cache fetch 模式保持原有容量。
+    本机共享请求槽总数，默认为 ``256``。DP 模式下，每个 rank 的调度并发和
+    CUDA Graph batch 上限按该值除以本机 DP rank 数并向下取整。
+    开启 DP prompt cache fetch 时，普通或 Prefill 节点的模型请求槽仍保留全局容量，
+    供跨 rank 前缀匹配使用。PD Master 当前不使用该参数执行请求准入限流。
 
 .. option:: --max_req_total_len
 
@@ -734,17 +734,6 @@ MTP 多预测参数
     目前此功能仅支持 DeepSeekV3/R1 模型。
     增加此值允许更多预测，但确保模型与指定的步数兼容。
     目前 deepseekv3/r1 模型仅支持 1 步
-
-DeepSeek 冗余专家参数
----------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    冗余专家配置的路径。可用于 deepseekv3 模型。
-
-.. option:: --auto_update_redundancy_expert
-
-    是否通过在线专家使用计数器为 deepseekv3 模型更新冗余专家。
 
 监控和日志参数
 --------------

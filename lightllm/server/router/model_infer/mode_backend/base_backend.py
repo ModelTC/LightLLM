@@ -13,6 +13,10 @@ from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    disable_eplb_model_init,
+)
+from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.req_manager import HybridAttentionReqManager
@@ -44,11 +48,9 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
-from lightllm.server.multi_level_kv_cache import (
-    CacheTier,
-    create_cache_placement_controller,
-)
+from lightllm.server.multi_level_kv_cache import create_cache_placement_controller
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from .dsv4_multi_level_kv_cache import Dsv4MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
 
@@ -150,6 +152,7 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
+        self.is_deepseek_v4 = isinstance(self.model.req_manager, DeepseekV4ReqManager)
 
         if self.is_hybrid_att_model:
             self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
@@ -199,14 +202,12 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
+            self.dp_control_tensor = torch.zeros(2, dtype=torch.int32, device="cpu", requires_grad=False)
             self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
-            )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        self.node_broadcast_tensor = torch.zeros(1, dtype=torch.int32, device="cpu", requires_grad=False)
+        self.node_gloo_group = create_new_group_for_current_node("gloo")
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
@@ -253,11 +254,17 @@ class ModeBackend:
             self.init_spec_engine()
 
         if self.args.enable_cpu_cache:
-            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
+            cache_module_cls = Dsv4MultiLevelKvCacheModule if self.is_deepseek_v4 else MultiLevelKvCacheModule
+            self.multi_level_cache_module = cache_module_cls(self)
 
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
+        if self.args.enable_prefill_eplb:
+            from lightllm.server.router.model_infer.mode_backend.eplb_manager import EPLBManager
+
+            self.model.eplb_manager = EPLBManager(self.model)
+            dist.barrier()
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -289,6 +296,8 @@ class ModeBackend:
                 self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
             else:
                 self.mem_managers.append(self.model.mem_manager)
+        if self.is_deepseek_v4:
+            self.dp_kv_shared_module.init_dsv4_cache_transfer(self.mem_managers)
         return
 
     def get_max_total_token_num(self):
@@ -344,7 +353,9 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
-            self.draft_models.append(draft_model_class(draft_model_kvargs))
+            with disable_eplb_model_init():
+                draft_model = draft_model_class(draft_model_kvargs)
+            self.draft_models.append(draft_model)
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return
@@ -471,8 +482,8 @@ class ModeBackend:
                 self.node_broadcast_tensor.fill_(0)
 
         src_rank_id = self.args.node_rank * self.node_world_size
-        broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-        new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+        broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_gloo_group, async_op=False)
+        new_buffer_is_ready = self.node_broadcast_tensor.item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
@@ -485,8 +496,8 @@ class ModeBackend:
                     self.node_broadcast_tensor.fill_(0)
 
             src_rank_id = self.args.node_rank * self.node_world_size
-            broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
-            new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+            broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_gloo_group, async_op=False)
+            new_buffer_is_ready = self.node_broadcast_tensor.item()
             if new_buffer_is_ready:
                 self._read_pd_trans_io_buffer_and_update_req_status()
         return
@@ -695,7 +706,10 @@ class ModeBackend:
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
 
-        if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
+        if self.args.enable_cpu_cache and (
+            (self.is_deepseek_v4 and self.is_master_in_dp)
+            or (not self.is_deepseek_v4 and len(g_infer_context.infer_req_ids) > 0)
+        ):
             self.multi_level_cache_module.update_cpu_cache_task_states()
 
         if req_ids is None:
@@ -722,6 +736,10 @@ class ModeBackend:
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
+        is_deepseek_v4 = self.is_deepseek_v4
+        can_alloc_dsv4_swa_page_num = None
+        if is_deepseek_v4:
+            can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
 
         for req_obj in ready_reqs:
 
@@ -754,16 +772,20 @@ class ModeBackend:
                     is_decode = False
 
             if is_decode:
-                # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
-                # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，
-                # 并将数量向下对齐到 page_size 的整数倍，以减少 alloc 调用次数并保持分页分配约束。
+                # Small pages benefit from reserving a few decode slots per allocation.
                 if alloc_token_num > 0 and self.args.page_size < 8:
                     alloc_token_num += 8 // self.args.page_size * self.args.page_size
-                if alloc_token_num <= can_alloc_token_num:
+                can_run = alloc_token_num <= can_alloc_token_num
+                if can_run and is_deepseek_v4:
+                    swa_page_num = req_obj.get_dsv4_decode_need_swa_page_num()
+                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
+                if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
+                    if is_deepseek_v4:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         if self.args.run_mode == "decode":
@@ -791,40 +813,34 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
-                # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
-                token_num, alloc_token_num = req_obj.prefill_need_token_num(
-                    is_chuncked_prefill=not self.disable_chunked_prefill
-                )
+                is_chuncked_prefill = not self.disable_chunked_prefill
+                token_num, alloc_token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=is_chuncked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                if alloc_token_num <= can_alloc_token_num:
+                can_run = alloc_token_num <= can_alloc_token_num
+                if can_run and is_deepseek_v4:
+                    swa_page_num = req_obj.get_dsv4_prefill_need_swa_page_num(is_chuncked_prefill=is_chuncked_prefill)
+                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
+                if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
+                    if is_deepseek_v4:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 
-        # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
+        # 先由控制器确定请求需要写入的缓存层级。
         cache_controller = g_infer_context.cache_placement_controller
         new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
         cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
-            offload_reqs = [
-                req for req in finished_reqs if CacheTier.CPU in req.cache_tiers or CacheTier.DISK in req.cache_tiers
-            ]
-            offload_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
-                finished_reqs=offload_reqs
+            true_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
+                finished_reqs=finished_reqs
             )
-            offload_finished_req_ids = {req.req_id for req in offload_finished_reqs}
-            true_finished_reqs = [
-                req
-                for req in finished_reqs
-                if (CacheTier.CPU not in req.cache_tiers and CacheTier.DISK not in req.cache_tiers)
-                or req.req_id in offload_finished_req_ids
-            ]
         else:
             true_finished_reqs = finished_reqs
 
@@ -855,10 +871,13 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
+        cpu_store_reqs = [] if self.args.enable_cpu_cache and self.is_deepseek_v4 and self.is_master_in_dp else None
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
         for req_obj in run_reqs:
             req_obj: InferReq = req_obj
+            if cpu_store_reqs is not None and req_obj.cur_kv_len < req_obj.shm_req.input_len:
+                cpu_store_reqs.append(req_obj)
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
@@ -878,6 +897,12 @@ class ModeBackend:
             req_obj.cur_output_len += 1
             pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
             update_func_objs.append(pack)
+
+        if cpu_store_reqs:
+            self.multi_level_cache_module.store_completed_prefill_pages(
+                reqs=cpu_store_reqs,
+                producer_stream=g_infer_context.get_overlap_stream(),
+            )
         return update_func_objs
 
     # 一些可以复用的通用功能函数
@@ -993,23 +1018,26 @@ class ModeBackend:
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
-    def _dp_all_gather_prefill_and_decode_req_num(
+    def _dp_all_reduce_req_presence(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[bool, bool]:
         """
-        Gather the number of prefill requests across all DP ranks.
+        Return whether any DP rank has prefill or decode requests.
+
+        Request counts originate on the CPU and the scheduler only needs their
+        global presence. Keep this control-plane collective on the CPU so it can
+        overlap the previous CUDA graph instead of synchronizing that graph back
+        to the host every decode step.
         """
-        current_dp_prefill_num = len(prefill_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
-        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-
-        current_dp_decode_num = len(decode_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_decode_num)
-        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_decode_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-
-        return dp_prefill_req_nums, dp_decode_req_nums
+        self.dp_control_tensor[0] = bool(prefill_reqs)
+        self.dp_control_tensor[1] = bool(decode_reqs)
+        all_reduce(
+            self.dp_control_tensor,
+            op=dist.ReduceOp.MAX,
+            group=dist_group_manager.dp_control_group,
+            async_op=False,
+        )
+        return bool(self.dp_control_tensor[0]), bool(self.dp_control_tensor[1])
 
     def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
         """

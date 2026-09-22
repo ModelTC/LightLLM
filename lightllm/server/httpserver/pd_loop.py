@@ -11,7 +11,12 @@ import signal
 import sys
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
-from lightllm.server.pd_io_struct import NodeRole, ObjType
+from lightllm.server.pd_io_struct import (
+    NodeRole,
+    ObjType,
+    PD_COMPACT_TOKEN_INFO_LEN,
+    build_pd_compact_token_info,
+)
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
@@ -24,6 +29,9 @@ from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyErro
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
+
+_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS = 5
+_PD_RECONNECT_DELAY_SECONDS = 10
 
 
 async def timer_log(manager: HttpServerManager):
@@ -78,10 +86,9 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     pd_handle_loop 主要负责与 pd master 进行注册连接，然后接收pd master发来的请求，然后
     将推理结果转发给 pd master进行处理。
     """
-    # 创建转发队列
-    forwarding_queue = AsyncQueue()
-
     while True:
+        # 转发队列属于当前连接，避免超时未退出的旧请求在重连后上报过期 token。
+        forwarding_queue = AsyncQueue()
         forwarding_tokens_task = None
         heartbeat_task = None
         generation_tasks: Dict[int, asyncio.Task] = {}
@@ -125,6 +132,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
+                        manager.begin_pd_request_registration(group_req_id)
                         generation_task = asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
@@ -138,9 +146,13 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         )
                         generation_tasks[group_req_id] = generation_task
 
-                        def remove_generation_task(task: asyncio.Task, request_id: int = group_req_id):
-                            if generation_tasks.get(request_id) is task:
-                                generation_tasks.pop(request_id, None)
+                        def remove_generation_task(
+                            task: asyncio.Task, request_id: int = group_req_id, tasks=generation_tasks
+                        ):
+                            if tasks.get(request_id) is task:
+                                tasks.pop(request_id, None)
+                                # task 可能在首次运行前被取消，此时协程内的 finally 不会执行。
+                                manager.cancel_pd_request_registration(request_id)
 
                         generation_task.add_done_callback(remove_generation_task)
                     elif obj[0] == ObjType.ABORT:
@@ -149,15 +161,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         generation_task = generation_tasks.get(group_req_id)
                         if generation_task is not None and not generation_task.done():
                             generation_task.cancel()
-                        if not (await manager.abort(group_req_id)):
-
-                            async def delayed_abort_task(group_req_id, retry_count):
-                                for _ in range(retry_count):
-                                    await asyncio.sleep(5.0)
-                                    if await manager.abort(group_req_id):
-                                        break
-
-                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
+                        await manager.abort(group_req_id)
 
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
@@ -179,15 +183,30 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
         finally:
+            # Cancel the connection's requests even if their generators cannot exit promptly.
+            # abort() also defers cancellation for requests that have not registered shm_req yet.
+            for group_req_id in generation_tasks:
+                await manager.abort(group_req_id)
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
-                await asyncio.gather(*child_tasks, return_exceptions=True)
+                done_tasks, pending_tasks = await asyncio.wait(
+                    child_tasks, timeout=_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS
+                )
+                if done_tasks:
+                    await asyncio.gather(*done_tasks, return_exceptions=True)
+                if pending_tasks:
+                    logger.warning(
+                        "timed out after %s seconds cleaning up %s PD child task(s); reconnecting",
+                        _PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS,
+                        len(pending_tasks),
+                    )
+                    for task in pending_tasks:
+                        task.cancel()
 
-        await asyncio.sleep(10)
-        await forwarding_queue.get_all_data()
+        await asyncio.sleep(_PD_RECONNECT_DELAY_SECONDS)
         logger.info("reconnection to pd_master")
 
 
@@ -234,6 +253,7 @@ async def _pd_process_generate(
     pd_upload_websocket: ClientConnection,
     pd_event: asyncio.Event,
 ):
+    return_output_logprobs = getattr(sampling_params, "return_output_logprobs", True)
     try:
         async for sub_req_id, request_output, metadata, finish_status in manager.generate(
             prompt=prompt,
@@ -243,7 +263,17 @@ async def _pd_process_generate(
             pd_upload_websocket=pd_upload_websocket,
             pd_event=pd_event,
         ):
-            metadata["node_mode"] = manager.args.run_mode
+            metadata.pop("prompt_ids", None)
+            if not return_output_logprobs:
+                for key in ("logprob", "cumlogprob", "special", "logprobs"):
+                    metadata.pop(key, None)
+            if metadata.get("count_output_tokens") == 1:
+                metadata["node_mode"] = manager.args.run_mode
+            if not return_output_logprobs:
+                compact_token_info = build_pd_compact_token_info(sub_req_id, request_output, metadata, finish_status)
+                if compact_token_info is not None:
+                    await forwarding_queue.put(compact_token_info)
+                    continue
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
         logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
@@ -268,16 +298,67 @@ async def _pd_process_generate(
             )
         except Exception:
             logger.exception(f"report pd node generate error failed, group_request_id: {group_request_id}")
+    finally:
+        manager.cancel_pd_request_registration(sampling_params.group_request_id)
 
 
 # 转发token的task
 async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
+    max_message_size = get_lightllm_websocket_max_message_size()
+    event_loop = asyncio.get_running_loop()
+    next_queue_metric_time = 0.0
+
     while True:
-        handle_list = await forwarding_queue.wait_to_get_all_data()
+        await forwarding_queue.wait_to_ready()
+        queue_duration = forwarding_queue.oldest_age()
+        handle_list = await forwarding_queue.get_all_data()
 
         if handle_list:
+            now = event_loop.time()
+            if now >= next_queue_metric_time:
+                from lightllm.server.api_http import g_objs
+
+                g_objs.httpserver_manager.metric_client.histogram_observe(
+                    "lightllm_pd_forward_queue_duration", queue_duration
+                )
+                next_queue_metric_time = now + 1.0
             load_info: dict = _get_load_info()
-            await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
+            pending_handle_lists = []
+            group_start = 0
+            group_is_compact = len(handle_list[0]) == PD_COMPACT_TOKEN_INFO_LEN
+            for index in range(1, len(handle_list)):
+                item_is_compact = len(handle_list[index]) == PD_COMPACT_TOKEN_INFO_LEN
+                if item_is_compact != group_is_compact:
+                    pending_handle_lists.append(handle_list[group_start:index])
+                    group_start = index
+                    group_is_compact = item_is_compact
+            pending_handle_lists.append(handle_list[group_start:])
+            pending_handle_lists.reverse()
+            while pending_handle_lists:
+                token_list = pending_handle_lists.pop()
+                obj_type = (
+                    ObjType.TOKEN_PACKS_COMPACT
+                    if len(token_list[0]) == PD_COMPACT_TOKEN_INFO_LEN
+                    else ObjType.TOKEN_PACKS
+                )
+                payload = pickle.dumps((obj_type, token_list, load_info))
+                if len(payload) <= max_message_size:
+                    await websocket.send(payload)
+                    continue
+
+                if len(token_list) == 1:
+                    raise ValueError(
+                        f"single PD token pack is {len(payload)} bytes, exceeding websocket limit "
+                        f"{max_message_size}"
+                    )
+
+                split_index = len(token_list) // 2
+                logger.warning(
+                    f"PD token pack is {len(payload)} bytes with {len(token_list)} items, exceeding websocket "
+                    f"limit {max_message_size}; splitting it"
+                )
+                # 栈后进先出，先压后半段，保持 token 的原始发送顺序。
+                pending_handle_lists.extend((token_list[split_index:], token_list[:split_index]))
 
 
 async def _send_heartbeat_to_pd_master(websocket: ClientConnection):

@@ -31,13 +31,30 @@ class MemoryManager:
 
     operator_class = NormalMemOperator
 
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
+    def __init__(
+        self,
+        size,
+        dtype,
+        head_num,
+        head_dim,
+        layer_num,
+        always_copy=False,
+        mem_fraction=0.9,
+        memory_reservations=None,
+    ):
         self.size = size
         self.head_num = head_num
         self.head_dim = head_dim
         self.layer_num = layer_num
         self.always_copy = always_copy
         self.dtype = dtype
+        # Named reservations are allocations made after KV profiling.  They are
+        # deliberately outside get_fixed_memory_size(): model-specific exact KV
+        # geometry owns fixed bytes, while these values are deducted once from
+        # the profile budget only.
+        self.memory_reservations = dict(memory_reservations or {})
+        if any(value < 0 for value in self.memory_reservations.values()):
+            raise ValueError(f"memory reservations must be non-negative: {self.memory_reservations}")
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
@@ -69,6 +86,9 @@ class MemoryManager:
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
+    def get_fixed_memory_size(self):
+        return 0
+
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         return (
@@ -97,8 +117,20 @@ class MemoryManager:
         world_size = dist.get_world_size()
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
+        fixed_memory_size = self.get_fixed_memory_size()
+        reservations = getattr(self, "memory_reservations", {})
+        reserved_memory_size = sum(reservations.values())
         pd_kv_move_buffer_size = self.get_pd_kv_move_buffer_size()
-        available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
+        available_memory_bytes = (
+            available_memory * 1024 ** 3 - fixed_memory_size - reserved_memory_size - pd_kv_move_buffer_size
+        )
+        if available_memory_bytes <= 0:
+            raise RuntimeError(
+                f"{type(self).__name__} fixed buffers require {fixed_memory_size / 1024**3:.2f} GB, "
+                f"plus {reserved_memory_size / 1024**3:.2f} GB reservations, "
+                f"plus {pd_kv_move_buffer_size / 1024**3:.2f} GB for the PD KV transfer buffer, "
+                f"but only {available_memory:.2f} GB is available"
+            )
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
@@ -106,6 +138,8 @@ class MemoryManager:
             self.size = tensor.item()
         logger.info(
             f"{str(available_memory)} GB space is available after load the model weight\n"
+            f"{str(fixed_memory_size / 1024 ** 2)} MB is reserved for fixed KV cache buffers\n"
+            f"{reservations} bytes are reserved for post-profile model buffers\n"
             f"{str(pd_kv_move_buffer_size / 1024 ** 2)} MB is reserved for PD KV transfer buffer\n"
             f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
             f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
@@ -137,6 +171,8 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -160,7 +196,7 @@ class MemoryManager:
         # keep for debug
         # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"src page token tensor {cur_page[0, :, 0, 0]}")
-        return
+        return cur_page.numel() * cur_page.element_size()
 
     def read_page_kv_move_buffer_to_mem(
         self,
@@ -169,6 +205,8 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
