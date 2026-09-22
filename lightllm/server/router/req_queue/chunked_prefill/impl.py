@@ -45,17 +45,14 @@ class ChunkedPrefillQueue(BaseQueue):
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
-        if len(self.waiting_req_list) == 0:
+        # 即使调度容量已满，也要先清理 abort 请求，避免继续占用共享请求槽位。
+        self.filter_aborted_reqs()
+        if not self.waiting_req_list:
             return None
 
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
         exist_req_num = self.get_batch_dp_req_size(current_batch)
-        req_is_full = exist_req_num >= self.running_max_req_size
-        if req_is_full:
-            return None
-
-        self.filter_aborted_reqs()
-        if len(self.waiting_req_list) == 0:
+        if exist_req_num >= self.running_max_req_size:
             return None
 
         is_busy = self.is_busy()

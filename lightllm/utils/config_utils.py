@@ -15,17 +15,14 @@ def get_config_json(model_path: str):
 
 
 def get_running_max_req_size_per_dp(args) -> int:
-    """Local GPU/scheduler capacity; the shared HTTP request pool stays global."""
+    """Return the request capacity for one local DP rank."""
     if args.running_max_req_size < 1:
         raise ValueError("running_max_req_size must be >= 1")
 
-    local_dp_size = max(1, getattr(args, "dp", 1) // getattr(args, "nnodes", 1))
-    # Cache fetch temporarily initializes remote DP requests on each rank; beam
-    # groups must fit on one rank in their entirety. Keep their existing capacity.
-    requires_global_capacity = getattr(args, "enable_dp_prompt_cache_fetch", False) or getattr(
-        args, "diverse_mode", False
-    )
-    if local_dp_size > 1 and not requires_global_capacity and is_hybrid_att_model(args.model_dir):
+    local_dp_size = max(1, args.dp // args.nnodes)
+    # Cache fetch and beam groups need the full capacity.
+    requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
+    if local_dp_size > 1 and not requires_global_capacity:
         return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
     return args.running_max_req_size
 
@@ -417,6 +414,7 @@ def has_vision_module(model_path: str) -> bool:
             model_cfg["vision_config"]
             return True
         elif model_type in ["qwen3_vl", "qwen3_vl_moe", "glm5_next"]:
+            # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
@@ -437,6 +435,8 @@ def has_vision_module(model_path: str) -> bool:
             == "qwen3_omni_moe_vision_encoder"
         ):
             # Qwen3OmniMoeVisionTransformerPretrainedModel
+            return True
+        elif model_type == "neo_chat":
             return True
         elif model_type in ["qwen3_5", "qwen3_5_moe"]:
             return True

@@ -238,15 +238,10 @@ PD 分离模式参数
 
 .. option:: --running_max_req_size
 
-    全局共享请求槽数，默认为 ``256``。DP 模式下仍是所有本机 DP rank 共用的总量。
-
-    Hybrid attention 模型中，每个 DP rank 的最大并发请求数及 GPU 请求状态槽数自动按
-    ``ceil(running_max_req_size / 本机 DP rank 数)`` 计算，超出该 rank 容量的请求在调度队列中等待。
-    其他模型、diverse 模式及 DP prompt cache fetch 模式保持全局槽数。
-
-    例如单机 GLM-5.3 Flash 使用 DP8、``running_max_req_size=32`` 时，每个 rank 分配 4 个请求槽，
-    另加 1 个 padding 槽。``mtp_step=2`` 时每槽保留 3 份 SSM 状态。
-    状态池在启动时固定分配，以保持 CUDA Graph 地址稳定；CUDA Graph 最大 batch 也会收敛到本地请求上限。
+    本机共享请求槽总数，默认为 ``256``。
+    DP 模式按 ``ceil(running_max_req_size / 本机 DP rank 数)``
+    分配每个 rank 的请求状态槽，调度并发和 CUDA Graph batch 上限也受此限制。
+    diverse 模式及 DP prompt cache fetch 模式保持原有容量。
 
 .. option:: --max_req_total_len
 

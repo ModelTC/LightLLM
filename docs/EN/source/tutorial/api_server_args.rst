@@ -253,18 +253,10 @@ Memory and Batch Processing Parameters
 
 .. option:: --running_max_req_size
 
-    Global shared request slots, default is ``256``. In DP mode this remains the total
-    shared by all DP ranks on the local node.
-
-    For hybrid attention models, the concurrent request limit and GPU request-state slots per
-    DP rank are automatically calculated as ``ceil(running_max_req_size / local DP rank count)``.
-    Requests beyond a rank's capacity wait in the router queue. Other models, diverse mode,
-    and DP prompt cache fetch retain the global capacity.
-
-    For example, single-node GLM-5.3 Flash with DP8 and ``running_max_req_size=32`` allocates
-    4 request slots plus 1 padding slot per rank. With ``mtp_step=2``, each slot holds 3 SSM states.
-    Pools are allocated at startup to keep CUDA Graph addresses stable, and the maximum
-    CUDA Graph batch size is capped at the local request limit.
+    Total shared request slots on the local node, default is ``256``.
+    DP mode allocates ``ceil(running_max_req_size / local DP rank count)``
+    request-state slots per rank, which also limits scheduling concurrency and CUDA Graph batches.
+    Diverse mode and DP prompt cache fetch keep the original capacity.
 
 .. option:: --max_req_total_len
 

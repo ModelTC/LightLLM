@@ -348,9 +348,7 @@ def _launch_subprocesses(args: StartArgs):
     auto_configure_allreduce_flags_from_args(args)
     local_request_capacity = get_running_max_req_size_per_dp(args)
 
-    # CUDA Graph 只需要覆盖调度器允许同时运行的请求数。配置得更大不会被真实请求使用，
-    # 反而会捕获无效的大 batch Graph 并额外占用显存，因此在全部参数调整完成后收敛到合法上限。
-    # 关闭 CUDA Graph 时该参数不生效，保留用户原值。
+    # Limit CUDA Graph batches to the local request capacity.
     if not args.disable_cudagraph and args.graph_max_batch_size > local_request_capacity:
         logger.warning(
             f"graph_max_batch_size {args.graph_max_batch_size} exceeds per-DP request capacity "

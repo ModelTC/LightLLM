@@ -23,7 +23,6 @@ class BaseQueue:
         # 在极端情况下减少，在非特定模式下，get_fixed_kv_len() 返回的都是
         # 0， 不会有任何影响。
         self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
-        # Must match this rank's GPU request/state pool, not the global SHM pool.
         self.running_max_req_size = get_running_max_req_size_per_dp(args)
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy

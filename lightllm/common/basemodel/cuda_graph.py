@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 import copy
 import bisect
+import math
 import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
@@ -47,7 +48,9 @@ class CudaGraph:
         batch_sizes = sorted({size for size in batch_sizes if size < max_batch_size} | {max_batch_size})
 
         if args.enable_tpsp_mix_mode:
-            batch_sizes = sorted({triton.cdiv(size, tp_world_size) * tp_world_size for size in batch_sizes})
+            # Keep complete fixed-layout MTP groups as well as TP/SP shards.
+            alignment = math.lcm(batch_step_size_before_split, tp_world_size)
+            batch_sizes = sorted({triton.cdiv(size, alignment) * alignment for size in batch_sizes})
         assert batch_sizes[-1] == max_batch_size
         return batch_sizes
 

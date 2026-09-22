@@ -181,6 +181,7 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)
     model.tp_world_size_ = 2
+    model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
     model.graph = None
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
     model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(77,), page_size=1)

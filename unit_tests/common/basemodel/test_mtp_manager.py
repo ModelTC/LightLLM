@@ -20,14 +20,14 @@ def _reset_mtp_manager():
     MtpManager._instance = None
 
 
-def _decode_batch_multiplier(monkeypatch, spec_mode, *, is_draft_model, mtp_step=7):
+def _decode_tokens_per_request(monkeypatch, spec_mode, *, is_draft_model, mtp_step=7):
     args = SimpleNamespace(
         mtp_mode=spec_mode,
         mtp_step=mtp_step,
         mtp_dynamic_verify=False,
     )
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
-    return MtpManager.get_instance().get_decode_batch_multiplier(is_draft_model)
+    return MtpManager.get_instance().get_decode_tokens_per_request(is_draft_model)
 
 
 @pytest.mark.parametrize(
@@ -44,28 +44,30 @@ def _decode_batch_multiplier(monkeypatch, spec_mode, *, is_draft_model, mtp_step
         ("dflash", True, 7),
     ],
 )
-def test_decode_batch_multiplier(monkeypatch, spec_mode, is_draft_model, expected):
-    assert _decode_batch_multiplier(monkeypatch, spec_mode, is_draft_model=is_draft_model) == expected
+def test_decode_tokens_per_request(monkeypatch, spec_mode, is_draft_model, expected):
+    assert _decode_tokens_per_request(monkeypatch, spec_mode, is_draft_model=is_draft_model) == expected
 
 
 @pytest.mark.parametrize(
-    "dynamic_verify,is_draft_model,expected",
+    "spec_mode,dynamic_verify,is_draft_model,expected",
     [
-        (False, False, 8),
-        (True, False, 1),
-        (False, True, 1),
-        (True, True, 1),
+        ("vanilla_with_att", False, False, 8),
+        ("vanilla_with_att", True, False, 1),
+        ("vanilla_with_att", False, True, 1),
+        ("vanilla_with_att", True, True, 1),
+        ("dspark", True, True, 7),
+        ("dflash", True, True, 7),
     ],
 )
-def test_decode_cuda_graph_grow_step_size(monkeypatch, dynamic_verify, is_draft_model, expected):
+def test_decode_batch_alignment(monkeypatch, spec_mode, dynamic_verify, is_draft_model, expected):
     args = SimpleNamespace(
-        mtp_mode="vanilla_with_att",
+        mtp_mode=spec_mode,
         mtp_step=7,
         mtp_dynamic_verify=dynamic_verify,
     )
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
 
-    assert MtpManager.get_instance().get_decode_cuda_graph_grow_step_size(is_draft_model) == expected
+    assert MtpManager.get_instance().get_decode_batch_alignment(is_draft_model) == expected
 
 
 @pytest.mark.parametrize(
