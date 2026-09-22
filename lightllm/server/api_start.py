@@ -75,6 +75,16 @@ def _launch_subprocesses(args: StartArgs):
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
+    if model_type == "deepseek_v4":
+        if args.page_size != 256 or args.linear_att_hash_page_size != 256:
+            logger.warning(
+                "DeepSeek-V4 forces --page_size and --linear_att_hash_page_size to 256 (got %s and %s)",
+                args.page_size,
+                args.linear_att_hash_page_size,
+            )
+        args.page_size = 256
+        args.linear_att_hash_page_size = 256
+
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
         if has_vision_module(args.model_dir):
@@ -215,9 +225,6 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.page_size < 1:
         raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
-    if get_model_type(args.model_dir) == "deepseek_v4":
-        if args.page_size != 256 or args.linear_att_hash_page_size != 256:
-            raise ValueError("DeepSeek-V4 requires --page_size 256 --linear_att_hash_page_size 256")
     if args.run_mode in ("prefill", "decode"):
         assert args.pd_kv_page_size % args.page_size == 0, "--pd_kv_page_size must be divisible by --page_size"
 
