@@ -1,6 +1,7 @@
 import time
 import asyncio
 import base64
+import json
 import pickle
 import setproctitle
 import multiprocessing as mp
@@ -23,6 +24,28 @@ registered_pd_master_objs: Dict[str, PD_Master_Obj] = {}
 registered_visual_server_objs: Dict[str, VIT_Obj] = {}
 registered_pd_master_obj_lock = Lock()
 registered_visual_server_obj_lock = Lock()
+
+
+def _parse_pd_master_obj(raw: dict) -> PD_Master_Obj:
+    if not isinstance(raw, dict):
+        raise ValueError("registration payload must be a JSON object")
+    node_id = raw.get("node_id")
+    host_ip_port = raw.get("host_ip_port")
+    if not isinstance(node_id, int) or not isinstance(host_ip_port, str):
+        raise ValueError("invalid PD_Master_Obj registration payload")
+    return PD_Master_Obj(node_id=node_id, host_ip_port=host_ip_port)
+
+
+def _parse_vit_obj(raw: dict) -> VIT_Obj:
+    if not isinstance(raw, dict):
+        raise ValueError("registration payload must be a JSON object")
+    node_id = raw.get("node_id")
+    host_ip = raw.get("host_ip")
+    port = raw.get("port")
+    if not isinstance(node_id, int) or not isinstance(host_ip, str) or not isinstance(port, int):
+        raise ValueError("invalid VIT_Obj registration payload")
+    return VIT_Obj(node_id=node_id, host_ip=host_ip, port=port)
+
 
 global_req_id = 0
 global_req_id_lock = Lock()
@@ -56,7 +79,12 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_ip, client_port = websocket.client
     logger.info(f"ws connected from IP: {client_ip}, Port: {client_port}")
-    registered_pd_master_obj: PD_Master_Obj = pickle.loads(await websocket.receive_bytes())
+    try:
+        registered_pd_master_obj = _parse_pd_master_obj(json.loads(await websocket.receive_text()))
+    except Exception as e:  # noqa: BLE001 - reject any malformed registration input without crashing the handler
+        logger.error(f"rejected pd_master registration from {client_ip}:{client_port}: {e}")
+        await websocket.close(code=1008)
+        return
     logger.info(f"received registered_pd_master_obj {registered_pd_master_obj}")
     with registered_pd_master_obj_lock:
         registered_pd_master_objs[registered_pd_master_obj.node_id] = registered_pd_master_obj
@@ -80,7 +108,12 @@ async def visual_websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_ip, client_port = websocket.client
     logger.info(f"ws connected from IP: {client_ip}, Port: {client_port}")
-    registered_visual_server_obj: VIT_Obj = pickle.loads(await websocket.receive_bytes())
+    try:
+        registered_visual_server_obj = _parse_vit_obj(json.loads(await websocket.receive_text()))
+    except Exception as e:  # noqa: BLE001 - reject any malformed registration input without crashing the handler
+        logger.error(f"rejected visual_server registration from {client_ip}:{client_port}: {e}")
+        await websocket.close(code=1008)
+        return
     logger.info(f"received registered_visual_server_obj {registered_visual_server_obj}")
     with registered_visual_server_obj_lock:
         registered_visual_server_objs[registered_visual_server_obj.node_id] = registered_visual_server_obj
