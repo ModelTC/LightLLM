@@ -27,8 +27,8 @@ class MtpManager:
     def __init__(self):
         self.args = get_env_start_args()
 
-    def get_decode_batch_multiplier(self, is_draft_model: bool) -> int:
-        """Return the physical decode rows used by one logical request."""
+    def get_decode_tokens_per_request(self, is_draft_model: bool) -> int:
+        """返回每请求的 decode token 数；动态 verify 返回压缩前的最大 token 数，用于容量规划。"""
 
         spec_mode = self.args.mtp_mode
         if spec_mode is None:
@@ -55,22 +55,16 @@ class MtpManager:
 
         return 1
 
-    def get_decode_cuda_graph_grow_step_size(self, is_draft_model: bool) -> int:
-        """Return the batch-size stride used to capture decode CUDA Graphs."""
-
-        # Draft model CUDA Graphs follow the drafter's physical decode layout.
-        if is_draft_model:
-            return self.get_decode_batch_multiplier(is_draft_model=True)
-        # Main model CUDA Graphs use unit growth for dynamically compacted verify rows.
-        else:
-            if self.args.mtp_dynamic_verify:
-                return 1
-            return self.get_decode_batch_multiplier(is_draft_model=False)
+    def get_decode_batch_alignment(self, is_draft_model: bool) -> int:
+        """返回 decode/graph 的基础对齐粒度；动态主模型压缩后允许任意行数。"""
+        if not is_draft_model and self.args.mtp_dynamic_verify:
+            return 1
+        return self.get_decode_tokens_per_request(is_draft_model)
 
     def get_decode_draft_step(self, is_draft_model: bool) -> int:
         """Return the number of extra decode rows processed per request."""
 
-        return self.get_decode_batch_multiplier(is_draft_model) - 1
+        return self.get_decode_tokens_per_request(is_draft_model) - 1
 
     def create_hidden_collector(
         self,
