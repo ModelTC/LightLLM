@@ -48,7 +48,23 @@ def causal_conv1d_fn(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    from sgl_kernel import causal_conv1d_fwd
+    try:
+        from sgl_kernel import causal_conv1d_fwd
+    except ImportError:
+        from .causal_conv1d_triton import causal_conv1d_fn as triton_causal_conv1d_fn
+
+        return triton_causal_conv1d_fn(
+            x,
+            weight,
+            bias,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            conv_states=conv_states,
+            activation=activation,
+            pad_slot_id=pad_slot_id,
+            **kwargs,
+        )
 
     if x.stride(-1) != 1:
         x = x.contiguous()
@@ -102,7 +118,21 @@ def causal_conv1d_update(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError(f"activation must be None, silu, or swish, actual: {activation}")
-    from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
+    try:
+        from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
+    except ImportError:
+        from .causal_conv1d_triton import causal_conv1d_update as triton_causal_conv1d_update
+
+        return triton_causal_conv1d_update(
+            x,
+            conv_state,
+            weight,
+            bias,
+            activation=activation,
+            cache_seqlens=cache_seqlens,
+            conv_state_indices=conv_state_indices,
+            pad_slot_id=pad_slot_id,
+        )
 
     activation_val = activation in ["silu", "swish"]
     unsqueeze = x.dim() == 2
