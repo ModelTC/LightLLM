@@ -1,103 +1,71 @@
+import numpy as np
 import torch
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.dist_utils import get_current_rank_in_node
-from lightllm.utils.log_utils import init_logger
-from typing import Union, List
-
-logger = init_logger(__name__)
 
 
 class KvCacheAllocator:
-    def __init__(self, size: int) -> None:
-        self.size = size
-        self.mem_state = torch.arange(
-            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self.mark_start = 0
-        self.mark_end = self.size
+    """A stack of physical page bases; returned token indexes own their storage."""
 
-        self._mem_state_return = torch.arange(
-            0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self._return_start = 0
+    def __init__(self, size: int, page_size: int = 1) -> None:
+        self.page_size = page_size
+        rank = get_current_rank_in_node()
+        self.shared_can_use_token_num = SharedInt(f"mem_manger_can_use_token_num_{rank}")
+        self.resize(size)
 
-        self.can_use_mem_size = self.size
-
-        rank_in_node = get_current_rank_in_node()
-        # 用共享内存进行共享，router 模块读取进行精确的调度估计；基础层会统一添加服务前缀以防止实例冲突。
-        self.shared_can_use_token_num = SharedInt(f"mem_manger_can_use_token_num_{rank_in_node}")
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        return
-
-    def alloc(self, need_size) -> torch.Tensor:
-        if need_size > self.mark_end - self.mark_start:
-            logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
-            assert False, "error alloc state"
-
-        start = self.mark_start
-        end = self.mark_start + need_size
-        self.mark_start += need_size
-
+    def _alloc_pages(self, need_size: int):
+        """Borrow page bases until the next allocator mutation; callers snapshot before DMA."""
+        assert need_size % self.page_size == 0
+        assert 0 <= need_size <= self.can_use_mem_size, "error alloc state"
+        start = (self.size - self.can_use_mem_size) // self.page_size
         self.can_use_mem_size -= need_size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        return self.free_pages[start : start + need_size // self.page_size]
 
-        # 利用缓冲区返回，避免异步情况下的内存竞争
-        if self._return_start + need_size > self._mem_state_return.shape[0]:
-            self._return_start = 0
-        ans = self._mem_state_return[self._return_start : self._return_start + need_size]
-        ans.copy_(self.mem_state[start:end])
-        self._return_start += need_size
-        return ans
+    def alloc(self, need_size: int) -> torch.Tensor:
+        pages = self._alloc_pages(need_size)
+        indexes = torch.empty(need_size, dtype=torch.int32, device="cpu", pin_memory=True)
+        self.expand_pages(pages, indexes.numpy())
+        return indexes
 
-    def free(self, free_index: Union[torch.Tensor, List[int]]):
-        """_summary_
-
-        Args:
-            free_index (torch.Tensor): _description_
-        """
-
-        end = self.mark_start
-        start = self.mark_start - len(free_index)
-        assert start >= 0, f"error free state start: {self.mark_start} free len {len(free_index)}"
-
-        if isinstance(free_index, list):
-            self.mem_state.numpy()[start:end] = free_index
+    def expand_pages(self, pages, out=None):
+        if out is None:
+            out = np.empty(len(pages) * self.page_size, dtype=np.int32)
+        if self.page_size == 1:
+            out[:] = pages
         else:
-            # 从 gpu 到 cpu 的拷贝操作是流内阻塞操作
-            self.mem_state[start:end] = free_index
+            # Short pages expand faster along the page-base axis than in short token runs.
+            np.add(
+                pages,
+                self.page_offsets[:, None],
+                out=out.reshape(-1, self.page_size).T,
+                order="C" if self.page_size < 8 else "F",
+            )
+        return out
 
-        self.mark_start -= len(free_index)
+    def free(self, free_index):
+        size = len(free_index)
+        assert size % self.page_size == 0
+        values = free_index.cpu().numpy() if isinstance(free_index, torch.Tensor) else np.asarray(free_index)
+        self.release_pages(values[:: self.page_size])
 
-        self.can_use_mem_size += len(free_index)
+    def release_pages(self, pages):
+        size = len(pages) * self.page_size
+        assert size <= self.size - self.can_use_mem_size, "error free state"
+        end = (self.size - self.can_use_mem_size) // self.page_size
+        self.free_pages[end - len(pages) : end] = pages
+        self.can_use_mem_size += size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-
-        if self.can_use_mem_size == len(self.mem_state):
-            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
-        return
 
     def free_all(self):
-        self.mem_state.numpy()[:] = list(range(0, len(self.mem_state)))
-        self.mark_start = 0
-        self.mark_end = len(self.mem_state)
-        self.can_use_mem_size = len(self.mem_state)
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        return
-
-    def resize(self, new_size: int) -> None:
-        """
-        just for test code
-        """
-        self.size = new_size
-        self.mem_state = torch.arange(
-            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self.mark_start = 0
-        self.mark_end = self.size
-
-        self._mem_state_return = torch.arange(
-            0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self._return_start = 0
-
+        self.free_pages[:] = np.arange(0, self.size, self.page_size, dtype=np.int32)
         self.can_use_mem_size = self.size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
+    def resize(self, new_size: int) -> None:
+        assert new_size % self.page_size == 0
+        self.size = new_size
+        self.free_pages = np.arange(0, new_size, self.page_size, dtype=np.int32)
+        self.page_offsets = np.arange(self.page_size, dtype=np.int32)
+        self.can_use_mem_size = new_size
+        self.shared_can_use_token_num.set_value(new_size)

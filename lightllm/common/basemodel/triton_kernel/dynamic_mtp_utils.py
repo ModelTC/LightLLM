@@ -209,86 +209,40 @@ def _compact_decode_model_input(
 ) -> ModelInput:
     assert not model_input.is_prefill
     assert selected_row_mask.is_cuda
-    assert model_input.b_req_idx.is_cuda
-    assert model_input.b_mtp_index.is_cuda
-    assert model_input.b_seq_len.is_cuda
-    assert model_input.b_shared_seq_len.is_cuda
-    assert model_input.b_shared_radix_node_id.is_cuda
-
     # Dynamic scheduling guarantees exactly dynamic_batch_size selected rows.
     selected_row_mask = selected_row_mask.to(torch.int32)
     old_batch_size = model_input.b_req_idx.shape[0]
     selected_dst_pos = torch.empty((old_batch_size,), dtype=torch.int32, device=model_input.b_req_idx.device)
+    fields = (
+        "input_ids",
+        "b_req_idx",
+        "b_mtp_index",
+        "b_seq_len",
+        "b_position_delta",
+        "b_shared_seq_len",
+        "b_shared_radix_node_id",
+    )
+    tensors = {}
+    for name in fields:
+        value = getattr(model_input, name)
+        if value is not None:
+            assert value.is_cuda
+        tensors[name] = value
+        tensors["out_" + name] = value.new_empty((dynamic_batch_size,)) if value is not None else None
 
-    out_input_ids = None
-    if model_input.input_ids is not None:
-        assert model_input.input_ids.is_cuda
-        out_input_ids = torch.empty(
-            (dynamic_batch_size,), dtype=model_input.input_ids.dtype, device=model_input.input_ids.device
-        )
-
-    out_b_shared_seq_len = torch.empty(
-        (dynamic_batch_size,), dtype=model_input.b_shared_seq_len.dtype, device=model_input.b_shared_seq_len.device
-    )
-    out_b_shared_radix_node_id = torch.empty(
-        (dynamic_batch_size,),
-        dtype=model_input.b_shared_radix_node_id.dtype,
-        device=model_input.b_shared_radix_node_id.device,
-    )
-
-    out_b_req_idx = torch.empty(
-        (dynamic_batch_size,), dtype=model_input.b_req_idx.dtype, device=model_input.b_req_idx.device
-    )
-    out_b_mtp_index = torch.empty(
-        (dynamic_batch_size,), dtype=model_input.b_mtp_index.dtype, device=model_input.b_mtp_index.device
-    )
-    out_b_seq_len = torch.empty(
-        (dynamic_batch_size,), dtype=model_input.b_seq_len.dtype, device=model_input.b_seq_len.device
-    )
-    out_b_position_delta = None
-    if model_input.b_position_delta is not None:
-        assert model_input.b_position_delta.is_cuda
-        out_b_position_delta = torch.empty(
-            (dynamic_batch_size,),
-            dtype=model_input.b_position_delta.dtype,
-            device=model_input.b_position_delta.device,
-        )
-
-    dummy_1d = model_input.b_req_idx
-    BLOCK_SIZE = triton.next_power_of_2(old_batch_size)
-    grid = (1,)
-    _fwd_kernel_compact_dynamic_mtp_model_input[grid](
-        input_ids=model_input.input_ids if model_input.input_ids is not None else dummy_1d,
-        out_input_ids=out_input_ids if out_input_ids is not None else dummy_1d,
-        b_req_idx=model_input.b_req_idx,
-        out_b_req_idx=out_b_req_idx,
-        b_mtp_index=model_input.b_mtp_index,
-        out_b_mtp_index=out_b_mtp_index,
-        b_seq_len=model_input.b_seq_len,
-        out_b_seq_len=out_b_seq_len,
-        b_position_delta=model_input.b_position_delta if model_input.b_position_delta is not None else dummy_1d,
-        out_b_position_delta=out_b_position_delta if out_b_position_delta is not None else dummy_1d,
-        b_shared_seq_len=model_input.b_shared_seq_len,
-        out_b_shared_seq_len=out_b_shared_seq_len,
-        b_shared_radix_node_id=model_input.b_shared_radix_node_id,
-        out_b_shared_radix_node_id=out_b_shared_radix_node_id,
+    _fwd_kernel_compact_dynamic_mtp_model_input[(1,)](
+        **tensors,
         selected_mask=selected_row_mask,
         selected_dst_pos=selected_dst_pos,
         batch_size=old_batch_size,
         HAS_INPUT_IDS=model_input.input_ids is not None,
         HAS_B_POSITION_DELTA=model_input.b_position_delta is not None,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=triton.next_power_of_2(old_batch_size),
         num_warps=8,
         num_stages=1,
     )
-
-    model_input.input_ids = out_input_ids
-    model_input.b_req_idx = out_b_req_idx
-    model_input.b_mtp_index = out_b_mtp_index
-    model_input.b_seq_len = out_b_seq_len
-    model_input.b_position_delta = out_b_position_delta
-    model_input.b_shared_seq_len = out_b_shared_seq_len
-    model_input.b_shared_radix_node_id = out_b_shared_radix_node_id
+    for name in fields:
+        setattr(model_input, name, tensors["out_" + name])
 
     if model_input.mtp_draft_input_hiddens is not None:
         assert model_input.mtp_draft_input_hiddens.is_cuda

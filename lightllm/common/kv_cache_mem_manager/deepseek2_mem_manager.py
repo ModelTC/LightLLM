@@ -1,8 +1,6 @@
 import torch
-import os
-import torch.distributed as dist
 from .mem_manager import MemoryManager
-from typing import List, Union, Any
+from typing import List, Any
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 from .operator import Deepseek2MemOperator

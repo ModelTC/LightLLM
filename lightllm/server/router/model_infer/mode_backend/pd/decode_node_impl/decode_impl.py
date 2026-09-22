@@ -1,4 +1,3 @@
-import random
 import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
@@ -102,16 +101,10 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 # 提前释放有问题的 mem_index。cur_kv_len 只表示已经传输完成的
                 # 逻辑长度，hold_kv_len 还包含最后一个页面中尚未使用的预留槽位。
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
-                error_mem_len = req_obj.hold_kv_len - old_prefix_len
-                if error_mem_len > 0:
-                    mem_indexes = (
-                        self.model.req_manager.req_to_token_indexs[
-                            req_obj.req_idx, old_prefix_len : req_obj.hold_kv_len
-                        ]
-                        .detach()
-                        .cpu()
+                if req_obj.hold_kv_len > old_prefix_len:
+                    self.model.req_manager.free_pages(
+                        self.model.req_manager.get_cpu_page_bases(req_obj.req_idx, old_prefix_len, req_obj.hold_kv_len)
                     )
-                    self.model.mem_manager.free(mem_indexes)
                     req_obj.cur_kv_len = old_prefix_len
                     req_obj.hold_kv_len = old_prefix_len
                     if self.is_master_in_dp:
@@ -131,14 +124,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             trans_page_size = self.args.pd_kv_page_size
             assert trans_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
-            assert req_obj.hold_kv_len == req_obj.cur_kv_len
-            need_mem_size = req_obj._kv_cache_alloc_need(input_len)
-
-            mem_indexes = self._alloc_req_kv_mem(req_obj, need_mem_size)
-            assert mem_indexes is not None
-            # 传输只覆盖真实 KV；最后一个模型页面中尚未使用的部分继续留在
-            # req_to_token_indexs 中，供后续 decode 直接切片使用。
-            mem_indexes = mem_indexes[: input_len - req_obj.cur_kv_len]
+            mem_indexes = self.model.req_manager.alloc_token_indexes(req_obj, input_len, self.radix_cache)
 
             while req_obj.pd_trans_kv_start_index < input_len:
                 cur_page_size = min(trans_page_size, input_len - req_obj.pd_trans_kv_start_index)
