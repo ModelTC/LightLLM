@@ -61,7 +61,7 @@ def test_dspark_without_block_size_uses_mtp_step(model_class, mtp_step):
     "model_class",
     [Qwen3DFlashModel, Qwen3_5DFlashModel, Qwen3DSparkModel, Qwen3_5DSparkModel],
 )
-def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
+def test_parallel_block_decode_commits_target_hiddens_directly(model_class, monkeypatch):
     model = model_class.__new__(model_class)
     model._cos_cached = torch.arange(24).view(6, 4)
     model._sin_cached = model._cos_cached + 100
@@ -70,7 +70,14 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
 
     target_hiddens = torch.arange(6, dtype=torch.float32).view(2, 3)
     mem_indexes = torch.tensor([7, 11])
-    model._select_mem_indexes = lambda _: mem_indexes
+    model.req_manager = SimpleNamespace(req_to_token_indexs=object())
+
+    def build_inputs(inputs, table):
+        assert inputs is model_input
+        assert table is model.req_manager.req_to_token_indexs
+        return mem_indexes, None
+
+    monkeypatch.setattr("lightllm.models.qwen3_dflash.model.build_kv_indexes_and_input_ids", build_inputs)
     observed_states = []
 
     class PreInfer:

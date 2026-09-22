@@ -1,12 +1,10 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
+from unit_tests.common.basemodel.triton_kernel.linear_att.test_mtp_fused_recurrent_autotune import reference
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA required", allow_module_level=True)
@@ -26,32 +24,13 @@ def _run_both(
     a_raw,
     b_raw,
 ):
-    """Run old (via autograd.Function) and new (direct kernel) side-by-side."""
-    state_old = initial_state.clone()
-    state_new = initial_state.clone()
-
-    o_old, fs_old = fused_recurrent_gated_delta_rule(
+    # The old FLA path retains FP32 state between tokens, unlike sequential decode
+    # and MTP since #1569. Compare with independent per-step rounding instead.
+    inputs = dict(
         q=q,
         k=k,
         v=v,
-        initial_state=state_old,
-        inplace_final_state=True,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
-        ssm_state_write_indices=ssm_state_write_indices,
-        num_accepted_tokens=num_accepted_tokens,
-        use_qk_l2norm_in_kernel=True,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        a_raw=a_raw,
-        b_raw=b_raw,
-    )
-
-    o_new, fs_new = mtp_fused_recurrent_gated_delta_rule(
-        q=q,
-        k=k,
-        v=v,
-        initial_state=state_new,
+        initial_state=initial_state.clone(),
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
         ssm_state_write_indices=ssm_state_write_indices,
@@ -61,8 +40,10 @@ def _run_both(
         a_raw=a_raw,
         b_raw=b_raw,
     )
-
-    return o_old, o_new, fs_old, fs_new
+    output_ref, state_ref = reference(inputs)
+    output, state = mtp_fused_recurrent_gated_delta_rule(**inputs)
+    torch.testing.assert_close(output.float(), output_ref, atol=2e-3, rtol=2e-2)
+    torch.testing.assert_close(state.float(), state_ref.float(), atol=2e-3, rtol=2e-2)
 
 
 @pytest.mark.parametrize("mtp_step", [1, 2, 3])
@@ -82,11 +63,11 @@ def test_mtp_verify_path(mtp_step):
     a_raw = torch.randn(num_tokens, HV, device="cuda", dtype=torch.bfloat16)
     b_raw = torch.randn(num_tokens, HV, device="cuda", dtype=torch.bfloat16)
     ssm_state = torch.randn(cache_slots, HV, K, V, device="cuda", dtype=torch.bfloat16)
-    ssm_idx = torch.randint(0, cache_slots, (batch, seqlen), device="cuda", dtype=torch.int32)
+    ssm_idx = torch.randperm(cache_slots, device="cuda", dtype=torch.int32)[:num_tokens].view(batch, seqlen)
     cu_seqlens = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * seqlen
     num_accepted = torch.full((batch,), seqlen, device="cuda", dtype=torch.int32)
 
-    o_old, o_new, fs_old, fs_new = _run_both(
+    _run_both(
         q,
         k,
         v,
@@ -100,15 +81,6 @@ def test_mtp_verify_path(mtp_step):
         a_raw,
         b_raw,
     )
-
-    assert torch.equal(
-        o_old, o_new
-    ), f"output mismatch, max diff={torch.abs(o_old.float() - o_new.float()).max().item():.6f}"
-    if not torch.equal(fs_old, fs_new):
-        assert torch.allclose(fs_old.float(), fs_new.float(), rtol=1e-2, atol=5.0), (
-            f"final_state mismatch at mtp_step={mtp_step}, "
-            f"max diff={torch.abs(fs_old.float() - fs_new.float()).max().item():.6f}"
-        )
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 4])
@@ -135,10 +107,10 @@ def test_variable_length_cu_seqlens(seed):
     b_raw = torch.randn(num_tokens, HV, device="cuda", dtype=torch.bfloat16)
     ssm_state = torch.randn(cache_slots, HV, K, V, device="cuda", dtype=torch.bfloat16)
     # 2D indices: S+1 = max_len columns, unused columns for short seqs are irrelevant
-    ssm_idx = torch.randint(0, cache_slots, (batch, max_len), device="cuda", dtype=torch.int32)
+    ssm_idx = torch.randperm(cache_slots, device="cuda", dtype=torch.int32)[: batch * max_len].view(batch, max_len)
     num_accepted = lengths.to(device="cuda", dtype=torch.int32)
 
-    o_old, o_new, fs_old, fs_new = _run_both(
+    _run_both(
         q,
         k,
         v,
@@ -152,15 +124,6 @@ def test_variable_length_cu_seqlens(seed):
         a_raw,
         b_raw,
     )
-
-    assert torch.equal(
-        o_old, o_new
-    ), f"seed={seed}: output mismatch, max diff={torch.abs(o_old.float() - o_new.float()).max().item():.6f}"
-    if not torch.equal(fs_old, fs_new):
-        assert torch.allclose(fs_old.float(), fs_new.float(), rtol=1e-2, atol=5.0), (
-            f"seed={seed}: final_state mismatch, "
-            f"max diff={torch.abs(fs_old.float() - fs_new.float()).max().item():.6f}"
-        )
 
 
 if __name__ == "__main__":
