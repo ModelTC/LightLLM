@@ -1,11 +1,6 @@
 import torch
 from typing import Optional, Tuple, Any
 from .base_impl import FuseMoeBaseImpl
-from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
-    build_initial_local_expert_ids,
-    build_logical_to_physical_map,
-    load_layer_placement,
-)
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
@@ -51,6 +46,13 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.num_redundant_experts_per_rank = start_args.eplb_num_redundant_experts_per_rank
 
         if self.num_redundant_experts_per_rank > 0:
+            # 延迟导入：顶层导入会经 mode_backend 包形成 meta_weights -> server 的循环依赖。
+            from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
+                build_initial_local_expert_ids,
+                build_logical_to_physical_map,
+                load_layer_placement,
+            )
+
             self.num_total_physical_experts = self.n_routed_experts + world_size * self.num_redundant_experts_per_rank
 
             # 阶段 1：先构造确定性的默认布局。未指定配置文件，或配置读取、校验失败时，
