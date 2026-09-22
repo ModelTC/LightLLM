@@ -6,20 +6,17 @@ import collections
 import pickle
 
 from sortedcontainers import SortedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager, HybridAttentionReqManager
-from lightllm.utils.infer_utils import mark_start, mark_end
-from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
+from lightllm.server.core.objs import Req, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
@@ -90,6 +87,7 @@ class InferenceContext:
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
         request_ids = []
+        req_prefix_lens = {}
         for r in requests:
             r_id, r_index, multimodal_params, _ = r
             assert r_id not in self.requests_mapping.keys()
@@ -100,11 +98,13 @@ class InferenceContext:
                 multimodal_params=multimodal_params,
                 vocab_size=self.vocab_size,
                 init_prefix_cache=init_prefix_cache,
+                req_prefix_lens=req_prefix_lens,
             )
             self.requests_mapping[r_id] = r_obj
             request_ids.append(r_id)
             req_objs.append(r_obj)
 
+        self.req_manager.copy_token_index_prefixes_to_gpu(req_prefix_lens)
         self.infer_req_ids.extend(request_ids)
 
         # diverse mode 下，建立一组请求间的主从关系
@@ -127,25 +127,25 @@ class InferenceContext:
 
         return req_objs
 
-    def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
+    def free_a_req_mem(self, free_page_index: List, req: "InferReq"):
         if self.radix_cache is None:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.hold_kv_len])
+            free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, 0, req.hold_kv_len))
         elif CacheTier.GPU not in req.cache_tiers:
-            self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
+            self._free_req_mem_without_radix_insert(free_page_index=free_page_index, req=req)
         else:
             if not self.is_hybrid_att_model:
-                self._full_att_free_req(free_token_index=free_token_index, req=req)
+                self._full_att_free_req(free_page_index=free_page_index, req=req)
             else:
-                self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
+                self._hybrid_att_free_req(free_page_index=free_page_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
         req.cur_kv_len = 0
         req.hold_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
-    def _free_req_mem_without_radix_insert(self, free_token_index: List, req: "InferReq"):
+    def _free_req_mem_without_radix_insert(self, free_page_index: List, req: "InferReq"):
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.hold_kv_len])
+        free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, shared_kv_len, req.hold_kv_len))
 
         if self.is_hybrid_att_model:
             # 释放请求尾部尚未移交给 radix cache 的 hybrid attention 小页状态。
@@ -163,27 +163,27 @@ class InferenceContext:
             req.shared_kv_node = None
         return
 
-    def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
+    def _full_att_free_req(self, free_page_index: List, req: "InferReq"):
         page_size = self.args.page_size
         cache_kv_len = req.cur_kv_len // page_size * page_size
-        # radix cache 只保存完整页，因此不足一页的有效 KV 和页内预留空间都不会参与插入。
-        # 先释放截断后的 [cache_kv_len, hold_kv_len) 区间，再处理可缓存前缀的插入和去重。
-        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
-        input_token_ids = req.get_input_token_ids()
-        key = torch.tensor(input_token_ids[0:cache_kv_len], dtype=torch.int64, device="cpu")
-        # .cpu() 是 流内阻塞操作
-        value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_kv_len].detach().cpu()
+        self._cache_req_prefix(free_page_index, req, cache_kv_len)
 
-        prefix_len, _ = self.radix_cache.insert(key, value)
+    def _cache_req_prefix(self, free_page_index: List, req: "InferReq", cache_kv_len: int, **cache_metadata):
+        """Cache complete KV pages and release the tail, duplicate pages and shared reference."""
+        indexes = self.req_manager.get_cpu_token_indexes(req.req_idx, 0, cache_kv_len)
+        free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, cache_kv_len, req.hold_kv_len))
+        key = torch.tensor(req.get_input_token_ids()[:cache_kv_len], dtype=torch.int64, device="cpu")
+        # The request row may be reused while the cached prefix is still alive.
+        prefix_len, _ = self.radix_cache.insert(key, indexes, **cache_metadata)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+        free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, old_prefix_len, prefix_len))
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
         return
 
-    def _hybrid_att_free_req(self, free_token_index: List, req: "InferReq"):
+    def _hybrid_att_free_req(self, free_page_index: List, req: "InferReq"):
         assert g_infer_context.is_hybrid_att_model is True
         args = get_env_start_args()
         hash_page_size = args.linear_att_hash_page_size
@@ -203,83 +203,32 @@ class InferenceContext:
         if req.hybrid_cache_len <= req.cur_kv_len and req.tail_small_page_buffer_id is not None:
             # 只有小页可以有 tail_small_page_buffer_id，然后进行小页插入。
             assert page_num % big_page_num != 0
-            free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][req.hybrid_cache_len : req.hold_kv_len]
-            )
-            req.cur_kv_len = req.hybrid_cache_len
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-            block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:page_num]
-            state_idxs = [None for _ in range(page_num)]
-            state_idxs[-1] = req.tail_small_page_buffer_id
-            req.tail_small_page_buffer_id = None
-            prefix_len, _ = self.radix_cache.insert(
-                key,
-                value,
-                block_hashs=block_hashs,
-                block_state_idxs=state_idxs,
-                len_to_big_page_id=req.hybrid_len_to_big_page_id,
-            )
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
-            return
-
-        if shared_kv_len < tail_big_page_token_num <= req.cur_kv_len:
-            free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][tail_big_page_token_num : req.hold_kv_len]
-            )
-            req.cur_kv_len = tail_big_page_token_num
-
+            cache_kv_len = req.hybrid_cache_len
+        elif shared_kv_len < tail_big_page_token_num <= req.cur_kv_len:
             assert req.tail_small_page_buffer_id is None
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-            cur_page_num = tail_big_page_token_num // hash_page_size
             assert tail_big_page_token_num % hash_page_size == 0
-            block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:cur_page_num]
-            state_idxs = [None for _ in range(cur_page_num)]
-            prefix_len, _ = self.radix_cache.insert(
-                key,
-                value,
-                block_hashs=block_hashs,
-                block_state_idxs=state_idxs,
-                len_to_big_page_id=req.hybrid_len_to_big_page_id,
-            )
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
-            return
-
-        if shared_kv_len <= req.cur_kv_len:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.hold_kv_len])
-            # 该分支不会把 prefill 阶段累积的 big page id 插入 radix cache（典型为 pause/abort
-            # 在 prefill 跨过 big page 边界后、到达末尾前触发），需在此显式释放，避免泄漏。
-
-            # 释放本请求 prefill 阶段在 big page 边界上申请、但尚未插入 radix cache 的 big page
-            # state buffer。仅当请求未走 insert 分支(小页/大页插入)就被释放时才会有残留，典型场景：
-            # big page 模式下请求在 prefill 跨过 big page 边界后、到达末尾前被 pause / abort。
-            # 若不释放，会泄漏 big page state slot，并触发 free_a_req_mem 中 dict 为空的断言。
-            if req.hybrid_len_to_big_page_id:
-                self.radix_cache.big_page_buffers.free_state_cache(list(req.hybrid_len_to_big_page_id.values()))
-                req.hybrid_len_to_big_page_id.clear()
-
-            req.cur_kv_len = shared_kv_len
+            cache_kv_len = tail_big_page_token_num
+        elif shared_kv_len <= req.cur_kv_len:
             assert req.tail_small_page_buffer_id is None
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.node_prefix_total_len == req.cur_kv_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
+            req.cur_kv_len = shared_kv_len
+            self._free_req_mem_without_radix_insert(free_page_index, req)
             return
+        else:
+            assert False, f"error state: cur_kv_len: {req.cur_kv_len}"
 
-        assert False, f"error state: cur_kv_len: {req.cur_kv_len}"
+        req.cur_kv_len = cache_kv_len
+        page_num = cache_kv_len // hash_page_size
+        state_idxs = [None] * page_num
+        state_idxs[-1] = req.tail_small_page_buffer_id
+        req.tail_small_page_buffer_id = None
+        self._cache_req_prefix(
+            free_page_index,
+            req,
+            cache_kv_len,
+            block_hashs=req.shm_req.hybrid_token_hash_list.get_all()[:page_num],
+            block_state_idxs=state_idxs,
+            len_to_big_page_id=req.hybrid_len_to_big_page_id,
+        )
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -303,7 +252,7 @@ class InferenceContext:
         should_modify_shm = modify_shm_finish_state and self.backend.is_master_in_dp
 
         free_req_index = []
-        free_token_index = []
+        free_page_index = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
@@ -312,7 +261,7 @@ class InferenceContext:
             if should_modify_shm:
                 req.final_token_metadata.dump()
 
-            self.free_a_req_mem(free_token_index, req)
+            self.free_a_req_mem(free_page_index, req)
 
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
@@ -322,9 +271,9 @@ class InferenceContext:
                 req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
-        if free_token_index:
-            free_token_index = custom_cat(free_token_index)
-        self.req_manager.free(free_req_index, free_token_index)
+        if free_page_index:
+            free_page_index = np.concatenate(free_page_index)
+        self.req_manager.free(free_req_index, free_page_index)
 
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
@@ -348,13 +297,12 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
-            free_token_index = []
+            free_page_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self.free_a_req_mem(free_token_index, req)
+                self.free_a_req_mem(free_page_index, req)
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True
@@ -362,27 +310,28 @@ class InferenceContext:
                     req.shm_req.is_paused = True
                     logger.debug(f"infer paused req id {req.req_id}")
 
-            if len(free_token_index) != 0:
-                free_token_index = custom_cat(free_token_index)
-                self.req_manager.free_token(free_token_index)
+            if len(free_page_index) != 0:
+                free_page_index = np.concatenate(free_page_index)
+                self.req_manager.free_pages(free_page_index)
         return self
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
             can_alloc_token_num = self.get_can_alloc_token_num()
+            req_prefix_lens = {}
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
                 # 才允许执行 radix cache 匹配，避免在容量不足时提前改变引用或重建 hybrid cache 状态。
-                alloc_token_num = req._kv_cache_alloc_need(req.get_cur_total_len())
+                alloc_token_num = self.req_manager.get_need_alloc_token_num(req, req.get_cur_total_len())
                 if alloc_token_num > can_alloc_token_num:
                     break
 
                 if g_infer_context.is_hybrid_att_model:
-                    req._hybrid_match_radix_cache()
+                    req._hybrid_match_radix_cache(req_prefix_lens=req_prefix_lens)
                 else:
-                    req._match_radix_cache()
+                    req._match_radix_cache(req_prefix_lens=req_prefix_lens)
 
                 assert req.paused is True
                 req.paused = False
@@ -390,6 +339,7 @@ class InferenceContext:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= alloc_token_num
+            self.req_manager.copy_token_index_prefixes_to_gpu(req_prefix_lens)
         return
 
     def get_can_alloc_token_num(self):
@@ -457,7 +407,7 @@ class InferSamplingParams:
         vocab_size: int,
     ) -> None:
         self.shm_param = shm_req.sample_params
-        self.disable_prompt_cache = self.shm_param.disable_prompt_cache
+        self.disable_prompt_cache = self.shm_param.disable_prompt_cache or self.shm_param.prompt_logprobs >= 0
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
@@ -533,6 +483,8 @@ class InferReq:
         multimodal_params: MultimodalParams,
         vocab_size: int = -1,
         init_prefix_cache: bool = True,
+        *,
+        req_prefix_lens,
     ):
         self.args = get_env_start_args()
         self.req_id = req_id
@@ -602,9 +554,9 @@ class InferReq:
 
         if init_prefix_cache:
             if g_infer_context.is_hybrid_att_model:
-                self._hybrid_match_radix_cache()
+                self._hybrid_match_radix_cache(req_prefix_lens=req_prefix_lens)
             else:
-                self._match_radix_cache()
+                self._match_radix_cache(req_prefix_lens=req_prefix_lens)
         return
 
     def _init_all_state(self):
@@ -638,7 +590,14 @@ class InferReq:
 
         return
 
-    def _match_radix_cache(self):
+    def _set_cache_prefix(self, shared_node, indexes, req_prefix_lens):
+        g_infer_context.req_manager.write_token_index_prefix(self.req_idx, 0, indexes, req_prefix_lens=req_prefix_lens)
+        self.shared_kv_node = shared_node
+        self.cur_kv_len = self.hold_kv_len = indexes.numel()
+        assert self.hold_kv_len % self.args.page_size == 0
+        self.shm_req.prompt_cache_len = self.cur_kv_len
+
+    def _match_radix_cache(self, req_prefix_lens):
         assert (
             g_infer_context.is_hybrid_att_model is False
         ), "current _match_radix_cache does not support hybrid attention models, to do..."
@@ -649,19 +608,12 @@ class InferReq:
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
-                self.shared_kv_node = share_node
-                ready_cache_len = share_node.node_prefix_total_len
-                # 从 cpu 到 gpu 是流内阻塞操作
-                g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                self.hold_kv_len = self.cur_kv_len
-                assert self.hold_kv_len % self.args.page_size == 0
-                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                self._set_cache_prefix(share_node, value_tensor, req_prefix_lens)
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
 
-    def _hybrid_match_radix_cache(self):
+    def _hybrid_match_radix_cache(self, req_prefix_lens):
         assert (
             g_infer_context.is_hybrid_att_model is True
         ), "current _hybrid_match_radix_cache only supports hybrid attention models, to do..."
@@ -683,94 +635,41 @@ class InferReq:
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
                 key, block_hashs=block_hashs, update_refs=True
             )
+            radix_cache = g_infer_context.radix_cache
+            req_manager = g_infer_context.req_manager
+            if share_node is not None and not share_node.is_big_page_node() and not big_page_is_disable:
+                shared_kv_len = share_node.node_prefix_total_len
+                cur_big_page_tokens = shared_kv_len // big_page_token_num * big_page_token_num
+                need_tokens = shared_kv_len - cur_big_page_tokens
+                if g_infer_context.get_can_alloc_token_num() <= need_tokens:
+                    # 无法重建小页尾部时，只恢复最近的大页 checkpoint。
+                    share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
+                    if share_node is not None:
+                        assert share_node.is_big_page_node()
+                        value_tensor = value_tensor[: share_node.node_prefix_total_len]
+
             if share_node is not None:
                 assert self.tail_small_page_buffer_id is None
-                if share_node.is_big_page_node():
-                    # 大页匹配
-                    self.shared_kv_node = share_node
-                    ready_cache_len = share_node.node_prefix_total_len
-                    # 从 cpu 到 gpu 是流内阻塞操作
-                    g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                    self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                    self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                    assert self.tail_small_page_buffer_id is None
-                    # 恢复 hybrid checkpoint
-                    g_infer_context.req_manager.restore_big_page_state(
-                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
-                    )
-                else:
-                    # 小页匹配
-                    if big_page_is_disable:
-                        # 如果 大页本质是被禁用的，可以直接使用小页的匹配结果
-                        self.shared_kv_node = share_node
-                        ready_cache_len = share_node.node_prefix_total_len
-                        # 从 cpu 到 gpu 是流内阻塞操作
-                        g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                        self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                        self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                        assert self.tail_small_page_buffer_id is None
-                        # 恢复 hybrid checkpoint
-                        g_infer_context.req_manager.restore_small_page_state(
-                            req=self,
-                        )
+                if share_node.is_big_page_node() or big_page_is_disable:
+                    self._set_cache_prefix(share_node, value_tensor, req_prefix_lens)
+                    if share_node.is_big_page_node():
+                        req_manager.restore_big_page_state(big_page_buffer_idx=share_node.big_page_buffer_idx, req=self)
                     else:
-                        # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
-                        # 对应的小页对应的节点，递归找到对应最近的大叶节点进行返回,然后赋值到req.shared_node 对象上
-                        shared_kv_len = share_node.node_prefix_total_len
-                        cur_big_page_tokens = (shared_kv_len // big_page_token_num) * big_page_token_num
-                        need_tokens = shared_kv_len - cur_big_page_tokens
-                        radix_cache = g_infer_context.radix_cache
-                        if g_infer_context.get_can_alloc_token_num() > need_tokens:
-                            # 有充足的token 容量时
-                            assert need_tokens % self.args.page_size == 0
-                            radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
-                            tail_mems = radix_cache.mem_manager.alloc(need_size=need_tokens)
-                            g_infer_context.req_manager.req_to_token_indexs[
-                                self.req_idx, 0:cur_big_page_tokens
-                            ] = value_tensor[0:cur_big_page_tokens]
-                            g_infer_context.req_manager.req_to_token_indexs[
-                                self.req_idx, cur_big_page_tokens:shared_kv_len
-                            ] = tail_mems
-
-                            # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
-                            radix_cache.mem_manager.operator.copy_mem_to_mem(
-                                value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
-                            )
-                            # 尾部 KV 换到新 mem 后，同步拷贝已捕获的 top-k prompt logprobs。
-                            self.prompt_selected_logprobs.copy_capture_slots_if_needed(
-                                source_indexes=value_tensor[cur_big_page_tokens:shared_kv_len],
-                                destination_indexes=tail_mems,
-                            )
-
-                            self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
-                            g_infer_context.req_manager.restore_small_page_state(
-                                req=self,
-                            )
-                            self.shared_kv_node = None
-
-                            big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
-                            self.shared_kv_node = big_page_shared_node
-                            self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                            self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                        else:
-                            # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
-                            share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
-                            if share_node is not None:
-                                assert share_node.is_big_page_node()
-                                # 大页匹配
-                                self.shared_kv_node = share_node
-                                ready_cache_len = share_node.node_prefix_total_len
-                                # 从 cpu 到 gpu 是流内阻塞操作
-                                g_infer_context.req_manager.req_to_token_indexs[
-                                    self.req_idx, 0:ready_cache_len
-                                ] = value_tensor[0:ready_cache_len]
-                                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                                assert self.tail_small_page_buffer_id is None
-                                # 恢复 hybrid checkpoint
-                                g_infer_context.req_manager.restore_big_page_state(
-                                    big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
-                                )
+                        req_manager.restore_small_page_state(req=self)
+                else:
+                    # 小页尾部复制到本请求独占的页；先恢复 checkpoint，再释放小页引用。
+                    assert need_tokens % self.args.page_size == 0
+                    radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
+                    tail_mems = radix_cache.mem_manager.alloc(need_size=need_tokens)
+                    indexes = torch.cat([value_tensor[:cur_big_page_tokens], tail_mems])
+                    radix_cache.mem_manager.operator.copy_mem_to_mem(value_tensor[cur_big_page_tokens:], tail_mems)
+                    self.prompt_selected_logprobs.copy_capture_slots_if_needed(
+                        source_indexes=value_tensor[cur_big_page_tokens:], destination_indexes=tail_mems
+                    )
+                    self.shared_kv_node = share_node
+                    req_manager.restore_small_page_state(req=self)
+                    share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
+                    self._set_cache_prefix(share_node, indexes, req_prefix_lens)
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
@@ -933,39 +832,17 @@ class InferReq:
                         return True
         return False
 
-    def prefill_need_token_num(self, is_chuncked_prefill: bool) -> Tuple[int, int]:
-        """返回 (本轮需要计算的 token 数, 需要额外分配的 KV token 容量)。
-
-        第一个值为目标 KV 长度减去已计算的 cur_kv_len，用于限制 batch 的计算量。
-        第二个值先将目标 KV 长度按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
-        用于检查和分配 KV 空间。已有页的剩余容量足够时，即使仍需计算 token，第二个值也可以为 0。
-        """
+    def prefill_need_token_num(self, is_chuncked_prefill: bool) -> int:
+        """本轮计算量；调度通过计算预算检查后再检查 KV 容量。"""
         if is_chuncked_prefill:
             target_kv_len = self.get_chuncked_input_token_len()
         else:
             target_kv_len = self.get_cur_total_len()
-        token_num = target_kv_len - self.cur_kv_len
-        alloc_token_num = self._kv_cache_alloc_need(target_kv_len)
-        return token_num, alloc_token_num
+        return target_kv_len - self.cur_kv_len
 
-    def decode_need_token_num(self) -> Tuple[int, int]:
-        """返回 (decode 需要的 token 数, 需要额外分配的 KV token 容量)。
-
-        第一个值沿用分页分配前的需求估算：普通 decode 为 1，MTP 为 2 * (mtp_step + 1)，
-        其中 MTP 的两倍系数包含原有的预留窗口，并非本轮实际接受的输出 token 数。
-        第二个值将 cur_kv_len 加上上述需求后按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
-        用于检查和分配 KV 空间。已有页的剩余容量足够时，第二个值为 0，仍可继续 decode。
-        """
-        decode_token_num = 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
-        alloc_token_num = self._kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
-        return decode_token_num, alloc_token_num
-
-    def _kv_cache_alloc_need(self, target_kv_len: int) -> int:
-        page_size = self.args.page_size
-        target_hold_len = (target_kv_len + page_size - 1) // page_size * page_size
-        alloc_token_num = max(target_hold_len - self.hold_kv_len, 0)
-        assert alloc_token_num % page_size == 0
-        return alloc_token_num
+    def decode_need_token_num(self) -> int:
+        """普通 decode 为 1；MTP 保留原有的双窗口容量。"""
+        return 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
 
 
 class InferReqUpdatePack:

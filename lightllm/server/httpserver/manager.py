@@ -28,7 +28,7 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
-from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
+from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient

@@ -1,6 +1,5 @@
 import time
-from typing import List, Dict
-from lightllm.utils.infer_utils import calculate_time
+from typing import List
 from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.config_utils import get_fixed_kv_len, get_running_max_req_size_per_dp

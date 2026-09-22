@@ -2,7 +2,7 @@ import dataclasses
 import torch
 import triton
 from ..base_att import BasePrefillAttState, BaseDecodeAttState, AttControl
-from typing import Optional, TYPE_CHECKING, Tuple
+from typing import Tuple
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor

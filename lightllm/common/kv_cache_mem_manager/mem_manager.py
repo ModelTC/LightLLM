@@ -1,6 +1,4 @@
 import math
-import os
-import re
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -47,7 +45,7 @@ class MemoryManager:
         self.page_size = get_env_start_args().page_size
         self.size = self.size // self.page_size * self.page_size
 
-        self.allocator = KvCacheAllocator(self.size)
+        self.allocator = KvCacheAllocator(self.size, self.page_size)
 
         self._init_buffers(
             self.size,
@@ -194,9 +192,6 @@ class MemoryManager:
         # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
 
-    def _free_buffers(self):
-        self.kv_buffer = None
-
     def alloc(self, need_size) -> torch.Tensor:
         assert (
             need_size % self.page_size == 0
@@ -208,23 +203,6 @@ class MemoryManager:
 
     def free_all(self):
         self.allocator.free_all()
-
-    def resize_mem(self, new_size):
-        """
-        just for test code
-        """
-        size = new_size // self.page_size * self.page_size
-        dtype = self.dtype
-        head_num = self.head_num
-        head_dim = self.head_dim
-        layer_num = self.layer_num
-
-        self.size = size
-        self.allocator.resize(size)
-        self._free_buffers()
-        self._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        self.HOLD_TOKEN_MEMINDEXES = tuple(range(self.size, self.size + self.page_size))
-        return
 
     def get_index_kv_buffer(self, index):
         return {"kv_buffer": self.kv_buffer[:, index]}
