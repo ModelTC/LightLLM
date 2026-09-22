@@ -253,8 +253,11 @@ Memory and Batch Processing Parameters
 
 .. option:: --running_max_req_size
 
-    Maximum number of requests for simultaneous forward inference, default ``256``.
-    PD Master does not currently use this parameter for request admission limiting.
+    Total shared request slots on the local node, default ``256``. In DP mode,
+    each rank's scheduling concurrency and CUDA Graph batch limit use this value
+    divided by the local DP rank count, rounded down. With DP prompt cache fetch,
+    Normal and Prefill model request slots retain the global capacity for cross-rank
+    prefix matching. PD Master does not currently use this parameter for admission limiting.
 
 .. option:: --max_req_total_len
 

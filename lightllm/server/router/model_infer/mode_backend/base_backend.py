@@ -773,6 +773,9 @@ class ModeBackend:
 
             if is_decode:
                 _, alloc_token_num = req_obj.decode_need_token_num()
+                # Small pages benefit from reserving a few decode slots per allocation.
+                if alloc_token_num > 0 and self.args.page_size < 8:
+                    alloc_token_num += 8 // self.args.page_size * self.args.page_size
                 can_run = alloc_token_num <= can_alloc_token_num
                 if can_run and is_deepseek_v4:
                     swa_page_num = req_obj.get_dsv4_decode_need_swa_page_num()

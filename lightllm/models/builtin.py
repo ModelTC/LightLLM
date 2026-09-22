@@ -89,6 +89,18 @@ ModelRegistry.register(
 ModelRegistry.register("minicpm", "lightllm.models.minicpm.model:MiniCPMTpPartModel")
 ModelRegistry.register("mistral", "lightllm.models.mistral.model:MistralTpPartModel")
 ModelRegistry.register("mixtral", "lightllm.models.mixtral.model:MixtralTpPartModel")
+ModelRegistry.register(
+    "neo_chat",
+    "lightllm.models.neo_chat.model:NeoTpPartModel",
+    is_multimodal=True,
+    condition=llm_model_type_is("qwen3"),
+)
+ModelRegistry.register(
+    "neo_chat",
+    "lightllm.models.neo_chat_moe.model:NeoTpMOEPartModel",
+    is_multimodal=True,
+    condition=llm_model_type_is("qwen3_moe"),
+)
 ModelRegistry.register("phi3", "lightllm.models.phi3.model:Phi3TpPartModel")
 ModelRegistry.register("qwen", "lightllm.models.qwen.model:QWenTpPartModel")
 ModelRegistry.register("qwen2", "lightllm.models.qwen2.model:Qwen2TpPartModel")

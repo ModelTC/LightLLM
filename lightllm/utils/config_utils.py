@@ -88,6 +88,19 @@ def get_generation_config_diff_dict(model_path: str) -> Dict[str, Any]:
     return {key: value for key, value in generation_cfg.items() if value is not None}
 
 
+def get_running_max_req_size_per_dp(args) -> int:
+    """Return the request capacity for one local DP rank."""
+    if args.running_max_req_size < 1:
+        raise ValueError("running_max_req_size must be >= 1")
+
+    local_dp_size = max(1, args.dp // args.nnodes)
+    # Cache fetch and beam groups need the full capacity.
+    requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
+    if local_dp_size > 1 and not requires_global_capacity:
+        return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
+    return args.running_max_req_size
+
+
 def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
     """
     Derive `max_req_total_len` from model config.json.
@@ -498,6 +511,8 @@ def has_vision_module(model_path: str) -> bool:
             == "qwen3_omni_moe_vision_encoder"
         ):
             # Qwen3OmniMoeVisionTransformerPretrainedModel
+            return True
+        elif model_type == "neo_chat":
             return True
         elif model_type in ["qwen3_5", "qwen3_5_moe"]:
             return True

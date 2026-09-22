@@ -157,5 +157,9 @@ def get_tokenizer(
             processor = AutoProcessor.from_pretrained(tokenizer_name)
             image_processor = processor.image_processor
         tokenizer = Gemma4Tokenizer(tokenizer, model_cfg, image_processor=image_processor)
+    elif model_type == "neo_chat":
+        from ..models.neo_chat_moe.model import NeoChatTokenizer
+
+        tokenizer = NeoChatTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
 
     return tokenizer

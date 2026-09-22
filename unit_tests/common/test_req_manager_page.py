@@ -249,7 +249,7 @@ def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
     backend._timer_merge_radix_tree = lambda: None
     backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
     backend._reorder_long_prefill_reqs = lambda reqs: reqs
-    context.get_can_alloc_token_num = lambda: 4
+    context.get_can_alloc_token_num = lambda: 12
     context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
     context.filter_reqs = lambda finished_reqs: None
     context.pause_reqs = lambda reqs, is_master_in_dp: None
@@ -287,9 +287,58 @@ def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
 
     assert prefill_reqs == []
     assert decode_reqs == [req]
-    assert req.hold_kv_len == 8
-    assert context.req_manager.mem_manager.alloc_sizes == [4]
+    assert req.hold_kv_len == 16
+    assert context.req_manager.mem_manager.alloc_sizes == [12]
     assert copy_modes == [True]
+
+
+@pytest.mark.parametrize(
+    "page_size, expected_alloc_token_num",
+    [(1, 9), (3, 9), (4, 12), (7, 14), (8, 8)],
+)
+def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_steps(
+    monkeypatch, page_size, expected_alloc_token_num
+):
+    context, backend = _make_context(monkeypatch)
+    context.args.page_size = page_size
+    context.req_manager.req_to_token_indexs = torch.full((2, 64), -1, dtype=torch.int32)
+    backend.args.enable_cpu_cache = False
+    backend.args.enable_prefill_decode_mixed = False
+    backend.args.run_mode = "normal"
+    backend.support_overlap = False
+    backend.batch_max_tokens = 8
+    backend.is_master_in_dp = True
+    backend._timer_merge_radix_tree = lambda: None
+    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
+    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    context.get_can_alloc_token_num = lambda: 32
+    context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
+    context.filter_reqs = lambda finished_reqs: None
+    context.pause_reqs = lambda reqs, is_master_in_dp: None
+
+    req = _make_req(0)
+    req.args = context.args
+    req.cur_kv_len = page_size
+    req.hold_kv_len = page_size
+    req.mtp_step = 0
+    req.filter_mark = False
+    req.wait_pause = False
+    req.paused = False
+    req.infer_aborted = False
+    req.finish_status = infer_batch.FinishStatus()
+    req.get_cur_total_len = lambda: req.cur_kv_len + 1
+    req.decode_need_token_num = MethodType(InferReq.decode_need_token_num, req)
+    context.req_manager.req_to_token_indexs[0, :page_size] = torch.arange(page_size, dtype=torch.int32)
+    context.req_manager.mem_manager.next_index = page_size
+    backend._filter_not_ready_reqs = lambda req_ids: [req]
+
+    for _ in range(expected_alloc_token_num):
+        _, decode_reqs = backend._get_classed_reqs(req_ids=[0])
+        assert decode_reqs == [req]
+        req.cur_kv_len += 1
+
+    assert req.hold_kv_len == page_size + expected_alloc_token_num
+    assert context.req_manager.mem_manager.alloc_sizes == [expected_alloc_token_num]
 
 
 def test_decode_reserves_mtp_headroom(monkeypatch):

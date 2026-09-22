@@ -96,6 +96,7 @@ with tempfile.TemporaryDirectory() as directory:
         ({"model_type": "gemma3"}, "gemma3.model", "Gemma3Tokenizer"),
         ({"model_type": "gemma4"}, "gemma4.tokenizer", "Gemma4Tokenizer"),
         ({"model_type": "gemma4", "vision_config": {}}, "gemma4.tokenizer", "Gemma4Tokenizer"),
+        ({"model_type": "neo_chat"}, "neo_chat_moe.model", "NeoChatTokenizer"),
     ],
 )
 def test_selected_multimodal_tokenizer_is_loaded(monkeypatch, config, module_name, class_name):

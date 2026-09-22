@@ -41,6 +41,7 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
         enable_cpu_cache=False,
         enable_prefill_decode_mixed=False,
         run_mode="decode",
+        page_size=4,
     )
     backend.support_overlap = support_overlap
     backend.is_master_in_dp = True
