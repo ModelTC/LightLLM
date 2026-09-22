@@ -57,15 +57,20 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
         if self.req_to_mtp_state_index is not None:
             self.req_to_mtp_state_index[req.req_idx] = 0
+        if self.mem_manager.windowed_draft_kv is not None:
+            self.mem_manager.windowed_draft_kv.reset_req(req.req_idx)
         return
 
     def create_small_page_cache_manager(self, size: int):
-        self.small_page_buffers = LinearAttCacheManager(size=size, linear_config=self.linear_config)
+        self.small_page_buffers = LinearAttCacheManager(
+            size=size, linear_config=self.linear_config, window_config=self.mem_manager.window_state_config
+        )
         return self.small_page_buffers
 
     def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
+        buffer_indexes_cpu = buffer_indexes
         buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
         state_cache_manager = self.big_page_buffers
         copy_linear_att_state_to_kv_buffer(
@@ -77,6 +82,12 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             cpu_kv_ssm_state=state_cache_manager.ssm_state_cache.buffer,
             mtp_step=self.mtp_step,
         )
+        if state_cache_manager.draft_window is not None:
+            for req_idx, buffer_idx in zip(req_indexes, buffer_indexes_cpu):
+                if buffer_idx != -1:
+                    self.mem_manager.windowed_draft_kv.save_checkpoint(
+                        req_idx, state_cache_manager.draft_window, buffer_idx
+                    )
         return
 
     def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager: LinearAttCacheManager):
@@ -87,6 +98,8 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         dst_conv_state, dst_ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
         dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
+        if state_cache_manager.draft_window is not None:
+            self.mem_manager.windowed_draft_kv.save_checkpoint(req_idx, state_cache_manager.draft_window, buffer_idx)
 
     def get_mamba_cache(self, layer_idx_in_all: int):
         assert (
@@ -116,6 +129,10 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         conv_cache_width = conv_state.shape[-1]
         self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
+        if state_cache_manager.draft_window is not None:
+            self.mem_manager.windowed_draft_kv.restore_checkpoint(
+                req.req_idx, state_cache_manager.draft_window, buffer_idx
+            )
         if self.req_to_mtp_state_index is not None:
             self.req_to_mtp_state_index[req.req_idx] = 0
         return

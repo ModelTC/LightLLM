@@ -62,7 +62,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    is_hybrid_model = is_hybrid_att_model(args.model_dir, args)
     mem_manager_class = None if is_hybrid_model else select_mem_manager_class()
     if is_hybrid_model:
         hybrid_config = get_hybrid_cache_config()

@@ -110,6 +110,28 @@ class WindowKVStore:
         self.ends.zero_()
         self.counts.zero_()
 
+    def reset_req(self, req_idx):
+        self.ends[req_idx] = 0
+        self.counts[req_idx] = 0
+
+    def save_checkpoint(self, req_idx, buffers, slot):
+        # Copy contiguous per-layer windows, preserving the physical p % W layout.
+        # The prefill stream event covers these D2H copies before radix publication.
+        for layer in range(self.kv.shape[0]):
+            buffers.kv[slot, layer].copy_(self.kv[layer, req_idx], non_blocking=True)
+        buffers.ends[slot : slot + 1].copy_(self.ends[req_idx : req_idx + 1], non_blocking=True)
+        buffers.counts[slot : slot + 1].copy_(self.counts[req_idx : req_idx + 1], non_blocking=True)
+
+    def restore_checkpoint(self, req_idx, buffers, slot):
+        for layer in range(self.kv.shape[0]):
+            self.kv[layer, req_idx].copy_(buffers.kv[slot, layer], non_blocking=True)
+        self.ends[req_idx : req_idx + 1].copy_(buffers.ends[slot : slot + 1], non_blocking=True)
+        self.counts[req_idx : req_idx + 1].copy_(buffers.counts[slot : slot + 1], non_blocking=True)
+        # Small-page matching can release the source node immediately after return.
+        # Finish H2D before its CPU slot can be evicted and overwritten.
+        if self.kv.is_cuda:
+            torch.cuda.current_stream(self.kv.device).synchronize()
+
     def prepare(self, reqs, features, starts, first, lengths, max_new):
         n = min(max_new, self.capacity)
         packed = features.new_empty((reqs.numel() * n, features.shape[-1]))
@@ -166,3 +188,68 @@ class WindowKVStore:
         slots = torch.arange(self.capacity, device=reqs.device)[None, :]
         positions = (end - self.capacity).clamp_min(0) + slots
         return positions.masked_fill(slots >= end.clamp_max(self.capacity), -1)
+
+
+class WindowKVPageHelper:
+    """Append a request's draft window to the existing PD att_state page.
+
+    The page uses global KV heads, just like ordinary PD KV pages, so P and D
+    may use different TP sizes. The ring's physical slot order is preserved.
+    """
+
+    def __init__(self, mem_manager, offset=0):
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        self.mem_manager = mem_manager
+        store = mem_manager.windowed_draft_kv
+        args = get_env_start_args()
+        tp_world_size = args.tp // args.dp
+        layers, _, window, heads, dim = store.kv.shape
+        self.shape = (window, layers, heads * tp_world_size, dim)
+        self.kv_offset = (offset + 7) // 8 * 8
+        self.kv_nbytes = window * layers * heads * tp_world_size * dim * store.kv.element_size()
+        self.end_offset = (self.kv_offset + self.kv_nbytes + 7) // 8 * 8
+        self.state_nbytes = self.end_offset + 12
+
+    def assert_page_size(self):
+        page = self.mem_manager.kv_move_buffer[0]
+        page_nbytes = page.numel() * page.element_size()
+        assert page_nbytes >= self.state_nbytes, (
+            f"PD page bytes {page_nbytes} is smaller than attention state bytes {self.state_nbytes}; "
+            "increase --pd_kv_page_size on both P and D nodes"
+        )
+
+    def copy_req_page(self, page_index, req_idx, dp_mems, mode):
+        from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
+
+        assert mode in ("read", "write")
+        assert req_idx is not None
+        page = self.mem_manager.kv_move_buffer[page_index].view(torch.uint8).reshape(-1)
+        kv_page = (
+            page[self.kv_offset : self.kv_offset + self.kv_nbytes]
+            .view(self.mem_manager.windowed_draft_kv.kv.dtype)
+            .view(self.shape)
+        )
+        end_page = page[self.end_offset : self.end_offset + 8].view(torch.int64)
+        count_page = page[self.end_offset + 8 : self.end_offset + 12].view(torch.int32)
+        window = self.shape[0]
+        indexes = torch.arange(req_idx * window, (req_idx + 1) * window, dtype=torch.int64, device=page.device)
+        for tp_index, mem in enumerate(dp_mems):
+            store = mem.windowed_draft_kv
+            layers, requests, capacity, heads, dim = store.kv.shape
+            assert (capacity, layers, heads * len(dp_mems), dim) == self.shape
+            assert store.kv.dtype == kv_page.dtype
+            page_io(
+                mem_indexes=indexes,
+                page_tensor=kv_page,
+                kv_buffer=store.kv.view(layers, requests * capacity, heads, dim),
+                tp_index=tp_index,
+                tp_world_size=len(dp_mems),
+                mode=mode,
+            )
+            if mode == "read":
+                store.ends[req_idx : req_idx + 1].copy_(end_page, non_blocking=True)
+                store.counts[req_idx : req_idx + 1].copy_(count_page, non_blocking=True)
+            elif tp_index == 0:
+                end_page.copy_(store.ends[req_idx : req_idx + 1], non_blocking=True)
+                count_page.copy_(store.counts[req_idx : req_idx + 1], non_blocking=True)

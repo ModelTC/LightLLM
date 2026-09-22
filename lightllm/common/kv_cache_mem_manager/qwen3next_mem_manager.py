@@ -5,6 +5,7 @@ from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .operator import LinearAttMemOperator
+from .windowed_mtp import WindowKVPageHelper
 from typing import Tuple, Any, List
 
 logger = init_logger(__name__)
@@ -32,13 +33,7 @@ class Qwen3NextMemManager(MemoryManager):
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
 
-    def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        # TODO 初始化线性 att 对应的部分 buffer.
-        self._init_linear_att_buffers()
-        return
-
-    def _init_linear_att_buffers(self):
+    def _init_state_cache_buffers(self):
         big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
@@ -49,40 +44,24 @@ class Qwen3NextMemManager(MemoryManager):
             size=triton.cdiv(self.size, big_page_token_num) + 2,
             linear_config=self.linear_config,
             keep_num=2,
+            window_config=self.window_state_config,
         )
 
         self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
         self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
         return
 
-    def _free_buffers(self):
-        super()._free_buffers()
-        self._free_linear_att_buffers()
-        return
-
-    def _free_linear_att_buffers(self):
-        self.big_page_buffers = None
-        return
-
     def write_to_shm(self, req_manager):
         self.req_to_conv_state = req_manager.req_to_conv_state
         self.req_to_ssm_state = req_manager.req_to_ssm_state
-        # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
-        # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本
-        # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针
-        # 启动会报 "Pointer argument cannot be accessed from Triton (cpu tensor?)"。
-        # 跨进程消费方并不使用 cpu 侧大页 state cache，序列化期间临时剔除以保住 pinned。
-        big_page_buffers = self.big_page_buffers
-        self.big_page_buffers = None
-        try:
-            return super().write_to_shm(req_manager)
-        finally:
-            self.big_page_buffers = big_page_buffers
+        return super().write_to_shm(req_manager)
 
-    def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
-        Qwen3NextLinearAttPageHelper(self).assert_page_size()
-        return kv_move_buffer
+    def _assert_att_state_page_size(self):
+        helper = Qwen3NextLinearAttPageHelper(self)
+        if self.windowed_draft_kv is None:
+            helper.assert_page_size()
+        else:
+            WindowKVPageHelper(self, offset=helper.state_nbytes).assert_page_size()
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -109,6 +88,10 @@ class Qwen3NextMemManager(MemoryManager):
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.write_req_to_page(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
+        if self.windowed_draft_kv is not None:
+            WindowKVPageHelper(self, offset=helper.state_nbytes).copy_req_page(
+                page_index, req_idx, dp_mems, mode="write"
+            )
         return
 
     def read_page_kv_move_buffer_to_mem(
@@ -136,6 +119,10 @@ class Qwen3NextMemManager(MemoryManager):
         helper = Qwen3NextLinearAttPageHelper(self)
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.read_page_to_req(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
+        if self.windowed_draft_kv is not None:
+            WindowKVPageHelper(self, offset=helper.state_nbytes).copy_req_page(
+                page_index, req_idx, dp_mems, mode="read"
+            )
         return
 
 

@@ -8,6 +8,7 @@ from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 from .base import StateCacheManager
 from .layer_cache import LayerCache
+from .windowed_mtp import WindowStateBuffers, WindowStateCacheConfig
 
 
 logger = init_logger(__name__)
@@ -158,9 +159,13 @@ class LinearAttCacheManager(StateCacheManager):
         size: int,
         linear_config: LinearAttCacheConfig,
         keep_num: int = 0,  # 用于记录需要保留的缓存数量，用于支持含有 linear_att 的如qwen3.5 模型的cpu cache的碎页处理。
+        window_config: WindowStateCacheConfig = None,
     ):
         super().__init__(size, keep_num)
         self.linear_config = linear_config
+        self.draft_window = (
+            WindowStateBuffers(size, window_config, linear_config.full_att_dtype) if window_config is not None else None
+        )
         # init the layer cache
         self.conv_state_cache = LayerCache(
             size=self.size,
@@ -187,5 +192,7 @@ class LinearAttCacheManager(StateCacheManager):
     def clear_to_init_state(self):
         self.conv_state_cache.buffer.zero_()
         self.ssm_state_cache.buffer.zero_()
+        if self.draft_window is not None:
+            self.draft_window.clear_to_init_state()
         super().clear_to_init_state()
         return

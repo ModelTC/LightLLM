@@ -468,9 +468,9 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         return False
 
 
-def is_hybrid_att_model(model_path: str) -> bool:
-    """Models whose non-full attention state follows hybrid checkpoint pages."""
-    return is_linear_att_mixed_model(model_path)
+def is_hybrid_att_model(model_path: str, args) -> bool:
+    """Whether target linear state or draft window snapshots require hybrid pages."""
+    return is_linear_att_mixed_model(model_path) or args.mtp_draft_kv_mode == "window"
 
 
 def get_model_type(model_path: str) -> Optional[str]:

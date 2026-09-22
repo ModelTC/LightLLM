@@ -14,7 +14,7 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.common.req_manager import ReqManager
+from lightllm.common.req_manager import ReqManager, ReqManagerForWindowedMTP
 from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
@@ -237,7 +237,8 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
+        req_manager_class = ReqManagerForWindowedMTP if self.args.mtp_draft_kv_mode == "window" else ReqManager
+        self.req_manager = req_manager_class(self.max_req_num, create_max_seq_len, None)
         return
 
     def _init_infer_layer(self, start_layer_index=0):

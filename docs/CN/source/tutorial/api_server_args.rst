@@ -683,19 +683,11 @@ MTP 多预测参数
     草稿 KV 缓存策略，默认 ``full``。dflash style 草稿模型支持 ``window``，
     仅保留最近窗口内的 KV。target 仍使用完整上下文。
 
-    当前要求 ``--run_mode normal``、``--dp 1``、未量化 KV，且设置
-    ``--disable_dynamic_prompt_cache``。暂不支持 CPU/prefix 缓存、动态验证、
-    diverse、混合 prefill/decode 或 overlap 模式。
-
 .. option:: --mtp_draft_window_size
 
     ``window`` 策略保留的最近位置数，默认 ``512``，必须大于 0。
 
     每个请求的历史容量上限为 ``mtp_draft_window_size``。
-
-    示例：在已有 dflash style 草稿模型启动命令中添加::
-
-        --mtp_draft_kv_mode window --mtp_draft_window_size 512 --disable_dynamic_prompt_cache
 
 .. option:: --mtp_draft_model_dir
 

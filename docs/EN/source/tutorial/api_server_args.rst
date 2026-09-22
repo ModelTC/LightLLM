@@ -696,19 +696,10 @@ MTP Multi-Prediction Parameters
     ``window``, which retains only recent-window KV. The target still
     uses its full context.
 
-    Currently requires ``--run_mode normal``, ``--dp 1``, unquantized KV, and
-    ``--disable_dynamic_prompt_cache``. CPU/prefix caching, dynamic verification,
-    diverse, mixed prefill/decode, and overlap modes are not supported.
-
 .. option:: --mtp_draft_window_size
 
     Number of recent positions retained by ``window``; defaults to ``512`` and
     must be positive.
-
-
-    Add these options to an existing launch command for a dflash style draft model::
-
-        --mtp_draft_kv_mode window --mtp_draft_window_size 512 --disable_dynamic_prompt_cache
 
 .. option:: --mtp_draft_model_dir
 

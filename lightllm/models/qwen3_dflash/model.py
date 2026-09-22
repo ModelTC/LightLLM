@@ -6,7 +6,6 @@ from lightllm.common.basemodel.attention import (
 )
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPAttBackend
-from lightllm.utils.windowed_mtp import validate_windowed_mtp, window_capacity
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.draft_registry import DraftModelRegistry
@@ -46,9 +45,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
 
         assert self.args.mtp_step <= self.config["block_size"]
         self.config["block_size"] = self.args.mtp_step
-        self.uses_windowed_draft_kv = getattr(self.args, "mtp_draft_kv_mode", "full") == "window"
-        if self.uses_windowed_draft_kv:
-            validate_windowed_mtp(self.args)
+        self.uses_windowed_draft_kv = self.args.mtp_draft_kv_mode == "window"
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
@@ -68,11 +65,15 @@ class Qwen3DFlashModel(LlamaTpPartModel):
                 layers=self.config["n_layer"],
                 kv_heads=self.config["num_key_value_heads"] // self.tp_world_size_,
                 head_dim=self.config.get("head_dim", self.config["n_embed"] // self.config["num_attention_heads"]),
-                window=window_capacity(self.args),
+                window=self.args.mtp_draft_window_size,
             )
 
     def _init_att_backend(self):
         if self.uses_windowed_draft_kv:
+            from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+            if flash_attn_with_kvcache is None:
+                raise NotImplementedError("Windowed MTP requires FA3")
+
             self.prefill_att_backend = self.decode_att_backend = WindowedMTPAttBackend(model=self)
             return
         super()._init_att_backend()

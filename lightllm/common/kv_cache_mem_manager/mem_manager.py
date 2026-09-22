@@ -8,7 +8,8 @@ from typing import List, Tuple, Any, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .allocator import KvCacheAllocator
-from .windowed_mtp import WindowKVStore
+from .windowed_mtp import WindowKVStore, WindowKVPageHelper
+from lightllm.common.state_cache_manager.windowed_mtp import load_window_state_config
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.utils.dist_utils import (
     get_current_device_id,
@@ -41,6 +42,8 @@ class MemoryManager:
         self.dtype = dtype
         self.windowed_draft_kv = None
         self._windowed_draft_kv_params = None
+        args = get_env_start_args()
+        self.window_state_config = load_window_state_config(args) if args.mtp_draft_kv_mode == "window" else None
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
@@ -56,7 +59,12 @@ class MemoryManager:
         self.HOLD_TOKEN_MEMINDEX = self.size
 
         # 构建对外的操作类接口
-        self.operator: BaseMemManagerOperator = self.operator_class(self)
+        operator_class = self.operator_class
+        if self.window_state_config is not None and operator_class is NormalMemOperator:
+            from .operator.windowed_mtp import WindowedMTPMemOperator
+
+            operator_class = WindowedMTPMemOperator
+        self.operator: BaseMemManagerOperator = operator_class(self)
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]
@@ -117,9 +125,29 @@ class MemoryManager:
         self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
         if self._windowed_draft_kv_params is not None:
             self.init_windowed_draft_kv(**self._windowed_draft_kv_params)
+        self._init_state_cache_buffers()
+
+    def _init_state_cache_buffers(self):
+        self.big_page_buffers = None
+        if self.window_state_config is not None:
+            from lightllm.common.state_cache_manager import WindowStateCacheManager
+
+            args = get_env_start_args()
+            page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+            self.big_page_buffers = WindowStateCacheManager(
+                size=(self.size + page_tokens - 1) // page_tokens + 2,
+                config=self.window_state_config,
+                dtype=self.dtype,
+                keep_num=2,
+            )
+            self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
+            self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
 
     def init_windowed_draft_kv(self, **cache_params):
         """Create draft window storage from dimensions supplied by the draft model."""
+        if self.window_state_config is not None:
+            for name in ("layers", "kv_heads", "head_dim", "window"):
+                assert cache_params[name] == getattr(self.window_state_config, name), f"draft window {name} mismatch"
         self._windowed_draft_kv_params = cache_params
         self.windowed_draft_kv = WindowKVStore(**cache_params, dtype=self.dtype, device=self.kv_buffer.device)
 
@@ -130,7 +158,12 @@ class MemoryManager:
         self._buffer_mem_indexes_tensors = [
             torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
         ]
+        self._assert_att_state_page_size()
         return self.kv_move_buffer
+
+    def _assert_att_state_page_size(self):
+        if self.windowed_draft_kv is not None:
+            WindowKVPageHelper(self).assert_page_size()
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -142,6 +175,11 @@ class MemoryManager:
         page_kind: str = "kv",
         req_idx: int = None,
     ):
+        if page_kind == "att_state" and self.windowed_draft_kv is not None:
+            dp_mems = mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]
+            assert len(dp_mems) == dp_world_size
+            WindowKVPageHelper(self).copy_req_page(page_index, req_idx, dp_mems, mode="write")
+            return
         assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
@@ -174,6 +212,11 @@ class MemoryManager:
         page_kind: str = "kv",
         req_idx: int = None,
     ):
+        if page_kind == "att_state" and self.windowed_draft_kv is not None:
+            dp_mems = mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]
+            assert len(dp_mems) == dp_world_size
+            WindowKVPageHelper(self).copy_req_page(page_index, req_idx, dp_mems, mode="read")
+            return
         assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
@@ -199,6 +242,7 @@ class MemoryManager:
     def _free_buffers(self):
         self.kv_buffer = None
         self.windowed_draft_kv = None
+        self.big_page_buffers = None
 
     def alloc(self, need_size) -> torch.Tensor:
         return self.allocator.alloc(need_size)
@@ -255,7 +299,14 @@ class MemoryManager:
         with lock:
             node_world_size = get_node_world_size()
             shm_name = f"mem_manager_{get_current_rank_in_node()}"
-            obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
+            # Only GPU running state is consumed by PD. Pickling CPU checkpoints
+            # would move their storage into ordinary shared memory and lose pinning.
+            big_page_buffers = self.big_page_buffers
+            self.big_page_buffers = None
+            try:
+                obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
+            finally:
+                self.big_page_buffers = big_page_buffers
             obj_size = len(obj_bytes_array[0])
             shm = create_or_link_shm(
                 name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"

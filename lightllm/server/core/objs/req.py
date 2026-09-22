@@ -215,7 +215,7 @@ class Req(ctypes.Structure):
         self.post_init()
 
         args = get_env_start_args()
-        if is_hybrid_att_model(args.model_dir):
+        if is_hybrid_att_model(args.model_dir, args):
             self._fill_hybrid_token_hash()
             if args.enable_cpu_cache:
                 cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_hybrid_cpu_cache_page_len_list()

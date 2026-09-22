@@ -163,11 +163,6 @@ def _launch_subprocesses(args: StartArgs):
                 f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
             )
 
-    if args.mtp_draft_kv_mode == "window":
-        from lightllm.utils.windowed_mtp import validate_windowed_mtp
-
-        validate_windowed_mtp(args)
-
     # mtp params check
     if args.mtp_mode is not None:
         if args.mtp_draft_model_dir is None:
@@ -181,6 +176,12 @@ def _launch_subprocesses(args: StartArgs):
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
+
+    if args.mtp_draft_kv_mode == "window":
+        assert args.mtp_draft_window_size > 0
+        assert args.mtp_mode in ("dflash", "dspark"), "windowed draft KV requires dflash or dspark"
+        if args.llm_kv_type not in (None, "None"):
+            raise ValueError("windowed draft KV currently requires unquantized KV")
 
     # automatically set visual_dp based on visual_tp and tp.
     # In visual proxy mode keep the caller-provided visual_dp / visual_tp.
@@ -275,7 +276,7 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
+    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir, args):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
 

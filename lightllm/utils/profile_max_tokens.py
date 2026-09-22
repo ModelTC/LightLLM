@@ -77,9 +77,9 @@ def profile_mtp_weight_memory(model):
     target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
     draft_cache_bytes = 0
     if getattr(model.args, "mtp_draft_kv_mode", "full") == "window":
-        from lightllm.utils.windowed_mtp import window_kv_pool_bytes
-
-        draft_cache_bytes = window_kv_pool_bytes(model.args, torch.tensor([], dtype=model.data_type).element_size())
+        from lightllm.common.state_cache_manager.windowed_mtp import load_window_state_config
+        config = load_window_state_config(model.args)
+        draft_cache_bytes = (model.args.running_max_req_size + 1) * config.get_state_bytes(model.data_type.itemsize)
     model.mem_fraction = get_mtp_adjusted_mem_fraction(
         mem_fraction=model.mem_fraction,
         target_weight_bytes=target_weight_bytes,
