@@ -756,6 +756,10 @@ class ModeBackend:
             if is_decode:
                 # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
+                # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，
+                # 并将数量向下对齐到 page_size 的整数倍，以减少 alloc 调用次数并保持分页分配约束。
+                if alloc_token_num > 0 and self.args.page_size < 8:
+                    alloc_token_num += 8 // self.args.page_size * self.args.page_size
                 if alloc_token_num <= can_alloc_token_num:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     decode_reqs.append(req_obj)
