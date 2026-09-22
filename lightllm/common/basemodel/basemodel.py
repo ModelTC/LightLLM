@@ -303,9 +303,10 @@ class TpPartBaseModel:
                 self.graph.warmup(self)
 
     def _init_prefill_cuda_graph(self):
+        # Draft models use self.run_mode="normal" even when the node is decode-only.
         self.prefill_graph = (
             None
-            if not get_env_start_args().enable_prefill_cudagraph
+            if self.args.run_mode == "decode" or not get_env_start_args().enable_prefill_cudagraph
             else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
         )
         if self.prefill_graph is not None:
@@ -988,6 +989,8 @@ class TpPartBaseModel:
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
+        if self.args.run_mode == "decode":
+            return
         disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
         if disable_check_max_len_infer:
             logger.info("disable_check_max_len_infer is true")
@@ -1063,12 +1066,16 @@ class TpPartBaseModel:
         Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
         torch.distributed.barrier()
 
+        warmup_max_tokens = self.batch_max_tokens
+        if self.args.run_mode == "decode":
+            decode_rows = self.max_req_num * self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+            warmup_max_tokens = min(warmup_max_tokens, decode_rows)
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 
-        if self.batch_max_tokens not in warmup_lengths:
-            warmup_lengths.append(self.batch_max_tokens)
+        if warmup_max_tokens not in warmup_lengths:
+            warmup_lengths.append(warmup_max_tokens)
 
-        warmup_lengths = [e for e in warmup_lengths if e <= self.batch_max_tokens]
+        warmup_lengths = [e for e in warmup_lengths if e <= warmup_max_tokens]
 
         warmup_lengths.sort(reverse=True)
 

@@ -1,5 +1,3 @@
-import os
-
 import torch
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
@@ -38,9 +36,6 @@ DSV4_CPU_CACHE_TOKEN_PAGE_SIZE = 2048
 # 追加候选槽，避免 rejected draft 覆盖仍存活的基础窗口。c128 同样追加候选槽，再对齐到 ratio 4。
 DSV4_C4_STATE_RING = 8  # 8 rows/page before MTP padding
 DSV4_C128_STATE_RING = 128  # 128 rows/request before MTP padding
-# swa 池占 full token 空间的比例(sglang DSV4 默认 swa_full_tokens_ratio=0.1 同值)。
-# 瞬时借页/驱逐走 swa 压力阀;池子大小仅按 ratio 切分,不再叠加结构性余量。
-DSV4_SWA_FULL_TOKENS_RATIO = float(os.getenv("DSV4_SWA_FULL_TOKENS_RATIO", "0.1"))
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -425,15 +420,13 @@ class DeepseekV4MemoryManager(MemoryManager):
         compress_rates: List[int],
         max_request_num: int,
         mtp_step: int,
+        swa_page_num: int,
         indexer_head_dim: int = 128,
         cpu_cache_token_page_size: int = DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
-        swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
         memory_reservations=None,
     ):
-        if get_env_start_args().page_size != DSV4_PROMPT_CACHE_PAGE_SIZE:
-            raise ValueError("DeepSeek-V4 requires --page_size 256")
         assert head_num == 1, "DeepSeek-V4 是 MLA(MQA)，dense latent 的 head_num 必须为 1"
         assert head_dim == self.mla_head_dim, f"DeepSeek-V4 packed KV 期望 head_dim={self.mla_head_dim}"
         assert (
@@ -443,6 +436,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         assert all(r in (0, 4, 128) for r in compress_rates), "compress_rates 取值只能是 0/4/128"
         assert max_request_num > 0, "max_request_num 必须为正数"
         assert 0 <= mtp_step < DSV4_C128_STATE_RING, "mtp_step 必须位于 [0, 128)"
+        assert swa_page_num > 0, "swa_page_num 必须为正数"
 
         self.compress_rates = list(compress_rates)
         self.n_c4 = sum(1 for r in self.compress_rates if r == 4)
@@ -451,7 +445,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.max_request_num = max_request_num
         self.c4_state_ring = DSV4_C4_STATE_RING + mtp_step
         self.c128_state_ring = _ceil_div(DSV4_C128_STATE_RING + mtp_step, 4) * 4
-        self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
+        self.swa_page_num = int(swa_page_num)
         self.cpu_cache_layout = DeepseekV4CpuCacheLayout.from_compress_rates(
             self.compress_rates,
             token_page_size=cpu_cache_token_page_size,
@@ -483,9 +477,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         )
 
     # ------------------------------------------------------------------ sizing
-    def _planned_swa_size(self, full_size: int) -> int:
-        return _ceil_div(int(full_size * self.swa_full_tokens_ratio), DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
-
     @staticmethod
     def _paged_state_rows(num_swa_pages: int, ring: int, ratio: int) -> int:
         rows = num_swa_pages * ring + ring + 1
@@ -499,19 +490,31 @@ class DeepseekV4MemoryManager(MemoryManager):
         return
 
     def get_cell_size(self):
-        kv_bytes = self.mla_bytes_per_token
-        indexer_bytes = self.indexer_bytes_per_token
-        state_dtype_bytes = torch._utils._element_size(torch.float32)
-        c4_state_width = 4 * self.head_dim + 4 * self.indexer_head_dim
-        c4_state_bytes = self.c4_state_ring / DSV4_SWA_PAGE_SIZE * c4_state_width * state_dtype_bytes * self.n_c4
-        swa_slot = kv_bytes * self.layer_num + c4_state_bytes
-        compressed = (kv_bytes + indexer_bytes) * self.n_c4 / 4 + kv_bytes * self.n_c128 / 128
-
-        return swa_slot * self.swa_full_tokens_ratio + compressed
+        # Profile the physical PackedPagePool stride, not 584 logical bytes per MLA slot.
+        # Its MLA pages round (slots * (576 data + 8 scale)) up to a 576-byte
+        # data-row boundary; the indexer pool uses align_bytes=1 (no padding).
+        # One 256-token full page owns one C4/indexer page and one C128 page
+        # per corresponding layer, so divide their total bytes by 256.
+        c4_page = _aligned_gpu_page_nbytes(
+            DSV4_C4_PAGE_SIZE, DSV4_MLA_DATA_BYTES_PER_TOKEN, self.mla_scale_bytes, DSV4_MLA_PAGE_ALIGN_BYTES
+        )
+        indexer_page = _aligned_gpu_page_nbytes(DSV4_C4_PAGE_SIZE, self.indexer_head_dim, DSV4_INDEXER_SCALE_BYTES)
+        c128_page = _aligned_gpu_page_nbytes(
+            DSV4_C128_PAGE_SIZE, DSV4_MLA_DATA_BYTES_PER_TOKEN, self.mla_scale_bytes, DSV4_MLA_PAGE_ALIGN_BYTES
+        )
+        return (self.n_c4 * (c4_page + indexer_page) + self.n_c128 * c128_page) / DSV4_PROMPT_CACHE_PAGE_SIZE
 
     def get_fixed_memory_size(self):
-        state_rows = (self.max_request_num + 1) * self.c128_state_ring + 1
-        return self.n_c128 * state_rows * (2 * self.head_dim) * torch._utils._element_size(torch.float32)
+        swa_page = _aligned_gpu_page_nbytes(
+            DSV4_SWA_PAGE_SIZE, DSV4_MLA_DATA_BYTES_PER_TOKEN, self.mla_scale_bytes, DSV4_MLA_PAGE_ALIGN_BYTES
+        )
+        swa_bytes = self.layer_num * (self.swa_page_num + 1) * swa_page  # includes the HOLD page
+        c4_rows = self._paged_state_rows(self.swa_page_num, self.c4_state_ring, 4)
+        c4_state_bytes = self.n_c4 * c4_rows * (4 * self.head_dim + 4 * self.indexer_head_dim) * 4
+        c128_rows = (self.max_request_num + 1) * self.c128_state_ring + 1
+        c128_state_bytes = self.n_c128 * c128_rows * (2 * self.head_dim) * 4
+        compressed_hold_bytes = int(self.get_cell_size() * DSV4_PROMPT_CACHE_PAGE_SIZE)
+        return swa_bytes + c4_state_bytes + c128_state_bytes + compressed_hold_bytes
 
     def get_pd_kv_move_buffer_size(self):
         args = get_env_start_args()
@@ -530,7 +533,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         rank_in_node = get_current_rank_in_node()
         server = get_unique_server_name()
 
-        self.swa_size = self._planned_swa_size(size)
+        self.swa_size = self.swa_page_num * DSV4_SWA_PAGE_SIZE
         self.swa_pool = PackedPagePool(
             size=self.swa_size,
             page_size=DSV4_SWA_PAGE_SIZE,

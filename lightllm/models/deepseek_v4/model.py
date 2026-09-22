@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import json
+import math
 import os
 import time
 
@@ -9,7 +10,11 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_CPU_CACHE_TOKEN_PAGE_SIZE
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
+    DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
+    DSV4_PROMPT_CACHE_PAGE_SIZE,
+    DSV4_SWA_PAGE_SIZE,
+)
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
 )
@@ -100,6 +105,16 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
         state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
         reservations = self._get_post_profile_memory_reservations()
+        retain = self.config["sliding_window"] + DSV4_PROMPT_CACHE_PAGE_SIZE
+        decode_width = max(state_mtp_step + 1, 2 * state_mtp_step)
+        # The retained window may straddle one extra physical page.
+        per_req_pages = math.ceil((retain + decode_width - 1) / DSV4_SWA_PAGE_SIZE) + 1
+        window_pages = self.max_req_num * per_req_pages
+        if self.args.run_mode != "prefill" and self.args.mtp_mode == "dspark":
+            window_pages += self.max_req_num
+        swa_page_num = window_pages
+        if self.args.run_mode != "decode":
+            swa_page_num += math.ceil(self.batch_max_tokens / DSV4_SWA_PAGE_SIZE)
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
@@ -110,6 +125,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
             mtp_step=state_mtp_step,
+            swa_page_num=swa_page_num,
             cpu_cache_token_page_size=(
                 DSV4_CPU_CACHE_TOKEN_PAGE_SIZE
                 if self.args.cpu_cache_token_page_size is None

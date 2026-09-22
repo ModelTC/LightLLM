@@ -63,7 +63,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         first_retained_page = max(0, start - retain + 1) // page_size
         evicted = [position for position in pages if position < first_retained_page]
         if evicted:
-            self.mem_manager.swa_page_allocator.free(torch.tensor([pages.pop(p) for p in evicted], dtype=torch.int32))
+            self.mem_manager.swa_page_allocator.free([pages.pop(p) for p in evicted])
             self.req_to_swa_pages[req_idx, :first_retained_page] = -1
         missing = [p for p in range(start // page_size, (end + page_size - 1) // page_size) if p not in pages]
         if missing:
@@ -140,7 +140,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
     def clear_runtime_state(self, req_idx):
         pages = self._swa_pages[req_idx]
         if pages:
-            self.mem_manager.swa_page_allocator.free(torch.tensor(list(pages.values()), dtype=torch.int32))
+            self.mem_manager.swa_page_allocator.free(list(pages.values()))
             pages.clear()
             self.req_to_swa_pages[req_idx].fill_(-1)
 
