@@ -48,6 +48,7 @@ from lightllm.server.multi_level_kv_cache import (
     CacheTier,
     create_cache_placement_controller,
 )
+from .prefill_queue_strategy import create_prefill_queue_strategy
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
@@ -258,6 +259,9 @@ class ModeBackend:
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
+
+        # 策略可能读取模型、缓存管理器和 rank 等全局调度状态，因此在 backend 完成初始化后再创建。
+        self.prefill_queue_strategy = create_prefill_queue_strategy(self)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -614,35 +618,6 @@ class ModeBackend:
             )
         return
 
-    def _reorder_pd_high_priority_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
-        """将 PD 分段续跑的高优先级请求前置，普通请求保持在其后。"""
-        # PD 分段续跑请求已经完成前一段推理，需要优先进入本轮调度；将请求拆分后再拼接，
-        # 保持各自原有顺序，并确保高优先级请求位于普通请求之前。
-        high_priority_reqs = [req for req in ready_reqs if req.shm_req.sample_params.pd_high_priority_request]
-        normal_reqs = [req for req in ready_reqs if not req.shm_req.sample_params.pd_high_priority_request]
-        return high_priority_reqs + normal_reqs
-
-    def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
-        """
-        提升一个短 prefill 请求的优先级。
-        """
-        short_token_threshold = self.args.short_prefill_token_threshold
-        if short_token_threshold is None:
-            return ready_reqs
-
-        def remaining_prefill_tokens(req: InferReq) -> int:
-            return max(0, req.shm_req.input_len - req.cur_kv_len)
-
-        sorted_reqs = sorted(
-            ready_reqs,
-            key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
-        )
-        if sorted_reqs and remaining_prefill_tokens(sorted_reqs[0]) <= short_token_threshold:
-            target_req = sorted_reqs[0]
-            ready_reqs.remove(target_req)
-            ready_reqs.insert(0, target_req)
-        return ready_reqs
-
     # 一些可以复用的通用功能函数
     def _alloc_req_kv_mem(
         self,
@@ -666,6 +641,23 @@ class ModeBackend:
         )
         req_obj.hold_kv_len = new_hold_kv_len
         return mem_indexes
+
+    @staticmethod
+    def _is_decode_req(req: InferReq, no_decode: bool, strict_prefill: bool) -> bool:
+        """判断请求在当前调度轮次中是否按 decode 请求处理。"""
+        if no_decode:
+            return False
+
+        is_decode = req.cur_kv_len + 1 == req.get_cur_total_len()
+        if not is_decode:
+            return False
+
+        if strict_prefill:
+            is_at_prompt_boundary = req.cur_kv_len + 1 == req.shm_req.input_len
+            if is_at_prompt_boundary:
+                return False
+
+        return True
 
     def _get_classed_reqs(
         self,
@@ -706,8 +698,11 @@ class ModeBackend:
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
-        ready_reqs = self._reorder_pd_high_priority_reqs(ready_reqs)
-        ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
+        ready_reqs = self.prefill_queue_strategy.reorder(
+            ready_reqs,
+            no_decode=no_decode,
+            strict_prefill=strict_prefill,
+        )
 
         wait_pause_reqs = []
         paused_reqs = []
@@ -746,14 +741,7 @@ class ModeBackend:
                     finished_reqs.append(req_obj)
                     continue
 
-            if no_decode:
-                is_decode = False
-            else:
-                is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
-                if is_decode and strict_prefill and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
-                    is_decode = False
-
-            if is_decode:
+            if self._is_decode_req(req_obj, no_decode=no_decode, strict_prefill=strict_prefill):
                 # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
                 # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，

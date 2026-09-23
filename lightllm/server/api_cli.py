@@ -371,11 +371,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument(
-        "--short_prefill_token_threshold",
-        type=int,
-        default=None,
-        help="""Enable short prefill request priority scheduling.
-        The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
+        "--prefill_queue_strategy",
+        choices=("default", "promote_shortest"),
+        default="default",
+        help="""Order ready requests before resource allocation.
+        Decode requests are identified first, remain in arrival order, and are not reordered by these policies.
+        default: preserve FCFS order for prefill requests with the same infer_high_priority value.
+        promote_shortest: keep negative-priority requests first in arrival order, then move one
+        shortest non-negative-priority prefill request to the front of the normal requests.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     vocab_topk_choices = [2, 8, 16, 32, 64, 128, 256, 512]

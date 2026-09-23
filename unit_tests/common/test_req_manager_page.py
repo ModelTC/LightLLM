@@ -185,8 +185,7 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
     backend.batch_max_tokens = batch_max_tokens
     backend.is_master_in_dp = True
     backend._timer_merge_radix_tree = lambda: None
-    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
-    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
     context.get_can_alloc_token_num = lambda: can_alloc_token_num
     context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
     context.filter_reqs = lambda finished_reqs: None
@@ -246,8 +245,7 @@ def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
     backend.batch_max_tokens = 8
     backend.is_master_in_dp = True
     backend._timer_merge_radix_tree = lambda: None
-    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
-    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
     context.get_can_alloc_token_num = lambda: 12
     context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
     context.filter_reqs = lambda finished_reqs: None
@@ -308,8 +306,7 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
     backend.batch_max_tokens = 8
     backend.is_master_in_dp = True
     backend._timer_merge_radix_tree = lambda: None
-    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
-    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
     context.get_can_alloc_token_num = lambda: 32
     context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
     context.filter_reqs = lambda finished_reqs: None

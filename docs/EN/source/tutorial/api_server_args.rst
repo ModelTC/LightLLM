@@ -153,10 +153,11 @@ PD disaggregation Mode Parameters
     that requests which have already produced partial results complete successfully. When set to a non-negative value,
     a timeout reports ``Server is busy``; a request that has
     entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
-    While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
-    The maximum probing period is controlled by ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` and defaults to
-    120 seconds. Once response tokens have been streamed to the client, the request is not restarted because doing so
-    would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
+    While this feature is enabled, PD Master returns ``Server is busy`` without retrying by default.
+    ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` controls the maximum retry probing period and defaults to ``0``;
+    set it to a positive value to make PD Master select P/D nodes again and retry within that period. Once response
+    tokens have been streamed to the client, the request is not restarted even when a positive timeout is configured,
+    because doing so would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
     resource wait timeout; all P/D nodes wait indefinitely, and a ``Server is busy`` raised for another reason is
     returned immediately without retrying.
     In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
@@ -166,7 +167,7 @@ PD disaggregation Mode Parameters
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
     solely from a high cache-hit rate.
 
-    Startup example:
+    The following example explicitly enables busy retries for up to 120 seconds:
 
     .. code-block:: bash
 
@@ -363,6 +364,38 @@ Scheduling Parameters
 .. option:: --disable_chunked_prefill
 
     Whether to disable chunked prefill
+
+.. option:: --prefill_queue_strategy
+
+    Prefill ordering policy in the inference backend before resource allocation. Defaults
+    to ``default``. The policy first identifies decode requests, keeps them at the left in
+    arrival order, and excludes them from subsequent sorting. ``infer_high_priority`` and
+    the selected policy apply only to the prefill requests on the right.
+
+    Prefill requests carry an internal ``infer_high_priority`` field. It defaults to ``0``,
+    cannot be set by external requests, and is assigned a negative value to continuation
+    segments through internal PD-disaggregation communication.
+
+    * ``default``: stably sort by ``infer_high_priority`` from smallest to largest and preserve
+      FCFS order within the same value.
+    * ``promote_shortest``: keep negative-priority prefill requests first in arrival order.
+      Among non-negative-priority normal requests, move only the request with the fewest
+      remaining prefill tokens to the front of the normal queue. Preserve the relative order
+      of all other normal requests. Fully processed prompts count as zero. This mode is mainly
+      intended for Prefill nodes in PD-disaggregated deployments to improve TTFT for some short
+      requests.
+
+    For example, append ``--prefill_queue_strategy promote_shortest`` to your launch command.
+    Compare TTFT, TPOT, and tail latency under representative traffic before choosing a
+    policy; changing policies does not guarantee an SLA improvement.
+
+    To extend, subclass ``PrefillQueueStrategy`` in
+    ``lightllm/server/router/model_infer/mode_backend/prefill_queue_strategy``, implement
+    ``reorder_prefill``, and
+    add the class to ``PREFILL_QUEUE_STRATEGIES`` to expose its name through the CLI.
+    Implementations must preserve the request set, request state, and input list, and
+    produce deterministic ordering across TP ranks. Each strategy receives the current
+    ``ModeBackend`` instance and can read scheduling state through ``self.backend``.
 
 .. option:: --diverse_mode
 

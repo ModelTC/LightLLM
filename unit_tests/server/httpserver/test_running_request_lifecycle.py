@@ -243,7 +243,7 @@ def test_pd_node_returns_busy_while_first_token_request_waits_in_router(mode):
             router_arrival_time=0,
             infer_start_time=0,
             sample_params=SimpleNamespace(
-                pd_high_priority_request=False,
+                high_priority_request=False,
                 pd_node_resource_wait_timeout_seconds=20,
             ),
         )
@@ -302,14 +302,14 @@ def test_httpserver_keeps_started_requests_and_requests_with_remaining_master_ti
         router_arrival_time=1.0,
         infer_start_time=0.0,
         sample_params=SimpleNamespace(
-            pd_high_priority_request=False,
+            high_priority_request=False,
             pd_node_resource_wait_timeout_seconds=60,
         ),
     )
     started_req = SimpleNamespace(
         router_arrival_time=1.0,
         infer_start_time=2.0,
-        sample_params=SimpleNamespace(pd_high_priority_request=False),
+        sample_params=SimpleNamespace(high_priority_request=False),
     )
     req_status = _req_status([waiting_req, started_req])
 
