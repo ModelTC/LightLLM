@@ -17,6 +17,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_paral
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
     build_initial_redundant_expert_ids,
+    expand_redundant_placement,
     build_logical_to_physical_map,
 )
 from lightllm.common.quantization.quantize_method import QuantizationMethod
@@ -95,6 +96,9 @@ class FusedMoeWeight(BaseWeightTpl):
         self._initial_redundant_expert_idx_to_local_idx = {}
         eplb = None
         if args.enable_prefill_eplb and not is_eplb_model_init_disabled():
+            full_layout = getattr(args, "eplb_placement_mode", "redundant") == "full"
+            if full_layout and args.run_mode != "prefill":
+                raise ValueError("full EPLB placement requires --run_mode prefill")
             num_redundant_experts_per_rank = args.eplb_num_redundant_experts_per_rank
             all_initial_ids = build_initial_redundant_expert_ids(
                 self.n_routed_experts,
@@ -115,6 +119,8 @@ class FusedMoeWeight(BaseWeightTpl):
             eplb = EPLBState(
                 num_redundant_experts_per_rank=num_redundant_experts_per_rank,
                 initial_redundant_expert_ids_by_rank=all_initial_ids,
+                full_layout=full_layout,
+                physical_to_logical=expand_redundant_placement(all_initial_ids, self.n_routed_experts),
                 logical_to_physical_map=logical_to_physical.cuda(),
                 logical_replica_count=logical_replica_count.cuda(),
                 route_counter=torch.zeros(
@@ -161,6 +167,13 @@ class FusedMoeWeight(BaseWeightTpl):
                 redundant_expert_idx: num_primary_experts_per_rank + i
                 for (i, redundant_expert_idx) in enumerate(self._initial_redundant_expert_ids)
             }
+            if eplb is not None and eplb.full_layout:
+                # All checkpoint tensors (including quantization scales) use
+                # the same logical-expert -> absolute local-row mapping.
+                self.expert_idx_to_local_idx = {
+                    expert: slot for slot, expert in enumerate(eplb.physical_to_logical[self.global_rank_].tolist())
+                }
+                self._initial_redundant_expert_idx_to_local_idx = {}
         else:
             self.local_expert_ids = list(range(self.n_routed_experts + self.num_fused_shared_experts))
             self.expert_idx_to_local_idx = {expert_idx: i for (i, expert_idx) in enumerate(self.local_expert_ids)}

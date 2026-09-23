@@ -771,7 +771,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="""Number of redundant physical experts per EP rank for each MoE layer used by prefill EPLB.
-            The value must be greater than 0.""",
+            Zero is supported with --eplb_placement_mode full.""",
+    )
+    parser.add_argument(
+        "--eplb_placement_mode",
+        choices=["redundant", "full"],
+        default="redundant",
+        help="""EPLB layout policy. 'redundant' keeps primary rows fixed; 'full' allows node-local
+            rearrangement of all rows and requires --run_mode prefill.""",
     )
     parser.add_argument(
         "--enable_fused_shared_experts",

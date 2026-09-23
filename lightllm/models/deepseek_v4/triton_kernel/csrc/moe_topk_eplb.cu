@@ -100,9 +100,11 @@ __global__ void moe_topk_eplb_kernel(
       const int id = selected[k];
       uint32_t replica = 0;
       if constexpr (!SingleToken) {
-        const uint32_t token_hash = static_cast<uint32_t>(token) * 2654435769u;
-        const uint32_t expert_hash = static_cast<uint32_t>(id) * 2246822519u;
-        replica = (token_hash + expert_hash) % static_cast<uint32_t>(replica_count[id]);
+        uint32_t value = static_cast<uint32_t>(token) ^ ((static_cast<uint32_t>(id) + 1u) * 0x9E3779B9u);
+        value = (value ^ (value >> 16)) * 0x7FEB352Du;
+        value = (value ^ (value >> 15)) * 0x846CA68Bu;
+        value ^= value >> 16;
+        replica = value % static_cast<uint32_t>(replica_count[id]);
       }
       weights[token * topk + k] = selected_score[k] / fmaxf(sum, 1e-20f) * routed_scaling_factor;
       physical_ids[token * topk + k] = logical_to_physical[id * map_slots + replica];

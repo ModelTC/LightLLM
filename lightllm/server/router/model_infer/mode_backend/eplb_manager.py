@@ -9,8 +9,13 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
     build_logical_to_physical_maps_for_layers,
+    expand_redundant_placement,
     plan_redundant_experts,
     select_improving_placements,
+)
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import (
+    plan_full_experts,
+    refine_placement_candidates,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
@@ -52,8 +57,13 @@ class EPLBManager:
         assert len(routed) == len(redundant) == 1
         self.num_logical_experts = routed.pop()
         self.num_redundant_experts_per_rank = redundant.pop()
+        self.full_layout = self._eplb_states[0].full_layout
+        assert all(state.full_layout == self.full_layout for state in self._eplb_states)
         self.current_placement = torch.stack(
-            [state.initial_redundant_expert_ids_by_rank for state in self._eplb_states]
+            [
+                state.physical_to_logical if self.full_layout else state.initial_redundant_expert_ids_by_rank
+                for state in self._eplb_states
+            ]
         )
         self.in_flight = False
         self.target_placement = None
@@ -87,6 +97,7 @@ class EPLBManager:
                 "eplb enabled "
                 f"layers={len(self.weights)} num_logical_experts={self.num_logical_experts} "
                 f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
+                f"placement_mode={'full' if self.full_layout else 'redundant'} "
                 f"step_interval={self.step_interval} "
                 f"rebalance_gain_threshold={self.rebalance_gain_threshold:.4f} "
                 f"placement_stickiness={self.placement_stickiness:.4f}"
@@ -215,6 +226,16 @@ class EPLBManager:
         logical_to_physical, replica_count = self.target_metadata[layer_index]
         eplb_state.logical_to_physical_map.copy_(logical_to_physical, non_blocking=True)
         eplb_state.logical_replica_count.copy_(replica_count, non_blocking=True)
+        placement = self.target_placement[layer_index]
+        eplb_state.physical_to_logical = (
+            placement.clone()
+            if getattr(self, "full_layout", False)
+            else expand_redundant_placement(placement, self.num_logical_experts)
+        )
+        eplb_state.placement_generation += 1
+        # Keep the CPU state truthful even while only a prefix of layers has
+        # been committed; subsequent planning waits for the whole generation.
+        self.current_placement[layer_index].copy_(placement)
 
     def _finish_rebalance(self):
         self.current_placement = self.target_placement
@@ -274,15 +295,44 @@ class EPLBManager:
                         "minimum": minimum,
                     }
                 else:
-                    candidate = plan_redundant_experts(
-                        global_load,
-                        self.world_size,
-                        self.num_redundant_experts_per_rank,
-                        expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                        node_world_size=self.node_world_size,
-                        current_placement=self.current_placement,
-                        stickiness=self.placement_stickiness,
-                    )
+                    full_layout = getattr(self, "full_layout", False)
+                    if full_layout:
+                        candidate = plan_full_experts(
+                            global_load,
+                            self.current_placement,
+                            expert_alignment=EPLB_EXPERT_ALIGNMENT,
+                            node_world_size=self.node_world_size,
+                            stickiness=self.placement_stickiness,
+                        )
+                    else:
+                        candidate = plan_redundant_experts(
+                            global_load,
+                            self.world_size,
+                            self.num_redundant_experts_per_rank,
+                            expert_alignment=EPLB_EXPERT_ALIGNMENT,
+                            node_world_size=self.node_world_size,
+                            current_placement=self.current_placement,
+                            stickiness=self.placement_stickiness,
+                        )
+                        candidates = [candidate]
+                        if self.placement_stickiness > 0:
+                            candidates.append(
+                                plan_redundant_experts(
+                                    global_load,
+                                    self.world_size,
+                                    self.num_redundant_experts_per_rank,
+                                    expert_alignment=EPLB_EXPERT_ALIGNMENT,
+                                    node_world_size=self.node_world_size,
+                                )
+                            )
+                        candidate = refine_placement_candidates(
+                            global_load,
+                            self.current_placement,
+                            candidates,
+                            expert_alignment=EPLB_EXPERT_ALIGNMENT,
+                            node_world_size=self.node_world_size,
+                            stickiness=self.placement_stickiness,
+                        )
                     placement, improved, metrics, before_load, after_load = select_improving_placements(
                         global_load,
                         self.current_placement,
@@ -290,6 +340,7 @@ class EPLBManager:
                         expert_alignment=EPLB_EXPERT_ALIGNMENT,
                         node_world_size=self.node_world_size,
                         rebalance_gain_threshold=self.rebalance_gain_threshold,
+                        full_layout=full_layout,
                     )
                     if bool(torch.any(improved)):
                         # A planner placement identifies experts by rank, not
@@ -355,6 +406,7 @@ class EPLBManager:
                         self.num_logical_experts,
                         source_rank=self.global_rank,
                         node_world_size=self.node_world_size,
+                        full_layout=getattr(self, "full_layout", False),
                     )
                     for improved_layer_offset, layer_index in enumerate(improved_layer_indices.tolist()):
                         placement = result["placement"][layer_index]
@@ -371,6 +423,7 @@ class EPLBManager:
                                     self.num_logical_experts,
                                     self.world_size,
                                     self.node_world_size,
+                                    full_layout=getattr(self, "full_layout", False),
                                 ),
                             )
                         )

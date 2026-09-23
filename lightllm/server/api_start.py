@@ -184,9 +184,14 @@ def _launch_subprocesses(args: StartArgs):
         assert not args.enable_prefill_cudagraph, "--enable_prefill_eplb does not support --enable_prefill_cudagraph"
         # EPLB updates expert weights in place, but SM100 Mega-MoE caches transformed weights by tensor data_ptr.
         assert not is_sm100_gpu(), "--enable_prefill_eplb does not support SM100"
-        assert (
-            args.eplb_num_redundant_experts_per_rank > 0
-        ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
+        assert args.eplb_placement_mode in ("redundant", "full"), "invalid --eplb_placement_mode"
+        if args.eplb_placement_mode == "full":
+            assert args.run_mode == "prefill", "--eplb_placement_mode full requires --run_mode prefill"
+            assert args.eplb_num_redundant_experts_per_rank >= 0, "redundant expert count must be nonnegative"
+        else:
+            assert (
+                args.eplb_num_redundant_experts_per_rank > 0
+            ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
