@@ -29,10 +29,20 @@ class Qwen3NextMemManager(MemoryManager):
         linear_config: LinearAttCacheConfig,
         always_copy=False,
         mem_fraction=0.9,
+        memory_reservations=None,
     ):
         self.linear_config = linear_config
 
-        super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            dtype,
+            num_kv_heads,
+            head_dim,
+            full_att_layer_num,
+            always_copy,
+            mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)

@@ -16,9 +16,20 @@ logger = init_logger(__name__)
 class FP8StaticPerHeadQuantMemManager(MemoryManager):
     operator_class = FP8StaticPerHeadQuantMemOperator
 
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
+    def __init__(
+        self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, memory_reservations=None
+    ):
         # 这里用uint8存储量化后的kv，方便兼容各种torch算子。fp8量化目前采用离线方案，kv_buffer不存储scale
-        super().__init__(size, torch.uint8, head_num, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            torch.uint8,
+            head_num,
+            head_dim,
+            layer_num,
+            always_copy,
+            mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
         self.qmax = torch.finfo(torch.float8_e4m3fn).max
         self.qmin = torch.finfo(torch.float8_e4m3fn).min

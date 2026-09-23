@@ -7,10 +7,21 @@ from .operator import PPLInt8KVMemOperator
 class PPLINT8KVMemoryManager(MemoryManager):
     operator_class = PPLInt8KVMemOperator
 
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=True, mem_fraction=0.9):
+    def __init__(
+        self, size, dtype, head_num, head_dim, layer_num, always_copy=True, mem_fraction=0.9, memory_reservations=None
+    ):
         self.kv_dtype = torch.int8
         self.group_quant_size = 8
-        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy=always_copy, mem_fraction=mem_fraction)
+        super().__init__(
+            size,
+            dtype,
+            head_num,
+            head_dim,
+            layer_num,
+            always_copy=always_copy,
+            mem_fraction=mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]

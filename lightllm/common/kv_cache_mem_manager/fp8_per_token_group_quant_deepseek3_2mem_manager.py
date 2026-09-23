@@ -33,10 +33,21 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
         (flashmla_bytes_per_token + indexer_bytes_per_token + alignment - 1) // alignment * alignment
     )
 
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
+    def __init__(
+        self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, memory_reservations=None
+    ):
         assert head_num == 1, "DeepSeek-V3.2 DSA FP8 path expects MQA-style head_num == 1"
         self.prefill_dtype = dtype
-        super().__init__(size, torch.uint8, head_num, self.total_bytes_per_token, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            torch.uint8,
+            head_num,
+            self.total_bytes_per_token,
+            layer_num,
+            always_copy,
+            mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
     def get_att_input_params(self, layer_index: int) -> Any:
         return self.kv_buffer[layer_index][:, :, : self.flashmla_bytes_per_token]

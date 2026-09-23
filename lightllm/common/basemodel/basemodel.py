@@ -14,6 +14,7 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.eplb_utils import get_eplb_staging_nbytes, get_eplb_sampling_peak_nbytes
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
@@ -211,8 +212,37 @@ class TpPartBaseModel:
             head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
             layer_num=self.config["n_layer"] + get_added_mtp_kv_layer_num(),
             mem_fraction=self.mem_fraction,
+            memory_reservations=self._get_post_profile_memory_reservations(),
         )
         return
+
+    def _get_eplb_weights(self):
+        if self.is_mtp_draft_model or not self.args.enable_prefill_eplb:
+            return []
+        from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
+
+        weights = {}
+        for layer in self.trans_layers_weight:
+            for weight in vars(layer).values():
+                if (
+                    isinstance(weight, FusedMoeWeight)
+                    and weight.enable_ep_moe
+                    and weight.expert_parallel_state.eplb is not None
+                ):
+                    weights[id(weight)] = weight
+        return sorted(weights.values(), key=lambda weight: weight.layer_num_)
+
+    def _get_post_profile_memory_reservations(self):
+        """Buffers allocated by EPLB after KV profiling, shared by all EP MoE models."""
+        weights = self._get_eplb_weights()
+        return {
+            name: value
+            for name, value in (
+                ("eplb_staging", get_eplb_staging_nbytes(weights)),
+                ("eplb_sampling", get_eplb_sampling_peak_nbytes(weights)),
+            )
+            if value
+        }
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size

@@ -15,8 +15,19 @@ class Deepseek2MemoryManager(MemoryManager):
 
     operator_class = Deepseek2MemOperator
 
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
-        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
+    def __init__(
+        self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, memory_reservations=None
+    ):
+        super().__init__(
+            size,
+            dtype,
+            head_num,
+            head_dim,
+            layer_num,
+            always_copy,
+            mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
     def get_att_input_params(self, layer_index: int) -> Any:
         kv = self.kv_buffer[layer_index]

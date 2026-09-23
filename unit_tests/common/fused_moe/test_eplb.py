@@ -9,6 +9,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+
+def _replica_index_reference(token, expert, counts):
+    value = token ^ (((expert.to(torch.int64) + 1) * 0x9E3779B9) & 0xFFFFFFFF)
+    value = ((value ^ (value >> 16)) * 0x7FEB352D) & 0xFFFFFFFF
+    value = ((value ^ (value >> 15)) * 0x846CA68B) & 0xFFFFFFFF
+    return (value ^ (value >> 16)) % counts
+
+
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
     build_initial_redundant_expert_ids,
     build_logical_to_physical_map,
@@ -49,6 +57,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_paral
     is_eplb_model_init_disabled,
 )
 from lightllm.common.eplb_utils import extract_eplb_expert_tensors
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import eplb_planner as eplb_planner_module
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
     _CudaBatchMemcpy,
@@ -967,7 +976,7 @@ def test_plan_and_broadcast_propagates_rank_zero_error_after_existing_broadcast(
     def record_broadcast(result_list, **_kwargs):
         broadcasted.append(result_list[0])
 
-    monkeypatch.setattr(manager_module, "plan_redundant_experts", broken_planner)
+    monkeypatch.setattr(eplb_planner_module, "plan_redundant_experts", broken_planner)
     monkeypatch.setattr(manager_module.dist, "broadcast_object_list", record_broadcast)
 
     with pytest.raises(RuntimeError, match="EPLB planner failed on rank zero") as exc_info:
@@ -2346,6 +2355,7 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
             operations.append("consumed synchronize")
 
     transfer = object.__new__(transfer_module._EPLBTransferBase)
+    transfer.full_layout = False
     transfer.backend = "test"
     transfer.device = torch.device("cuda", 0)
     transfer.staging_depth = 2
@@ -2421,6 +2431,7 @@ def test_transfer_finalization_failure_stays_in_worker_and_success_finalizes_onc
         transfer.device = torch.device("cuda", 0)
         transfer.global_rank = 0
         transfer.staging_depth = 1
+        transfer.full_layout = False
         transfer.staging = [[]]
         transfer._release = [threading.Event()]
         transfer._release[0].set()
@@ -2899,6 +2910,7 @@ def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
     stream = SimpleNamespace(cuda_stream=123, synchronize=lambda: None)
     batch_memcpy = BatchMemcpy()
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer.full_layout = False
     transfer._push_stream = stream
     transfer._batch_memcpy = batch_memcpy
     transfer.global_rank = 0
@@ -2943,6 +2955,7 @@ def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
 
 def test_nixl_prepare_transfer_batches_match_staging_depth():
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer.full_layout = False
     transfer.staging_depth = 2
     transfer.staging = ["staging-0", "staging-1"]
     seen_batches = []
@@ -3074,8 +3087,9 @@ def test_nixl_transfer_fails_fast_without_cuda13_batch_memcpy(monkeypatch):
     )
     monkeypatch.setattr(transfer_module.torch.cuda, "Stream", lambda device: ("stream", device))
     monkeypatch.setattr(transfer_module, "_CudaBatchMemcpy", unavailable)
+    weight = SimpleNamespace(expert_parallel_state=_test_parallel_state(eplb=True))
     with pytest.raises(RuntimeError, match="missing cudaMemcpyBatchAsync") as exc_info:
-        transfer_module.NixlEPLBTransfer([object()], object(), 0, 1)
+        transfer_module.NixlEPLBTransfer([weight], object(), 0, 1)
     assert exc_info.value is failure
 
 
@@ -3116,7 +3130,8 @@ def test_nixl_transfer_bounds_staging_depth(monkeypatch, layers, expected_depth)
     monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_ipc_metadata", lambda self: None)
     monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_push_layouts", lambda self: None)
 
-    transfer = transfer_module.NixlEPLBTransfer([object()] * layers, object(), 0, 1)
+    weight = SimpleNamespace(expert_parallel_state=_test_parallel_state(eplb=True))
+    transfer = transfer_module.NixlEPLBTransfer([weight] * layers, object(), 0, 1)
 
     assert transfer.staging_depth == expected_depth
 
@@ -3255,6 +3270,7 @@ def test_nixl_remote_read_cache_is_bounded_to_the_current_transfer_generation(
     transfer.global_rank = 0
     transfer.world_size = 2
     transfer.staging_depth = 1
+    transfer.full_layout = False
     transfer.staging = [[]]
     transfer.num_experts_per_rank = 0
     transfer._release = [threading.Event()]
@@ -3385,7 +3401,7 @@ def test_nixl_copy_batch_source_pushes_local_rows_and_keeps_remote_ucx_reads(
     transfer._push_stream = stream
     transfer._batch_memcpy = SimpleNamespace(enqueue=lambda descriptor, stream: enqueued.append((descriptor, stream)))
     remote_reads, waited_xfers, enqueued = [], [], []
-    transfer._get_remote_read = lambda src_rank, entries: remote_reads.append((src_rank, entries)) or (
+    transfer._get_remote_read = lambda src_rank, entries, part_index=None: remote_reads.append((src_rank, entries)) or (
         None,
         None,
         "xfer",
@@ -3533,10 +3549,9 @@ def test_grouped_topk_eplb_matches_topk_mapping_and_counting(record_load, tokens
         replica_indices = torch.zeros_like(logical_ids)
     else:
         token_indices = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1)
-        replica_indices = (
-            (((token_indices * 2654435769) & 0xFFFFFFFF) + ((logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF))
-            & 0xFFFFFFFF
-        ) % logical_replica_count[logical_ids.to(torch.long)].to(torch.int64)
+        replica_indices = _replica_index_reference(
+            token_indices, logical_ids, logical_replica_count[logical_ids.to(torch.long)].to(torch.int64)
+        )
     expected_ids = logical_to_physical[logical_ids.to(torch.long), replica_indices.to(torch.long)].to(torch.long)
     if record_load:
         expected_counter[1].scatter_add_(
@@ -3597,13 +3612,9 @@ def test_global_topk_eplb_supports_logical_ids_and_counting(record_load, tokens)
         replica_indices = torch.zeros_like(expected_logical_ids)
     else:
         token_indices = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1)
-        replica_indices = (
-            (
-                ((token_indices * 2654435769) & 0xFFFFFFFF)
-                + ((expected_logical_ids.to(torch.int64) * 2246822519) & 0xFFFFFFFF)
-            )
-            & 0xFFFFFFFF
-        ) % logical_replica_count[expected_logical_ids].to(torch.int64)
+        replica_indices = _replica_index_reference(
+            token_indices, expected_logical_ids, logical_replica_count[expected_logical_ids].to(torch.int64)
+        )
     expected_ids = logical_to_physical[expected_logical_ids, replica_indices.to(torch.long)].to(torch.long)
     if record_load:
         expected_counter[1].scatter_add_(
@@ -3663,3 +3674,20 @@ def test_triton_grouped_topk_eplb_empty_tokens_skips_kernel():
     assert weights.shape == physical_ids.shape == logical_ids.shape == (0, 4)
     assert physical_ids.dtype is logical_ids.dtype is torch.long
     assert torch.equal(counter, torch.zeros_like(counter))
+
+
+def test_eplb_configured_window_equal_interval_arms_immediately():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.step_interval = 20
+    manager.sampling_interval = 20
+    manager.steady_sample_steps = 20
+    manager._continuous_collection_start_step = None
+    manager._continuous_collection_end_step = None
+    manager._steady_collection_end_step = None
+    manager.prefill_steps = 0
+    calls = []
+    manager._reset_recorded_samples = lambda: calls.append("reset")
+    manager._set_recording = lambda value: calls.append(value)
+    manager._prepare_next_sampling_window()
+    assert manager._steady_collection_end_step == 20
+    assert calls == ["reset", True]

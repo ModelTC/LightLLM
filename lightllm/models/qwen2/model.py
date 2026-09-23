@@ -48,5 +48,6 @@ class Qwen2TpPartModel(LlamaTpPartModel):
             head_dim=head_dim_,
             layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
             mem_fraction=self.mem_fraction,
+            memory_reservations=self._get_post_profile_memory_reservations(),
         )
         return

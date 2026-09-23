@@ -8,13 +8,24 @@ class Deepseek3_2MemoryManager(Deepseek2MemoryManager):
 
     operator_class = Deepseek3_2MemOperator
 
-    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
+    def __init__(
+        self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, memory_reservations=None
+    ):
         assert dtype in [torch.bfloat16, torch.float16]
         # 因为V3.2 使用了NSA 稀疏的缘故，所以其head_dim 会比原始的kv 多 128 + 4 = 132 个字节 (128 fp8 + 4byte float32 scale)，
         # 但是为了让整个数组具备16字节对齐，满足一些算子的约束，修改为添加 128 + 16 = 144 个字节, 这 144个字节中，后面132个字节用于
         # 存储真实数据，剩下12个，浪费了，只是占位。
         # 所以在子类中定制为其pad上，对外使用的接口，需要进行重载区别。
-        super().__init__(size, dtype, head_num, head_dim + (144 // 2), layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            dtype,
+            head_num,
+            head_dim + (144 // 2),
+            layer_num,
+            always_copy,
+            mem_fraction,
+            memory_reservations=memory_reservations,
+        )
 
     def get_att_input_params(self, layer_index: int) -> Any:
         kv = self.kv_buffer[layer_index][:, :, : (self.head_dim - (144 // 2))]

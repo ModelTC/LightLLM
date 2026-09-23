@@ -54,6 +54,7 @@ class MixtralTpPartModel(TpPartBaseModel):
             layer_num=self.config["num_hidden_layers"],
             always_copy=False,
             mem_fraction=self.mem_fraction,
+            memory_reservations=self._get_post_profile_memory_reservations(),
         )
         return
 
