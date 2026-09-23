@@ -57,6 +57,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_paral
     is_eplb_model_init_disabled,
 )
 from lightllm.common.eplb_utils import extract_eplb_expert_tensors
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import eplb_planner as eplb_planner_module
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
     _CudaBatchMemcpy,
@@ -975,7 +976,7 @@ def test_plan_and_broadcast_propagates_rank_zero_error_after_existing_broadcast(
     def record_broadcast(result_list, **_kwargs):
         broadcasted.append(result_list[0])
 
-    monkeypatch.setattr(manager_module, "plan_redundant_experts", broken_planner)
+    monkeypatch.setattr(eplb_planner_module, "plan_redundant_experts", broken_planner)
     monkeypatch.setattr(manager_module.dist, "broadcast_object_list", record_broadcast)
 
     with pytest.raises(RuntimeError, match="EPLB planner failed on rank zero") as exc_info:
@@ -2354,6 +2355,7 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
             operations.append("consumed synchronize")
 
     transfer = object.__new__(transfer_module._EPLBTransferBase)
+    transfer.full_layout = False
     transfer.backend = "test"
     transfer.device = torch.device("cuda", 0)
     transfer.staging_depth = 2
@@ -2429,6 +2431,7 @@ def test_transfer_finalization_failure_stays_in_worker_and_success_finalizes_onc
         transfer.device = torch.device("cuda", 0)
         transfer.global_rank = 0
         transfer.staging_depth = 1
+        transfer.full_layout = False
         transfer.staging = [[]]
         transfer._release = [threading.Event()]
         transfer._release[0].set()
@@ -2907,6 +2910,7 @@ def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
     stream = SimpleNamespace(cuda_stream=123, synchronize=lambda: None)
     batch_memcpy = BatchMemcpy()
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer.full_layout = False
     transfer._push_stream = stream
     transfer._batch_memcpy = batch_memcpy
     transfer.global_rank = 0
@@ -2951,6 +2955,7 @@ def test_nixl_prepare_batch_compiles_hot_path_without_tensor_views(monkeypatch):
 
 def test_nixl_prepare_transfer_batches_match_staging_depth():
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer.full_layout = False
     transfer.staging_depth = 2
     transfer.staging = ["staging-0", "staging-1"]
     seen_batches = []
@@ -3265,6 +3270,7 @@ def test_nixl_remote_read_cache_is_bounded_to_the_current_transfer_generation(
     transfer.global_rank = 0
     transfer.world_size = 2
     transfer.staging_depth = 1
+    transfer.full_layout = False
     transfer.staging = [[]]
     transfer.num_experts_per_rank = 0
     transfer._release = [threading.Event()]
@@ -3395,7 +3401,7 @@ def test_nixl_copy_batch_source_pushes_local_rows_and_keeps_remote_ucx_reads(
     transfer._push_stream = stream
     transfer._batch_memcpy = SimpleNamespace(enqueue=lambda descriptor, stream: enqueued.append((descriptor, stream)))
     remote_reads, waited_xfers, enqueued = [], [], []
-    transfer._get_remote_read = lambda src_rank, entries: remote_reads.append((src_rank, entries)) or (
+    transfer._get_remote_read = lambda src_rank, entries, part_index=None: remote_reads.append((src_rank, entries)) or (
         None,
         None,
         "xfer",
@@ -3668,3 +3674,20 @@ def test_triton_grouped_topk_eplb_empty_tokens_skips_kernel():
     assert weights.shape == physical_ids.shape == logical_ids.shape == (0, 4)
     assert physical_ids.dtype is logical_ids.dtype is torch.long
     assert torch.equal(counter, torch.zeros_like(counter))
+
+
+def test_eplb_configured_window_equal_interval_arms_immediately():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.step_interval = 20
+    manager.sampling_interval = 20
+    manager.steady_sample_steps = 20
+    manager._continuous_collection_start_step = None
+    manager._continuous_collection_end_step = None
+    manager._steady_collection_end_step = None
+    manager.prefill_steps = 0
+    calls = []
+    manager._reset_recorded_samples = lambda: calls.append("reset")
+    manager._set_recording = lambda value: calls.append(value)
+    manager._prepare_next_sampling_window()
+    assert manager._steady_collection_end_step == 20
+    assert calls == ["reset", True]

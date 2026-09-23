@@ -12,6 +12,7 @@ from .eplb_placement import (
     _expert_locations,
     _expert_rank_load_all,
     _resolve_node_world_size,
+    plan_redundant_experts,
     validate_physical_placement,
 )
 
@@ -89,16 +90,20 @@ def _local_search(load, placement, alignment, node_world_size, full_layout, stic
                 break
             # Each move changes two distinct experts. Build only their routing
             # contributions, never a [candidates, all experts] load tensor.
-            old_ids = torch.tensor([move[2] for move in proposals])
-            new_ids = torch.tensor([move[3] for move in proposals])
+            proposal_tensor = torch.tensor(proposals, dtype=torch.long, device=rows.device)
+            old_ids = proposal_tensor[:, 2]
+            new_ids = proposal_tensor[:, 3]
             ids = torch.stack((old_ids, new_ids), dim=1)
             new_locations = locations[0, ids].clone()
-            for index, (rank, slot, old, new, other_rank, other_slot) in enumerate(proposals):
-                new_locations[index, 0, rank] = False
-                new_locations[index, 1, rank] = True
-                if other_rank >= 0:
-                    new_locations[index, 1, other_rank] = False
-                    new_locations[index, 0, other_rank] = True
+            proposal_indexes = torch.arange(len(proposals), device=rows.device)
+            ranks = proposal_tensor[:, 0]
+            new_locations[proposal_indexes, 0, ranks] = False
+            new_locations[proposal_indexes, 1, ranks] = True
+            has_other_rank = proposal_tensor[:, 4] >= 0
+            other_indexes = proposal_indexes[has_other_rank]
+            other_ranks = proposal_tensor[has_other_rank, 4]
+            new_locations[other_indexes, 1, other_ranks] = False
+            new_locations[other_indexes, 0, other_ranks] = True
             move_load = source[:, 0, :, ids].permute(0, 2, 1, 3)
             next_contributions = _expert_rank_load_all(
                 move_load, new_locations, source.shape[2], node_world_size, alignment
@@ -128,58 +133,125 @@ def _propose_moves(rows, locations, contributions, node_world_size, full_layout,
     row_ids = rows.tolist()
     per_rank = []
     for rank in rank_order:
-        moves = []
         node_start = rank // node_world_size * node_world_size
         node_end = node_start + node_world_size
         # Replacement candidates include cold redundant copies, freeing space
         # for hot experts. Last copies on a node may only move through swaps.
-        for new in expert_order:
-            if occupancy[new][rank]:
-                continue
-            if full_layout and not any(occupancy[new][node_start:node_end]):
-                continue
-            for slot, old in enumerate(row_ids[rank]):
-                if full_layout and sum(occupancy[old][node_start:node_end]) <= 1:
+
+        def replacements(rank=rank, node_start=node_start, node_end=node_end):
+            count = 0
+            for new in expert_order:
+                if occupancy[new][rank]:
                     continue
-                moves.append((rank, slot, old, new, -1, -1))
-                if len(moves) >= budget:
-                    break
-            if len(moves) >= budget:
-                break
-        swaps = []
+                if full_layout and not any(occupancy[new][node_start:node_end]):
+                    continue
+                for slot, old in enumerate(row_ids[rank]):
+                    if full_layout and sum(occupancy[old][node_start:node_end]) <= 1:
+                        continue
+                    yield rank, slot, old, new, -1, -1
+                    count += 1
+                    if count >= budget:
+                        return
+
         # Swap hot rows of heavy ranks with cold rows of lighter ranks. In
         # fixed-primary mode only the redundant rows are interchangeable.
-        hot_slots = sorted(range(capacity), key=lambda s: -per_copy_load[row_ids[rank][s]][rank])
-        for other in reversed(rank_order):
-            if other == rank or (full_layout and other // node_world_size != rank // node_world_size):
-                continue
-            cold_slots = sorted(range(capacity), key=lambda s: per_copy_load[row_ids[other][s]][other])
-            for slot in hot_slots:
-                old = row_ids[rank][slot]
-                if occupancy[old][other]:
+        def swaps(rank=rank, node_start=node_start, node_end=node_end):
+            count = 0
+            hot_slots = sorted(range(capacity), key=lambda s: -per_copy_load[row_ids[rank][s]][rank])
+            for other in reversed(rank_order):
+                if other == rank or (full_layout and other // node_world_size != rank // node_world_size):
                     continue
-                for other_slot in cold_slots:
-                    new = row_ids[other][other_slot]
-                    if occupancy[new][rank]:
+                cold_slots = sorted(range(capacity), key=lambda s: per_copy_load[row_ids[other][s]][other])
+                for slot in hot_slots:
+                    old = row_ids[rank][slot]
+                    if occupancy[old][other]:
                         continue
-                    swaps.append((rank, slot, old, new, other, other_slot))
-                    if len(swaps) >= budget:
-                        break
-                if len(swaps) >= budget:
-                    break
-            if len(swaps) >= budget:
-                break
-        per_rank.append(
-            [move for pair in zip(moves, swaps) for move in pair] + moves[len(swaps) :] + swaps[len(moves) :]
-        )
+                    for other_slot in cold_slots:
+                        new = row_ids[other][other_slot]
+                        if occupancy[new][rank]:
+                            continue
+                        yield rank, slot, old, new, other, other_slot
+                        count += 1
+                        if count >= budget:
+                            return
+
+        def interleaved(replacements=replacements, swaps=swaps):
+            replacement_iterator = replacements()
+            swap_iterator = swaps()
+            exhausted_replacements = exhausted_swaps = False
+            while not (exhausted_replacements and exhausted_swaps):
+                if not exhausted_replacements:
+                    try:
+                        yield next(replacement_iterator)
+                    except StopIteration:
+                        exhausted_replacements = True
+                if not exhausted_swaps:
+                    try:
+                        yield next(swap_iterator)
+                    except StopIteration:
+                        exhausted_swaps = True
+
+        per_rank.append(interleaved())
     proposals = []
-    for index in range(budget):
+    for _ in range(budget):
         for moves in per_rank:
-            if index < len(moves):
-                proposals.append(moves[index])
-                if len(proposals) == budget:
-                    return proposals
+            try:
+                proposals.append(next(moves))
+            except StopIteration:
+                continue
+            if len(proposals) == budget:
+                return proposals
     return proposals
+
+
+def plan_eplb_candidate(
+    expert_load,
+    current,
+    *,
+    full_layout,
+    world_size,
+    node_world_size,
+    num_redundant_experts_per_rank,
+    expert_alignment,
+    stickiness,
+):
+    """Return the manager's CPU candidate before selection/metadata/broadcast."""
+    if full_layout:
+        return plan_full_experts(
+            expert_load,
+            current,
+            expert_alignment=expert_alignment,
+            node_world_size=node_world_size,
+            stickiness=stickiness,
+        )
+    candidate = plan_redundant_experts(
+        expert_load,
+        world_size,
+        num_redundant_experts_per_rank,
+        expert_alignment=expert_alignment,
+        node_world_size=node_world_size,
+        current_placement=current,
+        stickiness=stickiness,
+    )
+    candidates = [candidate]
+    if stickiness > 0:
+        candidates.append(
+            plan_redundant_experts(
+                expert_load,
+                world_size,
+                num_redundant_experts_per_rank,
+                expert_alignment=expert_alignment,
+                node_world_size=node_world_size,
+            )
+        )
+    return refine_placement_candidates(
+        expert_load,
+        current,
+        candidates,
+        expert_alignment=expert_alignment,
+        node_world_size=node_world_size,
+        stickiness=stickiness,
+    )
 
 
 def plan_full_experts(

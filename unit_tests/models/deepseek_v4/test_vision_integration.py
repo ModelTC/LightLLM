@@ -403,23 +403,44 @@ def test_router_uses_bias_vl_only_for_image_tokens(is_hash):
     torch.testing.assert_close(weights, expected, rtol=2e-5, atol=1e-6)
 
 
-def test_eplb_rejects_vision_routing():
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_eplb_router_routes_vision_tokens():
+    """The real router forwards vision bias to EPLB instead of rejecting it."""
     from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 
     router = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
     router.has_vision = True
-    router.is_hash = False
+    router.is_hash = True
     router.vocab_size = 32
-    logits = torch.zeros((1, 256), dtype=torch.float32)
-    infer_state = SimpleNamespace(is_prefill=True, input_ids=torch.tensor([100_000]))
-    layer_weight = SimpleNamespace(
-        gate_bias_=SimpleNamespace(weight=torch.zeros(256, dtype=torch.float32)),
-        gate_bias_vl_=SimpleNamespace(weight=torch.zeros(256, dtype=torch.float32)),
-        experts_=SimpleNamespace(expert_parallel_state=SimpleNamespace(eplb=object())),
+    router.num_experts_per_tok = 6
+    router.routed_scaling_factor = 1.0
+    router.alloc_tensor = torch.empty
+    maps = torch.arange(256 * 2, dtype=torch.int32, device="cuda").view(256, 2)
+    eplb = SimpleNamespace(
+        logical_to_physical_map=maps,
+        logical_replica_count=torch.full((256,), 2, dtype=torch.int32, device="cuda"),
+        route_counter=torch.zeros((1, 256), dtype=torch.int64, device="cuda"),
+        recording=True,
+        next_sample_index=lambda: 0,
     )
+    table = torch.zeros((32, 6), dtype=torch.int64, device="cuda")
+    table[2] = torch.tensor([1, 4, 7, 10, 13, 16], device="cuda")
+    vision_bias = torch.zeros(256, dtype=torch.float32, device="cuda")
+    vision_bias[200:206] = torch.arange(6, 0, -1, dtype=torch.float32, device="cuda")
+    layer_weight = SimpleNamespace(
+        gate_tid2eid_=SimpleNamespace(weight=table),
+        gate_bias_vl_=SimpleNamespace(weight=vision_bias),
+        experts_=SimpleNamespace(expert_parallel_state=SimpleNamespace(eplb=eplb)),
+    )
+    logits = torch.zeros((2, 256), dtype=torch.float32, device="cuda")
+    infer_state = SimpleNamespace(is_prefill=True, input_ids=torch.tensor([2, 32], device="cuda"))
 
-    with pytest.raises(RuntimeError, match="does not support vision routing"):
-        router._select_experts(logits, infer_state, layer_weight)
+    _, physical, logical = router._select_experts(logits, infer_state, layer_weight, return_logical_ids=True)
+
+    torch.testing.assert_close(logical[0], table[2])
+    torch.testing.assert_close(logical[1], torch.arange(200, 206, device="cuda"))
+    torch.testing.assert_close(physical // 2, logical)
+    assert eplb.route_counter.sum().item() == 12
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

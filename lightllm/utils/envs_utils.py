@@ -151,12 +151,48 @@ def get_lightllm_websocket_max_message_size():
 
 
 @lru_cache(maxsize=None)
+def get_dsv4_eplb_tile_routing() -> bool:
+    raw = os.getenv("LIGHTLLM_DSV4_EPLB_TILE_ROUTING", "0")
+    if raw not in ("0", "1"):
+        raise ValueError("LIGHTLLM_DSV4_EPLB_TILE_ROUTING must be 0 or 1")
+    return raw == "1"
+
+
+@lru_cache(maxsize=None)
+def get_eplb_planner_process() -> bool:
+    raw = os.getenv("LIGHTLLM_EPLB_PLANNER_PROCESS", "0")
+    if raw not in ("0", "1"):
+        raise ValueError("LIGHTLLM_EPLB_PLANNER_PROCESS must be 0 or 1")
+    return raw == "1"
+
+
+@lru_cache(maxsize=None)
 def get_prefill_eplb_step_interval():
     """Return the number of prefill forwards between EPLB attempts."""
     interval = int(os.getenv("LIGHTLLM_PREFILL_EPLB_STEP_INTERVAL", 20))
     if interval <= 0:
         raise ValueError("LIGHTLLM_PREFILL_EPLB_STEP_INTERVAL must be greater than 0")
     return interval
+
+
+@lru_cache(maxsize=None)
+def get_prefill_eplb_steady_sample_steps() -> int:
+    value = int(os.getenv("LIGHTLLM_PREFILL_EPLB_STEADY_SAMPLE_STEPS", "4"))
+    if value <= 0:
+        raise ValueError("LIGHTLLM_PREFILL_EPLB_STEADY_SAMPLE_STEPS must be greater than 0")
+    return value
+
+
+@lru_cache(maxsize=None)
+def get_prefill_eplb_min_rebalance_interval() -> int:
+    """Return the fixed-boundary steady sampling period, not a strict commit-to-commit distance."""
+    value = int(os.getenv("LIGHTLLM_PREFILL_EPLB_MIN_REBALANCE_INTERVAL", "0"))
+    if value < 0:
+        raise ValueError("LIGHTLLM_PREFILL_EPLB_MIN_REBALANCE_INTERVAL must be non-negative")
+    step_interval = get_prefill_eplb_step_interval()
+    if value and value < step_interval:
+        raise ValueError("LIGHTLLM_PREFILL_EPLB_MIN_REBALANCE_INTERVAL must be 0 or at least step interval")
+    return value
 
 
 @lru_cache(maxsize=None)

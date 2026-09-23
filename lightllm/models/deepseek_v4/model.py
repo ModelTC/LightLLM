@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import json
+import math
 import os
 import time
 
@@ -45,8 +46,11 @@ from lightllm.utils.config_utils import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.utils.envs_utils import get_dsv4_eplb_tile_routing
+from lightllm.utils.dist_utils import get_dp_world_size, get_node_world_size
 from lightllm.common.eplb_utils import (
     get_eplb_staging_shape,
+    get_eplb_staging_tensor_shape,
     extract_eplb_expert_tensors,
 )
 
@@ -126,12 +130,22 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         weights = self._get_eplb_weights()
         staging = _get_eplb_staging_nbytes(weights)
         sampling = _get_eplb_sampling_peak_nbytes(weights)
-        return {name: value for name, value in (("eplb_staging", staging), ("eplb_sampling", sampling)) if value}
+        tile = _get_eplb_tile_routing_peak_nbytes(weights, self.args, self.config)
+        return {
+            name: value
+            for name, value in (("eplb_staging", staging), ("eplb_sampling", sampling), ("eplb_tile_routing", tile))
+            if value
+        }
 
     def _get_eplb_weights(self):
         if self.is_mtp_draft_model or not self.args.enable_prefill_eplb:
             return []
         weights = []
+        if get_dsv4_eplb_tile_routing():
+            if self.is_mtp_draft_model or self.args.run_mode != "prefill":
+                raise RuntimeError("tile routing is only valid for the target prefill model")
+            if get_dp_world_size() != 1 or get_node_world_size() != 8:
+                raise RuntimeError("tile routing requires per-DP world size 1 and node world size 8")
         seen = set()
         for layer_weight in self.trans_layers_weight:
             experts = getattr(layer_weight, "experts_", None)
@@ -578,10 +592,27 @@ def _get_eplb_staging_nbytes(weights) -> int:
     if not weights:
         return 0
     depth, staged_rows = get_eplb_staging_shape(weights)
-    one_row_nbytes = sum(
-        tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(weights[0])
+    full_layout = getattr(weights[0].expert_parallel_state.eplb, "full_layout", False)
+    staged_nbytes = sum(
+        math.prod(get_eplb_staging_tensor_shape(tensor, staged_rows, full_layout=full_layout)) * tensor.element_size()
+        for _, tensor in extract_eplb_expert_tensors(weights[0])
     )
-    return depth * staged_rows * one_row_nbytes
+    return depth * staged_nbytes
+
+
+def _get_eplb_tile_routing_peak_nbytes(weights, args, config) -> int:
+    """One routing-chain peak reservation, independent of the number of layers."""
+    if not get_dsv4_eplb_tile_routing() or not weights:
+        return 0
+    state = weights[0].expert_parallel_state
+    eplb = state.eplb
+    if getattr(args, "run_mode", None) != "prefill" or not getattr(eplb, "full_layout", False):
+        return 0
+    if state.num_logical_experts != 256 or state.world_size != 8:
+        raise RuntimeError("tile routing requires DeepSeek-V4 E256 world8")
+    from lightllm.models.deepseek_v4.triton_kernel.eplb_tile_route import tile_routing_peak_nbytes
+
+    return tile_routing_peak_nbytes(int(args.batch_max_tokens), int(config["num_experts_per_tok"]))
 
 
 def _get_eplb_sampling_peak_nbytes(weights) -> int:

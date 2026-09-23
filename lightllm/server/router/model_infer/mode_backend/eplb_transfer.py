@@ -1,5 +1,6 @@
 """Asynchronous expert-row migration for EPLB."""
 import ctypes
+import math
 import os
 import re
 import socket
@@ -11,7 +12,12 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import torch
 import torch.distributed as dist
 
-from lightllm.common.eplb_utils import extract_eplb_expert_tensors, get_eplb_staging_shape
+from lightllm.common.eplb_utils import (
+    EPLB_FULL_STAGING_PARTS,
+    extract_eplb_expert_tensors,
+    get_eplb_staging_shape,
+    get_eplb_staging_tensor_shape,
+)
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import validate_physical_placement
 
 
@@ -120,6 +126,7 @@ class _EPLBTransferBase:
             # TransferStep.dst_slot is an absolute row in full-layout mode.
             self.num_experts_per_rank = 0
         self.device = weights[0].w13.weight.device
+        self.full_layout = getattr(self._eplb_states[0], "full_layout", False)
         self.live = [extract_eplb_expert_tensors(weight) for weight in weights]
         self._validate_live_layout()
         _, staged_rows = get_eplb_staging_shape(weights)
@@ -128,7 +135,7 @@ class _EPLBTransferBase:
                 (
                     name,
                     torch.empty(
-                        (staged_rows,) + tuple(tensor.shape[1:]),
+                        get_eplb_staging_tensor_shape(tensor, staged_rows, full_layout=self.full_layout),
                         dtype=tensor.dtype,
                         device=tensor.device,
                     ),
@@ -185,7 +192,7 @@ class _EPLBTransferBase:
         def worker() -> None:
             try:
                 torch.cuda.set_device(self.device)
-                if not layer_plans:
+                if not layer_plans and not self.full_layout:
                     self._finish_transfer_generation()
                 for batch_index, (batch, prepared_batch) in enumerate(prepared_batches):
                     batch_start = batch_index * self.staging_depth
@@ -193,6 +200,8 @@ class _EPLBTransferBase:
                         release = self._release[buffer_index]
                         # A buffer cannot be reused until its prior committed rows are no longer read by CUDA.
                         release.wait()
+                        if self._error is not None:
+                            return
                         release.clear()
                         if self._consumed_recorded[buffer_index]:
                             self._consumed_events[buffer_index].synchronize()
@@ -204,7 +213,7 @@ class _EPLBTransferBase:
                         # before a source can reuse the peer buffer for this batch.
                         dist.barrier(group=self.transfer_group)
                     self._copy_batch(batch, prepared_batch)
-                    if batch_start + self.staging_depth >= len(layer_plans):
+                    if batch_start + self.staging_depth >= len(layer_plans) and not self.full_layout:
                         self._finish_transfer_generation()
                     with self._pending_lock:
                         self._pending.extend((layer_index, buffer_index) for layer_index, _, buffer_index, _ in batch)
@@ -226,18 +235,64 @@ class _EPLBTransferBase:
                 raise RuntimeError("EPLB commit does not match the pending FIFO")
             self._pending.popleft()
             changed_dst_slots = self._changed_dst_slots[buffer_index]
-        for (_, live), (_, staging) in zip(self.live[layer_index], self.staging[buffer_index]):
-            _commit_staging_rows(
-                live,
-                staging,
-                self.num_experts_per_rank,
-                changed_dst_slots,
-            )
+        if self.full_layout:
+            try:
+                self._commit_full_parts(layer_index, buffer_index, changed_dst_slots)
+            except BaseException as exc:
+                self._error = exc
+                for release in self._release:
+                    release.set()
+                raise
+        else:
+            for (_, live), (_, staging) in zip(self.live[layer_index], self.staging[buffer_index]):
+                _commit_staging_rows(live, staging, self.num_experts_per_rank, changed_dst_slots)
         if post_copy is not None:
             post_copy()
         self._consumed_events[buffer_index].record(torch.cuda.current_stream())
         self._consumed_recorded[buffer_index] = True
         self._release[buffer_index].set()
+
+    def _full_phase_gate(self, error):
+        flag = torch.tensor([int(error is not None)], dtype=torch.int32, device="cpu")
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=self.transfer_group)
+        if flag.item():
+            raise RuntimeError("full EPLB migration phase failed") from error
+
+    def _commit_full_parts(self, layer_index, buffer_index, changed_dst_slots):
+        """Commit both slices before publishing full-layout routing metadata."""
+        error = None
+        try:
+            batch, container = self._full_prepared_batches[buffer_index]
+            if len(batch) != 1 or batch[0][0] != layer_index or len(container.parts) != EPLB_FULL_STAGING_PARTS:
+                raise RuntimeError("invalid full EPLB prepared batch")
+            self._commit_full_part(layer_index, buffer_index, changed_dst_slots, 0)
+            torch.cuda.current_stream().synchronize()
+        except BaseException as exc:
+            error = exc
+        self._full_phase_gate(error)  # All ranks consumed part 0 before staging reuse.
+        error = None
+        try:
+            self._copy_batch(batch, container.parts[1])
+        except BaseException as exc:
+            error = exc
+        self._full_phase_gate(error)  # All incoming part-1 transfers are complete.
+        error = None
+        try:
+            self._commit_full_part(layer_index, buffer_index, changed_dst_slots, 1)
+            torch.cuda.current_stream().synchronize()
+            self._full_prepared_batches.pop(buffer_index, None)
+        except BaseException as exc:
+            error = exc
+        self._full_phase_gate(error)  # All live weight slices are complete before publish.
+
+    def _commit_full_part(self, layer_index, buffer_index, changed_dst_slots, part_index):
+        for (_, live), (_, staging) in zip(self.live[layer_index], self.staging[buffer_index]):
+            live_flat = live.view(live.shape[0], -1)
+            width = staging.shape[1]
+            offset = part_index * width
+            valid = min(width, live_flat.shape[1] - offset)
+            if valid > 0:
+                _commit_staging_rows(live_flat[:, offset : offset + valid], staging[:, :valid], 0, changed_dst_slots)
 
     def finish(self) -> None:
         """Wait for the released migration worker to exit before another rebalance."""
@@ -248,6 +303,8 @@ class _EPLBTransferBase:
         self._thread = None
         if self._error is not None:
             raise RuntimeError("EPLB migration worker failed") from self._error
+        if self.full_layout:
+            self._finish_transfer_generation()
 
 
 class NixlEPLBTransfer(_EPLBTransferBase):
@@ -260,6 +317,8 @@ class NixlEPLBTransfer(_EPLBTransferBase):
     class _PreparedBatch:
         remote_entries: Dict[int, list]
         push_batch: "_PreparedCudaMemcpyBatch | None"
+        part_index: int | None = None
+        parts: tuple | None = None
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
         # Full layouts stage every changed row of one layer before publishing;
@@ -273,6 +332,7 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         self._xfer_cache = {}
         self._used_xfer_cache_keys = set()
         self._ipc_staging = {}
+        self._full_prepared_batches = {}
         self._same_node_ranks = set()
         self._cross_node_ranks = set()
         self._push_stream = torch.cuda.Stream(device=self.device)
@@ -451,12 +511,29 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                     else self._ipc_staging[dst_rank][buffer_index]
                 )
                 layout = [(name, tensor.data_ptr(), tensor[0].nbytes) for name, tensor in staging]
-                if [(name, row_nbytes) for name, _, row_nbytes in layout] != reference:
+                expected = (
+                    [
+                        (
+                            name,
+                            math.prod(get_eplb_staging_tensor_shape(tensor, 1, full_layout=True))
+                            * tensor.element_size(),
+                        )
+                        for name, tensor in self.live[0]
+                    ]
+                    if self.full_layout
+                    else reference
+                )
+                if [(name, row_nbytes) for name, _, row_nbytes in layout] != expected:
                     raise RuntimeError("NIXL source-push staging row layout mismatch")
                 layouts.append(layout)
             self._push_staging_row_layout[dst_rank] = layouts
 
-    def _prepare_batch(self, batch):
+    def _prepare_batch(self, batch, part_index=None):
+        if self.full_layout:
+            if part_index not in range(EPLB_FULL_STAGING_PARTS):
+                raise ValueError("full EPLB requires a valid staging part index")
+        elif part_index is not None:
+            raise ValueError("redundant EPLB does not use staging parts")
         remote_entries = defaultdict(list)
         push_descriptors = []
         for layer_index, plan, buffer_index, staging in batch:
@@ -468,33 +545,62 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                 if step.src_rank == self.global_rank and step.dst_rank in self._same_node_ranks:
                     by_destination[step.dst_rank].append(step)
             for src_rank, steps in steps_by_source.items():
-                remote_entries[src_rank].extend((layer_index, run, staging) for run in self._contiguous_runs(steps))
+                runs = ([step] for step in steps) if self.full_layout else self._contiguous_runs(steps)
+                remote_entries[src_rank].extend((layer_index, run, staging) for run in runs)
             source_layout = self._live_row_layout[layer_index]
             for dst_rank, steps in by_destination.items():
                 destination_layout = self._push_staging_row_layout[dst_rank][buffer_index]
-                for run in self._contiguous_runs(steps):
+                runs = ([step] for step in steps) if self.full_layout else self._contiguous_runs(steps)
+                for run in runs:
                     first = run[0]
                     run_len = len(run)
-                    for (_, source_ptr, row_nbytes), (_, destination_ptr, _) in zip(source_layout, destination_layout):
-                        push_descriptors.append(
-                            (
-                                source_ptr + first.src_local_row * row_nbytes,
-                                destination_ptr + first.dst_slot * row_nbytes,
-                                run_len * row_nbytes,
+                    for (_, source_ptr, row_nbytes), (_, destination_ptr, staged_row_nbytes) in zip(
+                        source_layout, destination_layout
+                    ):
+                        if self.full_layout:
+                            offset = (part_index or 0) * staged_row_nbytes
+                            size = min(staged_row_nbytes, row_nbytes - offset)
+                            if size <= 0:
+                                continue
+                            push_descriptors.append(
+                                (
+                                    source_ptr + first.src_local_row * row_nbytes + offset,
+                                    destination_ptr + first.dst_slot * staged_row_nbytes,
+                                    size,
+                                )
                             )
-                        )
+                        else:
+                            push_descriptors.append(
+                                (
+                                    source_ptr + first.src_local_row * row_nbytes,
+                                    destination_ptr + first.dst_slot * row_nbytes,
+                                    run_len * row_nbytes,
+                                )
+                            )
         push_batch = self._batch_memcpy.prepare(push_descriptors) if push_descriptors else None
-        return self._PreparedBatch(dict(remote_entries), push_batch)
+        return self._PreparedBatch(dict(remote_entries), push_batch, part_index=part_index)
 
     def prepare_transfer(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
-        return [(batch, self._prepare_batch(batch)) for batch in self._make_batches(layer_plans)]
+        result = []
+        for batch in self._make_batches(layer_plans):
+            if self.full_layout:
+                parts = tuple(
+                    self._prepare_batch(batch, part_index=part_index) for part_index in range(EPLB_FULL_STAGING_PARTS)
+                )
+                result.append((batch, self._PreparedBatch({}, None, parts=parts)))
+            else:
+                result.append((batch, self._prepare_batch(batch)))
+        return result
 
-    def _get_remote_read(self, src_rank: int, entries):
+    def _get_remote_read(self, src_rank: int, entries, part_index=None):
+        if part_index is not None and part_index not in range(EPLB_FULL_STAGING_PARTS):
+            raise ValueError("invalid EPLB staging part index")
         cache_key = self._remote_read_cache_key(src_rank, entries)
-        cached = self._xfer_cache.get(cache_key)
-        if cached is not None:
-            self._used_xfer_cache_keys.add(cache_key)
-            return cached
+        if part_index is None:
+            cached = self._xfer_cache.get(cache_key)
+            if cached is not None:
+                self._used_xfer_cache_keys.add(cache_key)
+                return cached
         local_descs = []
         remote_descs = []
         local_dlist = remote_dlist = xfer = None
@@ -504,24 +610,48 @@ class NixlEPLBTransfer(_EPLBTransferBase):
                 if len(remote_layer) != len(staging):
                     raise RuntimeError(f"NIXL remote rank {src_rank} has incompatible layer layout")
                 first = run[0]
+                if part_index is not None and len(run) != 1:
+                    raise RuntimeError("full EPLB part requires one transfer step per run")
                 run_len = len(run)
                 for tensor_index, (_, staging_tensor) in enumerate(staging):
                     name, remote_ptr, remote_device, remote_nbytes = remote_layer[tensor_index]
-                    if (
-                        name != self.live[layer_index][tensor_index][0]
-                        or remote_nbytes != staging_tensor[first.dst_slot].nbytes
-                    ):
+                    live_tensor = self.live[layer_index][tensor_index][1]
+                    expected_nbytes = (
+                        live_tensor[0].nbytes if part_index is not None else staging_tensor[first.dst_slot].nbytes
+                    )
+                    if name != self.live[layer_index][tensor_index][0] or remote_nbytes != expected_nbytes:
                         raise RuntimeError(f"NIXL remote rank {src_rank} descriptor range mismatch")
-                    local_descs.append(
-                        (
-                            staging_tensor[first.dst_slot].data_ptr(),
-                            run_len * remote_nbytes,
-                            staging_tensor.get_device(),
+                    if part_index is None:
+                        local_descs.append(
+                            (
+                                staging_tensor[first.dst_slot].data_ptr(),
+                                run_len * remote_nbytes,
+                                staging_tensor.get_device(),
+                            )
                         )
-                    )
-                    remote_descs.append(
-                        (remote_ptr + first.src_local_row * remote_nbytes, run_len * remote_nbytes, remote_device)
-                    )
+                        remote_descs.append(
+                            (remote_ptr + first.src_local_row * remote_nbytes, run_len * remote_nbytes, remote_device)
+                        )
+                    else:
+                        staging_nbytes = staging_tensor[0].nbytes
+                        offset = part_index * staging_nbytes
+                        size = min(staging_nbytes, remote_nbytes - offset)
+                        if size <= 0:
+                            continue
+                        local_descs.append(
+                            (staging_tensor[first.dst_slot].data_ptr(), size, staging_tensor.get_device())
+                        )
+                        remote_descs.append(
+                            (remote_ptr + first.src_local_row * remote_nbytes + offset, size, remote_device)
+                        )
+            if not local_descs:
+                return None
+            if part_index is not None:
+                cache_key = (cache_key, part_index, tuple(local_descs), tuple(remote_descs))
+                cached = self._xfer_cache.get(cache_key)
+                if cached is not None:
+                    self._used_xfer_cache_keys.add(cache_key)
+                    return cached
             local_dlist = self._nixl_agent.prep_xfer_dlist(
                 "NIXL_INIT_AGENT", self._nixl_agent.get_xfer_descs(local_descs, "VRAM"), backends=["UCX"]
             )
@@ -547,11 +677,18 @@ class NixlEPLBTransfer(_EPLBTransferBase):
             raise
 
     def _copy_batch(self, batch, prepared_batch) -> None:
+        if prepared_batch.parts is not None:
+            if len(batch) != 1:
+                raise RuntimeError("full EPLB batch must have depth one")
+            self._full_prepared_batches[batch[0][2]] = (batch, prepared_batch)
+            prepared_batch = prepared_batch.parts[0]
         if prepared_batch.push_batch is not None:
             self._batch_memcpy.enqueue(prepared_batch.push_batch, self._push_stream.cuda_stream)
         xfers = [
-            self._get_remote_read(src_rank, entries) for src_rank, entries in prepared_batch.remote_entries.items()
+            self._get_remote_read(src_rank, entries, prepared_batch.part_index)
+            for src_rank, entries in prepared_batch.remote_entries.items()
         ]
+        xfers = [xfer for xfer in xfers if xfer is not None]
         self._wait_xfers(xfers)
         self._push_stream.synchronize()
         # Before a rank publishes this batch it has completed its outgoing source-pushes and

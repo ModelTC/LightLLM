@@ -1,5 +1,7 @@
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Dict, Optional
 
 import torch
@@ -14,8 +16,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
     select_improving_placements,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import (
-    plan_full_experts,
-    refine_placement_candidates,
+    plan_eplb_candidate,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     NixlEPLBTransfer,
@@ -23,10 +24,14 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     build_transfer_plan,
 )
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_node_world_size
+from lightllm.common.eplb_planner_worker import EPLBPlannerWorker
 from lightllm.utils.envs_utils import (
     get_eplb_placement_stickiness,
+    get_eplb_planner_process,
     get_eplb_rebalance_gain_threshold,
     get_prefill_eplb_step_interval,
+    get_prefill_eplb_steady_sample_steps,
+    get_prefill_eplb_min_rebalance_interval,
 )
 from lightllm.utils.log_utils import init_logger
 
@@ -50,6 +55,8 @@ class EPLBManager:
         self.step_interval = get_prefill_eplb_step_interval()
         self.rebalance_gain_threshold = get_eplb_rebalance_gain_threshold()
         self.placement_stickiness = get_eplb_placement_stickiness()
+        self.steady_sample_steps = get_prefill_eplb_steady_sample_steps()
+        self.min_rebalance_interval = get_prefill_eplb_min_rebalance_interval()
         self.sampling_interval = self.step_interval
         self.prefill_steps = 0
         routed = {weight.expert_parallel_state.num_logical_experts for weight in self.weights}
@@ -74,6 +81,9 @@ class EPLBManager:
         self._evaluation_result = None
         self._evaluation_error = None
         self._evaluation_thread = None
+        self._diagnostics_dir = os.getenv("LIGHTLLM_EPLB_DIAGNOSTICS_DIR") or None
+        self._diagnostic_dump_sequence = 0
+        self._planner_worker = EPLBPlannerWorker() if self.global_rank == 0 and get_eplb_planner_process() else None
         # A fresh manager starts with one continuous base window. After a
         # sufficient evaluation, steady state returns to the cheap sparse
         # probe. An insufficient sparse probe schedules one fresh continuous
@@ -100,7 +110,10 @@ class EPLBManager:
                 f"placement_mode={'full' if self.full_layout else 'redundant'} "
                 f"step_interval={self.step_interval} "
                 f"rebalance_gain_threshold={self.rebalance_gain_threshold:.4f} "
-                f"placement_stickiness={self.placement_stickiness:.4f}"
+                f"placement_stickiness={self.placement_stickiness:.4f} "
+                f"steady_sample_steps={self.steady_sample_steps} min_rebalance_interval={self.min_rebalance_interval} "
+                f"planner_process={self._planner_worker is not None} "
+                f"planner_worker={getattr(self._planner_worker, 'info', None)}"
             )
 
     def poll(self):
@@ -157,7 +170,15 @@ class EPLBManager:
         self._continuous_collection_end_step = None
 
     def _steady_sample_window_steps(self) -> int:
-        return min(EPLB_STEADY_SAMPLE_STEPS, self.sampling_interval)
+        # Preserve the original four-step sampling window when the base interval is smaller.
+        return min(
+            getattr(self, "steady_sample_steps", EPLB_STEADY_SAMPLE_STEPS),
+            max(self.step_interval, EPLB_STEADY_SAMPLE_STEPS),
+            self.sampling_interval,
+        )
+
+    def _sampling_interval_cap(self) -> int:
+        return max(self.step_interval * 16, getattr(self, "min_rebalance_interval", 0))
 
     def _arm_steady_collection(self, collection_end_step: int):
         """Start the fixed sparse window without moving its evaluation boundary."""
@@ -181,7 +202,7 @@ class EPLBManager:
         if self.sampling_interval == 1:
             self._reset_recorded_samples()
             self._set_recording(True)
-        elif self.sampling_interval <= EPLB_STEADY_SAMPLE_STEPS:
+        elif self.sampling_interval <= self._steady_sample_window_steps():
             # There is no later pre-boundary manager step at which to arm a
             # full clamped window, so arm immediately but keep the same next
             # fixed boundary.
@@ -244,7 +265,18 @@ class EPLBManager:
         self.in_flight = False
         self._prepare_next_sampling_window()
         if self.global_rank == 0:
-            logger.info(f"eplb completed wall_time={time.time() - self.in_flight_started_at:.2f}s")
+            timing = getattr(self, "_inflight_timing", {})
+            logger.info(
+                "eplb completed wall_time=%.2fs control_cpu_ms=%.3f control_poll_calls=%s "
+                "commit_cpu_ms=%.3f commit_max_ms=%.3f commit_calls=%s "
+                "(CPU wall; commit includes existing stream waits, not net stall)",
+                time.time() - self.in_flight_started_at,
+                timing.get("control_cpu_ms", 0.0),
+                timing.get("control_poll_calls", 0),
+                timing.get("commit_cpu_ms", 0.0),
+                timing.get("commit_max_ms", 0.0),
+                timing.get("commit_calls", 0),
+            )
 
     def _poll_in_flight(self):
         local_error = None
@@ -254,7 +286,12 @@ class EPLBManager:
             pending = []
             local_error = exc
         ready_count = self._control_count(EPLB_CONTROL_ERROR if local_error is not None else len(pending))
+        control_started = time.perf_counter()
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=self.control_group)
+        timing = getattr(self, "_inflight_timing", None)
+        if timing is not None:
+            timing["control_poll_calls"] += 1
+            timing["control_cpu_ms"] += (time.perf_counter() - control_started) * 1000.0
         ready_count = int(ready_count.item())
         if ready_count < 0:
             if local_error is not None:
@@ -274,7 +311,14 @@ class EPLBManager:
                 raise RuntimeError(
                     f"EPLB pending layer {layer_index} does not match expected {self.in_flight_layers[0]}"
                 )
+            commit_started = time.perf_counter()
             self.transfer.commit(layer_index, buffer_index, lambda: self._commit_layer_metadata(layer_index))
+            commit_ms = (time.perf_counter() - commit_started) * 1000.0
+            timing = getattr(self, "_inflight_timing", None)
+            if timing is not None:
+                timing["commit_calls"] += 1
+                timing["commit_cpu_ms"] += commit_ms
+                timing["commit_max_ms"] = max(timing["commit_max_ms"], commit_ms)
             self.in_flight_layers.pop(0)
         if not self.in_flight_layers:
             self.transfer.finish()
@@ -296,43 +340,25 @@ class EPLBManager:
                     }
                 else:
                     full_layout = getattr(self, "full_layout", False)
-                    if full_layout:
-                        candidate = plan_full_experts(
-                            global_load,
-                            self.current_placement,
-                            expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                            node_world_size=self.node_world_size,
-                            stickiness=self.placement_stickiness,
-                        )
+                    candidate_started = time.perf_counter()
+                    settings = {
+                        "full_layout": full_layout,
+                        "world_size": self.world_size,
+                        "node_world_size": self.node_world_size,
+                        "num_redundant_experts_per_rank": self.num_redundant_experts_per_rank,
+                        "expert_alignment": EPLB_EXPERT_ALIGNMENT,
+                        "stickiness": self.placement_stickiness,
+                    }
+                    worker = getattr(self, "_planner_worker", None)
+                    if worker is None:
+                        candidate = plan_eplb_candidate(global_load, self.current_placement, **settings)
+                        candidate_timing = {"compute_ms": None, "roundtrip_ms": None}
                     else:
-                        candidate = plan_redundant_experts(
-                            global_load,
-                            self.world_size,
-                            self.num_redundant_experts_per_rank,
-                            expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                            node_world_size=self.node_world_size,
-                            current_placement=self.current_placement,
-                            stickiness=self.placement_stickiness,
+                        candidate, candidate_timing = worker.plan(
+                            global_load.cpu(), self.current_placement.cpu(), **settings
                         )
-                        candidates = [candidate]
-                        if self.placement_stickiness > 0:
-                            candidates.append(
-                                plan_redundant_experts(
-                                    global_load,
-                                    self.world_size,
-                                    self.num_redundant_experts_per_rank,
-                                    expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                                    node_world_size=self.node_world_size,
-                                )
-                            )
-                        candidate = refine_placement_candidates(
-                            global_load,
-                            self.current_placement,
-                            candidates,
-                            expert_alignment=EPLB_EXPERT_ALIGNMENT,
-                            node_world_size=self.node_world_size,
-                            stickiness=self.placement_stickiness,
-                        )
+                    candidate_parent_ms = (time.perf_counter() - candidate_started) * 1000.0
+                    select_align_started = time.perf_counter()
                     placement, improved, metrics, before_load, after_load = select_improving_placements(
                         global_load,
                         self.current_placement,
@@ -353,7 +379,13 @@ class EPLBManager:
                             placement[layer_index] = align_target_placement(
                                 self.current_placement[layer_index], placement[layer_index]
                             )
+                    select_align_ms = (time.perf_counter() - select_align_started) * 1000.0
                     result = {
+                        "candidate_timing_ms": {
+                            **candidate_timing,
+                            "parent_candidate_ms": candidate_parent_ms,
+                            "select_align_ms": select_align_ms,
+                        },
                         "kind": "planned" if bool(torch.any(improved)) else "no_improvement",
                         "placement": placement,
                         "improved": improved,
@@ -364,21 +396,50 @@ class EPLBManager:
             except BaseException as exc:
                 local_error = exc
                 result = {"kind": "error", "message": f"{type(exc).__name__}: {exc}"}
+        broadcast_started = time.perf_counter()
         if self.world_size > 1:
             result_list = [result]
             dist.broadcast_object_list(result_list, src=0, group=self.evaluation_group)
             result = result_list[0]
+        broadcast_ms = (time.perf_counter() - broadcast_started) * 1000.0
         if result["kind"] == "error":
             if local_error is not None:
                 raise RuntimeError("EPLB planner failed on rank zero") from local_error
             raise RuntimeError(f"EPLB planner failed on rank zero: {result['message']}")
+        result["broadcast_ms"] = broadcast_ms
         return result
+
+    def _dump_evaluation_samples(self, global_load, recorded_sample_count, sample_window_steps):
+        diagnostics_dir = getattr(self, "_diagnostics_dir", None)
+        if not diagnostics_dir or self.global_rank != 0:
+            return 0.0
+        started = time.perf_counter()
+        try:
+            directory = Path(diagnostics_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            self._diagnostic_dump_sequence = getattr(self, "_diagnostic_dump_sequence", 0) + 1
+            payload = {
+                "global_load": global_load,
+                "current_placement": self.current_placement.clone(),
+                "prefill_steps": self.prefill_steps,
+                "recorded_sample_count": recorded_sample_count,
+                "sample_window_steps": sample_window_steps,
+            }
+            torch.save(payload, directory / f"evaluation-{self._diagnostic_dump_sequence:06d}.pt")
+        except Exception as exc:
+            logger.warning("EPLB diagnostics dump disabled after write failure: %s", exc)
+            self._diagnostics_dir = None
+        return (time.perf_counter() - started) * 1000.0
 
     def _evaluate_after_event(self, event: torch.cuda.Event):
         """Run the CPU/Gloo planning phase after the frozen CUDA counters are ready."""
         try:
+            timing_started = time.perf_counter()
+            thread_cpu_started = time.thread_time()
             torch.cuda.set_device(self._eplb_states[0].route_counter.device)
             event.synchronize()
+            event_wait_ms = (time.perf_counter() - timing_started) * 1000.0
+            collect_started = time.perf_counter()
             local_load = self._collect_local_samples()
             recorded_sample_count = int(local_load.shape[0])
             sample_window_steps = (
@@ -393,7 +454,12 @@ class EPLBManager:
             global_load = torch.zeros((*local_load.shape[:2], num_nodes, local_load.shape[2]), dtype=local_load.dtype)
             global_load[:, :, self.global_rank // self.node_world_size] = local_load
             dist.all_reduce(global_load, op=dist.ReduceOp.SUM, group=self.evaluation_group)
+            collect_reduce_ms = (time.perf_counter() - collect_started) * 1000.0
+            diagnostic_dump_ms = self._dump_evaluation_samples(global_load, recorded_sample_count, sample_window_steps)
+            plan_started = time.perf_counter()
             result = self._plan_and_broadcast(global_load)
+            plan_broadcast_ms = (time.perf_counter() - plan_started) * 1000.0
+            prepare_started = time.perf_counter()
             result["recorded_sample_count"] = recorded_sample_count
             result["sample_window_steps"] = sample_window_steps
             if result["kind"] == "planned":
@@ -430,6 +496,22 @@ class EPLBManager:
                 result["metadata"] = metadata
                 result["layer_plans"] = layer_plans
                 result["prepared_batches"] = self.transfer.prepare_transfer(layer_plans)
+            prepare_ms = (time.perf_counter() - prepare_started) * 1000.0
+            candidate_timing = result.get("candidate_timing_ms", {})
+            result["evaluation_timing_ms"] = {
+                "event_wait": event_wait_ms,
+                "collect_reduce": collect_reduce_ms,
+                "plan_broadcast": plan_broadcast_ms,
+                "candidate_compute": candidate_timing.get("compute_ms"),
+                "candidate_roundtrip": candidate_timing.get("roundtrip_ms"),
+                "candidate_parent": candidate_timing.get("parent_candidate_ms"),
+                "select_align": candidate_timing.get("select_align_ms"),
+                "broadcast": result.get("broadcast_ms"),
+                "prepare": prepare_ms,
+                "diagnostic_dump": diagnostic_dump_ms,
+                "total": (time.perf_counter() - timing_started) * 1000.0,
+                "parent_thread_cpu": (time.thread_time() - thread_cpu_started) * 1000.0,
+            }
             with self._evaluation_lock:
                 self._evaluation_result = result
         except BaseException as exc:
@@ -466,10 +548,32 @@ class EPLBManager:
         self._evaluation_thread.join()
         self.evaluation_in_flight = False
         self._evaluation_thread = None
+        if self.global_rank == 0 and result.get("evaluation_timing_ms"):
+            logger.info(
+                "eplb evaluation CPU wall ms event_wait=%.3f collect_reduce=%.3f "
+                "plan_broadcast=%.3f prepare=%.3f diagnostic_dump=%.3f total=%.3f "
+                "candidate_compute=%s candidate_roundtrip=%s select_align=%s broadcast=%s parent_thread_cpu=%s",
+                *[
+                    result["evaluation_timing_ms"][key]
+                    for key in (
+                        "event_wait",
+                        "collect_reduce",
+                        "plan_broadcast",
+                        "prepare",
+                        "diagnostic_dump",
+                        "total",
+                        "candidate_compute",
+                        "candidate_roundtrip",
+                        "select_align",
+                        "broadcast",
+                        "parent_thread_cpu",
+                    )
+                ],
+            )
         if result["kind"] == "insufficient":
             from_continuous_window = self._continuous_collection_end_step is not None
             if from_continuous_window:
-                self.sampling_interval = min(self.sampling_interval * 4, self.step_interval * 16)
+                self.sampling_interval = min(self.sampling_interval * 4, self._sampling_interval_cap())
                 self._prepare_next_sampling_window()
             else:
                 self._begin_continuous_collection()
@@ -500,7 +604,7 @@ class EPLBManager:
                     )
             return False
         if result["kind"] == "no_improvement":
-            self.sampling_interval = min(self.sampling_interval * 4, self.step_interval * 16)
+            self.sampling_interval = min(self.sampling_interval * 4, self._sampling_interval_cap())
             if self.global_rank == 0:
                 logger.info(
                     "eplb skip rearrangement: no model improvement model_imbalance_ratio=%.4f "
@@ -537,7 +641,7 @@ class EPLBManager:
     def _start_rebalance(self, result):
         placement = result["placement"]
         layer_plans = result["layer_plans"]
-        self.sampling_interval = self.step_interval
+        self.sampling_interval = max(self.step_interval, getattr(self, "min_rebalance_interval", 0))
         self._clear_continuous_collection()
         self._reset_recorded_samples()
         self.target_placement = placement
@@ -545,6 +649,13 @@ class EPLBManager:
         self.in_flight_layers = [layer_index for layer_index, _ in layer_plans]
         self.in_flight = True
         self.in_flight_started_at = time.time()
+        self._inflight_timing = {
+            "control_poll_calls": 0,
+            "control_cpu_ms": 0.0,
+            "commit_calls": 0,
+            "commit_cpu_ms": 0.0,
+            "commit_max_ms": 0.0,
+        }
         self.transfer.start(layer_plans, result["prepared_batches"])
         if self.global_rank == 0:
             actual_changed_slot_count = sum(len(plan) for _, plan in layer_plans)

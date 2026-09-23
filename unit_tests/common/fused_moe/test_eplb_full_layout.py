@@ -8,6 +8,7 @@ import torch
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
     _estimate_rank_load,
+    _expert_locations,
     build_initial_redundant_expert_ids,
     build_logical_to_physical_maps_for_layers,
     expand_redundant_placement,
@@ -16,6 +17,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
     validate_physical_placement,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import (
+    _propose_moves,
     plan_full_experts,
     refine_placement_candidates,
 )
@@ -318,3 +320,51 @@ def test_full_state_initialization_including_zero_replicas(monkeypatch, redundan
     for expert, count in enumerate(state.logical_replica_count.tolist()):
         for index in state.logical_to_physical_map[expert, :count].tolist():
             assert state.physical_to_logical.flatten()[index] == expert
+
+
+def test_propose_moves_preserves_interleaving_and_budget_truncation():
+    rows = torch.tensor([[0, 1], [2, 3]])
+    locations = torch.zeros((4, 2), dtype=torch.bool)
+    locations[rows, torch.arange(2)[:, None]] = True
+    contributions = torch.tensor([[[9.0, 1.0], [8.0, 1.0], [1.0, 6.0], [1.0, 5.0]]])
+    expected_prefix = [
+        (0, 0, 0, 2, -1, -1),
+        (1, 0, 2, 0, -1, -1),
+        (0, 0, 0, 3, 1, 1),
+        (1, 0, 2, 1, 0, 1),
+        (0, 1, 1, 2, -1, -1),
+        (1, 1, 3, 0, -1, -1),
+        (0, 0, 0, 2, 1, 0),
+    ]
+    expected_tail = [
+        (1, 0, 2, 0, 0, 0),
+        (0, 0, 0, 3, -1, -1),
+        (1, 0, 2, 1, -1, -1),
+        (0, 1, 1, 3, 1, 1),
+        (1, 1, 3, 1, 0, 1),
+        (0, 1, 1, 3, -1, -1),
+        (1, 1, 3, 1, -1, -1),
+        (0, 1, 1, 2, 1, 0),
+        (1, 1, 3, 0, 0, 0),
+    ]
+    expected = expected_prefix + expected_tail
+    assert _propose_moves(rows, locations, contributions, 2, False, 1) == expected[:1]
+    assert _propose_moves(rows, locations, contributions, 2, False, 7) == expected[:7]
+    # Budget 256 exhausts both rank iterators; the remaining kind tails retain order.
+    assert _propose_moves(rows, locations, contributions, 2, False, 256) == expected
+
+
+def test_propose_moves_full_layout_uses_swaps_when_replacements_are_illegal():
+    rows = torch.tensor([[0, 1], [2, 3]])
+    locations = _expert_locations(rows[None], 4, True)[0]
+    contributions = torch.tensor([[[9.0, 1.0], [8.0, 1.0], [1.0, 6.0], [1.0, 5.0]]])
+    moves = _propose_moves(rows, locations, contributions, 2, True, 256)
+    assert moves
+    assert all(move[4] >= 0 for move in moves)
+
+
+def test_propose_moves_returns_empty_when_every_copy_is_already_local():
+    rows = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]])
+    locations = _expert_locations(rows[None], 4, True)[0]
+    contributions = torch.ones((1, 4, 2))
+    assert _propose_moves(rows, locations, contributions, 2, True, 256) == []
