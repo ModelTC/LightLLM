@@ -46,7 +46,7 @@ from lightllm.utils.config_utils import (
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.eplb_utils import (
-    EPLB_MAX_STAGING_DEPTH,
+    get_eplb_staging_shape,
     extract_eplb_expert_tensors,
 )
 
@@ -577,12 +577,11 @@ def _get_eplb_staging_nbytes(weights) -> int:
     """Owned bytes for NIXL's reusable staging rows, excluding live expert weights."""
     if not weights:
         return 0
-    depth = min(EPLB_MAX_STAGING_DEPTH, len(weights))
-    redundant = weights[0].expert_parallel_state.eplb.num_redundant_experts_per_rank
+    depth, staged_rows = get_eplb_staging_shape(weights)
     one_row_nbytes = sum(
         tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(weights[0])
     )
-    return depth * redundant * one_row_nbytes
+    return depth * staged_rows * one_row_nbytes
 
 
 def _get_eplb_sampling_peak_nbytes(weights) -> int:

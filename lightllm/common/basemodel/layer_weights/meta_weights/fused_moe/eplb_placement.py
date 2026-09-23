@@ -12,7 +12,7 @@ def build_initial_redundant_expert_ids(
     """Build a deterministic initial placement without local duplicates."""
     assert num_logical_experts % num_ranks == 0
     num_experts_per_rank = num_logical_experts // num_ranks
-    assert 0 < num_redundant_experts_per_rank <= num_logical_experts - num_experts_per_rank
+    assert 0 <= num_redundant_experts_per_rank <= num_logical_experts - num_experts_per_rank
 
     # 初始化结果确定，不依赖随机数。
     # 每个 rank 不会复制自己原本拥有的 expert。
@@ -21,6 +21,30 @@ def build_initial_redundant_expert_ids(
     rank_offsets = torch.arange(1, num_ranks + 1, dtype=torch.int64)[:, None] * num_experts_per_rank
     expert_offsets = torch.arange(num_redundant_experts_per_rank, dtype=torch.int64)
     return (rank_offsets + expert_offsets) % num_logical_experts
+
+
+def expand_redundant_placement(placement: torch.Tensor, num_logical_experts: int) -> torch.Tensor:
+    """Prepend the initial contiguous primary rows to a redundant-only layout."""
+    num_ranks = placement.shape[-2]
+    assert num_logical_experts % num_ranks == 0
+    primary = torch.arange(num_logical_experts, device=placement.device, dtype=placement.dtype)
+    primary = primary.reshape(num_ranks, -1).expand(*placement.shape[:-2], num_ranks, -1)
+    return torch.cat((primary, placement), dim=-1)
+
+
+def validate_physical_placement(placement: torch.Tensor, num_logical_experts: int) -> None:
+    """Reject layouts that cannot be represented by one replica per rank."""
+    if placement.ndim != 3 or placement.dtype not in (torch.int32, torch.int64):
+        raise ValueError("physical placement must be integer [layers, ranks, slots]")
+    if min(placement.shape) <= 0 or not torch.all((placement >= 0) & (placement < num_logical_experts)):
+        raise ValueError("physical placement has empty dimensions or invalid expert IDs")
+    if num_logical_experts % placement.shape[1] != 0:
+        raise ValueError("logical expert count must be divisible by the EP world size")
+    ordered = placement.sort(dim=-1).values
+    if torch.any(ordered[..., 1:] == ordered[..., :-1]):
+        raise ValueError("physical placement contains duplicate experts on a rank")
+    if not torch.all(_expert_locations(placement, num_logical_experts, full_layout=True).any(dim=-1)):
+        raise ValueError("physical placement must cover every logical expert")
 
 
 def build_logical_to_physical_map(
@@ -47,28 +71,54 @@ def build_logical_to_physical_maps_for_layers(
     num_logical_experts: int,  # 逻辑 expert 的总数。
     source_rank: int | None = None,  # 可选的全局源 rank；传入时优先选择同节点副本。
     node_world_size: int | None = None,  # 单个节点包含的 rank 数；source_rank 非空时必填。
+    *,
+    full_layout: bool = False,
 ) -> Tuple[
     torch.Tensor,  # logical_to_physical, shape [num_layers, num_logical_experts, num_ranks]
     torch.Tensor,  # replica_counts, shape [num_layers, num_logical_experts]
 ]:
-    """Build stable CPU int32 maps for the supplied layers without modifying the input."""
+    """Build CPU int32 maps without modifying the supplied placement.
+
+    With ``full_layout=True`` the input includes all absolute physical rows;
+    otherwise it contains only the redundant rows after fixed primary rows.
+    """
     if redundant_expert_ids_by_layer.ndim != 3:
         raise ValueError("redundant_expert_ids_by_layer must be [layers, ranks, num_redundant_experts_per_rank]")
     num_ranks, num_redundant_experts_per_rank = redundant_expert_ids_by_layer.shape[1:]
     assert num_logical_experts % num_ranks == 0
-    layout = _get_physical_expert_layout(num_logical_experts, num_ranks, num_redundant_experts_per_rank)
-    logical_to_physical, replica_counts = _build_global_replica_maps_for_layers(redundant_expert_ids_by_layer, layout)
+    if full_layout:
+        validate_physical_placement(redundant_expert_ids_by_layer, num_logical_experts)
+        num_physical_experts_per_rank = num_redundant_experts_per_rank
+        physical = redundant_expert_ids_by_layer.cpu().to(torch.int64)
+        layers = physical.shape[0]
+        logical_to_physical = torch.full((layers, num_logical_experts, num_ranks), -1, dtype=torch.int32)
+        replica_counts = torch.zeros((layers, num_logical_experts), dtype=torch.int32)
+        layer_ids = torch.arange(layers)[:, None]
+        for rank in range(num_ranks):
+            experts = physical[:, rank]
+            positions = replica_counts[layer_ids, experts].to(torch.int64)
+            logical_to_physical[layer_ids, experts, positions] = rank * num_physical_experts_per_rank + torch.arange(
+                num_physical_experts_per_rank, dtype=torch.int32
+            )
+            replica_counts[layer_ids, experts] += 1
+    else:
+        layout = _get_physical_expert_layout(num_logical_experts, num_ranks, num_redundant_experts_per_rank)
+        num_physical_experts_per_rank = layout.num_physical_experts_per_rank
+        logical_to_physical, replica_counts = _build_global_replica_maps_for_layers(
+            redundant_expert_ids_by_layer, layout
+        )
     if source_rank is None:
         return logical_to_physical, replica_counts
 
-    assert node_world_size is not None
+    assert node_world_size is not None and 0 < node_world_size <= num_ranks
+    assert num_ranks % node_world_size == 0 and 0 <= source_rank < num_ranks
     replica_positions = torch.arange(num_ranks, dtype=torch.int64)
     compact_maps_by_layer, selected_counts_by_layer = _select_source_node_replicas(
         logical_to_physical,
         replica_counts,
         source_rank=source_rank,
         node_world_size=node_world_size,
-        num_physical_experts_per_rank=layout.num_physical_experts_per_rank,
+        num_physical_experts_per_rank=num_physical_experts_per_rank,
         replica_positions=replica_positions,
     )
     return (
@@ -90,13 +140,18 @@ def select_improving_placements(
     rebalance_gain_threshold: float,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
+    full_layout: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float | int], torch.Tensor, torch.Tensor]:
     """Select better layers and return current/final rank loads without re-estimation."""
     if not 0.0 <= rebalance_gain_threshold <= 1.0:
         raise ValueError("rebalance_gain_threshold must be between 0.0 and 1.0")
     assert current_placement.shape == candidate_placement.shape
-    current_rank_load = _estimate_rank_load(expert_load, current_placement, expert_alignment, node_world_size)
-    candidate_rank_load = _estimate_rank_load(expert_load, candidate_placement, expert_alignment, node_world_size)
+    current_rank_load = _estimate_rank_load(
+        expert_load, current_placement, expert_alignment, node_world_size, full_layout
+    )
+    candidate_rank_load = _estimate_rank_load(
+        expert_load, candidate_placement, expert_alignment, node_world_size, full_layout
+    )
     current_critical = current_rank_load.max(dim=-1).values.sum(dim=0)
     candidate_critical = candidate_rank_load.max(dim=-1).values.sum(dim=0)
     # Each changed layer must reduce its own critical load. All selected
@@ -375,6 +430,7 @@ def _estimate_rank_load(
     redundant_expert_ids: torch.Tensor,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
+    full_layout: bool = False,
 ) -> torch.Tensor:
     """Estimate [samples, layers, ranks] load from source-node-local routing.
 
@@ -391,7 +447,7 @@ def _estimate_rank_load(
 
     rank_load = _expert_rank_load_all(
         expert_load,
-        _expert_locations(redundant_expert_ids, num_logical_experts),
+        _expert_locations(redundant_expert_ids, num_logical_experts, full_layout),
         num_nodes,
         node_world_size,
         expert_alignment,
@@ -411,7 +467,9 @@ def _resolve_node_world_size(expert_load: torch.Tensor, num_ranks: int, node_wor
     return node_world_size
 
 
-def _expert_locations(redundant_expert_ids: torch.Tensor, num_logical_experts: int) -> torch.Tensor:
+def _expert_locations(
+    redundant_expert_ids: torch.Tensor, num_logical_experts: int, full_layout: bool = False
+) -> torch.Tensor:
     """Return ``[layer, logical expert, rank]`` physical-copy occupancy."""
     num_layers, num_ranks, num_redundant_experts_per_rank = redundant_expert_ids.shape
     assert num_logical_experts % num_ranks == 0
@@ -423,7 +481,8 @@ def _expert_locations(redundant_expert_ids: torch.Tensor, num_logical_experts: i
     )
     expert_ids = torch.arange(num_logical_experts, device=locations.device)
     owners = expert_ids // num_experts_per_rank
-    locations[:, expert_ids, owners] = True
+    if not full_layout:
+        locations[:, expert_ids, owners] = True
     layers = torch.arange(num_layers, device=locations.device)[:, None]
     ranks = torch.arange(num_ranks, device=locations.device).repeat_interleave(num_redundant_experts_per_rank)[None, :]
     redundant_ids = redundant_expert_ids.reshape(num_layers, -1)

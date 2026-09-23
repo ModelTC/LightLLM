@@ -4,6 +4,7 @@ import random
 import socket
 import statistics
 import time
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -17,6 +18,7 @@ from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
     build_initial_redundant_expert_ids,
+    build_logical_to_physical_maps_for_layers,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
     EPLBState,
@@ -442,3 +444,88 @@ def _depth_worker(rank, port):
 )
 def test_eplb_transfer_eight_gpu_bounded_staging_reuse():
     mp.spawn(_depth_worker, args=(_free_port(),), nprocs=8, join=True)
+
+
+def _full_layout_worker(rank, port, world_size):
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    control_group = dist.new_group(list(range(world_size)), backend="gloo")
+    transfer_group = dist.new_group(list(range(world_size)), backend="gloo")
+    experts = world_size * 2
+    current = torch.arange(experts).reshape(world_size, 2)
+    weights = []
+    for layer in range(3):
+        state = EPLBState(
+            num_redundant_experts_per_rank=0,
+            initial_redundant_expert_ids_by_rank=torch.empty((world_size, 0), dtype=torch.int64),
+            logical_to_physical_map=torch.empty((experts, world_size), device="cuda", dtype=torch.int32),
+            logical_replica_count=torch.ones(experts, device="cuda", dtype=torch.int32),
+            route_counter=torch.zeros((1, experts), device="cuda", dtype=torch.int64),
+            full_layout=True,
+            physical_to_logical=current.clone(),
+        )
+        values = (current[rank].cuda() + 10 * layer).view(-1, 1)
+        weights.append(
+            SimpleNamespace(
+                expert_parallel_state=ExpertParallelState(experts, world_size, state),
+                w13=_Pack(values.repeat(1, 16).to(torch.uint8), (values + 0.5).float()),
+                w2=_Pack(values.repeat(1, 8).to(torch.float16), (values + 0.25).float()),
+            )
+        )
+    transfer = NixlEPLBTransfer(weights, transfer_group, rank, world_size)
+    assert transfer.staging_depth == 1
+    assert all(tensor.shape[0] == 2 for _, tensor in transfer.staging[0])
+    targets = [current.roll(1, dims=0)]
+    second = targets[0].clone()
+    second[[0, 1]] = second[[1, 0]]
+    targets.append(second)
+    for generation, target in enumerate(targets, start=1):
+        target = align_target_placement(current, target)
+        plan = build_transfer_plan(current, target, experts, world_size, world_size, full_layout=True)
+        if world_size == 3 and generation == 2:
+            assert all(step.dst_rank != 2 for step in plan)
+        maps, counts = build_logical_to_physical_maps_for_layers(
+            target[None], experts, source_rank=rank, node_world_size=world_size, full_layout=True
+        )
+
+        def assert_old(layer):
+            expected = current[rank].cuda() + 10 * layer
+            torch.testing.assert_close(weights[layer].w13.weight[:, 0].long(), expected)
+            torch.testing.assert_close(weights[layer].w2.weight[:, 0].long(), expected)
+
+        def publish(layer):
+            state = weights[layer].expert_parallel_state.eplb
+            state.logical_to_physical_map.copy_(maps[0])
+            state.logical_replica_count.copy_(counts[0])
+            state.physical_to_logical = target.clone()
+            state.placement_generation += 1
+
+        _run_layers(transfer, control_group, [(layer, plan) for layer in (2, 0, 1)], publish, assert_old)
+        torch.cuda.synchronize()
+        for layer, weight in enumerate(weights):
+            expected = target[rank].cuda() + 10 * layer
+            torch.testing.assert_close(weight.w13.weight[:, 0].long(), expected)
+            torch.testing.assert_close(weight.w2.weight[:, 0].long(), expected)
+            torch.testing.assert_close(weight.w13.weight_scale[:, 0], expected.float() + 0.5)
+            torch.testing.assert_close(weight.w2.weight_scale[:, 0], expected.float() + 0.25)
+            state = weight.expert_parallel_state.eplb
+            assert state.placement_generation == generation
+            for expert in range(experts):
+                physical = state.logical_to_physical_map[expert, 0].item()
+                dst, row = divmod(physical, 2)
+                assert target[dst, row] == expert
+        current = target
+        dist.barrier(group=control_group)
+    transfer.shutdown()
+    dist.barrier(group=control_group)
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+def test_full_layout_gpu_overwrite_cycles_and_staging_reuse(world_size):
+    if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
+        pytest.skip(f"requires {world_size} CUDA GPUs")
+    mp.spawn(_full_layout_worker, args=(_free_port(), world_size), nprocs=world_size, join=True)

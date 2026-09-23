@@ -30,6 +30,16 @@ def _expert(rows=4, redundant=2):
     )
 
 
+@pytest.mark.parametrize("redundant", [0, 2])
+def test_full_layout_memory_reserves_one_complete_layer_including_scales(redundant):
+    weights = [_expert(rows=4 + redundant, redundant=redundant) for _ in range(12)]
+    for weight in weights:
+        weight.expert_parallel_state.eplb.full_layout = True
+        weight.expert_parallel_state.num_primary_experts_per_rank = 4
+    expected = sum(tensor.nbytes for _, tensor in extract_eplb_expert_tensors(weights[0]))
+    assert _get_eplb_staging_nbytes(weights) == expected
+
+
 @pytest.mark.parametrize(
     "enable,draft,redundant,staging,sampling,exclusion",
     [

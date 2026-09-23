@@ -6,6 +6,38 @@ from lightllm.models.deepseek_v4.triton_kernel.moe_topk import deepseek_v4_eplb_
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("copies", [2, 3, 4, 8])
+def test_deepseek_v4_replica_hash_balances_periodic_expert_selections(copies):
+    tokens, experts, topk = 4096, 256, 6
+    logits = torch.zeros((tokens, experts), device="cuda")
+    table = torch.tensor([[0, 1, 2, 3, 4, 5], [7, 1, 2, 3, 4, 5]], device="cuda")
+    input_tokens = (torch.arange(tokens, device="cuda") % 4 == 0).long()
+    maps = torch.arange(experts * copies, device="cuda", dtype=torch.int32).reshape(experts, copies)
+    counter = torch.zeros((1, experts), device="cuda", dtype=torch.int64)
+    weights, physical, logical = deepseek_v4_eplb_topk(
+        logits=logits,
+        bias=None,
+        input_tokens=input_tokens,
+        hash_indices_table=table,
+        topk=topk,
+        routed_scaling_factor=1.0,
+        logical_to_physical_map=maps,
+        logical_replica_count=torch.full((experts,), copies, device="cuda", dtype=torch.int32),
+        expert_counter=counter,
+        sample_index=0,
+        record_load=True,
+        return_logical_ids=True,
+    )
+    torch.testing.assert_close(logical, table[input_tokens])
+    torch.testing.assert_close(physical // copies, logical)
+    torch.testing.assert_close(weights.sum(dim=1), torch.ones(tokens, device="cuda"))
+    assert counter[0, 7] == tokens // 4
+    histogram = torch.bincount(physical[::4, 0] % copies, minlength=copies)
+    assert histogram.min() > 0.75 * (tokens // 4 / copies)
+    assert histogram.max() < 1.25 * (tokens // 4 / copies)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("is_hash", [False, True])
 @pytest.mark.parametrize("record_load", [False, True])
 @pytest.mark.parametrize("token_num", [1, 4])
@@ -44,9 +76,10 @@ def test_deepseek_v4_eplb_topk_matches_reference(is_hash, record_load, token_num
     if token_num == 1:
         replica_indices = torch.zeros_like(expected_logical_ids)
     else:
-        token_phase = (token_indices * 2654435769) & 0xFFFFFFFF
-        expert_phase = (expected_logical_ids * 2246822519) & 0xFFFFFFFF
-        replica_indices = ((token_phase + expert_phase) & 0xFFFFFFFF) % 2
+        value = token_indices ^ (((expected_logical_ids + 1) * 0x9E3779B9) & 0xFFFFFFFF)
+        value = ((value ^ (value >> 16)) * 0x7FEB352D) & 0xFFFFFFFF
+        value = ((value ^ (value >> 15)) * 0x846CA68B) & 0xFFFFFFFF
+        replica_indices = (value ^ (value >> 16)) % 2
     expected_physical_ids = logical_to_physical[expected_logical_ids, replica_indices].to(torch.long)
     torch.cuda.synchronize()
 
