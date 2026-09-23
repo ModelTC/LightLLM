@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 
 from .base import PrefillQueueStrategy
-from .strategies import FCFSStrategy, PromoteShortestPrefillStrategy
+from .strategies import FCFSStrategy, HRRNPrefillStrategy, PromoteShortestPrefillStrategy
 
 if TYPE_CHECKING:
     from ..base_backend import ModeBackend
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 PREFILL_QUEUE_STRATEGIES = {
     "default": FCFSStrategy,
     "promote_shortest": PromoteShortestPrefillStrategy,
+    "hrrn": HRRNPrefillStrategy,
 }
 
 

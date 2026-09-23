@@ -384,8 +384,17 @@ Scheduling Parameters
       of all other normal requests. Fully processed prompts count as zero. This mode is mainly
       intended for Prefill nodes in PD-disaggregated deployments to improve TTFT for some short
       requests.
+    * ``hrrn``: keep negative-priority prefill requests first, then order normal requests with
+      token-based Highest Response Ratio Next. The response ratio uses the number of prefill
+      tokens processed while a request has waited and the uncached prefill tokens captured when it first
+      participates in HRRN ordering.
+      It favors short requests while gradually aging long-waiting requests to prevent starvation.
+      This mode is intended for Prefill nodes in PD-disaggregated deployments with highly varied
+      request lengths. This strategy is based on
+      `SGLang PR #32911 <https://github.com/sgl-project/sglang/pull/32911>`_; thanks to its authors
+      and the SGLang community for sharing their work.
 
-    For example, append ``--prefill_queue_strategy promote_shortest`` to your launch command.
+    For example, append ``--prefill_queue_strategy hrrn`` to your launch command.
     Compare TTFT, TPOT, and tail latency under representative traffic before choosing a
     policy; changing policies does not guarantee an SLA improvement.
 

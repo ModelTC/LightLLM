@@ -83,6 +83,8 @@ class ModeBackend:
         self._radix_tree_merge_counter: int = 0
         self._enable_radix_tree_timer_merge: bool = enable_radix_tree_timer_merge()
         self._radix_tree_merge_update_delta: int = get_radix_tree_merge_update_delta()
+        # 已提交执行的 prefill token 总数，作为 HRRN 与墙上时间无关的 aging 轴。
+        self.processed_prefill_tokens: int = 0
         pass
 
     def init_model(self, kvargs):
@@ -683,6 +685,7 @@ class ModeBackend:
         3. finished_reqs 需要释放的请求, 包含正常结束和aborted退出的请求。
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
+        6. prefill_tokens 本轮选出的 prefill batch 需要计算的 token 数
         """
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
@@ -694,7 +697,7 @@ class ModeBackend:
             req_ids = g_infer_context.infer_req_ids
 
         if len(req_ids) == 0:
-            return [], []
+            return [], [], 0
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
@@ -830,6 +833,7 @@ class ModeBackend:
         # 则将 decode 请求合并到 prefill 请求中。
         if self.args.enable_prefill_decode_mixed and len(prefill_reqs) > 0 and len(decode_reqs) > 0:
             if prefill_tokens + len(decode_reqs) <= self.batch_max_tokens:
+                prefill_tokens += len(decode_reqs)
                 for decode_req in decode_reqs:
                     # 给 decode req 添加一个属性标签，标识其为混合prefill的请求。
                     # 在 prefill 阶段，会根据这个属性标签， 对这些请求的处理进行一些
@@ -838,7 +842,7 @@ class ModeBackend:
                     prefill_reqs.append(decode_req)
                 decode_reqs = []
 
-        return prefill_reqs, decode_reqs
+        return prefill_reqs, decode_reqs, prefill_tokens
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
