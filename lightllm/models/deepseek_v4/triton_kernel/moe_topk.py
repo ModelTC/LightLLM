@@ -20,6 +20,8 @@ def deepseek_v4_eplb_topk(
     record_load: bool,
     alloc_tensor_func=torch.empty,
     return_logical_ids: bool = False,
+    bias_vl: torch.Tensor | None = None,
+    image_token_start: int = 0,
 ):
     """Select DeepSeek-V4 routes and emit EPLB physical expert IDs."""
     token_num, num_experts = logits.shape
@@ -27,6 +29,18 @@ def deepseek_v4_eplb_topk(
         raise RuntimeError(f"DeepSeek-V4 EPLB fused top-k requires 256 experts, got {num_experts}")
     if hash_indices_table is not None:
         topk = hash_indices_table.shape[1]
+    if bias_vl is not None:
+        if (
+            not bias_vl.is_cuda
+            or bias_vl.device != logits.device
+            or bias_vl.dtype != torch.float32
+            or bias_vl.ndim != 1
+            or bias_vl.numel() != num_experts
+            or not bias_vl.is_contiguous()
+        ):
+            raise RuntimeError("bias_vl must be a contiguous [256] float32 CUDA tensor on the logits device")
+        if input_tokens is None or image_token_start <= 0:
+            raise RuntimeError("vision routing requires input_tokens and image_token_start > 0")
     weights = alloc_tensor_func((token_num, topk), dtype=torch.float32, device=logits.device)
     physical_ids = alloc_tensor_func((token_num, topk), dtype=torch.long, device=logits.device)
     logical_ids = (
@@ -36,9 +50,11 @@ def deepseek_v4_eplb_topk(
         return weights, physical_ids, logical_ids
     _load_cuda().moe_topk_eplb(
         logits.contiguous(),
-        bias.contiguous() if bias is not None else logits,
-        input_tokens.contiguous() if input_tokens is not None else physical_ids,
-        hash_indices_table.contiguous() if hash_indices_table is not None else physical_ids,
+        bias.contiguous() if bias is not None else None,
+        input_tokens.contiguous() if input_tokens is not None else None,
+        hash_indices_table.contiguous() if hash_indices_table is not None else None,
+        bias_vl,
+        int(image_token_start),
         weights,
         physical_ids,
         logical_ids if logical_ids is not None else physical_ids,
@@ -48,7 +64,6 @@ def deepseek_v4_eplb_topk(
         sample_index,
         record_load,
         return_logical_ids,
-        hash_indices_table is not None,
         routed_scaling_factor,
     )
     return weights, physical_ids, logical_ids

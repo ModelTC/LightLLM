@@ -2,10 +2,10 @@
 
 **首版实现（仅单元测试）**
 
-- 通用 Triton 路径的物理副本选择使用 32 位混合哈希，保留单 token 选择及融合计数/路由语义。
+- Triton 与 DSv4 CUDA 的物理副本选择统一使用 32 位混合哈希，保留单 token 选择及融合计数/路由语义。
 - 默认 `redundant` 模式保留固定主专家，同时比较当前布局、粘性贪心、无粘性贪心与局部搜索结果。每个种子、每层至多搜索 4 步，每步最多评估 256 个替换/交换；沿用模型级收益门槛。搜索先累积改进，再检查粘性余量，避免每一步门槛阻断可获益的搜索路径。
 - 新增显式 `full` 模式：完整物理布局、全专家覆盖和 rank 内唯一性校验、按负载分配副本数、节点内装箱与局部搜索。节点拥有的专家集合保持不变；支持 R=0。启动仍使用确定性默认布局，加载器通过完整布局索引权重及量化参数。
-- 迁移源来自真实当前布局，完整模式目标使用绝对行号。GPU 传输沿用 CUDA IPC/NIXL，整层待写行先 staging，所有 rank 就绪后在原有安全边界发布。完整模式只分配一层全行 staging。
+- 迁移源来自真实当前布局，完整模式目标使用绝对行号。GPU 传输沿用 CUDA IPC/NIXL，整层待写行先 staging，所有 rank 就绪后在原有安全边界发布。完整模式只分配一层全行 staging，DSv4 显存预留与实际分配共用同一策略。
 - 每层维护 `physical_to_logical` 和 `placement_generation`，在权重/映射提交时更新；部分层已提交时，CPU 当前布局也反映已发布的真实状态。
 
 启动参数示例（本次未启动服务）：
@@ -17,14 +17,16 @@
 
 `--eplb_placement_mode` 默认为 `redundant`，其 R 仍必须大于 0。`full` 仅允许 PD prefill，R 必须非负且满足每卡无重复的容量约束。既有 EP、禁用 prefill CUDA graph、非 SM100 等限制继续适用；本次没有扩展 decode 支持。
 
-单元测试包括独立逐来源负载评分、固定主专家反例的穷举最优比较、均匀/偏斜负载、来源节点约束、R=0、非法布局、版本发布、内存预留、通用路由 kernel 的周期性输入，以及两卡/三卡覆盖环与八卡原有迁移回归。GPU 迁移测试使用小型人工权重和真实 CUDA IPC，检查权重及 scale、多层缓冲复用、连续两代迁移和无任务 rank；没有启动模型服务，也没有验证跨机器 UCX 传输。
+单元测试包括独立逐来源负载评分、固定主专家反例的穷举最优比较、均匀/偏斜负载、来源节点约束、R=0、非法布局、版本发布、内存预留、两种路由 kernel 的周期性输入，以及两卡/三卡覆盖环与八卡原有迁移回归。GPU 迁移测试使用小型人工权重和真实 CUDA IPC，检查权重及 scale、多层缓冲复用、连续两代迁移和无任务 rank；没有启动模型服务，也没有验证跨机器 UCX 传输。
 
-验证范围为 CPU 与单 GPU 单测、两卡/三卡完整布局迁移及八卡 staging 复用回归。没有运行服务或迁移带宽基准。复现命令：
+验证记录：H200 / PyTorch 2.11.0+cu130 环境中，CPU 与单 GPU 单测 242 项通过，两卡/三卡完整布局迁移 2 项通过，八卡原有 staging 复用回归 1 项通过，共 245 项。没有运行服务或迁移带宽基准。复现命令：
 
 ```bash
 python -m pytest -q unit_tests/common/fused_moe/test_eplb.py \
   unit_tests/common/fused_moe/test_eplb_full_layout.py \
   unit_tests/common/fused_moe/test_eplb_hash.py \
+  unit_tests/models/deepseek_v4/test_moe_topk.py \
+  unit_tests/models/deepseek_v4/test_memory_profile.py \
   unit_tests/server/test_api_start_eplb.py --disable-warnings
 python -m pytest -q unit_tests/common/fused_moe/test_eplb_transfer_gpu.py \
   -k 'full_layout or bounded_staging_reuse' --disable-warnings
@@ -56,7 +58,7 @@ python -m pytest -q unit_tests/common/fused_moe/test_eplb_transfer_gpu.py \
 | 批次 | 交付 | 预期价值 | 放行条件 |
 | --- | --- | --- | --- |
 | PR0 | 可重放的负载数据、阶段耗时和服务基准 | 判断瓶颈和剩余优化空间 | 采样不显著扰动服务，数据可按批次/层/布局版本对齐 |
-| PR1 | 修复通用 Triton 路径的副本哈希 | 消除已复现的周期性集中分发 | 对抗输入通过，输出语义一致，融合路由性能无显著退化 |
+| PR1 | 修复 Triton 与 DSv4 CUDA 的副本哈希 | 消除已复现的周期性集中分发 | 对抗输入通过，输出语义一致，融合路由性能无显著退化 |
 | PR2 | 多候选与局部搜索，先保持主专家固定 | 以较低改造成本缩小现有贪心算法的差距 | 同一代价函数下不劣于当前候选，并通过独立轨迹验证 |
 | PR3 | 完整布局表示、加载和通用 GPU 迁移 | 为移动原始专家打通运行时 | 多 rank 迁移、覆盖环、量化参数和 overlap 正确性通过 |
 | PR4 | 完整专家重排；先节点内，后有条件跨节点 | 突破固定主专家的均衡上限 | 端到端收益成立，跨节点通信和 staging 成本受控 |
@@ -69,7 +71,7 @@ PR0 应复用 `ep_balance_monitor.py` 已有的对齐后计算负载和压力漂
 
 首先建立四类基线：EPLB 关闭、现有 EPLB、相同副本预算的固定布局、各阶段的新实现。对比同时覆盖初始化、稳态和迁移阶段。使用同一请求轨迹，并把用于生成布局的区间与用于评价的区间分开。
 
-PR1 修改通用 `grouped_topk.py::_eplb_replica_index` 中的物理副本选择。采用 wzj 分支的 32 位混合思路，保留 top-k、映射、计数的融合执行。这里修改的是物理副本选择，不修改逻辑专家选择、gate weight 或校正偏置。
+PR1 同时修改 `grouped_topk.py::_eplb_replica_index` 和 DSv4 `moe_topk_eplb.cu` 中的物理副本选择。采用 wzj 分支的 32 位混合思路，保留 top-k、映射、计数的融合执行。这里修改的是物理副本选择，不修改 DSv4 的逻辑专家 hash routing、logical top-k、gate weight 或校正偏置。
 
 需要覆盖周期性 token 下标、2/3/4/8 个副本、热点集中、单 token、空 batch 和多来源相关输入。不要机械加入 TP rank 随机盐：实际独立 dispatch 来源可以去相关，但对于复制输入后求和的执行路径，副本选择必须遵守其跨 rank 一致性约束。现有 source-rank 路由表旋转也应纳入测试。
 
@@ -92,7 +94,7 @@ placement_generation[layer]
 
 “初始主专家”只用于默认启动布局，不再作为执行期间不可变的位置公式。第一版保持每卡固定槽位容量、逻辑专家全覆盖、同一 rank 内不重复放置同一逻辑专家。上游装箱结果可能不满足最后一个约束，需要修复或拒绝，不能直接照搬。以后如有必要再扩展同卡多副本。
 
-主要改动涉及 `expert_parallel_state.py`、`fused_moe_weight.py`、`eplb_placement.py`、`eplb_transfer.py`、`eplb_manager.py`。传输源从当前布局查询；目标槽使用绝对 local_slot，移除“目标槽加原始专家数”的假设。固定 shape 的映射 tensor 和 live 权重尽量原地更新。
+主要改动涉及 `expert_parallel_state.py`、`fused_moe_weight.py`、`eplb_placement.py`、`eplb_transfer.py`、`eplb_manager.py` 和 DSv4 内存预留。传输源从当前布局查询；目标槽使用绝对 local_slot，移除“目标槽加原始专家数”的假设。固定 shape 的映射 tensor 和 live 权重尽量原地更新。
 
 第一版完整重排只对显式 PD prefill 模式开放。当前 decode 路径把前 E/W 行当作主专家，DeepEP decode 也按 E 而非完整物理专家数初始化；在混合/decode 模式适配完成前不能放开这个限制。prefill 服务的 warmup、空请求、最后一个 chunk 和与 MTP 相关的实际执行路径仍需验证。独立 draft 模型的专家布局不随目标模型一起隐式修改。
 
@@ -141,13 +143,14 @@ PR6 先实现背景更新的副本分发权重：慢速规划布局，较快根�
 | 文件/模块 | 计划职责 |
 | --- | --- |
 | `lightllm/common/basemodel/triton_kernel/fused_moe/grouped_topk.py` | 稳健副本哈希，后续可选加权选择 |
+| `lightllm/models/deepseek_v4/triton_kernel/csrc/moe_topk_eplb.cu` | 与 Triton 路径一致的物理分发语义 |
 | `lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/eplb_placement.py` | 候选接口、统一评分、受限搜索、完整布局与拓扑策略 |
 | `lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/expert_parallel_state.py` | 完整布局状态及版本 |
 | `lightllm/common/basemodel/layer_weights/meta_weights/fused_moe/fused_moe_weight.py` | 按完整布局加载权重和量化参数 |
 | `lightllm/server/router/model_infer/mode_backend/eplb_manager.py` | 新鲜采样、候选选择、回本判断、发布与持久化 |
 | `lightllm/server/router/model_infer/mode_backend/eplb_transfer.py` | 任意物理行、覆盖环、GPU staging 预算和版本一致提交 |
 | `lightllm/server/router/model_infer/mode_backend/ep_balance_monitor.py` | 复用实际计算负载统计，补充物理副本与耗时反馈 |
-| `lightllm/common/eplb_utils.py` | staging/采样峰值/量化参数的内存预算 |
+| `lightllm/common/eplb_utils.py`、DSv4 memory profile | staging/采样峰值/量化参数的内存预算 |
 
 实验矩阵按现有硬件选择，不预设论文中的 GPU 与线上硬件相同：单节点与多节点；短/长 prompt；小/大 chunk；低/高并发；均匀、热点、热点漂移和真实混合语料；已有量化及 overlap 路径。副本预算先扫现有合法的 R，再在完整布局支持后加入 R=0。
 

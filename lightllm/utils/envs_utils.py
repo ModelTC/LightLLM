@@ -151,6 +151,14 @@ def get_lightllm_websocket_max_message_size():
 
 
 @lru_cache(maxsize=None)
+def get_dsv4_eplb_tile_routing() -> bool:
+    raw = os.getenv("LIGHTLLM_DSV4_EPLB_TILE_ROUTING", "0")
+    if raw not in ("0", "1"):
+        raise ValueError("LIGHTLLM_DSV4_EPLB_TILE_ROUTING must be 0 or 1")
+    return raw == "1"
+
+
+@lru_cache(maxsize=None)
 def get_eplb_planner_process() -> bool:
     raw = os.getenv("LIGHTLLM_EPLB_PLANNER_PROCESS", "0")
     if raw not in ("0", "1"):

@@ -190,6 +190,17 @@ def _launch_subprocesses(args: StartArgs):
         assert not args.enable_prefill_eplb, "--ep_moe_backend triton does not support --enable_prefill_eplb"
         assert is_sm90_gpu(), "--ep_moe_backend triton only supports SM90 GPUs"
 
+    from lightllm.utils.envs_utils import get_dsv4_eplb_tile_routing
+
+    if get_dsv4_eplb_tile_routing():
+        assert args.run_mode == "prefill", "tile routing requires --run_mode prefill"
+        assert args.enable_prefill_eplb and args.enable_ep_moe, "tile routing requires EPLB EP-MoE"
+        assert args.eplb_placement_mode == "full", "tile routing requires --eplb_placement_mode full"
+        assert 0 <= args.eplb_num_redundant_experts_per_rank <= 2, "tile routing supports R0..R2"
+        assert args.nnodes == 1 and args.tp == 8 and args.dp == 8, "tile routing requires one node tp=8 dp=8"
+        assert args.disable_cudagraph, "tile routing requires --disable_cudagraph"
+        assert not args.enable_prefill_microbatch_overlap, "tile routing does not support prefill microbatch overlap"
+
     if args.enable_prefill_eplb:
         assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"
         assert not args.enable_prefill_cudagraph, "--enable_prefill_eplb does not support --enable_prefill_cudagraph"

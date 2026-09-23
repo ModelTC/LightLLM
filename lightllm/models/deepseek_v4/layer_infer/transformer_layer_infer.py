@@ -8,7 +8,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import s
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_dsv4_eplb_tile_routing, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
@@ -614,17 +614,18 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         if layer_weight.experts_.expert_parallel_state is not None:
             eplb = layer_weight.experts_.expert_parallel_state.eplb
         if infer_state.is_prefill is True and eplb is not None:
-            if bias_vl is not None:
-                raise RuntimeError("DeepSeek-V4 EPLB does not support vision routing yet")
             from lightllm.models.deepseek_v4.triton_kernel.moe_topk import (
                 deepseek_v4_eplb_topk,
             )
 
-            return deepseek_v4_eplb_topk(
+            tile_routing = get_dsv4_eplb_tile_routing()
+            weights, physical_ids, logical_ids = deepseek_v4_eplb_topk(
                 logits=logits,
                 bias=bias,
                 input_tokens=input_tokens,
                 hash_indices_table=hash_indices_table,
+                bias_vl=bias_vl,
+                image_token_start=image_token_start,
                 topk=self.num_experts_per_tok,
                 routed_scaling_factor=self.routed_scaling_factor,
                 logical_to_physical_map=eplb.logical_to_physical_map,
@@ -633,8 +634,25 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
                 sample_index=eplb.next_sample_index(),
                 record_load=eplb.recording,
                 alloc_tensor_func=self.alloc_tensor,
-                return_logical_ids=return_logical_ids,
+                return_logical_ids=tile_routing or return_logical_ids,
             )
+            if tile_routing:
+                from lightllm.models.deepseek_v4.triton_kernel.eplb_tile_route import route
+
+                state = layer_weight.experts_.expert_parallel_state
+                if not eplb.full_layout or state.num_logical_experts != 256 or state.world_size != 8:
+                    raise RuntimeError("tile routing requires DeepSeek-V4 full EPLB E256 world8")
+                physical_slots = state.num_primary_experts_per_rank + eplb.num_redundant_experts_per_rank
+                route(
+                    logical_ids,
+                    physical_ids,
+                    eplb.logical_to_physical_map,
+                    eplb.logical_replica_count,
+                    physical_slots,
+                    layer_weight.experts_.global_rank_,
+                    self.alloc_tensor,
+                )
+            return weights, physical_ids, logical_ids if return_logical_ids else None
 
         weights = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.float32, device=logits.device)
         indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=indices_dtype, device=logits.device)

@@ -45,8 +45,11 @@ from lightllm.utils.config_utils import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.utils.envs_utils import get_dsv4_eplb_tile_routing
+from lightllm.utils.dist_utils import get_dp_world_size, get_node_world_size
 from lightllm.common.eplb_utils import (
-    EPLB_MAX_STAGING_DEPTH,
+    get_eplb_staging_nbytes as _get_eplb_staging_nbytes,
+    get_eplb_sampling_peak_nbytes as _get_eplb_sampling_peak_nbytes,
     extract_eplb_expert_tensors,
 )
 
@@ -126,12 +129,22 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         weights = self._get_eplb_weights()
         staging = _get_eplb_staging_nbytes(weights)
         sampling = _get_eplb_sampling_peak_nbytes(weights)
-        return {name: value for name, value in (("eplb_staging", staging), ("eplb_sampling", sampling)) if value}
+        tile = _get_eplb_tile_routing_peak_nbytes(weights, self.args, self.config)
+        return {
+            name: value
+            for name, value in (("eplb_staging", staging), ("eplb_sampling", sampling), ("eplb_tile_routing", tile))
+            if value
+        }
 
     def _get_eplb_weights(self):
         if self.is_mtp_draft_model or not self.args.enable_prefill_eplb:
             return []
         weights = []
+        if get_dsv4_eplb_tile_routing():
+            if self.is_mtp_draft_model or self.args.run_mode != "prefill":
+                raise RuntimeError("tile routing is only valid for the target prefill model")
+            if get_dp_world_size() != 1 or get_node_world_size() != 8:
+                raise RuntimeError("tile routing requires per-DP world size 1 and node world size 8")
         seen = set()
         for layer_weight in self.trans_layers_weight:
             experts = getattr(layer_weight, "experts_", None)
@@ -573,44 +586,16 @@ class DeepSeekV4Tokenizer:
         return prompt
 
 
-def _get_eplb_staging_nbytes(weights) -> int:
-    """Owned bytes for NIXL's reusable staging rows, excluding live expert weights."""
-    if not weights:
+def _get_eplb_tile_routing_peak_nbytes(weights, args, config) -> int:
+    """One routing-chain peak reservation, independent of the number of layers."""
+    if not get_dsv4_eplb_tile_routing() or not weights:
         return 0
-    depth = min(EPLB_MAX_STAGING_DEPTH, len(weights))
-    redundant = weights[0].expert_parallel_state.eplb.num_redundant_experts_per_rank
-    one_row_nbytes = sum(
-        tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(weights[0])
-    )
-    return depth * redundant * one_row_nbytes
-
-
-def _get_eplb_sampling_peak_nbytes(weights) -> int:
-    """Peak temporary bytes of EPLB sample collection, excluding route counters.
-
-    _collect_local_samples keeps stack(counters), index_select output and index
-    temporaries live together.  Counters are persistent state and intentionally
-    excluded.  CUDA allocator rounding is represented by 512-byte alignment.
-    """
-    counters = []
-    seen = set()
-    for weight in weights:
-        state = getattr(weight, "expert_parallel_state", None)
-        eplb = getattr(state, "eplb", None)
-        counter = getattr(eplb, "route_counter", None)
-        if counter is None or id(counter) in seen:
-            continue
-        seen.add(id(counter))
-        counters.append(counter)
-    if not counters:
+    state = weights[0].expert_parallel_state
+    eplb = state.eplb
+    if getattr(args, "run_mode", None) != "prefill" or not getattr(eplb, "full_layout", False):
         return 0
-    first = counters[0]
-    if any(tuple(counter.shape) != tuple(first.shape) or counter.dtype != first.dtype for counter in counters):
-        raise ValueError("EPLB route counters must have identical shape and dtype")
-    align = lambda value: (value + 511) // 512 * 512
-    stack_bytes = align(len(counters) * first.numel() * first.element_size())
-    # index_select has the stack shape.  The int64 selection index is bounded
-    # by one ring axis; this is the selection peak, not a claim that every
-    # arithmetic intermediate remains live.
-    index_temp_bytes = align(first.shape[0] * 8)
-    return 2 * stack_bytes + index_temp_bytes
+    if state.num_logical_experts != 256 or state.world_size != 8:
+        raise RuntimeError("tile routing requires DeepSeek-V4 E256 world8")
+    from lightllm.models.deepseek_v4.triton_kernel.eplb_tile_route import tile_routing_peak_nbytes
+
+    return tile_routing_peak_nbytes(int(args.batch_max_tokens), int(config["num_experts_per_tok"]))
