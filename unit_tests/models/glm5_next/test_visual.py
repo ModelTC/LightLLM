@@ -52,6 +52,100 @@ def test_image_patch_order_temporal_repeat_and_black_padding():
     assert not patches[-1].any()
 
 
+def test_vision_attention_uses_triton_rope_with_fa3_backend(monkeypatch):
+    import lightllm.models.glm5_next.glm5_next_visual as glm_visual
+    import lightllm.server.visualserver as visualserver
+    from lightllm.common.basemodel.attention_vit.fa3.fp import Fa3VitAttBackend
+    from lightllm.server.visualserver import set_vit_att_backend
+
+    rope_inputs = []
+    norm_inputs = []
+    attn_inputs = []
+
+    def fake_qk_norm(qkv, q_weight, k_weight, eps):
+        norm_inputs.append((qkv, q_weight, k_weight, eps))
+        return qkv[:, 0].contiguous(), qkv[:, 1].contiguous()
+
+    def fake_rope(x, cos, sin):
+        rope_inputs.append((x, cos, sin))
+        return x
+
+    def fake_fa3(q, k, v, o, cu_seqlens, max_seqlen):
+        attn_inputs.append((q, k, v, cu_seqlens, max_seqlen))
+        o.copy_(q)
+        return o
+
+    monkeypatch.setattr(glm_visual, "qk_rms_norm", fake_qk_norm)
+    monkeypatch.setattr(glm_visual, "apply_rotary_pos_emb_triton", fake_rope)
+    monkeypatch.setattr(Fa3VitAttBackend, "_vit_att_fwd", staticmethod(fake_fa3))
+    monkeypatch.setattr(visualserver, "VIT_ATTN_BACKEND", visualserver.VIT_ATTN_BACKEND)
+    set_vit_att_backend("fa3")
+
+    attention = glm_visual.Glm5NextVisionAttention(hidden_size=16, num_heads=2, eps=1e-5, bias=True)
+    x = torch.randn(3, 16)
+    cos = torch.randn(3, 4)
+    sin = torch.randn(3, 4)
+    cu_seqlens = torch.tensor([0, 3], dtype=torch.int32)
+    result = attention(x, cu_seqlens, 3, cos, sin)
+
+    assert result.shape == x.shape
+    assert len(norm_inputs) == 1
+    assert norm_inputs[0][0].shape == (3, 3, 2, 8)
+    assert [(q.shape, cos_.shape, sin_.shape) for q, cos_, sin_ in rope_inputs] == [
+        ((3, 2, 8), (3, 4), (3, 4)),
+        ((3, 2, 8), (3, 4), (3, 4)),
+    ]
+    assert len(attn_inputs) == 1
+    assert attn_inputs[0][0].shape == attn_inputs[0][1].shape == attn_inputs[0][2].shape == (3, 2, 8)
+
+
+def test_vision_rms_norm_preserves_glm_rounding(monkeypatch):
+    import lightllm.models.glm5_next.glm5_next_visual as glm_visual
+
+    norm_calls = []
+
+    def fake_rms_norm(x, weight, eps, round_norm_before_weight):
+        norm_calls.append((x, weight, eps, round_norm_before_weight))
+        return x
+
+    monkeypatch.setattr(glm_visual, "rms_norm", fake_rms_norm)
+    norm = glm_visual.Glm5NextVisionRMSNorm(hidden_size=8, eps=1e-5)
+    x = torch.randn(2, 8)
+    assert norm(x) is x
+    assert len(norm_calls) == 1
+    assert norm_calls[0][0] is x
+    assert norm_calls[0][1] is norm.weight
+    assert norm_calls[0][2:] == (1e-5, True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_glm_vision_norms_match_reference():
+    from lightllm.models.vit.triton_kernel.rms_norm_vit import qk_rms_norm, rms_norm
+
+    def glm_rms_norm(x, weight, eps):
+        normalized = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + eps)
+        return normalized.to(x.dtype) * weight
+
+    torch.manual_seed(53)
+    eps = 1e-5
+    qkv = torch.randn(7, 3, 16, 64, dtype=torch.bfloat16, device="cuda")
+    q_weight = torch.randn(64, dtype=torch.bfloat16, device="cuda")
+    k_weight = torch.randn(64, dtype=torch.bfloat16, device="cuda")
+    q, k = qk_rms_norm(qkv, q_weight, k_weight, eps)
+
+    torch.testing.assert_close(q, glm_rms_norm(qkv[:, 0], q_weight, eps), atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(k, glm_rms_norm(qkv[:, 1], k_weight, eps), atol=1e-2, rtol=1e-2)
+
+    x = torch.randn(7, 1024, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(1024, dtype=torch.bfloat16, device="cuda")
+    torch.testing.assert_close(
+        rms_norm(x, weight, eps, round_norm_before_weight=True),
+        glm_rms_norm(x, weight, eps),
+        atol=1e-2,
+        rtol=1e-2,
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vision_batch_preserves_independent_image_attention():
     from lightllm.models.glm5_next.glm5_next_visual import Glm5NextVisionTransformer

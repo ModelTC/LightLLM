@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
+from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+from lightllm.models.vit.triton_kernel.rms_norm_vit import qk_rms_norm, rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
 from .vision_process import Glm5NextImageProcessor
 
@@ -21,19 +23,7 @@ class Glm5NextVisionRMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, hidden_states):
-        # GLM rounds the normalized value to the input dtype before multiplying the weight.
-        normalized = hidden_states.float()
-        normalized = normalized * torch.rsqrt(normalized.square().mean(-1, keepdim=True) + self.eps)
-        return normalized.to(hidden_states.dtype) * self.weight
-
-
-def apply_rotary_pos_emb(x, cos, sin):
-    original_dtype = x.dtype
-    x = x.float()
-    first, second = x.chunk(2, dim=-1)
-    rotated = torch.cat((-second, first), dim=-1)
-    cos, sin = torch.cat((cos, cos), -1).unsqueeze(1), torch.cat((sin, sin), -1).unsqueeze(1)
-    return (x * cos + rotated * sin).to(original_dtype)
+        return rms_norm(hidden_states, self.weight, eps=self.eps, round_norm_before_weight=True)
 
 
 class Glm5NextVisionMLP(nn.Module):
@@ -60,9 +50,11 @@ class Glm5NextVisionAttention(nn.Module):
         self.k_norm = Glm5NextVisionRMSNorm(hidden_size // num_heads, eps)
 
     def forward(self, x, cu_seqlens, max_seqlen, rotary_cos, rotary_sin):
-        q, k, v = self.qkv(x).reshape(x.shape[0], 3, self.num_heads, -1).unbind(1)
-        q = apply_rotary_pos_emb(self.q_norm(q), rotary_cos, rotary_sin)
-        k = apply_rotary_pos_emb(self.k_norm(k), rotary_cos, rotary_sin)
+        qkv = self.qkv(x).reshape(x.shape[0], 3, self.num_heads, -1)
+        q, k = qk_rms_norm(qkv, self.q_norm.weight, self.k_norm.weight, self.q_norm.eps)
+        v = qkv[:, 2]
+        q = apply_rotary_pos_emb_triton(q, rotary_cos, rotary_sin)
+        k = apply_rotary_pos_emb_triton(k, rotary_cos, rotary_sin)
         out = torch.empty_like(q)
         get_vit_attn_backend()(q, k, v, out, cu_seqlens, max_seqlen)
         return self.proj(out.reshape(x.shape[0], -1))
