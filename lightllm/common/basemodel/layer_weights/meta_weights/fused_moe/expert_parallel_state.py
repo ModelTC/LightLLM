@@ -31,6 +31,9 @@ class EPLBState:
     route_counter: torch.Tensor
     recording: bool = False
     recorded_sample_count: int = 0
+    full_layout: bool = False
+    physical_to_logical: Optional[torch.Tensor] = None
+    placement_generation: int = 0
 
     def next_sample_index(self) -> int:
         if not self.recording:

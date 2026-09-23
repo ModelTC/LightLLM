@@ -11,11 +11,14 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import torch
 import torch.distributed as dist
 
-from lightllm.common.eplb_utils import EPLB_MAX_STAGING_DEPTH, extract_eplb_expert_tensors
+from lightllm.common.eplb_utils import extract_eplb_expert_tensors, get_eplb_staging_shape
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import validate_physical_placement
 
 
 @dataclass(frozen=True)
 class TransferStep:
+    """dst_slot is absolute in full mode, relative to the redundant region otherwise."""
+
     dst_rank: int
     dst_slot: int
     src_rank: int
@@ -25,7 +28,7 @@ class TransferStep:
 def align_target_placement(current: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Canonicalize a target row layout without moving retained experts.
 
-    EPLB placement is rank-based: redundant slots on one rank are
+    EPLB placement is rank-based: movable slots on one rank are
     interchangeable. Retained experts therefore keep their live physical
     slot, while new experts fill freed slots in the planner's target-row
     order. The returned placement is the single canonical layout that must
@@ -56,23 +59,31 @@ def build_transfer_plan(
     num_logical_experts: int,
     world_size: int,
     node_world_size: int,
+    *,
+    full_layout: bool = False,
 ) -> List[TransferStep]:
     assert tuple(current.shape) == tuple(target.shape) == (world_size, current.shape[1])
-    num_experts_per_rank = num_logical_experts // world_size
+    if full_layout:
+        validate_physical_placement(current[None], num_logical_experts)
+        validate_physical_placement(target[None], num_logical_experts)
+    num_experts_per_rank = 0 if full_layout else num_logical_experts // world_size
     current_rows = current.tolist()
     aligned_target_rows = align_target_placement(current, target).tolist()
-    # A logical expert has one primary row and at most one redundant row per
-    # rank, so this source list is already unique.  Build it once instead of
-    # allocating/sorting a set for every destination slot.
-    candidates_by_expert = [
-        [
-            (
-                expert // num_experts_per_rank,
-                expert % num_experts_per_rank,
-            )
+    # Full layouts have no implicit primary source. Both policies allow at
+    # most one copy of each expert per rank, so source lists are already unique.
+    candidates_by_expert = (
+        [[] for _ in range(num_logical_experts)]
+        if full_layout
+        else [
+            [
+                (
+                    expert // num_experts_per_rank,
+                    expert % num_experts_per_rank,
+                )
+            ]
+            for expert in range(num_logical_experts)
         ]
-        for expert in range(num_logical_experts)
-    ]
+    )
     for rank, row in enumerate(current_rows):
         for slot, expert in enumerate(row):
             candidates_by_expert[expert].append((rank, num_experts_per_rank + slot))
@@ -105,16 +116,19 @@ class _EPLBTransferBase:
         self.global_rank = global_rank
         self.world_size = world_size
         self.num_experts_per_rank = weights[0].expert_parallel_state.num_primary_experts_per_rank
+        if self._eplb_states[0].full_layout:
+            # TransferStep.dst_slot is an absolute row in full-layout mode.
+            self.num_experts_per_rank = 0
         self.device = weights[0].w13.weight.device
         self.live = [extract_eplb_expert_tensors(weight) for weight in weights]
         self._validate_live_layout()
-        num_redundant_slots_per_rank = self._eplb_states[0].num_redundant_experts_per_rank
+        _, staged_rows = get_eplb_staging_shape(weights)
         self.staging = [
             [
                 (
                     name,
                     torch.empty(
-                        (num_redundant_slots_per_rank,) + tuple(tensor.shape[1:]),
+                        (staged_rows,) + tuple(tensor.shape[1:]),
                         dtype=tensor.dtype,
                         device=tensor.device,
                     ),
@@ -248,8 +262,9 @@ class NixlEPLBTransfer(_EPLBTransferBase):
         push_batch: "_PreparedCudaMemcpyBatch | None"
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
-        # Reuse at most eight layer buffers to bound EPLB staging memory.
-        self.staging_depth = min(EPLB_MAX_STAGING_DEPTH, len(weights))
+        # Full layouts stage every changed row of one layer before publishing;
+        # this makes arbitrary overwrite cycles safe without eight full layers.
+        self.staging_depth, _ = get_eplb_staging_shape(weights)
         super().__init__(weights, transfer_group, global_rank, world_size)
         self._nixl_agent = None
         self._registered_descs = None
