@@ -262,6 +262,8 @@ def test_stop_str_match_mode_updates_shared_buffer():
     with pytest.raises(ValueError):
         writer.stop_str_match_mode.set_mode(3)
     assert reader.stop_str_match_mode.is_content_only()
+
+
 def test_infer_high_priority_is_internal_and_ignores_external_value():
     params = SamplingParams()
     params.init(None, infer_high_priority=-3)
