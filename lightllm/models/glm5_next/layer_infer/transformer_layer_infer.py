@@ -18,6 +18,7 @@ from lightllm.common.basemodel.triton_kernel.mhc import (
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
@@ -174,6 +175,58 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             ),
         )
 
+    def _context_attention_wrapper_run(self, q, cache_kv, infer_state, layer_weight):
+        """Capture GLM sparse attention with the indexer's graph inputs.
+
+        Sparse attention is replayed as a CPU-side step because the indexer
+        performs runtime request-state updates.  Besides Q and KV, it needs
+        the hidden state and Q-LoRA projection saved by ``_get_qkv``.  Python
+        assignments made during capture do not run during graph replay, so
+        preserve those tensors explicitly and restore them for every replay.
+        """
+        if not torch.cuda.is_current_stream_capturing():
+            return self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+
+        q = q.contiguous()
+        cache_kv = cache_kv.contiguous()
+        indexer_inputs = infer_state.get_topk_indices_params
+        hidden_states = indexer_inputs["hidden_states"].contiguous()
+        q_lora = indexer_inputs["q_lora"].contiguous()
+        _q = tensor_to_no_ref_tensor(q)
+        _cache_kv = tensor_to_no_ref_tensor(cache_kv)
+        _hidden_states = tensor_to_no_ref_tensor(hidden_states)
+        _q_lora = tensor_to_no_ref_tensor(q_lora)
+        pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
+        pre_capture_graph.__exit__(None, None, None)
+
+        def restore_indexer_inputs(state):
+            state.get_topk_indices_params = {"hidden_states": _hidden_states, "q_lora": _q_lora}
+
+        def get_o_shape_dtype_device():
+            restore_indexer_inputs(infer_state)
+            with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
+                output = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
+                output_shape, output_dtype, output_device = output.shape, output.dtype, output.device
+            return output_shape, output_dtype, output_device
+
+        output_shape, output_dtype, output_device = get_o_shape_dtype_device()
+        infer_state.prefill_cuda_graph_create_graph_obj()
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+        output = torch.empty(output_shape, dtype=output_dtype, device=output_device)
+        _output = tensor_to_no_ref_tensor(output)
+
+        def sparse_att_func(new_infer_state):
+            restore_indexer_inputs(new_infer_state)
+            tmp_output = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
+            assert tmp_output.shape == _output.shape
+            _output.copy_(tmp_output)
+
+        infer_state.prefill_cuda_graph_add_cpu_runnning_func(
+            func=sparse_att_func,
+            after_graph=pre_capture_graph,
+        )
+        return output
+
     def _token_attention_kernel(self, q, infer_state, layer_weight, out=None):
         if self.is_linear_attention_layer:
             raise AssertionError("KDA uses its dedicated backend")
@@ -243,28 +296,100 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         output = layer_weight.linear_o_proj.mm(output.view(tokens, -1))
         return self._tpsp_reduce(input=output, infer_state=infer_state)
 
+    def _kda_prefill_cuda_graph_wrapper(
+        self,
+        mixed_qkv: torch.Tensor,
+        raw_decay_gate: torch.Tensor,
+        beta_logits: torch.Tensor,
+        infer_state,
+        layer_weight,
+    ) -> torch.Tensor:
+        """Run KDA prefill between CUDA-graph segments.
+
+        KDA updates request-owned convolution and SSM state, so its prefill
+        kernel must use the attention state constructed for the request being
+        replayed rather than the one used while capturing.  Keep its inputs and
+        output at stable addresses, then register it as a CPU-side replay step
+        between the surrounding CUDA-graph segments.
+        """
+        backend = infer_state.prefill_att_state1.backend
+        mixed_qkv = mixed_qkv.contiguous()
+        raw_decay_gate = raw_decay_gate.contiguous()
+        beta_logits = beta_logits.contiguous()
+        _mixed_qkv = tensor_to_no_ref_tensor(mixed_qkv)
+        _raw_decay_gate = tensor_to_no_ref_tensor(raw_decay_gate)
+        _beta_logits = tensor_to_no_ref_tensor(beta_logits)
+
+        pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
+        pre_capture_graph.__exit__(None, None, None)
+
+        # chunk_kda_with_fused_gate returns [1, tokens, heads, head_dim].
+        # Construct this shape directly instead of dry-running the kernel:
+        # kernel setup may synchronize with the host, which is illegal while a
+        # CUDA graph capture is active.
+        output_shape = (1, mixed_qkv.shape[0], backend.tp_num_heads, backend.head_dim)
+        infer_state.prefill_cuda_graph_create_graph_obj()
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+        output = torch.empty(output_shape, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
+        _output = tensor_to_no_ref_tensor(output)
+
+        def kda_prefill_func(new_infer_state):
+            tmp_output = new_infer_state.prefill_att_state1.prefill_att(
+                q=None,
+                k=None,
+                v=None,
+                att_control=AttControl(
+                    linear_att_prefill=True,
+                    linear_att_prefill_dict={
+                        "mixed_qkv": _mixed_qkv,
+                        "raw_gate": _raw_decay_gate,
+                        "raw_beta": _beta_logits,
+                        "layer_weight": layer_weight,
+                        "layer_num": self.layer_num_,
+                    },
+                ),
+                alloc_func=self.alloc_tensor,
+            )
+            assert tmp_output.shape == _output.shape
+            _output.copy_(tmp_output)
+
+        infer_state.prefill_cuda_graph_add_cpu_runnning_func(
+            func=kda_prefill_func,
+            after_graph=pre_capture_graph,
+        )
+        return output
+
     def context_attention_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.is_linear_attention_layer:
             return super().context_attention_forward(input_embeddings, infer_state, layer_weight)
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
-        core_output = infer_state.prefill_att_state1.prefill_att(
-            q=None,
-            k=None,
-            v=None,
-            att_control=AttControl(
-                linear_att_prefill=True,
-                linear_att_prefill_dict={
-                    "mixed_qkv": qkv,
-                    "raw_gate": raw_decay_gate,
-                    "raw_beta": beta_logits,
-                    "layer_weight": layer_weight,
-                    "layer_num": self.layer_num_,
-                },
-            ),
-            alloc_func=self.alloc_tensor,
-        )
+        if torch.cuda.is_current_stream_capturing():
+            core_output = self._kda_prefill_cuda_graph_wrapper(
+                qkv,
+                raw_decay_gate,
+                beta_logits,
+                infer_state,
+                layer_weight,
+            )
+        else:
+            core_output = infer_state.prefill_att_state1.prefill_att(
+                q=None,
+                k=None,
+                v=None,
+                att_control=AttControl(
+                    linear_att_prefill=True,
+                    linear_att_prefill_dict={
+                        "mixed_qkv": qkv,
+                        "raw_gate": raw_decay_gate,
+                        "raw_beta": beta_logits,
+                        "layer_weight": layer_weight,
+                        "layer_num": self.layer_num_,
+                    },
+                ),
+                alloc_func=self.alloc_tensor,
+            )
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def token_attention_forward(self, input_embeddings, infer_state, layer_weight):
