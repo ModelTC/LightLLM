@@ -1067,7 +1067,7 @@ class TpPartBaseModel:
 
         warmup_max_tokens = self.batch_max_tokens
         if self.args.run_mode == "decode":
-            decode_rows = self.max_req_num * self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
+            decode_rows = self.max_req_num * self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
             warmup_max_tokens = min(warmup_max_tokens, decode_rows)
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 

@@ -25,6 +25,7 @@ class HybridAttPagedTreeNode:
         self.token_mem_index_value: torch.Tensor = None
 
         self.ref_counter = 0
+        self.checkpoint_transfer_refs = 0
         self.time_id = time_gen.generate_time_id()
 
         self.node_value_len = 0
@@ -165,7 +166,7 @@ class HybridAttPagedRadixCache:
         # 和回收水位 guard 掩盖）。这里显式排除，使数据结构与回收逻辑的意图一致。
         if node.is_leaf() and node is not self.root_node:
             self._evict_tree_set.add(node)
-        if node.small_page_buffer_idx is not None:
+        if node.small_page_buffer_idx is not None and node.checkpoint_transfer_refs == 0:
             self._evict_tree_set_for_state_cache.add(node)
         return
 
@@ -341,7 +342,10 @@ class HybridAttPagedRadixCache:
         key: torch.Tensor,
         block_hashs: Optional[List[int]] = None,
         update_refs: bool = False,
+        return_mem_indexes: bool = True,
+        pin_checkpoint: bool = False,
     ):
+        assert not pin_checkpoint or update_refs
         assert key is not None, "key must not be None"
         if block_hashs is None:
             block_hashs = []
@@ -362,18 +366,36 @@ class HybridAttPagedRadixCache:
             update_refs=update_refs,
         )
         if len(ans_node_list) == 0:
+            if update_refs:
+                self.dec_node_ref_counter(self.root_node)
             return None, 0, None
 
         # 判定真正可以用的匹配节点。
         ans_node_list = self._trim_unusable_match_tail(ans_node_list, update_refs=update_refs)
         if len(ans_node_list) == 0:
+            if update_refs:
+                self.dec_node_ref_counter(self.root_node)
             return None, 0, None
 
         ans_node = ans_node_list[-1]
+        if pin_checkpoint and not ans_node.is_big_page_node():
+            self._discard_node(ans_node)
+            assert ans_node.small_page_buffer_idx is not None
+            ans_node.checkpoint_transfer_refs += 1
+            self._add_node(ans_node)
+        if not return_mem_indexes:
+            return ans_node, ans_node.node_prefix_total_len, None
         mem_value = torch.concat([e.token_mem_index_value for e in ans_node_list])
         assert len(mem_value) == ans_node.node_prefix_total_len
-
         return ans_node, len(mem_value), mem_value
+
+    def release_checkpoint_pin(self, node: HybridAttPagedTreeNode):
+        if node is None or node.is_big_page_node():
+            return
+        self._discard_node(node)
+        assert node.checkpoint_transfer_refs > 0
+        node.checkpoint_transfer_refs -= 1
+        self._add_node(node)
 
     def _match_prefix_helper(
         self,
@@ -438,7 +460,6 @@ class HybridAttPagedRadixCache:
             if node.is_big_page_node():
                 break
             elif node.small_page_buffer_idx is not None:
-                assert not node.is_big_page_node()
                 break
             else:
                 removed_list.append(node)
@@ -522,13 +543,34 @@ class HybridAttPagedRadixCache:
         self._add_node(old_node)
         return
 
-    def get_mem_index_value_by_node(self, node: HybridAttPagedTreeNode) -> Optional[torch.Tensor]:
+    def get_mem_index_value_by_node(
+        self, node: HybridAttPagedTreeNode, start: int = 0, end: Optional[int] = None
+    ) -> Optional[torch.Tensor]:
         if node is None:
             return None
+        if start == 0 and end is None:
+            ans_list = []
+            while node is not None:
+                ans_list.append(node.token_mem_index_value)
+                node = node.parent
+            ans_list.reverse()
+            return torch.concat(ans_list, dim=0)
 
+        if end is None:
+            end = node.node_prefix_total_len
+        assert 0 <= start <= end <= node.node_prefix_total_len
+        if start == end:
+            return node.token_mem_index_value.new_empty((0,))
         ans_list = []
         while node is not None:
-            ans_list.append(node.token_mem_index_value)
+            node_end = node.node_prefix_total_len
+            node_start = node_end - len(node.token_mem_index_value)
+            if node_start < end and start < node_end:
+                value_start = max(start - node_start, 0)
+                value_end = min(end - node_start, len(node.token_mem_index_value))
+                ans_list.append(node.token_mem_index_value[value_start:value_end])
+            if node_start <= start:
+                break
             node = node.parent
 
         ans_list.reverse()
@@ -591,6 +633,9 @@ class HybridAttPagedRadixCache:
             if len(small_page_buffer_ids) > 0:
                 self.small_page_buffers.free_state_cache(small_page_buffer_ids)
         return
+
+    def get_available_small_page_buffer_num(self):
+        return self.small_page_buffers.get_free_cache_num() + len(self._evict_tree_set_for_state_cache)
 
     def free_one_small_page_buffer(self):
         if self.small_page_buffers is None:
