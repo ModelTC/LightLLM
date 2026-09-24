@@ -45,7 +45,6 @@ def test_pd_transport_without_logprobs_keeps_token_id_in_compact_packet():
 
     class _Manager:
         args = SimpleNamespace(run_mode="decode")
-        cancel_pd_request_registration = MagicMock()
 
         async def generate(self, **_kwargs):
             yield 123, "token", metadata, finish_status

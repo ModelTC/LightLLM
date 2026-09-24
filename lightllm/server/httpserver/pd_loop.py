@@ -30,9 +30,6 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
-_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS = 5
-_PD_RECONNECT_DELAY_SECONDS = 10
-
 
 async def timer_log(manager: HttpServerManager):
     while True:
@@ -86,9 +83,10 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     pd_handle_loop 主要负责与 pd master 进行注册连接，然后接收pd master发来的请求，然后
     将推理结果转发给 pd master进行处理。
     """
+    # 创建转发队列
+    forwarding_queue = AsyncQueue()
+
     while True:
-        # 转发队列属于当前连接，避免超时未退出的旧请求在重连后上报过期 token。
-        forwarding_queue = AsyncQueue()
         forwarding_tokens_task = None
         heartbeat_task = None
         generation_tasks: Dict[int, asyncio.Task] = {}
@@ -132,7 +130,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
-                        manager.begin_pd_request_registration(group_req_id)
                         generation_task = asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
@@ -146,13 +143,9 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         )
                         generation_tasks[group_req_id] = generation_task
 
-                        def remove_generation_task(
-                            task: asyncio.Task, request_id: int = group_req_id, tasks=generation_tasks
-                        ):
-                            if tasks.get(request_id) is task:
-                                tasks.pop(request_id, None)
-                                # task 可能在首次运行前被取消，此时协程内的 finally 不会执行。
-                                manager.cancel_pd_request_registration(request_id)
+                        def remove_generation_task(task: asyncio.Task, request_id: int = group_req_id):
+                            if generation_tasks.get(request_id) is task:
+                                generation_tasks.pop(request_id, None)
 
                         generation_task.add_done_callback(remove_generation_task)
                     elif obj[0] == ObjType.ABORT:
@@ -161,7 +154,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         generation_task = generation_tasks.get(group_req_id)
                         if generation_task is not None and not generation_task.done():
                             generation_task.cancel()
-                        await manager.abort(group_req_id)
+                        if not (await manager.abort(group_req_id)):
+
+                            async def delayed_abort_task(group_req_id, retry_count):
+                                for _ in range(retry_count):
+                                    await asyncio.sleep(5.0)
+                                    if await manager.abort(group_req_id):
+                                        break
+
+                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
 
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
@@ -183,30 +184,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
         finally:
-            # Cancel the connection's requests even if their generators cannot exit promptly.
-            # abort() also defers cancellation for requests that have not registered shm_req yet.
-            for group_req_id in generation_tasks:
-                await manager.abort(group_req_id)
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
-                done_tasks, pending_tasks = await asyncio.wait(
-                    child_tasks, timeout=_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS
-                )
-                if done_tasks:
-                    await asyncio.gather(*done_tasks, return_exceptions=True)
-                if pending_tasks:
-                    logger.warning(
-                        "timed out after %s seconds cleaning up %s PD child task(s); reconnecting",
-                        _PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS,
-                        len(pending_tasks),
-                    )
-                    for task in pending_tasks:
-                        task.cancel()
+                await asyncio.gather(*child_tasks, return_exceptions=True)
 
-        await asyncio.sleep(_PD_RECONNECT_DELAY_SECONDS)
+        await asyncio.sleep(10)
+        await forwarding_queue.get_all_data()
         logger.info("reconnection to pd_master")
 
 
@@ -298,30 +284,16 @@ async def _pd_process_generate(
             )
         except Exception:
             logger.exception(f"report pd node generate error failed, group_request_id: {group_request_id}")
-    finally:
-        manager.cancel_pd_request_registration(sampling_params.group_request_id)
 
 
 # 转发token的task
 async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
     max_message_size = get_lightllm_websocket_max_message_size()
-    event_loop = asyncio.get_running_loop()
-    next_queue_metric_time = 0.0
 
     while True:
-        await forwarding_queue.wait_to_ready()
-        queue_duration = forwarding_queue.oldest_age()
-        handle_list = await forwarding_queue.get_all_data()
+        handle_list = await forwarding_queue.wait_to_get_all_data()
 
         if handle_list:
-            now = event_loop.time()
-            if now >= next_queue_metric_time:
-                from lightllm.server.api_http import g_objs
-
-                g_objs.httpserver_manager.metric_client.histogram_observe(
-                    "lightllm_pd_forward_queue_duration", queue_duration
-                )
-                next_queue_metric_time = now + 1.0
             load_info: dict = _get_load_info()
             pending_handle_lists = []
             group_start = 0

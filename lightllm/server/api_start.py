@@ -1,6 +1,5 @@
 import multiprocessing as mp
 import os
-import tempfile
 import uuid
 import subprocess
 import math
@@ -27,7 +26,6 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
-from lightllm.utils.device_utils import is_sm100_gpu, is_sm90_gpu
 
 logger = init_logger(__name__)
 
@@ -192,22 +190,6 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
-
-    if args.ep_moe_backend == "triton":
-        assert args.enable_ep_moe, "--ep_moe_backend triton requires --enable_ep_moe"
-        assert args.run_mode == "prefill", "--ep_moe_backend triton only supports --run_mode prefill"
-        assert args.nnodes == 1, "--ep_moe_backend triton only supports a single node"
-        assert not args.enable_prefill_eplb, "--ep_moe_backend triton does not support --enable_prefill_eplb"
-        assert is_sm90_gpu(), "--ep_moe_backend triton only supports SM90 GPUs"
-
-    if args.enable_prefill_eplb:
-        assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"
-        assert not args.enable_prefill_cudagraph, "--enable_prefill_eplb does not support --enable_prefill_cudagraph"
-        # EPLB updates expert weights in place, but SM100 Mega-MoE caches transformed weights by tensor data_ptr.
-        assert not is_sm100_gpu(), "--enable_prefill_eplb does not support SM100"
-        assert (
-            args.eplb_num_redundant_experts_per_rank > 0
-        ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
@@ -487,15 +469,6 @@ def _launch_subprocesses(args: StartArgs):
             ],
         )
 
-    instance_disk_cache_dir = None
-    if args.enable_cpu_cache and args.enable_disk_cache:
-        cache_base_dir = args.disk_cache_dir or tempfile.gettempdir()
-        disk_cache_name = os.getenv("DISK_CACHE_NAME") or f"lightllm_disk_cache_{get_unique_server_name()}"
-        if disk_cache_name in (".", "..") or os.path.basename(disk_cache_name) != disk_cache_name:
-            raise ValueError("DISK_CACHE_NAME must be a single directory name")
-        instance_disk_cache_dir = os.path.join(cache_base_dir, disk_cache_name)
-    process_manager.register_disk_cache_dir(instance_disk_cache_dir)
-
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
 
@@ -503,7 +476,7 @@ def _launch_subprocesses(args: StartArgs):
             start_funcs=[
                 start_multi_level_kv_cache_manager,
             ],
-            start_args=[(args, instance_disk_cache_dir)],
+            start_args=[(args,)],
         )
 
     process_manager.start_submodule_processes(

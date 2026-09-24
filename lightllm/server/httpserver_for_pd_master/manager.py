@@ -60,8 +60,6 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
-        self.next_request_queue_metric_time = 0.0
-        self._abort_notify_tasks = set()
         # 限流开关只在 PD Master 生效；P/D 节点不读取本地开关或超时配置，只执行 Master 下发的值。
         self.enable_pd_node_self_request_limit = not args.disable_pd_node_self_request_limit
         self.pd_node_resource_wait_timeout_seconds = get_pd_node_resource_wait_timeout_seconds()
@@ -80,7 +78,7 @@ class HttpServerManagerForPDMaster:
         return
 
     def get_real_supported_max_req_total_len(self):
-        # HttpServerManager.generate 会借用长度校验逻辑，其中会调用本方法。
+        # HttpServerManager.generate 会借用 _check_and_repair_length(self, ...)，其中会调用本方法。
         # PD master 无本地 token 池 shm 计数；上限与启动参数及子节点对齐的 max_req_total_len 一致。
         return self.max_req_total_len
 
@@ -98,14 +96,11 @@ class HttpServerManagerForPDMaster:
         return False
 
     async def register_pd(self, pd_info_json, websocket):
-        return self.pd_manager.register_pd(pd_info_json, websocket)
+        self.pd_manager.register_pd(pd_info_json, websocket)
+        return
 
-    async def remove_pd(self, pd_client: PD_Client_Obj):
-        self.pd_manager.remove_pd(pd_client)
-        # Wake every stage so the request's existing error path aborts the surviving peer.
-        for req_status in self.req_id_to_out_inf.values():
-            if req_status.p_node is pd_client or req_status.d_node is pd_client:
-                await req_status.set_error(f"PD {pd_client.mode} node {pd_client.client_ip_port} disconnected")
+    async def remove_pd(self, pd_info_json):
+        self.pd_manager.remove_pd(pd_info_json)
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -186,9 +181,12 @@ class HttpServerManagerForPDMaster:
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
         input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
+        fake_prompt_ids = [0 for _ in range(input_token_num)]
         from lightllm.server.httpserver.manager import HttpServerManager
 
-        HttpServerManager._check_and_repair_length(self, prompt_tokens=input_token_num, sampling_params=sampling_params)
+        await HttpServerManager._check_and_repair_length(
+            self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
+        )
 
         return_output_logprobs = getattr(sampling_params, "return_output_logprobs", True)
         origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
@@ -532,7 +530,7 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.send_control_message(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -551,7 +549,7 @@ class HttpServerManagerForPDMaster:
         logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.send_control_message(
+        await d_node.websocket.send_bytes(
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
@@ -572,7 +570,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
         pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
         decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
-        await p_node.send_control_message(
+        await p_node.websocket.send_bytes(
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
@@ -598,41 +596,24 @@ class HttpServerManagerForPDMaster:
                         group_request_id=group_request_id,
                         reason="fetch_pd_stream decode period check network disconnected",
                     )
-            request_queue_duration = req_status.oldest_age()
             token_list = req_status.pop_all_tokens()
-            if token_list and now >= self.next_request_queue_metric_time:
-                self.metric_client.histogram_observe(
-                    "lightllm_pd_master_request_queue_duration", request_queue_duration
-                )
-                self.next_request_queue_metric_time = now + 1.0
-            ready_token_list = []
             for sub_req_id, request_output, metadata, finish_status in token_list:
                 output_index = metadata.get("count_output_tokens")
                 # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
                 if output_index == 1:
-                    node_run_mode = metadata.pop("node_mode", None)
                     if first_token_gen is False:
                         first_token_gen = True
+                        node_run_mode = metadata.pop("node_mode", None)
                         if node_run_mode == "prefill":
                             if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                 finish_status = FinishStatus(FinishStatus.NO_FINISH)
                         metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                        ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
-                    elif finish_status.status in (
-                        FinishStatus.FINISHED_ABORTED,
-                        FinishStatus.FINISHED_ERROR,
-                    ):
-                        metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                        ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
+                        yield sub_req_id, request_output, metadata, finish_status
                     else:
                         continue
                 else:
                     metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                    ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
-
-            for index, token_info in enumerate(ready_token_list):
-                token_info[2]["_pd_stream_batch_end"] = index == len(ready_token_list) - 1
-                yield token_info
+                    yield sub_req_id, request_output, metadata, finish_status
 
         return
 
@@ -668,9 +649,6 @@ class HttpServerManagerForPDMaster:
                     prompt_cache_len = metadata.get("prompt_cache_len", 0)
                     req_status.put_tokens_to_front(new_tokens)
                     return prompt_cache_len
-                if token[3].is_finished():
-                    req_status.put_tokens_to_front(new_tokens)
-                    return ready_kv_len
 
     async def _wait_to_token_package(
         self,
@@ -758,24 +736,15 @@ class HttpServerManagerForPDMaster:
         except:
             pass
 
-        async def notify_node(node: Optional[PD_Client_Obj]):
-            if node is None:
-                return
-            try:
-                await node.send_control_message(pickle.dumps((ObjType.ABORT, group_request_id)))
-            except BaseException:
-                pass
+        try:
+            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+        except:
+            pass
 
-        # HTTP request cancellation must not cancel an ABORT while it is waiting for
-        # the node's websocket send lock. Keep independent tasks alive until both
-        # nodes have received the cleanup message or their connections fail.
-        notify_tasks = [asyncio.create_task(notify_node(node)) for node in (p_node, d_node) if node is not None]
-        self._abort_notify_tasks.update(notify_tasks)
-        for task in notify_tasks:
-            task.add_done_callback(self._abort_notify_tasks.discard)
-
-        if notify_tasks:
-            await asyncio.gather(*(asyncio.shield(task) for task in notify_tasks))
+        try:
+            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+        except:
+            pass
 
         return
 
@@ -797,8 +766,6 @@ class HttpServerManagerForPDMaster:
     async def handle_loop(self):
         self.infos_queues = AsyncQueue()
         asyncio.create_task(self.timer_log())
-        event_loop = asyncio.get_running_loop()
-        next_ingress_queue_metric_time = 0.0
 
         use_config_server = self.args.config_server_host and self.args.config_server_port
 
@@ -808,15 +775,7 @@ class HttpServerManagerForPDMaster:
             asyncio.create_task(register_loop(self))
 
         while True:
-            await self.infos_queues.wait_to_ready()
-            ingress_queue_duration = self.infos_queues.oldest_age()
-            objs = await self.infos_queues.get_all_data()
-            now = event_loop.time()
-            if objs and now >= next_ingress_queue_metric_time:
-                self.metric_client.histogram_observe(
-                    "lightllm_pd_master_ingress_queue_duration", ingress_queue_duration
-                )
-                next_ingress_queue_metric_time = now + 1.0
+            objs = await self.infos_queues.wait_to_get_all_data()
 
             try:
                 for obj in objs:
@@ -883,7 +842,6 @@ class ReqStatus:
         self.up_status_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
-        self.oldest_token_time = None
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
         self.error_info: Optional[str] = None
@@ -919,29 +877,19 @@ class ReqStatus:
         was_empty = not self.out_token_info_list
         self.out_token_info_list.append(token_info)
         if was_empty:
-            self.oldest_token_time = time.monotonic()
             self.event.set()
-
-    def oldest_age(self):
-        if self.oldest_token_time is None:
-            return 0.0
-        return time.monotonic() - self.oldest_token_time
 
     def pop_all_tokens(self):
         self.event.clear()
         ans = self.out_token_info_list
         self.out_token_info_list = []
-        self.oldest_token_time = None
         return ans
 
     def put_tokens_to_front(self, token_list: List[Tuple[int, str, dict, FinishStatus]]):
         if not token_list:
             return
 
-        was_empty = not self.out_token_info_list
         self.out_token_info_list = token_list + self.out_token_info_list
-        if was_empty:
-            self.oldest_token_time = time.monotonic()
         self.event.set()
 
 
@@ -1042,15 +990,12 @@ class PDManager:
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
-        return pd_client
+        return
 
-    def remove_pd(self, pd_client: PD_Client_Obj):
-        # A closing connection must not remove a newer registration at the same address.
-        pd_client.websocket = None
-        if self.url_to_pd_nodes.get(pd_client.client_ip_port) is not pd_client:
-            return
+    def remove_pd(self, pd_info_json):
+        pd_client = PD_Client_Obj(**pd_info_json)
 
-        self.url_to_pd_nodes.pop(pd_client.client_ip_port)
+        self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
         self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
         self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
 
@@ -1081,10 +1026,4 @@ class PDManager:
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
-        if not self.prefill_nodes or not self.decode_nodes:
-            raise ServerBusyError(
-                "PD nodes unavailable: "
-                f"registered_prefill={len(self.prefill_nodes)}, registered_decode={len(self.decode_nodes)}",
-                status_code=503,
-            )
         return self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)

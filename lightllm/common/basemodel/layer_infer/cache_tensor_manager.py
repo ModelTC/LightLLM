@@ -22,12 +22,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
         if hasattr(self, "storage_weak_ptr"):
             storage_weak_ptr = self.storage_weak_ptr
         else:
-            try:
-                storage_weak_ptr = self.untyped_storage()._weak_ref()
-            except RuntimeError:
-                # Some tensor implementations, including UndefinedTensorImpl,
-                # have no backing storage. Their destructor must stay silent.
-                return
+            storage_weak_ptr = self.untyped_storage()._weak_ref()
             UntypedStorage._free_weak_ref(storage_weak_ptr)
         if storage_weak_ptr in g_cache_manager.ptr_to_bufnode:
             g_cache_manager.changed_ptr.add(storage_weak_ptr)

@@ -24,11 +24,12 @@ import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Set, Union
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (
-    enable_env_vars,
     get_env_start_args,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
+    get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
@@ -36,17 +37,10 @@ from lightllm.utils.dist_utils import (
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
-from lightllm.utils.device_utils import (
-    get_device_sm_count,
-    has_nvlink,
-    is_sm90_gpu,
-    is_sm100_gpu,
-)
+from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 logger = init_logger(__name__)
-FP8_MOE_QUANT_METHOD = "fp8w8a8-b128-deepgemm"
-FP4_MOE_QUANT_METHOD = "fp4fp8-b32-deepgemm"
 
 
 def get_deep_ep_prefill_moe_workspace_size(
@@ -164,15 +158,10 @@ class DistributeGroupManager:
     def __init__(self):
         self.groups = []
         self.dp_control_group = None
-        self.ep_balance_monitor_group = None
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
         self.ep_prefill_moe_workspace = None
         self.ep_mega_moe_buffer = None
-        self.ep_mega_moe_mma_type = None
-        self.ep_mega_moe_quant_method = None
-        self.ep_triton_moe_buffer = None
-        self.ep_triton_moe_quant_method = None
         self.ep_num_sms = None
 
     def __len__(self):
@@ -189,14 +178,6 @@ class DistributeGroupManager:
             self.groups.append(group)
         if args.dp > 1:
             self.dp_control_group = dist.new_group(ranks=list(range(get_global_world_size())), backend="gloo")
-        if (
-            getattr(args, "enable_ep_moe", False)
-            and not getattr(args, "disable_ep_balance_monitor", False)
-            and getattr(args, "run_mode", "normal") != "decode"
-            and not getattr(args, "enable_prefill_cudagraph", False)
-            and not is_sm100_gpu()
-        ):
-            self.ep_balance_monitor_group = dist.new_group(ranks=list(range(get_global_world_size())), backend="gloo")
         return
 
     def get_default_group(self) -> CustomProcessGroup:
@@ -240,9 +221,9 @@ class DistributeGroupManager:
         """初始化 DeepEP 通信组以及当前模型实际需要的 MoE buffer。
 
         ``expert_quant_method_names`` 是各 MoE 层最终绑定的 quant method 名称集合。
-        同一个模型可能逐层混用多种 expert quant method：满足约束的 SM100 FP4 和
-        SM90 FP8 层走 Mega/Triton EP MoE，其他层走 DeepEP legacy 路径。这里只为实际
-        存在的执行路径分配 buffer，避免为未使用的路径长期占用显存。
+        同一个模型可能逐层混用 FP4 和 FP8：SM100 FP4 层走 Mega MoE，其他层走
+        DeepEP legacy low-latency 路径。这里只为实际存在的执行路径分配 buffer，
+        避免为未使用的路径长期占用显存。
         """
         args = get_env_start_args()
         enable_ep_moe = args.enable_ep_moe
@@ -255,10 +236,6 @@ class DistributeGroupManager:
             self.ep_low_latency_buffer = None
             self.ep_prefill_moe_workspace = None
             self.ep_mega_moe_buffer = None
-            self.ep_mega_moe_mma_type = None
-            self.ep_mega_moe_quant_method = None
-            self.ep_triton_moe_buffer = None
-            self.ep_triton_moe_quant_method = None
             self.ep_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
@@ -275,15 +252,7 @@ class DistributeGroupManager:
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        total_redundant_experts = (
-            get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
-            if get_env_start_args().enable_prefill_eplb
-            else 0
-        )
-        self.ll_prefill_num_experts = n_routed_experts + total_redundant_experts
-        # EPLB's redundant rows are a prefill-only physical layout; decode
-        # always routes the logical expert space.
-        self.ll_decode_num_experts = n_routed_experts
+        self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -293,43 +262,31 @@ class DistributeGroupManager:
             allow_multiple_reduction=True,
         )
         self.ep_mega_moe_buffer = None
-        self.ep_triton_moe_buffer = None
         self.ep_low_latency_buffer = None
         self.ep_prefill_moe_workspace = None
 
         if not expert_quant_method_names:
             raise ValueError("No valid MoE quant method was found while initializing DeepEP buffers")
 
-        self.ep_mega_moe_mma_type = None
-        self.ep_mega_moe_quant_method = None
-        self.ep_triton_moe_quant_method = None
-        if args.ep_moe_backend == "triton" and FP8_MOE_QUANT_METHOD in expert_quant_method_names:
-            self.ep_triton_moe_quant_method = FP8_MOE_QUANT_METHOD
+        mega_moe_quant_method = "fp4fp8-b32-deepgemm"
+        is_sm100 = is_sm100_gpu()
 
-        if (
-            self.ep_triton_moe_quant_method is None
-            and is_sm100_gpu()
-            and FP4_MOE_QUANT_METHOD in expert_quant_method_names
-        ):
-            self.ep_mega_moe_mma_type = "fp8xfp4"
-            self.ep_mega_moe_quant_method = FP4_MOE_QUANT_METHOD
-        elif self.ep_triton_moe_quant_method is None and (
-            enable_env_vars("LIGHTLLM_ENABLE_SM90_FP8_MEGA_MOE")
-            and is_sm90_gpu()
-            and FP8_MOE_QUANT_METHOD in expert_quant_method_names
-            and total_redundant_experts == 0
-            and args.nnodes == 1
-            and not args.enable_rl
-        ):
-            self.ep_mega_moe_mma_type = "fp8xfp8"
-            self.ep_mega_moe_quant_method = FP8_MOE_QUANT_METHOD
-
-        enable_mega_moe_buffer = self.ep_mega_moe_mma_type is not None
-        enable_triton_ep_moe_buffer = self.ep_triton_moe_quant_method is not None
-        fused_moe_quant_method = self.ep_triton_moe_quant_method or self.ep_mega_moe_quant_method
-        has_legacy_moe_layer = fused_moe_quant_method is None or any(
-            method_name != fused_moe_quant_method for method_name in expert_quant_method_names
-        )
+        # Buffer 选择规则：
+        # 1. 非 SM100 不支持 Mega MoE，只初始化 legacy low-latency buffer；
+        # 2. SM100 全部 MoE 层为 FP4，只初始化 Mega MoE buffer；
+        # 3. SM100 全部 MoE 层为 FP8，只初始化 legacy low-latency buffer；
+        # 4. SM100 逐层混合 FP4/FP8，两套 buffer 都要初始化。
+        if is_sm100:
+            # 只要存在一个 FP4 MoE 层，就需要 Mega MoE buffer；只要存在一个非 FP4
+            # MoE 层，就需要 legacy low-latency buffer。FP4/FP8 逐层混用时两者都会初始化。
+            has_mega_moe_layer = mega_moe_quant_method in expert_quant_method_names
+            has_legacy_moe_layer = any(
+                method_name != mega_moe_quant_method for method_name in expert_quant_method_names
+            )
+            enable_mega_moe_buffer = has_mega_moe_layer
+        else:
+            enable_mega_moe_buffer = False
+            has_legacy_moe_layer = True
 
         enable_low_latency_buffer = has_legacy_moe_layer and args.run_mode != "prefill"
         enable_prefill_workspace = has_legacy_moe_layer and args.run_mode == "prefill"
@@ -338,10 +295,7 @@ class DistributeGroupManager:
             # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
             # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens,
-                self.ll_hidden,
-                global_world_size,
-                self.ll_decode_num_experts,
+                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
             )
             num_rdma_bytes = decode_size_hint
             # normal 节点同时执行 Prefill 和 Decode，复用的 RDMA buffer 必须覆盖全部 Prefill workspace。
@@ -351,7 +305,7 @@ class DistributeGroupManager:
                     hidden_size=self.ll_hidden,
                     intermediate_size=moe_intermediate_size,
                     num_experts_per_tok=num_experts_per_tok,
-                    num_experts=self.ll_prefill_num_experts,
+                    num_experts=self.ll_num_experts,
                     world_size=global_world_size,
                     hidden_dtype=get_torch_dtype(args.data_type),
                 )
@@ -360,7 +314,7 @@ class DistributeGroupManager:
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
                 low_latency_mode=True,
-                num_qps_per_rank=(self.ll_decode_num_experts // global_world_size),
+                num_qps_per_rank=(self.ll_num_experts // global_world_size),
             )
             self.ep_prefill_moe_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
                 torch.uint8, use_rdma_buffer=True
@@ -372,7 +326,7 @@ class DistributeGroupManager:
                 hidden_size=self.ll_hidden,
                 intermediate_size=moe_intermediate_size,
                 num_experts_per_tok=num_experts_per_tok,
-                num_experts=self.ll_prefill_num_experts,
+                num_experts=self.ll_num_experts,
                 world_size=global_world_size,
                 hidden_dtype=get_torch_dtype(args.data_type),
             )
@@ -382,64 +336,34 @@ class DistributeGroupManager:
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
 
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_prefill_num_experts, num_experts_per_tok)
-        use_all_sms_for_fp8 = enable_triton_ep_moe_buffer or self.ep_mega_moe_mma_type == "fp8xfp8"
-        deepep_sms = 0 if use_all_sms_for_fp8 and not has_legacy_moe_layer else theoretical_sms
-        low_latency_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_decode_num_experts, num_experts_per_tok)
-        self._set_num_sms_for_deep_gemm(deepep_sms, low_latency_sms)
-
-        if enable_triton_ep_moe_buffer:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_triton_ep_moe import (
-                SM90FP8TritonEPMoEBuffer,
-            )
-
-            self.ep_triton_moe_buffer = SM90FP8TritonEPMoEBuffer(
-                deepep_group,
-                num_experts=self.ll_decode_num_experts,
-                num_max_tokens_per_rank=self.ll_num_tokens,
-                topk=num_experts_per_tok,
-                hidden_size=self.ll_hidden,
-                intermediate_size=moe_intermediate_size,
-            )
-
         if enable_mega_moe_buffer:
+            # SM100 FP4 层通过 DeepGEMM Mega MoE 完成通信和计算，不使用 legacy
+            # low-latency buffer，因此纯 FP4 模型无需承担后者的大块 RDMA 显存。
             if moe_intermediate_size is None:
-                raise ValueError("Mega MoE requires moe_intermediate_size or intermediate_size in model config")
+                raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
 
             import deep_gemm
 
-            num_max_tokens_per_rank = (
-                self.ll_decode_num_tokens
-                if self.ep_mega_moe_mma_type == "fp8xfp8" and args.run_mode == "decode"
-                else self.ll_num_tokens
-            )
-            mega_buffer_kwargs = (
-                {"mma_type": self.ep_mega_moe_mma_type} if self.ep_mega_moe_mma_type == "fp8xfp8" else {}
-            )
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
-                self.ll_decode_num_experts,
-                num_max_tokens_per_rank,
+                self.ll_num_experts,
+                self.ll_num_tokens,
                 num_experts_per_tok,
                 self.ll_hidden,
                 moe_intermediate_size,
-                **mega_buffer_kwargs,
             )
         logger.info(
             "Initialize DeepEP MoE buffers: low_latency=%s, prefill_workspace_bytes=%s, "
-            "mega_moe=%s, mega_moe_mma_type=%s, triton_ep_moe=%s, ll_prefill_num_experts=%s, "
-            "ll_decode_num_experts=%s, expert_quant_method_names=%s",
+            "mega_moe=%s, expert_quant_method_names=%s",
             enable_low_latency_buffer,
             self.ep_prefill_moe_workspace.numel() if self.ep_prefill_moe_workspace is not None else 0,
             enable_mega_moe_buffer,
-            self.ep_mega_moe_mma_type,
-            enable_triton_ep_moe_buffer,
-            self.ll_prefill_num_experts,
-            self.ll_decode_num_experts,
             sorted(expert_quant_method_names),
         )
+        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+        self._set_num_sms_for_deep_gemm(theoretical_sms)
 
-    def _set_num_sms_for_deep_gemm(self, deepep_sms: int, low_latency_sms: int):
+    def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
         try:
             try:
                 from deep_gemm.jit_kernels.utils import set_num_sms
@@ -448,19 +372,11 @@ class DistributeGroupManager:
 
             device_sms = get_device_sm_count()
             deepep_sms = max(0, min(deepep_sms, max(device_sms - 2, 0)))
-            low_latency_sms = max(0, min(low_latency_sms, max(device_sms - 2, 0)))
             self.ep_num_sms = deepep_sms
             if self.ep_low_latency_buffer is not None:
-                # This setting controls the legacy low-latency buffer; keep
-                # its SM reservation based on decode's logical expert count.
-                deep_ep.Buffer.set_num_sms(low_latency_sms - low_latency_sms % 2)
-            deep_gemm_sms = max(device_sms - deepep_sms, 2)
-            if self.ep_mega_moe_mma_type == "fp8xfp8":
-                deep_gemm_sms -= deep_gemm_sms % 2
-            set_num_sms(deep_gemm_sms)
+                deep_ep.Buffer.set_num_sms(deepep_sms - deepep_sms % 2)
+            set_num_sms(max(device_sms - deepep_sms, 2))
         except BaseException as e:
-            if self.ep_mega_moe_mma_type is not None:
-                raise RuntimeError("Failed to reserve a fixed SM pool before allocating the Mega MoE buffer") from e
             logger.warning(f"set num sms for deep_gemm failed: {e}")
 
     def get_deep_ep_prefill_moe_workspace(self, microbatch_index: int = 0) -> torch.Tensor:
@@ -500,7 +416,7 @@ class DistributeGroupManager:
         """
         if self.ep_low_latency_buffer is not None:
             self.ep_low_latency_buffer.clean_low_latency_buffer(
-                self.ll_decode_num_tokens, self.ll_hidden, self.ll_decode_num_experts
+                self.ll_decode_num_tokens, self.ll_hidden, self.ll_num_experts
             )
 
 

@@ -12,16 +12,11 @@ from lightllm.server.httpserver_for_pd_master.manager import (
     HttpServerManagerForPDMaster,
     ReqStatus,
 )
-from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj
+from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 
 
-class _PDManagerStub:
-    def cancel_pd_request_registration(self, _group_request_id):
-        pass
-
-
-class _FailingManager(_PDManagerStub):
+class _FailingManager:
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -29,7 +24,7 @@ class _FailingManager(_PDManagerStub):
         yield
 
 
-class _CancelledManager(_PDManagerStub):
+class _CancelledManager:
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -37,14 +32,14 @@ class _CancelledManager(_PDManagerStub):
         yield
 
 
-class _SuccessfulManager(_PDManagerStub):
+class _SuccessfulManager:
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
         yield 123, "token", {"count_output_tokens": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
 
 
-class _StopPrefillManager(_PDManagerStub):
+class _StopPrefillManager:
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
@@ -56,7 +51,7 @@ class _FatalGenerateError(BaseException):
     pass
 
 
-class _FatalManager(_PDManagerStub):
+class _FatalManager:
     args = SimpleNamespace(run_mode="decode")
 
     async def generate(self, **_kwargs):
@@ -64,7 +59,7 @@ class _FatalManager(_PDManagerStub):
         yield
 
 
-class _BusyManager(_PDManagerStub):
+class _BusyManager:
     args = SimpleNamespace(run_mode="decode")
 
     async def generate(self, **_kwargs):
@@ -250,11 +245,10 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
-        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
-        p_node = SimpleNamespace(send_control_message=AsyncMock())
-        d_node = SimpleNamespace(send_control_message=AsyncMock())
+        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
         req_status = ReqStatus(123, p_node, d_node)
         manager.req_id_to_out_inf = {123: req_status}
 
@@ -269,8 +263,8 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
             assert req_status.prefill_prompt_ids_event.is_set()
             assert req_status.up_status_event.is_set()
             assert manager.req_id_to_out_inf[123] is req_status
-            p_node.send_control_message.assert_not_awaited()
-            d_node.send_control_message.assert_not_awaited()
+            p_node.websocket.send_bytes.assert_not_awaited()
+            d_node.websocket.send_bytes.assert_not_awaited()
 
             with pytest.raises(
                 RuntimeError,
@@ -291,7 +285,6 @@ def test_pd_master_request_rejection_becomes_server_busy_error():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
-        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
         req_status = ReqStatus(123, MagicMock(), MagicMock())
@@ -353,8 +346,8 @@ def test_pd_master_abort_removes_request_even_when_node_notifications_fail():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.req_id_to_out_inf = {}
-        p_node = SimpleNamespace(send_control_message=AsyncMock(side_effect=ConnectionError("p down")))
-        d_node = SimpleNamespace(send_control_message=AsyncMock(side_effect=ConnectionError("d down")))
+        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock(side_effect=ConnectionError("p down"))))
+        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock(side_effect=ConnectionError("d down"))))
         manager.req_id_to_out_inf[123] = ReqStatus(123, p_node, d_node)
 
         await manager.abort(123)
@@ -368,41 +361,12 @@ def test_pd_master_abort_uses_explicit_nodes_when_request_status_is_missing():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.req_id_to_out_inf = {}
-        p_node = SimpleNamespace(send_control_message=AsyncMock())
-        d_node = SimpleNamespace(send_control_message=AsyncMock())
+        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
 
         await manager.abort(123, p_node=p_node, d_node=d_node)
 
-        p_node.send_control_message.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
-        d_node.send_control_message.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
-
-    asyncio.run(run())
-
-
-def test_pd_master_abort_does_not_wait_for_disconnected_node_inflight_send():
-    async def run():
-        send_started = asyncio.Event()
-        release_send = asyncio.Event()
-
-        class _BlockingWebSocket:
-            async def send_bytes(self, _payload):
-                send_started.set()
-                await release_send.wait()
-
-        p_node = PD_Client_Obj(1, "prefill:8000", "prefill", {}, websocket=_BlockingWebSocket())
-        d_node = SimpleNamespace(send_control_message=AsyncMock())
-        inflight_send = asyncio.create_task(p_node.send_control_message(b"request"))
-        await send_started.wait()
-
-        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-        manager.req_id_to_out_inf = {123: ReqStatus(123, p_node, d_node)}
-        p_node.websocket = None
-
-        try:
-            await asyncio.wait_for(manager.abort(123), timeout=1)
-            d_node.send_control_message.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
-        finally:
-            release_send.set()
-            await inflight_send
+        p_node.websocket.send_bytes.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
+        d_node.websocket.send_bytes.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
 
     asyncio.run(run())

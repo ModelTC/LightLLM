@@ -425,7 +425,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         cpu_cache_token_page_size: int = DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
         always_copy=False,
         mem_fraction=0.9,
-        memory_reservations=None,
     ):
         assert head_num == 1, "DeepSeek-V4 是 MLA(MQA)，dense latent 的 head_num 必须为 1"
         assert head_dim == self.mla_head_dim, f"DeepSeek-V4 packed KV 期望 head_dim={self.mla_head_dim}"
@@ -465,16 +464,7 @@ class DeepseekV4MemoryManager(MemoryManager):
                 self.layer_to_c128_idx[lid] = c128
                 c128 += 1
 
-        super().__init__(
-            size,
-            dtype,
-            head_num,
-            head_dim,
-            layer_num,
-            always_copy,
-            mem_fraction,
-            memory_reservations=memory_reservations,
-        )
+        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
 
     # ------------------------------------------------------------------ sizing
     @staticmethod
