@@ -779,32 +779,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable ep moe for deepseekv3 model.""",
     )
     parser.add_argument(
-        "--ep_moe_backend",
+        "--ep_redundancy_expert_config_path",
         type=str,
-        choices=["auto", "triton"],
-        default="auto",
-        help=(
-            "EP MoE execution backend. 'auto' keeps the existing backend selection; "
-            "'triton' selects the single-node SM90 FP8 Triton peer backend on Prefill nodes "
-            "for experts resolved by --expert_dtype fp8."
-        ),
+        default=None,
+        help="""Path of the redundant expert config. It can be used for deepseekv3 model.""",
     )
     parser.add_argument(
-        "--disable_ep_balance_monitor",
+        "--auto_update_redundancy_expert",
         action="store_true",
-        help="""Disable the prefill expert balance monitor enabled by default for EP-MoE.""",
-    )
-    parser.add_argument(
-        "--enable_prefill_eplb",
-        action="store_true",
-        help="""Enable online expert load balancing for prefill only.""",
-    )
-    parser.add_argument(
-        "--eplb_num_redundant_experts_per_rank",
-        type=int,
-        default=2,
-        help="""Number of redundant physical experts per EP rank for each MoE layer used by prefill EPLB.
-            The value must be greater than 0.""",
+        help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
     )
     parser.add_argument(
         "--enable_fused_shared_experts",

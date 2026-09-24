@@ -20,11 +20,8 @@ def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue):
     event = mp.Event()
     proc = mp.Process(target=_init_env, args=(args, info_queue, event))
     proc.start()
-    while not event.wait(timeout=1):
-        if not proc.is_alive():
-            raise RuntimeError("prefill kv move manager process failed during initialization")
-    if not proc.is_alive():
-        raise RuntimeError("prefill kv move manager process exited during initialization")
+    event.wait()
+    assert proc.is_alive()
     logger.info("prefill kv move manager process started")
     return
 

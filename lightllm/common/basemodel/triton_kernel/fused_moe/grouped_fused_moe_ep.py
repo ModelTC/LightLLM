@@ -11,7 +11,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quan
     silu_and_mul_masked_post_quant_fwd,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
-    lightllm_per_token_group_quant_fp8,
     per_token_group_quant_fp8,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
@@ -20,7 +19,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
     ep_gather_chunk,
     ep_zero_padding,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_balance import PrefillEPBalanceCounters
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
@@ -31,6 +29,7 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
 logger = init_logger(__name__)
+_MEGA_MOE_STATES: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
 SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
 
 
@@ -48,8 +47,8 @@ def get_ep_num_sms() -> int:
     return getattr(dist_group_manager, "ep_num_sms", None) or 0
 
 
-def use_mega_moe(quant_method: Any) -> bool:
-    return getattr(quant_method, "mega_moe_mma_type", None) is not None
+def use_sm100_mega_moe(quant_method: Any) -> bool:
+    return is_sm100_gpu() and quant_method.method_name == "fp4fp8-b32-deepgemm"
 
 
 def check_ep_expert_dtype(quant_method: Any):
@@ -98,28 +97,23 @@ def masked_group_gemm(
     return gemm_out_b
 
 
-def _get_mega_moe_weights(w13: Any, w2: Any, mma_type: str):
-    weights = getattr(w13, "_mega_moe_weights", None)
-    if weights is not None:
-        return weights
-    transform_kwargs = {"mma_type": mma_type} if mma_type == "fp8xfp8" else {}
-    weights = deep_gemm.transform_weights_for_mega_moe(
-        (w13.weight, w13.weight_scale),
-        (w2.weight, w2.weight_scale),
-        **transform_kwargs,
+def _get_mega_moe_cache_state(w13: Any, w2: Any):
+    state_key = (
+        w13.weight.data_ptr(),
+        w13.weight_scale.data_ptr(),
+        w2.weight.data_ptr(),
+        w2.weight_scale.data_ptr(),
     )
-    if mma_type == "fp8xfp8":
-        # Keep the transformed layout in the preallocated weight storage so we do not retain a second
-        # full copy of the expert weights. Skip copy_ when DeepGEMM already returned an alias.
-        for target, transformed in zip(
-            (w13.weight, w13.weight_scale, w2.weight, w2.weight_scale),
-            (*weights[0], *weights[1]),
-        ):
-            if target.data_ptr() != transformed.data_ptr():
-                target.copy_(transformed)
-        weights = ((w13.weight, w13.weight_scale), (w2.weight, w2.weight_scale))
-    w13._mega_moe_weights = weights
-    return weights
+    return _MEGA_MOE_STATES.setdefault(state_key, {})
+
+
+def _get_mega_moe_weights(w13: Any, w2: Any, state: Dict[str, Any]):
+    if "weight_cache" not in state:
+        state["weight_cache"] = deep_gemm.transform_weights_for_mega_moe(
+            (w13.weight, w13.weight_scale),
+            (w2.weight, w2.weight_scale),
+        )
+    return state["weight_cache"]
 
 
 def _get_mega_moe_cumulative_stats(num_local_experts: int, device: torch.device, state: Dict[str, Any]):
@@ -130,19 +124,6 @@ def _get_mega_moe_cumulative_stats(num_local_experts: int, device: torch.device,
     return stats
 
 
-def prepare_ep_moe_weights(w13: Any, w2: Any, quant_method: Any):
-    if dist_group_manager.ep_triton_moe_quant_method == quant_method.method_name:
-        quant_method.mega_moe_mma_type = None
-        return
-    mma_type = dist_group_manager.ep_mega_moe_mma_type
-    if dist_group_manager.ep_mega_moe_quant_method != quant_method.method_name:
-        quant_method.mega_moe_mma_type = None
-        return
-    quant_method.mega_moe_mma_type = mma_type
-    if mma_type == "fp8xfp8":
-        _get_mega_moe_weights(w13, w2, mma_type)
-
-
 def mega_moe_impl(
     hidden_states: torch.Tensor,
     w13: Any,
@@ -150,17 +131,15 @@ def mega_moe_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_method: Any,
-    mma_type: str,
-    clamp_limit: Optional[float] = None,
-    alloc_tensor_func: Callable = torch.empty,
 ):
-    kernel_name = "fp8_fp8_mega_moe" if mma_type == "fp8xfp8" else "fp8_fp4_mega_moe"
-    if not (HAS_DEEPGEMM and hasattr(deep_gemm, kernel_name)):
-        raise RuntimeError(f"deep_gemm does not provide {kernel_name} Mega MoE kernel")
+    if not (HAS_DEEPGEMM and hasattr(deep_gemm, "fp8_fp4_mega_moe")):
+        raise RuntimeError("deep_gemm does not provide fp8-fp4 Mega MoE kernel")
+
+    from deep_gemm.utils import per_token_cast_to_fp8
 
     buffer = getattr(dist_group_manager, "ep_mega_moe_buffer", None)
     if buffer is None:
-        raise RuntimeError("Mega MoE requires dist_group_manager.ep_mega_moe_buffer to be initialized")
+        raise RuntimeError("SM100 Mega MoE requires dist_group_manager.ep_mega_moe_buffer to be initialized")
 
     num_tokens = hidden_states.shape[0]
     if num_tokens > buffer.num_max_tokens_per_rank:
@@ -168,48 +147,27 @@ def mega_moe_impl(
             f"Mega MoE got {num_tokens} tokens, exceeding num_max_tokens_per_rank={buffer.num_max_tokens_per_rank}"
         )
 
-    if mma_type == "fp8xfp8":
-        lightllm_per_token_group_quant_fp8(
-            x=hidden_states,
-            group_size=quant_method.block_size,
-            x_q=buffer.x[:num_tokens],
-            x_s=buffer.x_sf[:num_tokens],
-            eps=1e-4,
-            dtype=buffer.x.dtype,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            topk_ids_out=buffer.topk_idx[:num_tokens],
-            topk_weights_out=buffer.topk_weights[:num_tokens],
-        )
-    else:
-        from deep_gemm.utils import per_token_cast_to_fp8
-
-        qinput_tensor = per_token_cast_to_fp8(
-            hidden_states,
-            use_ue8m0=True,
-            gran_k=quant_method.block_size,
-            use_packed_ue8m0=True,
-        )
-        buffer.x[:num_tokens].copy_(qinput_tensor[0])
-        buffer.x_sf[:num_tokens].copy_(qinput_tensor[1])
-        buffer.topk_idx[:num_tokens].copy_(topk_ids)
-        buffer.topk_weights[:num_tokens].copy_(topk_weights)
-
-    l1_weights, l2_weights = _get_mega_moe_weights(w13, w2, mma_type)
-    state = getattr(w13, "_mega_moe_state", None)
-    if state is None:
-        state = {}
-        w13._mega_moe_state = state
+    qinput_tensor = per_token_cast_to_fp8(
+        hidden_states,
+        use_ue8m0=True,
+        gran_k=quant_method.block_size,
+        use_packed_ue8m0=True,
+    )
+    state = _get_mega_moe_cache_state(w13, w2)
+    l1_weights, l2_weights = _get_mega_moe_weights(w13, w2, state)
     stats = _get_mega_moe_cumulative_stats(w13.weight.shape[0], hidden_states.device, state)
-    output = alloc_tensor_func(hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype)
-    kernel = getattr(deep_gemm, kernel_name)
-    kernel(
+    buffer.x[:num_tokens].copy_(qinput_tensor[0])
+    buffer.x_sf[:num_tokens].copy_(qinput_tensor[1])
+    buffer.topk_idx[:num_tokens].copy_(topk_ids)
+    buffer.topk_weights[:num_tokens].copy_(topk_weights)
+
+    output = torch.empty_like(hidden_states)
+    deep_gemm.fp8_fp4_mega_moe(
         output,
         l1_weights,
         l2_weights,
         buffer,
         cumulative_local_expert_recv_stats=stats,
-        activation_clamp=clamp_limit,
     )
     return output
 
@@ -220,6 +178,16 @@ def quantize_fused_experts_input(
     quant_method: Any,
 ):
     check_ep_expert_dtype(quant_method)
+    if use_sm100_mega_moe(quant_method):
+        from deep_gemm.utils import per_token_cast_to_fp8
+
+        return per_token_cast_to_fp8(
+            hidden_states,
+            use_ue8m0=True,
+            gran_k=quant_method.block_size,
+            use_packed_ue8m0=True,
+        )
+
     block_size_k = 0
     if w13.weight.ndim == 3:
         block_size_k = w13.weight.shape[2] // w13.weight_scale.shape[2]
@@ -239,22 +207,12 @@ def fused_experts(
     previous_event: Optional[Any] = None,
     clamp_limit: Optional[float] = None,
     alloc_tensor_func: Callable = torch.empty,
-    ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
 ):
     check_ep_expert_dtype(quant_method)
-    mma_type = getattr(quant_method, "mega_moe_mma_type", None)
-    if mma_type is not None:
-        return mega_moe_impl(
-            hidden_states,
-            w13,
-            w2,
-            topk_weights,
-            topk_idx,
-            quant_method,
-            mma_type,
-            clamp_limit=clamp_limit,
-            alloc_tensor_func=alloc_tensor_func,
-        )
+    if use_sm100_mega_moe(quant_method):
+        if clamp_limit is not None:
+            raise RuntimeError("SM100 Mega MoE does not support clamped SwiGLU yet.")
+        return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
 
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
     return fused_experts_impl(
@@ -274,7 +232,6 @@ def fused_experts(
         previous_event=previous_event,
         clamp_limit=clamp_limit,
         alloc_tensor_func=alloc_tensor_func,
-        ep_balance_counters=ep_balance_counters,
     )
 
 
@@ -295,7 +252,6 @@ def fused_experts_impl(
     previous_event: Optional[Any] = None,
     clamp_limit: Optional[float] = None,
     alloc_tensor_func: Callable = torch.empty,
-    ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -348,12 +304,6 @@ def fused_experts_impl(
             do_expand=True,
             use_tma_aligned_col_major_sf=True,
         )
-        if ep_balance_counters is not None:
-            # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
-            ep_balance_counters.accumulate(
-                route_load=topk_idx.numel(),
-                compute_load=recv_x[0].shape[0],
-            )
         # Dispatch is synchronous in this path.  Its FP8 source is no longer
         # needed once the received tensors have been produced.
         del qinput_tensor, input_scale
