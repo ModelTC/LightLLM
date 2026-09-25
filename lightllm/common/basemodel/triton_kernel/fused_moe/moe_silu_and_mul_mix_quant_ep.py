@@ -7,6 +7,14 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 @triton.jit
+def _ceil_to_ue8m0(x):
+    bits = x.to(tl.float32).to(tl.int32, bitcast=True)
+    exp = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0)
+    exp = tl.maximum(tl.minimum(exp, 254), 1)
+    return (exp << 23).to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _silu_and_mul_post_quant_kernel(
     input_ptr,
     stride_input_0,
@@ -26,6 +34,7 @@ def _silu_and_mul_post_quant_kernel(
     fp8_min,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
+    USE_UE8M0_SCALE: tl.constexpr,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
 ):
     expert_id = tl.program_id(2)
@@ -61,7 +70,10 @@ def _silu_and_mul_post_quant_kernel(
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
-        output_s = _absmax / fp8_max
+        if USE_UE8M0_SCALE:
+            output_s = _ceil_to_ue8m0(tl.maximum(_absmax, 1.0e-4) / fp8_max)
+        else:
+            output_s = _absmax / fp8_max
         output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(output_ptr.dtype.element_ty)
         tl.store(
             output_ptr_offs + token_index * stride_output_1,
@@ -80,6 +92,7 @@ def silu_and_mul_masked_post_quant_fwd(
     output_scale: torch.Tensor,
     quant_group_size: int,
     masked_m: torch.Tensor,
+    use_ue8m0_scales: bool = False,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -135,6 +148,7 @@ def silu_and_mul_masked_post_quant_fwd(
         fp8_min,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
+        USE_UE8M0_SCALE=use_ue8m0_scales,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
         num_warps=num_warps,
     )
