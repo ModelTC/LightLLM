@@ -38,12 +38,19 @@ def test_pd_node_resource_wait_timeout_is_internal_and_defaults_to_waiting_forev
     sampling_params = SamplingParams()
     sampling_params.init(
         None,
-        pd_high_priority_request=True,
+        high_priority_request=True,
         pd_node_resource_wait_timeout_seconds=99,
     )
 
-    assert sampling_params.pd_high_priority_request is False
+    assert sampling_params.high_priority_request is False
     assert sampling_params.pd_node_resource_wait_timeout_seconds == -1
+
+
+def test_infer_high_priority_is_internal_and_cannot_be_set_by_request():
+    sampling_params = SamplingParams()
+    sampling_params.init(None, infer_high_priority=-3)
+
+    assert sampling_params.infer_high_priority == 0
 
 
 def test_shm_req_partial_allocations_are_released_on_failure():
@@ -95,7 +102,7 @@ def test_high_priority_shm_req_allocation_uses_shorter_backoff_even_with_local_l
             assert (
                 await manager._alloc_shm_req_indexes(
                     1,
-                    pd_high_priority_request=True,
+                    high_priority_request=True,
                     pd_node_resource_wait_timeout_seconds=60,
                 )
                 == [3]
@@ -106,8 +113,8 @@ def test_high_priority_shm_req_allocation_uses_shorter_backoff_even_with_local_l
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("pd_high_priority_request", [False, True])
-def test_shm_req_allocation_uses_master_timeout_independently_of_priority(pd_high_priority_request):
+@pytest.mark.parametrize("high_priority_request", [False, True])
+def test_shm_req_allocation_uses_master_timeout_independently_of_priority(high_priority_request):
     async def run():
         manager = _manager()
         manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=None)
@@ -118,7 +125,7 @@ def test_shm_req_allocation_uses_master_timeout_independently_of_priority(pd_hig
         ):
             await manager._alloc_shm_req_indexes(
                 1,
-                pd_high_priority_request=pd_high_priority_request,
+                high_priority_request=high_priority_request,
                 pd_node_resource_wait_timeout_seconds=60,
             )
 
@@ -126,7 +133,7 @@ def test_shm_req_allocation_uses_master_timeout_independently_of_priority(pd_hig
 
 
 @pytest.mark.parametrize(
-    ("infer_start_time", "pd_high_priority_request", "resource_wait_timeout_seconds", "expected"),
+    ("infer_start_time", "high_priority_request", "resource_wait_timeout_seconds", "expected"),
     [
         (0, False, -1, False),
         (0, False, 60, True),
@@ -137,7 +144,7 @@ def test_shm_req_allocation_uses_master_timeout_independently_of_priority(pd_hig
 )
 def test_router_wait_uses_master_timeout_independently_of_priority(
     infer_start_time,
-    pd_high_priority_request,
+    high_priority_request,
     resource_wait_timeout_seconds,
     expected,
 ):
@@ -148,7 +155,7 @@ def test_router_wait_uses_master_timeout_independently_of_priority(
                 infer_start_time=infer_start_time,
                 router_arrival_time=100,
                 sample_params=SimpleNamespace(
-                    pd_high_priority_request=pd_high_priority_request,
+                    high_priority_request=high_priority_request,
                     pd_node_resource_wait_timeout_seconds=resource_wait_timeout_seconds,
                 ),
             )
@@ -159,13 +166,13 @@ def test_router_wait_uses_master_timeout_independently_of_priority(
         assert req_status.has_timed_out_waiting_for_inference() is expected
 
 
-def test_pd_high_priority_request_is_inserted_before_first_normal_request():
+def test_high_priority_request_is_inserted_before_first_normal_request():
     queue = BaseQueue.__new__(BaseQueue)
     queue.dp_index = 0
-    earlier_high_req = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
-    normal_req = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=False))
-    high_req_1 = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
-    high_req_2 = SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))
+    earlier_high_req = SimpleNamespace(sample_params=SimpleNamespace(high_priority_request=True))
+    normal_req = SimpleNamespace(sample_params=SimpleNamespace(high_priority_request=False))
+    high_req_1 = SimpleNamespace(sample_params=SimpleNamespace(high_priority_request=True))
+    high_req_2 = SimpleNamespace(sample_params=SimpleNamespace(high_priority_request=True))
     queue.waiting_req_list = [earlier_high_req, normal_req]
 
     queue.extend([high_req_1, high_req_2])
@@ -175,15 +182,15 @@ def test_pd_high_priority_request_is_inserted_before_first_normal_request():
     assert high_req_2.sample_params.suggested_dp_index == 0
 
 
-def test_pd_high_priority_request_group_keeps_fifo_order_while_waiting_for_dp_index():
+def test_high_priority_request_group_keeps_fifo_order_while_waiting_for_dp_index():
     queue = DpQueue.__new__(DpQueue)
     queue.dp_size_in_node = 2
-    earlier_high_group = [SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=True))]
-    normal_group = [SimpleNamespace(sample_params=SimpleNamespace(pd_high_priority_request=False))]
+    earlier_high_group = [SimpleNamespace(sample_params=SimpleNamespace(high_priority_request=True))]
+    normal_group = [SimpleNamespace(sample_params=SimpleNamespace(high_priority_request=False))]
     new_high_group = [
         SimpleNamespace(
             sample_params=SimpleNamespace(
-                pd_high_priority_request=True,
+                high_priority_request=True,
                 suggested_dp_index=-1,
             )
         )

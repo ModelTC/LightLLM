@@ -430,11 +430,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 高优先级请求仍以更短的间隔重试；资源等待上限
+            # 申请资源并存储。高优先级请求仍以更短的间隔重试；资源等待上限
             # 完全由 PD Master 下发，与请求优先级无关。
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
-                pd_high_priority_request=sampling_params.pd_high_priority_request,
+                high_priority_request=sampling_params.high_priority_request,
                 pd_node_resource_wait_timeout_seconds=sampling_params.pd_node_resource_wait_timeout_seconds,
             )
             req_objs: List[Req] = []
@@ -545,7 +545,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def _alloc_shm_req_indexes(
         self,
         req_num: int,
-        pd_high_priority_request: bool = False,
+        high_priority_request: bool = False,
         pd_node_resource_wait_timeout_seconds: int = -1,
     ) -> List[int]:
         """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
@@ -565,7 +565,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             while len(alloced_req_indexes) < req_num:
                 alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
                 # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
-                sleep_time_factor = 0.2 if pd_high_priority_request else 1
+                sleep_time_factor = 0.2 if high_priority_request else 1
                 sleep_time = 0.1
                 while alloc_req_index is None:
                     if alloc_deadline is not None and time.monotonic() >= alloc_deadline:

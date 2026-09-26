@@ -49,8 +49,7 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
     backend.logger = logger
     backend._timer_merge_radix_tree = MagicMock()
     backend._filter_not_ready_reqs = MagicMock(return_value=reqs)
-    backend._reorder_pd_high_priority_reqs = MagicMock(side_effect=lambda reqs: reqs)
-    backend._reorder_long_prefill_reqs = MagicMock(side_effect=lambda reqs: reqs)
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=MagicMock(side_effect=lambda reqs, **kwargs: reqs))
 
     infer_context = base_backend.g_infer_context
     monkeypatch.setattr(infer_context, "get_can_alloc_token_num", MagicMock(return_value=0))

@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class InferenceContext:
+    backend: Optional["ModeBackend"] = None
     req_manager: ReqManager = None  # gpu 请求管理
     radix_cache: Union[HybridAttPagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
@@ -553,6 +554,9 @@ class InferReq:
         self.filter_mark = False
         self.need_out_token_id_statistics = True
         self.out_token_id_count: Dict[int, int] = None
+
+        # InferReq 创建时直接快照后端累计的 prefill token，作为 HRRN aging 的起点。
+        self.arrival_processed_prefill_tokens: int = g_infer_context.backend.processed_prefill_tokens
 
         # diverse mode 下，用于标记请求组之间的依赖关系
         self.slave_reqs: List[InferReq] = []

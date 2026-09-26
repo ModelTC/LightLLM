@@ -170,6 +170,12 @@ def test_sampling_params_initialization():
     assert params.pd_kv_trans_params.get() == pd_kv_trans_params
 
 
+def test_infer_high_priority_is_internal_and_ignores_external_value():
+    params = SamplingParams()
+    params.init(None, infer_high_priority=-3)
+    assert params.infer_high_priority == 0
+
+
 # Mock tokenizer for testing
 class MockTokenizer:
     def encode(self, text, add_special_tokens=False):

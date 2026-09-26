@@ -79,11 +79,11 @@ def test_pd_node_continuation_resource_wait_timeout_reads_environment_variable(m
     get_pd_node_continuation_resource_wait_timeout_seconds.cache_clear()
 
 
-def test_pd_node_busy_retry_timeout_defaults_to_120_seconds(monkeypatch):
+def test_pd_node_busy_retry_timeout_defaults_to_zero(monkeypatch):
     monkeypatch.delenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", raising=False)
     get_pd_node_busy_retry_timeout_seconds.cache_clear()
 
-    assert get_pd_node_busy_retry_timeout_seconds() == 120
+    assert get_pd_node_busy_retry_timeout_seconds() == 0
 
     get_pd_node_busy_retry_timeout_seconds.cache_clear()
 
