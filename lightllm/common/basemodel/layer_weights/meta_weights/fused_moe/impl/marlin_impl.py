@@ -11,6 +11,10 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.workspace = self.create_workspace()
+
     def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM
 
@@ -28,8 +32,8 @@ class FuseMoeMarlin(FuseMoeTriton):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
     ):
 
         w1_weight, w1_scale, w1_zero_point = w13.weight, w13.weight_scale, w13.weight_zero_point

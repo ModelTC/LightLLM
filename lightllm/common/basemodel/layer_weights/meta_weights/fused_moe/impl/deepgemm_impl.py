@@ -1,11 +1,17 @@
 import torch
 from typing import Optional, Tuple, Any
-from .triton_impl import FuseMoeTriton
+from .base_impl import FuseMoeBaseImpl
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
+    get_env_start_args,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
+)
+from lightllm.utils.dist_utils import (
+    get_global_rank,
+    get_global_world_size,
+    get_node_world_size,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
@@ -15,11 +21,98 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+    eplb_repair_topk_ids,
+)
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 
 
-class FuseMoeDeepGEMM(FuseMoeTriton):
+class FuseMoeDeepGEMM(FuseMoeBaseImpl):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._init_eplb_runtime()
+
+    def _init_eplb_runtime(self):
+        """初始化本地物理槽位以及可更新的 EPLB 路由运行态。
+
+        ``local_logics_expert_ids_list`` 始终描述全部本地物理行。初始化时主专家
+        在前、冗余专家在后；负载均衡运行后允许替换任意物理行，并在同一个
+        安全推理边界同时更新专家权重和 ``logical_to_physical_map``。
+        """
+        world_size = get_global_world_size()
+        assert self.n_routed_experts % world_size == 0
+        global_rank = get_global_rank()
+        start_args = get_env_start_args()
+        self.num_redundant_experts_per_rank = start_args.eplb_num_redundant_experts_per_rank
+
+        if self.num_redundant_experts_per_rank > 0:
+            # 延迟导入：顶层导入会经 mode_backend 包形成 meta_weights -> server 的循环依赖。
+            from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
+                build_initial_local_expert_ids,
+                build_logical_to_physical_map,
+                load_layer_placement,
+            )
+
+            self.num_total_physical_experts = self.n_routed_experts + world_size * self.num_redundant_experts_per_rank
+
+            # 阶段 1：先构造确定性的默认布局。未指定配置文件，或配置读取、校验失败时，
+            # 后续权重初始化会继续使用这份布局。
+            initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
+                self.n_routed_experts,
+                world_size,
+                self.num_redundant_experts_per_rank,
+            )
+
+            # 阶段 2：如果指定了配置文件，尝试读取与当前层及部署拓扑匹配的历史布局。
+            # load_layer_placement 会负责记录 warning，并在任何异常或配置无效时返回 None。
+            config_path = start_args.eplb_config_path
+            if config_path is not None:
+                saved_placement = load_layer_placement(
+                    config_path,
+                    layer_index=self.layer_index,
+                    num_logical_experts=self.n_routed_experts,
+                    world_size=world_size,
+                    num_redundant_experts_per_rank=self.num_redundant_experts_per_rank,
+                )
+
+                # 阶段 3：只有完整校验通过的历史布局才会替换默认布局，使专家权重在
+                # 初始化时直接加载到上一次优化后的物理槽位中。
+                if saved_placement is not None:
+                    initial_local_expert_ids_by_rank = saved_placement
+            self.local_logics_expert_ids_list = initial_local_expert_ids_by_rank[global_rank]
+            self.logical_to_physical_map = torch.tensor(
+                build_logical_to_physical_map(
+                    initial_local_expert_ids_by_rank,
+                    self.n_routed_experts,
+                    current_rank=global_rank,
+                    node_world_size=get_node_world_size(),
+                ),
+                dtype=torch.int32,
+            ).cuda()
+            # 环形缓冲区保留最近 24 次 prefill 路由采样，每次采样写入独立的一行；
+            # 始终按 logical expert 统计，冗余副本不会拆散规划器观察到的负载信号。
+            self.prefill_route_counter = torch.zeros(
+                (24, self.n_routed_experts),
+                dtype=torch.int64,
+                device="cuda",
+            )
+            # [0] 是单调递增的 sample index；[1] 用于在同一个 kernel 内协调
+            # 目标行清零，并从所有 program 中选出最后完成者。
+            self.prefill_route_sample_index = torch.zeros(2, dtype=torch.int64, device="cuda")
+            # 动态 EPLB 默认采集路由负载；以后使用配置文件固定专家布局时，
+            # 可以关闭该开关，避免执行不再需要的 atomic counter 更新。
+            self.recording = True
+        else:
+            self.num_total_physical_experts = self.n_routed_experts
+            num_local_experts = self.n_routed_experts // world_size
+            first_local_expert_id = global_rank * num_local_experts
+            self.local_logics_expert_ids_list = list(
+                range(
+                    first_local_expert_id,
+                    first_local_expert_id + num_local_experts,
+                )
+            )
+
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -32,10 +125,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         num_expert_group: int,
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
-        """Select experts and return topk weights and ids."""
-        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
+        """只选择逻辑专家，不在此阶段应用 EPLB 物理布局。"""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
@@ -53,19 +144,27 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
-        origin_topk_ids = topk_ids
-        if self.redundancy_expert_num > 0:
-            # 因为 redundancy_topk_ids_repair 会修改 topk_ids，所以需要先复制一份
-            origin_topk_ids = topk_ids.clone()
-            redundancy_topk_ids_repair(
-                topk_ids=topk_ids,
-                redundancy_expert_ids=self.redundancy_expert_ids_tensor,
-                ep_expert_num=self.ep_n_routed_experts,
-                global_rank=self.global_rank_,
-                expert_counter=self.routed_expert_counter_tensor,
-                enable_counter=self.auto_update_redundancy_expert,
+        return topk_weights, topk_ids
+
+    def _prepare_expert_execution(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_prefill: bool,
+        shared_expert_gate: Optional[torch.Tensor] = None,
+    ):
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
+        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
+        if self.num_redundant_experts_per_rank > 0:
+            topk_ids = eplb_repair_topk_ids(
+                logical_topk_ids=topk_ids,
+                logical_to_physical_map=self.logical_to_physical_map,
+                prefill_route_counter=self.prefill_route_counter,
+                prefill_route_sample_index=self.prefill_route_sample_index,
+                update_prefill_route_counter=self.recording and is_prefill is True,
+                mode="global_first",
             )
-        return topk_weights, topk_ids, origin_topk_ids
+        return topk_weights, topk_ids
 
     def _fused_experts(
         self,
@@ -74,8 +173,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
     ):
         output = fused_experts(
             hidden_states=input_tensor,
@@ -83,7 +182,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2=w2,
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
-            num_experts=self.total_expert_num_contain_redundancy,  # number of all experts contain redundancy
+            num_experts=self.num_total_physical_experts,
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
@@ -102,7 +201,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -113,6 +212,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=False)
 
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -121,7 +221,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_idx=topk_idx,
             x=hidden_states,
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
-            num_experts=self.total_expert_num_contain_redundancy,
+            num_experts=self.num_total_physical_experts,
             use_fp8=use_fp8_w8a8,
             async_finish=False,
             return_recv_hook=True,
@@ -141,7 +241,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -152,6 +252,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=True)
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
 
@@ -168,7 +269,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_experts=self.total_expert_num_contain_redundancy,
+            num_experts=self.num_total_physical_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             expert_alignment=128,
             num_sms=get_ep_num_sms(),

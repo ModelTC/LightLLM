@@ -95,6 +95,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
             shared_expert_gate=shared_expert_gate,
         )

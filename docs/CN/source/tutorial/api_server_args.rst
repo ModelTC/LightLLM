@@ -708,6 +708,66 @@ PD 分离模式参数
 
     使用 tgi 输入和输出格式
 
+专家并行与 EPLB 参数
+--------------------
+
+.. option:: --enable_ep_moe
+
+    为支持的 MoE 模型启用专家并行。使用 EPLB 时必须开启此参数。
+
+.. option:: --eplb_num_redundant_experts_per_rank
+
+    每个 MoE 层在每个 EP rank 上分配的冗余物理专家数量，默认值为 ``0``，表示关闭 EPLB。
+    设置为正数时启用 EPLB，并且必须同时设置 ``--enable_ep_moe``；负数会在启动阶段被拒绝。
+
+    每个 rank 会额外分配指定数量的专家权重行。EPLB 将逻辑专家映射到主副本或冗余物理副本，
+    统计路由负载，并可在线迁移冗余副本以改善专家负载均衡。增大此值可以提供更多布局选择，
+    但也会占用更多 GPU 显存并增加专家迁移流量。
+
+    EPLB 当前不能与 ``--enable_prefill_cudagraph`` 同时使用，也不支持 SM100 GPU。
+    同一部署中的所有 rank 和节点必须使用相同的配置值。
+
+.. option:: --eplb_plan_mode
+
+    EPLB 动态重排使用的专家布局规划算法，默认值为 ``greedy``。当前支持：
+
+    * ``greedy``：根据各层逻辑专家的全局路由负载生成近似均衡的完整布局，
+      并尽量复用当前 rank 和物理槽位以减少专家迁移。
+
+    此参数只选择布局规划算法，不改变 token 到已有专家副本的运行时分发策略。
+    同一个 EP 通信组内的所有 rank 必须使用相同的值。PD 分离部署中的 prefill
+    和 decode 进程拥有各自独立的 EPLB manager，因此可以分别设置适合各自流量
+    特征的规划算法；非 PD 部署则使用一个算法处理该进程采集到的全部路由负载。
+
+.. option:: --eplb_rebalance_count
+
+    动态 EPLB 最多成功执行的重排次数，默认值为 ``1``。只有新布局实际发生
+    专家权重迁移并完成提交后才计数；样本不足或规划布局不变不会消耗次数。
+
+    * ``-1``：不限制次数，持续进行动态重排；
+    * ``0``：不进行动态重排，仅使用初始化时的冗余布局；
+    * 正整数：完成指定次数的重排后停止规划。
+
+.. option:: --eplb_config_path
+
+    EPLB 布局 JSON 文件路径，默认值为 ``None``。指定后，LightLLM 会在初始化专家权重之前校验并
+    读取各层保存的布局，使服务启动后立即使用上一次优化得到的专家分配。同一个文件也作为输出：
+    每次成功完成动态重排后，rank 0 会写回当前最新布局。
+
+    如果文件不存在、JSON 无法解析、缺少模型层，或保存的专家拓扑与当前部署不匹配，LightLLM 会
+    记录 warning，并对受影响的层使用默认初始化布局。只有后续动态重排成功完成时，rank 0 才会把
+    新布局写入该路径。
+
+    以下示例为每个 EP rank 配置两个冗余专家::
+
+        python -m lightllm.server.api_server \
+            --model_dir /path/to/model \
+            --enable_ep_moe \
+            --eplb_num_redundant_experts_per_rank 2 \
+            --eplb_plan_mode greedy \
+            --eplb_rebalance_count 1 \
+            --eplb_config_path /path/to/eplb-placement.json
+
 MTP 多预测参数
 --------------
 
@@ -734,17 +794,6 @@ MTP 多预测参数
     目前此功能仅支持 DeepSeekV3/R1 模型。
     增加此值允许更多预测，但确保模型与指定的步数兼容。
     目前 deepseekv3/r1 模型仅支持 1 步
-
-DeepSeek 冗余专家参数
----------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    冗余专家配置的路径。可用于 deepseekv3 模型。
-
-.. option:: --auto_update_redundancy_expert
-
-    是否通过在线专家使用计数器为 deepseekv3 模型更新冗余专家。
 
 监控和日志参数
 --------------

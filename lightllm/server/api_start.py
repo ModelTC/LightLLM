@@ -160,6 +160,16 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
+    assert (
+        args.eplb_num_redundant_experts_per_rank >= 0
+    ), "--eplb_num_redundant_experts_per_rank must be greater than or equal to 0"
+    assert args.eplb_rebalance_count >= -1, "--eplb_rebalance_count must be greater than or equal to -1"
+    if args.eplb_num_redundant_experts_per_rank > 0:
+        assert args.enable_ep_moe, "EPLB requires --enable_ep_moe"
+        assert not args.enable_prefill_cudagraph, "EPLB does not support --enable_prefill_cudagraph"
+        # TODO: Support EPLB redundant experts together with RL after their runtime state updates are coordinated.
+        assert not args.enable_rl, "EPLB redundant experts do not support --enable_rl"
+
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
         for backend in args.llm_prefill_att_backend:
