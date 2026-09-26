@@ -247,7 +247,7 @@ ready 发布使用 `release`、等待方使用 `acquire`，最后完成信号使
 
 ### 5.7 manager 聚合与重置
 
-manager 在安全推理边界把各层 `[24, E]` 环形缓冲区沿第 0 维求和并复制到 CPU，得到 planner 使用的 `[layer, logical_expert]` 负载。如果样本量不足或规划结果未改变布局，不主动清空缓冲区；后续 prefill 会继续写入，并在容量用满后滚动覆盖最旧行。
+manager 在安全推理边界一次性堆叠各层 `[24, E]` 环形缓冲区，在 GPU 上沿 sample 维求和后复制到 CPU，得到 planner 使用的 `[layer, logical_expert]` 负载。如果样本量不足或规划结果未改变布局，不主动清空缓冲区；后续 prefill 会继续写入，并在容量用满后滚动覆盖最旧行。
 
 初始化、成功切换到新布局，以及达到重排次数上限后开始下一轮指标窗口时，manager 会同时清零 `prefill_route_counter` 和 `prefill_route_sample_index`。清零提交到 overlap stream，自然排在此前 forward 之后、后续 forward 之前，不需要额外的全设备同步。
 
@@ -437,13 +437,38 @@ DP 随机分流下每个 rank 的路由统计都是对全局路由分布的无�
 
 ## 11. 指标与运行行为
 
-rank 0 周期性上报：
+rank 0 周期性上报 logical expert 路由分布：
 
 ```text
-lightllm_eplb_topk_expert_imbalance_ratio
+lightllm_eplb_topk_expert_imbalance_ratio_p25
+lightllm_eplb_topk_expert_imbalance_ratio_p50
+lightllm_eplb_topk_expert_imbalance_ratio_p100
 ```
 
-该指标先计算每层 `max(expert_load) / mean(expert_load)`，再对有效层求平均。值越接近 1，表示观测窗口内的逻辑专家负载越均衡。
+manager 先对每个有效层计算 `max(expert_load) / mean(expert_load)`，过滤没有采样负载的层，再对所有层的比值排序并使用 nearest-rank 位置取值：
+
+- P25：较均衡的四分之一位置，可观察大多数浅层或稳定层的基线；
+- P50：中位层，用于描述典型 MoE 层的路由倾斜程度；
+- P100：最大值，即当前窗口中最不均衡的层。
+
+这三个值都以 `1` 表示完全均衡。例如 P50 为 `1.8`，表示中位层最热 logical expert 的 token 数是该层专家平均值的 1.8 倍。
+
+当全局样本量达到规划阈值且 planner 产生目标布局后，rank 0 使用 planner 实际消费的同一份 `global_load` 上报：
+
+```text
+lightllm_prefill_ep_compute_critical_overhead_ratio_before_rebalance
+lightllm_prefill_ep_compute_critical_overhead_ratio_after_rebalance
+```
+
+这两个指标参考 `eplb2` 的关键路径计算开销定义，但不维护独立的 compute counter、后台 monitor 线程和额外通信组。manager 假设同一 logical expert 的流量由 hash 均匀分配给全部 physical 副本，并按 128 token 对每个副本的估算负载向上对齐。`before_rebalance` 使用当前布局，`after_rebalance` 使用 planner 给出的目标布局；二者的输入负载完全相同，可以直接衡量预计的重排收益。如果 planner 判断布局无需改变，两个值应相同。
+
+每层先计算最繁忙 rank 相对平均 rank 的额外负载，最后跨层汇总：
+
+```text
+overhead_ratio = sum(max_rank_load - mean_rank_load) / sum(mean_rank_load)
+```
+
+因此不同层的热点 rank 不会互相抵消。指标为 `0` 表示估算的 EP rank 负载完全均衡，`0.3` 表示最慢 rank 造成的关键路径计算量比理想均衡状态高约 30%。它是基于聚合 logical route 和均匀副本分发假设的布局质量估算值，不是 DeepEP 接收缓冲区的实测 compute load，也不表示每次 prefill 的瞬时开销。只有实际执行 placement 规划时这两个 gauge 才会更新；其余时间保留最近一次规划结果。
 
 `--eplb_rebalance_count` 的行为如下：
 

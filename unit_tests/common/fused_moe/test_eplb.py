@@ -19,6 +19,7 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.mode_backend.eplb import (
     runtime_manager as manager_module,
 )
+from lightllm.server.router.model_infer.mode_backend.eplb import metrics as eplb_metrics
 from lightllm.server.router.model_infer.mode_backend.eplb import (
     placement_plan_task as plan_module,
 )
@@ -907,40 +908,118 @@ def test_transfer_planner_exits_process_on_failure(monkeypatch):
     assert logs == ["EPLB transfer planning failed"]
 
 
-def test_expert_load_imbalance_ratio_averages_layer_ratios():
-    global_load = torch.tensor(
+def test_compute_critical_overhead_ratio_estimates_rank_pressure():
+    load = torch.tensor([[384, 128, 128, 128]], dtype=torch.int64)
+    placement = [[[0, 1], [2, 3]]]
+
+    ratio = eplb_metrics.compute_critical_overhead_ratio(
+        logical_expert_load=load,
+        placement=placement,
+        expert_alignment=128,
+    )
+
+    # rank loads are [512, 256], so excess critical / balanced is 128 / 384.
+    assert ratio == pytest.approx(1 / 3)
+
+
+def test_compute_critical_overhead_ratio_preserves_layer_boundaries():
+    load = torch.tensor(
         [
-            [2, 4, 6],
-            [10, 10, 10],
+            [1, 0],
+            [0, 1],
         ],
         dtype=torch.int64,
     )
 
-    ratio = manager_module._expert_load_imbalance_ratio(global_load)
+    ratio = eplb_metrics.compute_critical_overhead_ratio(
+        logical_expert_load=load,
+        placement=[
+            [[0], [1]],
+            [[0], [1]],
+        ],
+        expert_alignment=128,
+    )
 
-    assert ratio == pytest.approx(1.25)
+    # 两层的热点 rank 相反；逐层取关键路径时仍各有 100% 开销，不能相互抵消。
+    assert ratio == pytest.approx(1.0)
 
 
-def test_manager_publishes_expert_load_metrics_from_rank_zero():
+def test_compute_critical_overhead_ratio_is_zero_without_load():
+    assert (
+        eplb_metrics.compute_critical_overhead_ratio(
+            logical_expert_load=torch.zeros((1, 2), dtype=torch.int64),
+            placement=[[[0], [1]]],
+            expert_alignment=128,
+        )
+        == 0.0
+    )
+
+
+def test_logical_expert_imbalance_percentiles_report_layer_distribution():
+    load = torch.tensor(
+        [
+            [3, 3, 3, 3],
+            [6, 2, 2, 2],
+            [9, 1, 1, 1],
+            [12, 0, 0, 0],
+            [0, 0, 0, 0],
+        ],
+        dtype=torch.int64,
+    )
+
+    assert eplb_metrics.logical_expert_imbalance_percentiles(expert_load=load) == {
+        25: pytest.approx(1.0),
+        50: pytest.approx(2.0),
+        100: pytest.approx(4.0),
+    }
+
+
+def test_logical_expert_imbalance_percentiles_are_zero_without_load():
+    assert eplb_metrics.logical_expert_imbalance_percentiles(expert_load=torch.zeros((3, 4), dtype=torch.int64)) == {
+        25: 0.0,
+        50: 0.0,
+        100: 0.0,
+    }
+
+
+def test_publish_expert_load_metrics():
     calls = []
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.global_rank = 0
-    manager.metric_client = SimpleNamespace(gauge_set=lambda name, value: calls.append((name, value)))
+    metric_client = SimpleNamespace(gauge_set=lambda name, value: calls.append((name, value)))
 
-    manager._publish_expert_load_metric(torch.tensor([[2, 4, 6], [10, 10, 10]]))
+    eplb_metrics.publish_expert_load_metrics(
+        metric_client=metric_client,
+        expert_load=torch.tensor([[384, 128, 128, 128]]),
+    )
 
     assert calls == [
-        (manager_module.EPLB_EXPERT_IMBALANCE_RATIO_METRIC, 1.25),
+        (eplb_metrics.EXPERT_IMBALANCE_RATIO_METRICS[25], pytest.approx(2.0)),
+        (eplb_metrics.EXPERT_IMBALANCE_RATIO_METRICS[50], pytest.approx(2.0)),
+        (eplb_metrics.EXPERT_IMBALANCE_RATIO_METRICS[100], pytest.approx(2.0)),
     ]
 
 
-def test_manager_does_not_publish_expert_load_metrics_from_other_ranks():
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.global_rank = 1
+def test_publish_rebalance_compute_metrics_from_global_load():
+    calls = []
+    metric_client = SimpleNamespace(gauge_set=lambda name, value: calls.append((name, value)))
 
-    manager._publish_expert_load_metric(torch.tensor([[1, 2]]))
+    eplb_metrics.publish_rebalance_compute_metrics(
+        metric_client=metric_client,
+        global_load=torch.tensor([[384, 128, 128, 128]]),
+        current_placement=[[[0, 1, 2], [1, 2, 3]]],
+        target_placement=[[[0, 1, 2], [0, 2, 3]]],
+        expert_alignment=128,
+    )
 
-    assert not hasattr(manager, "metric_client")
+    assert calls == [
+        (
+            eplb_metrics.COMPUTE_CRITICAL_OVERHEAD_RATIO_BEFORE_REBALANCE_METRIC,
+            pytest.approx(0.25),
+        ),
+        (
+            eplb_metrics.COMPUTE_CRITICAL_OVERHEAD_RATIO_AFTER_REBALANCE_METRIC,
+            pytest.approx(0.0),
+        ),
+    ]
 
 
 def test_eplb_prefill_route_counter_has_24_samples_per_logical_expert(monkeypatch):
@@ -1783,6 +1862,38 @@ def test_wait_plan_finish_broadcasts_pending_status(monkeypatch):
     assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
 
 
+def test_wait_plan_finish_publishes_before_and_after_metrics(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
+    manager.global_rank = 0
+    manager.control_group = object()
+    manager.current_placement = [[[0, 1], [2, 3]]]
+    target_placement = [[[0, 2], [1, 3]]]
+    manager._planning_global_load = torch.tensor([[4, 3, 2, 1]], dtype=torch.int64)
+    manager._plan_task = SimpleNamespace(
+        is_finished=lambda: True,
+        result=target_placement,
+    )
+    manager.metric_client = object()
+    published = []
+    monkeypatch.setattr(
+        eplb_metrics,
+        "publish_rebalance_compute_metrics",
+        lambda **kwargs: published.append((kwargs["global_load"], kwargs["target_placement"])),
+    )
+    monkeypatch.setattr(manager_module.dist, "broadcast_object_list", lambda _values, **_kwargs: None)
+
+    manager._step_wait_plan_placement_finished()
+
+    assert manager.state is manager_module.EPLBManagerState.PLAN_TRANSFER
+    assert manager.target_placement is target_placement
+    assert len(published) == 1
+    assert torch.equal(published[0][0], torch.tensor([[4, 3, 2, 1]], dtype=torch.int64))
+    assert published[0][1] is target_placement
+    assert not hasattr(manager, "_planning_global_load")
+    assert not hasattr(manager, "_plan_task")
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_manager_transfer_task_commit_orders_live_weights_between_overlap_forwards(
     monkeypatch,
@@ -2070,7 +2181,12 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     manager.planner = object()
     manager.current_placement = [[[0, 1, 2, 3]]]
-    manager._publish_expert_load_metric = lambda load: published_loads.append(load)
+    manager.metric_client = object()
+    monkeypatch.setattr(
+        eplb_metrics,
+        "publish_expert_load_metrics",
+        lambda **kwargs: published_loads.append(kwargs["expert_load"]),
+    )
     monkeypatch.setattr(manager_module, "EPLBPlanTask", PlanTask)
 
     manager.step()
@@ -2090,6 +2206,7 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     assert plan_tasks[0].current_placement is manager.current_placement
     assert plan_tasks[0].started
     assert manager._plan_task is plan_tasks[0]
+    assert torch.equal(manager._planning_global_load, local_load)
     assert not hasattr(manager, "_local_load")
     assert len(published_loads) == 1
 
@@ -2105,7 +2222,12 @@ def test_manager_keeps_reporting_after_reaching_rebalance_limit(monkeypatch):
     manager._eplb_impls = [SimpleNamespace(prefill_route_counter=local_load)]
     manager.max_rebalance_count = 1
     manager.completed_rebalance_count = 1
-    manager._publish_expert_load_metric = lambda load: published_loads.append(load)
+    manager.metric_client = object()
+    monkeypatch.setattr(
+        eplb_metrics,
+        "publish_expert_load_metrics",
+        lambda **kwargs: published_loads.append(kwargs["expert_load"]),
+    )
     manager._clear_prefill_route_samples = lambda: cleared_counters.append(True)
     monkeypatch.setattr(
         manager_module.dist,

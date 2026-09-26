@@ -20,6 +20,7 @@ from lightllm.utils.envs_utils import get_eplb_step_interval
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
 
+from . import metrics as eplb_metrics
 from .async_transfer_planner import EPLBTransferPlanner
 from .expert_transfer import (
     EPLBTransferInfo,
@@ -37,7 +38,6 @@ from .placement_plan_task import EPLBPlanTask
 logger = init_logger(__name__)
 EPLB_EXPERT_ALIGNMENT = 128
 EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT = 128
-EPLB_EXPERT_IMBALANCE_RATIO_METRIC = "lightllm_eplb_topk_expert_imbalance_ratio"
 
 
 class EPLBManagerState(Enum):
@@ -236,14 +236,18 @@ class EPLBManager:
         if len({counter.shape[0] for counter in counters}) != 1:
             raise RuntimeError("EPLB prefill route counter capacities must match across layers")
 
-        # 将各层环形样本聚合并复制到 CPU，后续规划统一使用这份快照。
+        # 在 GPU 上沿 sample 维聚合各层的环形样本，再一次性复制到 CPU，
+        # 得到 planner 使用的 [layer, logical_expert] 负载，避免逐层发起
+        # GPU -> CPU 拷贝。
         # 此处先不清零 GPU 样本：如果样本不足或无需迁移，下一周期会继续
         # 滚动覆盖最旧行；达到重排上限或成功切换到新布局后才重置窗口。本轮
         # 异步规划使用独立的 CPU 快照，不会与后续的 atomic add 竞争。
-        # 当前 planner 仍消费 [layer, logical_expert] 聚合负载；先对 24 行采样
-        # 求和保持现有规划语义。后续逐样本规划可以直接在这里保留 sample 维。
-        local_load = torch.stack([counter.detach().sum(dim=0).cpu() for counter in counters])
-        self._publish_expert_load_metric(local_load)
+        local_load = torch.stack(counters).sum(dim=1).detach().cpu()
+        if self.global_rank == 0:
+            eplb_metrics.publish_expert_load_metrics(
+                metric_client=self.metric_client,
+                expert_load=local_load,
+            )
 
         # 达到重排次数上限后仍保留周期性负载上报，但不再执行后续的跨 rank
         # 通信和布局规划。清空本轮样本，使下一次指标对应新的采样窗口。
@@ -292,6 +296,9 @@ class EPLBManager:
 
         self.state = EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
         if self.global_rank == 0:
+            # 保留 planner 实际消费的全局负载快照。目标布局产生后，使用同一份
+            # 输入分别评估 current/target placement，确保 before/after 可直接比较。
+            self._planning_global_load = global_load
             self._plan_task = EPLBPlanTask(
                 self.planner,
                 global_load,
@@ -313,6 +320,14 @@ class EPLBManager:
             return
 
         if self.global_rank == 0:
+            eplb_metrics.publish_rebalance_compute_metrics(
+                metric_client=self.metric_client,
+                global_load=self._planning_global_load,
+                current_placement=self.current_placement,
+                target_placement=placement,
+                expert_alignment=EPLB_EXPERT_ALIGNMENT,
+            )
+            del self._planning_global_load
             del self._plan_task
 
         if placement == self.current_placement:
@@ -487,14 +502,6 @@ class EPLBManager:
         )
         layer_impl.logical_to_physical_map.copy_(logical_to_physical_map, non_blocking=True)
 
-    def _publish_expert_load_metric(self, local_load: torch.Tensor) -> None:
-        if self.global_rank != 0:
-            return
-        self.metric_client.gauge_set(
-            EPLB_EXPERT_IMBALANCE_RATIO_METRIC,
-            _expert_load_imbalance_ratio(local_load),
-        )
-
     def _clear_prefill_route_samples(self) -> None:
         """在 overlap stream 上清空所有层的 prefill 路由样本和设备端索引。"""
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -528,16 +535,3 @@ def _find_fused_moe_weights(model: TpPartBaseModel) -> List[FusedMoeWeight]:
         if isinstance(weight, FusedMoeWeight) and weight.enable_ep_moe:
             weights.append(weight)
     return weights
-
-
-def _expert_load_imbalance_ratio(expert_load: torch.Tensor) -> float:
-    """计算各层逻辑专家最大 token 数与平均值之比，再对所有层取平均。"""
-    if expert_load.ndim != 2:
-        raise ValueError("expert_load must be [layers, logical_experts]")
-    expert_load = expert_load.to(torch.float64)
-    layer_means = expert_load.mean(dim=1)
-    valid_layers = layer_means > 0
-    if not torch.any(valid_layers):
-        return 0.0
-    ratios = expert_load.max(dim=1).values[valid_layers] / layer_means[valid_layers]
-    return float(ratios.mean().item())

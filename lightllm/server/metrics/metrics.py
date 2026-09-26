@@ -32,9 +32,22 @@ MONITOR_INFO = {
     "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
     "lightllm_gen_throughput": "Generation throughput of latest completed request (tokens/s)",
     "lightllm_num_running_reqs": "Number of running requests",
-    "lightllm_eplb_topk_expert_imbalance_ratio": (
-        "Maximum routed token count divided by the mean across logical experts, averaged across MoE layers in the "
-        "accumulated EPLB routing sample"
+    "lightllm_prefill_ep_compute_critical_overhead_ratio_before_rebalance": (
+        "Estimated excess critical EP-rank compute divided by balanced compute for the global load used by the latest "
+        "EPLB placement plan, evaluated before rebalance; 0.3 means 30% overhead"
+    ),
+    "lightllm_prefill_ep_compute_critical_overhead_ratio_after_rebalance": (
+        "Estimated excess critical EP-rank compute divided by balanced compute for the global load used by the latest "
+        "EPLB placement plan, evaluated on the planned placement; 0.3 means 30% overhead"
+    ),
+    "lightllm_eplb_topk_expert_imbalance_ratio_p25": (
+        "P25 across MoE layers of maximum-to-mean logical expert routed-token load"
+    ),
+    "lightllm_eplb_topk_expert_imbalance_ratio_p50": (
+        "P50 across MoE layers of maximum-to-mean logical expert routed-token load"
+    ),
+    "lightllm_eplb_topk_expert_imbalance_ratio_p100": (
+        "P100 across MoE layers of maximum-to-mean logical expert routed-token load"
     ),
 }
 
@@ -115,7 +128,11 @@ class Monitor:
         self.create_gauge("lightllm_cache_hit_rate")
         self.create_gauge("lightllm_gen_throughput")
         self.create_gauge("lightllm_num_running_reqs")
-        self.create_gauge("lightllm_eplb_topk_expert_imbalance_ratio")
+        self.create_gauge("lightllm_prefill_ep_compute_critical_overhead_ratio_before_rebalance")
+        self.create_gauge("lightllm_prefill_ep_compute_critical_overhead_ratio_after_rebalance")
+        self.create_gauge("lightllm_eplb_topk_expert_imbalance_ratio_p25")
+        self.create_gauge("lightllm_eplb_topk_expert_imbalance_ratio_p50")
+        self.create_gauge("lightllm_eplb_topk_expert_imbalance_ratio_p100")
 
     def create_histogram(self, name, buckets, labelnames=None):
         all_labels = ["model_name"] + (labelnames or [])
