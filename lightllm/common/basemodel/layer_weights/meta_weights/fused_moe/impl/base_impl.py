@@ -61,7 +61,7 @@ class FuseMoeBaseImpl(ABC):
         use_grouped_topk: bool,
         topk_group: int,
         num_expert_group: int,
-        is_prefill: Optional[bool] = None,
+        is_prefill: bool,
         # Callback to capture MoE topk expert ids (routed experts metadata).
         moe_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
@@ -70,6 +70,7 @@ class FuseMoeBaseImpl(ABC):
         # 追加 shared expert 时使用 sigmoid(logit) 作为其聚合权重。
         shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         topk_weights, topk_ids = self._select_experts(
             input_tensor=input_tensor,
             router_logits=router_logits,
@@ -88,6 +89,7 @@ class FuseMoeBaseImpl(ABC):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             shared_expert_gate=shared_expert_gate,
+            is_prefill=is_prefill,
         )
         return self._fused_experts(
             input_tensor=input_tensor,
@@ -127,6 +129,7 @@ class FuseMoeBaseImpl(ABC):
         self,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """将逻辑路由结果转换为 MoE kernel 实际需要的执行布局。
@@ -143,6 +146,9 @@ class FuseMoeBaseImpl(ABC):
         的权重，使其输出按 token 动态参与 routed expert 输出的聚合；传入 ``None``
         时，普通 fused shared expert 的追加权重为 1。EP 路径不使用该参数，而是
         单独计算 shared expert，并在应用相同门控后与 routed MoE 输出相加。
+
+        ``is_prefill`` 必须由上层入口显式传入 ``True`` 或 ``False``。即使当前实现
+        尚未使用该信息，也不允许用 ``None`` 隐式表示执行阶段。
         """
         pass
 
@@ -154,8 +160,8 @@ class FuseMoeBaseImpl(ABC):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
     ) -> torch.Tensor:
         """根据准备完成的路由结果执行融合 MoE 计算。
 

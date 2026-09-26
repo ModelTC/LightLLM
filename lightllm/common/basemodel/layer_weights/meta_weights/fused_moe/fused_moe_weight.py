@@ -109,10 +109,11 @@ class FusedMoeWeight(BaseWeightTpl):
         use_grouped_topk: bool,
         topk_group: int,
         num_expert_group: int,
-        is_prefill: Optional[bool] = None,
+        is_prefill: bool,
         infer_state=None,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         # Captures MoE topk expert ids for routed-experts metadata when enabled.
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         return self.fuse_moe_impl(

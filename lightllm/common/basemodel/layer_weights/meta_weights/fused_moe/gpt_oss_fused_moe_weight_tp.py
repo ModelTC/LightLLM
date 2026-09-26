@@ -144,10 +144,11 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         use_grouped_topk: bool,
         topk_group: int,
         num_expert_group: int,
-        is_prefill: Optional[bool] = None,
+        is_prefill: bool,
         infer_state=None,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         assert shared_expert_gate is None, "shared_expert_gate is not supported by GPT-OSS fused MoE"
 
         topk_weights, topk_ids = self._router(router_logits, top_k)

@@ -64,7 +64,7 @@ python -m lightllm.server.api_server \
   │ logical top-k IDs
   v
 EPLB 路由 kernel
-  ├── 按 logical expert 累计 route_counter
+  ├── 把本次 prefill 的 logical expert 负载写入环形采样行
   ├── 查询 logical_to_physical_map
   └── 为每个 token 选择 physical expert ID
           │
@@ -73,7 +73,7 @@ EPLB 路由 kernel
 
 周期性控制面：
 
-route_counter
+prefill_route_counter（最近 24 次 prefill 采样）
   -> 全局负载汇总
   -> placement planner
   -> target placement
@@ -131,7 +131,8 @@ rank 3: [6, 7, 0, 1]
 
 - `local_logics_expert_ids_list`：本 rank 每个物理槽对应的逻辑专家；
 - `logical_to_physical_map`：logical ID 到可用 physical IDs 的设备路由表；
-- `route_counter`：长度为 `E` 的 `int64` GPU 计数器；
+- `prefill_route_counter`：shape 为 `[24, E]` 的 `int64` GPU 环形采样缓冲区；
+- `prefill_route_sample_index`：shape 为 `[2]` 的 `int64` GPU 状态，分别保存 sample index 和核内同步计数；
 - `num_redundant_experts_per_rank`：本 rank 的额外槽位数。
 
 目前启用 EP MoE 时使用 `FuseMoeDeepGEMM` 实现。EPLB manager 只收集启用了 EP 的 `layer.experts`，并保留模型中的层顺序。
@@ -180,7 +181,7 @@ _select_experts
 | `current_node_first` | 本节点存在副本时在节点内选择，否则回退到全局副本 |
 | `global_first` | 直接在全局全部有效副本间选择 |
 
-当前 DeepGEMM EPLB 路径使用 `current_gpu_first`。未来如果要支持“本卡 -> 本节点 -> 全局”的三级回退，需要布局规划算法同时具备节点拓扑感知能力。
+当前 DeepGEMM EPLB 路径使用 `global_first`。未来如果要支持“本卡 -> 本节点 -> 全局”的三级回退，需要布局规划算法同时具备节点拓扑感知能力。
 
 ### 5.4 副本哈希
 
@@ -188,11 +189,67 @@ _select_experts
 
 该变换由奇数乘法和可逆的异或移位组成，可以显著降低规律性 token 间隔与副本数之间的低位相关性。例如同一专家每隔 4 个 token 出现且有 4 个副本时，简单线性哈希可能退化到单一副本，avalanche mix 能将流量重新打散。
 
-### 5.5 负载统计
+### 5.5 prefill 环形采样
 
-路由 kernel 在 physical ID 映射前，按 logical expert 对 `route_counter` 执行原子累加。这样同一逻辑专家的多个物理副本不会拆散规划器观察到的负载信号。
+负载采样只在调用方明确传入 `is_prefill=True` 时启用。decode 仍然执行 logical-to-physical 映射，但不会更新采样缓冲区，也不会推进 sample index。这样可以只使用吞吐量较大、统计稳定性更好的 prefill 路由结果，同时避免给高频 decode 路径增加原子操作。
 
-计数器与 MoE forward 位于同一条 overlap stream。清零操作也提交到该 stream，从而自然排在此前 forward 之后、后续 forward 之前，无需额外的全设备同步。
+每层使用一个 `[24, E]` 的 `prefill_route_counter`。其中每一行表示一次 prefill 路由 kernel 调用的 logical expert 直方图，24 表示最多保留最近 24 次采样，而不是 24 个 token 或 24 个 manager step。一次 manager step 内如果发生多次 prefill dispatch，它们会分别占用不同的采样行；第 25 次采样开始按环形方式覆盖最旧的数据：
+
+```text
+sample_row = sample_index % 24
+
+prefill_route_counter
+  row 0  -> 一次完整 prefill dispatch 的 [expert_0, ..., expert_E-1] 计数
+  row 1  -> 下一次完整 prefill dispatch 的计数
+  ...
+  row 23 -> 最近 24 次采样中的一行
+```
+
+固定 24 行可以限制设备内存和 CPU 快照成本，并让规划器观察最近一段时间的流量，而不是让很早以前的流量永久影响当前布局。当前 manager 在评估时沿 sample 维求和，将 `[24, E]` 聚合回 `[E]`，因此现有 planner 接口无需感知环形缓冲区。
+
+计数始终使用 logical expert ID，而不是最终选中的 physical expert ID。同一逻辑专家即使拥有多个物理副本，规划器看到的仍然是一份完整需求量，不会因为副本分发而被拆散。
+
+### 5.6 无额外清零 kernel 的采样事务
+
+环形行在复用前必须清零，否则新旧两次采样会叠加。为避免每次 prefill 额外发射一个清零 kernel，清零、路由计数和 sample index 提交都融合在 `_eplb_repair_topk_ids_kernel` 内；其中 `_record_prefill_route_sample` 是 Triton 子 JIT 函数，不会形成独立的 kernel launch。
+
+`prefill_route_sample_index` 的两个元素含义如下：
+
+```text
+[0] sample index：单调递增；对 24 取余得到当前环形行
+[1] sync state ：0                     表示目标行尚未清零
+                 1                     表示清零完成，采样可以开始
+                 1 + completed_programs 表示已经完成的 program 数
+```
+
+一次采样事务按以下顺序执行：
+
+1. 所有 program 读取同一个 sample index，并计算本次目标行。sample index 只由最后完成者推进，因此在本次 kernel 生命周期内保持不变。
+2. `program_id == 0` 清空目标行，然后通过带 `release` 语义的原子加一把 sync state 从 0 发布为 1。
+3. 其他 program 使用带 `acquire` 语义的原子读等待 sync state 达到 1，确保不会在清零完成前向目标行累加。
+4. 屏障通过后，每个 program 根据自己处理的有效 top-k 元素，对对应 logical expert 执行 `atomic_add(1)`。
+5. 每个 program 完成 physical ID 写回和负载计数后，再对 sync state 原子加一，提交一个完成信号。
+6. Triton 的 `atomic_add` 返回加法前的旧值，因此用 `old_value + 1 == num_programs + 1` 判断唯一的最后完成者。额外的 1 是步骤 2 发布的 ready 标记。
+7. 最后完成者先把 sample index 加一，再把 sync state 交换为 0，使下一次 kernel 可以复用后续环形行。
+
+完整状态变化如下：
+
+```text
+sync=0
+  -> program 0 清零目标行
+  -> sync=1（ready）
+  -> 所有 program 统计 logical expert 并分别提交完成信号
+  -> sync=1+num_programs
+  -> 唯一最后完成者推进 sample index，并复位 sync=0
+```
+
+ready 发布使用 `release`、等待方使用 `acquire`，最后完成信号使用 `acq_rel`，从而约束目标行清零和后续原子计数的可见顺序。所有调用还必须在同一 CUDA stream 上串行复用同一组 counter 和同步状态；当前 MoE forward 与采样都位于 overlap stream，满足这一约束。
+
+### 5.7 manager 聚合与重置
+
+manager 在安全推理边界把各层 `[24, E]` 环形缓冲区沿第 0 维求和并复制到 CPU，得到 planner 使用的 `[layer, logical_expert]` 负载。如果样本量不足或规划结果未改变布局，不主动清空缓冲区；后续 prefill 会继续写入，并在容量用满后滚动覆盖最旧行。
+
+初始化、成功切换到新布局，以及达到重排次数上限后开始下一轮指标窗口时，manager 会同时清零 `prefill_route_counter` 和 `prefill_route_sample_index`。清零提交到 overlap stream，自然排在此前 forward 之后、后续 forward 之前，不需要额外的全设备同步。
 
 ## 6. EPLB 状态机
 
@@ -200,7 +257,7 @@ _select_experts
 
 ```text
 [COLLECTING]
-  累计 logical route counter，等待评估周期
+  将 prefill logical route 写入 24 行环形采样，等待评估周期
         |
         v
 [EVALUATING]
@@ -233,16 +290,16 @@ _select_experts
 
 ```text
 EVALUATING
-  |-- 平均 token 数不足 ----------> 保留 counter，继续累计
-  `-- 达到重排次数上限 ----------> 清空 counter，只做周期性指标上报
+  |-- 平均 token 数不足 ----------> 保留环形窗口，继续滚动采样
+  `-- 达到重排次数上限 ----------> 清空采样，只做周期性指标上报
 
 WAIT_PLAN_PLACEMENT_FINISHED
-  `-- 目标布局与当前布局相同 -----> 保留 counter，等待下次评估
+  `-- 目标布局与当前布局相同 -----> 保留环形窗口，等待下次评估
 ```
 
 默认每 20 个采样 step 评估一次，可以通过环境变量 `LIGHTLLM_EPLB_STEP_INTERVAL` 调整。该值必须大于 0。
 
-只有当整个 world 的平均样本量达到每个“层 × 逻辑专家”256 个 token 时才开始规划。样本不足不会清空 counter，低流量服务可以跨多个评估周期累计数据。
+只有当整个 world 的平均样本量达到每个“层 × 逻辑专家”128 个 token 时才开始规划。样本不足不会清空环形缓冲区，低流量服务可以跨多个评估周期继续采样；缓冲区写满后只保留最近 24 次 prefill dispatch。
 
 ## 7. 专家分布分析
 
@@ -358,7 +415,7 @@ DP 随机分流下每个 rank 的路由统计都是对全局路由分布的无�
 
 权重和路由 metadata 在同一条 stream 上更新，后续 forward 只能看到完整提交后的状态，不会观察到“新路由指向旧权重”或“旧路由指向新权重”的中间状态。
 
-全部批次完成后，manager 发布目标布局、清空 route counter、增加完成次数，并回到 `COLLECTING`。
+全部批次完成后，manager 发布目标布局、清空 prefill 路由采样及设备端 sample index、增加完成次数，并回到 `COLLECTING`。
 
 ## 10. 布局持久化
 
@@ -446,6 +503,8 @@ EPLB 单元测试主要位于 `unit_tests/common/fused_moe/test_eplb.py`，覆�
 - 权重与 metadata 的安全提交；
 - 配置文件加载、校验和持久化；
 - logical-to-physical kernel 的精确映射；
+- prefill 环形采样的逐行计数、循环覆盖、sample index 推进和同步状态复位；
+- 非 prefill 路径不修改采样状态，以及空输入不推进 sample index；
 - token index `0..4096`、expert ID `0..255`，以及 `2、3、4、5、101、127、128、251` 个副本时的哈希分布。
 
 多 GPU pinned-memory 传输测试位于 `unit_tests/common/fused_moe/test_eplb_transfer_gpu.py`。

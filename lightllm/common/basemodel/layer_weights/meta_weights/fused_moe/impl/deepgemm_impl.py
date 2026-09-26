@@ -89,8 +89,16 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 ),
                 dtype=torch.int32,
             ).cuda()
-            # 始终按逻辑专家统计负载，冗余副本不会拆散规划器观察到的负载信号。
-            self.route_counter = torch.zeros(self.n_routed_experts, dtype=torch.int64, device="cuda")
+            # 环形缓冲区保留最近 24 次 prefill 路由采样，每次采样写入独立的一行；
+            # 始终按 logical expert 统计，冗余副本不会拆散规划器观察到的负载信号。
+            self.prefill_route_counter = torch.zeros(
+                (24, self.n_routed_experts),
+                dtype=torch.int64,
+                device="cuda",
+            )
+            # [0] 是单调递增的 sample index；[1] 用于在同一个 kernel 内协调
+            # 目标行清零，并从所有 program 中选出最后完成者。
+            self.prefill_route_sample_index = torch.zeros(2, dtype=torch.int64, device="cuda")
             # 动态 EPLB 默认采集路由负载；以后使用配置文件固定专家布局时，
             # 可以关闭该开关，避免执行不再需要的 atomic counter 更新。
             self.recording = True
@@ -142,15 +150,18 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         if self.num_redundant_experts_per_rank > 0:
             topk_ids = eplb_repair_topk_ids(
                 logical_topk_ids=topk_ids,
                 logical_to_physical_map=self.logical_to_physical_map,
-                logical_expert_counter=self.route_counter,
-                update_logical_expert_counter=self.recording,
+                prefill_route_counter=self.prefill_route_counter,
+                prefill_route_sample_index=self.prefill_route_sample_index,
+                update_prefill_route_counter=self.recording and is_prefill is True,
                 mode="global_first",
             )
         return topk_weights, topk_ids
@@ -162,8 +173,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
     ):
         output = fused_experts(
             hidden_states=input_tensor,
@@ -201,7 +212,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
-        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx)
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=False)
 
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -241,7 +252,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
-        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx)
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=True)
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
 

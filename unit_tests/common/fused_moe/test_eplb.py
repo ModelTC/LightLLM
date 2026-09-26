@@ -58,13 +58,16 @@ def _test_moe_impl(
     num_logical_experts=128,
     world_size=16,
     num_redundant_experts_per_rank=1,
-    route_counter=None,
+    prefill_route_counter=None,
+    prefill_route_sample_index=None,
     recording=False,
 ):
     logical_to_physical_map = None
     if eplb:
-        if route_counter is None:
-            route_counter = torch.zeros((num_logical_experts,), dtype=torch.int64)
+        if prefill_route_counter is None:
+            prefill_route_counter = torch.zeros((24, num_logical_experts), dtype=torch.int64)
+        if prefill_route_sample_index is None:
+            prefill_route_sample_index = torch.zeros((2,), dtype=torch.int64)
         logical_to_physical_map = torch.zeros((num_logical_experts, world_size + 3), dtype=torch.int32)
         logical_to_physical_map[:, :3] = 1
     else:
@@ -75,7 +78,8 @@ def _test_moe_impl(
         num_redundant_experts_per_rank=num_redundant_experts_per_rank,
         local_logics_expert_ids_list=list(range(num_logical_experts // world_size + num_redundant_experts_per_rank)),
         logical_to_physical_map=logical_to_physical_map,
-        route_counter=route_counter,
+        prefill_route_counter=prefill_route_counter,
+        prefill_route_sample_index=prefill_route_sample_index,
         recording=recording,
     )
 
@@ -85,7 +89,8 @@ def _set_deepgemm_runtime(impl, runtime):
         "num_total_physical_experts",
         "num_redundant_experts_per_rank",
         "logical_to_physical_map",
-        "route_counter",
+        "prefill_route_counter",
+        "prefill_route_sample_index",
         "recording",
     ):
         setattr(impl, name, getattr(runtime, name))
@@ -134,8 +139,8 @@ def test_base_call_template_forwards_selection_and_capture_callback():
         ):
             return "weights", "logical_ids"
 
-        def _prepare_expert_execution(self, topk_weights, topk_ids, shared_expert_gate=None):
-            seen["prepare"] = {"topk_ids": topk_ids}
+        def _prepare_expert_execution(self, topk_weights, topk_ids, is_prefill, shared_expert_gate=None):
+            seen["prepare"] = {"topk_ids": topk_ids, "is_prefill": is_prefill}
             return topk_weights, "physical_ids"
 
         def _fused_experts(
@@ -145,8 +150,8 @@ def test_base_call_template_forwards_selection_and_capture_callback():
             w2,
             topk_weights,
             topk_ids,
+            is_prefill,
             router_logits=None,
-            is_prefill=None,
         ):
             seen["fused"] = {"topk_ids": topk_ids}
             return "output"
@@ -166,11 +171,28 @@ def test_base_call_template_forwards_selection_and_capture_callback():
         0,
         0,
         moe_capture_callback=captured.append,
+        is_prefill=True,
     )
     assert result == "output"
     assert captured == ["logical_ids"]
     assert seen["prepare"]["topk_ids"] == "logical_ids"
+    assert seen["prepare"]["is_prefill"] is True
     assert seen["fused"]["topk_ids"] == "physical_ids"
+
+    with pytest.raises(AssertionError, match="is_prefill must be explicitly specified"):
+        impl(
+            "input",
+            "logits",
+            "w13",
+            "w2",
+            None,
+            "softmax",
+            2,
+            False,
+            False,
+            0,
+            0,
+        )
 
 
 def test_factory_selects_all_paths_without_ep_constructor_state(monkeypatch):
@@ -194,7 +216,7 @@ def test_factory_selects_all_paths_without_ep_constructor_state(monkeypatch):
     assert isinstance(ep_impl, deepgemm_module.FuseMoeDeepGEMM)
     assert ep_impl.num_total_physical_experts == 4
     assert not hasattr(ep_impl, "num_primary_experts_per_rank")
-    assert not hasattr(ep_impl, "route_counter")
+    assert not hasattr(ep_impl, "prefill_route_counter")
     assert not hasattr(ep_impl, "expert_parallel_state")
     assert isinstance(
         create_fuse_moe_impl(
@@ -760,15 +782,15 @@ def test_transfer_plan_respects_explicit_target_slots():
 
 def test_manager_evaluating_copies_route_counters_to_cpu_without_modifying_them(monkeypatch):
     counters = [
-        torch.tensor([10, 11], dtype=torch.int64),
-        torch.tensor([40, 41], dtype=torch.int64),
+        torch.tensor([[10, 11]], dtype=torch.int64),
+        torch.tensor([[40, 41]], dtype=torch.int64),
     ]
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.state = manager_module.EPLBManagerState.EVALUATING
     manager._eplb_impls = [
         _test_moe_impl(
             eplb=True,
-            route_counter=counter,
+            prefill_route_counter=counter,
             num_logical_experts=2,
             world_size=1,
         )
@@ -791,8 +813,8 @@ def test_manager_evaluating_copies_route_counters_to_cpu_without_modifying_them(
     manager._step_evaluating()
 
     assert local_token_counts == [102]
-    assert torch.equal(counters[0], torch.tensor([10, 11], dtype=torch.int64))
-    assert torch.equal(counters[1], torch.tensor([40, 41], dtype=torch.int64))
+    assert torch.equal(counters[0], torch.tensor([[10, 11]], dtype=torch.int64))
+    assert torch.equal(counters[1], torch.tensor([[40, 41]], dtype=torch.int64))
 
 
 def test_manager_delegates_distribution_planning_to_planner_class():
@@ -921,7 +943,7 @@ def test_manager_does_not_publish_expert_load_metrics_from_other_ranks():
     assert not hasattr(manager, "metric_client")
 
 
-def test_eplb_route_counter_has_one_entry_per_logical_expert(monkeypatch):
+def test_eplb_prefill_route_counter_has_24_samples_per_logical_expert(monkeypatch):
     args = type(
         "Args",
         (),
@@ -945,7 +967,9 @@ def test_eplb_route_counter_has_one_entry_per_logical_expert(monkeypatch):
 
     impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace())
 
-    assert impl.route_counter.shape == (4,)
+    assert impl.prefill_route_counter.shape == (24, 4)
+    assert impl.prefill_route_sample_index.shape == (2,)
+    assert torch.equal(impl.prefill_route_sample_index, torch.zeros(2, dtype=torch.int64))
 
 
 def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
@@ -966,7 +990,8 @@ def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
     assert not hasattr(impl, "num_primary_experts_per_rank")
     assert not hasattr(impl, "initial_local_expert_ids_by_rank")
     assert not hasattr(impl, "logical_to_physical_map")
-    assert not hasattr(impl, "route_counter")
+    assert not hasattr(impl, "prefill_route_counter")
+    assert not hasattr(impl, "prefill_route_sample_index")
     assert not hasattr(impl, "recording")
 
 
@@ -979,7 +1004,7 @@ def test_manager_evaluation_gathers_token_counts_from_all_ranks(monkeypatch):
             {
                 "fuse_moe_impl": _test_moe_impl(
                     eplb=True,
-                    route_counter=torch.zeros((4,), dtype=torch.int64),
+                    prefill_route_counter=torch.zeros((24, 4), dtype=torch.int64),
                     num_logical_experts=4,
                     world_size=1,
                 )
@@ -996,8 +1021,9 @@ def test_manager_evaluation_gathers_token_counts_from_all_ranks(monkeypatch):
     manager.control_group = object()
     manager.max_rebalance_count = -1
     manager.completed_rebalance_count = 0
-    local = torch.full((4,), 100, dtype=torch.int64)
-    manager._eplb_impls[0].route_counter = local
+    local = torch.full((24, 4), 0, dtype=torch.int64)
+    local[0].fill_(100)
+    manager._eplb_impls[0].prefill_route_counter = local
     manager.state = manager_module.EPLBManagerState.EVALUATING
     seen = {}
 
@@ -1131,8 +1157,8 @@ def test_eplb_prefill_repairs_ids_after_selection(monkeypatch):
     assert topk_idx.dtype is torch.long
     assert qinput == "qinput"
     assert calls[0]["logical_topk_ids"] is logical_ids
-    assert not calls[0]["update_logical_expert_counter"]
-    assert calls[0]["mode"] == "current_gpu_first"
+    assert not calls[0]["update_prefill_route_counter"]
+    assert calls[0]["mode"] == "global_first"
 
 
 def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
@@ -1152,7 +1178,7 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
     impl.quant_method = object()
     runtime = _test_moe_impl(
         eplb=True,
-        route_counter=torch.zeros((128,), dtype=torch.int64),
+        prefill_route_counter=torch.zeros((24, 128), dtype=torch.int64),
         recording=True,
     )
     _set_deepgemm_runtime(impl, runtime)
@@ -1198,8 +1224,8 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
     assert topk_idx is physical_ids
     assert len(repair_calls) == 1
     assert repair_calls[0]["logical_topk_ids"] is logical_ids
-    assert repair_calls[0]["update_logical_expert_counter"]
-    assert repair_calls[0]["mode"] == "current_gpu_first"
+    assert repair_calls[0]["update_prefill_route_counter"]
+    assert repair_calls[0]["mode"] == "global_first"
     assert calls[0]["topk_idx"] is physical_ids
     assert calls[0]["topk_idx"].dtype is torch.long
     assert calls[0]["previous_event"] is caller_event
@@ -1264,7 +1290,8 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
 
     assert impl.num_redundant_experts_per_rank == 1
     assert impl.num_total_physical_experts == 6
-    assert impl.route_counter.shape == (4,)
+    assert impl.prefill_route_counter.shape == (24, 4)
+    assert impl.prefill_route_sample_index.shape == (2,)
     assert impl.recording
     assert impl.local_logics_expert_ids_list == [0, 1, 2]
     assert not hasattr(impl, "initial_local_expert_ids_by_rank")
@@ -1353,13 +1380,13 @@ def test_eplb_prepare_repairs_logical_ids(monkeypatch):
         return physical_ids
 
     monkeypatch.setattr(deepgemm_module, "eplb_repair_topk_ids", repair)
-    weights, selected = impl._prepare_expert_execution(torch.ones((1, 2)), logical_ids)
+    weights, selected = impl._prepare_expert_execution(torch.ones((1, 2)), logical_ids, is_prefill=True)
 
     assert weights.tolist() == [[1.0, 1.0]]
     assert selected is physical_ids
     assert calls[0]["logical_topk_ids"] is logical_ids
-    assert calls[0]["update_logical_expert_counter"]
-    assert calls[0]["mode"] == "current_gpu_first"
+    assert calls[0]["update_prefill_route_counter"]
+    assert calls[0]["mode"] == "global_first"
 
 
 def test_decode_masked_group_gemm_uses_all_physical_rows_when_eplb_is_enabled(
@@ -1636,7 +1663,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
 
     manager._commit_transfer = commit_transfer
     manager._publish_layer_metadata = publish_layer_metadata
-    manager._clear_route_counters = lambda: cleared_route_counters.append(True)
+    manager._clear_prefill_route_samples = lambda: cleared_route_counters.append(True)
     used_streams = []
     overlap_stream = object()
 
@@ -1723,7 +1750,7 @@ def test_manager_returns_to_collecting_after_reaching_rebalance_limit():
     manager.pending_transfer_batches = []
     manager.max_rebalance_count = 1
     manager.completed_rebalance_count = 0
-    manager._clear_route_counters = lambda: None
+    manager._clear_prefill_route_samples = lambda: None
     persisted_placements = []
     manager._persist_current_placement = lambda: persisted_placements.append(manager.current_placement)
 
@@ -1838,7 +1865,7 @@ def test_manager_step_advances_inflight_transfer():
 
 def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    route_counter = torch.tensor([1, 2], dtype=torch.int64)
+    prefill_route_counter = torch.tensor([[1, 2]], dtype=torch.int64)
     local_token_counts = []
     manager.state = manager_module.EPLBManagerState.COLLECTING
     manager.global_rank = 1
@@ -1846,7 +1873,7 @@ def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
     manager.step_interval = 3
     manager.next_evaluation_step = 3
     manager.num_logical_experts = 2
-    manager._eplb_impls = [SimpleNamespace(route_counter=route_counter)]
+    manager._eplb_impls = [SimpleNamespace(prefill_route_counter=prefill_route_counter)]
     manager.world_size = 1
     manager.control_group = object()
     manager.max_rebalance_count = -1
@@ -1872,7 +1899,7 @@ def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert local_token_counts == [3]
     assert manager.next_evaluation_step == 6
-    assert torch.equal(route_counter, torch.tensor([1, 2], dtype=torch.int64))
+    assert torch.equal(prefill_route_counter, torch.tensor([[1, 2]], dtype=torch.int64))
 
 
 def test_manager_step_uses_explicit_state_instead_of_pending_work():
@@ -1984,7 +2011,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
 def test_manager_evaluation_with_insufficient_tokens_returns_to_collecting(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.state = manager_module.EPLBManagerState.EVALUATING
-    manager._eplb_impls = [SimpleNamespace(route_counter=torch.full((4,), 255, dtype=torch.int64))]
+    manager._eplb_impls = [SimpleNamespace(prefill_route_counter=torch.full((1, 4), 255, dtype=torch.int64))]
     manager.num_logical_experts = 4
     manager.steps = 11
     manager.step_interval = 20
@@ -2014,7 +2041,7 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     manager.state = manager_module.EPLBManagerState.EVALUATING
     manager.global_rank = 0
     manager.num_logical_experts = 4
-    manager._eplb_impls = [SimpleNamespace(route_counter=local_load[0])]
+    manager._eplb_impls = [SimpleNamespace(prefill_route_counter=local_load)]
     manager.world_size = 1
     manager.control_group = object()
     manager.max_rebalance_count = -1
@@ -2075,11 +2102,11 @@ def test_manager_keeps_reporting_after_reaching_rebalance_limit(monkeypatch):
     manager.state = manager_module.EPLBManagerState.EVALUATING
     manager.global_rank = 0
     manager.num_logical_experts = 4
-    manager._eplb_impls = [SimpleNamespace(route_counter=local_load[0])]
+    manager._eplb_impls = [SimpleNamespace(prefill_route_counter=local_load)]
     manager.max_rebalance_count = 1
     manager.completed_rebalance_count = 1
     manager._publish_expert_load_metric = lambda load: published_loads.append(load)
-    manager._clear_route_counters = lambda: cleared_counters.append(True)
+    manager._clear_prefill_route_samples = lambda: cleared_counters.append(True)
     monkeypatch.setattr(
         manager_module.dist,
         "all_gather_object",
@@ -2318,10 +2345,14 @@ def test_manager_rejects_sm100_before_initialization(monkeypatch):
         manager_module.EPLBManager(type("Model", (), {})())
 
 
-def test_manager_clears_all_route_counters_on_overlap_stream(monkeypatch):
+def test_manager_clears_all_prefill_route_samples_on_overlap_stream(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    counters = [torch.tensor([1, 2]), torch.tensor([3, 4])]
-    manager._eplb_impls = [SimpleNamespace(route_counter=counter) for counter in counters]
+    counters = [torch.tensor([[1, 2]]), torch.tensor([[3, 4]])]
+    sample_indices = [torch.tensor([7, 3]), torch.tensor([9, 4])]
+    manager._eplb_impls = [
+        SimpleNamespace(prefill_route_counter=counter, prefill_route_sample_index=sample_index)
+        for counter, sample_index in zip(counters, sample_indices)
+    ]
     overlap_stream = object()
     used_streams = []
     monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: overlap_stream)
@@ -2331,10 +2362,11 @@ def test_manager_clears_all_route_counters_on_overlap_stream(monkeypatch):
         lambda stream: (used_streams.append(stream) or nullcontext()),
     )
 
-    manager._clear_route_counters()
+    manager._clear_prefill_route_samples()
 
     assert used_streams == [overlap_stream]
     assert all(torch.count_nonzero(counter) == 0 for counter in counters)
+    assert all(torch.count_nonzero(sample_index) == 0 for sample_index in sample_indices)
 
 
 def test_manager_initializes_without_transfer_task(monkeypatch):
@@ -2350,7 +2382,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
                 num_logical_experts=4,
                 world_size=2,
                 num_redundant_experts_per_rank=2,
-                route_counter=torch.zeros((4,), dtype=torch.int64),
+                prefill_route_counter=torch.zeros((24, 4), dtype=torch.int64),
             ),
         },
     )()
@@ -2365,7 +2397,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     clear_calls = []
     monkeypatch.setattr(
         manager_module.EPLBManager,
-        "_clear_route_counters",
+        "_clear_prefill_route_samples",
         lambda manager: clear_calls.append(manager),
     )
     monkeypatch.setattr(manager_module, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
@@ -2419,10 +2451,10 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
-@pytest.mark.parametrize("update_logical_expert_counter", [False, True])
+@pytest.mark.parametrize("update_prefill_route_counter", [False, True])
 @pytest.mark.parametrize("tokens", [1, 32])
 @pytest.mark.parametrize("mode", ["current_gpu_first", "current_node_first", "global_first"])
-def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tokens, mode):
+def test_eplb_repair_topk_ids_maps_and_counts(update_prefill_route_counter, tokens, mode):
     from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
         eplb_repair_topk_ids,
     )
@@ -2466,7 +2498,8 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
         ),
         dim=1,
     )
-    counter = torch.zeros((experts,), dtype=torch.int64, device="cuda")
+    counter = torch.zeros((24, experts), dtype=torch.int64, device="cuda")
+    sample_index = torch.zeros((2,), dtype=torch.int64, device="cuda")
     expected_counter = torch.zeros_like(counter)
 
     logical_ids_long = logical_ids.to(torch.long)
@@ -2490,8 +2523,8 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
     hash_values ^= hash_values >> 16
     replica_indices = hash_values % num_preferred_replicas[logical_ids_long].to(torch.int64)
     expected_ids = logical_to_physical[logical_ids_long, replica_indices + 3]
-    if update_logical_expert_counter:
-        expected_counter.scatter_add_(
+    if update_prefill_route_counter:
+        expected_counter[0].scatter_add_(
             0,
             logical_ids.reshape(-1).to(torch.long),
             torch.ones(logical_ids.numel(), dtype=torch.int64, device="cuda"),
@@ -2500,8 +2533,9 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
     physical_ids = eplb_repair_topk_ids(
         logical_topk_ids=logical_ids,
         logical_to_physical_map=logical_to_physical,
-        logical_expert_counter=counter,
-        update_logical_expert_counter=update_logical_expert_counter,
+        prefill_route_counter=counter,
+        prefill_route_sample_index=sample_index,
+        update_prefill_route_counter=update_prefill_route_counter,
         mode=mode,
     )
     torch.cuda.synchronize()
@@ -2509,6 +2543,56 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_logical_expert_counter, tok
     assert torch.equal(logical_ids, original_logical_ids)
     assert torch.equal(physical_ids, expected_ids)
     assert torch.equal(counter, expected_counter)
+    assert sample_index.tolist() == ([1, 0] if update_prefill_route_counter else [0, 0])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+def test_eplb_prefill_route_counter_multigrid_ring_wrap_is_exact():
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+        eplb_repair_topk_ids,
+    )
+
+    capacity = 24
+    experts = 256
+    tokens = 1025
+    topk = 4
+    num_samples = capacity + 2
+    base_ids = torch.arange(tokens * topk, dtype=torch.int32, device="cuda").view(tokens, topk)
+    logical_experts = torch.arange(experts, dtype=torch.int32, device="cuda")
+    logical_to_physical = torch.stack(
+        (
+            torch.ones_like(logical_experts),
+            torch.ones_like(logical_experts),
+            torch.ones_like(logical_experts),
+            logical_experts,
+        ),
+        dim=1,
+    )
+    counter = torch.zeros((capacity, experts), dtype=torch.int64, device="cuda")
+    sample_index = torch.zeros((2,), dtype=torch.int64, device="cuda")
+    expected = torch.zeros_like(counter)
+
+    for sample in range(num_samples):
+        logical_ids = (base_ids + sample) % experts
+        physical_ids = eplb_repair_topk_ids(
+            logical_topk_ids=logical_ids,
+            logical_to_physical_map=logical_to_physical,
+            prefill_route_counter=counter,
+            prefill_route_sample_index=sample_index,
+            update_prefill_route_counter=True,
+            mode="global_first",
+        )
+        expected[sample % capacity] = torch.bincount(
+            logical_ids.reshape(-1).to(torch.long),
+            minlength=experts,
+        )
+        assert torch.equal(physical_ids, logical_ids)
+
+    torch.cuda.synchronize()
+
+    assert sample_index.tolist() == [num_samples, 0]
+    assert torch.equal(counter, expected)
+    assert int(counter.sum().item()) == capacity * tokens * topk
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
@@ -2528,13 +2612,15 @@ def test_eplb_repair_topk_ids_spreads_strided_expert_tokens():
         dtype=torch.int32,
         device="cuda",
     )
-    counter = torch.zeros((2,), dtype=torch.int64, device="cuda")
+    counter = torch.zeros((24, 2), dtype=torch.int64, device="cuda")
+    sample_index = torch.zeros((2,), dtype=torch.int64, device="cuda")
 
     physical_ids = eplb_repair_topk_ids(
         logical_topk_ids=logical_ids,
         logical_to_physical_map=logical_to_physical,
-        logical_expert_counter=counter,
-        update_logical_expert_counter=False,
+        prefill_route_counter=counter,
+        prefill_route_sample_index=sample_index,
+        update_prefill_route_counter=False,
         mode="global_first",
     )
     torch.cuda.synchronize()
@@ -2562,13 +2648,15 @@ def test_eplb_replica_hash_is_uniform_across_tokens_and_experts(num_replicas):
         device="cuda",
     )
     logical_to_physical = torch.cat((replica_counts, physical_ids), dim=1)
-    counter = torch.zeros((num_experts,), dtype=torch.int64, device="cuda")
+    counter = torch.zeros((24, num_experts), dtype=torch.int64, device="cuda")
+    sample_index = torch.zeros((2,), dtype=torch.int64, device="cuda")
 
     routed_physical_ids = eplb_repair_topk_ids(
         logical_topk_ids=logical_ids,
         logical_to_physical_map=logical_to_physical,
-        logical_expert_counter=counter,
-        update_logical_expert_counter=False,
+        prefill_route_counter=counter,
+        prefill_route_sample_index=sample_index,
+        update_prefill_route_counter=False,
         mode="global_first",
     )
     torch.cuda.synchronize()
@@ -2604,7 +2692,8 @@ def test_eplb_repair_topk_ids_empty_input_skips_kernel():
 
     experts = 64
     logical_ids = torch.empty((0, 4), dtype=torch.int32, device="cuda")
-    counter = torch.zeros((experts,), dtype=torch.int64, device="cuda")
+    counter = torch.zeros((24, experts), dtype=torch.int64, device="cuda")
+    sample_index = torch.zeros((2,), dtype=torch.int64, device="cuda")
     logical_to_physical = torch.stack(
         (
             torch.ones((experts,), dtype=torch.int32, device="cuda"),
@@ -2617,14 +2706,16 @@ def test_eplb_repair_topk_ids_empty_input_skips_kernel():
     physical_ids = eplb_repair_topk_ids(
         logical_topk_ids=logical_ids,
         logical_to_physical_map=logical_to_physical,
-        logical_expert_counter=counter,
-        update_logical_expert_counter=True,
+        prefill_route_counter=counter,
+        prefill_route_sample_index=sample_index,
+        update_prefill_route_counter=True,
         mode="current_gpu_first",
     )
 
     assert physical_ids.shape == (0, 4)
     assert physical_ids.dtype is torch.int32
     assert torch.equal(counter, torch.zeros_like(counter))
+    assert torch.equal(sample_index, torch.zeros_like(sample_index))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
@@ -2635,13 +2726,15 @@ def test_eplb_repair_topk_ids_rejects_unknown_dispatch_mode():
 
     logical_ids = torch.empty((0, 1), dtype=torch.int32, device="cuda")
     logical_to_physical = torch.tensor([[1, 1, 1, 0]], dtype=torch.int32, device="cuda")
-    counter = torch.zeros((1,), dtype=torch.int64, device="cuda")
+    counter = torch.zeros((24, 1), dtype=torch.int64, device="cuda")
+    sample_index = torch.zeros((2,), dtype=torch.int64, device="cuda")
 
     with pytest.raises(AssertionError, match="unsupported EPLB dispatch mode"):
         eplb_repair_topk_ids(
             logical_topk_ids=logical_ids,
             logical_to_physical_map=logical_to_physical,
-            logical_expert_counter=counter,
-            update_logical_expert_counter=False,
+            prefill_route_counter=counter,
+            prefill_route_sample_index=sample_index,
+            update_prefill_route_counter=False,
             mode="unknown",
         )

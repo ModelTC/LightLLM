@@ -42,8 +42,10 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         self,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         if self.num_fused_shared_experts > 0:
             from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
                 append_fused_shared_experts,
@@ -65,8 +67,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: bool = False,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
