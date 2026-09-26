@@ -280,6 +280,18 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    if getattr(args, "enable_replayssm", False):
+        from lightllm.utils.config_utils import get_model_type
+
+        assert get_model_type(args.model_dir) in (
+            "qwen3_next",
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ), "ReplaySSM currently requires a GDN model"
+        assert args.replayssm_cache_len >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"
+
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
         # 小页池大小只对 hybrid 模型生效。
