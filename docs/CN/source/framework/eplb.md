@@ -93,8 +93,10 @@ prefill_route_counter（最近 24 次 prefill 采样）
 | `eplb/placement/planner.py` | 布局规划器抽象接口 |
 | `eplb/placement/factory.py` | 根据 `eplb_plan_mode` 创建具体规划器 |
 | `eplb/placement/greedy.py` | 默认的贪心布局算法 |
+| `eplb/async_task.py` | 统一后台线程任务的启动、完成与异常处理 |
+| `eplb/async_placement_plan_task.py` | 在后台根据负载生成目标专家布局 |
 | `eplb/async_transfer_planner.py` | 在后台生成跨层传输批次 |
-| `eplb/expert_transfer.py` | 规划槽位依赖并执行专家权重传输 |
+| `eplb/async_expert_transfer.py` | 规划槽位依赖并在后台执行专家权重传输 |
 | `eplb/runtime_manager.py` | 驱动状态机，协调采集、规划、传输和提交 |
 
 ## 4. 初始化布局与权重加载

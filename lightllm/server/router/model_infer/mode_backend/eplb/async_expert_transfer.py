@@ -1,7 +1,5 @@
-"""EPLB 专家权重的逐层迁移。"""
+"""EPLB 专家权重的异步逐层迁移。"""
 
-import os
-import threading
 import zlib
 from dataclasses import dataclass
 from typing import List, Sequence
@@ -10,11 +8,9 @@ import torch
 import torch.distributed as dist
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
-from lightllm.utils.log_utils import init_logger
 
+from .async_task import EPLBAsyncTask
 from .eplb_utils import NamedTensor, extract_eplb_expert_tensors
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -43,7 +39,7 @@ class EPLBTransferInfo:
     dest_local_expert_index: int
 
 
-class PinnedMemoryEPLBTransfer:
+class PinnedMemoryEPLBTransfer(EPLBAsyncTask):
     """在后台线程中传输一个逻辑专家的全部权重张量。
 
     只有源 rank 和目标 rank 参与 Gloo 点对点通信，具体的数据路径是：
@@ -102,61 +98,45 @@ class PinnedMemoryEPLBTransfer:
                 )
         self._device_to_host_stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
 
-        self.status = "idle"
-        self._transfer_thread: threading.Thread = threading.Thread(
-            target=self._run_transfer,
-            name=f"eplb-transfer-layer-{transfer_info.layer_index}-expert-{transfer_info.source_logical_expert_id}",
-            daemon=True,
+        super().__init__(
+            thread_name=(
+                f"eplb-transfer-layer-{transfer_info.layer_index}-expert-{transfer_info.source_logical_expert_id}"
+            )
         )
 
-    def start(self) -> None:
-        """启动构造函数中 transfer_info 描述的异步传输。"""
-        assert self.status == "idle", "EPLB transfer has already been started"
-        self.status = "running"
-        self._transfer_thread.start()
-
-    def is_finished(self) -> bool:
-        """返回后台传输是否已经成功完成。"""
-        return self.status == "succeeded"
-
-    def _run_transfer(self) -> None:
+    def execute(self) -> None:
         """把指定专家的全部权重行传输到各 rank 的 pinned memory。"""
-        try:
-            transfer_info: EPLBTransferInfo = self.transfer_info
-            if self._is_source_rank:
-                torch.cuda.set_device(self._device)
-                with torch.cuda.stream(self._device_to_host_stream):
-                    for tensor_buffer in self.tensor_buffers:
-                        tensor_buffer.pinned_row.copy_(
-                            tensor_buffer.live_tensor[transfer_info.source_local_expert_index],
-                            non_blocking=True,
-                        )
-                # Gloo 读取 pinned row 前，源 rank 必须等待 GPU -> CPU 拷贝完成。
-                self._device_to_host_stream.synchronize()
+        transfer_info: EPLBTransferInfo = self.transfer_info
+        if self._is_source_rank:
+            torch.cuda.set_device(self._device)
+            with torch.cuda.stream(self._device_to_host_stream):
+                for tensor_buffer in self.tensor_buffers:
+                    tensor_buffer.pinned_row.copy_(
+                        tensor_buffer.live_tensor[transfer_info.source_local_expert_index],
+                        non_blocking=True,
+                    )
+            # Gloo 读取 pinned row 前，源 rank 必须等待 GPU -> CPU 拷贝完成。
+            self._device_to_host_stream.synchronize()
 
-            if transfer_info.source_rank != transfer_info.dest_rank:
-                if self._is_source_rank:
-                    for tensor_buffer in self.tensor_buffers:
-                        message_tag = self._build_p2p_message_tag(tensor_buffer.name)
-                        dist.send(
-                            tensor_buffer.pinned_row,
-                            dst=transfer_info.dest_rank,
-                            group=self._p2p_group,
-                            tag=message_tag,
-                        )
-                elif self._is_destination_rank:
-                    for tensor_buffer in self.tensor_buffers:
-                        message_tag = self._build_p2p_message_tag(tensor_buffer.name)
-                        dist.recv(
-                            tensor_buffer.pinned_row,
-                            src=transfer_info.source_rank,
-                            group=self._p2p_group,
-                            tag=message_tag,
-                        )
-            self.status = "succeeded"
-        except BaseException:
-            logger.exception("EPLB transfer failed")
-            os._exit(1)
+        if transfer_info.source_rank != transfer_info.dest_rank:
+            if self._is_source_rank:
+                for tensor_buffer in self.tensor_buffers:
+                    message_tag = self._build_p2p_message_tag(tensor_buffer.name)
+                    dist.send(
+                        tensor_buffer.pinned_row,
+                        dst=transfer_info.dest_rank,
+                        group=self._p2p_group,
+                        tag=message_tag,
+                    )
+            elif self._is_destination_rank:
+                for tensor_buffer in self.tensor_buffers:
+                    message_tag = self._build_p2p_message_tag(tensor_buffer.name)
+                    dist.recv(
+                        tensor_buffer.pinned_row,
+                        src=transfer_info.source_rank,
+                        group=self._p2p_group,
+                        tag=message_tag,
+                    )
 
     def _build_p2p_message_tag(self, tensor_name: str) -> int:
         """为当前专家张量生成 source 和 destination 一致的 Gloo 整数 tag。

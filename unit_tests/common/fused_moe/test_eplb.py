@@ -19,12 +19,13 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.mode_backend.eplb import (
     runtime_manager as manager_module,
 )
+from lightllm.server.router.model_infer.mode_backend.eplb import async_task as async_task_module
 from lightllm.server.router.model_infer.mode_backend.eplb import metrics as eplb_metrics
 from lightllm.server.router.model_infer.mode_backend.eplb import (
-    placement_plan_task as plan_module,
+    async_placement_plan_task as plan_module,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb import (
-    expert_transfer as transfer_module,
+    async_expert_transfer as transfer_module,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb import (
     async_transfer_planner as transfer_planner_module,
@@ -44,7 +45,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
     fused_moe_weight as fused_weight_module,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb.eplb_utils import extract_eplb_expert_tensors
-from lightllm.server.router.model_infer.mode_backend.eplb.expert_transfer import (
+from lightllm.server.router.model_infer.mode_backend.eplb.async_expert_transfer import (
     EPLBTransferInfo,
     ExpertTensorBuffer,
     PinnedMemoryEPLBTransfer,
@@ -845,13 +846,13 @@ def test_plan_task_exits_process_on_failure(monkeypatch):
     )
     exits = []
     logs = []
-    monkeypatch.setattr(plan_module.os, "_exit", exits.append)
-    monkeypatch.setattr(plan_module.logger, "exception", logs.append)
+    monkeypatch.setattr(async_task_module.os, "_exit", exits.append)
+    monkeypatch.setattr(async_task_module.logger, "exception", logs.append)
 
     task._run()
 
     assert exits == [1]
-    assert logs == ["EPLB planning failed"]
+    assert logs == ["EPLBPlanTask failed"]
 
 
 def test_transfer_planner_combines_all_layer_batches(monkeypatch):
@@ -898,13 +899,13 @@ def test_transfer_planner_exits_process_on_failure(monkeypatch):
     exits = []
     logs = []
     monkeypatch.setattr(transfer_planner_module, "build_transfer_plan", fail)
-    monkeypatch.setattr(transfer_planner_module.os, "_exit", exits.append)
-    monkeypatch.setattr(transfer_planner_module.logger, "exception", logs.append)
+    monkeypatch.setattr(async_task_module.os, "_exit", exits.append)
+    monkeypatch.setattr(async_task_module.logger, "exception", logs.append)
 
     planner._run()
 
     assert exits == [1]
-    assert logs == ["EPLB transfer planning failed"]
+    assert logs == ["EPLBTransferPlanner failed"]
 
 
 def test_compute_critical_overhead_ratio_estimates_rank_pressure():
@@ -2327,7 +2328,7 @@ def test_pinned_transfer_copies_source_row_and_sends_to_destination(monkeypatch)
         lambda tensor, dst, group, tag: sends.append((tensor.clone(), dst, group, tag)),
     )
 
-    transfer._run_transfer()
+    transfer._run()
 
     assert transfer.status == "succeeded"
     assert len(sends) == 1
@@ -2364,7 +2365,7 @@ def test_pinned_transfer_skips_p2p_for_local_destination(monkeypatch):
     monkeypatch.setattr(transfer_module.dist, "send", lambda *_args, **_kwargs: p2p_calls.append("send"))
     monkeypatch.setattr(transfer_module.dist, "recv", lambda *_args, **_kwargs: p2p_calls.append("recv"))
 
-    transfer._run_transfer()
+    transfer._run()
 
     assert transfer.is_finished()
     assert p2p_calls == []
@@ -2394,12 +2395,12 @@ def test_pinned_transfer_exits_process_on_failure(monkeypatch):
 
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
     monkeypatch.setattr(transfer_module.dist, "recv", fail_recv)
-    monkeypatch.setattr(transfer_module.logger, "exception", logged_messages.append)
-    monkeypatch.setattr(transfer_module.os, "_exit", exit_codes.append)
+    monkeypatch.setattr(async_task_module.logger, "exception", logged_messages.append)
+    monkeypatch.setattr(async_task_module.os, "_exit", exit_codes.append)
 
-    transfer._run_transfer()
+    transfer._run()
 
-    assert logged_messages == ["EPLB transfer failed"]
+    assert logged_messages == ["PinnedMemoryEPLBTransfer failed"]
     assert exit_codes == [1]
     assert not transfer.is_finished()
 
@@ -2424,7 +2425,7 @@ def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
         )
     ]
     transfer.status = "idle"
-    transfer._transfer_thread = threading.Thread(target=transfer._run_transfer, daemon=True)
+    transfer._thread = threading.Thread(target=transfer._run, daemon=True)
     receives = []
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
     monkeypatch.setattr(

@@ -1,18 +1,13 @@
 """EPLB 专家传输计划的异步生成器。"""
 
-import os
-import threading
 from typing import List, Optional
 
-from lightllm.utils.log_utils import init_logger
-
-from .expert_transfer import EPLBTransferInfo, build_transfer_plan
+from .async_task import EPLBAsyncTask
+from .async_expert_transfer import EPLBTransferInfo, build_transfer_plan
 from .placement import ExpertPlacement
 
-logger = init_logger(__name__)
 
-
-class EPLBTransferPlanner:
+class EPLBTransferPlanner(EPLBAsyncTask):
     """在后台线程中逐层生成并按 layer 顺序拼接专家传输批次。
 
     输入布局在规划期间保持只读。每层独立调用 ``build_transfer_plan``，因此
@@ -31,39 +26,20 @@ class EPLBTransferPlanner:
         self.target_placement = target_placement
         self.num_logical_experts = num_logical_experts
         self.world_size = world_size
-        self.status = "idle"
         self.result: Optional[List[List[EPLBTransferInfo]]] = None
-        self._thread = threading.Thread(
-            target=self._run,
-            name="eplb-transfer-plan",
-            daemon=True,
-        )
+        super().__init__(thread_name="eplb-transfer-plan")
 
-    def start(self) -> None:
-        """启动异步传输规划。"""
-        assert self.status == "idle", "EPLB transfer planner has already been started"
-        self.status = "running"
-        self._thread.start()
-
-    def is_finished(self) -> bool:
-        """返回全部层的传输批次是否已经生成。"""
-        return self.status == "succeeded"
-
-    def _run(self) -> None:
-        try:
-            transfer_batches: List[List[EPLBTransferInfo]] = []
-            layer_placements = zip(self.current_placement, self.target_placement)
-            for layer_index, (current_layer, target_layer) in enumerate(layer_placements):
-                layer_transfer_batches = build_transfer_plan(
-                    current_layer,
-                    target_layer,
-                    layer_index,
-                    self.num_logical_experts,
-                    self.world_size,
-                )
-                transfer_batches.extend(layer_transfer_batches)
-            self.result = transfer_batches
-            self.status = "succeeded"
-        except BaseException:
-            logger.exception("EPLB transfer planning failed")
-            os._exit(1)
+    def execute(self) -> None:
+        """逐层生成传输批次，并按 layer 顺序保存完整结果。"""
+        transfer_batches: List[List[EPLBTransferInfo]] = []
+        layer_placements = zip(self.current_placement, self.target_placement)
+        for layer_index, (current_layer, target_layer) in enumerate(layer_placements):
+            layer_transfer_batches = build_transfer_plan(
+                current_layer,
+                target_layer,
+                layer_index,
+                self.num_logical_experts,
+                self.world_size,
+            )
+            transfer_batches.extend(layer_transfer_batches)
+        self.result = transfer_batches

@@ -11,10 +11,9 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from lightllm.server.router.model_infer.mode_backend.eplb.expert_transfer import (
+from lightllm.server.router.model_infer.mode_backend.eplb.async_expert_transfer import (
     EPLBTransferInfo,
     PinnedMemoryEPLBTransfer,
-    TransferStatus,
     build_transfer_plan,
 )
 
@@ -82,7 +81,7 @@ def _free_port():
 def _wait_for_transfer(transfer, control_group):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        ready_count = torch.tensor([int(transfer.status is TransferStatus.SUCCEEDED)], dtype=torch.int32)
+        ready_count = torch.tensor([int(transfer.is_finished())], dtype=torch.int32)
         dist.all_reduce(ready_count, op=dist.ReduceOp.MIN, group=control_group)
         if int(ready_count.item()) == 1:
             return
@@ -94,7 +93,7 @@ def _wait_for_all_transfers(transfers, control_group):
     """等待每个 rank 参与的全部并发传输完成。"""
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
-        local_finished = all(transfer.status is TransferStatus.SUCCEEDED for transfer in transfers)
+        local_finished = all(transfer.is_finished() for transfer in transfers)
         globally_finished = torch.tensor([int(local_finished)], dtype=torch.int32)
         dist.all_reduce(globally_finished, op=dist.ReduceOp.MIN, group=control_group)
         if int(globally_finished.item()) == 1:
