@@ -4,7 +4,6 @@ import os
 import threading
 import zlib
 from dataclasses import dataclass
-from enum import Enum
 from typing import List, Sequence
 
 import torch
@@ -44,14 +43,6 @@ class EPLBTransferInfo:
     dest_local_expert_index: int
 
 
-class TransferStatus(Enum):
-    """异步传输线程的生命周期状态。"""
-
-    IDLE = "idle"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-
-
 class PinnedMemoryEPLBTransfer:
     """在后台线程中传输一个逻辑专家的全部权重张量。
 
@@ -63,8 +54,8 @@ class PinnedMemoryEPLBTransfer:
     网络通信。其他 rank 不分配 pinned row，也不参与该专家的数据传输。
 
     本类只负责异步传输，不修改 live 权重，也不更新路由 metadata。传输成功后，
-    ``status`` 会变为 :attr:`TransferStatus.SUCCEEDED`，收到的数据保存在
-    ``tensor_buffers``。EPLBManager 在主循环的安全边界同步提交这些数据。
+    ``status`` 会变为 ``"succeeded"``，收到的数据保存在 ``tensor_buffers``。
+    EPLBManager 在主循环的安全边界同步提交这些数据。
 
     每个对象只表示构造函数中 ``transfer_info`` 指定的一次传输。源 rank 直接
     读取 ``source_local_expert_index`` 指定的物理行；目标物理槽位不属于传输
@@ -111,7 +102,7 @@ class PinnedMemoryEPLBTransfer:
                 )
         self._device_to_host_stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
 
-        self.status: TransferStatus = TransferStatus.IDLE
+        self.status = "idle"
         self._transfer_thread: threading.Thread = threading.Thread(
             target=self._run_transfer,
             name=f"eplb-transfer-layer-{transfer_info.layer_index}-expert-{transfer_info.source_logical_expert_id}",
@@ -120,13 +111,13 @@ class PinnedMemoryEPLBTransfer:
 
     def start(self) -> None:
         """启动构造函数中 transfer_info 描述的异步传输。"""
-        assert self.status is TransferStatus.IDLE, "EPLB transfer has already been started"
-        self.status = TransferStatus.RUNNING
+        assert self.status == "idle", "EPLB transfer has already been started"
+        self.status = "running"
         self._transfer_thread.start()
 
     def is_finished(self) -> bool:
         """返回后台传输是否已经成功完成。"""
-        return self.status is TransferStatus.SUCCEEDED
+        return self.status == "succeeded"
 
     def _run_transfer(self) -> None:
         """把指定专家的全部权重行传输到各 rank 的 pinned memory。"""
@@ -162,7 +153,7 @@ class PinnedMemoryEPLBTransfer:
                             group=self._p2p_group,
                             tag=message_tag,
                         )
-            self.status = TransferStatus.SUCCEEDED
+            self.status = "succeeded"
         except BaseException:
             logger.exception("EPLB transfer failed")
             os._exit(1)

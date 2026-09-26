@@ -2,7 +2,6 @@
 
 import os
 import threading
-from enum import Enum
 from typing import Optional
 
 import torch
@@ -12,14 +11,6 @@ from lightllm.utils.log_utils import init_logger
 from .placement import EPLBPlanner, ExpertPlacement
 
 logger = init_logger(__name__)
-
-
-class PlanTaskStatus(Enum):
-    """异步规划任务的生命周期状态。"""
-
-    IDLE = "idle"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
 
 
 class EPLBPlanTask:
@@ -34,7 +25,7 @@ class EPLBPlanTask:
         self.planner = planner
         self.global_load = global_load
         self.current_placement = current_placement
-        self.status = PlanTaskStatus.IDLE
+        self.status = "idle"
         self.result: Optional[ExpertPlacement] = None
         self._thread = threading.Thread(
             target=self._run,
@@ -44,13 +35,13 @@ class EPLBPlanTask:
 
     def start(self) -> None:
         """启动异步规划。"""
-        assert self.status is PlanTaskStatus.IDLE, "EPLB plan task has already been started"
-        self.status = PlanTaskStatus.RUNNING
+        assert self.status == "idle", "EPLB plan task has already been started"
+        self.status = "running"
         self._thread.start()
 
     def is_finished(self) -> bool:
         """返回规划任务是否已经成功完成。"""
-        return self.status is PlanTaskStatus.SUCCEEDED
+        return self.status == "succeeded"
 
     def _run(self) -> None:
         try:
@@ -58,7 +49,7 @@ class EPLBPlanTask:
                 self.global_load.tolist(),
                 self.current_placement,
             )
-            self.status = PlanTaskStatus.SUCCEEDED
+            self.status = "succeeded"
         except BaseException:
             logger.exception("EPLB planning failed")
             os._exit(1)

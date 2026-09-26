@@ -48,7 +48,6 @@ from lightllm.server.router.model_infer.mode_backend.eplb.expert_transfer import
     EPLBTransferInfo,
     ExpertTensorBuffer,
     PinnedMemoryEPLBTransfer,
-    TransferStatus,
     build_transfer_plan,
 )
 
@@ -828,7 +827,7 @@ def test_manager_delegates_distribution_planning_to_planner_class():
 
     task._run()
 
-    assert task.status is plan_module.PlanTaskStatus.SUCCEEDED
+    assert task.status == "succeeded"
     assert task.result == planned_placement
     assert len(calls) == 1
     assert calls[0][0] == logical_load.tolist()
@@ -878,7 +877,7 @@ def test_transfer_planner_combines_all_layer_batches(monkeypatch):
 
     planner._run()
 
-    assert planner.status is transfer_planner_module.TransferPlanStatus.SUCCEEDED
+    assert planner.status == "succeeded"
     assert planner.result == [[transfer_infos[0]], [transfer_infos[1]]]
     assert calls == [
         (current_placement[0], target_placement[0], 0, 4, 2),
@@ -1902,7 +1901,7 @@ def test_manager_transfer_task_commit_orders_live_weights_between_overlap_forwar
         def __init__(self, live, received, transfer_info):
             self.tensor_buffers = [ExpertTensorBuffer("weight", live, received)]
             self.transfer_info = transfer_info
-            self.status = TransferStatus.SUCCEEDED
+            self.status = "succeeded"
 
         def is_finished(self):
             return True
@@ -2318,7 +2317,7 @@ def test_pinned_transfer_copies_source_row_and_sends_to_destination(monkeypatch)
             torch.empty(2),
         )
     ]
-    transfer.status = TransferStatus.RUNNING
+    transfer.status = "running"
     sends = []
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
     monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: nullcontext())
@@ -2330,7 +2329,7 @@ def test_pinned_transfer_copies_source_row_and_sends_to_destination(monkeypatch)
 
     transfer._run_transfer()
 
-    assert transfer.status is TransferStatus.SUCCEEDED
+    assert transfer.status == "succeeded"
     assert len(sends) == 1
     assert torch.equal(sends[0][0], torch.tensor([3.0, 4.0]))
     expected_tag = transfer._build_p2p_message_tag("weight")
@@ -2358,7 +2357,7 @@ def test_pinned_transfer_skips_p2p_for_local_destination(monkeypatch):
             torch.empty(2),
         )
     ]
-    transfer.status = TransferStatus.RUNNING
+    transfer.status = "running"
     p2p_calls = []
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
     monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: nullcontext())
@@ -2386,7 +2385,7 @@ def test_pinned_transfer_exits_process_on_failure(monkeypatch):
             torch.empty(1),
         )
     ]
-    transfer.status = TransferStatus.RUNNING
+    transfer.status = "running"
     logged_messages = []
     exit_codes = []
 
@@ -2424,7 +2423,7 @@ def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
             torch.tensor([3.0]),
         )
     ]
-    transfer.status = TransferStatus.IDLE
+    transfer.status = "idle"
     transfer._transfer_thread = threading.Thread(target=transfer._run_transfer, daemon=True)
     receives = []
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
@@ -2437,9 +2436,9 @@ def test_pinned_transfer_is_single_use_and_exposes_pinned_rows(monkeypatch):
     assert not transfer.is_finished()
     transfer.start()
     deadline = time.monotonic() + 2
-    while transfer.status is TransferStatus.RUNNING and time.monotonic() < deadline:
+    while transfer.status == "running" and time.monotonic() < deadline:
         time.sleep(0.001)
-    assert transfer.status is TransferStatus.SUCCEEDED
+    assert transfer.status == "succeeded"
     assert transfer.is_finished()
     assert torch.equal(transfer.tensor_buffers[0].pinned_row, torch.tensor([3.0]))
     assert len(receives) == 1

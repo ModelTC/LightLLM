@@ -2,7 +2,6 @@
 
 import os
 import threading
-from enum import Enum
 from typing import List, Optional
 
 from lightllm.utils.log_utils import init_logger
@@ -11,14 +10,6 @@ from .expert_transfer import EPLBTransferInfo, build_transfer_plan
 from .placement import ExpertPlacement
 
 logger = init_logger(__name__)
-
-
-class TransferPlanStatus(Enum):
-    """异步传输规划器的生命周期状态。"""
-
-    IDLE = "idle"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
 
 
 class EPLBTransferPlanner:
@@ -40,7 +31,7 @@ class EPLBTransferPlanner:
         self.target_placement = target_placement
         self.num_logical_experts = num_logical_experts
         self.world_size = world_size
-        self.status = TransferPlanStatus.IDLE
+        self.status = "idle"
         self.result: Optional[List[List[EPLBTransferInfo]]] = None
         self._thread = threading.Thread(
             target=self._run,
@@ -50,13 +41,13 @@ class EPLBTransferPlanner:
 
     def start(self) -> None:
         """启动异步传输规划。"""
-        assert self.status is TransferPlanStatus.IDLE, "EPLB transfer planner has already been started"
-        self.status = TransferPlanStatus.RUNNING
+        assert self.status == "idle", "EPLB transfer planner has already been started"
+        self.status = "running"
         self._thread.start()
 
     def is_finished(self) -> bool:
         """返回全部层的传输批次是否已经生成。"""
-        return self.status is TransferPlanStatus.SUCCEEDED
+        return self.status == "succeeded"
 
     def _run(self) -> None:
         try:
@@ -72,7 +63,7 @@ class EPLBTransferPlanner:
                 )
                 transfer_batches.extend(layer_transfer_batches)
             self.result = transfer_batches
-            self.status = TransferPlanStatus.SUCCEEDED
+            self.status = "succeeded"
         except BaseException:
             logger.exception("EPLB transfer planning failed")
             os._exit(1)
