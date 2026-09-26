@@ -17,6 +17,7 @@ def rms_norm_kernel(
     eps: tl.constexpr,
     N_COLS: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    ROUND_NORM_BEFORE_WEIGHT: tl.constexpr,
 ):
     """Rms norm kernel."""
     prog_id = tl.program_id(0)
@@ -30,13 +31,21 @@ def rms_norm_kernel(
 
     var = tl.sum(xf * xf, 0) * float(1.0 / N_COLS)
     out = xf / tl.sqrt(var + eps)
+    if ROUND_NORM_BEFORE_WEIGHT:
+        out = out.to(x.dtype)
     out = (w * out).to(x.dtype)
 
     out_ptr = output + prog_id * out_row_stride
     tl.store(out_ptr + offsets * out_col_stride, out, mask=offsets < N_COLS)
 
 
-def rms_norm(hidden_states: Tensor, weight: Tensor, eps: float = 1e-5, use_custom_tensor_mananger: bool = False):
+def rms_norm(
+    hidden_states: Tensor,
+    weight: Tensor,
+    eps: float = 1e-5,
+    use_custom_tensor_mananger: bool = False,
+    round_norm_before_weight: bool = False,
+):
     """Rms norm."""
 
     assert hidden_states.is_contiguous(), "hidden_states must be contiguous"
@@ -73,10 +82,86 @@ def rms_norm(hidden_states: Tensor, weight: Tensor, eps: float = 1e-5, use_custo
         eps=eps,
         N_COLS=hidden_dim,
         BLOCK_N=BLOCK_N,
+        ROUND_NORM_BEFORE_WEIGHT=round_norm_before_weight,
         num_warps=4,
         num_stages=3,
     )
     return output.reshape(origin_shape)
+
+
+@triton.jit
+def qk_rms_norm_kernel(
+    input,
+    q_weight,
+    k_weight,
+    q_output,
+    k_output,
+    input_stride_token,
+    input_stride_qkv,
+    input_stride_head,
+    input_stride_dim,
+    output_stride_token,
+    output_stride_head,
+    output_stride_dim,
+    eps: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    token = tl.program_id(0)
+    head = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK_N)
+    mask = offsets < HEAD_DIM
+
+    input_offset = token * input_stride_token + head * input_stride_head + offsets * input_stride_dim
+    q = tl.load(input + input_offset, mask=mask, other=0.0).to(tl.float32)
+    k = tl.load(input + input_offset + input_stride_qkv, mask=mask, other=0.0).to(tl.float32)
+    q_rstd = tl.rsqrt(tl.sum(q * q, axis=0) / HEAD_DIM + eps)
+    k_rstd = tl.rsqrt(tl.sum(k * k, axis=0) / HEAD_DIM + eps)
+
+    # GLM rounds the normalized value to the input dtype before applying the weight.
+    q = (q * q_rstd).to(input.dtype.element_ty)
+    k = (k * k_rstd).to(input.dtype.element_ty)
+    q = q * tl.load(q_weight + offsets, mask=mask, other=0.0)
+    k = k * tl.load(k_weight + offsets, mask=mask, other=0.0)
+
+    output_offset = token * output_stride_token + head * output_stride_head + offsets * output_stride_dim
+    tl.store(q_output + output_offset, q, mask=mask)
+    tl.store(k_output + output_offset, k, mask=mask)
+
+
+def qk_rms_norm(input: Tensor, q_weight: Tensor, k_weight: Tensor, eps: float) -> tuple[Tensor, Tensor]:
+    """Normalize Q and K from a packed ``[tokens, 3, heads, head_dim]`` QKV tensor.
+
+    This avoids materializing the strided Q/K views before their per-head RMSNorm.
+    """
+
+    assert input.ndim == 4 and input.shape[1] == 3 and input.is_contiguous()
+    tokens, _, heads, head_dim = input.shape
+    assert q_weight.shape == k_weight.shape == (head_dim,)
+    q_output = torch.empty((tokens, heads, head_dim), dtype=input.dtype, device=input.device)
+    k_output = torch.empty_like(q_output)
+    input_stride_token, input_stride_qkv, input_stride_head, input_stride_dim = input.stride()
+    output_stride_token, output_stride_head, output_stride_dim = q_output.stride()
+    qk_rms_norm_kernel[(tokens, heads)](
+        input,
+        q_weight,
+        k_weight,
+        q_output,
+        k_output,
+        input_stride_token,
+        input_stride_qkv,
+        input_stride_head,
+        input_stride_dim,
+        output_stride_token,
+        output_stride_head,
+        output_stride_dim,
+        eps=eps,
+        HEAD_DIM=head_dim,
+        BLOCK_N=triton.next_power_of_2(head_dim),
+        num_warps=4,
+        num_stages=3,
+    )
+    return q_output, k_output
 
 
 def test():

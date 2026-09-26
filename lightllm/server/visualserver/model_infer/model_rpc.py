@@ -22,6 +22,7 @@ from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrain
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
 from lightllm.models.neo_chat_moe.neo_visual import NeoVisionTransformerPretrainedModel
+from lightllm.models.glm5_next.glm5_next_visual import Glm5NextVisionTransformer
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
@@ -80,6 +81,8 @@ class VisualModelRpcServer(rpyc.Service):
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
                 self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
+            elif self.model_type == "glm5_next":
+                self.model = Glm5NextVisionTransformer(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
                 self.model = (
                     Qwen2VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()

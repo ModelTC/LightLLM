@@ -90,6 +90,10 @@ def get_tokenizer(
 
         image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)
         tokenizer = Tarsier2Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
+    elif model_type == "glm5_next" and model_cfg.get("vision_config") is not None:
+        from ..models.glm5_next.tokenizer import Glm5NextTokenizer
+
+        tokenizer = Glm5NextTokenizer(tokenizer, model_cfg, tokenizer_name)
     elif model_type == "llava" or model_type == "internlmxcomposer2":
         from ..models.llava.model import LlavaTokenizer
 

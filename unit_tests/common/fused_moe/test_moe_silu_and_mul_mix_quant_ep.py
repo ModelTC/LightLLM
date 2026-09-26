@@ -108,5 +108,34 @@ def test_silu_and_mul_masked_skips_padded_tokens():
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("alpha,limit,add_one", [(1.0, 10.0, False), (1.702, 7.0, True)])
+def test_clamped_swiglu_quantization_matches_reference(dtype, alpha, limit, add_one):
+    torch.manual_seed(53)
+    x = (torch.randn(3, 5, 4096, device="cuda") * 16).to(dtype)
+    masked_m = torch.tensor([0, 2, 5], dtype=torch.int32, device="cuda")
+    out = torch.full((3, 5, 2048), 1.0, dtype=torch.float8_e4m3fn, device="cuda")
+    scales = torch.full((3, 5, 16), 7.0, dtype=torch.float32, device="cuda")
+
+    silu_and_mul_masked_post_quant_fwd(
+        x, out, scales, 128, masked_m, alpha=alpha, limit=limit, clamp_up_add_one=add_one
+    )
+
+    gate, up = x.float().chunk(2, dim=-1)
+    gate = gate.clamp(max=limit)
+    gate = (gate * torch.sigmoid(alpha * gate)).to(dtype).float()
+    activation = (gate * (up.clamp(-limit, limit) + int(add_one))).to(dtype).float()
+    groups = activation.reshape(3, 5, 16, 128)
+    expected_scales = groups.abs().amax(-1).clamp(min=1e-10) / 448
+    expected_q = (groups / expected_scales.unsqueeze(-1)).clamp(-448, 448).to(torch.float8_e4m3fn)
+    expected = (expected_q.float() * expected_scales.unsqueeze(-1)).reshape(3, 5, 2048)
+    actual = out.float() * scales.repeat_interleave(128, dim=-1)
+    for expert, count in enumerate(masked_m.tolist()):
+        torch.testing.assert_close(scales[expert, :count], expected_scales[expert, :count], atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(actual[expert, :count], expected[expert, :count], atol=0.05, rtol=0.02)
+        assert torch.all(out[expert, count:].float() == 1)
+        assert torch.all(scales[expert, count:] == 7)
+
+
 if __name__ == "__main__":
     pytest.main()
