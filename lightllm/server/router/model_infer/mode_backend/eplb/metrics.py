@@ -21,7 +21,7 @@ EXPERT_IMBALANCE_RATIO_METRICS = {
 }
 
 
-def logical_expert_imbalance_percentiles(*, expert_load: torch.Tensor) -> dict[int, float]:
+def logical_expert_imbalance_percentiles(expert_load: torch.Tensor) -> dict[int, float]:
     """统计各层 ``最热 logical expert / 本层平均负载`` 的分位数。"""
     assert expert_load.ndim == 2 and expert_load.numel() > 0
 
@@ -47,7 +47,7 @@ def logical_expert_imbalance_percentiles(*, expert_load: torch.Tensor) -> dict[i
     return dict(zip(percentiles, percentile_values.tolist()))
 
 
-def publish_expert_load_metrics(*, metric_client: MetricClient, expert_load: torch.Tensor) -> None:
+def publish_expert_load_metrics(metric_client: MetricClient, expert_load: torch.Tensor) -> None:
     """上报 logical expert 层间不均衡分位数。"""
     imbalance_percentiles = logical_expert_imbalance_percentiles(expert_load=expert_load)
     for percentile, metric_name in EXPERT_IMBALANCE_RATIO_METRICS.items():
@@ -58,7 +58,6 @@ def publish_expert_load_metrics(*, metric_client: MetricClient, expert_load: tor
 
 
 def compute_critical_overhead_ratio(
-    *,
     logical_expert_load: torch.Tensor,
     placement: ExpertPlacement,
     expert_alignment: int,
@@ -113,7 +112,6 @@ def compute_critical_overhead_ratio(
 
 
 def publish_rebalance_compute_metrics(
-    *,
     metric_client: MetricClient,
     sample_load: torch.Tensor,
     current_placement: ExpertPlacement,

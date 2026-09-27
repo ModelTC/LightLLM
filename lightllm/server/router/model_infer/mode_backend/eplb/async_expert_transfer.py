@@ -60,7 +60,6 @@ class PinnedMemoryEPLBTransfer(EPLBAsyncTask):
 
     def __init__(
         self,
-        *,
         weights: Sequence[FusedMoeWeight],
         transfer_group: dist.ProcessGroup,
         current_global_rank: int,

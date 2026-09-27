@@ -13,7 +13,6 @@ class EPLBLoadGatherTask(EPLBAsyncTask):
 
     def __init__(
         self,
-        *,
         local_load_samples: torch.Tensor,
         load_gather_group: dist.ProcessGroup,
     ) -> None:

@@ -133,7 +133,6 @@ class GreedyEPLBPlanner(EPLBPlanner):
         self,
         world_size: int,
         num_redundant_experts_per_rank: int,
-        *,
         expert_alignment: int = 1,
     ):
         if world_size <= 1:
@@ -148,7 +147,6 @@ class GreedyEPLBPlanner(EPLBPlanner):
 
     def plan(
         self,
-        *,
         logical_expert_load_samples: torch.Tensor,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:

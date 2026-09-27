@@ -156,13 +156,20 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         if self.num_redundant_experts_per_rank > 0:
+            # 延迟导入以避免 meta_weights -> server 的循环依赖。prefill 和
+            # decode 的分发策略统一由 EPLB 模块管理。
+            from lightllm.server.router.model_infer.mode_backend.eplb.eplb_utils import (
+                get_eplb_dispatch_mode,
+            )
+
+            dispatch_mode = get_eplb_dispatch_mode(is_prefill=is_prefill)
             topk_ids = eplb_repair_topk_ids(
                 logical_topk_ids=topk_ids,
                 logical_to_physical_map=self.logical_to_physical_map,
                 prefill_route_counter=self.prefill_route_counter,
                 prefill_route_sample_index=self.prefill_route_sample_index,
                 update_prefill_route_counter=self.recording and is_prefill is True,
-                mode="global_first",
+                mode=dispatch_mode,
             )
         return topk_weights, topk_ids
 

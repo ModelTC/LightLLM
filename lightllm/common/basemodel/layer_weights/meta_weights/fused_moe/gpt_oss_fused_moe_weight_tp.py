@@ -187,7 +187,6 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         self,
         blocks,
         scales,
-        *,
         dtype: torch.dtype = torch.bfloat16,
         rows_per_chunk: int = 32768 * 1024,
     ) -> torch.Tensor:

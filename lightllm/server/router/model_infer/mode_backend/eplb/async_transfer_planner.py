@@ -17,7 +17,6 @@ class EPLBTransferPlanner(EPLBAsyncTask):
 
     def __init__(
         self,
-        *,
         current_placement: ExpertPlacement,
         target_placement: ExpertPlacement,
         num_logical_experts: int,

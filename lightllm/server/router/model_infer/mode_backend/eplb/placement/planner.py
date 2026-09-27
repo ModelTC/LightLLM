@@ -13,7 +13,6 @@ class EPLBPlanner(ABC):
     @abstractmethod
     def plan(
         self,
-        *,
         logical_expert_load_samples: torch.Tensor,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:

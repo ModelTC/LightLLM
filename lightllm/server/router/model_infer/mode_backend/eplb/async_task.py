@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 class EPLBAsyncTask:
     """提供单次后台任务统一的启动、完成和失败处理。"""
 
-    def __init__(self, *, thread_name: str) -> None:
+    def __init__(self, thread_name: str) -> None:
         self.status = "idle"
         self._thread = threading.Thread(
             target=self._run,

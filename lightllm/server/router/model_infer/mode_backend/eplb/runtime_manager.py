@@ -148,6 +148,7 @@ class EPLBManager:
             self.world_size,
             self.num_redundant_experts_per_rank,
             expert_alignment=EPLB_EXPERT_ALIGNMENT,
+            node_world_size=self.node_world_size,
         )
 
         # 评估调度：steps 只在 COLLECTING 状态递增。prefill 路由样本从当前
@@ -177,9 +178,9 @@ class EPLBManager:
         self.control_group = dist.new_group(list(range(self.world_size)), backend="gloo")
         self.transfer_group = dist.new_group(list(range(self.world_size)), backend="gloo")
 
-        # 每层布局都保存完整的本地专家列表；完成初始化后，所有物理槽位
-        # 都可以由 EPLB 重新分配，不再区分固定主专家槽和冗余专家槽。
-        # 本 rank 的布局索引为 [layer][local_expert]。
+        # 每层布局都保存完整的本地专家列表，索引为
+        # [layer][local_expert]。greedy 可以重新分配全部物理槽；topology_aware
+        # 固定规范主专家前缀，只重新分配末尾的冗余槽。
         local_expert_ids_by_layer = [list(impl.local_logics_expert_ids_list) for impl in self._eplb_impls]
 
         # all_gather 后的布局索引为 [rank][layer][local_expert]。

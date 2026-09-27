@@ -776,10 +776,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--eplb_plan_mode",
         type=str,
-        choices=["greedy"],
+        choices=["greedy", "topology_aware"],
         default="greedy",
         help="""EPLB placement planning algorithm used by this inference process.
-            Prefill and decode processes may select their planner independently in PD deployments.""",
+            'greedy' may rearrange every physical expert slot; 'topology_aware' keeps canonical primary experts
+            fixed and plans redundant slots with source-node-local prefill dispatch. Prefill and decode processes
+            may select their planner independently in PD deployments.""",
     )
     parser.add_argument(
         "--eplb_rebalance_count",

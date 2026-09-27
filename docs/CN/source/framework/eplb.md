@@ -48,7 +48,7 @@ python -m lightllm.server.api_server \
 | --- | --- | --- |
 | `--enable_ep_moe` | 关闭 | 启用专家并行；EPLB 的前置条件 |
 | `--eplb_num_redundant_experts_per_rank` | `0` | 每个 rank 的额外物理专家槽位数；大于 0 时启用 EPLB |
-| `--eplb_plan_mode` | `greedy` | 选择动态布局规划算法；当前支持 `greedy` |
+| `--eplb_plan_mode` | `greedy` | 选择动态布局规划算法；支持 `greedy` 和 `topology_aware` |
 | `--eplb_rebalance_count` | `1` | 最多完成的动态重排次数；`-1` 表示不限次数，`0` 表示不动态重排 |
 | `--eplb_config_path` | `None` | 可选的布局加载与回写路径 |
 
@@ -93,6 +93,7 @@ prefill_route_counter（最近 24 次 prefill 采样）
 | `eplb/placement/planner.py` | 布局规划器抽象接口 |
 | `eplb/placement/factory.py` | 根据 `eplb_plan_mode` 创建具体规划器 |
 | `eplb/placement/greedy.py` | 默认的贪心布局算法 |
+| `eplb/placement/topology_aware.py` | 固定主专家、仅规划冗余槽位的拓扑感知算法 |
 | `eplb/async_task.py` | 统一后台线程任务的启动、完成与异常处理 |
 | `eplb/async_load_gather_task.py` | 在独立 Gloo 通信组中后台汇集逐 rank、逐 sample 的原始负载 |
 | `eplb/async_placement_plan_task.py` | 在后台根据负载生成目标专家布局 |
@@ -113,7 +114,9 @@ rank 2: [4, 5, 6, 7]
 rank 3: [6, 7, 0, 1]
 ```
 
-每行前两个槽位来自原始连续划分，后两个槽位是启动时已经加载完成的冗余副本。运行期允许重新分配所有物理槽位，不再区分不可移动的“主槽位”和只能替换的“冗余槽位”。
+每行前两个槽位来自原始连续划分，后两个槽位是启动时已经加载完成的冗余副本。运行期的
+可移动范围由 planner 决定：`greedy` 可以重新分配全部物理槽位；`topology_aware` 固定
+前面的规范主专家槽，只替换末尾的冗余槽。
 
 ### 4.2 从历史布局启动
 
@@ -184,7 +187,9 @@ _select_experts
 | `current_node_first` | 本节点存在副本时在节点内选择，否则回退到全局副本 |
 | `global_first` | 直接在全局全部有效副本间选择 |
 
-当前 DeepGEMM EPLB 路径使用 `global_first`。未来如果要支持“本卡 -> 本节点 -> 全局”的三级回退，需要布局规划算法同时具备节点拓扑感知能力。
+DeepGEMM 的 decode 路径使用 `current_gpu_first`。prefill 路径与 planner 的负载模型保持一致：
+`greedy` 使用 `global_first`，`topology_aware` 使用 `current_node_first`。当前不实现
+“本卡 -> 本节点 -> 全局”的三级回退。
 
 ### 5.4 副本哈希
 
@@ -354,9 +359,10 @@ rank 的 `[layer, sample, logical_expert]` 原始快照，并在通信完成后�
 3. **隔离关键路径**：all-gather 在后台线程和专用 Gloo 通信组中运行，主推理线程只在
    `WAIT_LOAD_GATHER_FINISHED` 状态轮询完成标记，不会被大块负载通信直接阻塞。
 
-planner 接口直接接收 `[rank, layer, sample, logical_expert]` CPU Tensor。当前 Greedy
-实现进入算法主体前沿 rank 和 sample 维求和为 `[layer, logical_expert]`，再转换成嵌套
-list；因此原始维度在 planner 边界仍然可用，而后续贪心逻辑保持简单的纯 Python 实现。
+planner 接口直接接收 `[rank, layer, sample, logical_expert]` CPU Tensor。Greedy 实现进入
+算法主体前沿 rank 和 sample 维求和为 `[layer, logical_expert]`，再转换成嵌套 list；
+Topology-Aware planner 保留 sample 维，并且只聚合同一源节点内的 rank，以匹配逐批次对齐
+和节点本地优先的执行模型。
 
 ## 8. 布局规划
 
@@ -369,7 +375,10 @@ logical_expert_load_samples: CPU Tensor[rank, layer, sample, logical_expert]
 [layer][rank][local physical slot] -> logical expert ID
 ```
 
-`--eplb_plan_mode` 只负责选择布局算法。`create_eplb_planner` 将字符串模式转换成具体实例，使状态机不依赖某个算法类。当前唯一模式为 `greedy`。
+`create_eplb_planner` 将 `--eplb_plan_mode` 转换成具体实例，使状态机不依赖某个算法类。目前支持：
+
+- `greedy`：规划完整物理布局，prefill 在全局全部副本间分发 token；
+- `topology_aware`：固定规范主专家，只规划冗余槽位，prefill 优先使用源节点内的副本。
 
 规划只在 rank 0 的后台线程执行。完成后，目标布局通过控制通信组广播给所有 rank。相同输入必须产生确定结果，便于所有 rank 生成一致的传输计划。
 
@@ -384,6 +393,26 @@ logical_expert_load_samples: CPU Tensor[rank, layer, sample, logical_expert]
 5. **复用当前布局**：先把候选 rank 行匹配到共同专家最多的当前 rank，再让共同专家尽量保留原物理槽位，以减少跨 rank 传输和 rank 内覆盖。
 
 规划负载按 128 token 对齐，降低很小的计数波动对布局的影响。专家 ID 和 rank ID 用作稳定的平局规则，因此结果是确定性的。
+
+### 8.3 Topology-Aware 规划算法
+
+Topology-Aware 模式以源节点拓扑和关键 rank 计算量为规划目标。每个 rank 的前
+`num_logical_experts / world_size` 个主专家槽保持不变，算法只填写末尾的冗余槽位，因此
+单次规划最多改变 `layer × rank × redundant_slots_per_rank` 个槽位。主要过程如下：
+
+1. 将输入从 `[rank, layer, sample, expert]` 聚合为
+   `[sample, layer, source_node, expert]`，保留每次 prefill 样本和流量来源节点；
+2. 对每个候选布局模拟节点本地优先分发：源节点存在副本时只在节点内副本间均分，否则
+   回退到全局副本；每个 sample 的物理专家负载分别按 128 token 向上对齐；
+3. 各层独立规划：每轮选择一个仍有空槽的低负载 rank，再同时比较该层的所有合法
+   expert，选择能让各 sample 的关键 rank 计算量之和最小的副本；
+4. 候选布局必须让每个被替换层的关键负载下降，并且模型级预计收益至少达到 5%，否则
+   保留当前布局；最终把仍在同一 rank 的副本复用到原物理槽位。
+
+该模式要求规范主槽布局。如果从 `greedy` 生成的全槽布局或旧配置切换到
+`topology_aware`，第一次规划会恢复规范主专家前缀，并重新生成冗余槽位；由于旧布局不满足
+固定主专家假设，这一次无法与旧布局比较收益，也无法复用旧冗余槽位。后续规划只会修改
+冗余槽位，并应用 5% 收益门槛。
 
 ## 9. 权重迁移与安全提交
 
@@ -471,7 +500,7 @@ lightllm_prefill_ep_compute_critical_overhead_ratio_before_rebalance
 lightllm_prefill_ep_compute_critical_overhead_ratio_after_rebalance
 ```
 
-这两个指标参考 `eplb2` 的关键路径计算开销定义，但不维护独立的 compute counter、后台 monitor 线程和额外通信组。manager 假设同一 logical expert 的流量由 hash 均匀分配给全部 physical 副本，并按 128 token 对每个副本的估算负载向上对齐。`before_rebalance` 使用当前布局，`after_rebalance` 使用 planner 给出的目标布局；二者的输入负载完全相同，可以直接衡量预计的重排收益。不会沿 sample 维累加，因为不同 sample 行来自不同 prefill 批次，累加后并不对应任何一次真实计算。如果 planner 判断布局无需改变，两个值应相同。
+这两个指标采用关键路径计算开销定义，但不维护独立的 compute counter、后台 monitor 线程和额外通信组。manager 假设同一 logical expert 的流量由 hash 均匀分配给全部 physical 副本，并按 128 token 对每个副本的估算负载向上对齐。`before_rebalance` 使用当前布局，`after_rebalance` 使用 planner 给出的目标布局；二者的输入负载完全相同，可以直接衡量预计的重排收益。不会沿 sample 维累加，因为不同 sample 行来自不同 prefill 批次，累加后并不对应任何一次真实计算。如果 planner 判断布局无需改变，两个值应相同。
 
 每层先计算最繁忙 rank 相对平均 rank 的额外负载，最后跨层汇总：
 
@@ -544,3 +573,69 @@ EPLB 单元测试主要位于 `unit_tests/common/fused_moe/test_eplb.py`，覆�
 - token index `0..4096`、expert ID `0..255`，以及 `2、3、4、5、101、127、128、251` 个副本时的哈希分布。
 
 多 GPU pinned-memory 传输测试位于 `unit_tests/common/fused_moe/test_eplb_transfer_gpu.py`。
+
+## 附录 A：Topology-Aware planner 的设计取舍
+
+### A.1 删除 placement stickiness
+
+早期实现提供了 `placement_stickiness` 参数：当候选 expert 已经位于目标 rank 时，从该
+候选的关键负载目标值中减去“本层平均 expert 负载 × stickiness 比例”。默认比例为 0.1，
+目的是让规划器在收益相近时倾向保留当前 rank membership，减少布局抖动和权重迁移。
+
+该机制最终被删除，主要原因如下：
+
+1. **候选生成与迁移决策相互混合。** stickiness 会直接修改负载目标，使 planner 选出的
+   不再是当前负载模型下关键路径最短的布局；参数越大，这种偏离越明显。
+2. **与收益门槛职责重叠。** planner 已经要求候选逐层严格改善，并要求整个模型的预计收益
+   至少达到 5%。这套门槛可以直接过滤无收益或低收益迁移，无须再次在目标函数中加入经验
+   偏置。
+3. **固定比例难以跨模型解释。** 0.1 依赖层平均 expert 负载，却没有直接对应“减少多少关键
+   路径计算”或“节省多少迁移开销”；合适取值还会随模型、拓扑、采样窗口和流量分布变化。
+4. **物理槽位已经单独复用。** 候选通过收益检查后，仍位于同一 rank 的冗余副本会优先保留
+   原物理槽位，因此不会因为候选顺序变化产生无意义的 rank 内覆盖。
+
+删除后，规划流程的职责边界更清晰：候选生成只负责最小化逐 sample 的关键 rank 计算量；
+逐层严格改善和模型级 5% 收益门槛决定是否采用候选；最后的槽位复用负责降低实际传输量。
+这样负载目标保持可解释，控制迁移敏感度时也只需要调整一个收益门槛。
+
+如果后续在持续重排场景中观察到采样噪声导致布局反复切换，更合适的处理位置是决策层，
+例如延长采样窗口、提高收益门槛、增加重排最小间隔或引入显式滞回，而不是再次用旧布局
+偏置候选负载目标。
+
+### A.2 选择逐层规划
+
+候选布局生成曾使用跨层向量化：每一轮同时为全部 MoE 层选择目标 rank 和冗余 expert。
+这种实现能够让 PyTorch 在 layer 维并行，但需要在一个函数中同时维护多层索引、合法候选
+mask 和增量负载，核心 tensor 的 shape 也达到
+`[sample, layer, candidate_expert, rank]`。由于各层之间没有共享的候选状态，这些跨层索引
+并不是算法本身的必要部分。
+
+重构前使用 256 个 logical expert、24 个 sample、每 rank 2 个冗余槽位和 128-token
+alignment，对跨层向量化和专用逐层原型进行了逐元素结果对照与性能测试。测试机器有
+192 个 CPU 核，PyTorch 默认使用 96 个 CPU 线程；下表为完整 `plan()` 三次运行的中位数：
+
+| MoE 层数 | Rank 数 | 跨层向量化 | 逐层规划 | 逐层 / 向量化 |
+|---:|---:|---:|---:|---:|
+| 8 | 8 | 25.77 ms | 59.26 ms | 2.30× |
+| 32 | 8 | 64.42 ms | 230.62 ms | 3.58× |
+| 32 | 16 | 161.56 ms | 1717.39 ms | 10.63× |
+
+逐层实现变慢的主要原因不是计算量增加，而是无法再沿 layer 维执行大型并行算子，并且需要
+执行更多小型 PyTorch 操作。单线程测试中，32 层、8 rank 的逐层原型反而比跨层向量化快
+约 16%，也验证了多线程并行和算子调度是主要差异来源。16 rank 下每层需要依次填充更多
+冗余槽位，因此逐层调用开销更加明显。
+
+最终仍选择逐层规划，原因如下：
+
+1. **代码与算法边界一致。** 每层只维护 `[expert, rank]`、
+   `[sample, expert, rank]` 和 `[sample, rank]` 三类状态，不再使用容易误读的跨层高级索引。
+2. **降低候选临时内存。** 最大临时 tensor 不再包含 layer 维。以 32 层、16 rank 为例，
+   单个 float64 候选 tensor 从约 24 MiB 降到约 0.75 MiB。
+3. **规划位于异步低频路径。** placement 在后台线程中生成，不处于每个 token 的推理热路径；
+   相比缩短一次后台规划时间，可维护性和峰值内存更重要。
+4. **保留单层内部向量化。** `_plan_one_layer()` 仍然一次比较该层全部 logical expert，
+   没有退化成逐 expert 的 Python 循环；节点—rank 拓扑 mask 也只在多层规划前构造一次。
+
+该选择明确接受了多线程 CPU 下更长的规划时间。如果后续部署需要高频重排，特别是 16 rank
+及以上拓扑，可以在不改变单层算法的前提下增加小批量 layer 调度，或针对后台 planner
+单独优化并行执行；不应重新把多层状态揉进单层候选逻辑中。

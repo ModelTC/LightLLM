@@ -7,7 +7,6 @@ from .deepgemm_impl import FuseMoeDeepGEMM
 
 
 def create_fuse_moe_impl(
-    *,
     n_routed_experts: int,
     num_fused_shared_experts: int,
     routed_scaling_factor: float,

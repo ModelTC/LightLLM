@@ -9,6 +9,7 @@ import torch
 from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
     EPLBPlanner,
     GreedyEPLBPlanner,
+    TopologyAwareEPLBPlanner,
     build_initial_local_expert_ids,
     build_logical_to_physical_map,
     create_eplb_planner,
@@ -24,6 +25,7 @@ from lightllm.server.router.model_infer.mode_backend.eplb import (
     async_load_gather_task as load_gather_module,
 )
 from lightllm.server.router.model_infer.mode_backend.eplb import metrics as eplb_metrics
+from lightllm.server.router.model_infer.mode_backend.eplb import eplb_utils as eplb_utils_module
 from lightllm.server.router.model_infer.mode_backend.eplb import (
     async_placement_plan_task as plan_module,
 )
@@ -57,7 +59,6 @@ from lightllm.server.router.model_infer.mode_backend.eplb.async_expert_transfer 
 
 
 def _test_moe_impl(
-    *,
     eplb=False,
     num_logical_experts=128,
     world_size=16,
@@ -284,6 +285,7 @@ def test_eplb_redundant_experts_default_to_disabled():
     assert StartArgs().eplb_num_redundant_experts_per_rank == 0
     assert parser.parse_args([]).eplb_plan_mode == "greedy"
     assert parser.parse_args(["--eplb_plan_mode", "greedy"]).eplb_plan_mode == "greedy"
+    assert parser.parse_args(["--eplb_plan_mode", "topology_aware"]).eplb_plan_mode == "topology_aware"
     assert StartArgs().eplb_plan_mode == "greedy"
     assert parser.parse_args([]).eplb_rebalance_count == 1
     assert parser.parse_args(["--eplb_rebalance_count", "-1"]).eplb_rebalance_count == -1
@@ -326,6 +328,10 @@ def test_eplb_planner_defines_an_abstract_planning_interface():
         EPLBPlanner()
 
     assert isinstance(GreedyEPLBPlanner(2, 1), EPLBPlanner)
+    assert isinstance(
+        TopologyAwareEPLBPlanner(2, 1, node_world_size=2),
+        EPLBPlanner,
+    )
 
 
 def test_create_eplb_planner_selects_requested_algorithm():
@@ -334,17 +340,165 @@ def test_create_eplb_planner_selects_requested_algorithm():
         2,
         1,
         expert_alignment=1,
+        node_world_size=2,
     )
 
     assert isinstance(planner, GreedyEPLBPlanner)
 
-    with pytest.raises(ValueError, match="unsupported EPLB plan mode"):
+    planner = create_eplb_planner(
+        "topology_aware",
+        4,
+        1,
+        expert_alignment=128,
+        node_world_size=2,
+    )
+
+    assert isinstance(planner, TopologyAwareEPLBPlanner)
+    assert planner.node_world_size == 2
+
+    with pytest.raises(AssertionError):
         create_eplb_planner(
             "unknown",
             2,
             1,
             expert_alignment=1,
+            node_world_size=2,
         )
+
+
+def test_topology_aware_planner_minimizes_samplewise_aligned_critical_load():
+    planner = TopologyAwareEPLBPlanner(
+        2,
+        1,
+        node_world_size=2,
+        expert_alignment=128,
+        rebalance_gain_threshold=0.0,
+    )
+    load = torch.zeros((2, 1, 2, 4), dtype=torch.int64)
+    load[0, 0] = torch.tensor(
+        [
+            [300, 20, 20, 200],
+            [100, 300, 40, 160],
+        ]
+    )
+    current = [[[0, 1, 2], [2, 3, 0]]]
+
+    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+
+    assert result == [[[0, 1, 3], [2, 3, 0]]]
+
+
+def test_topology_aware_planner_keeps_primary_slots_and_builds_legal_redundant_rows():
+    planner = TopologyAwareEPLBPlanner(
+        4,
+        2,
+        node_world_size=4,
+        expert_alignment=128,
+        rebalance_gain_threshold=0.0,
+    )
+    current = _initial_expert_placement(8, 4, 2).unsqueeze(0).tolist()
+    load = torch.ones((4, 1, 2, 8), dtype=torch.int64)
+    load[:, :, :, 0] = 1000
+    load[:, :, :, 4] = 500
+
+    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+
+    for rank, rank_placement in enumerate(result[0]):
+        primary_experts = list(range(rank * 2, (rank + 1) * 2))
+        redundant_experts = rank_placement[2:]
+        assert rank_placement[:2] == primary_experts
+        assert len(rank_placement) == len(set(rank_placement))
+        assert all(expert_id // 2 != rank for expert_id in redundant_experts)
+    placed_experts = {expert_id for rank_placement in result[0] for expert_id in rank_placement}
+    assert placed_experts == set(range(8))
+
+
+def test_topology_aware_planner_prefers_replica_on_the_request_source_node():
+    planner = TopologyAwareEPLBPlanner(
+        4,
+        1,
+        expert_alignment=128,
+        node_world_size=2,
+        rebalance_gain_threshold=0.0,
+    )
+    load = torch.zeros((4, 1, 1, 8), dtype=torch.int64)
+    load[0, 0, 0, 0] = 1024
+    current = _initial_expert_placement(8, 4, 1).unsqueeze(0).tolist()
+
+    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+
+    # Expert 0 is owned by rank 0. Rank 1 is the only other rank on source
+    # node 0, so a local-first plan puts its redundant copy there.
+    assert result[0][1][-1] == 0
+
+
+def test_topology_aware_planner_plans_each_layer_independently():
+    planner = TopologyAwareEPLBPlanner(
+        4,
+        2,
+        node_world_size=2,
+        rebalance_gain_threshold=0.0,
+    )
+    generator = torch.Generator().manual_seed(17)
+    load = torch.randint(0, 1000, (4, 3, 4, 16), generator=generator)
+    current = _initial_expert_placement(16, 4, 2).unsqueeze(0).repeat(3, 1, 1).tolist()
+
+    combined_result = planner.plan(
+        logical_expert_load_samples=load,
+        current_placement=current,
+    )
+    layer_results = [
+        planner.plan(
+            logical_expert_load_samples=load[:, layer_index : layer_index + 1],
+            current_placement=[current[layer_index]],
+        )[0]
+        for layer_index in range(load.shape[1])
+    ]
+
+    assert combined_result == layer_results
+
+
+def test_topology_aware_planner_reuses_unchanged_layout_and_physical_slots():
+    generator = torch.Generator().manual_seed(7)
+    load = torch.randint(1, 1000, (4, 3, 2, 16), generator=generator)
+    initial = _initial_expert_placement(16, 4, 2).unsqueeze(0).repeat(3, 1, 1).tolist()
+    candidate_planner = TopologyAwareEPLBPlanner(
+        4,
+        2,
+        node_world_size=4,
+        rebalance_gain_threshold=0.0,
+    )
+    current = candidate_planner.plan(
+        logical_expert_load_samples=load,
+        current_placement=initial,
+    )
+    default_planner = TopologyAwareEPLBPlanner(4, 2, node_world_size=4)
+
+    result = default_planner.plan(
+        logical_expert_load_samples=load,
+        current_placement=current,
+    )
+
+    assert result == current
+
+
+def test_topology_aware_planner_restores_canonical_primaries_from_full_slot_layout():
+    planner = TopologyAwareEPLBPlanner(
+        2,
+        1,
+        node_world_size=2,
+        rebalance_gain_threshold=0.0,
+    )
+    load = torch.tensor([[[[100, 90, 80, 70]]], [[[60, 50, 40, 30]]]])
+    full_slot_layout = [[[0, 2, 3], [1, 3, 0]]]
+
+    result = planner.plan(
+        logical_expert_load_samples=load,
+        current_placement=full_slot_layout,
+    )
+
+    assert result[0][0][:2] == [0, 1]
+    assert result[0][1][:2] == [2, 3]
 
 
 def test_eplb_planner_builds_legal_concrete_slot_layout():
@@ -919,13 +1073,13 @@ def test_load_gather_task_preserves_rank_layer_and_sample_dimensions(monkeypatch
     load_gather_group = object()
     calls = []
 
-    def all_gather(output, local, *, group):
+    def all_gather(output, local, group):
         calls.append((local, group))
         output[0].copy_(local)
         output[1].copy_(local + 100)
 
     monkeypatch.setattr(load_gather_module.dist, "all_gather", all_gather)
-    monkeypatch.setattr(load_gather_module.dist, "get_world_size", lambda *, group: 2)
+    monkeypatch.setattr(load_gather_module.dist, "get_world_size", lambda group: 2)
     task = load_gather_module.EPLBLoadGatherTask(
         local_load_samples=local_load,
         load_gather_group=load_gather_group,
@@ -1194,6 +1348,42 @@ def test_eplb_prefill_route_counter_has_24_samples_per_logical_expert(monkeypatc
     assert impl.prefill_route_counter.shape == (24, 4)
     assert impl.prefill_route_sample_index.shape == (2,)
     assert torch.equal(impl.prefill_route_sample_index, torch.zeros(2, dtype=torch.int64))
+    assert not hasattr(impl, "eplb_dispatch_mode")
+
+
+@pytest.mark.parametrize(
+    ("plan_mode", "dispatch_mode"),
+    [
+        ("greedy", "global_first"),
+        ("topology_aware", "current_node_first"),
+    ],
+)
+def test_prefill_dispatch_mode_matches_planner_load_model(monkeypatch, plan_mode, dispatch_mode):
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode=plan_mode),
+    )
+    assert eplb_utils_module.get_eplb_dispatch_mode(is_prefill=True) == dispatch_mode
+
+
+def test_prefill_dispatch_mode_rejects_unknown_planner(monkeypatch):
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode="unknown"),
+    )
+    with pytest.raises(AssertionError, match="unsupported EPLB plan mode"):
+        eplb_utils_module.get_eplb_dispatch_mode(is_prefill=True)
+
+
+def test_decode_dispatch_mode_prefers_current_gpu(monkeypatch):
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: pytest.fail("decode must not read the prefill planner mode"),
+    )
+    assert eplb_utils_module.get_eplb_dispatch_mode(is_prefill=False) == "current_gpu_first"
 
 
 def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
@@ -1373,6 +1563,11 @@ def test_eplb_prefill_repairs_ids_after_selection(monkeypatch):
         return physical_ids
 
     monkeypatch.setattr(deepgemm_module, "eplb_repair_topk_ids", repair)
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode="greedy"),
+    )
     monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
 
     weights, topk_idx, qinput = impl.select_experts_and_quant_input(
@@ -1428,6 +1623,11 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
         return physical_ids
 
     monkeypatch.setattr(deepgemm_module, "eplb_repair_topk_ids", repair)
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode="greedy"),
+    )
     monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
     monkeypatch.setattr(
@@ -1616,6 +1816,11 @@ def test_eplb_prepare_repairs_logical_ids(monkeypatch):
         return physical_ids
 
     monkeypatch.setattr(deepgemm_module, "eplb_repair_topk_ids", repair)
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode="greedy"),
+    )
     weights, selected = impl._prepare_expert_execution(torch.ones((1, 2)), logical_ids, is_prefill=True)
 
     assert weights.tolist() == [[1.0, 1.0]]
@@ -1623,6 +1828,29 @@ def test_eplb_prepare_repairs_logical_ids(monkeypatch):
     assert calls[0]["logical_topk_ids"] is logical_ids
     assert calls[0]["update_prefill_route_counter"]
     assert calls[0]["mode"] == "global_first"
+
+
+def test_topology_aware_prepare_uses_node_local_dispatch(monkeypatch):
+    impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    runtime = _test_moe_impl(eplb=True, recording=True)
+    _set_deepgemm_runtime(impl, runtime)
+    logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
+    calls = []
+
+    def repair(**kwargs):
+        calls.append(kwargs)
+        return logical_ids
+
+    monkeypatch.setattr(deepgemm_module, "eplb_repair_topk_ids", repair)
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode="topology_aware"),
+    )
+
+    impl._prepare_expert_execution(torch.ones((1, 2)), logical_ids, is_prefill=True)
+
+    assert calls[0]["mode"] == "current_node_first"
 
 
 def test_decode_masked_group_gemm_uses_all_physical_rows_when_eplb_is_enabled(
@@ -2761,6 +2989,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert "plan_mode=greedy" in logs[0]
     assert "planner=GreedyEPLBPlanner" in logs[0]
     assert weight.fuse_moe_impl.recording
+    assert not hasattr(weight.fuse_moe_impl, "eplb_dispatch_mode")
     assert manager._eplb_impls[0] is weight.fuse_moe_impl
 
 

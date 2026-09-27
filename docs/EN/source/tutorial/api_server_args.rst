@@ -745,15 +745,19 @@ Expert Parallelism and EPLB Parameters
 .. option:: --eplb_plan_mode
 
     Expert placement planning algorithm used for dynamic EPLB rebalances. The default is ``greedy``. The
-    currently supported value is:
+    supported values are:
 
     * ``greedy``: builds an approximately balanced full placement from the global logical-expert load of each
-      layer and attempts to reuse the current ranks and physical slots to reduce expert migration.
+      layer and attempts to reuse the current ranks and physical slots to reduce expert migration. Prefill tokens
+      are distributed across all valid replicas.
+    * ``topology_aware``: keeps the canonical primary slots fixed and plans only redundant slots. It retains
+      individual prefill samples and source-node load, estimates the critical path with node-local-first dispatch
+      and 128-token alignment, and uses a model-level gain threshold plus physical-slot reuse to avoid low-value
+      migrations. During prefill, replicas on the request's source node are preferred.
 
-    This option selects the placement planner; it does not change how tokens are dispatched among replicas in
-    an existing placement. Every rank in one EP communication group must use the same value. Prefill and decode
-    processes in a PD-disaggregated deployment have independent EPLB managers and may select planners suited to
-    their respective traffic. A non-PD process uses one planner for all routing load collected by that process.
+    Every rank in one EP communication group must use the same value. Prefill and decode processes in a
+    PD-disaggregated deployment have independent EPLB managers and may select planners suited to their respective
+    traffic. A non-PD process uses one planner for all routing load collected by that process.
 
 .. option:: --eplb_rebalance_count
 

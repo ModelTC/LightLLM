@@ -1,8 +1,10 @@
-"""EPLB 专家权重提取工具。"""
+"""EPLB 公共工具。"""
 
 from typing import List, Optional, Protocol, Tuple
 
 import torch
+
+from lightllm.utils.envs_utils import get_env_start_args
 
 NamedTensor = Tuple[str, torch.Tensor]
 
@@ -20,6 +22,29 @@ class EPLBExpertWeight(Protocol):
 
     w13: ExpertWeightPack
     w2: ExpertWeightPack
+
+
+def get_eplb_dispatch_mode(is_prefill: bool) -> str:
+    """根据推理阶段和布局算法返回 EPLB 副本分发模式。
+
+    Decode 当前固定优先使用本卡副本。Prefill 的分发策略必须与 planner 的
+    负载模型一致：``topology_aware`` 优先使用当前节点的副本，``greedy``
+    直接在全部有效副本之间分发。
+    """
+    assert is_prefill is not None
+    if not is_prefill:
+        return "current_gpu_first"
+
+    plan_mode = get_env_start_args().eplb_plan_mode
+    assert plan_mode in (
+        "greedy",
+        "topology_aware",
+    ), f"unsupported EPLB plan mode: {plan_mode}"
+
+    if plan_mode == "topology_aware":
+        return "current_node_first"
+    else:
+        return "global_first"
 
 
 def extract_eplb_expert_tensors(weight: EPLBExpertWeight) -> List[NamedTensor]:

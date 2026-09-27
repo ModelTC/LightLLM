@@ -13,7 +13,6 @@ class EPLBPlanTask(EPLBAsyncTask):
 
     def __init__(
         self,
-        *,
         planner: EPLBPlanner,
         logical_expert_load_samples: torch.Tensor,
         current_placement: ExpertPlacement,
