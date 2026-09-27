@@ -106,6 +106,14 @@ def get_eplb_step_interval():
 
 
 @lru_cache(maxsize=None)
+def get_eplb_transfer_layer_parallelism():
+    """返回 EPLB 权重迁移时允许并行处理的最大层数。"""
+    parallelism = int(os.getenv("LIGHTLLM_EPLB_TRANSFER_LAYER_PARALLELISM", 16))
+    assert parallelism > 0
+    return parallelism
+
+
+@lru_cache(maxsize=None)
 def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 

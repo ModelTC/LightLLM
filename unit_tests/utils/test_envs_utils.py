@@ -1,10 +1,29 @@
 from lightllm.utils.envs_utils import (
+    get_eplb_transfer_layer_parallelism,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
     get_pd_node_continuation_resource_wait_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
 )
+
+
+def test_eplb_transfer_layer_parallelism_defaults_to_sixteen(monkeypatch):
+    monkeypatch.delenv("LIGHTLLM_EPLB_TRANSFER_LAYER_PARALLELISM", raising=False)
+    get_eplb_transfer_layer_parallelism.cache_clear()
+
+    assert get_eplb_transfer_layer_parallelism() == 16
+
+    get_eplb_transfer_layer_parallelism.cache_clear()
+
+
+def test_eplb_transfer_layer_parallelism_reads_environment_variable(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_EPLB_TRANSFER_LAYER_PARALLELISM", "4")
+    get_eplb_transfer_layer_parallelism.cache_clear()
+
+    assert get_eplb_transfer_layer_parallelism() == 4
+
+    get_eplb_transfer_layer_parallelism.cache_clear()
 
 
 def test_pd_cache_high_priority_max_age_defaults_to_36_seconds(monkeypatch):

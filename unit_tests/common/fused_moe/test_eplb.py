@@ -1161,12 +1161,13 @@ def test_transfer_planner_combines_all_layer_batches(monkeypatch):
         target_placement=target_placement,
         num_logical_experts=4,
         world_size=2,
+        transfer_layer_parallelism=8,
     )
 
     planner._run()
 
     assert planner.status == "succeeded"
-    assert planner.result == [[transfer_infos[0]], [transfer_infos[1]]]
+    assert planner.result == [[transfer_infos[0], transfer_infos[1]]]
     assert calls == [
         {
             "current_placement": current_placement[0],
@@ -1185,6 +1186,49 @@ def test_transfer_planner_combines_all_layer_batches(monkeypatch):
     ]
 
 
+def test_transfer_planner_limits_parallel_layers_and_preserves_layer_order(monkeypatch):
+    current_placement = [[[0], [1]]] * 5
+    target_placement = [[[1], [0]]] * 5
+    transfer_infos_by_layer = [
+        [EPLBTransferInfo(layer_index, batch_index, 0, 0, 1, 0) for batch_index in range(batch_count)]
+        for layer_index, batch_count in enumerate((3, 0, 1, 2, 1))
+    ]
+
+    def build_plan(**kwargs):
+        return [[transfer_info] for transfer_info in transfer_infos_by_layer[kwargs["layer_index"]]]
+
+    monkeypatch.setattr(transfer_planner_module, "build_transfer_plan", build_plan)
+    planner = transfer_planner_module.EPLBTransferPlanner(
+        current_placement=current_placement,
+        target_placement=target_placement,
+        num_logical_experts=2,
+        world_size=2,
+        transfer_layer_parallelism=2,
+    )
+
+    planner._run()
+
+    assert planner.status == "succeeded"
+    assert planner.result == [
+        [transfer_infos_by_layer[0][0], transfer_infos_by_layer[2][0]],
+        [transfer_infos_by_layer[0][1], transfer_infos_by_layer[3][0]],
+        [transfer_infos_by_layer[0][2], transfer_infos_by_layer[3][1]],
+        [transfer_infos_by_layer[4][0]],
+    ]
+
+    serial_planner = transfer_planner_module.EPLBTransferPlanner(
+        current_placement=current_placement,
+        target_placement=target_placement,
+        num_logical_experts=2,
+        world_size=2,
+        transfer_layer_parallelism=1,
+    )
+    serial_planner._run()
+    assert serial_planner.result == [
+        [transfer_info] for layer_transfer_infos in transfer_infos_by_layer for transfer_info in layer_transfer_infos
+    ]
+
+
 def test_transfer_planner_exits_process_on_failure(monkeypatch):
     def fail(**_kwargs):
         raise RuntimeError("transfer planning boom")
@@ -1194,6 +1238,7 @@ def test_transfer_planner_exits_process_on_failure(monkeypatch):
         target_placement=[[[1], [0]]],
         num_logical_experts=2,
         world_size=2,
+        transfer_layer_parallelism=8,
     )
     exits = []
     logs = []
@@ -2432,6 +2477,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     manager.transfer_group = object()
     manager.world_size = 2
     manager.num_logical_experts = 4
+    manager.transfer_layer_parallelism = 8
     manager.pending_transfer_batches = None
     placement = [
         [[0, 1, 2], [2, 3, 3]],
@@ -2459,6 +2505,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
             self.target = kwargs["target_placement"]
             self.num_logical_experts = kwargs["num_logical_experts"]
             self.world_size = kwargs["world_size"]
+            self.transfer_layer_parallelism = kwargs["transfer_layer_parallelism"]
             self.result = [[transfer_infos[0]], [transfer_infos[1]]]
             self.started = False
             self.finished = False
@@ -2493,6 +2540,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     assert transfer_planner.target is placement
     assert transfer_planner.num_logical_experts == manager.num_logical_experts
     assert transfer_planner.world_size == manager.world_size
+    assert transfer_planner.transfer_layer_parallelism == manager.transfer_layer_parallelism
     assert transfer_planner.started
 
     remote_finished = False
@@ -2936,6 +2984,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     monkeypatch.setattr(manager_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(manager_module, "get_node_world_size", lambda: 2)
     monkeypatch.setattr(manager_module, "get_eplb_step_interval", lambda: 20)
+    monkeypatch.setattr(manager_module, "get_eplb_transfer_layer_parallelism", lambda: 8)
     clear_calls = []
     monkeypatch.setattr(
         manager_module.EPLBManager,
@@ -2981,6 +3030,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert manager.metric_client is metric_client
     assert metric_client_ports == [1234]
     assert manager.next_evaluation_step == manager.step_interval
+    assert manager.transfer_layer_parallelism == 8
     assert manager.max_rebalance_count == 1
     assert manager.completed_rebalance_count == 0
     assert manager.plan_mode == "greedy"

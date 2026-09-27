@@ -314,6 +314,11 @@ WAIT_PLAN_PLACEMENT_FINISHED
 
 默认每 20 个采样 step 评估一次，可以通过环境变量 `LIGHTLLM_EPLB_STEP_INTERVAL` 调整。该值必须大于 0。
 
+专家权重迁移默认同时推进 16 个 MoE 层，可以通过环境变量
+`LIGHTLLM_EPLB_TRANSFER_LAYER_PARALLELISM` 调整，该值必须大于 0。每层内部仍严格按照
+槽位覆盖依赖顺序执行；并行只发生在相互独立的不同层之间。增大该值可以提高通信和
+GPU/CPU 拷贝的重叠度，但也会按活动传输任务数增加 pinned memory 和 CUDA stream 的峰值占用。
+
 只有当 rank 0 的平均样本量达到每个“层 × 逻辑专家”128 个 token 时才开始规划。各 rank 的路由分布高度相似，因此 rank 0 足以作为是否值得发起全量通信的低成本判断。样本不足不会清空环形缓冲区，低流量服务可以跨多个评估周期继续采样；缓冲区写满后只保留最近 24 次 prefill dispatch。
 
 ## 7. 专家分布分析

@@ -16,7 +16,10 @@ from lightllm.utils.dist_utils import (
     get_node_world_size,
 )
 from lightllm.utils.device_utils import is_sm100_gpu
-from lightllm.utils.envs_utils import get_eplb_step_interval
+from lightllm.utils.envs_utils import (
+    get_eplb_step_interval,
+    get_eplb_transfer_layer_parallelism,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_port_args import get_shm_port_args
 
@@ -154,6 +157,7 @@ class EPLBManager:
         # 评估调度：steps 只在 COLLECTING 状态递增。prefill 路由样本从当前
         # 布局生效时开始写入，并在固定容量内保留最近的采样窗口。
         self.step_interval: int = get_eplb_step_interval()
+        self.transfer_layer_parallelism: int = get_eplb_transfer_layer_parallelism()
         self.steps: int = 0
         self.max_rebalance_count: int = max_rebalance_count
         self.completed_rebalance_count: int = 0
@@ -207,6 +211,7 @@ class EPLBManager:
                 f"eplb enabled layers={len(weights)} num_logical_experts={self.num_logical_experts} "
                 f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} max_rebalance_count={self.max_rebalance_count} "
+                f"transfer_layer_parallelism={self.transfer_layer_parallelism} "
                 f"plan_mode={self.plan_mode} planner={type(self.planner).__name__}"
             )
 
@@ -414,6 +419,7 @@ class EPLBManager:
             target_placement=self.target_placement,
             num_logical_experts=self.num_logical_experts,
             world_size=self.world_size,
+            transfer_layer_parallelism=self.transfer_layer_parallelism,
         )
         self._transfer_planner.start()
         self.state = EPLBManagerState.WAIT_PLAN_TRANSFER_FINISHED
