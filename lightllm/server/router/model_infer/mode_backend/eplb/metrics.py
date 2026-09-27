@@ -115,19 +115,19 @@ def compute_critical_overhead_ratio(
 def publish_rebalance_compute_metrics(
     *,
     metric_client: MetricClient,
-    global_load: torch.Tensor,
+    sample_load: torch.Tensor,
     current_placement: ExpertPlacement,
     target_placement: ExpertPlacement,
     expert_alignment: int,
 ) -> None:
     """使用同一个 prefill 样本上报重排前后的关键路径开销。"""
     before_rebalance_ratio = compute_critical_overhead_ratio(
-        logical_expert_load=global_load,
+        logical_expert_load=sample_load,
         placement=current_placement,
         expert_alignment=expert_alignment,
     )
     after_rebalance_ratio = compute_critical_overhead_ratio(
-        logical_expert_load=global_load,
+        logical_expert_load=sample_load,
         placement=target_placement,
         expert_alignment=expert_alignment,
     )

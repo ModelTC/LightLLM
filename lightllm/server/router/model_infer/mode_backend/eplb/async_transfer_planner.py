@@ -17,6 +17,7 @@ class EPLBTransferPlanner(EPLBAsyncTask):
 
     def __init__(
         self,
+        *,
         current_placement: ExpertPlacement,
         target_placement: ExpertPlacement,
         num_logical_experts: int,
@@ -35,11 +36,11 @@ class EPLBTransferPlanner(EPLBAsyncTask):
         layer_placements = zip(self.current_placement, self.target_placement)
         for layer_index, (current_layer, target_layer) in enumerate(layer_placements):
             layer_transfer_batches = build_transfer_plan(
-                current_layer,
-                target_layer,
-                layer_index,
-                self.num_logical_experts,
-                self.world_size,
+                current_placement=current_layer,
+                target_placement=target_layer,
+                layer_index=layer_index,
+                num_logical_experts=self.num_logical_experts,
+                world_size=self.world_size,
             )
             transfer_batches.extend(layer_transfer_batches)
         self.result = transfer_batches

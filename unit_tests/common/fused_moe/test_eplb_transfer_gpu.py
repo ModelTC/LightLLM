@@ -158,14 +158,22 @@ def _worker(rank, port):
     target = [[0, 1, 3], [2, 3, 1]]
     for expected_layer in range(2):
         transfer_batches = build_transfer_plan(
-            current,
-            target,
-            expected_layer,
+            current_placement=current,
+            target_placement=target,
+            layer_index=expected_layer,
             num_logical_experts=4,
             world_size=2,
         )
         for transfer_batch in transfer_batches:
-            transfers = [PinnedMemoryEPLBTransfer(weights, transfer_group, rank, info) for info in transfer_batch]
+            transfers = [
+                PinnedMemoryEPLBTransfer(
+                    weights=weights,
+                    transfer_group=transfer_group,
+                    current_global_rank=rank,
+                    transfer_info=info,
+                )
+                for info in transfer_batch
+            ]
             for transfer in transfers:
                 assert all(buffer.pinned_row.is_pinned() for buffer in transfer.tensor_buffers)
                 transfer.start()
@@ -190,11 +198,25 @@ def _worker(rank, port):
     # 主槽位互换会形成覆盖环。两个方向必须同时完成 GPU -> pinned memory
     # 传输后才能 commit，验证同一 rank 上并发的 send/recv 任务可以正常结束。
     swap_target = [[0, 3, 2], [2, 1, 0]]
-    swap_plan = build_transfer_plan(current, swap_target, 0, num_logical_experts=4, world_size=2)
+    swap_plan = build_transfer_plan(
+        current_placement=current,
+        target_placement=swap_target,
+        layer_index=0,
+        num_logical_experts=4,
+        world_size=2,
+    )
     assert len(swap_plan) == 1
     swap_infos = swap_plan[0]
     assert len(swap_infos) == 2
-    swap_transfers = [PinnedMemoryEPLBTransfer(weights, transfer_group, rank, info) for info in swap_infos]
+    swap_transfers = [
+        PinnedMemoryEPLBTransfer(
+            weights=weights,
+            transfer_group=transfer_group,
+            current_global_rank=rank,
+            transfer_info=info,
+        )
+        for info in swap_infos
+    ]
     for transfer in swap_transfers:
         transfer.start()
     for transfer in swap_transfers:
@@ -262,7 +284,12 @@ def _many_concurrent_p2p_worker(rank, port):
             if rank in (transfer_info.source_rank, transfer_info.dest_rank)
         ]
         transfers = [
-            PinnedMemoryEPLBTransfer(weights, transfer_group, rank, transfer_info)
+            PinnedMemoryEPLBTransfer(
+                weights=weights,
+                transfer_group=transfer_group,
+                current_global_rank=rank,
+                transfer_info=transfer_info,
+            )
             for transfer_info in local_transfer_infos
         ]
         assert len(transfer_infos) == 768

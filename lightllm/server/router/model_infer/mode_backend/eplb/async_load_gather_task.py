@@ -14,30 +14,29 @@ class EPLBLoadGatherTask(EPLBAsyncTask):
     def __init__(
         self,
         *,
-        local_load: torch.Tensor,
+        local_load_samples: torch.Tensor,
         load_gather_group: dist.ProcessGroup,
-        world_size: int,
     ) -> None:
-        assert local_load.device.type == "cpu"
-        assert local_load.ndim == 3
-        assert world_size > 0
-        self.local_load = local_load.contiguous()
+        assert local_load_samples.device.type == "cpu"
+        assert local_load_samples.ndim == 3
+        self.local_load_samples = local_load_samples.contiguous()
         self.load_gather_group = load_gather_group
-        self.world_size = world_size
+        self.world_size = dist.get_world_size(group=load_gather_group)
+        assert self.world_size > 0
         self.result: Optional[torch.Tensor] = None
         super().__init__(thread_name="eplb-load-gather")
 
     def execute(self) -> None:
         """生成 ``[rank, layer, sample, logical_expert]`` 的连续结果。"""
         gathered_load = torch.empty(
-            (self.world_size, *self.local_load.shape),
-            dtype=self.local_load.dtype,
-            device=self.local_load.device,
+            (self.world_size, *self.local_load_samples.shape),
+            dtype=self.local_load_samples.dtype,
+            device=self.local_load_samples.device,
         )
         load_by_rank = list(gathered_load.unbind(dim=0))
         dist.all_gather(
             load_by_rank,
-            self.local_load,
+            self.local_load_samples,
             group=self.load_gather_group,
         )
         self.result = gathered_load

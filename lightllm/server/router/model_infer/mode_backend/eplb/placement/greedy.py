@@ -148,27 +148,31 @@ class GreedyEPLBPlanner(EPLBPlanner):
 
     def plan(
         self,
-        logical_expert_load: torch.Tensor,
+        *,
+        logical_expert_load_samples: torch.Tensor,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:
         """聚合全局逐样本负载，逐层规划并组合成完整的多层布局。"""
-        # logical_expert_load: [rank, layer, sample, logical_expert] CPU Tensor。
+        # logical_expert_load_samples: [rank, layer, sample, logical_expert]
+        # CPU Tensor。
         # Greedy 算法只需要整个采样窗口内每层各 logical expert 的累计负载，
         # 因此沿 rank 和 sample 维求和为 [layer, logical_expert]，再转成 list
         # 进入后续纯 Python 分析逻辑。
-        assert logical_expert_load.device.type == "cpu"
-        assert logical_expert_load.ndim == 4
-        assert logical_expert_load.shape[0] == self.world_size
-        load = logical_expert_load.sum(dim=(0, 2)).to(torch.float64).tolist()
+        assert logical_expert_load_samples.device.type == "cpu"
+        assert logical_expert_load_samples.ndim == 4
+        assert logical_expert_load_samples.shape[0] == self.world_size
+        aggregated_load = logical_expert_load_samples.sum(dim=(0, 2)).to(torch.float64).tolist()
 
         # 一次性校验所有层的形状和布局约束。后续每层规划之间没有共享的
         # 可变状态。
-        current = [[[int(expert) for expert in rank] for rank in layer] for layer in current_placement]
-        self._validate_inputs(load, current)
+        self._validate_inputs(aggregated_load, current_placement)
 
         # 每层只依赖自己的逻辑专家负载和当前布局。先完成单层规划，再将结果
         # 按原 layer 顺序组合，避免多层候选和负载数据交叉索引。
-        return [self._plan_layer(layer_load, current_layer) for layer_load, current_layer in zip(load, current)]
+        return [
+            self._plan_layer(layer_load, current_layer)
+            for layer_load, current_layer in zip(aggregated_load, current_placement)
+        ]
 
     def _plan_layer(
         self,

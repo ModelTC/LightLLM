@@ -358,7 +358,7 @@ def test_eplb_planner_builds_legal_concrete_slot_layout():
     load[:, :, :, 0] = 1000
     load[:, :, :, 4] = 500
 
-    result = planner.plan(load, current)
+    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
     placement = result[0]
 
     for row in placement:
@@ -374,7 +374,10 @@ def test_eplb_planner_returns_deterministic_layout_for_zero_load_experts():
     planner = GreedyEPLBPlanner(2, 1)
     current = [[[0, 1, 3], [2, 3, 1]]]
 
-    result = planner.plan(_planner_load([[0, 0, 0, 0]], world_size=2), current)
+    result = planner.plan(
+        logical_expert_load_samples=_planner_load([[0, 0, 0, 0]], world_size=2),
+        current_placement=current,
+    )
 
     assert result == [[[0, 1, 3], [2, 0, 1]]]
 
@@ -393,9 +396,12 @@ def test_eplb_planner_aggregates_rank_and_sample_dimensions():
     equivalent_raw_load = torch.zeros_like(raw_load)
     equivalent_raw_load[0, :, 0] = aggregated_load
 
-    result = planner.plan(raw_load, current)
+    result = planner.plan(logical_expert_load_samples=raw_load, current_placement=current)
 
-    assert result == planner.plan(equivalent_raw_load, current)
+    assert result == planner.plan(
+        logical_expert_load_samples=equivalent_raw_load,
+        current_placement=current,
+    )
 
 
 def test_eplb_planner_plans_each_layer_independently_then_combines_results():
@@ -411,7 +417,7 @@ def test_eplb_planner_plans_each_layer_independently_then_combines_results():
         world_size=2,
     )
 
-    result = planner.plan(load, current)
+    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
 
     assert result == [
         [[0, 1, 3], [2, 0, 1]],
@@ -423,7 +429,10 @@ def test_eplb_planner_iteratively_places_hot_expert_on_idle_rank():
     planner = GreedyEPLBPlanner(2, 1)
     current = [[[0, 1, 3], [2, 3, 1]]]
 
-    result = planner.plan(_planner_load([[1000, 1, 1, 1]], world_size=2), current)
+    result = planner.plan(
+        logical_expert_load_samples=_planner_load([[1000, 1, 1, 1]], world_size=2),
+        current_placement=current,
+    )
 
     assert result == [[[0, 1, 3], [2, 0, 1]]]
 
@@ -433,8 +442,8 @@ def test_eplb_planner_repeatedly_splits_the_hottest_remaining_expert():
     current = _initial_expert_placement(8, 4, 3).unsqueeze(0).tolist()
 
     result = planner.plan(
-        _planner_load([[1000, 900, 800, 700, 1, 1, 1, 1]], world_size=4),
-        current,
+        logical_expert_load_samples=_planner_load([[1000, 900, 800, 700, 1, 1, 1, 1]], world_size=4),
+        current_placement=current,
     )
 
     replica_counts = [sum(expert in row for row in result[0]) for expert in range(8)]
@@ -567,8 +576,8 @@ def test_eplb_planner_keeps_selected_experts_in_their_current_slots():
     current = _initial_expert_placement(8, 4, 2).unsqueeze(0).tolist()
 
     result = planner.plan(
-        _planner_load([[50, 98, 54, 6, 34, 66, 63, 52]], world_size=4),
-        current,
+        logical_expert_load_samples=_planner_load([[50, 98, 54, 6, 34, 66, 63, 52]], world_size=4),
+        current_placement=current,
     )
 
     # 只要专家仍分配在同一个 rank，就保留其原物理槽位。
@@ -592,7 +601,7 @@ def test_eplb_planner_fills_every_rank_with_distinct_nonlocal_experts():
     )
     load = load_by_layer_and_rank.permute(1, 0, 2).unsqueeze(dim=2)
 
-    result = planner.plan(load, current)
+    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
 
     assert len(result) == len(current)
     assert all(len(actual) == len(expected) for actual, expected in zip(result[0], current[0]))
@@ -628,7 +637,7 @@ def test_eplb_planner_supports_multiple_redundant_experts_per_rank():
         world_size=4,
     )
 
-    result = planner.plan(load, current)
+    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
 
     for row in result[0]:
         assert len(row) == len(set(row)) == 7
@@ -891,9 +900,8 @@ def test_manager_evaluating_starts_raw_load_gather_without_modifying_counters(mo
     assert len(tasks) == 1
     assert tasks[0].started
     assert tasks[0].kwargs["load_gather_group"] is manager.load_gather_group
-    assert tasks[0].kwargs["world_size"] == manager.world_size
     assert torch.equal(
-        tasks[0].kwargs["local_load"],
+        tasks[0].kwargs["local_load_samples"],
         torch.tensor([[[10, 11]], [[40, 41]]], dtype=torch.int64),
     )
     assert torch.equal(counters[0], torch.tensor([[10, 11]], dtype=torch.int64))
@@ -917,10 +925,10 @@ def test_load_gather_task_preserves_rank_layer_and_sample_dimensions(monkeypatch
         output[1].copy_(local + 100)
 
     monkeypatch.setattr(load_gather_module.dist, "all_gather", all_gather)
+    monkeypatch.setattr(load_gather_module.dist, "get_world_size", lambda *, group: 2)
     task = load_gather_module.EPLBLoadGatherTask(
-        local_load=local_load,
+        local_load_samples=local_load,
         load_gather_group=load_gather_group,
-        world_size=2,
     )
 
     task._run()
@@ -940,8 +948,16 @@ def test_manager_delegates_distribution_planning_to_planner_class():
     logical_load = torch.tensor([[[[10, 20]]]])
     calls = []
     planned_placement = [[[0, 1]]]
-    planner = SimpleNamespace(plan=lambda load, placement: (calls.append((load, placement)) or planned_placement))
-    task = plan_module.EPLBPlanTask(planner, logical_load, current_placement)
+    planner = SimpleNamespace(
+        plan=lambda **kwargs: (
+            calls.append((kwargs["logical_expert_load_samples"], kwargs["current_placement"])) or planned_placement
+        )
+    )
+    task = plan_module.EPLBPlanTask(
+        planner=planner,
+        logical_expert_load_samples=logical_load,
+        current_placement=current_placement,
+    )
 
     task._run()
 
@@ -953,13 +969,13 @@ def test_manager_delegates_distribution_planning_to_planner_class():
 
 
 def test_plan_task_exits_process_on_failure(monkeypatch):
-    def fail(_load, _placement):
+    def fail(**_kwargs):
         raise RuntimeError("planning boom")
 
     task = plan_module.EPLBPlanTask(
-        SimpleNamespace(plan=fail),
-        torch.tensor([[[[10, 20]]]]),
-        [[[1]]],
+        planner=SimpleNamespace(plan=fail),
+        logical_expert_load_samples=torch.tensor([[[[10, 20]]]]),
+        current_placement=[[[1]]],
     )
     exits = []
     logs = []
@@ -981,14 +997,14 @@ def test_transfer_planner_combines_all_layer_batches(monkeypatch):
     ]
     calls = []
 
-    def build_plan(*args):
-        calls.append(args)
-        return [[transfer_infos[args[2]]]]
+    def build_plan(**kwargs):
+        calls.append(kwargs)
+        return [[transfer_infos[kwargs["layer_index"]]]]
 
     monkeypatch.setattr(transfer_planner_module, "build_transfer_plan", build_plan)
     planner = transfer_planner_module.EPLBTransferPlanner(
-        current_placement,
-        target_placement,
+        current_placement=current_placement,
+        target_placement=target_placement,
         num_logical_experts=4,
         world_size=2,
     )
@@ -998,18 +1014,30 @@ def test_transfer_planner_combines_all_layer_batches(monkeypatch):
     assert planner.status == "succeeded"
     assert planner.result == [[transfer_infos[0]], [transfer_infos[1]]]
     assert calls == [
-        (current_placement[0], target_placement[0], 0, 4, 2),
-        (current_placement[1], target_placement[1], 1, 4, 2),
+        {
+            "current_placement": current_placement[0],
+            "target_placement": target_placement[0],
+            "layer_index": 0,
+            "num_logical_experts": 4,
+            "world_size": 2,
+        },
+        {
+            "current_placement": current_placement[1],
+            "target_placement": target_placement[1],
+            "layer_index": 1,
+            "num_logical_experts": 4,
+            "world_size": 2,
+        },
     ]
 
 
 def test_transfer_planner_exits_process_on_failure(monkeypatch):
-    def fail(*_args):
+    def fail(**_kwargs):
         raise RuntimeError("transfer planning boom")
 
     planner = transfer_planner_module.EPLBTransferPlanner(
-        [[[0], [1]]],
-        [[[1], [0]]],
+        current_placement=[[[0], [1]]],
+        target_placement=[[[1], [0]]],
         num_logical_experts=2,
         world_size=2,
     )
@@ -1115,13 +1143,13 @@ def test_publish_expert_load_metrics():
     ]
 
 
-def test_publish_rebalance_compute_metrics_from_global_load():
+def test_publish_rebalance_compute_metrics_from_sample_load():
     calls = []
     metric_client = SimpleNamespace(gauge_set=lambda name, value: calls.append((name, value)))
 
     eplb_metrics.publish_rebalance_compute_metrics(
         metric_client=metric_client,
-        global_load=torch.tensor([[384, 128, 128, 128]]),
+        sample_load=torch.tensor([[384, 128, 128, 128]]),
         current_placement=[[[0, 1, 2], [1, 2, 3]]],
         target_placement=[[[0, 1, 2], [0, 2, 3]]],
         expert_alignment=128,
@@ -1221,11 +1249,11 @@ def test_manager_wait_load_gather_aggregates_rank_and_sample_dimensions(monkeypa
     assert seen["group"] is manager.control_group
     assert seen["local_finished"] is True
     assert manager.state is manager_module.EPLBManagerState.PLAN_PLACEMENT
-    assert manager._planning_load_samples is gathered_load
+    assert manager._pending_plan_load_samples is gathered_load
     # metrics 只汇总各 rank 的 sample 0；rank 1 在 sample 1 中的负载
     # 不应累加进来。
-    assert torch.equal(manager._planning_global_load, torch.full((1, 4), 150, dtype=torch.int64))
-    assert not hasattr(manager, "_load_gather_task")
+    assert torch.equal(manager._metric_sample_load, torch.full((1, 4), 150, dtype=torch.int64))
+    assert manager._load_gather_task is None
 
 
 def test_manager_wait_load_gather_does_not_advance_until_every_rank_finishes(monkeypatch):
@@ -1858,6 +1886,9 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     manager.state = manager_module.EPLBManagerState.TRANSFERRING
     manager.max_rebalance_count = -1
     manager.completed_rebalance_count = 0
+    manager.rebalance_started_at = None
+    manager.active_transfer_batch = None
+    manager.active_transfers = None
     committed = []
     active_streams = []
     cleared_route_counters = []
@@ -1895,7 +1926,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     monkeypatch.setattr(
         manager_module,
         "PinnedMemoryEPLBTransfer",
-        lambda _weights, _group, _rank, transfer_info: Transfer(transfer_info),
+        lambda **kwargs: Transfer(kwargs["transfer_info"]),
     )
 
     gathered_states = [
@@ -1923,7 +1954,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
     manager.active_transfers[0].finished = True
     manager._step_transferring()
     assert committed == [remote_info, local_info0]
-    assert not hasattr(manager, "active_transfers")
+    assert manager.active_transfers is None
 
     manager._step_transferring()
     assert starts == [local_info0, local_info1]
@@ -1938,9 +1969,9 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
         [[0, 1, 2], [2, 3, 3], [4, 5, 2], [6, 7, 0]],
         [[0, 1, 4], [2, 3, 5], [4, 5, 6], [6, 7, 1]],
     ]
-    assert not hasattr(manager, "pending_transfer_batches")
-    assert not hasattr(manager, "target_placement")
-    assert not hasattr(manager, "rebalance_started_at")
+    assert manager.pending_transfer_batches is None
+    assert manager.target_placement is None
+    assert manager.rebalance_started_at is None
     assert cleared_route_counters == [True]
     assert local_states == [False, True, True]
     assert used_streams == [overlap_stream, overlap_stream]
@@ -1958,6 +1989,9 @@ def test_manager_returns_to_collecting_after_reaching_rebalance_limit():
     manager.pending_transfer_batches = []
     manager.max_rebalance_count = 1
     manager.completed_rebalance_count = 0
+    manager.rebalance_started_at = None
+    manager.active_transfer_batch = None
+    manager.active_transfers = None
     manager._clear_prefill_route_samples = lambda: None
     persisted_placements = []
     manager._persist_current_placement = lambda: persisted_placements.append(manager.current_placement)
@@ -1998,8 +2032,8 @@ def test_wait_plan_finish_publishes_before_and_after_metrics(monkeypatch):
     manager.control_group = object()
     manager.current_placement = [[[0, 1], [2, 3]]]
     target_placement = [[[0, 2], [1, 3]]]
-    manager._planning_load_samples = torch.tensor([[[[4, 3, 2, 1]]]], dtype=torch.int64)
-    manager._planning_global_load = torch.tensor([[4, 3, 2, 1]], dtype=torch.int64)
+    manager._pending_plan_load_samples = None
+    manager._metric_sample_load = torch.tensor([[4, 3, 2, 1]], dtype=torch.int64)
     manager._plan_task = SimpleNamespace(
         is_finished=lambda: True,
         result=target_placement,
@@ -2009,7 +2043,7 @@ def test_wait_plan_finish_publishes_before_and_after_metrics(monkeypatch):
     monkeypatch.setattr(
         eplb_metrics,
         "publish_rebalance_compute_metrics",
-        lambda **kwargs: published.append((kwargs["global_load"], kwargs["target_placement"])),
+        lambda **kwargs: published.append((kwargs["sample_load"], kwargs["target_placement"])),
     )
     monkeypatch.setattr(manager_module.dist, "broadcast_object_list", lambda _values, **_kwargs: None)
 
@@ -2020,9 +2054,9 @@ def test_wait_plan_finish_publishes_before_and_after_metrics(monkeypatch):
     assert len(published) == 1
     assert torch.equal(published[0][0], torch.tensor([[4, 3, 2, 1]], dtype=torch.int64))
     assert published[0][1] is target_placement
-    assert not hasattr(manager, "_planning_load_samples")
-    assert not hasattr(manager, "_planning_global_load")
-    assert not hasattr(manager, "_plan_task")
+    assert manager._pending_plan_load_samples is None
+    assert manager._metric_sample_load is None
+    assert manager._plan_task is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -2170,6 +2204,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     manager.transfer_group = object()
     manager.world_size = 2
     manager.num_logical_experts = 4
+    manager.pending_transfer_batches = None
     placement = [
         [[0, 1, 2], [2, 3, 3]],
         [[0, 1, 3], [2, 3, 0]],
@@ -2191,11 +2226,11 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     transfer_planners = []
 
     class TransferPlanner:
-        def __init__(self, current, target, num_logical_experts, world_size):
-            self.current = current
-            self.target = target
-            self.num_logical_experts = num_logical_experts
-            self.world_size = world_size
+        def __init__(self, **kwargs):
+            self.current = kwargs["current_placement"]
+            self.target = kwargs["target_placement"]
+            self.num_logical_experts = kwargs["num_logical_experts"]
+            self.world_size = kwargs["world_size"]
             self.result = [[transfer_infos[0]], [transfer_infos[1]]]
             self.started = False
             self.finished = False
@@ -2211,7 +2246,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     monkeypatch.setattr(
         manager_module,
         "PinnedMemoryEPLBTransfer",
-        lambda *_args: pytest.fail("transfer object must not be built while planning transfers"),
+        lambda **_kwargs: pytest.fail("transfer object must not be built while planning transfers"),
     )
 
     manager._step_wait_plan_placement_finished()
@@ -2219,7 +2254,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     assert manager.state is manager_module.EPLBManagerState.PLAN_TRANSFER
     assert manager.target_placement is placement
     assert transfer_planners == []
-    assert not hasattr(manager, "pending_transfer_batches")
+    assert manager.pending_transfer_batches is None
 
     manager.step()
 
@@ -2242,16 +2277,14 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_TRANSFER_FINISHED
-    assert not hasattr(manager, "pending_transfer_batches")
+    assert manager.pending_transfer_batches is None
 
     remote_finished = True
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.TRANSFERRING
     assert manager.pending_transfer_batches == [[transfer_infos[0]], [transfer_infos[1]]]
-    assert not hasattr(manager, "_transfer_planner")
-    assert not hasattr(manager, "active_transfer")
-    assert not hasattr(manager, "target_metadata")
+    assert manager._transfer_planner is None
 
 
 def test_manager_evaluation_with_insufficient_tokens_returns_to_collecting(monkeypatch):
@@ -2306,8 +2339,8 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     class LoadGatherTask:
         def __init__(self, **kwargs):
-            self.local_load = kwargs["local_load"]
-            self.result = self.local_load.unsqueeze(0)
+            self.local_load_samples = kwargs["local_load_samples"]
+            self.result = self.local_load_samples.unsqueeze(0)
             self.started = False
 
         def start(self):
@@ -2325,10 +2358,10 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     )
 
     class PlanTask:
-        def __init__(self, planner, logical_expert_load, current_placement):
-            self.planner = planner
-            self.logical_expert_load = logical_expert_load
-            self.current_placement = current_placement
+        def __init__(self, **kwargs):
+            self.planner = kwargs["planner"]
+            self.logical_expert_load_samples = kwargs["logical_expert_load_samples"]
+            self.current_placement = kwargs["current_placement"]
             self.started = False
             plan_tasks.append(self)
 
@@ -2349,31 +2382,32 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     assert manager.state is manager_module.EPLBManagerState.WAIT_LOAD_GATHER_FINISHED
     assert manager._load_gather_task.started
-    assert torch.equal(manager._load_gather_task.local_load, local_load.unsqueeze(0))
+    assert torch.equal(manager._load_gather_task.local_load_samples, local_load.unsqueeze(0))
     assert len(published_loads) == 1
     assert torch.equal(published_loads[0], local_load)
     assert plan_tasks == []
-    assert not hasattr(manager, "_plan_task")
+    assert getattr(manager, "_plan_task", None) is None
 
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.PLAN_PLACEMENT
-    planning_load_samples = manager._planning_load_samples
+    planning_load_samples = manager._pending_plan_load_samples
     assert torch.equal(planning_load_samples, local_load.unsqueeze(0).unsqueeze(0))
-    assert torch.equal(manager._planning_global_load, local_load)
-    assert not hasattr(manager, "_load_gather_task")
+    assert torch.equal(manager._metric_sample_load, local_load)
+    assert manager._load_gather_task is None
     assert plan_tasks == []
 
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
-    assert plan_tasks[0].logical_expert_load is planning_load_samples
-    assert torch.equal(plan_tasks[0].logical_expert_load, local_load.unsqueeze(0).unsqueeze(0))
+    assert plan_tasks[0].logical_expert_load_samples is planning_load_samples
+    assert torch.equal(plan_tasks[0].logical_expert_load_samples, local_load.unsqueeze(0).unsqueeze(0))
     assert plan_tasks[0].planner is manager.planner
     assert plan_tasks[0].current_placement is manager.current_placement
     assert plan_tasks[0].started
     assert manager._plan_task is plan_tasks[0]
-    assert torch.equal(manager._planning_global_load, local_load)
+    assert manager._pending_plan_load_samples is None
+    assert torch.equal(manager._metric_sample_load, local_load)
     assert len(published_loads) == 1
 
 
@@ -2417,9 +2451,9 @@ def test_nonzero_rank_enters_plan_wait_without_starting_planner():
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
-    assert not hasattr(manager, "_plan_task")
-    assert not hasattr(manager, "_planning_load_samples")
-    assert not hasattr(manager, "_planning_global_load")
+    assert getattr(manager, "_plan_task", None) is None
+    assert getattr(manager, "_pending_plan_load_samples", None) is None
+    assert getattr(manager, "_metric_sample_load", None) is None
 
 
 def test_manager_planning_without_changes_returns_to_collecting(monkeypatch):
@@ -2446,7 +2480,7 @@ def test_manager_planning_without_changes_returns_to_collecting(monkeypatch):
 
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert manager.next_evaluation_step == 31
-    assert not hasattr(manager, "_plan_task")
+    assert getattr(manager, "_plan_task", None) is None
 
 
 def test_manager_exposes_one_lifecycle_step_entrypoint():
@@ -2709,8 +2743,8 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("manager initialization must not save the placement"),
     )
     manager = manager_module.EPLBManager(type("Model", (), {})(), config_path="/tmp/eplb.json")
-    assert not hasattr(manager, "_plan_task")
-    assert not hasattr(manager, "pending_transfer_batches")
+    assert manager._plan_task is None
+    assert manager.pending_transfer_batches is None
     assert manager.state is manager_module.EPLBManagerState.COLLECTING
     assert (manager.load_gather_group, manager.control_group, manager.transfer_group) == tuple(groups)
     assert new_group_calls == [(([0, 1],), {"backend": "gloo"})] * 3

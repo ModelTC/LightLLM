@@ -13,12 +13,13 @@ class EPLBPlanTask(EPLBAsyncTask):
 
     def __init__(
         self,
+        *,
         planner: EPLBPlanner,
-        logical_expert_load: torch.Tensor,
+        logical_expert_load_samples: torch.Tensor,
         current_placement: ExpertPlacement,
     ) -> None:
         self.planner = planner
-        self.logical_expert_load = logical_expert_load
+        self.logical_expert_load_samples = logical_expert_load_samples
         self.current_placement = current_placement
         self.result: Optional[ExpertPlacement] = None
         super().__init__(thread_name="eplb-plan")
@@ -26,6 +27,6 @@ class EPLBPlanTask(EPLBAsyncTask):
     def execute(self) -> None:
         """根据全局 logical expert 负载生成目标布局。"""
         self.result = self.planner.plan(
-            self.logical_expert_load,
-            self.current_placement,
+            logical_expert_load_samples=self.logical_expert_load_samples,
+            current_placement=self.current_placement,
         )

@@ -362,10 +362,10 @@ list；因此原始维度在 planner 边界仍然可用，而后续贪心逻辑�
 
 ### 8.1 规划器接口与选择
 
-所有布局算法实现统一的 `EPLBPlanner.plan(logical_expert_load, current_placement)` 接口，返回：
+所有布局算法实现统一的 `EPLBPlanner.plan(logical_expert_load_samples, current_placement)` 接口，返回：
 
 ```text
-logical_expert_load: CPU Tensor[rank, layer, sample, logical_expert]
+logical_expert_load_samples: CPU Tensor[rank, layer, sample, logical_expert]
 [layer][rank][local physical slot] -> logical expert ID
 ```
 

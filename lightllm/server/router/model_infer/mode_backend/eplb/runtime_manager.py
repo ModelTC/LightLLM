@@ -157,6 +157,19 @@ class EPLBManager:
         self.max_rebalance_count: int = max_rebalance_count
         self.completed_rebalance_count: int = 0
 
+        # 一次重排周期中的短期状态。统一初始化为 None，避免各状态
+        # 通过 hasattr()/del 隐式定义 EPLBManager 的属性结构。
+        self._load_gather_task: Optional[EPLBLoadGatherTask] = None
+        self._pending_plan_load_samples: Optional[torch.Tensor] = None
+        self._metric_sample_load: Optional[torch.Tensor] = None
+        self._plan_task: Optional[EPLBPlanTask] = None
+        self.target_placement: Optional[ExpertPlacement] = None
+        self._transfer_planner: Optional[EPLBTransferPlanner] = None
+        self.pending_transfer_batches: Optional[List[List[EPLBTransferInfo]]] = None
+        self.rebalance_started_at: Optional[float] = None
+        self.active_transfer_batch: Optional[List[EPLBTransferInfo]] = None
+        self.active_transfers: Optional[List[PinnedMemoryEPLBTransfer]] = None
+
         # 分布式通信：后台负载汇集、主线程控制面和后台权重传输分别使用
         # 独立的 Gloo 通信组。负载 all-gather 可能跨越多个 manager step，
         # 不能与主线程中按 step 排序的控制 collective 共用同一个 group。
@@ -299,9 +312,8 @@ class EPLBManager:
 
             if has_enough_load:
                 self._load_gather_task = EPLBLoadGatherTask(
-                    local_load=local_load_samples,
+                    local_load_samples=local_load_samples,
                     load_gather_group=self.load_gather_group,
-                    world_size=self.world_size,
                 )
                 self._load_gather_task.start()
                 self.state = EPLBManagerState.WAIT_LOAD_GATHER_FINISHED
@@ -309,55 +321,57 @@ class EPLBManager:
                 self.state = EPLBManagerState.COLLECTING
 
     def _step_wait_load_gather_finished(self) -> None:
-        """等待各 rank 的原始负载汇集完成，并生成 planner 的全局负载。"""
-        local_finished = self._load_gather_task.is_finished()
-        finished_by_rank = [False] * self.world_size
-        dist.all_gather_object(
-            finished_by_rank,
-            local_finished,
-            group=self.control_group,
-        )
-        if not all(finished_by_rank):
+        """等待原始负载汇集完成，并准备 planner 和 metrics 输入。"""
+        assert self._load_gather_task is not None
+        if not self._all_ranks_finished(self._load_gather_task.is_finished()):
             return
 
-        gathered_load = self._load_gather_task.result
-        assert gathered_load is not None
-        assert gathered_load.ndim == 4
-        assert gathered_load.shape[0] == self.world_size
-        assert gathered_load.shape[1] == len(self._eplb_impls)
-        assert gathered_load.shape[3] == self.num_logical_experts
-        del self._load_gather_task
+        gathered_load_samples = self._load_gather_task.result
+        assert gathered_load_samples is not None
+        assert gathered_load_samples.ndim == 4
+        assert gathered_load_samples.shape[0] == self.world_size
+        assert gathered_load_samples.shape[1] == len(self._eplb_impls)
+        assert gathered_load_samples.shape[3] == self.num_logical_experts
+        self._load_gather_task = None
 
-        # gathered_load 保留 [rank, layer, sample, logical_expert] 原始结构并
+        # gathered_load_samples 保留 [rank, layer, sample, logical_expert]
+        # 原始结构并
         # 直接交给 planner。重排计算指标应表示一次真实 prefill 的
         # 关键路径开销，而不是多个不同批次累加后的虚拟大批次。
-        # 因此固定取环形缓冲区第 0 个 sample 行，只汇总同一次
-        # 分布式 prefill 在各 rank 上的分片，得到 [layer, logical_expert]。
+        # EP rank 以相同顺序执行 prefill，每次 dispatch 都将同一 sample
+        # index 推进一次；因此各 rank 的第 0 行属于同一采样位置。
+        # metrics 固定取该行，只汇总其在各 rank 上的分片，得到
+        # [layer, logical_expert]。
         if self.global_rank == 0:
-            self._planning_load_samples = gathered_load
-            metric_load_by_rank = gathered_load[:, :, 0, :]
-            self._planning_global_load = metric_load_by_rank.sum(dim=0)
+            self._pending_plan_load_samples = gathered_load_samples
+            metric_sample_load_by_rank = gathered_load_samples[:, :, 0, :]
+            self._metric_sample_load = metric_sample_load_by_rank.sum(dim=0)
         self.state = EPLBManagerState.PLAN_PLACEMENT
 
     def _step_plan_placement(self) -> None:
         """由 rank 0 使用已汇集的全局负载启动异步规划。"""
         self.state = EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
         if self.global_rank == 0:
+            assert self._pending_plan_load_samples is not None
             # planner 消费保留 rank/sample 维的原始快照；指标使用其中
             # 一个 sample 行，确保 before/after 比较的是同一批负载。
             self._plan_task = EPLBPlanTask(
                 planner=self.planner,
-                logical_expert_load=self._planning_load_samples,
+                logical_expert_load_samples=self._pending_plan_load_samples,
                 current_placement=self.current_placement,
             )
             self._plan_task.start()
+            # 任务对象已持有 Tensor，manager 不再保留重复引用。
+            self._pending_plan_load_samples = None
 
     def _step_wait_plan_placement_finished(self) -> None:
         """等待 rank 0 完成规划并广播目标专家排布。"""
         placement: Optional[ExpertPlacement] = None
-        if self.global_rank == 0 and self._plan_task.is_finished():
-            placement = self._plan_task.result
-            assert placement is not None
+        if self.global_rank == 0:
+            assert self._plan_task is not None
+            if self._plan_task.is_finished():
+                placement = self._plan_task.result
+                assert placement is not None
 
         values = [placement]
         dist.broadcast_object_list(values, src=0, group=self.control_group)
@@ -366,16 +380,16 @@ class EPLBManager:
             return
 
         if self.global_rank == 0:
+            assert self._metric_sample_load is not None
             eplb_metrics.publish_rebalance_compute_metrics(
                 metric_client=self.metric_client,
-                global_load=self._planning_global_load,
+                sample_load=self._metric_sample_load,
                 current_placement=self.current_placement,
                 target_placement=placement,
                 expert_alignment=EPLB_EXPERT_ALIGNMENT,
             )
-            del self._planning_load_samples
-            del self._planning_global_load
-            del self._plan_task
+            self._metric_sample_load = None
+            self._plan_task = None
 
         if placement == self.current_placement:
             if self.global_rank == 0:
@@ -393,65 +407,67 @@ class EPLBManager:
         # 所有 rank 使用相同的 current/target placement 独立生成确定性的传输
         # 批次，避免广播体积较大的任务列表；耗时的逐层依赖分析放到后台线程，
         # 当前推理线程从下一次安全边界开始只需轮询完成状态。
+        assert self.target_placement is not None
         self._transfer_planner = EPLBTransferPlanner(
-            self.current_placement,
-            self.target_placement,
-            self.num_logical_experts,
-            self.world_size,
+            current_placement=self.current_placement,
+            target_placement=self.target_placement,
+            num_logical_experts=self.num_logical_experts,
+            world_size=self.world_size,
         )
         self._transfer_planner.start()
         self.state = EPLBManagerState.WAIT_PLAN_TRANSFER_FINISHED
 
     def _step_wait_plan_transfer_finished(self) -> None:
         """等待所有 rank 异步生成相同的传输批次，再统一进入传输状态。"""
-        local_finished = self._transfer_planner.is_finished()
-        finished_by_rank = [False] * self.world_size
-        dist.all_gather_object(finished_by_rank, local_finished, group=self.control_group)
+        assert self._transfer_planner is not None
 
         # 即使本 rank 已经完成，也必须等待其他 rank 的镜像任务列表就绪；否则
         # 提前进入 TRANSFERRING 的 rank 可能发起尚无对端参与的点对点传输。
-        if not all(finished_by_rank):
+        if not self._all_ranks_finished(self._transfer_planner.is_finished()):
             return
-        else:
-            pending_transfer_batches = self._transfer_planner.result
-            assert pending_transfer_batches is not None
-            self.pending_transfer_batches = pending_transfer_batches
-            del self._transfer_planner
-            if not self.pending_transfer_batches:
-                raise RuntimeError("planned EPLB rearrangement must contain at least one transfer")
 
-            self.state = EPLBManagerState.TRANSFERRING
-            if self.global_rank == 0:
-                changed_layer_count = sum(
-                    current != target for current, target in zip(self.current_placement, self.target_placement)
-                )
-                logger.info(
-                    "eplb started steps=%s changed_layer_count=%s changed_slot_count=%s",
-                    self.steps,
-                    changed_layer_count,
-                    sum(len(transfer_batch) for transfer_batch in self.pending_transfer_batches),
-                )
+        pending_transfer_batches = self._transfer_planner.result
+        assert pending_transfer_batches is not None
+        self.pending_transfer_batches = pending_transfer_batches
+        self._transfer_planner = None
+        if not self.pending_transfer_batches:
+            raise RuntimeError("planned EPLB rearrangement must contain at least one transfer")
+
+        self.state = EPLBManagerState.TRANSFERRING
+        if self.global_rank == 0:
+            assert self.target_placement is not None
+            changed_layer_count = sum(
+                current != target for current, target in zip(self.current_placement, self.target_placement)
+            )
+            logger.info(
+                "eplb started steps=%s changed_layer_count=%s changed_slot_count=%s",
+                self.steps,
+                changed_layer_count,
+                sum(len(transfer_batch) for transfer_batch in self.pending_transfer_batches),
+            )
 
     def _step_transferring(self) -> None:
         """启动或轮询一个传输批次；整批完成后再统一提交。"""
-        if not hasattr(self, "rebalance_started_at"):
-            self.rebalance_started_at = time.time()
+        if self.rebalance_started_at is None:
+            self.rebalance_started_at = time.monotonic()
 
         # 没有活动批次时，所有 rank 根据相同的 pending 列表构造下一批任务。
-        if not hasattr(self, "active_transfer_batch"):
+        if self.active_transfer_batch is None:
+            assert self.pending_transfer_batches is not None
             transfer_batch = self.pending_transfer_batches.pop(0) if self.pending_transfer_batches else []
 
             # 空批次表示公共任务列表已经耗尽，所有 rank 可以同时结束重排。
             if not transfer_batch:
+                assert self.target_placement is not None
                 self.current_placement = self.target_placement
-                elapsed = time.time() - self.rebalance_started_at
+                elapsed = time.monotonic() - self.rebalance_started_at
                 if self.global_rank == 0:
                     self._persist_current_placement()
                 self._clear_prefill_route_samples()
                 self.completed_rebalance_count += 1
-                del self.pending_transfer_batches
-                del self.target_placement
-                del self.rebalance_started_at
+                self.pending_transfer_batches = None
+                self.target_placement = None
+                self.rebalance_started_at = None
                 self.state = EPLBManagerState.COLLECTING
                 if self.global_rank == 0:
                     logger.info(
@@ -468,10 +484,10 @@ class EPLBManager:
                 # row，必须等整批传输完成后再统一覆盖 live 权重。
                 self.active_transfers = [
                     PinnedMemoryEPLBTransfer(
-                        self._weights,
-                        self.transfer_group,
-                        self.global_rank,
-                        transfer_info,
+                        weights=self._weights,
+                        transfer_group=self.transfer_group,
+                        current_global_rank=self.global_rank,
+                        transfer_info=transfer_info,
                     )
                     for transfer_info in transfer_batch
                     if self.global_rank in (transfer_info.source_rank, transfer_info.dest_rank)
@@ -487,32 +503,32 @@ class EPLBManager:
         # 每个 rank 只负责自己参与的任务；不参与当前批次的 rank，其本地任务
         # 列表为空，all([]) 自然为 True。所有 rank 汇总一个布尔值即可判断整批
         # 是否完成，无需重复传输并逐条匹配 EPLBTransferInfo。
-        local_finished = all(transfer.is_finished() for transfer in self.active_transfers)
-        finished_by_rank = [False] * self.world_size
-        dist.all_gather_object(finished_by_rank, local_finished, group=self.control_group)
-        if not all(finished_by_rank):
+        assert self.active_transfers is not None
+        if not self._all_ranks_finished(all(transfer.is_finished() for transfer in self.active_transfers)):
             return
-        else:
-            # 所有 rank 使用相同的批次顺序提交，因此全局 placement 和 metadata
-            # 始终一致；只有 destination rank 会额外写入实际专家权重。
-            from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-            # 专家权重和路由 metadata 都由 overlap stream 上的 MoE forward
-            # 读取。将整批写操作排到同一条 stream，便可自然等待此前的 forward，
-            # 并保证后续 forward 只能看到完整提交后的权重与 metadata。
-            with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-                for transfer_info in self.active_transfer_batch:
-                    self._commit_transfer(transfer_info)
-                for layer_index in {transfer_info.layer_index for transfer_info in self.active_transfer_batch}:
-                    self._publish_layer_metadata(layer_index)
+        # 所有 rank 使用相同的批次顺序提交，因此全局 placement 和 metadata
+        # 始终一致；只有 destination rank 会额外写入实际专家权重。
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-            del self.active_transfers
-            del self.active_transfer_batch
+        # 专家权重和路由 metadata 都由 overlap stream 上的 MoE forward
+        # 读取。将整批写操作排到同一条 stream，便可自然等待此前的 forward，
+        # 并保证后续 forward 只能看到完整提交后的权重与 metadata。
+        assert self.active_transfer_batch is not None
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            for transfer_info in self.active_transfer_batch:
+                self._commit_transfer(transfer_info)
+            for layer_index in {transfer_info.layer_index for transfer_info in self.active_transfer_batch}:
+                self._publish_layer_metadata(layer_index)
+
+        self.active_transfers = None
+        self.active_transfer_batch = None
 
     def _commit_transfer(self, transfer_info: EPLBTransferInfo) -> None:
         """把一条已完成传输提交到 live 权重和完整布局。"""
         is_destination_rank = transfer_info.dest_rank == self.global_rank
         if is_destination_rank:
+            assert self.active_transfers is not None
             active_transfer = next(
                 (transfer for transfer in self.active_transfers if transfer.transfer_info == transfer_info),
                 None,
@@ -533,6 +549,16 @@ class EPLBManager:
             layer_impl.local_logics_expert_ids_list[
                 transfer_info.dest_local_expert_index
             ] = transfer_info.source_logical_expert_id
+
+    def _all_ranks_finished(self, local_finished: bool) -> bool:
+        """通过控制通信组判断所有 rank 的当前后台任务是否完成。"""
+        finished_by_rank = [False] * self.world_size
+        dist.all_gather_object(
+            finished_by_rank,
+            local_finished,
+            group=self.control_group,
+        )
+        return all(finished_by_rank)
 
     def _publish_layer_metadata(self, layer_index: int) -> None:
         """在整批槽位更新完成后发布该层路由 metadata。"""
