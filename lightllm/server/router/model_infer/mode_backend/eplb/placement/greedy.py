@@ -1,15 +1,18 @@
-"""使用纯 Python 实现贪心 EPLB 专家布局规划。
+"""使用 CPU Tensor 输入和纯 Python 核心逻辑实现贪心 EPLB 布局规划。
 
-规划器有意使用嵌套 list，而不是 Tensor。Tensor 转换仅发生在 manager 的
-分布式通信和迁移边界；规划模块不依赖 Tensor，更易于阅读、测试和替换算法。
+入口保留 all-gather 产生的 rank、layer、sample 和 logical expert 维度；
+Greedy planner 先完成必要的聚合，再转换为嵌套 list。实际贪心分析仍只使用
+Python 数值和容器，更易于阅读、测试和替换算法。
 """
 
 import heapq
 from math import ceil
 from typing import List
 
+import torch
+
 from .planner import EPLBPlanner
-from .types import ExpertPlacement, ExpertReplicaGroup, LayerPlacement, LogicalExpertLoad
+from .types import ExpertPlacement, ExpertReplicaGroup, LayerPlacement
 
 
 class GreedyEPLBPlanner(EPLBPlanner):
@@ -145,13 +148,21 @@ class GreedyEPLBPlanner(EPLBPlanner):
 
     def plan(
         self,
-        logical_expert_load: LogicalExpertLoad,
+        logical_expert_load: torch.Tensor,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:
-        """逐层规划专家布局，再组合成完整的多层布局。"""
-        # 先把外部输入转换成规划器内部统一使用的 Python 数值类型，并一次性
-        # 校验所有层的形状和布局约束。后续每层规划之间没有共享的可变状态。
-        load = [[float(value) for value in layer] for layer in logical_expert_load]
+        """聚合全局逐样本负载，逐层规划并组合成完整的多层布局。"""
+        # logical_expert_load: [rank, layer, sample, logical_expert] CPU Tensor。
+        # Greedy 算法只需要整个采样窗口内每层各 logical expert 的累计负载，
+        # 因此沿 rank 和 sample 维求和为 [layer, logical_expert]，再转成 list
+        # 进入后续纯 Python 分析逻辑。
+        assert logical_expert_load.device.type == "cpu"
+        assert logical_expert_load.ndim == 4
+        assert logical_expert_load.shape[0] == self.world_size
+        load = logical_expert_load.sum(dim=(0, 2)).to(torch.float64).tolist()
+
+        # 一次性校验所有层的形状和布局约束。后续每层规划之间没有共享的
+        # 可变状态。
         current = [[[int(expert) for expert in rank] for rank in layer] for layer in current_placement]
         self._validate_inputs(load, current)
 
@@ -342,7 +353,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
 
     def _validate_inputs(
         self,
-        logical_expert_load: LogicalExpertLoad,
+        logical_expert_load: List[List[float]],
         placement: ExpertPlacement,
     ) -> None:
         """拒绝会导致逐层规划静默截断的输入。"""

@@ -120,7 +120,7 @@ def publish_rebalance_compute_metrics(
     target_placement: ExpertPlacement,
     expert_alignment: int,
 ) -> None:
-    """使用同一份 planner 输入上报重排前后的关键路径开销。"""
+    """使用同一个 prefill 样本上报重排前后的关键路径开销。"""
     before_rebalance_ratio = compute_critical_overhead_ratio(
         logical_expert_load=global_load,
         placement=current_placement,

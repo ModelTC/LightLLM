@@ -3,8 +3,6 @@
 from typing import List, Tuple
 
 
-# [layer][logical expert]
-LogicalExpertLoad = List[List[float]]
 # [rank][local physical expert] -> logical expert
 LayerPlacement = List[List[int]]
 # [layer][rank][local physical expert] -> logical expert

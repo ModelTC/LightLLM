@@ -25,6 +25,7 @@ from .async_expert_transfer import (
     EPLBTransferInfo,
     PinnedMemoryEPLBTransfer,
 )
+from .async_load_gather_task import EPLBLoadGatherTask
 from .async_placement_plan_task import EPLBPlanTask
 from .async_transfer_planner import EPLBTransferPlanner
 from .placement import (
@@ -45,6 +46,7 @@ class EPLBManagerState(Enum):
 
     COLLECTING = "collecting"
     EVALUATING = "evaluating"
+    WAIT_LOAD_GATHER_FINISHED = "wait_load_gather_finished"
     PLAN_PLACEMENT = "plan_placement"
     WAIT_PLAN_PLACEMENT_FINISHED = "wait_plan_placement_finished"
     PLAN_TRANSFER = "plan_transfer"
@@ -64,13 +66,19 @@ class EPLBManager:
                 | 评估周期到达
                 v
         [EVALUATING]
-          将本地环形样本聚合到 CPU 并上报负载指标；汇总各 rank 的
-          token 总数，判断样本量和剩余重排次数。
+          将本地环形样本完整复制到 CPU 并上报负载指标；在独立 Gloo
+          通信组中启动逐样本负载的后台 all-gather。rank 0 在通信前判断
+          本地样本量；样本不足或达到重排次数上限时不启动通信。
+                |
+                v
+        [WAIT_LOAD_GATHER_FINISHED]
+          等待所有 rank 完成负载汇集，保留 planner 需要的
+          rank 和 sample 原始维度。
                 |
                 | 样本充足且仍允许重排
                 v
         [PLAN_PLACEMENT]
-          汇集完整的全局专家负载；rank 0 启动后台布局规划任务。
+          rank 0 使用完整的全局专家负载启动后台布局规划任务。
                 |
                 v
         [WAIT_PLAN_PLACEMENT_FINISHED]
@@ -149,7 +157,10 @@ class EPLBManager:
         self.max_rebalance_count: int = max_rebalance_count
         self.completed_rebalance_count: int = 0
 
-        # 分布式通信：控制面与权重传输使用独立的通信组。
+        # 分布式通信：后台负载汇集、主线程控制面和后台权重传输分别使用
+        # 独立的 Gloo 通信组。负载 all-gather 可能跨越多个 manager step，
+        # 不能与主线程中按 step 排序的控制 collective 共用同一个 group。
+        self.load_gather_group = dist.new_group(list(range(self.world_size)), backend="gloo")
         self.control_group = dist.new_group(list(range(self.world_size)), backend="gloo")
         self.transfer_group = dist.new_group(list(range(self.world_size)), backend="gloo")
 
@@ -195,6 +206,10 @@ class EPLBManager:
             self._step_evaluating()
             return
 
+        if self.state is EPLBManagerState.WAIT_LOAD_GATHER_FINISHED:
+            self._step_wait_load_gather_finished()
+            return
+
         if self.state is EPLBManagerState.PLAN_PLACEMENT:
             self._step_plan_placement()
             return
@@ -229,21 +244,22 @@ class EPLBManager:
             self.state = EPLBManagerState.EVALUATING
 
     def _step_evaluating(self) -> None:
-        """发布本地负载指标，并在次数允许时根据全局样本量决定是否规划。"""
+        """快照本地逐样本负载，并在独立通信组中启动后台汇集。"""
         counters = [impl.prefill_route_counter for impl in self._eplb_impls]
         if any(counter.ndim != 2 or counter.shape[1] != self.num_logical_experts for counter in counters):
             raise RuntimeError("EPLB prefill route counter shape must be [sample_capacity, num_logical_experts]")
         if len({counter.shape[0] for counter in counters}) != 1:
             raise RuntimeError("EPLB prefill route counter capacities must match across layers")
 
-        # 在 GPU 上沿 sample 维聚合各层的环形样本，再一次性复制到 CPU，
-        # 得到 planner 使用的 [layer, logical_expert] 负载，避免逐层发起
-        # GPU -> CPU 拷贝。
+        # 一次性堆叠各层环形样本并复制到 CPU，保留完整的
+        # [layer, sample, logical_expert] 维度。后续后台 all-gather 会继续保留
+        # rank 和 sample 维；通信完成后将原始四维快照交给 planner。
         # 此处先不清零 GPU 样本：如果样本不足或无需迁移，下一周期会继续
         # 滚动覆盖最旧行；达到重排上限或成功切换到新布局后才重置窗口。本轮
         # 异步规划使用独立的 CPU 快照，不会与后续的 atomic add 竞争。
-        local_load = torch.stack(counters).sum(dim=1).detach().cpu()
+        local_load_samples = torch.stack(counters).detach().cpu()
         if self.global_rank == 0:
+            local_load = local_load_samples.sum(dim=1)
             eplb_metrics.publish_expert_load_metrics(
                 metric_client=self.metric_client,
                 expert_load=local_load,
@@ -258,51 +274,81 @@ class EPLBManager:
             self._clear_prefill_route_samples()
             self.state = EPLBManagerState.COLLECTING
         else:
-            # 汇集各 rank 的 token 总数，判断当前统计量是否足以进行布局规划。
-            token_count_by_rank = [0] * self.world_size
-            dist.all_gather_object(
-                token_count_by_rank,
-                int(local_load.sum().item()),
-                group=self.control_group,
-            )
-            average_tokens_per_expert = sum(token_count_by_rank) / local_load.numel()
-            if average_tokens_per_expert < EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT:
-                if self.global_rank == 0:
+            # rank 0 的路由分布足以代表全局分布，因此只使用 rank 0 的本地
+            # 样本判断统计量是否充足，再广播布尔决策以保持所有 rank 的状态
+            # 转移一致。样本不足时不启动大块原始负载 all-gather。
+            has_enough_load = None
+            if self.global_rank == 0:
+                average_tokens_per_expert = local_load.sum().item() / local_load.numel()
+                has_enough_load = average_tokens_per_expert >= EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT
+                if not has_enough_load:
                     logger.info(
                         "eplb continue collecting average_tokens_per_expert=%.2f threshold=%s",
                         average_tokens_per_expert,
                         EPLB_MIN_AVERAGE_TOKENS_PER_EXPERT,
                     )
-                self.state = EPLBManagerState.COLLECTING
+
+            values = [has_enough_load]
+            dist.broadcast_object_list(
+                values,
+                src=0,
+                group=self.control_group,
+            )
+            has_enough_load = values[0]
+            assert has_enough_load is not None
+
+            if has_enough_load:
+                self._load_gather_task = EPLBLoadGatherTask(
+                    local_load=local_load_samples,
+                    load_gather_group=self.load_gather_group,
+                    world_size=self.world_size,
+                )
+                self._load_gather_task.start()
+                self.state = EPLBManagerState.WAIT_LOAD_GATHER_FINISHED
             else:
-                self._local_load = local_load
-                self.state = EPLBManagerState.PLAN_PLACEMENT
+                self.state = EPLBManagerState.COLLECTING
+
+    def _step_wait_load_gather_finished(self) -> None:
+        """等待各 rank 的原始负载汇集完成，并生成 planner 的全局负载。"""
+        local_finished = self._load_gather_task.is_finished()
+        finished_by_rank = [False] * self.world_size
+        dist.all_gather_object(
+            finished_by_rank,
+            local_finished,
+            group=self.control_group,
+        )
+        if not all(finished_by_rank):
+            return
+
+        gathered_load = self._load_gather_task.result
+        assert gathered_load is not None
+        assert gathered_load.ndim == 4
+        assert gathered_load.shape[0] == self.world_size
+        assert gathered_load.shape[1] == len(self._eplb_impls)
+        assert gathered_load.shape[3] == self.num_logical_experts
+        del self._load_gather_task
+
+        # gathered_load 保留 [rank, layer, sample, logical_expert] 原始结构并
+        # 直接交给 planner。重排计算指标应表示一次真实 prefill 的
+        # 关键路径开销，而不是多个不同批次累加后的虚拟大批次。
+        # 因此固定取环形缓冲区第 0 个 sample 行，只汇总同一次
+        # 分布式 prefill 在各 rank 上的分片，得到 [layer, logical_expert]。
+        if self.global_rank == 0:
+            self._planning_load_samples = gathered_load
+            metric_load_by_rank = gathered_load[:, :, 0, :]
+            self._planning_global_load = metric_load_by_rank.sum(dim=0)
+        self.state = EPLBManagerState.PLAN_PLACEMENT
 
     def _step_plan_placement(self) -> None:
-        """汇集全局负载，并由 rank 0 启动异步规划。"""
-        local_load = self._local_load
-        del self._local_load
-
-        # 一次分配连续的 [rank][layer][logical_expert] 缓冲区，再沿 rank 维
-        # 切出 all_gather 所需的输出 tensor。
-        gathered_load = torch.empty(
-            (self.world_size, *local_load.shape),
-            dtype=local_load.dtype,
-            device=local_load.device,
-        )
-        load_by_rank = list(gathered_load.unbind(dim=0))
-        dist.all_gather(load_by_rank, local_load, group=self.control_group)
-        global_load = gathered_load.sum(dim=0)
-
+        """由 rank 0 使用已汇集的全局负载启动异步规划。"""
         self.state = EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
         if self.global_rank == 0:
-            # 保留 planner 实际消费的全局负载快照。目标布局产生后，使用同一份
-            # 输入分别评估 current/target placement，确保 before/after 可直接比较。
-            self._planning_global_load = global_load
+            # planner 消费保留 rank/sample 维的原始快照；指标使用其中
+            # 一个 sample 行，确保 before/after 比较的是同一批负载。
             self._plan_task = EPLBPlanTask(
-                self.planner,
-                global_load,
-                self.current_placement,
+                planner=self.planner,
+                logical_expert_load=self._planning_load_samples,
+                current_placement=self.current_placement,
             )
             self._plan_task.start()
 
@@ -327,6 +373,7 @@ class EPLBManager:
                 target_placement=placement,
                 expert_alignment=EPLB_EXPERT_ALIGNMENT,
             )
+            del self._planning_load_samples
             del self._planning_global_load
             del self._plan_task
 

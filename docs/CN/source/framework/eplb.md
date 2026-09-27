@@ -94,6 +94,7 @@ prefill_route_counter（最近 24 次 prefill 采样）
 | `eplb/placement/factory.py` | 根据 `eplb_plan_mode` 创建具体规划器 |
 | `eplb/placement/greedy.py` | 默认的贪心布局算法 |
 | `eplb/async_task.py` | 统一后台线程任务的启动、完成与异常处理 |
+| `eplb/async_load_gather_task.py` | 在独立 Gloo 通信组中后台汇集逐 rank、逐 sample 的原始负载 |
 | `eplb/async_placement_plan_task.py` | 在后台根据负载生成目标专家布局 |
 | `eplb/async_transfer_planner.py` | 在后台生成跨层传输批次 |
 | `eplb/async_expert_transfer.py` | 规划槽位依赖并在后台执行专家权重传输 |
@@ -249,7 +250,9 @@ ready 发布使用 `release`、等待方使用 `acquire`，最后完成信号使
 
 ### 5.7 manager 聚合与重置
 
-manager 在安全推理边界一次性堆叠各层 `[24, E]` 环形缓冲区，在 GPU 上沿 sample 维求和后复制到 CPU，得到 planner 使用的 `[layer, logical_expert]` 负载。如果样本量不足或规划结果未改变布局，不主动清空缓冲区；后续 prefill 会继续写入，并在容量用满后滚动覆盖最旧行。
+manager 在安全推理边界一次性堆叠各层 `[24, E]` 环形缓冲区，并完整复制为 `[layer, sample, logical_expert]` CPU 快照。rank 0 先沿 sample 维聚合本地负载并判断样本量，再向所有 rank 广播是否继续规划；样本不足时直接返回采集状态，不发起大块通信。样本充足时，后台任务使用独立的 Gloo 通信组执行 all-gather，得到 `[rank, layer, sample, logical_expert]`，并把这个四维 Tensor 直接交给 planner。独立通信组使长时间运行的后台 all-gather 不会打乱主线程控制 collective 的调用顺序。
+
+如果样本量不足或规划结果未改变布局，不主动清空缓冲区；后续 prefill 会继续写入，并在容量用满后滚动覆盖最旧行。
 
 初始化、成功切换到新布局，以及达到重排次数上限后开始下一轮指标窗口时，manager 会同时清零 `prefill_route_counter` 和 `prefill_route_sample_index`。清零提交到 overlap stream，自然排在此前 forward 之后、后续 forward 之前，不需要额外的全设备同步。
 
@@ -263,11 +266,16 @@ manager 在安全推理边界一次性堆叠各层 `[24, E]` 环形缓冲区，�
         |
         v
 [EVALUATING]
-  CPU 快照、指标上报、样本量与重排次数检查
+  CPU 原始样本快照、指标上报；rank 0 判断样本量并广播结果
+  样本充足且次数允许时启动后台 load all-gather
+        |
+        v
+[WAIT_LOAD_GATHER_FINISHED]
+  等待各 rank 汇集完成，保留 planner 需要的原始四维输入
         |
         v
 [PLAN_PLACEMENT]
-  汇集全局负载，rank 0 启动后台布局规划
+  rank 0 启动后台布局规划
         |
         v
 [WAIT_PLAN_PLACEMENT_FINISHED]
@@ -292,7 +300,7 @@ manager 在安全推理边界一次性堆叠各层 `[24, E]` 环形缓冲区，�
 
 ```text
 EVALUATING
-  |-- 平均 token 数不足 ----------> 保留环形窗口，继续滚动采样
+  |-- rank 0 平均 token 数不足 ----> 保留环形窗口，继续滚动采样
   `-- 达到重排次数上限 ----------> 清空采样，只做周期性指标上报
 
 WAIT_PLAN_PLACEMENT_FINISHED
@@ -301,7 +309,7 @@ WAIT_PLAN_PLACEMENT_FINISHED
 
 默认每 20 个采样 step 评估一次，可以通过环境变量 `LIGHTLLM_EPLB_STEP_INTERVAL` 调整。该值必须大于 0。
 
-只有当整个 world 的平均样本量达到每个“层 × 逻辑专家”128 个 token 时才开始规划。样本不足不会清空环形缓冲区，低流量服务可以跨多个评估周期继续采样；缓冲区写满后只保留最近 24 次 prefill dispatch。
+只有当 rank 0 的平均样本量达到每个“层 × 逻辑专家”128 个 token 时才开始规划。各 rank 的路由分布高度相似，因此 rank 0 足以作为是否值得发起全量通信的低成本判断。样本不足不会清空环形缓冲区，低流量服务可以跨多个评估周期继续采样；缓冲区写满后只保留最近 24 次 prefill dispatch。
 
 ## 7. 专家分布分析
 
@@ -310,7 +318,7 @@ WAIT_PLAN_PLACEMENT_FINISHED
 
 ### 7.1 各 rank 分布相似性（实测）
 
-在 `EPLBManager` 全局汇总负载（`_step_plan_placement` 的 `all_gather` 之后）时，
+在 `EPLBManager` 全局汇总负载（后台原始 load `all_gather` 完成之后）时，
 把各 rank 的 `[layer][logical_expert]` 负载逐层归一化为概率分布，以 rank0 的分布为基准，
 与其余 rank 逐层计算 cosine 相似度。观测窗口为 warmup 阶段一次完整采样
 （58 个 MoE 层 × 7 对，共 406 对）：
@@ -334,21 +342,21 @@ eplb load prob cosine summary mean_by_rank(0..7): 1.0000 0.9773 0.9711 0.9745 0.
 DP 随机分流下每个 rank 的路由统计都是对全局路由分布的无偏采样，
 分布形状（倾斜度、热点名单、长尾形态）在 rank 之间同源。
 
-### 7.2 设计依据：分布规划只使用 rank0 的数据
+### 7.2 设计选择：异步汇集所有 rank 的原始样本
 
-上述相似性是后续设计中**分布规划只使用 rank0 负载统计**的合理性依据：
+各 rank 的负载分布虽然高度相似，但单 rank 仍带有可观测的采样噪声。当前实现汇集所有
+rank 的 `[layer, sample, logical_expert]` 原始快照，并在通信完成后统一求和：
 
-1. **代表性**：各 rank 分布形状同源且高度一致（cosine 中位 0.97，浅层几乎重合），
-   rank0 的逐层概率分布与全局聚合分布在形状上等价，
-   以 rank0 为样本做倾斜度分档、热点估计、副本预算分配（注水）不会产生系统性偏差。
-2. **成本**：规划无需等待全 rank 负载汇聚即可获得分布形状，
-   采集与规划的关键路径缩短到单 rank 统计，状态机的全局同步点相应减少。
-3. **误差边界**：单 rank 估计相对全局的偏差上界为观测到的采样噪声
-   （cosine ≥ 0.94），配合负载估计的平滑处理与迁移增益门槛，
-   不会因单 rank 采样波动触发错误的副本迁移决策。
+1. **降低采样噪声**：规划器使用整个 world 的累计流量，热点排序和副本预算不依赖某个
+   rank 的随机流量分片；
+2. **保留分析信息**：通信结果在聚合前保留 rank 和 sample 维，后续可以直接增加跨 rank
+   差异或采样稳定性指标，不需要重新设计采集路径；
+3. **隔离关键路径**：all-gather 在后台线程和专用 Gloo 通信组中运行，主推理线程只在
+   `WAIT_LOAD_GATHER_FINISHED` 状态轮询完成标记，不会被大块负载通信直接阻塞。
 
-因此布局规划中所有"分布形状"相关的决策（概率分布、倾斜度、热点排序）
-均以 rank0 的 logical expert 负载统计为准。
+planner 接口直接接收 `[rank, layer, sample, logical_expert]` CPU Tensor。当前 Greedy
+实现进入算法主体前沿 rank 和 sample 维求和为 `[layer, logical_expert]`，再转换成嵌套
+list；因此原始维度在 planner 边界仍然可用，而后续贪心逻辑保持简单的纯 Python 实现。
 
 ## 8. 布局规划
 
@@ -357,6 +365,7 @@ DP 随机分流下每个 rank 的路由统计都是对全局路由分布的无�
 所有布局算法实现统一的 `EPLBPlanner.plan(logical_expert_load, current_placement)` 接口，返回：
 
 ```text
+logical_expert_load: CPU Tensor[rank, layer, sample, logical_expert]
 [layer][rank][local physical slot] -> logical expert ID
 ```
 
@@ -455,14 +464,14 @@ manager 先对每个有效层计算 `max(expert_load) / mean(expert_load)`，过
 
 这三个值都以 `1` 表示完全均衡。例如 P50 为 `1.8`，表示中位层最热 logical expert 的 token 数是该层专家平均值的 1.8 倍。
 
-当全局样本量达到规划阈值且 planner 产生目标布局后，rank 0 使用 planner 实际消费的同一份 `global_load` 上报：
+当样本量达到规划阈值且 planner 产生目标布局后，rank 0 固定选取原始四维快照的第 0 个 sample 行，并仅沿 rank 维汇总为 `[layer, logical_expert]` 负载后上报：
 
 ```text
 lightllm_prefill_ep_compute_critical_overhead_ratio_before_rebalance
 lightllm_prefill_ep_compute_critical_overhead_ratio_after_rebalance
 ```
 
-这两个指标参考 `eplb2` 的关键路径计算开销定义，但不维护独立的 compute counter、后台 monitor 线程和额外通信组。manager 假设同一 logical expert 的流量由 hash 均匀分配给全部 physical 副本，并按 128 token 对每个副本的估算负载向上对齐。`before_rebalance` 使用当前布局，`after_rebalance` 使用 planner 给出的目标布局；二者的输入负载完全相同，可以直接衡量预计的重排收益。如果 planner 判断布局无需改变，两个值应相同。
+这两个指标参考 `eplb2` 的关键路径计算开销定义，但不维护独立的 compute counter、后台 monitor 线程和额外通信组。manager 假设同一 logical expert 的流量由 hash 均匀分配给全部 physical 副本，并按 128 token 对每个副本的估算负载向上对齐。`before_rebalance` 使用当前布局，`after_rebalance` 使用 planner 给出的目标布局；二者的输入负载完全相同，可以直接衡量预计的重排收益。不会沿 sample 维累加，因为不同 sample 行来自不同 prefill 批次，累加后并不对应任何一次真实计算。如果 planner 判断布局无需改变，两个值应相同。
 
 每层先计算最繁忙 rank 相对平均 rank 的额外负载，最后跨层汇总：
 
