@@ -744,33 +744,36 @@ Expert Parallelism and EPLB Parameters
 
 .. option:: --eplb_plan_mode
 
-    Expert placement planning algorithm used for dynamic EPLB rebalances. The default is ``topology_aware``. The
-    supported values are:
+    Expert placement planning algorithm used for dynamic prefill EPLB rebalances. The default is
+    ``topology_aware``. The supported values are:
 
     * ``global_balance``: a reference implementation of global load balancing. It builds an approximately
       balanced full placement from the global logical-expert load of each layer and attempts to reuse current
       ranks and physical slots to reduce expert migration. Prefill tokens are distributed across all valid
       replicas. This mode is not suitable for grouped top-k routing.
     * ``topology_aware``: keeps the canonical primary slots fixed and plans only redundant slots. It retains
-      individual prefill samples and source-node load, estimates the critical path with node-local-first dispatch
-      and 128-token alignment, and uses a model-level gain threshold plus physical-slot reuse to avoid low-value
-      migrations. During prefill, replicas on the request's source node are preferred.
+      individual prefill samples and source-node load to match node-local-first dispatch, and uses 128-token
+      alignment, a model-level gain threshold, and physical-slot reuse to avoid low-value migrations.
 
-    Every rank in one EP communication group must use the same value. Prefill and decode processes in a
-    PD-disaggregated deployment have independent EPLB managers and may select planners suited to their respective
-    traffic. A non-PD process uses one planner for all routing load collected by that process.
+    Both algorithms are prefill-only and do not consume the decode co-occurrence statistics. Every rank in one EP
+    communication group must use the same value. The plan mode must match ``--eplb_run_mode`` or initialization
+    fails. No decode planner is currently registered.
 
 .. option:: --eplb_run_mode
 
-    Inference stage whose load is optimized by EPLB. The default is ``prefill``. The supported values are:
+    Inference stage whose routing statistics are collected by EPLB. The default is ``prefill``. The supported
+    values are:
 
     * ``prefill`` marks the EPLB manager as targeting prefill load.
-    * ``decode`` marks the EPLB manager as targeting decode load.
+    * ``decode`` records the upper triangle of a logical-expert co-occurrence matrix.
 
-    This option is independent of ``--eplb_plan_mode``: the run mode selects the type of load to optimize,
-    while the plan mode selects the expert-placement algorithm. The mode is propagated to the EPLB manager so
-    phase-specific statistics structures can be connected independently as they evolve. Selecting ``decode``
-    disables the existing prefill routing counter.
+    ``prefill`` uses a ``[24, E]`` ring of routing samples. ``decode`` uses an ``[E, E]`` logical-expert
+    co-occurrence matrix and writes only its upper triangle, including the main diagonal. Decode mode disables
+    the prefill counter, and prefill mode adds no statistics atomics
+    to the decode path. These buffers are allocated exclusively; attributes for the inactive mode are ``None``,
+    so both allocations never consume GPU memory at the same time. The currently available plan modes are
+    prefill-only. The decode statistics structure is implemented, but decode requires a dedicated planner to be
+    registered in the factory before it can be started as a complete EPLB run mode.
 
 .. option:: --eplb_rebalance_count
 

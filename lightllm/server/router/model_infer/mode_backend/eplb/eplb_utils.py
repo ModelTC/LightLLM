@@ -25,32 +25,33 @@ class EPLBExpertWeight(Protocol):
 
 
 def get_eplb_dispatch_mode(is_prefill: bool) -> str:
-    """根据推理阶段和布局算法返回 EPLB 副本分发模式。
-
-    Decode 当前固定优先使用本卡副本。Prefill 的分发策略必须与 planner 的
-    负载模型一致：``topology_aware`` 优先使用当前节点的副本，``global_balance``
-    直接在全部有效副本之间分发。
-    """
-    assert is_prefill is not None
-    if not is_prefill:
-        return "current_gpu_first"
-
+    """查询 ``(is_prefill, plan_mode)`` 对应的 EPLB 副本分发模式。"""
+    default_dispatch_mode = {
+        True: "current_node_first",
+        False: "current_gpu_first",
+    }
+    # (是否为 prefill, planner 模式): 副本分发模式
+    dispatch_mode_table = {
+        (True, "global_balance"): "global_first",
+        (True, "topology_aware"): "current_node_first",
+        (False, "global_balance"): "current_gpu_first",
+        (False, "topology_aware"): "current_gpu_first",
+    }
     plan_mode = get_env_start_args().eplb_plan_mode
-    assert plan_mode in (
-        "global_balance",
-        "topology_aware",
-    ), f"unsupported EPLB plan mode: {plan_mode}"
-
-    if plan_mode == "topology_aware":
-        return "current_node_first"
-    else:
-        return "global_first"
+    dispatch_key = (is_prefill, plan_mode)
+    return dispatch_mode_table.get(dispatch_key, default_dispatch_mode[is_prefill])
 
 
 def should_record_prefill_route(is_prefill: bool) -> bool:
     """仅在 prefill 定制模式的 prefill 请求中记录路由负载。"""
     run_mode = get_env_start_args().eplb_run_mode
     return run_mode == "prefill" and is_prefill
+
+
+def should_record_decode_route(is_prefill: bool) -> bool:
+    """仅在 decode 定制模式的 decode 请求中记录专家共现。"""
+    run_mode = get_env_start_args().eplb_run_mode
+    return run_mode == "decode" and not is_prefill
 
 
 def extract_eplb_expert_tensors(weight: EPLBExpertWeight) -> List[NamedTensor]:

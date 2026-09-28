@@ -21,6 +21,37 @@ EXPERT_IMBALANCE_RATIO_METRICS = {
 }
 
 
+def logical_expert_load(route_statistics: torch.Tensor, run_mode: str) -> torch.Tensor:
+    """从原始路由统计中提取每个 logical expert 的负载。
+
+    本地统计的输入输出 shape：
+
+    - prefill: ``[layer, sample, expert_num] -> [layer, expert_num]``
+    - decode: ``[layer, expert_num, expert_num] -> [layer, expert_num]``
+
+    all-gather 后的输入输出 shape：
+
+    - prefill: ``[rank, layer, sample, expert_num] -> [rank, layer, expert_num]``
+    - decode: ``[rank, layer, expert_num, expert_num] -> [rank, layer, expert_num]``
+    """
+    if run_mode == "prefill":
+        # sample 维保存多次独立的 prefill 路由采样，沿该维求和得到专家总负载。
+        return route_statistics.sum(dim=-2)
+    else:
+        # decode 共现矩阵的主对角线保存每个 logical expert 的精确路由次数。
+        return torch.diagonal(route_statistics, dim1=-2, dim2=-1)
+
+
+def prefill_rebalance_metric_load(route_statistics: torch.Tensor) -> torch.Tensor:
+    """生成 prefill 重排前后计算开销指标使用的负载。
+
+    shape: ``[rank, layer, sample, expert_num] -> [layer, expert_num]``。
+    """
+    # 不同 sample 来自不同批次。固定取各 rank 的第 0 行，避免将多个
+    # 批次累加成一次不存在的虚拟大批次。
+    return route_statistics[:, :, 0, :].sum(dim=0)
+
+
 def logical_expert_imbalance_percentiles(expert_load: torch.Tensor) -> dict[int, float]:
     """统计各层 ``最热 logical expert / 本层平均负载`` 的分位数。"""
     assert expert_load.ndim == 2 and expert_load.numel() > 0

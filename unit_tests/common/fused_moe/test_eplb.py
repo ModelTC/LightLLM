@@ -65,13 +65,22 @@ def _test_moe_impl(
     num_redundant_experts_per_rank=1,
     prefill_route_counter=None,
     prefill_route_sample_index=None,
+    decode_route_counter=None,
+    run_mode="prefill",
 ):
     logical_to_physical_map = None
     if eplb:
-        if prefill_route_counter is None:
-            prefill_route_counter = torch.zeros((24, num_logical_experts), dtype=torch.int64)
-        if prefill_route_sample_index is None:
-            prefill_route_sample_index = torch.zeros((2,), dtype=torch.int64)
+        if run_mode == "prefill":
+            if prefill_route_counter is None:
+                prefill_route_counter = torch.zeros((24, num_logical_experts), dtype=torch.int64)
+            if prefill_route_sample_index is None:
+                prefill_route_sample_index = torch.zeros((2,), dtype=torch.int64)
+            decode_route_counter = None
+        else:
+            prefill_route_counter = None
+            prefill_route_sample_index = None
+            if decode_route_counter is None:
+                decode_route_counter = torch.zeros((num_logical_experts, num_logical_experts), dtype=torch.int64)
         logical_to_physical_map = torch.zeros((num_logical_experts, world_size + 3), dtype=torch.int32)
         logical_to_physical_map[:, :3] = 1
     else:
@@ -84,6 +93,7 @@ def _test_moe_impl(
         logical_to_physical_map=logical_to_physical_map,
         prefill_route_counter=prefill_route_counter,
         prefill_route_sample_index=prefill_route_sample_index,
+        decode_route_counter=decode_route_counter,
     )
 
 
@@ -94,6 +104,7 @@ def _set_deepgemm_runtime(impl, runtime):
         "logical_to_physical_map",
         "prefill_route_counter",
         "prefill_route_sample_index",
+        "decode_route_counter",
     ):
         setattr(impl, name, getattr(runtime, name))
 
@@ -337,9 +348,10 @@ def test_eplb_planner_defines_an_abstract_planning_interface():
 
 def test_create_eplb_planner_selects_requested_algorithm():
     planner = create_eplb_planner(
-        "global_balance",
-        2,
-        1,
+        plan_mode="global_balance",
+        run_mode="prefill",
+        num_ranks=2,
+        num_redundant_experts_per_rank=1,
         expert_alignment=1,
         node_world_size=2,
     )
@@ -347,9 +359,10 @@ def test_create_eplb_planner_selects_requested_algorithm():
     assert isinstance(planner, GlobalBalanceEPLBPlanner)
 
     planner = create_eplb_planner(
-        "topology_aware",
-        4,
-        1,
+        plan_mode="topology_aware",
+        run_mode="prefill",
+        num_ranks=4,
+        num_redundant_experts_per_rank=1,
         expert_alignment=128,
         node_world_size=2,
     )
@@ -359,12 +372,24 @@ def test_create_eplb_planner_selects_requested_algorithm():
 
     with pytest.raises(AssertionError):
         create_eplb_planner(
-            "unknown",
-            2,
-            1,
+            plan_mode="unknown",
+            run_mode="prefill",
+            num_ranks=2,
+            num_redundant_experts_per_rank=1,
             expert_alignment=1,
             node_world_size=2,
         )
+
+    for prefill_plan_mode in ("global_balance", "topology_aware"):
+        with pytest.raises(AssertionError, match="is for 'prefill'"):
+            create_eplb_planner(
+                plan_mode=prefill_plan_mode,
+                run_mode="decode",
+                num_ranks=2,
+                num_redundant_experts_per_rank=1,
+                expert_alignment=1,
+                node_world_size=2,
+            )
 
 
 def test_topology_aware_planner_minimizes_samplewise_aligned_critical_load():
@@ -384,7 +409,7 @@ def test_topology_aware_planner_minimizes_samplewise_aligned_critical_load():
     )
     current = [[[0, 1, 2], [2, 3, 0]]]
 
-    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+    result = planner.plan(route_statistics=load, current_placement=current)
 
     assert result == [[[0, 1, 3], [2, 3, 0]]]
 
@@ -402,7 +427,7 @@ def test_topology_aware_planner_keeps_primary_slots_and_builds_legal_redundant_r
     load[:, :, :, 0] = 1000
     load[:, :, :, 4] = 500
 
-    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+    result = planner.plan(route_statistics=load, current_placement=current)
 
     for rank, rank_placement in enumerate(result[0]):
         primary_experts = list(range(rank * 2, (rank + 1) * 2))
@@ -426,7 +451,7 @@ def test_topology_aware_planner_prefers_replica_on_the_request_source_node():
     load[0, 0, 0, 0] = 1024
     current = _initial_expert_placement(8, 4, 1).unsqueeze(0).tolist()
 
-    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+    result = planner.plan(route_statistics=load, current_placement=current)
 
     # Expert 0 is owned by rank 0. Rank 1 is the only other rank on source
     # node 0, so a local-first plan puts its redundant copy there.
@@ -445,12 +470,12 @@ def test_topology_aware_planner_plans_each_layer_independently():
     current = _initial_expert_placement(16, 4, 2).unsqueeze(0).repeat(3, 1, 1).tolist()
 
     combined_result = planner.plan(
-        logical_expert_load_samples=load,
+        route_statistics=load,
         current_placement=current,
     )
     layer_results = [
         planner.plan(
-            logical_expert_load_samples=load[:, layer_index : layer_index + 1],
+            route_statistics=load[:, layer_index : layer_index + 1],
             current_placement=[current[layer_index]],
         )[0]
         for layer_index in range(load.shape[1])
@@ -470,13 +495,13 @@ def test_topology_aware_planner_reuses_unchanged_layout_and_physical_slots():
         rebalance_gain_threshold=0.0,
     )
     current = candidate_planner.plan(
-        logical_expert_load_samples=load,
+        route_statistics=load,
         current_placement=initial,
     )
     default_planner = TopologyAwareEPLBPlanner(4, 2, node_world_size=4)
 
     result = default_planner.plan(
-        logical_expert_load_samples=load,
+        route_statistics=load,
         current_placement=current,
     )
 
@@ -494,7 +519,7 @@ def test_topology_aware_planner_restores_canonical_primaries_from_full_slot_layo
     full_slot_layout = [[[0, 2, 3], [1, 3, 0]]]
 
     result = planner.plan(
-        logical_expert_load_samples=load,
+        route_statistics=load,
         current_placement=full_slot_layout,
     )
 
@@ -513,7 +538,7 @@ def test_global_balance_planner_builds_legal_concrete_slot_layout():
     load[:, :, :, 0] = 1000
     load[:, :, :, 4] = 500
 
-    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+    result = planner.plan(route_statistics=load, current_placement=current)
     placement = result[0]
 
     for row in placement:
@@ -530,7 +555,7 @@ def test_global_balance_planner_returns_deterministic_layout_for_zero_load_exper
     current = [[[0, 1, 3], [2, 3, 1]]]
 
     result = planner.plan(
-        logical_expert_load_samples=_planner_load([[0, 0, 0, 0]], world_size=2),
+        route_statistics=_planner_load([[0, 0, 0, 0]], world_size=2),
         current_placement=current,
     )
 
@@ -551,10 +576,10 @@ def test_global_balance_planner_aggregates_rank_and_sample_dimensions():
     equivalent_raw_load = torch.zeros_like(raw_load)
     equivalent_raw_load[0, :, 0] = aggregated_load
 
-    result = planner.plan(logical_expert_load_samples=raw_load, current_placement=current)
+    result = planner.plan(route_statistics=raw_load, current_placement=current)
 
     assert result == planner.plan(
-        logical_expert_load_samples=equivalent_raw_load,
+        route_statistics=equivalent_raw_load,
         current_placement=current,
     )
 
@@ -572,7 +597,7 @@ def test_global_balance_planner_plans_each_layer_independently_then_combines_res
         world_size=2,
     )
 
-    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+    result = planner.plan(route_statistics=load, current_placement=current)
 
     assert result == [
         [[0, 1, 3], [2, 0, 1]],
@@ -585,7 +610,7 @@ def test_global_balance_planner_iteratively_places_hot_expert_on_idle_rank():
     current = [[[0, 1, 3], [2, 3, 1]]]
 
     result = planner.plan(
-        logical_expert_load_samples=_planner_load([[1000, 1, 1, 1]], world_size=2),
+        route_statistics=_planner_load([[1000, 1, 1, 1]], world_size=2),
         current_placement=current,
     )
 
@@ -597,7 +622,7 @@ def test_global_balance_planner_repeatedly_splits_the_hottest_remaining_expert()
     current = _initial_expert_placement(8, 4, 3).unsqueeze(0).tolist()
 
     result = planner.plan(
-        logical_expert_load_samples=_planner_load([[1000, 900, 800, 700, 1, 1, 1, 1]], world_size=4),
+        route_statistics=_planner_load([[1000, 900, 800, 700, 1, 1, 1, 1]], world_size=4),
         current_placement=current,
     )
 
@@ -731,7 +756,7 @@ def test_global_balance_planner_keeps_selected_experts_in_their_current_slots():
     current = _initial_expert_placement(8, 4, 2).unsqueeze(0).tolist()
 
     result = planner.plan(
-        logical_expert_load_samples=_planner_load([[50, 98, 54, 6, 34, 66, 63, 52]], world_size=4),
+        route_statistics=_planner_load([[50, 98, 54, 6, 34, 66, 63, 52]], world_size=4),
         current_placement=current,
     )
 
@@ -756,7 +781,7 @@ def test_global_balance_planner_fills_every_rank_with_distinct_nonlocal_experts(
     )
     load = load_by_layer_and_rank.permute(1, 0, 2).unsqueeze(dim=2)
 
-    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+    result = planner.plan(route_statistics=load, current_placement=current)
 
     assert len(result) == len(current)
     assert all(len(actual) == len(expected) for actual, expected in zip(result[0], current[0]))
@@ -792,7 +817,7 @@ def test_global_balance_planner_supports_multiple_redundant_experts_per_rank():
         world_size=4,
     )
 
-    result = planner.plan(logical_expert_load_samples=load, current_placement=current)
+    result = planner.plan(route_statistics=load, current_placement=current)
 
     for row in result[0]:
         assert len(row) == len(set(row)) == 7
@@ -1025,6 +1050,7 @@ def test_manager_evaluating_starts_raw_load_gather_without_modifying_counters(mo
         for counter in counters
     ]
     manager.num_logical_experts = 2
+    manager.run_mode = "prefill"
     manager.global_rank = 1
     manager.world_size = 1
     manager.load_gather_group = object()
@@ -1056,11 +1082,67 @@ def test_manager_evaluating_starts_raw_load_gather_without_modifying_counters(mo
     assert tasks[0].started
     assert tasks[0].kwargs["load_gather_group"] is manager.load_gather_group
     assert torch.equal(
-        tasks[0].kwargs["local_load_samples"],
+        tasks[0].kwargs["local_route_statistics"],
         torch.tensor([[[10, 11]], [[40, 41]]], dtype=torch.int64),
     )
     assert torch.equal(counters[0], torch.tensor([[10, 11]], dtype=torch.int64))
     assert torch.equal(counters[1], torch.tensor([[40, 41]], dtype=torch.int64))
+
+
+def test_manager_evaluating_gathers_decode_upper_triangle(monkeypatch):
+    decode_counter = torch.tensor([[300, 50, 20], [0, 400, 30], [0, 0, 500]], dtype=torch.int64)
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.state = manager_module.EPLBManagerState.EVALUATING
+    manager._eplb_impls = [
+        _test_moe_impl(
+            eplb=True,
+            decode_route_counter=decode_counter,
+            num_logical_experts=3,
+            world_size=1,
+            run_mode="decode",
+        )
+    ]
+    manager.num_logical_experts = 3
+    manager.run_mode = "decode"
+    manager.global_rank = 0
+    manager.world_size = 1
+    manager.load_gather_group = object()
+    manager.control_group = object()
+    manager.max_rebalance_count = -1
+    manager.completed_rebalance_count = 0
+    manager.metric_client = object()
+    tasks = []
+    published_loads = []
+
+    class LoadGatherTask:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.started = False
+            tasks.append(self)
+
+        def start(self):
+            self.started = True
+
+    monkeypatch.setattr(manager_module, "EPLBLoadGatherTask", LoadGatherTask)
+    monkeypatch.setattr(
+        manager_module.dist,
+        "broadcast_object_list",
+        lambda _values, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        eplb_metrics,
+        "publish_expert_load_metrics",
+        lambda **kwargs: published_loads.append(kwargs["expert_load"]),
+    )
+
+    manager._step_evaluating()
+
+    assert manager.state is manager_module.EPLBManagerState.WAIT_LOAD_GATHER_FINISHED
+    assert tasks[0].started
+    assert torch.equal(tasks[0].kwargs["local_route_statistics"], decode_counter.unsqueeze(0))
+    assert len(published_loads) == 1
+    assert torch.equal(published_loads[0], torch.tensor([[300, 400, 500]], dtype=torch.int64))
+    assert torch.equal(decode_counter, tasks[0].kwargs["local_route_statistics"][0])
 
 
 def test_load_gather_task_preserves_rank_layer_and_sample_dimensions(monkeypatch):
@@ -1082,7 +1164,7 @@ def test_load_gather_task_preserves_rank_layer_and_sample_dimensions(monkeypatch
     monkeypatch.setattr(load_gather_module.dist, "all_gather", all_gather)
     monkeypatch.setattr(load_gather_module.dist, "get_world_size", lambda group: 2)
     task = load_gather_module.EPLBLoadGatherTask(
-        local_load_samples=local_load,
+        local_route_statistics=local_load,
         load_gather_group=load_gather_group,
     )
 
@@ -1105,12 +1187,12 @@ def test_manager_delegates_distribution_planning_to_planner_class():
     planned_placement = [[[0, 1]]]
     planner = SimpleNamespace(
         plan=lambda **kwargs: (
-            calls.append((kwargs["logical_expert_load_samples"], kwargs["current_placement"])) or planned_placement
+            calls.append((kwargs["route_statistics"], kwargs["current_placement"])) or planned_placement
         )
     )
     task = plan_module.EPLBPlanTask(
         planner=planner,
-        logical_expert_load_samples=logical_load,
+        route_statistics=logical_load,
         current_placement=current_placement,
     )
 
@@ -1129,7 +1211,7 @@ def test_plan_task_exits_process_on_failure(monkeypatch):
 
     task = plan_module.EPLBPlanTask(
         planner=SimpleNamespace(plan=fail),
-        logical_expert_load_samples=torch.tensor([[[[10, 20]]]]),
+        route_statistics=torch.tensor([[[[10, 20]]]]),
         current_placement=[[[1]]],
     )
     exits = []
@@ -1343,6 +1425,19 @@ def test_publish_expert_load_metrics():
     ]
 
 
+def test_prefill_rebalance_metric_load_uses_one_sample_across_ranks():
+    route_statistics = torch.zeros((2, 1, 2, 4), dtype=torch.int64)
+    route_statistics[0, 0, 0].fill_(100)
+    route_statistics[1, 0, 0].fill_(50)
+    route_statistics[1, 0, 1].fill_(1000)
+
+    metric_load = eplb_metrics.prefill_rebalance_metric_load(
+        route_statistics=route_statistics,
+    )
+
+    assert torch.equal(metric_load, torch.full((1, 4), 150, dtype=torch.int64))
+
+
 def test_publish_rebalance_compute_metrics_from_sample_load():
     calls = []
     metric_client = SimpleNamespace(gauge_set=lambda name, value: calls.append((name, value)))
@@ -1367,13 +1462,15 @@ def test_publish_rebalance_compute_metrics_from_sample_load():
     ]
 
 
-def test_eplb_prefill_route_counter_has_24_samples_per_logical_expert(monkeypatch):
+@pytest.mark.parametrize("run_mode", ["prefill", "decode"])
+def test_eplb_allocates_only_the_active_route_counter(monkeypatch, run_mode):
     args = type(
         "Args",
         (),
         {
             "eplb_num_redundant_experts_per_rank": 2,
             "eplb_config_path": None,
+            "eplb_run_mode": run_mode,
         },
     )()
     monkeypatch.setattr(deepgemm_module, "get_env_start_args", lambda: args)
@@ -1391,9 +1488,16 @@ def test_eplb_prefill_route_counter_has_24_samples_per_logical_expert(monkeypatc
 
     impl = deepgemm_module.FuseMoeDeepGEMM(4, 0, 1.0, SimpleNamespace())
 
-    assert impl.prefill_route_counter.shape == (24, 4)
-    assert impl.prefill_route_sample_index.shape == (2,)
-    assert torch.equal(impl.prefill_route_sample_index, torch.zeros(2, dtype=torch.int64))
+    if run_mode == "prefill":
+        assert impl.prefill_route_counter.shape == (24, 4)
+        assert impl.prefill_route_sample_index.shape == (2,)
+        assert impl.decode_route_counter is None
+        assert torch.equal(impl.prefill_route_sample_index, torch.zeros(2, dtype=torch.int64))
+    else:
+        assert impl.prefill_route_counter is None
+        assert impl.prefill_route_sample_index is None
+        assert impl.decode_route_counter.shape == (4, 4)
+        assert torch.count_nonzero(impl.decode_route_counter) == 0
     assert not hasattr(impl, "eplb_dispatch_mode")
 
 
@@ -1413,21 +1517,30 @@ def test_prefill_dispatch_mode_matches_planner_load_model(monkeypatch, plan_mode
     assert eplb_utils_module.get_eplb_dispatch_mode(is_prefill=True) == dispatch_mode
 
 
-def test_prefill_dispatch_mode_rejects_unknown_planner(monkeypatch):
+def test_prefill_dispatch_mode_uses_node_first_for_unknown_planner(monkeypatch):
     monkeypatch.setattr(
         eplb_utils_module,
         "get_env_start_args",
         lambda: SimpleNamespace(eplb_plan_mode="unknown"),
     )
-    with pytest.raises(AssertionError, match="unsupported EPLB plan mode"):
-        eplb_utils_module.get_eplb_dispatch_mode(is_prefill=True)
+    assert eplb_utils_module.get_eplb_dispatch_mode(is_prefill=True) == "current_node_first"
 
 
-def test_decode_dispatch_mode_prefers_current_gpu(monkeypatch):
+@pytest.mark.parametrize("plan_mode", ["global_balance", "topology_aware"])
+def test_decode_dispatch_mode_prefers_current_gpu(monkeypatch, plan_mode):
     monkeypatch.setattr(
         eplb_utils_module,
         "get_env_start_args",
-        lambda: pytest.fail("decode must not read the prefill planner mode"),
+        lambda: SimpleNamespace(eplb_plan_mode=plan_mode),
+    )
+    assert eplb_utils_module.get_eplb_dispatch_mode(is_prefill=False) == "current_gpu_first"
+
+
+def test_decode_dispatch_mode_uses_gpu_first_for_unknown_planner(monkeypatch):
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode="unknown"),
     )
     assert eplb_utils_module.get_eplb_dispatch_mode(is_prefill=False) == "current_gpu_first"
 
@@ -1452,6 +1565,7 @@ def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
     assert not hasattr(impl, "logical_to_physical_map")
     assert not hasattr(impl, "prefill_route_counter")
     assert not hasattr(impl, "prefill_route_sample_index")
+    assert not hasattr(impl, "decode_route_counter")
 
 
 def test_manager_wait_load_gather_aggregates_rank_and_sample_dimensions(monkeypatch):
@@ -1460,6 +1574,7 @@ def test_manager_wait_load_gather_aggregates_rank_and_sample_dimensions(monkeypa
     manager.global_rank = 0
     manager.world_size = 4
     manager.num_logical_experts = 4
+    manager.run_mode = "prefill"
     manager.control_group = object()
     manager.state = manager_module.EPLBManagerState.WAIT_LOAD_GATHER_FINISHED
     gathered_load = torch.zeros((4, 1, 24, 4), dtype=torch.int64)
@@ -1484,11 +1599,39 @@ def test_manager_wait_load_gather_aggregates_rank_and_sample_dimensions(monkeypa
     assert seen["group"] is manager.control_group
     assert seen["local_finished"] is True
     assert manager.state is manager_module.EPLBManagerState.PLAN_PLACEMENT
-    assert manager._pending_plan_load_samples is gathered_load
-    # metrics 只汇总各 rank 的 sample 0；rank 1 在 sample 1 中的负载
-    # 不应累加进来。
-    assert torch.equal(manager._metric_sample_load, torch.full((1, 4), 150, dtype=torch.int64))
+    assert manager._pending_route_statistics is gathered_load
     assert manager._load_gather_task is None
+
+
+def test_manager_wait_load_gather_prepares_decode_statistics_for_planning(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager._eplb_impls = [object()]
+    manager.global_rank = 0
+    manager.world_size = 2
+    manager.num_logical_experts = 3
+    manager.run_mode = "decode"
+    manager.control_group = object()
+    manager.state = manager_module.EPLBManagerState.WAIT_LOAD_GATHER_FINISHED
+    gathered_decode_statistics = torch.tensor(
+        [
+            [[[10, 3, 1], [0, 20, 4], [0, 0, 30]]],
+            [[[40, 2, 5], [0, 50, 6], [0, 0, 60]]],
+        ],
+        dtype=torch.int64,
+    )
+    manager._load_gather_task = SimpleNamespace(
+        is_finished=lambda: True,
+        result=gathered_decode_statistics,
+    )
+    monkeypatch.setattr(
+        manager_module.dist,
+        "all_gather_object",
+        lambda output, local_finished, **_kwargs: output.__setitem__(slice(None), [local_finished] * 2),
+    )
+    manager._step_wait_load_gather_finished()
+
+    assert manager.state is manager_module.EPLBManagerState.PLAN_PLACEMENT
+    assert manager._pending_route_statistics is gathered_decode_statistics
 
 
 def test_manager_wait_load_gather_does_not_advance_until_every_rank_finishes(monkeypatch):
@@ -1522,7 +1665,7 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.quant_method = type("Quant", (), {"method_name": "fp8"})()
     impl.n_routed_experts = 128
-    _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True))
+    _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True, run_mode="decode"))
     logical_ids = torch.tensor([[0, 127]], dtype=torch.int32)
     physical_ids = torch.tensor([[128, 143]], dtype=torch.int32)
     impl._select_experts = lambda **_kwargs: (
@@ -1536,6 +1679,11 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
         return physical_ids
 
     monkeypatch.setattr(deepgemm_module, "eplb_repair_topk_ids", repair)
+    monkeypatch.setattr(
+        eplb_utils_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(eplb_plan_mode="topology_aware", eplb_run_mode="decode"),
+    )
     monkeypatch.setattr(
         deepgemm_module,
         "get_deepep_num_max_dispatch_tokens_per_rank_decode",
@@ -1557,6 +1705,9 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
 
     assert result[2].tolist() == [[128, 143]]
     assert repairs[0]["logical_topk_ids"] is logical_ids
+    assert not repairs[0]["update_prefill_route_counter"]
+    assert repairs[0]["update_decode_route_counter"]
+    assert repairs[0]["decode_route_counter"] is impl.decode_route_counter
     assert repairs[0]["mode"] == "current_gpu_first"
     assert calls[0]["num_experts"] == 144
 
@@ -1634,6 +1785,7 @@ def test_eplb_prefill_repairs_ids_after_selection(monkeypatch):
     assert qinput == "qinput"
     assert calls[0]["logical_topk_ids"] is logical_ids
     assert calls[0]["update_prefill_route_counter"]
+    assert not calls[0]["update_decode_route_counter"]
     assert calls[0]["mode"] == "global_first"
 
 
@@ -1705,6 +1857,7 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
     assert len(repair_calls) == 1
     assert repair_calls[0]["logical_topk_ids"] is logical_ids
     assert repair_calls[0]["update_prefill_route_counter"]
+    assert not repair_calls[0]["update_decode_route_counter"]
     assert repair_calls[0]["mode"] == "global_first"
     assert calls[0]["topk_idx"] is physical_ids
     assert calls[0]["topk_idx"].dtype is torch.long
@@ -1753,6 +1906,7 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
         lambda: SimpleNamespace(
             eplb_num_redundant_experts_per_rank=1,
             eplb_config_path=None,
+            eplb_run_mode="prefill",
         ),
     )
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
@@ -1772,6 +1926,7 @@ def test_deepgemm_constructor_owns_eplb_runtime(monkeypatch):
     assert impl.num_total_physical_experts == 6
     assert impl.prefill_route_counter.shape == (24, 4)
     assert impl.prefill_route_sample_index.shape == (2,)
+    assert impl.decode_route_counter is None
     assert impl.local_logics_expert_ids_list == [0, 1, 2]
     assert not hasattr(impl, "initial_local_expert_ids_by_rank")
     assert not hasattr(impl, "expert_parallel_state")
@@ -1785,6 +1940,7 @@ def test_deepgemm_constructor_loads_saved_layout_before_weight_initialization(mo
         lambda: SimpleNamespace(
             eplb_num_redundant_experts_per_rank=1,
             eplb_config_path="/tmp/eplb.json",
+            eplb_run_mode="prefill",
         ),
     )
     monkeypatch.setattr(deepgemm_module, "get_global_world_size", lambda: 2)
@@ -1822,16 +1978,23 @@ def test_deepgemm_constructor_loads_saved_layout_before_weight_initialization(mo
 
 
 @pytest.mark.parametrize(
-    ("run_mode", "update_prefill_route_counter"),
-    [("prefill", True), ("decode", False)],
+    ("run_mode", "is_prefill", "update_prefill_counter", "update_decode_counter"),
+    [
+        ("prefill", True, True, False),
+        ("prefill", False, False, False),
+        ("decode", True, False, False),
+        ("decode", False, False, True),
+    ],
 )
-def test_eplb_prepare_records_only_for_prefill_run_mode(
+def test_eplb_prepare_records_statistics_for_matching_run_mode_and_phase(
     monkeypatch,
     run_mode,
-    update_prefill_route_counter,
+    is_prefill,
+    update_prefill_counter,
+    update_decode_counter,
 ):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
-    runtime = _test_moe_impl(eplb=True)
+    runtime = _test_moe_impl(eplb=True, run_mode=run_mode)
     _set_deepgemm_runtime(impl, runtime)
     logical_ids = torch.tensor([[3, 4]], dtype=torch.int32)
     physical_ids = torch.tensor([[13, 14]], dtype=torch.int32)
@@ -1847,13 +2010,22 @@ def test_eplb_prepare_records_only_for_prefill_run_mode(
         "get_env_start_args",
         lambda: SimpleNamespace(eplb_plan_mode="global_balance", eplb_run_mode=run_mode),
     )
-    weights, selected = impl._prepare_expert_execution(torch.ones((1, 2)), logical_ids, is_prefill=True)
+    weights, selected = impl._prepare_expert_execution(torch.ones((1, 2)), logical_ids, is_prefill=is_prefill)
 
     assert weights.tolist() == [[1.0, 1.0]]
     assert selected is physical_ids
     assert calls[0]["logical_topk_ids"] is logical_ids
-    assert calls[0]["update_prefill_route_counter"] is update_prefill_route_counter
-    assert calls[0]["mode"] == "global_first"
+    assert calls[0]["update_prefill_route_counter"] is update_prefill_counter
+    assert calls[0]["update_decode_route_counter"] is update_decode_counter
+    assert calls[0]["mode"] == ("global_first" if is_prefill else "current_gpu_first")
+    if run_mode == "prefill":
+        assert calls[0]["prefill_route_counter"] is not None
+        assert calls[0]["prefill_route_sample_index"] is not None
+        assert calls[0]["decode_route_counter"] is None
+    else:
+        assert calls[0]["prefill_route_counter"] is None
+        assert calls[0]["prefill_route_sample_index"] is None
+        assert calls[0]["decode_route_counter"] is not None
 
 
 def test_topology_aware_prepare_uses_node_local_dispatch(monkeypatch):
@@ -2156,7 +2328,7 @@ def test_manager_transfers_only_local_tasks_and_gathers_global_status(monkeypatc
 
     manager._commit_transfer = commit_transfer
     manager._publish_layer_metadata = publish_layer_metadata
-    manager._clear_prefill_route_samples = lambda: cleared_route_counters.append(True)
+    manager._clear_route_statistics = lambda: cleared_route_counters.append(True)
     used_streams = []
     overlap_stream = object()
 
@@ -2244,7 +2416,7 @@ def test_manager_returns_to_collecting_after_reaching_rebalance_limit():
     manager.rebalance_started_at = None
     manager.active_transfer_batch = None
     manager.active_transfers = None
-    manager._clear_prefill_route_samples = lambda: None
+    manager._clear_route_statistics = lambda: None
     persisted_placements = []
     manager._persist_current_placement = lambda: persisted_placements.append(manager.current_placement)
 
@@ -2280,14 +2452,15 @@ def test_wait_plan_finish_publishes_before_and_after_metrics(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.state = manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
     manager.global_rank = 0
+    manager.run_mode = "prefill"
     manager.control_group = object()
     manager.current_placement = [[[0, 1], [2, 3]]]
     target_placement = [[[0, 2], [1, 3]]]
-    manager._pending_plan_load_samples = None
-    manager._metric_sample_load = torch.tensor([[4, 3, 2, 1]], dtype=torch.int64)
+    route_statistics = torch.tensor([[[[4, 3, 2, 1]]]], dtype=torch.int64)
     manager._plan_task = SimpleNamespace(
         is_finished=lambda: True,
         result=target_placement,
+        route_statistics=route_statistics,
     )
     manager.metric_client = object()
     published = []
@@ -2305,8 +2478,34 @@ def test_wait_plan_finish_publishes_before_and_after_metrics(monkeypatch):
     assert len(published) == 1
     assert torch.equal(published[0][0], torch.tensor([[4, 3, 2, 1]], dtype=torch.int64))
     assert published[0][1] is target_placement
-    assert manager._pending_plan_load_samples is None
-    assert manager._metric_sample_load is None
+    assert manager._plan_task is None
+
+
+def test_wait_plan_finish_skips_prefill_compute_metrics_for_decode(monkeypatch):
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.state = manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
+    manager.global_rank = 0
+    manager.run_mode = "decode"
+    manager.control_group = object()
+    manager.current_placement = [[[0, 1], [2, 3]]]
+    target_placement = [[[0, 2], [1, 3]]]
+    manager._plan_task = SimpleNamespace(
+        is_finished=lambda: True,
+        result=target_placement,
+        route_statistics=torch.zeros((1, 1, 4, 4), dtype=torch.int64),
+    )
+    manager.metric_client = object()
+    monkeypatch.setattr(
+        eplb_metrics,
+        "publish_rebalance_compute_metrics",
+        lambda **_kwargs: pytest.fail("decode must not publish prefill compute metrics"),
+    )
+    monkeypatch.setattr(manager_module.dist, "broadcast_object_list", lambda _values, **_kwargs: None)
+
+    manager._step_wait_plan_placement_finished()
+
+    assert manager.state is manager_module.EPLBManagerState.PLAN_TRANSFER
+    assert manager.target_placement is target_placement
     assert manager._plan_task is None
 
 
@@ -2400,6 +2599,7 @@ def test_manager_evaluates_only_after_entering_evaluating_state(monkeypatch):
     manager.step_interval = 3
     manager.next_evaluation_step = 3
     manager.num_logical_experts = 2
+    manager.run_mode = "prefill"
     manager._eplb_impls = [SimpleNamespace(prefill_route_counter=prefill_route_counter)]
     manager.world_size = 1
     manager.control_group = object()
@@ -2455,6 +2655,7 @@ def test_manager_plans_transfers_asynchronously_before_entering_transferring(mon
     manager.transfer_group = object()
     manager.world_size = 2
     manager.num_logical_experts = 4
+    manager.run_mode = "prefill"
     manager.transfer_layer_parallelism = 8
     manager.pending_transfer_batches = None
     placement = [
@@ -2546,6 +2747,7 @@ def test_manager_evaluation_with_insufficient_tokens_returns_to_collecting(monke
     manager.state = manager_module.EPLBManagerState.EVALUATING
     manager._eplb_impls = [SimpleNamespace(prefill_route_counter=torch.full((1, 4), 100, dtype=torch.int64))]
     manager.num_logical_experts = 4
+    manager.run_mode = "prefill"
     manager.steps = 11
     manager.step_interval = 20
     manager.next_evaluation_step = 31
@@ -2584,6 +2786,7 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     manager.state = manager_module.EPLBManagerState.EVALUATING
     manager.global_rank = 0
     manager.num_logical_experts = 4
+    manager.run_mode = "prefill"
     manager._eplb_impls = [SimpleNamespace(prefill_route_counter=local_load)]
     manager.world_size = 1
     manager.control_group = object()
@@ -2593,8 +2796,8 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     class LoadGatherTask:
         def __init__(self, **kwargs):
-            self.local_load_samples = kwargs["local_load_samples"]
-            self.result = self.local_load_samples.unsqueeze(0)
+            self.local_route_statistics = kwargs["local_route_statistics"]
+            self.result = self.local_route_statistics.unsqueeze(0)
             self.started = False
 
         def start(self):
@@ -2614,7 +2817,7 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     class PlanTask:
         def __init__(self, **kwargs):
             self.planner = kwargs["planner"]
-            self.logical_expert_load_samples = kwargs["logical_expert_load_samples"]
+            self.route_statistics = kwargs["route_statistics"]
             self.current_placement = kwargs["current_placement"]
             self.started = False
             plan_tasks.append(self)
@@ -2636,7 +2839,7 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
 
     assert manager.state is manager_module.EPLBManagerState.WAIT_LOAD_GATHER_FINISHED
     assert manager._load_gather_task.started
-    assert torch.equal(manager._load_gather_task.local_load_samples, local_load.unsqueeze(0))
+    assert torch.equal(manager._load_gather_task.local_route_statistics, local_load.unsqueeze(0))
     assert len(published_loads) == 1
     assert torch.equal(published_loads[0], local_load)
     assert plan_tasks == []
@@ -2645,23 +2848,21 @@ def test_manager_evaluation_with_enough_tokens_enters_planning(monkeypatch):
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.PLAN_PLACEMENT
-    planning_load_samples = manager._pending_plan_load_samples
-    assert torch.equal(planning_load_samples, local_load.unsqueeze(0).unsqueeze(0))
-    assert torch.equal(manager._metric_sample_load, local_load)
+    planning_route_statistics = manager._pending_route_statistics
+    assert torch.equal(planning_route_statistics, local_load.unsqueeze(0).unsqueeze(0))
     assert manager._load_gather_task is None
     assert plan_tasks == []
 
     manager.step()
 
     assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
-    assert plan_tasks[0].logical_expert_load_samples is planning_load_samples
-    assert torch.equal(plan_tasks[0].logical_expert_load_samples, local_load.unsqueeze(0).unsqueeze(0))
+    assert plan_tasks[0].route_statistics is planning_route_statistics
+    assert torch.equal(plan_tasks[0].route_statistics, local_load.unsqueeze(0).unsqueeze(0))
     assert plan_tasks[0].planner is manager.planner
     assert plan_tasks[0].current_placement is manager.current_placement
     assert plan_tasks[0].started
     assert manager._plan_task is plan_tasks[0]
-    assert manager._pending_plan_load_samples is None
-    assert torch.equal(manager._metric_sample_load, local_load)
+    assert manager._pending_route_statistics is None
     assert len(published_loads) == 1
 
 
@@ -2673,6 +2874,7 @@ def test_manager_keeps_reporting_after_reaching_rebalance_limit(monkeypatch):
     manager.state = manager_module.EPLBManagerState.EVALUATING
     manager.global_rank = 0
     manager.num_logical_experts = 4
+    manager.run_mode = "prefill"
     manager._eplb_impls = [SimpleNamespace(prefill_route_counter=local_load)]
     manager.max_rebalance_count = 1
     manager.completed_rebalance_count = 1
@@ -2682,7 +2884,7 @@ def test_manager_keeps_reporting_after_reaching_rebalance_limit(monkeypatch):
         "publish_expert_load_metrics",
         lambda **kwargs: published_loads.append(kwargs["expert_load"]),
     )
-    manager._clear_prefill_route_samples = lambda: cleared_counters.append(True)
+    manager._clear_route_statistics = lambda: cleared_counters.append(True)
     monkeypatch.setattr(
         manager_module,
         "EPLBLoadGatherTask",
@@ -2706,8 +2908,7 @@ def test_nonzero_rank_enters_plan_wait_without_starting_planner():
 
     assert manager.state is manager_module.EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
     assert getattr(manager, "_plan_task", None) is None
-    assert getattr(manager, "_pending_plan_load_samples", None) is None
-    assert getattr(manager, "_metric_sample_load", None) is None
+    assert getattr(manager, "_pending_route_statistics", None) is None
 
 
 def test_manager_planning_without_changes_returns_to_collecting(monkeypatch):
@@ -2913,14 +3114,31 @@ def test_manager_rejects_sm100_before_initialization(monkeypatch):
         manager_module.EPLBManager(type("Model", (), {})())
 
 
-def test_manager_clears_all_prefill_route_samples_on_overlap_stream(monkeypatch):
+def test_manager_clears_all_route_statistics_on_overlap_stream(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     counters = [torch.tensor([[1, 2]]), torch.tensor([[3, 4]])]
     sample_indices = [torch.tensor([7, 3]), torch.tensor([9, 4])]
-    manager._eplb_impls = [
-        SimpleNamespace(prefill_route_counter=counter, prefill_route_sample_index=sample_index)
-        for counter, sample_index in zip(counters, sample_indices)
+    decode_counters = [
+        torch.tensor([[1, 2], [3, 4]]),
+        torch.tensor([[5, 6], [7, 8]]),
     ]
+    prefill_impls = [
+        SimpleNamespace(
+            prefill_route_counter=counter,
+            prefill_route_sample_index=sample_index,
+            # 第一层同时持有两种统计，验证三个状态会独立清零。
+            decode_route_counter=decode_counters[0] if index == 0 else None,
+        )
+        for index, (counter, sample_index) in enumerate(zip(counters, sample_indices))
+    ]
+    decode_impls = [
+        SimpleNamespace(
+            prefill_route_counter=None,
+            prefill_route_sample_index=None,
+            decode_route_counter=decode_counters[1],
+        )
+    ]
+    manager._eplb_impls = prefill_impls + decode_impls
     overlap_stream = object()
     used_streams = []
     monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: overlap_stream)
@@ -2930,11 +3148,12 @@ def test_manager_clears_all_prefill_route_samples_on_overlap_stream(monkeypatch)
         lambda stream: (used_streams.append(stream) or nullcontext()),
     )
 
-    manager._clear_prefill_route_samples()
+    manager._clear_route_statistics()
 
     assert used_streams == [overlap_stream]
     assert all(torch.count_nonzero(counter) == 0 for counter in counters)
     assert all(torch.count_nonzero(sample_index) == 0 for sample_index in sample_indices)
+    assert all(torch.count_nonzero(counter) == 0 for counter in decode_counters)
 
 
 def test_manager_initializes_without_transfer_task(monkeypatch):
@@ -2965,7 +3184,7 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     clear_calls = []
     monkeypatch.setattr(
         manager_module.EPLBManager,
-        "_clear_prefill_route_samples",
+        "_clear_route_statistics",
         lambda manager: clear_calls.append(manager),
     )
     monkeypatch.setattr(manager_module, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
@@ -3019,6 +3238,20 @@ def test_manager_initializes_without_transfer_task(monkeypatch):
     assert "planner=TopologyAwareEPLBPlanner" in logs[0]
     assert not hasattr(weight.fuse_moe_impl, "eplb_dispatch_mode")
     assert manager._eplb_impls[0] is weight.fuse_moe_impl
+
+    # 当前两个 planner 都属于 prefill，不能与 decode 运行模式组合。
+    weight.fuse_moe_impl = _test_moe_impl(
+        eplb=True,
+        num_logical_experts=4,
+        world_size=2,
+        num_redundant_experts_per_rank=2,
+        run_mode="decode",
+    )
+    with pytest.raises(AssertionError, match="is for 'prefill'"):
+        manager_module.EPLBManager(
+            type("Model", (), {})(),
+            run_mode="decode",
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
@@ -3107,6 +3340,8 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_prefill_route_counter, toke
         prefill_route_counter=counter,
         prefill_route_sample_index=sample_index,
         update_prefill_route_counter=update_prefill_route_counter,
+        decode_route_counter=None,
+        update_decode_route_counter=False,
         mode=mode,
     )
     torch.cuda.synchronize()
@@ -3115,6 +3350,61 @@ def test_eplb_repair_topk_ids_maps_and_counts(update_prefill_route_counter, toke
     assert torch.equal(physical_ids, expected_ids)
     assert torch.equal(counter, expected_counter)
     assert sample_index.tolist() == ([1, 0] if update_prefill_route_counter else [0, 0])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+def test_eplb_decode_route_counter_records_exact_upper_triangle():
+    from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
+        eplb_repair_topk_ids,
+    )
+
+    num_tokens = 1025
+    topk = 4
+    experts = 64
+    logical_ids = (torch.arange(num_tokens * topk, device="cuda", dtype=torch.int32) % experts).view(
+        num_tokens,
+        topk,
+    )
+    # 显式覆盖最小/最大 expert ID，并用反序 top-k 验证 pair 的上三角
+    # 落点只由 expert ID 决定；相等边界仍必须准确进入主对角线。
+    logical_ids[0] = torch.tensor([0, 1, 2, experts - 1], device="cuda")
+    logical_ids[1] = torch.tensor([experts - 1, 2, 1, 0], device="cuda")
+    logical_experts = torch.arange(experts, dtype=torch.int32, device="cuda")
+    logical_to_physical = torch.stack(
+        (
+            torch.ones_like(logical_experts),
+            torch.ones_like(logical_experts),
+            torch.ones_like(logical_experts),
+            logical_experts,
+        ),
+        dim=1,
+    )
+    decode_counter = torch.zeros((experts, experts), dtype=torch.int64, device="cuda")
+    selected_experts = torch.nn.functional.one_hot(logical_ids.cpu().to(torch.long), num_classes=experts).sum(
+        dim=1, dtype=torch.int64
+    )
+    expected_cooccurrence = torch.triu(selected_experts.T @ selected_experts)
+
+    physical_ids = eplb_repair_topk_ids(
+        logical_topk_ids=logical_ids,
+        logical_to_physical_map=logical_to_physical,
+        prefill_route_counter=None,
+        prefill_route_sample_index=None,
+        update_prefill_route_counter=False,
+        decode_route_counter=decode_counter,
+        update_decode_route_counter=True,
+        mode="current_gpu_first",
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(physical_ids, logical_ids)
+    assert torch.equal(decode_counter.cpu(), expected_cooccurrence)
+    assert torch.equal(
+        torch.diagonal(decode_counter).cpu(),
+        torch.bincount(logical_ids.cpu().flatten().to(torch.long), minlength=experts),
+    )
+    assert torch.count_nonzero(torch.tril(decode_counter, diagonal=-1)) == 0
+    assert int(decode_counter.sum().item()) == num_tokens * topk * (topk + 1) // 2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
@@ -3151,6 +3441,8 @@ def test_eplb_prefill_route_counter_multigrid_ring_wrap_is_exact():
             prefill_route_counter=counter,
             prefill_route_sample_index=sample_index,
             update_prefill_route_counter=True,
+            decode_route_counter=None,
+            update_decode_route_counter=False,
             mode="global_first",
         )
         expected[sample % capacity] = torch.bincount(
@@ -3192,6 +3484,8 @@ def test_eplb_repair_topk_ids_spreads_strided_expert_tokens():
         prefill_route_counter=counter,
         prefill_route_sample_index=sample_index,
         update_prefill_route_counter=False,
+        decode_route_counter=None,
+        update_decode_route_counter=False,
         mode="global_first",
     )
     torch.cuda.synchronize()
@@ -3228,6 +3522,8 @@ def test_eplb_replica_hash_is_uniform_across_tokens_and_experts(num_replicas):
         prefill_route_counter=counter,
         prefill_route_sample_index=sample_index,
         update_prefill_route_counter=False,
+        decode_route_counter=None,
+        update_decode_route_counter=False,
         mode="global_first",
     )
     torch.cuda.synchronize()
@@ -3280,6 +3576,8 @@ def test_eplb_repair_topk_ids_empty_input_skips_kernel():
         prefill_route_counter=counter,
         prefill_route_sample_index=sample_index,
         update_prefill_route_counter=True,
+        decode_route_counter=None,
+        update_decode_route_counter=False,
         mode="current_gpu_first",
     )
 
@@ -3307,5 +3605,7 @@ def test_eplb_repair_topk_ids_rejects_unknown_dispatch_mode():
             prefill_route_counter=counter,
             prefill_route_sample_index=sample_index,
             update_prefill_route_counter=False,
+            decode_route_counter=None,
+            update_decode_route_counter=False,
             mode="unknown",
         )

@@ -147,19 +147,18 @@ class GlobalBalanceEPLBPlanner(EPLBPlanner):
 
     def plan(
         self,
-        logical_expert_load_samples: torch.Tensor,
+        route_statistics: torch.Tensor,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:
-        """聚合全局逐样本负载，逐层规划并组合成完整的多层布局。"""
-        # logical_expert_load_samples: [rank, layer, sample, logical_expert]
-        # CPU Tensor。
-        # Global Balance 算法只需要整个采样窗口内每层各 logical expert 的累计负载，
-        # 因此沿 rank 和 sample 维求和为 [layer, logical_expert]，再转成 list
-        # 进入后续纯 Python 分析逻辑。
-        assert logical_expert_load_samples.device.type == "cpu"
-        assert logical_expert_load_samples.ndim == 4
-        assert logical_expert_load_samples.shape[0] == self.world_size
-        aggregated_load = logical_expert_load_samples.sum(dim=(0, 2)).to(torch.float64).tolist()
+        """聚合全局路由统计，逐层规划并组合成完整的多层布局。"""
+        # route_statistics: [rank, layer, sample, logical_expert]
+        # CPU Tensor。Global Balance 只使用 prefill 累计负载，因此沿 rank
+        # 和 sample 维求和为 [layer, logical_expert]，再转成 list 进入纯
+        # Python 分析逻辑。
+        assert route_statistics.device.type == "cpu"
+        assert route_statistics.ndim == 4
+        assert route_statistics.shape[0] == self.world_size
+        aggregated_load = route_statistics.sum(dim=(0, 2)).to(torch.float64).tolist()
 
         # 一次性校验所有层的形状和布局约束。后续每层规划之间没有共享的
         # 可变状态。

@@ -726,30 +726,33 @@ PD 分离模式参数
 
 .. option:: --eplb_plan_mode
 
-    EPLB 动态重排使用的专家布局规划算法，默认值为 ``topology_aware``。当前支持：
+    EPLB prefill 动态重排使用的专家布局规划算法，默认值为 ``topology_aware``。当前支持：
 
     * ``global_balance``：全局均衡的样板实现。它根据各层逻辑专家的全局路由负载生成
       近似均衡的完整布局，并尽量复用当前 rank 和物理槽位以减少专家迁移；prefill token
       在全部有效副本间分发。该模式不适合 grouped top-k 场景。
     * ``topology_aware``：固定每个 rank 的主专家槽，只规划冗余槽位。它保留逐次 prefill
-      样本和源节点负载，按节点本地优先分发及 128-token 对齐估算关键路径，并通过
-      模型级收益门槛和物理槽位复用减少低收益迁移。prefill 运行时会优先选择源节点内的副本。
+      样本和源节点负载，匹配节点优先分发，并使用 128-token 对齐、模型级收益门槛和
+      物理槽位复用减少低收益迁移。
 
-    同一个 EP 通信组内的所有 rank 必须使用相同的值。PD 分离部署中的 prefill
-    和 decode 进程拥有各自独立的 EPLB manager，因此可以分别设置适合各自流量
-    特征的规划算法；非 PD 部署则使用一个算法处理该进程采集到的全部路由负载。
+    两个算法都只针对 prefill，不会消费 decode 共现矩阵。plan mode 必须与
+    ``--eplb_run_mode`` 匹配，否则初始化会直接失败。同一个 EP 通信组内的所有 rank
+    必须使用相同的值。当前尚未注册 decode planner。
 
 .. option:: --eplb_run_mode
 
-    EPLB 针对哪一种推理阶段进行负载均衡，默认值为 ``prefill``。支持：
+    EPLB 采集哪一种推理阶段的路由统计，默认值为 ``prefill``。支持：
 
     * ``prefill``：标识当前 EPLB manager 面向 prefill 负载进行优化；
-    * ``decode``：标识当前 EPLB manager 面向 decode 负载进行优化。
+    * ``decode``：采集 decode logical expert 的上三角共现统计。
 
-    该参数与 ``--eplb_plan_mode`` 相互独立：``eplb_run_mode`` 选择需要优化的负载类型，
-    ``eplb_plan_mode`` 选择生成专家布局的算法。该模式标识已贯通至 EPLB manager，后续可以为
-    两种运行模式分别接入适合各自负载特点的统计数据结构。选择 ``decode`` 时不会执行现有的
-    prefill 路由统计。
+    ``prefill`` 使用 ``[24, E]`` 环形路由样本，
+    ``decode`` 使用 ``[E, E]`` logical expert 共现矩阵并只写包含主对角线的上三角。
+    选择 ``decode`` 时不会执行 prefill
+    路由统计；选择 ``prefill`` 时也不会给 decode 路径增加统计原子操作。两套统计缓冲区
+    互斥分配，未启用模式对应的属性为 ``None``，不会同时占用显存。当前
+    目前两个 ``--eplb_plan_mode`` 取值都只属于 prefill。decode 统计结构已经实现，但需要在
+    factory 中注册 decode 专用 planner 后才能作为完整 EPLB 运行模式启动。
 
 .. option:: --eplb_rebalance_count
 

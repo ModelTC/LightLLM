@@ -30,15 +30,6 @@ from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._init_eplb_runtime()
-
-    def _init_eplb_runtime(self):
-        """初始化本地物理槽位以及可更新的 EPLB 路由运行态。
-
-        ``local_logics_expert_ids_list`` 始终描述全部本地物理行。初始化时主专家
-        在前、冗余专家在后；负载均衡运行后允许替换任意物理行，并在同一个
-        安全推理边界同时更新专家权重和 ``logical_to_physical_map``。
-        """
         world_size = get_global_world_size()
         assert self.n_routed_experts % world_size == 0
         global_rank = get_global_rank()
@@ -46,49 +37,68 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.num_redundant_experts_per_rank = start_args.eplb_num_redundant_experts_per_rank
 
         if self.num_redundant_experts_per_rank > 0:
-            # 延迟导入：顶层导入会经 mode_backend 包形成 meta_weights -> server 的循环依赖。
-            from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
-                build_initial_local_expert_ids,
-                build_logical_to_physical_map,
-                load_layer_placement,
+            self._init_eplb_runtime(
+                start_args=start_args,
+                world_size=world_size,
+                global_rank=global_rank,
+            )
+        else:
+            self._init_standard_expert_layout(
+                world_size=world_size,
+                global_rank=global_rank,
             )
 
-            self.num_total_physical_experts = self.n_routed_experts + world_size * self.num_redundant_experts_per_rank
+    def _init_eplb_runtime(self, start_args: Any, world_size: int, global_rank: int) -> None:
+        """初始化本地物理槽位以及可更新的 EPLB 路由运行态。
 
-            # 阶段 1：先构造确定性的默认布局。未指定配置文件，或配置读取、校验失败时，
-            # 后续权重初始化会继续使用这份布局。
-            initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
+        ``local_logics_expert_ids_list`` 始终描述全部本地物理行。初始化时主专家
+        在前、冗余专家在后；负载均衡运行后允许替换任意物理行，并在同一个
+        安全推理边界同时更新专家权重和 ``logical_to_physical_map``。
+        """
+        # 延迟导入：顶层导入会经 mode_backend 包形成 meta_weights -> server 的循环依赖。
+        from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
+            build_initial_local_expert_ids,
+            build_logical_to_physical_map,
+            load_layer_placement,
+        )
+
+        self.num_total_physical_experts = self.n_routed_experts + world_size * self.num_redundant_experts_per_rank
+
+        # 阶段 1：先构造确定性的默认布局。未指定配置文件，或配置读取、校验失败时，
+        # 后续权重初始化会继续使用这份布局。
+        initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
+            self.n_routed_experts,
+            world_size,
+            self.num_redundant_experts_per_rank,
+        )
+
+        # 阶段 2：如果指定了配置文件，尝试读取与当前层及部署拓扑匹配的历史布局。
+        # load_layer_placement 会负责记录 warning，并在任何异常或配置无效时返回 None。
+        config_path = start_args.eplb_config_path
+        if config_path is not None:
+            saved_placement = load_layer_placement(
+                config_path,
+                layer_index=self.layer_index,
+                num_logical_experts=self.n_routed_experts,
+                world_size=world_size,
+                num_redundant_experts_per_rank=self.num_redundant_experts_per_rank,
+            )
+
+            # 阶段 3：只有完整校验通过的历史布局才会替换默认布局，使专家权重在
+            # 初始化时直接加载到上一次优化后的物理槽位中。
+            if saved_placement is not None:
+                initial_local_expert_ids_by_rank = saved_placement
+        self.local_logics_expert_ids_list = initial_local_expert_ids_by_rank[global_rank]
+        self.logical_to_physical_map = torch.tensor(
+            build_logical_to_physical_map(
+                initial_local_expert_ids_by_rank,
                 self.n_routed_experts,
-                world_size,
-                self.num_redundant_experts_per_rank,
-            )
-
-            # 阶段 2：如果指定了配置文件，尝试读取与当前层及部署拓扑匹配的历史布局。
-            # load_layer_placement 会负责记录 warning，并在任何异常或配置无效时返回 None。
-            config_path = start_args.eplb_config_path
-            if config_path is not None:
-                saved_placement = load_layer_placement(
-                    config_path,
-                    layer_index=self.layer_index,
-                    num_logical_experts=self.n_routed_experts,
-                    world_size=world_size,
-                    num_redundant_experts_per_rank=self.num_redundant_experts_per_rank,
-                )
-
-                # 阶段 3：只有完整校验通过的历史布局才会替换默认布局，使专家权重在
-                # 初始化时直接加载到上一次优化后的物理槽位中。
-                if saved_placement is not None:
-                    initial_local_expert_ids_by_rank = saved_placement
-            self.local_logics_expert_ids_list = initial_local_expert_ids_by_rank[global_rank]
-            self.logical_to_physical_map = torch.tensor(
-                build_logical_to_physical_map(
-                    initial_local_expert_ids_by_rank,
-                    self.n_routed_experts,
-                    current_rank=global_rank,
-                    node_world_size=get_node_world_size(),
-                ),
-                dtype=torch.int32,
-            ).cuda()
+                current_rank=global_rank,
+                node_world_size=get_node_world_size(),
+            ),
+            dtype=torch.int32,
+        ).cuda()
+        if start_args.eplb_run_mode == "prefill":
             # 环形缓冲区保留最近 24 次 prefill 路由采样，每次采样写入独立的一行；
             # 始终按 logical expert 统计，冗余副本不会拆散规划器观察到的负载信号。
             self.prefill_route_counter = torch.zeros(
@@ -99,16 +109,30 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             # [0] 是单调递增的 sample index；[1] 用于在同一个 kernel 内协调
             # 目标行清零，并从所有 program 中选出最后完成者。
             self.prefill_route_sample_index = torch.zeros(2, dtype=torch.int64, device="cuda")
+            self.decode_route_counter = None
         else:
-            self.num_total_physical_experts = self.n_routed_experts
-            num_local_experts = self.n_routed_experts // world_size
-            first_local_expert_id = global_rank * num_local_experts
-            self.local_logics_expert_ids_list = list(
-                range(
-                    first_local_expert_id,
-                    first_local_expert_id + num_local_experts,
-                )
+            self.prefill_route_counter = None
+            self.prefill_route_sample_index = None
+            # decode 共现矩阵只写包含主对角线的上三角。对角线记录单个
+            # logical expert 的精确负载，非对角位置记录无序 expert pair
+            # 在同一个 token 的 top-k 中共同出现的次数。
+            self.decode_route_counter = torch.zeros(
+                (self.n_routed_experts, self.n_routed_experts),
+                dtype=torch.int64,
+                device="cuda",
             )
+
+    def _init_standard_expert_layout(self, world_size: int, global_rank: int) -> None:
+        """初始化未启用 EPLB 时连续均分的本地专家布局。"""
+        self.num_total_physical_experts = self.n_routed_experts
+        num_local_experts = self.n_routed_experts // world_size
+        first_local_expert_id = global_rank * num_local_experts
+        self.local_logics_expert_ids_list = list(
+            range(
+                first_local_expert_id,
+                first_local_expert_id + num_local_experts,
+            )
+        )
 
     def _select_experts(
         self,
@@ -157,17 +181,21 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             # decode 的分发策略统一由 EPLB 模块管理。
             from lightllm.server.router.model_infer.mode_backend.eplb.eplb_utils import (
                 get_eplb_dispatch_mode,
+                should_record_decode_route,
                 should_record_prefill_route,
             )
 
             dispatch_mode = get_eplb_dispatch_mode(is_prefill=is_prefill)
             update_prefill_route_counter = should_record_prefill_route(is_prefill=is_prefill)
+            update_decode_route_counter = should_record_decode_route(is_prefill=is_prefill)
             topk_ids = eplb_repair_topk_ids(
                 logical_topk_ids=topk_ids,
                 logical_to_physical_map=self.logical_to_physical_map,
                 prefill_route_counter=self.prefill_route_counter,
                 prefill_route_sample_index=self.prefill_route_sample_index,
                 update_prefill_route_counter=update_prefill_route_counter,
+                decode_route_counter=self.decode_route_counter,
+                update_decode_route_counter=update_decode_route_counter,
                 mode=dispatch_mode,
             )
         return topk_weights, topk_ids

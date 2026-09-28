@@ -778,19 +778,21 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         choices=["prefill", "decode"],
         default="prefill",
-        help="""Inference stage targeted by EPLB. This keeps prefill- and decode-specific load-balancing
-            policies and routing statistics distinguishable. The default is 'prefill'.""",
+        help="""Inference stage whose routing statistics are collected by EPLB. Prefill uses a routing-sample
+            ring, while decode uses the upper triangle of a logical-expert co-occurrence matrix. The default
+            is 'prefill'.""",
     )
     parser.add_argument(
         "--eplb_plan_mode",
         type=str,
         choices=["global_balance", "topology_aware"],
         default="topology_aware",
-        help="""EPLB placement planning algorithm used by this inference process.
+        help="""Prefill EPLB placement planning algorithm used by this inference process.
             'global_balance' is a reference implementation that may rearrange every physical expert slot;
             'topology_aware' keeps canonical primary experts fixed and plans redundant slots with source-node-local
-            prefill dispatch. The default is 'topology_aware'. Prefill and decode processes may select their planner
-            independently in PD deployments.""",
+            prefill dispatch. Both algorithms are prefill-only and do not consume decode co-occurrence statistics.
+            The plan mode must match --eplb_run_mode. A decode planner has not been registered yet.
+            The default is 'topology_aware'.""",
     )
     parser.add_argument(
         "--eplb_rebalance_count",

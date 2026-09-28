@@ -63,22 +63,21 @@ class EPLBManager:
     每次调用 :meth:`step` 最多处理一个状态。主路径及各状态的职责如下::
 
         [COLLECTING]
-          prefill kernel 将各层 logical expert 负载写入 24 行环形样本；
+          prefill kernel 写入 24 行环形样本，decode kernel 写入上三角共现矩阵；
           manager 只记录采样 step，等待下一个评估周期。
                 |
                 | 评估周期到达
                 v
         [EVALUATING]
-          将本地环形样本完整复制到 CPU 并上报负载指标；在独立 Gloo
-          通信组中启动逐样本负载的后台 all-gather。rank 0 在通信前判断
-          本地样本量；样本不足或达到重排次数上限时不启动通信。
+          将当前运行模式的原始统计完整复制到 CPU。rank 0 在通信前判断
+          本地样本量；样本充足时在独立 Gloo 通信组中启动后台 all-gather。
                 |
                 v
         [WAIT_LOAD_GATHER_FINISHED]
-          等待所有 rank 完成负载汇集，保留 planner 需要的
-          rank 和 sample 原始维度。
+          等待所有 rank 完成负载汇集，并把当前模式的原始四维统计交给
+          对应 planner。
                 |
-                | 样本充足且仍允许重排
+                | 统计量充足且仍允许重排
                 v
         [PLAN_PLACEMENT]
           rank 0 使用完整的全局专家负载启动后台布局规划任务。
@@ -100,16 +99,16 @@ class EPLBManager:
         [TRANSFERRING]
           分批启动并轮询后台权重传输；整批完成后，主推理线程在安全
           边界统一提交权重和路由 metadata。全部批次完成后发布新布局、
-          清空 prefill 路由样本并回到 COLLECTING。
+          清空路由统计并回到 COLLECTING。
 
     以下分支会提前回到 ``COLLECTING``::
 
         EVALUATING
-          |-- 平均 token 数不足 --------> 保留环形窗口，继续滚动采样
-          `-- 已达到重排次数上限 ------> 清空样本，仅周期性上报指标
+          |-- 平均 token 数不足 --------> 保留当前统计，继续采集
+          `-- 已达到重排次数上限 ------> 清空统计，仅周期性上报指标
 
         WAIT_PLAN_PLACEMENT_FINISHED
-          `-- 目标布局与当前布局相同 ---> 保留环形窗口，等待下次评估
+          `-- 目标布局与当前布局相同 ---> 保留当前统计，等待下次评估
 
     布局规划、传输规划和权重传输在后台执行；主推理线程只负责创建任务、
     轮询状态，以及在安全边界提交已经完成的结果。
@@ -132,7 +131,6 @@ class EPLBManager:
         weights: List[FusedMoeWeight] = _find_fused_moe_weights(model)
         assert weights, "EPLB requires at least one EP MoE layer"
         assert max_rebalance_count >= -1
-        assert run_mode in ("prefill", "decode")
 
         # 模型与专家拓扑：初始化后保持不变。
         self._weights: List[FusedMoeWeight] = weights
@@ -147,20 +145,21 @@ class EPLBManager:
         first_impl = self._eplb_impls[0]
         self.num_logical_experts: int = first_impl.n_routed_experts
         self.num_redundant_experts_per_rank: int = first_impl.num_redundant_experts_per_rank
-        # run_mode 决定 EPLB 面向哪类推理负载进行优化。当前先把模式作为
-        # manager 的稳定输入；prefill 与 decode 的采样结构可在此基础上分别演进。
+        # run_mode 决定 EPLB 采集哪类路由统计；factory 统一校验 plan_mode
+        # 是否属于该运行阶段，避免在状态机中分散维护模式组合。
         self.run_mode: str = run_mode
         self.plan_mode: str = plan_mode
         self.planner: EPLBPlanner = create_eplb_planner(
-            self.plan_mode,
-            self.world_size,
-            self.num_redundant_experts_per_rank,
+            plan_mode=self.plan_mode,
+            run_mode=self.run_mode,
+            num_ranks=self.world_size,
+            num_redundant_experts_per_rank=self.num_redundant_experts_per_rank,
             expert_alignment=EPLB_EXPERT_ALIGNMENT,
             node_world_size=self.node_world_size,
         )
 
-        # 评估调度：steps 只在 COLLECTING 状态递增。prefill 路由样本从当前
-        # 布局生效时开始写入，并在固定容量内保留最近的采样窗口。
+        # 评估调度：steps 只在 COLLECTING 状态递增。两种运行模式共用同一套
+        # 汇集、规划、迁移和提交状态机，planner 负责解释各自的原始统计。
         self.step_interval: int = get_eplb_step_interval()
         self.transfer_layer_parallelism: int = get_eplb_transfer_layer_parallelism()
         self.steps: int = 0
@@ -170,8 +169,7 @@ class EPLBManager:
         # 一次重排周期中的短期状态。统一初始化为 None，避免各状态
         # 通过 hasattr()/del 隐式定义 EPLBManager 的属性结构。
         self._load_gather_task: Optional[EPLBLoadGatherTask] = None
-        self._pending_plan_load_samples: Optional[torch.Tensor] = None
-        self._metric_sample_load: Optional[torch.Tensor] = None
+        self._pending_route_statistics: Optional[torch.Tensor] = None
         self._plan_task: Optional[EPLBPlanTask] = None
         self.target_placement: Optional[ExpertPlacement] = None
         self._transfer_planner: Optional[EPLBTransferPlanner] = None
@@ -208,7 +206,7 @@ class EPLBManager:
 
         self.state = EPLBManagerState.COLLECTING
         self.next_evaluation_step = self.step_interval
-        self._clear_prefill_route_samples()
+        self._clear_route_statistics()
 
         if self.global_rank == 0:
             self.metric_client: MetricClient = MetricClient(get_shm_port_args().metric_port)
@@ -217,7 +215,8 @@ class EPLBManager:
                 f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} max_rebalance_count={self.max_rebalance_count} "
                 f"transfer_layer_parallelism={self.transfer_layer_parallelism} "
-                f"run_mode={self.run_mode} plan_mode={self.plan_mode} planner={type(self.planner).__name__}"
+                f"run_mode={self.run_mode} plan_mode={self.plan_mode} "
+                f"planner={type(self.planner).__name__}"
             )
 
     def step(self) -> None:
@@ -268,38 +267,32 @@ class EPLBManager:
             self.state = EPLBManagerState.EVALUATING
 
     def _step_evaluating(self) -> None:
-        """快照本地逐样本负载，并在独立通信组中启动后台汇集。"""
-        counters = [impl.prefill_route_counter for impl in self._eplb_impls]
-        if any(counter.ndim != 2 or counter.shape[1] != self.num_logical_experts for counter in counters):
-            raise RuntimeError("EPLB prefill route counter shape must be [sample_capacity, num_logical_experts]")
-        if len({counter.shape[0] for counter in counters}) != 1:
-            raise RuntimeError("EPLB prefill route counter capacities must match across layers")
-
-        # 一次性堆叠各层环形样本并复制到 CPU，保留完整的
-        # [layer, sample, logical_expert] 维度。后续后台 all-gather 会继续保留
-        # rank 和 sample 维；通信完成后将原始四维快照交给 planner。
-        # 此处先不清零 GPU 样本：如果样本不足或无需迁移，下一周期会继续
-        # 滚动覆盖最旧行；达到重排上限或成功切换到新布局后才重置窗口。本轮
-        # 异步规划使用独立的 CPU 快照，不会与后续的 atomic add 竞争。
-        local_load_samples = torch.stack(counters).detach().cpu()
+        """快照当前运行模式的路由统计，并在独立通信组中启动后台汇集。"""
+        # 这里保留统计的原始结构：prefill 是 [layer, sample, expert_num]，
+        # decode 是 [layer, expert_num, expert_num]。planner 需要原始结构，
+        # 因此只为指标和样本量判断额外提取 [layer, expert_num] 负载。
+        local_route_statistics = self._snapshot_local_route_statistics()
         if self.global_rank == 0:
-            local_load = local_load_samples.sum(dim=1)
+            local_load = eplb_metrics.logical_expert_load(
+                route_statistics=local_route_statistics,
+                run_mode=self.run_mode,
+            )
             eplb_metrics.publish_expert_load_metrics(
                 metric_client=self.metric_client,
                 expert_load=local_load,
             )
 
         # 达到重排次数上限后仍保留周期性负载上报，但不再执行后续的跨 rank
-        # 通信和布局规划。清空本轮样本，使下一次指标对应新的采样窗口。
+        # 通信和布局规划。清空本轮统计，使下一次指标对应新的采样窗口。
         reached_rebalance_limit = (
             self.max_rebalance_count != -1 and self.completed_rebalance_count >= self.max_rebalance_count
         )
         if reached_rebalance_limit:
-            self._clear_prefill_route_samples()
+            self._clear_route_statistics()
             self.state = EPLBManagerState.COLLECTING
         else:
             # rank 0 的路由分布足以代表全局分布，因此只使用 rank 0 的本地
-            # 样本判断统计量是否充足，再广播布尔决策以保持所有 rank 的状态
+            # 统计判断数据量是否充足，再广播布尔决策以保持所有 rank 的状态
             # 转移一致。样本不足时不启动大块原始负载 all-gather。
             has_enough_load = None
             if self.global_rank == 0:
@@ -322,8 +315,10 @@ class EPLBManager:
             assert has_enough_load is not None
 
             if has_enough_load:
+                # all-gather 继续传输原始统计，而不是已经聚合过的 metrics
+                # 负载，使不同 planner 可以使用各自需要的维度信息。
                 self._load_gather_task = EPLBLoadGatherTask(
-                    local_load_samples=local_load_samples,
+                    local_route_statistics=local_route_statistics,
                     load_gather_group=self.load_gather_group,
                 )
                 self._load_gather_task.start()
@@ -334,46 +329,39 @@ class EPLBManager:
     def _step_wait_load_gather_finished(self) -> None:
         """等待原始负载汇集完成，并准备 planner 和 metrics 输入。"""
         assert self._load_gather_task is not None
+        # 所有 rank 必须一起离开该状态，避免部分 rank 提前进入后续控制
+        # collective，而其他 rank 仍在等待后台 Gloo all-gather。
         if not self._all_ranks_finished(self._load_gather_task.is_finished()):
             return
 
-        gathered_load_samples = self._load_gather_task.result
-        assert gathered_load_samples is not None
-        assert gathered_load_samples.ndim == 4
-        assert gathered_load_samples.shape[0] == self.world_size
-        assert gathered_load_samples.shape[1] == len(self._eplb_impls)
-        assert gathered_load_samples.shape[3] == self.num_logical_experts
+        gathered_route_statistics = self._load_gather_task.result
+        assert gathered_route_statistics is not None
+        assert gathered_route_statistics.ndim == 4
+        assert gathered_route_statistics.shape[0] == self.world_size
+        assert gathered_route_statistics.shape[1] == len(self._eplb_impls)
+        assert gathered_route_statistics.shape[3] == self.num_logical_experts
         self._load_gather_task = None
 
-        # gathered_load_samples 保留 [rank, layer, sample, logical_expert]
-        # 原始结构并
-        # 直接交给 planner。重排计算指标应表示一次真实 prefill 的
-        # 关键路径开销，而不是多个不同批次累加后的虚拟大批次。
-        # EP rank 以相同顺序执行 prefill，每次 dispatch 都将同一 sample
-        # index 推进一次；因此各 rank 的第 0 行属于同一采样位置。
-        # metrics 固定取该行，只汇总其在各 rank 上的分片，得到
-        # [layer, logical_expert]。
         if self.global_rank == 0:
-            self._pending_plan_load_samples = gathered_load_samples
-            metric_sample_load_by_rank = gathered_load_samples[:, :, 0, :]
-            self._metric_sample_load = metric_sample_load_by_rank.sum(dim=0)
+            # planner 始终保留当前模式的完整四维统计。规划任务
+            # 会持有该 Tensor，后续可在目标布局生成后直接计算重排指标。
+            self._pending_route_statistics = gathered_route_statistics
         self.state = EPLBManagerState.PLAN_PLACEMENT
 
     def _step_plan_placement(self) -> None:
-        """由 rank 0 使用已汇集的全局负载启动异步规划。"""
+        """由 rank 0 使用已汇集的全局路由统计启动异步规划。"""
         self.state = EPLBManagerState.WAIT_PLAN_PLACEMENT_FINISHED
         if self.global_rank == 0:
-            assert self._pending_plan_load_samples is not None
-            # planner 消费保留 rank/sample 维的原始快照；指标使用其中
-            # 一个 sample 行，确保 before/after 比较的是同一批负载。
+            assert self._pending_route_statistics is not None
+            # planner 直接消费当前运行模式的原始全局统计。
             self._plan_task = EPLBPlanTask(
                 planner=self.planner,
-                logical_expert_load_samples=self._pending_plan_load_samples,
+                route_statistics=self._pending_route_statistics,
                 current_placement=self.current_placement,
             )
             self._plan_task.start()
             # 任务对象已持有 Tensor，manager 不再保留重复引用。
-            self._pending_plan_load_samples = None
+            self._pending_route_statistics = None
 
     def _step_wait_plan_placement_finished(self) -> None:
         """等待 rank 0 完成规划并广播目标专家排布。"""
@@ -385,21 +373,28 @@ class EPLBManager:
                 assert placement is not None
 
         values = [placement]
+        # 规划未完成时 rank 0 广播 None，所有 rank 保持当前状态；得到完整
+        # placement 后再同时进入传输规划，保证后续点对点任务顺序一致。
         dist.broadcast_object_list(values, src=0, group=self.control_group)
         placement = values[0]
         if placement is None:
             return
 
         if self.global_rank == 0:
-            assert self._metric_sample_load is not None
-            eplb_metrics.publish_rebalance_compute_metrics(
-                metric_client=self.metric_client,
-                sample_load=self._metric_sample_load,
-                current_placement=self.current_placement,
-                target_placement=placement,
-                expert_alignment=EPLB_EXPERT_ALIGNMENT,
-            )
-            self._metric_sample_load = None
+            assert self._plan_task is not None
+            if self.run_mode == "prefill":
+                # 此时已同时拥有规划任务保留的原始统计和目标布局，
+                # 可以就地生成 prefill 指标负载并上报，无需 manager 跨状态缓存。
+                metric_load = eplb_metrics.prefill_rebalance_metric_load(
+                    route_statistics=self._plan_task.route_statistics,
+                )
+                eplb_metrics.publish_rebalance_compute_metrics(
+                    metric_client=self.metric_client,
+                    sample_load=metric_load,
+                    current_placement=self.current_placement,
+                    target_placement=placement,
+                    expert_alignment=EPLB_EXPERT_ALIGNMENT,
+                )
             self._plan_task = None
 
         if placement == self.current_placement:
@@ -475,7 +470,7 @@ class EPLBManager:
                 elapsed = time.monotonic() - self.rebalance_started_at
                 if self.global_rank == 0:
                     self._persist_current_placement()
-                self._clear_prefill_route_samples()
+                self._clear_route_statistics()
                 self.completed_rebalance_count += 1
                 self.pending_transfer_batches = None
                 self.target_placement = None
@@ -587,17 +582,34 @@ class EPLBManager:
         )
         layer_impl.logical_to_physical_map.copy_(logical_to_physical_map, non_blocking=True)
 
-    def _clear_prefill_route_samples(self) -> None:
-        """在 overlap stream 上清空所有层的 prefill 路由样本和设备端索引。"""
+    def _snapshot_local_route_statistics(self) -> torch.Tensor:
+        """复制 prefill 的 ``[layer, sample, expert_num]`` 或 decode 的
+        ``[layer, expert_num, expert_num]`` 统计。
+        """
+        counter_name = f"{self.run_mode}_route_counter"
+        counters = [getattr(impl, counter_name) for impl in self._eplb_impls]
+        assert all(counter is not None for counter in counters)
+
+        # 此处不清零 GPU counter：样本不足时继续积累；后台 all-gather
+        # 持有独立的 CPU 快照。
+        return torch.stack(counters).detach().cpu()
+
+    def _clear_route_statistics(self) -> None:
+        """在 overlap stream 上清空所有层当前已分配的路由统计。"""
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        # prefill route sample 由 forward 中的 Triton kernel 在 overlap stream 上更新。
-        # 将 zero_ 排到同一条 stream，可保证它位于此前 forward 之后、下一次
-        # forward 之前，无需额外 synchronize，也不会与 atomic add 并发。
+        # route counter 由 forward 中的 Triton kernel 在 overlap stream 上
+        # 更新。将 zero_ 排到同一条 stream，可保证它位于此前 forward 之后、
+        # 下一次 forward 之前，不会与 atomic add 并发。各状态独立判空，兼容
+        # 后续同一层同时保留 prefill 和 decode 统计。
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             for impl in self._eplb_impls:
-                impl.prefill_route_counter.zero_()
-                impl.prefill_route_sample_index.zero_()
+                if impl.prefill_route_counter is not None:
+                    impl.prefill_route_counter.zero_()
+                if impl.prefill_route_sample_index is not None:
+                    impl.prefill_route_sample_index.zero_()
+                if impl.decode_route_counter is not None:
+                    impl.decode_route_counter.zero_()
 
     def _persist_current_placement(self) -> None:
         """由 rank 0 将当前完整布局写回启动时指定的输入/输出文件。"""

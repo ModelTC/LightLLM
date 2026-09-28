@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -128,21 +130,65 @@ def _record_prefill_route_sample(
 
 
 @triton.jit
+def _record_decode_route_cooccurrence(
+    logical_topk_ids_ptr,
+    topk_id_offsets,
+    row_expert_ids,
+    valid_mask,
+    num_topk_ids,
+    decode_route_counter_ptr,
+    decode_route_counter_row_stride,
+    TOP_K: tl.constexpr,
+):
+    """把 decode top-k 的无序 expert 对记录到共现矩阵上三角。"""
+    # 每个有效 lane 对应当前 token 的一个 logical expert，并以该 expert
+    # 作为矩阵行。先由展平 offset 定位所属 token 的 top-k 起点。
+    token_topk_start_offsets = (topk_id_offsets // TOP_K) * TOP_K
+    counter_row_offsets = row_expert_ids * decode_route_counter_row_stride
+
+    # 例如 top-k 为 [7, 11, 23]：expert 7 的 lane 写 [7,7]、[7,11]、
+    # [7,23]；expert 11 的 lane 跳过重复的 [11,7]，继续写 [11,11]
+    # 和 [11,23]。因此每个非对角无序 expert 对只记录一次。
+    for partner_slot in tl.static_range(0, TOP_K):
+        partner_offsets = token_topk_start_offsets + partner_slot
+        partner_mask = valid_mask & (partner_offsets < num_topk_ids)
+        partner_expert_ids = tl.load(
+            logical_topk_ids_ptr + partner_offsets,
+            mask=partner_mask,
+            other=0,
+        )
+
+        # 使用 <= 而不是 <，明确把 [i, i] 纳入上三角。top-k ID 唯一时，
+        # 每个被选中的 expert 恰好有一个自身槽位，因此对角线准确加一；
+        # i < j 的 pair 由较小 ID 对应的 lane 唯一写入，不存在重复计数。
+        upper_triangle_mask = partner_mask & (row_expert_ids <= partner_expert_ids)
+        tl.atomic_add(
+            decode_route_counter_ptr + counter_row_offsets + partner_expert_ids,
+            1,
+            mask=upper_triangle_mask,
+            sem="relaxed",
+        )
+
+
+@triton.jit
 def _eplb_repair_topk_ids_kernel(
     logical_topk_ids_ptr,
     physical_topk_ids_ptr,
     num_topk_ids,
-    top_k,
     logical_to_physical_map_ptr,
     logical_to_physical_map_row_stride,
     prefill_route_counter_ptr,
     prefill_route_counter_row_stride,
     prefill_route_sample_index_ptr,
+    decode_route_counter_ptr,
+    decode_route_counter_row_stride,
     DISPATCH_MODE: tl.constexpr,
     UPDATE_PREFILL_ROUTE_COUNTER: tl.constexpr,
+    UPDATE_DECODE_ROUTE_COUNTER: tl.constexpr,
     NUM_LOGICAL_EXPERTS: tl.constexpr,
     PREFILL_ROUTE_COUNTER_CAPACITY: tl.constexpr,
     COUNTER_BLOCK_SIZE: tl.constexpr,
+    TOP_K: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     # 阶段 1：将二维 [num_tokens, top_k] 路由结果展平后分块处理。
@@ -190,7 +236,7 @@ def _eplb_repair_topk_ids_kernel(
     else:
         # global_first: 直接在所有 rank 的有效副本间分发。
         num_preferred_replicas = num_global_replicas
-    token_indices = topk_id_offsets // top_k
+    token_indices = topk_id_offsets // TOP_K
     selected_replica_indices = _replica_index(token_indices, logical_expert_ids, num_preferred_replicas)
 
     # 阶段 4：读取选中槽位的 physical expert ID 并写入新的输出 tensor。
@@ -216,14 +262,30 @@ def _eplb_repair_topk_ids_kernel(
             COUNTER_BLOCK_SIZE,
         )
 
+    # 阶段 6：decode 定制模式下，把同一 token 中的无序 expert pair 记录到
+    # 共现矩阵上三角（包含主对角线）。该路径不需要跨 program 同步。
+    if UPDATE_DECODE_ROUTE_COUNTER:
+        _record_decode_route_cooccurrence(
+            logical_topk_ids_ptr,
+            topk_id_offsets,
+            logical_expert_ids,
+            valid_mask,
+            num_topk_ids,
+            decode_route_counter_ptr,
+            decode_route_counter_row_stride,
+            TOP_K,
+        )
+
 
 @torch.no_grad()
 def eplb_repair_topk_ids(
     logical_topk_ids: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
-    prefill_route_counter: torch.Tensor,
-    prefill_route_sample_index: torch.Tensor,
+    prefill_route_counter: Optional[torch.Tensor],
+    prefill_route_sample_index: Optional[torch.Tensor],
     update_prefill_route_counter: bool,
+    decode_route_counter: Optional[torch.Tensor],
+    update_decode_route_counter: bool,
     mode: str,
 ) -> torch.Tensor:
     """将 logical top-k ID 转换为当前 EPLB 布局中的 physical expert ID。
@@ -242,12 +304,20 @@ def eplb_repair_topk_ids(
         prefill_route_counter: prefill 路由采样的环形缓冲区，shape 为
             ``[sample_capacity, num_logical_experts]``。一次 kernel 调用只写
             ``prefill_route_sample_index[0] % sample_capacity`` 对应的一行。
+            decode 运行模式下为 ``None``。
         prefill_route_sample_index: shape 为 ``[2]`` 的设备端同步状态。第 0 项
             是单调递增的 sample index；第 1 项用于核内清零与完成同步：0
             表示尚未清零，正数为 ready 标记 1 加上已完成的 program 数量；
             达到 ``num_programs + 1`` 后，最后完成者推进 sample index 并清零。
+            decode 运行模式下为 ``None``。
         update_prefill_route_counter: 是否记录本次 prefill 路由采样并推进 sample
             index。decode 或固定布局不需要采样时可以关闭。
+        decode_route_counter: decode logical expert 共现计数，shape 为
+            ``[num_logical_experts, num_logical_experts]``。对每个 token 只写
+            包含主对角线的上三角：``[i, i]`` 是 expert i 的路由次数，
+            ``[i, j]``（i < j）是两个 expert 同时出现的次数。prefill
+            运行模式下为 ``None``。
+        update_decode_route_counter: 是否记录本次 decode 上三角共现次数。
         mode: 必须显式指定的副本分发模式，不提供默认值：
 
             * ``current_gpu_first``：本卡优先，没有本卡副本时回退到全局；
@@ -272,14 +342,41 @@ def eplb_repair_topk_ids(
     assert logical_to_physical_map.ndim == 2
     assert logical_to_physical_map.shape[1] > 3
     assert logical_to_physical_map.stride(1) == 1
-    assert prefill_route_counter.ndim == 2
-    assert prefill_route_counter.shape[0] > 1
-    assert prefill_route_counter.shape[1] == logical_to_physical_map.shape[0]
-    assert prefill_route_counter.is_contiguous()
-    assert prefill_route_counter.dtype is torch.int64
-    assert prefill_route_sample_index.shape == (2,)
-    assert prefill_route_sample_index.dtype is torch.int64
-    assert prefill_route_sample_index.device == prefill_route_counter.device
+    assert not (update_prefill_route_counter and update_decode_route_counter)
+    assert (prefill_route_counter is None) != (decode_route_counter is None)
+
+    num_logical_experts = logical_to_physical_map.shape[0]
+    if prefill_route_counter is not None:
+        assert prefill_route_sample_index is not None
+        assert prefill_route_counter.ndim == 2
+        assert prefill_route_counter.shape[0] > 1
+        assert prefill_route_counter.shape[1] == num_logical_experts
+        assert prefill_route_counter.is_contiguous()
+        assert prefill_route_counter.dtype is torch.int64
+        assert prefill_route_sample_index.shape == (2,)
+        assert prefill_route_sample_index.dtype is torch.int64
+        assert prefill_route_sample_index.device == prefill_route_counter.device
+        assert not update_decode_route_counter
+
+        kernel_prefill_route_counter = prefill_route_counter
+        kernel_prefill_route_sample_index = prefill_route_sample_index
+        kernel_decode_route_counter = prefill_route_counter
+        prefill_route_counter_capacity = prefill_route_counter.shape[0]
+    else:
+        assert prefill_route_sample_index is None
+        assert decode_route_counter is not None
+        assert decode_route_counter.shape == (num_logical_experts, num_logical_experts)
+        assert decode_route_counter.is_contiguous()
+        assert decode_route_counter.dtype is torch.int64
+        assert not update_prefill_route_counter
+
+        # Triton launch 的 pointer 参数不能传 None。未启用的 prefill 分支会被
+        # constexpr 完全裁剪，因此可复用 decode counter 作为不会解引用的占位指针。
+        kernel_prefill_route_counter = decode_route_counter
+        kernel_prefill_route_sample_index = decode_route_counter
+        kernel_decode_route_counter = decode_route_counter
+        prefill_route_counter_capacity = 1
+
     physical_topk_ids = torch.empty_like(logical_topk_ids)
     if logical_topk_ids.numel() == 0:
         return physical_topk_ids
@@ -289,17 +386,20 @@ def eplb_repair_topk_ids(
         logical_topk_ids_ptr=logical_topk_ids,
         physical_topk_ids_ptr=physical_topk_ids,
         num_topk_ids=logical_topk_ids.numel(),
-        top_k=logical_topk_ids.shape[1],
         logical_to_physical_map_ptr=logical_to_physical_map,
         logical_to_physical_map_row_stride=logical_to_physical_map.stride(0),
-        prefill_route_counter_ptr=prefill_route_counter,
-        prefill_route_counter_row_stride=prefill_route_counter.stride(0),
-        prefill_route_sample_index_ptr=prefill_route_sample_index,
+        prefill_route_counter_ptr=kernel_prefill_route_counter,
+        prefill_route_counter_row_stride=kernel_prefill_route_counter.stride(0),
+        prefill_route_sample_index_ptr=kernel_prefill_route_sample_index,
+        decode_route_counter_ptr=kernel_decode_route_counter,
+        decode_route_counter_row_stride=kernel_decode_route_counter.stride(0),
         DISPATCH_MODE=dispatch_mode,
         UPDATE_PREFILL_ROUTE_COUNTER=update_prefill_route_counter,
-        NUM_LOGICAL_EXPERTS=prefill_route_counter.shape[1],
-        PREFILL_ROUTE_COUNTER_CAPACITY=prefill_route_counter.shape[0],
-        COUNTER_BLOCK_SIZE=triton.next_power_of_2(prefill_route_counter.shape[1]),
+        UPDATE_DECODE_ROUTE_COUNTER=update_decode_route_counter,
+        NUM_LOGICAL_EXPERTS=num_logical_experts,
+        PREFILL_ROUTE_COUNTER_CAPACITY=prefill_route_counter_capacity,
+        COUNTER_BLOCK_SIZE=triton.next_power_of_2(num_logical_experts),
+        TOP_K=logical_topk_ids.shape[1],
         BLOCK_SIZE=block_size,
         num_warps=4,
         num_stages=1,

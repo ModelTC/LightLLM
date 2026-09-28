@@ -9,7 +9,7 @@ from .types import ExpertPlacement
 
 
 class TopologyAwareEPLBPlanner(EPLBPlanner):
-    """根据源节点流量规划冗余专家，并最小化各层关键 rank 的计算负载。
+    """根据 prefill 源节点流量规划冗余专家。
 
     与会重新排列全部物理槽位的 ``GlobalBalanceEPLBPlanner`` 不同，本规划器固定
     每个 rank 的规范主专家，只修改末尾的冗余专家槽位。规划过程保留原始
@@ -18,7 +18,7 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
 
     算法包含五个主要阶段：
 
-    1. 把 ``[rank, layer, sample, expert]`` 负载聚合为
+    1. 把 ``[rank, layer, sample, expert]`` 聚合为
        ``[sample, layer, source_node, expert]``；
     2. 从当前完整布局中提取冗余槽位，固定主专家不参与候选规划；
     3. 各层独立填充冗余槽位，每次选择使关键 rank 计算量最小的专家副本；
@@ -54,17 +54,17 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
 
     def plan(
         self,
-        logical_expert_load_samples: torch.Tensor,
+        route_statistics: torch.Tensor,
         current_placement: ExpertPlacement,
     ) -> ExpertPlacement:
         """返回 ``[layer][rank][local physical slot]`` 形式的完整目标布局。"""
-        assert logical_expert_load_samples.device.type == "cpu"
-        assert logical_expert_load_samples.ndim == 4
-        assert logical_expert_load_samples.shape[0] == self.world_size
-        assert logical_expert_load_samples.shape[1] > 0
+        assert route_statistics.device.type == "cpu"
+        assert route_statistics.ndim == 4
+        assert route_statistics.shape[0] == self.world_size
+        assert route_statistics.shape[1] > 0
 
-        num_layers = logical_expert_load_samples.shape[1]
-        num_logical_experts = logical_expert_load_samples.shape[3]
+        num_layers = route_statistics.shape[1]
+        num_logical_experts = route_statistics.shape[3]
         self._validate_complete_placement(
             current_placement,
             num_layers=num_layers,
@@ -78,7 +78,7 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
         #
         # 同一节点内的 rank 使用相同的本地副本集合，因此先在节点内部聚合；
         # 不聚合不同节点，也不聚合 sample，避免丢失拓扑和逐批次对齐信息。
-        source_node_load = self._aggregate_load_by_source_node(logical_expert_load_samples).to(torch.float64)
+        source_node_load = self._aggregate_load_by_source_node(route_statistics).to(torch.float64)
 
         # 步骤 2：把当前完整布局转换为算法内部使用的冗余布局。
         #
@@ -205,8 +205,8 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
         local_rank_mask = self._build_local_rank_mask(num_nodes)
 
         # 各层没有共享的规划状态。显式逐层处理可以让单层算法只操作
-        # [sample, source_node, expert] 等三维数据，同时把候选临时内存限制在
-        # 单层规模。layer 顺序固定，因此结果仍然具有确定性。
+        # [sample, source_node, expert] 三维数据，同时把候选临时内存
+        # 限制在单层规模。layer 顺序固定，因此结果仍然具有确定性。
         return torch.stack(
             [
                 self._plan_one_layer(
@@ -243,8 +243,8 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
         primary_ranks = expert_ids // num_primary_experts_per_rank
         expert_locations[expert_ids, primary_ranks] = True
 
-        # expert_rank_load: [sample, logical_expert, rank]；rank_load 再沿
-        # logical expert 维累加为 [sample, rank]。
+        # expert_rank_load: [sample, logical_expert, rank]；rank_load
+        # 再沿 logical expert 维累加为 [sample, rank]。
         expert_rank_load = self._estimate_one_layer_expert_rank_load(
             source_node_load,
             expert_locations,
@@ -358,7 +358,7 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
         redundant_placement: torch.Tensor,
         local_rank_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """估算冗余布局对应的 ``[sample, layer, rank]`` 计算负载。"""
+        """估算冗余布局对应的 ``[sample, layer, rank]`` 负载。"""
         num_logical_experts = source_node_load.shape[-1]
         locations = self._expert_locations(
             redundant_placement,
@@ -424,7 +424,7 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
         locations: torch.Tensor,
         local_rank_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """计算对齐后的 ``[sample, layer, expert, rank]`` 负载贡献。"""
+        """计算 ``[sample, layer, expert, rank]`` 对齐负载。"""
         route_fraction = self._route_fraction(
             locations,
             local_rank_mask=local_rank_mask,
@@ -442,7 +442,7 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
         locations: torch.Tensor,
         local_rank_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """计算单层 ``[sample, expert, rank]`` 的对齐后负载贡献。"""
+        """计算单层 ``[sample, expert, rank]`` 的对齐负载。"""
         route_fraction = self._route_fraction(
             locations,
             local_rank_mask=local_rank_mask,

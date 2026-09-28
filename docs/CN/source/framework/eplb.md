@@ -49,19 +49,22 @@ python -m lightllm.server.api_server \
 | --- | --- | --- |
 | `--enable_ep_moe` | 关闭 | 启用专家并行；EPLB 的前置条件 |
 | `--eplb_num_redundant_experts_per_rank` | `0` | 每个 rank 的额外物理专家槽位数；大于 0 时启用 EPLB |
-| `--eplb_run_mode` | `prefill` | 选择 EPLB 面向 prefill 或 decode 负载进行优化 |
-| `--eplb_plan_mode` | `topology_aware` | 选择动态布局规划算法；支持 `global_balance` 和 `topology_aware` |
+| `--eplb_run_mode` | `prefill` | 选择采集 prefill 负载或 decode 共现统计 |
+| `--eplb_plan_mode` | `topology_aware` | 选择 prefill 动态布局规划算法；支持 `global_balance` 和 `topology_aware` |
 | `--eplb_rebalance_count` | `1` | 最多完成的动态重排次数；`-1` 表示不限次数，`0` 表示不动态重排 |
 | `--eplb_config_path` | `None` | 可选的布局加载与回写路径 |
 
 完整命令行说明见 {doc}`../tutorial/api_server_args`。
 
-`eplb_run_mode` 和 `eplb_plan_mode` 分别回答“优化哪类负载”和“使用哪种布局算法”，两者相互独立。
-在 PD 分离部署中，prefill 和 decode 进程各自拥有独立的 EPLB manager，可以分别设置运行模式和规划算法。
+`eplb_run_mode` 决定采集哪一类路由统计。`eplb_plan_mode` 当前只在 prefill 模式生效；
+`global_balance` 和 `topology_aware` 都是 prefill 专用算法，不会消费 decode 共现矩阵。
+在 PD 分离部署中，prefill 和 decode 进程各自拥有独立的 EPLB manager。
 同一个 EP 通信组内的所有 rank 必须使用相同配置。非 PD 部署只有一个 manager，由 `eplb_run_mode`
-决定该 manager 面向 prefill 还是 decode 负载进行优化。两种模式后续可以使用各自适合的统计数据结构。
-当 `eplb_run_mode=decode` 时，现有的 prefill 路由统计算子会在编译期关闭，不更新
-`prefill_route_counter`；decode 专用统计结构由后续实现单独接入。
+决定该 manager 采集 prefill 负载还是 decode 共现统计。
+当 `eplb_run_mode=decode` 时，prefill 环形采样路径会在编译期关闭，decode 路径改为更新
+logical expert 共现矩阵的上三角；反之，`prefill` 模式不会给高频 decode 路径增加统计原子操作。
+decode 共现统计、全局汇集和指标上报链路已经实现。planner factory 会校验 plan mode 与 run mode
+是否匹配；当前两个 planner 都属于 prefill，因此需要先注册 decode 专用 planner，才能启动完整的 decode EPLB。
 
 ## 3. 总体架构
 
@@ -71,7 +74,8 @@ python -m lightllm.server.api_server \
   │ logical top-k IDs
   v
 EPLB 路由 kernel
-  ├── 把本次 prefill 的 logical expert 负载写入环形采样行
+  ├── prefill：把 logical expert 负载写入环形采样行
+  ├── decode ：把同一 token 的无序 expert pair 写入共现矩阵上三角
   ├── 查询 logical_to_physical_map
   └── 为每个 token 选择 physical expert ID
           │
@@ -80,9 +84,9 @@ EPLB 路由 kernel
 
 周期性控制面：
 
-prefill_route_counter（最近 24 次 prefill 采样）
+prefill_route_counter（24 次 prefill 采样）或 decode_route_counter（E × E 上三角共现矩阵）
   -> 全局负载汇总
-  -> placement planner
+  -> 对应 run mode 的 placement planner
   -> target placement
   -> transfer planner
   -> 后台权重传输
@@ -144,9 +148,12 @@ rank 3: [6, 7, 0, 1]
 
 - `local_logics_expert_ids_list`：本 rank 每个物理槽对应的逻辑专家；
 - `logical_to_physical_map`：logical ID 到可用 physical IDs 的设备路由表；
-- `prefill_route_counter`：shape 为 `[24, E]` 的 `int64` GPU 环形采样缓冲区；
-- `prefill_route_sample_index`：shape 为 `[2]` 的 `int64` GPU 状态，分别保存 sample index 和核内同步计数；
+- prefill 模式分配 `prefill_route_counter`：shape 为 `[24, E]` 的 `int64` GPU 环形采样缓冲区；
+- prefill 模式分配 `prefill_route_sample_index`：shape 为 `[2]` 的 `int64` GPU 状态，分别保存 sample index 和核内同步计数；
+- decode 模式分配 `decode_route_counter`：shape 为 `[E, E]` 的 `int64` GPU logical expert 共现计数矩阵，只写包含主对角线的上三角；
 - `num_redundant_experts_per_rank`：本 rank 的额外槽位数。
+
+prefill 和 decode 统计缓冲区互斥分配：未启用模式对应的属性显式为 `None`，不会同时占用两套显存。
 
 目前启用 EP MoE 时使用 `FuseMoeDeepGEMM` 实现。EPLB manager 只收集启用了 EP 的 `layer.experts`，并保留模型中的层顺序。
 
@@ -206,7 +213,9 @@ DeepGEMM 的 decode 路径使用 `current_gpu_first`。prefill 路径与 planner
 
 ### 5.5 prefill 环形采样
 
-负载采样只在调用方明确传入 `is_prefill=True` 时启用。decode 仍然执行 logical-to-physical 映射，但不会更新采样缓冲区，也不会推进 sample index。这样可以只使用吞吐量较大、统计稳定性更好的 prefill 路由结果，同时避免给高频 decode 路径增加原子操作。
+只有 `eplb_run_mode=prefill` 且调用方明确传入 `is_prefill=True` 时，才启用
+prefill 负载采样。decode 仍然执行 logical-to-physical 映射，但不会更新该缓冲区，也不会推进
+sample index。
 
 每层使用一个 `[24, E]` 的 `prefill_route_counter`。其中每一行表示一次 prefill 路由 kernel 调用的 logical expert 直方图，24 表示最多保留最近 24 次采样，而不是 24 个 token 或 24 个 manager step。一次 manager step 内如果发生多次 prefill dispatch，它们会分别占用不同的采样行；第 25 次采样开始按环形方式覆盖最旧的数据：
 
@@ -224,7 +233,34 @@ prefill_route_counter
 
 计数始终使用 logical expert ID，而不是最终选中的 physical expert ID。同一逻辑专家即使拥有多个物理副本，规划器看到的仍然是一份完整需求量，不会因为副本分发而被拆散。
 
-### 5.6 无额外清零 kernel 的采样事务
+### 5.6 decode 上三角专家共现矩阵
+
+只有 `eplb_run_mode=decode` 且当前调用为 decode 时，才更新每层的 `[E, E]`
+`decode_route_counter`。设一个 token 的 top-k logical expert 集合为 `S`，kernel 只为满足
+`i <= j` 的无序 expert 对执行：
+
+```text
+decode_route_counter[i, j] += 1
+```
+
+使用 expert ID 的大小关系决定存储方向，而不是依赖 top-k 槽位顺序，因此同一个非对角 pair
+始终落在 `[min(i, j), max(i, j)]`，只记录一次。`<=` 明确包含主对角线：当 `i == j` 时，
+该位置记录 expert `i` 被路由选中的精确次数，不会因为上三角过滤而遗漏。top-k ID 唯一时，
+每个 token 总共贡献 `top_k × (top_k + 1) / 2` 次计数。
+
+实现以展平后的每个 top-k 元素作为矩阵行更新者，并在 Triton 静态循环中读取同一 token 的
+其他 top-k 元素。所有位置使用原子加，不需要 prefill 环形行清零所需的 program 间同步，
+也不会增加额外 kernel launch。manager 评估时完整汇集各 rank 的上三角矩阵；样本量判断和
+负载指标使用主对角线。该统计不会传给 prefill 专用的 `global_balance` 或 `topology_aware`。
+如果后续 decode planner 需要对称矩阵，可以在 CPU 规划路径中恢复：
+
+```text
+full = upper + upper.T - diag(diagonal(upper))
+```
+
+减去一次主对角线是为了避免把 expert 自身负载重复两次。
+
+### 5.7 无额外清零 kernel 的 prefill 采样事务
 
 环形行在复用前必须清零，否则新旧两次采样会叠加。为避免每次 prefill 额外发射一个清零 kernel，清零、路由计数和 sample index 提交都融合在 `_eplb_repair_topk_ids_kernel` 内；其中 `_record_prefill_route_sample` 是 Triton 子 JIT 函数，不会形成独立的 kernel launch。
 
@@ -260,13 +296,20 @@ sync=0
 
 ready 发布使用 `release`、等待方使用 `acquire`，最后完成信号使用 `acq_rel`，从而约束目标行清零和后续原子计数的可见顺序。所有调用还必须在同一 CUDA stream 上串行复用同一组 counter 和同步状态；当前 MoE forward 与采样都位于 overlap stream，满足这一约束。
 
-### 5.7 manager 聚合与重置
+### 5.8 manager 聚合与重置
 
-manager 在安全推理边界一次性堆叠各层 `[24, E]` 环形缓冲区，并完整复制为 `[layer, sample, logical_expert]` CPU 快照。rank 0 先沿 sample 维聚合本地负载并判断样本量，再向所有 rank 广播是否继续规划；样本不足时直接返回采集状态，不发起大块通信。样本充足时，后台任务使用独立的 Gloo 通信组执行 all-gather，得到 `[rank, layer, sample, logical_expert]`，并把这个四维 Tensor 直接交给 planner。独立通信组使长时间运行的后台 all-gather 不会打乱主线程控制 collective 的调用顺序。
+manager 在安全推理边界按运行模式堆叠各层统计，并复制为 CPU 快照：prefill 是
+`[layer, sample, expert_num]`，decode 是 `[layer, expert_num, expert_num]`。rank 0 使用
+prefill sample 总量或 decode 主对角线判断样本量；样本充足时，后台任务使用独立 Gloo
+通信组执行 all-gather，分别得到 `[rank, layer, sample, expert_num]` 或
+`[rank, layer, expert_num, expert_num]`，再把原始四维统计交给当前 run mode 对应的 planner。
 
-如果样本量不足或规划结果未改变布局，不主动清空缓冲区；后续 prefill 会继续写入，并在容量用满后滚动覆盖最旧行。
+样本量不足时不主动清空缓冲区；后续 prefill 滚动覆盖最旧行，decode 继续累积共现次数。
+规划结果未改变布局时保留当前统计，成功切换布局后开始新的统计窗口。
 
-初始化、成功切换到新布局，以及达到重排次数上限后开始下一轮指标窗口时，manager 会同时清零 `prefill_route_counter` 和 `prefill_route_sample_index`。清零提交到 overlap stream，自然排在此前 forward 之后、后续 forward 之前，不需要额外的全设备同步。
+初始化、成功切换到新布局，以及开始下一轮指标窗口时，manager 只清零当前 run mode 已分配的
+统计缓冲区。清零提交到 overlap stream，自然排在此前 forward 之后、后续 forward 之前，不需要
+额外的全设备同步。
 
 ## 6. EPLB 状态机
 
@@ -274,12 +317,12 @@ manager 在安全推理边界一次性堆叠各层 `[24, E]` 环形缓冲区，�
 
 ```text
 [COLLECTING]
-  将 prefill logical route 写入 24 行环形采样，等待评估周期
+  按 run mode 写入 prefill 环形样本或 decode 上三角共现矩阵，等待评估周期
         |
         v
 [EVALUATING]
   CPU 原始样本快照、指标上报；rank 0 判断样本量并广播结果
-  样本充足且次数允许时启动后台 load all-gather
+  样本充足时启动后台 load all-gather
         |
         v
 [WAIT_LOAD_GATHER_FINISHED]
@@ -362,35 +405,38 @@ DP 随机分流下每个 rank 的路由统计都是对全局路由分布的无�
 ### 7.2 设计选择：异步汇集所有 rank 的原始样本
 
 各 rank 的负载分布虽然高度相似，但单 rank 仍带有可观测的采样噪声。当前实现汇集所有
-rank 的 `[layer, sample, logical_expert]` 原始快照，并在通信完成后统一求和：
+rank 的原始快照：prefill 为 `[layer, sample, expert_num]`，decode 为
+`[layer, expert_num, expert_num]`：
 
-1. **降低采样噪声**：规划器使用整个 world 的累计流量，热点排序和副本预算不依赖某个
-   rank 的随机流量分片；
-2. **保留分析信息**：通信结果在聚合前保留 rank 和 sample 维，后续可以直接增加跨 rank
+1. **降低采样噪声**：planner 使用整个 world 的统计，不依赖单个 rank 的随机流量分片；
+2. **保留分析信息**：通信结果在聚合前保留 rank 和原始统计维度，后续可以直接增加跨 rank
    差异或采样稳定性指标，不需要重新设计采集路径；
 3. **隔离关键路径**：all-gather 在后台线程和专用 Gloo 通信组中运行，主推理线程只在
    `WAIT_LOAD_GATHER_FINISHED` 状态轮询完成标记，不会被大块负载通信直接阻塞。
 
-planner 接口直接接收 `[rank, layer, sample, logical_expert]` CPU Tensor。Global Balance 实现进入
-算法主体前沿 rank 和 sample 维求和为 `[layer, logical_expert]`，再转换成嵌套 list；
-Topology-Aware planner 保留 sample 维，并且只聚合同一源节点内的 rank，以匹配逐批次对齐
-和节点本地优先的执行模型。
+planner 直接接收当前 run mode 的原始四维 CPU Tensor。Global Balance
+进入算法主体前沿 rank 和 sample 维求和为 `[layer, logical_expert]`；Topology-Aware 保留
+sample 维并只聚合同一源节点内的 rank。后续 decode planner 将直接解释
+`[rank, layer, expert_num, expert_num]` 上三角共现统计，manager 状态机无需增加 decode 分支。
 
 ## 8. 布局规划
 
 ### 8.1 规划器接口与选择
 
-所有布局算法实现统一的 `EPLBPlanner.plan(logical_expert_load_samples, current_placement)` 接口，返回：
+所有布局算法实现统一的 `EPLBPlanner.plan(route_statistics, current_placement)` 接口，返回：
 
 ```text
-logical_expert_load_samples: CPU Tensor[rank, layer, sample, logical_expert]
+route_statistics: CPU Tensor
+  prefill: [rank, layer, sample, expert_num]
+  decode:  [rank, layer, expert_num, expert_num]
 [layer][rank][local physical slot] -> logical expert ID
 ```
 
-`create_eplb_planner` 将 `--eplb_plan_mode` 转换成具体实例，使状态机不依赖某个算法类。目前支持：
+`create_eplb_planner` 将 `--eplb_plan_mode` 转换成具体实例，使状态机不依赖某个算法类。
+当前两个实现都只用于 prefill：
 
 - `global_balance`：全局均衡的样板实现，规划完整物理布局，prefill 在全局全部副本间分发 token；
-- `topology_aware`：固定规范主专家，只规划冗余槽位，prefill 优先使用源节点内的副本。
+- `topology_aware`：固定规范主专家，只规划冗余槽位，匹配 prefill 的节点优先分发。
 
 规划只在 rank 0 的后台线程执行。完成后，目标布局通过控制通信组广播给所有 rank。相同输入必须产生确定结果，便于所有 rank 生成一致的传输计划。
 
@@ -408,14 +454,13 @@ logical_expert_load_samples: CPU Tensor[rank, layer, sample, logical_expert]
 
 ### 8.3 Topology-Aware 规划算法
 
-Topology-Aware 模式以源节点拓扑和关键 rank 计算量为规划目标。每个 rank 的前
+Topology-Aware 模式以 prefill 源节点流量、副本局部性和关键 rank 计算量为规划目标。每个 rank 的前
 `num_logical_experts / world_size` 个主专家槽保持不变，算法只填写末尾的冗余槽位，因此
 单次规划最多改变 `layer × rank × redundant_slots_per_rank` 个槽位。主要过程如下：
 
-1. 将输入从 `[rank, layer, sample, expert]` 聚合为
-   `[sample, layer, source_node, expert]`，保留每次 prefill 样本和流量来源节点；
-2. 对每个候选布局模拟节点本地优先分发：源节点存在副本时只在节点内副本间均分，否则
-   回退到全局副本；每个 sample 的物理专家负载分别按 128 token 向上对齐；
+1. 将 prefill 输入聚合为 `[sample, layer, source_node, expert]`，保留样本和流量来源节点；
+2. 模拟节点本地优先分发：源节点存在目标专家副本时只使用节点内副本，否则回退到全局副本；
+   每个 sample 的物理专家负载分别按 128 token 对齐；
 3. 各层独立规划：每轮选择一个仍有空槽的低负载 rank，再同时比较该层的所有合法
    expert，选择能让各 sample 的关键 rank 计算量之和最小的副本；
 4. 候选布局必须让每个被替换层的关键负载下降，并且模型级预计收益至少达到 5%，否则
@@ -467,7 +512,8 @@ Topology-Aware 模式以源节点拓扑和关键 rank 计算量为规划目标�
 
 权重和路由 metadata 在同一条 stream 上更新，后续 forward 只能看到完整提交后的状态，不会观察到“新路由指向旧权重”或“旧路由指向新权重”的中间状态。
 
-全部批次完成后，manager 发布目标布局、清空 prefill 路由采样及设备端 sample index、增加完成次数，并回到 `COLLECTING`。
+全部批次完成后，manager 发布目标布局、清空 prefill/decode 路由统计、增加完成次数，并回到
+`COLLECTING`。
 
 ## 10. 布局持久化
 
@@ -505,14 +551,19 @@ manager 先对每个有效层计算 `max(expert_load) / mean(expert_load)`，过
 
 这三个值都以 `1` 表示完全均衡。例如 P50 为 `1.8`，表示中位层最热 logical expert 的 token 数是该层专家平均值的 1.8 倍。
 
-当样本量达到规划阈值且 planner 产生目标布局后，rank 0 固定选取原始四维快照的第 0 个 sample 行，并仅沿 rank 维汇总为 `[layer, logical_expert]` 负载后上报：
+当 prefill 样本量达到规划阈值且 planner 产生目标布局后，rank 0 固定选取原始快照的第 0 个
+sample 行并沿 rank 汇总，构造 `[layer, logical_expert]` 指标负载并上报：
 
 ```text
 lightllm_prefill_ep_compute_critical_overhead_ratio_before_rebalance
 lightllm_prefill_ep_compute_critical_overhead_ratio_after_rebalance
 ```
 
-这两个指标采用关键路径计算开销定义，但不维护独立的 compute counter、后台 monitor 线程和额外通信组。manager 假设同一 logical expert 的流量由 hash 均匀分配给全部 physical 副本，并按 128 token 对每个副本的估算负载向上对齐。`before_rebalance` 使用当前布局，`after_rebalance` 使用 planner 给出的目标布局；二者的输入负载完全相同，可以直接衡量预计的重排收益。不会沿 sample 维累加，因为不同 sample 行来自不同 prefill 批次，累加后并不对应任何一次真实计算。如果 planner 判断布局无需改变，两个值应相同。
+这些指标采用关键路径计算开销定义，但不维护独立的 compute counter、后台 monitor 线程和额外通信组。
+manager 假设同一 logical expert 的流量由 hash 均匀分配给全部 physical 副本，并按 128 token 对
+每个副本的估算负载向上对齐。`before_rebalance` 使用当前布局，`after_rebalance` 使用 planner
+给出的目标布局；二者输入负载相同。不沿 sample 维累加，因为不同 sample 行来自不同
+prefill 批次。decode 当前没有专用排布算法，因此不发布“重排前/重排后”的预计计算开销指标。
 
 每层先计算最繁忙 rank 相对平均 rank 的额外负载，最后跨层汇总：
 
@@ -680,3 +731,37 @@ group，再只在这些 group 内选择专家；这种约束原本提供了利�
 因此 `global_balance` 保留为教学、测试和对照用的样板实现，不应作为 grouped top-k 部署的
 生产方案。此类场景应使用能够显式保留 group/拓扑局部性并把通信代价纳入目标的 planner，
 当前默认使用的 `topology_aware` 比全局均衡样板更接近这一方向。
+
+## 附录 C：Decode 共现矩阵只记录上三角
+
+一个 token 的 top-k 集合为 `S` 时，完整有序共现矩阵会记录 `S × S`，但 `[i, j]` 与
+`[j, i]` 表示同一个无序 expert pair。Decode 排布只需要知道两个 expert 是否共同出现，
+不需要保存两份完全对称的信息，因此最终选择只记录包含主对角线的上三角：
+
+```text
+i <= j: decode_route_counter[i, j] += 1
+i >  j: 跳过，由 [j, i] 保存同一个 pair
+```
+
+存储方向由 expert ID 大小决定，不受 top-k 返回顺序影响。`i == j` 是必须保留的边界：它表示
+expert `i` 自身被路由选中的次数。kernel 使用 `<=` 作为 mask，因此自身项会进入原子加；在
+top-k ID 唯一的正常条件下，每个 expert 在一个 token 中恰好对应一个自身槽位，不会漏记或
+重复。非对角 pair 则只由较小 expert ID 对应的 lane 写入一次。
+
+该方案完整保留所有无序共现关系和每个 expert 的精确负载，同时把 top-k=8 时每个 token 的
+原子操作数从 64 降为 36，减少 43.75%。使用 H200、256 个 logical expert、top-k=8 的融合
+路由 kernel 进行 A/B 测试，下表是 60 个 MoE 层相对关闭统计的累计净增时间：
+
+| 单步 token 数与分布 | 上三角记录 | 完整对称记录 |
+| ---: | ---: | ---: |
+| 512，均匀 | 0.138 ms | 约 0.183 ms |
+| 8192，均匀 | 0.228 ms | 约 0.356 ms |
+| 8192，热点 | 2.868 ms | 约 2.881 ms |
+
+均匀分布下，上三角方案明显减少原子工作量；所有 token 都命中同一组 expert 的极端热点场景
+主要受相同地址上的原子串行化限制，过滤一半矩阵写入只能带来很小改善。这里的 token 数是一次
+decode forward 中的活跃 token 数，通常对应活跃请求数，不是单条请求的上下文长度。
+
+当前仍使用 `[E, E]` tensor，并让下三角保持为零，优点是索引、对角线负载提取和后续 planner
+读取都很直接。若后续确认控制面通信量成为瓶颈，可以再把上三角打包为 `E(E+1)/2` 的连续
+存储；这属于数据布局优化，不改变本节的计数语义。
