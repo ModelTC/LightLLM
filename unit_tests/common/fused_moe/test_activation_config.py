@@ -87,7 +87,14 @@ def test_call_parameters_reach_expert_activation(monkeypatch, activation):
     if kwargs:
         default_output = weight.experts(x.clone(), router, 2, True, False, 0, 0)
     actual = weight.experts(x.clone(), router, 2, True, False, 0, 0, **kwargs)
+    actual_with_topk = weight.experts_with_topk(
+        x.clone(),
+        topk_weights=probs,
+        topk_ids=top.indices,
+        **kwargs,
+    )
     torch.testing.assert_close(actual, expected.bfloat16(), atol=0.125, rtol=0.01)
+    torch.testing.assert_close(actual_with_topk, expected.bfloat16(), atol=0.125, rtol=0.01)
     if kwargs:
         # A clamped call must not change subsequent calls on the same weight.
         actual_default = weight.experts(x.clone(), router, 2, True, False, 0, 0)

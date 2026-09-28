@@ -221,7 +221,7 @@ def fused_experts(
     clamp_up_add_one: bool = True,
     alloc_tensor_func: Callable = torch.empty,
 ):
-    assert alpha is None or limit is not None
+    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
         if limit is not None:

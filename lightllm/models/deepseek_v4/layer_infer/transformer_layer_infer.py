@@ -203,7 +203,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             recv_weights0,
             hidden_dtype=x0.dtype,
             microbatch_index=infer_state.microbatch_index,
-            clamp_limit=self.swiglu_limit,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
         )
 
         combine_event0 = ElasticBuffer.capture()
@@ -219,7 +221,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             recv_weights1,
             hidden_dtype=x1.dtype,
             microbatch_index=infer_state1.microbatch_index,
-            clamp_limit=self.swiglu_limit,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
         )
 
         combine_event1 = ElasticBuffer.capture()
@@ -294,7 +298,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             masked_m0,
             x0.dtype,
             expected_m,
-            clamp_limit=self.swiglu_limit,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
         )
 
         dispatch_hook1()
@@ -305,7 +311,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             masked_m1,
             x1.dtype,
             expected_m,
-            clamp_limit=self.swiglu_limit,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
         )
 
         combine_hook0()
@@ -540,7 +548,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             topk_ids=indices,
             is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
-            clamp_limit=float(self.swiglu_limit),
+            alpha=1.0,
+            limit=float(self.swiglu_limit),
+            clamp_up_add_one=False,
             alloc_tensor_func=self.alloc_tensor,
         )
 
@@ -548,7 +558,13 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
         shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(gate_up, shared, limit=self.swiglu_limit)
+        silu_and_mul_fwd(
+            gate_up,
+            shared,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+        )
         input = None
         gate_up = None
         out = layer_weight.down_proj.mm(shared)

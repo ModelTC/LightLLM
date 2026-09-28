@@ -26,7 +26,6 @@ def _silu_and_mul_post_quant_kernel(
     fp8_min,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
-    USE_LIMIT_ONLY: tl.constexpr = False,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
     alpha: tl.constexpr = None,
@@ -62,17 +61,13 @@ def _silu_and_mul_post_quant_kernel(
             gate = gate / (1 + tl.exp(-gate * alpha))
             if CLAMP_UP_ADD_ONE:
                 up += 1
+        elif USE_TANH_APPROXIMATE_GELU:
+            gate_cubed = gate * gate * gate
+            tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
+            tanh_val = 2.0 / (1.0 + tl.exp(-2.0 * tanh_arg)) - 1.0
+            gate = 0.5 * gate * (1.0 + tanh_val)
         else:
-            if USE_LIMIT_ONLY:
-                gate = tl.minimum(gate, limit)
-                up = tl.minimum(tl.maximum(up, -limit), limit)
-            if USE_TANH_APPROXIMATE_GELU:
-                gate_cubed = gate * gate * gate
-                tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
-                tanh_val = 2.0 / (1.0 + tl.exp(-2.0 * tanh_arg)) - 1.0
-                gate = 0.5 * gate * (1.0 + tanh_val)
-            else:
-                gate = gate / (1 + tl.exp(-gate))
+            gate = gate / (1 + tl.exp(-gate))
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
         if USE_LIMIT_AND_ALPHA:
@@ -110,7 +105,7 @@ def silu_and_mul_masked_post_quant_fwd(
     masked_m shape [expert_num],
     """
 
-    assert alpha is None or limit is not None
+    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
     assert input.is_contiguous()
     assert output.dtype == torch.float8_e4m3fn
     assert output.is_contiguous()
@@ -157,9 +152,8 @@ def silu_and_mul_masked_post_quant_fwd(
         fp8_min,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
-        USE_LIMIT_ONLY=limit is not None and alpha is None,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
-        USE_LIMIT_AND_ALPHA=limit is not None and alpha is not None,
+        USE_LIMIT_AND_ALPHA=limit is not None,
         alpha=alpha,
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,

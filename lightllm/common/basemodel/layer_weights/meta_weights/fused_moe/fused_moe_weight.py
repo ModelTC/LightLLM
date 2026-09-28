@@ -171,7 +171,9 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_ids: torch.Tensor,
         is_prefill: Optional[bool] = None,
         infer_state=None,
-        clamp_limit: Optional[float] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
         alloc_tensor_func=torch.empty,
     ) -> torch.Tensor:
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
@@ -184,7 +186,9 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             is_prefill=is_prefill,
-            clamp_limit=clamp_limit,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
             alloc_tensor_func=alloc_tensor_func,
         )
 
@@ -263,7 +267,9 @@ class FusedMoeWeight(BaseWeightTpl):
         masked_m: torch.Tensor,
         dtype: torch.dtype,
         expected_m: int,
-        clamp_limit: Optional[float] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         assert self.enable_ep_moe, "masked_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.masked_group_gemm(
@@ -273,7 +279,9 @@ class FusedMoeWeight(BaseWeightTpl):
             masked_m=masked_m,
             dtype=dtype,
             expected_m=expected_m,
-            clamp_limit=clamp_limit,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
 
     def prefilled_group_gemm(
@@ -286,7 +294,9 @@ class FusedMoeWeight(BaseWeightTpl):
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
         microbatch_index: int = 0,
-        clamp_limit: Optional[float] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
@@ -300,7 +310,9 @@ class FusedMoeWeight(BaseWeightTpl):
             w2=self.w2,
             hidden_dtype=hidden_dtype,
             microbatch_index=microbatch_index,
-            clamp_limit=clamp_limit,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
 
     def low_latency_combine(
