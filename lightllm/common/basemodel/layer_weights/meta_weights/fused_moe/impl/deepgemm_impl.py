@@ -76,7 +76,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
-        clamp_limit: Optional[float] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
         alloc_tensor_func=torch.empty,
     ):
         output = fused_experts(
@@ -89,7 +91,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
-            clamp_limit=clamp_limit,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
             alloc_tensor_func=alloc_tensor_func,
         )
         return output
@@ -226,7 +230,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2_weight,
             w2_scale,
             expected_m=expected_m,
-            clamp_limit=clamp_limit,
+            limit=clamp_limit,
         )
 
     def prefilled_group_gemm(
@@ -261,7 +265,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 block_size_k=self.quant_method.block_size,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
-                clamp_limit=clamp_limit,
+                limit=clamp_limit,
             )
         else:
             gather_out = torch.empty(

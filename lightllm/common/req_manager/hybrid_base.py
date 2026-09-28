@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
@@ -39,11 +39,11 @@ class HybridAttentionReqManager(ReqManager, ABC):
     def init_hybrid_attention_state(self, req: "InferReq"):
         """无前缀缓存命中时，初始化已分配请求槽位的 GPU 运行态。"""
 
-    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq", checkpoint_len: int):
+    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq", checkpoint_len: Optional[int] = None):
         """将指定大页槽位的 CPU checkpoint 恢复到请求 GPU 运行态。"""
         self.restore_state(req, self.big_page_buffers, big_page_buffer_idx, checkpoint_len)
 
-    def restore_small_page_state(self, req: "InferReq", checkpoint_len: int):
+    def restore_small_page_state(self, req: "InferReq", checkpoint_len: Optional[int] = None):
         """将 req.shared_kv_node 对应的小页 checkpoint 恢复到请求 GPU 运行态。"""
         self.restore_state(req, self.small_page_buffers, req.shared_kv_node.small_page_buffer_idx, checkpoint_len)
 

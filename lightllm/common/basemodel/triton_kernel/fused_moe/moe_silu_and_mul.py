@@ -25,6 +25,7 @@ def _silu_and_mul_kernel_fast(
     layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
     USE_LIMIT_ONLY: tl.constexpr = False,
+    CLAMP_UP_ADD_ONE: tl.constexpr = True,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
@@ -71,11 +72,9 @@ def _silu_and_mul_kernel_fast(
             up = tl.minimum(tl.maximum(up, -limit), limit)
             gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
             gate = gate.to(input_ptr.dtype.element_ty)
-            tl.store(
-                output_ptr + out_offsets,
-                (up + 1) * gate,
-                mask=mask,
-            )
+            if CLAMP_UP_ADD_ONE:
+                up += 1
+            tl.store(output_ptr + out_offsets, up * gate, mask=mask)
         else:
             if USE_LIMIT_ONLY:
                 # clamped swiglu (DeepSeek-V4 swiglu_limit): clamp 后接标准 silu，
@@ -127,6 +126,7 @@ def silu_and_mul_fwd(
     limit=None,
     alpha=None,
     run_config=None,
+    clamp_up_add_one=True,
 ):
     assert input.stride(-1) == 1
     assert output.is_contiguous()
@@ -180,6 +180,7 @@ def silu_and_mul_fwd(
         layout=layout,
         USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
         USE_LIMIT_ONLY=USE_LIMIT_ONLY,
+        CLAMP_UP_ADD_ONE=clamp_up_add_one,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
     )
     return

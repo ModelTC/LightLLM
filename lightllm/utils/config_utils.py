@@ -98,7 +98,7 @@ def get_running_max_req_size_per_dp(args) -> int:
     local_dp_size = max(1, args.dp // args.nnodes)
     # Cache fetch and beam groups need the full capacity.
     requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
-    if local_dp_size > 1 and not requires_global_capacity:
+    if local_dp_size > 1 and not requires_global_capacity and is_hybrid_att_model(args.model_dir):
         return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
     return args.running_max_req_size
 
@@ -489,7 +489,7 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen2_5_VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
-        elif model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+        elif model_type in ["qwen3_vl", "qwen3_vl_moe", "glm5_next"]:
             # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
@@ -555,7 +555,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "glm5_next", "glm5_next_text"]:
             return True
         else:
             return False

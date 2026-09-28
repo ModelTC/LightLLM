@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
@@ -64,7 +64,11 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         return self.small_page_buffers
 
     def save_big_page_states(
-        self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int], checkpoint_lens: List[int]
+        self,
+        b_req_idx: torch.Tensor,
+        req_indexes: List[int],
+        buffer_indexes: List[int],
+        checkpoint_lens: Optional[List[int]] = None,
     ):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
@@ -82,7 +86,11 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         return
 
     def save_state(
-        self, req_idx: int, buffer_idx: int, state_cache_manager: LinearAttCacheManager, checkpoint_len: int
+        self,
+        req_idx: int,
+        buffer_idx: int,
+        state_cache_manager: LinearAttCacheManager,
+        checkpoint_len: Optional[int] = None,
     ):
         # checkpoint 只保存标准 conv 窗口和请求的基准 SSM 状态，不包含 MTP 扩展运行态。
         conv_cache_width = self.linear_config.get_conv_state_shape()[-1]
@@ -114,7 +122,11 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         )
 
     def restore_state(
-        self, req: "InferReq", state_cache_manager: LinearAttCacheManager, buffer_idx: int, checkpoint_len: int
+        self,
+        req: "InferReq",
+        state_cache_manager: LinearAttCacheManager,
+        buffer_idx: int,
+        checkpoint_len: Optional[int] = None,
     ):
         conv_state, ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         conv_dest = req.req_idx

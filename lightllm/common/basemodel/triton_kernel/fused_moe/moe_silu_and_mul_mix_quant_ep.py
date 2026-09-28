@@ -24,11 +24,14 @@ def _silu_and_mul_post_quant_kernel(
     size_n,
     fp8_max,
     fp8_min,
-    limit: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
     USE_LIMIT_ONLY: tl.constexpr = False,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
+    USE_LIMIT_AND_ALPHA: tl.constexpr = False,
+    alpha: tl.constexpr = None,
+    limit: tl.constexpr = None,
+    CLAMP_UP_ADD_ONE: tl.constexpr = True,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -53,18 +56,28 @@ def _silu_and_mul_post_quant_kernel(
     for token_index in tl.range(token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE):
         gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(tl.float32)
         up = tl.load(input_ptr_offs + token_index * stride_input_1 + size_n, mask=offs_in_d < size_n, other=0.0)
-        if USE_LIMIT_ONLY:
+        if USE_LIMIT_AND_ALPHA:
             gate = tl.minimum(gate, limit)
             up = tl.minimum(tl.maximum(up, -limit), limit)
-        if USE_TANH_APPROXIMATE_GELU:
-            gate_cubed = gate * gate * gate
-            tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
-            tanh_val = 2.0 / (1.0 + tl.exp(-2.0 * tanh_arg)) - 1.0
-            gate = 0.5 * gate * (1.0 + tanh_val)
+            gate = gate / (1 + tl.exp(-gate * alpha))
+            if CLAMP_UP_ADD_ONE:
+                up += 1
         else:
-            gate = gate / (1 + tl.exp(-gate))
+            if USE_LIMIT_ONLY:
+                gate = tl.minimum(gate, limit)
+                up = tl.minimum(tl.maximum(up, -limit), limit)
+            if USE_TANH_APPROXIMATE_GELU:
+                gate_cubed = gate * gate * gate
+                tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
+                tanh_val = 2.0 / (1.0 + tl.exp(-2.0 * tanh_arg)) - 1.0
+                gate = 0.5 * gate * (1.0 + tanh_val)
+            else:
+                gate = gate / (1 + tl.exp(-gate))
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
+        if USE_LIMIT_AND_ALPHA:
+            # Match the BF16/FP16 activation stored before prefill's FP8 quantization.
+            gate_up = gate_up.to(input_ptr.dtype.element_ty).to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
         output_s = _absmax / fp8_max
         output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(output_ptr.dtype.element_ty)
@@ -85,7 +98,9 @@ def silu_and_mul_masked_post_quant_fwd(
     output_scale: torch.Tensor,
     quant_group_size: int,
     masked_m: torch.Tensor,
+    alpha=None,
     limit=None,
+    clamp_up_add_one=True,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -95,6 +110,7 @@ def silu_and_mul_masked_post_quant_fwd(
     masked_m shape [expert_num],
     """
 
+    assert alpha is None or limit is not None
     assert input.is_contiguous()
     assert output.dtype == torch.float8_e4m3fn
     assert output.is_contiguous()
@@ -139,11 +155,14 @@ def silu_and_mul_masked_post_quant_fwd(
         size_n,
         fp8_max,
         fp8_min,
-        limit=limit,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
-        USE_LIMIT_ONLY=limit is not None,
+        USE_LIMIT_ONLY=limit is not None and alpha is None,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
+        USE_LIMIT_AND_ALPHA=limit is not None and alpha is not None,
+        alpha=alpha,
+        limit=limit,
+        CLAMP_UP_ADD_ONE=clamp_up_add_one,
         num_warps=num_warps,
     )
     return
