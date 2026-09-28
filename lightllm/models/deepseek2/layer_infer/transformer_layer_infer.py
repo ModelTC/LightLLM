@@ -234,6 +234,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
         )
 

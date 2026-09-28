@@ -187,8 +187,11 @@ class StartArgs:
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
     enable_ep_moe: bool = field(default=False)
-    ep_redundancy_expert_config_path: Optional[str] = field(default=None)
-    auto_update_redundancy_expert: bool = field(default=False)
+    eplb_num_redundant_experts_per_rank: int = field(default=0)
+    eplb_run_mode: str = field(default="prefill", metadata={"choices": ["prefill", "decode"]})
+    eplb_plan_mode: str = field(default="topology_aware", metadata={"choices": ["global_balance", "topology_aware"]})
+    eplb_rebalance_count: int = field(default=1)
+    eplb_config_path: Optional[str] = field(default=None)
     enable_fused_shared_experts: bool = field(default=False)
     mtp_mode: Optional[str] = field(
         default=None,

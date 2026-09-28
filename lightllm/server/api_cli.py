@@ -774,15 +774,44 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable ep moe for deepseekv3 model.""",
     )
     parser.add_argument(
-        "--ep_redundancy_expert_config_path",
-        type=str,
-        default=None,
-        help="""Path of the redundant expert config. It can be used for deepseekv3 model.""",
+        "--eplb_num_redundant_experts_per_rank",
+        type=int,
+        default=0,
+        help="""Number of redundant physical experts per EP rank for each MoE layer.
+            Set to 0 to disable EPLB.""",
     )
     parser.add_argument(
-        "--auto_update_redundancy_expert",
-        action="store_true",
-        help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
+        "--eplb_run_mode",
+        type=str,
+        choices=["prefill", "decode"],
+        default="prefill",
+        help="""Inference stage targeted by EPLB. This keeps prefill- and decode-specific load-balancing
+            policies and routing statistics distinguishable. The default is 'prefill'.""",
+    )
+    parser.add_argument(
+        "--eplb_plan_mode",
+        type=str,
+        choices=["global_balance", "topology_aware"],
+        default="topology_aware",
+        help="""EPLB placement planning algorithm used by this inference process.
+            'global_balance' is a reference implementation that may rearrange every physical expert slot;
+            'topology_aware' keeps canonical primary experts fixed and plans redundant slots with source-node-local
+            prefill dispatch. The default is 'topology_aware'. Prefill and decode processes may select their planner
+            independently in PD deployments.""",
+    )
+    parser.add_argument(
+        "--eplb_rebalance_count",
+        type=int,
+        default=1,
+        help="""Maximum number of completed EPLB rebalances. -1 means unlimited,
+            0 disables dynamic rebalancing, and the default is 1.""",
+    )
+    parser.add_argument(
+        "--eplb_config_path",
+        type=str,
+        default=None,
+        help="""Path to an EPLB placement JSON file. A valid saved layout is loaded during weight
+            initialization, and the latest runtime layout is written back to the same path.""",
     )
     parser.add_argument(
         "--enable_fused_shared_experts",

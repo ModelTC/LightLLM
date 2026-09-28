@@ -80,6 +80,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    架构介绍 <framework/framework>
    token attention介绍 <framework/token_attention>
    峰值显存调度器介绍 <framework/router>
+   EPLB 专家负载均衡实现 <framework/eplb>
    
 .. Indices and tables
 .. ==================

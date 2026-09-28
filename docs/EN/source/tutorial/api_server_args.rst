@@ -724,6 +724,89 @@ Sampling and Generation Parameters
 
     Use tgi input and output format
 
+Expert Parallelism and EPLB Parameters
+--------------------------------------
+
+.. option:: --enable_ep_moe
+
+    Enable expert parallelism for supported MoE models. EPLB requires this option.
+
+.. option:: --eplb_num_redundant_experts_per_rank
+
+    Number of redundant physical experts allocated on each EP rank for every MoE layer. The default is ``0``,
+    which disables EPLB. A positive value enables EPLB and must be used together with ``--enable_ep_moe``;
+    negative values are rejected during startup.
+
+    Each rank allocates the configured number of additional expert weight rows. EPLB maps logical experts to
+    primary or redundant physical copies, records routing load, and can migrate redundant copies online to
+    improve expert load balance. Larger values provide more placement flexibility but consume more GPU memory
+    and increase expert migration traffic.
+
+    EPLB currently cannot be combined with ``--enable_prefill_cudagraph`` and is not supported on SM100 GPUs.
+    Use the same value on every rank and node in one deployment.
+
+.. option:: --eplb_plan_mode
+
+    Expert placement planning algorithm used for dynamic EPLB rebalances. The default is ``topology_aware``. The
+    supported values are:
+
+    * ``global_balance``: a reference implementation of global load balancing. It builds an approximately
+      balanced full placement from the global logical-expert load of each layer and attempts to reuse current
+      ranks and physical slots to reduce expert migration. Prefill tokens are distributed across all valid
+      replicas. This mode is not suitable for grouped top-k routing.
+    * ``topology_aware``: keeps the canonical primary slots fixed and plans only redundant slots. It retains
+      individual prefill samples and source-node load, estimates the critical path with node-local-first dispatch
+      and 128-token alignment, and uses a model-level gain threshold plus physical-slot reuse to avoid low-value
+      migrations. During prefill, replicas on the request's source node are preferred.
+
+    Every rank in one EP communication group must use the same value. Prefill and decode processes in a
+    PD-disaggregated deployment have independent EPLB managers and may select planners suited to their respective
+    traffic. A non-PD process uses one planner for all routing load collected by that process.
+
+.. option:: --eplb_run_mode
+
+    Inference stage whose load is optimized by EPLB. The default is ``prefill``. The supported values are:
+
+    * ``prefill`` marks the EPLB manager as targeting prefill load.
+    * ``decode`` marks the EPLB manager as targeting decode load.
+
+    This option is independent of ``--eplb_plan_mode``: the run mode selects the type of load to optimize,
+    while the plan mode selects the expert-placement algorithm. The mode is propagated to the EPLB manager so
+    phase-specific statistics structures can be connected independently as they evolve. Selecting ``decode``
+    disables the existing prefill routing counter.
+
+.. option:: --eplb_rebalance_count
+
+    Maximum number of successfully completed dynamic EPLB rebalances. The default is ``1``. A count is consumed
+    only after a new placement has transferred and committed its expert weights; insufficient samples and unchanged
+    placements do not consume the limit.
+
+    * ``-1`` keeps dynamic rebalancing enabled indefinitely.
+    * ``0`` disables dynamic rebalancing, leaving only the initial redundant placement active.
+    * A positive value stops planning after that many completed rebalances.
+
+.. option:: --eplb_config_path
+
+    Path to an EPLB placement JSON file. The default is ``None``. When specified, LightLLM validates and loads
+    the saved per-layer placement before expert weights are initialized, so the service starts directly with the
+    previous optimized layout. The same file is updated with the latest layout after every successfully completed
+    rebalance.
+
+    If the file does not exist, cannot be decoded, is missing a model layer, or does not match the current expert
+    topology, LightLLM logs a warning and uses the default initial placement for the affected layer. Rank 0 writes
+    a new layout to this path only after a dynamic rebalance completes successfully.
+
+    Example: enable EPLB with two redundant experts per EP rank::
+
+        python -m lightllm.server.api_server \
+            --model_dir /path/to/model \
+            --enable_ep_moe \
+            --eplb_num_redundant_experts_per_rank 2 \
+            --eplb_run_mode prefill \
+            --eplb_plan_mode topology_aware \
+            --eplb_rebalance_count 1 \
+            --eplb_config_path /path/to/eplb-placement.json
+
 MTP Multi-Prediction Parameters
 -------------------------------
 
@@ -750,17 +833,6 @@ MTP Multi-Prediction Parameters
     Currently this feature only supports DeepSeekV3/R1 models.
     Increasing this value allows more predictions, but ensure the model is compatible with the specified number of steps.
     Currently deepseekv3/r1 models only support 1 step
-
-DeepSeek Redundant Expert Parameters
-------------------------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    Path to redundant expert configuration. Can be used for deepseekv3 models.
-
-.. option:: --auto_update_redundancy_expert
-
-    Whether to update redundant experts for deepseekv3 models through online expert usage counters.
 
 Monitoring and Logging Parameters
 ---------------------------------
