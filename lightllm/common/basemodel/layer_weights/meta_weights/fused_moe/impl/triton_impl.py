@@ -65,6 +65,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         is_prefill: bool = False,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -82,6 +85,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             use_fp8_w8a8=use_fp8_w8a8,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
-            limit=clamp_limit,
+            alpha=alpha,
+            limit=clamp_limit if limit is None else limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
         return input_tensor

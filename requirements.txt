@@ -1,3 +1,6 @@
+# FlashInfer cubin wheels are published on the official FlashInfer index.
+--extra-index-url https://flashinfer.ai/whl
+
 anyio==3.7.1
 black==23.12.0
 boltons==23.0.0
@@ -38,7 +41,8 @@ packaging==24.2
 pip==23.0.1
 pluggy==1.2.0
 plumbum==1.8.2
-protobuf==4.22.3
+# CUTLASS DSL 4.6 requires protobuf >= 6.30.2, < 7.
+protobuf==6.33.5
 pycparser==2.21
 pydantic==2.10.3
 pyOpenSSL==23.2.0
@@ -80,9 +84,15 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 hypercorn==0.18.0
-flashinfer-python==0.6.12
-flashinfer-cubin==0.6.12
-sglang-kernel==0.4.2.post1
+# SM90 NoPE MLA (512 latent dimensions, zero RoPE dimensions).
+flashinfer-python[cu13]==0.6.18
+flashinfer-cubin==0.6.18
+cuda-tile==1.4.0
+nvidia-cutlass-dsl==4.6.2
+nvidia-cudnn-frontend==1.25.0
+nccl4py==0.3.1
+# FA3 only_qv supports NoPE MLA on Hopper; 0.4.5 keeps Torch 2.11 compatibility.
+sglang-kernel==0.4.5
 httpx==0.28.1
 librosa==0.11.0
 cuda_bindings==13.2.0

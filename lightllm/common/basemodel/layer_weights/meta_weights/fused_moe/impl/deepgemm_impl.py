@@ -339,6 +339,9 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         if is_prefill is False:
             w13 = self._primary_weight_pack(w13)
@@ -359,6 +362,9 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             previous_event=None,  # for overlap
             clamp_limit=clamp_limit,
             alloc_tensor_func=alloc_tensor_func,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
             ep_balance_counters=self.ep_balance_counters,
         )
         return output

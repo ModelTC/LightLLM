@@ -39,6 +39,9 @@ class FuseMoeBaseImpl(ABC):
         per_expert_scale: Optional[torch.Tensor] = None,
         # Qwen3.5 uses this gate to control fused shared expert aggregation weights.
         shared_expert_gate: Optional[torch.Tensor] = None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ) -> torch.Tensor:
         topk_weights, topk_ids, origin_topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -57,6 +60,9 @@ class FuseMoeBaseImpl(ABC):
         )
         if moe_capture_callback is not None:
             moe_capture_callback(origin_topk_ids)
+        activation = {}
+        if alpha is not None or limit is not None:
+            activation = dict(alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
         return self._fused_experts(
             input_tensor=input_tensor,
             w13=w13,
@@ -65,6 +71,7 @@ class FuseMoeBaseImpl(ABC):
             topk_ids=topk_ids,
             router_logits=router_logits,
             is_prefill=is_prefill,
+            **activation,
         )
 
     @abstractmethod
