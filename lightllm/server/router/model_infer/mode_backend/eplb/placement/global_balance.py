@@ -1,8 +1,8 @@
-"""使用 CPU Tensor 输入和纯 Python 核心逻辑实现贪心 EPLB 布局规划。
+"""使用 CPU Tensor 输入和纯 Python 核心逻辑实现全局均衡 EPLB 布局规划。
 
 入口保留 all-gather 产生的 rank、layer、sample 和 logical expert 维度；
-Greedy planner 先完成必要的聚合，再转换为嵌套 list。实际贪心分析仍只使用
-Python 数值和容器，更易于阅读、测试和替换算法。
+Global Balance planner 先完成必要的聚合，再转换为嵌套 list。实际规划仍只
+使用 Python 数值和容器，作为易于阅读、测试和替换的样板实现。
 """
 
 import heapq
@@ -15,7 +15,7 @@ from .planner import EPLBPlanner
 from .types import ExpertPlacement, ExpertReplicaGroup, LayerPlacement
 
 
-class GreedyEPLBPlanner(EPLBPlanner):
+class GlobalBalanceEPLBPlanner(EPLBPlanner):
     """使用两阶段启发式算法生成完整的专家布局。
 
     设计目标
@@ -153,7 +153,7 @@ class GreedyEPLBPlanner(EPLBPlanner):
         """聚合全局逐样本负载，逐层规划并组合成完整的多层布局。"""
         # logical_expert_load_samples: [rank, layer, sample, logical_expert]
         # CPU Tensor。
-        # Greedy 算法只需要整个采样窗口内每层各 logical expert 的累计负载，
+        # Global Balance 算法只需要整个采样窗口内每层各 logical expert 的累计负载，
         # 因此沿 rank 和 sample 维求和为 [layer, logical_expert]，再转成 list
         # 进入后续纯 Python 分析逻辑。
         assert logical_expert_load_samples.device.type == "cpu"

@@ -120,7 +120,8 @@ class EPLBManager:
         model: TpPartBaseModel,
         max_rebalance_count: int = 1,
         config_path: Optional[str] = None,
-        plan_mode: str = "greedy",
+        plan_mode: str = "topology_aware",
+        run_mode: str = "prefill",
     ) -> None:
         # SM100 FP4 Mega-MoE 会将在线专家权重转换为独立的 kernel 布局，并使用源 tensor 的 data_ptr
         # 作为 key 缓存这些转换后的副本。EPLB 通过原地 copy_ 替换专家行，只改变权重内容而不会改变
@@ -131,6 +132,7 @@ class EPLBManager:
         weights: List[FusedMoeWeight] = _find_fused_moe_weights(model)
         assert weights, "EPLB requires at least one EP MoE layer"
         assert max_rebalance_count >= -1
+        assert run_mode in ("prefill", "decode")
 
         # 模型与专家拓扑：初始化后保持不变。
         self._weights: List[FusedMoeWeight] = weights
@@ -145,6 +147,9 @@ class EPLBManager:
         first_impl = self._eplb_impls[0]
         self.num_logical_experts: int = first_impl.n_routed_experts
         self.num_redundant_experts_per_rank: int = first_impl.num_redundant_experts_per_rank
+        # run_mode 决定 EPLB 面向哪类推理负载进行优化。当前先把模式作为
+        # manager 的稳定输入；prefill 与 decode 的采样结构可在此基础上分别演进。
+        self.run_mode: str = run_mode
         self.plan_mode: str = plan_mode
         self.planner: EPLBPlanner = create_eplb_planner(
             self.plan_mode,
@@ -183,7 +188,7 @@ class EPLBManager:
         self.transfer_group = dist.new_group(list(range(self.world_size)), backend="gloo")
 
         # 每层布局都保存完整的本地专家列表，索引为
-        # [layer][local_expert]。greedy 可以重新分配全部物理槽；topology_aware
+        # [layer][local_expert]。global_balance 可以重新分配全部物理槽；topology_aware
         # 固定规范主专家前缀，只重新分配末尾的冗余槽。
         local_expert_ids_by_layer = [list(impl.local_logics_expert_ids_list) for impl in self._eplb_impls]
 
@@ -212,7 +217,7 @@ class EPLBManager:
                 f"num_redundant_experts_per_rank={self.num_redundant_experts_per_rank} "
                 f"step_interval={self.step_interval} max_rebalance_count={self.max_rebalance_count} "
                 f"transfer_layer_parallelism={self.transfer_layer_parallelism} "
-                f"plan_mode={self.plan_mode} planner={type(self.planner).__name__}"
+                f"run_mode={self.run_mode} plan_mode={self.plan_mode} planner={type(self.planner).__name__}"
             )
 
     def step(self) -> None:

@@ -5,7 +5,7 @@ from .planner import EPLBPlanner
 from .initial import build_initial_local_expert_ids
 from .routing import build_logical_to_physical_map
 from .topology_aware import TopologyAwareEPLBPlanner
-from .greedy import GreedyEPLBPlanner
+from .global_balance import GlobalBalanceEPLBPlanner
 from .factory import create_eplb_planner
 from .config import load_layer_placement, save_placement_config
 
@@ -13,7 +13,7 @@ __all__ = [
     "EPLBPlanner",
     "TopologyAwareEPLBPlanner",
     "ExpertPlacement",
-    "GreedyEPLBPlanner",
+    "GlobalBalanceEPLBPlanner",
     "LayerPlacement",
     "LogicalToPhysicalMap",
     "build_initial_local_expert_ids",

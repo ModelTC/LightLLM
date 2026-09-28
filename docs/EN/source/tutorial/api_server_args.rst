@@ -744,12 +744,13 @@ Expert Parallelism and EPLB Parameters
 
 .. option:: --eplb_plan_mode
 
-    Expert placement planning algorithm used for dynamic EPLB rebalances. The default is ``greedy``. The
+    Expert placement planning algorithm used for dynamic EPLB rebalances. The default is ``topology_aware``. The
     supported values are:
 
-    * ``greedy``: builds an approximately balanced full placement from the global logical-expert load of each
-      layer and attempts to reuse the current ranks and physical slots to reduce expert migration. Prefill tokens
-      are distributed across all valid replicas.
+    * ``global_balance``: a reference implementation of global load balancing. It builds an approximately
+      balanced full placement from the global logical-expert load of each layer and attempts to reuse current
+      ranks and physical slots to reduce expert migration. Prefill tokens are distributed across all valid
+      replicas. This mode is not suitable for grouped top-k routing.
     * ``topology_aware``: keeps the canonical primary slots fixed and plans only redundant slots. It retains
       individual prefill samples and source-node load, estimates the critical path with node-local-first dispatch
       and 128-token alignment, and uses a model-level gain threshold plus physical-slot reuse to avoid low-value
@@ -758,6 +759,18 @@ Expert Parallelism and EPLB Parameters
     Every rank in one EP communication group must use the same value. Prefill and decode processes in a
     PD-disaggregated deployment have independent EPLB managers and may select planners suited to their respective
     traffic. A non-PD process uses one planner for all routing load collected by that process.
+
+.. option:: --eplb_run_mode
+
+    Inference stage whose load is optimized by EPLB. The default is ``prefill``. The supported values are:
+
+    * ``prefill`` marks the EPLB manager as targeting prefill load.
+    * ``decode`` marks the EPLB manager as targeting decode load.
+
+    This option is independent of ``--eplb_plan_mode``: the run mode selects the type of load to optimize,
+    while the plan mode selects the expert-placement algorithm. The mode is propagated to the EPLB manager so
+    phase-specific statistics structures can be connected independently as they evolve. Selecting ``decode``
+    disables the existing prefill routing counter.
 
 .. option:: --eplb_rebalance_count
 
@@ -786,7 +799,8 @@ Expert Parallelism and EPLB Parameters
             --model_dir /path/to/model \
             --enable_ep_moe \
             --eplb_num_redundant_experts_per_rank 2 \
-            --eplb_plan_mode greedy \
+            --eplb_run_mode prefill \
+            --eplb_plan_mode topology_aware \
             --eplb_rebalance_count 1 \
             --eplb_config_path /path/to/eplb-placement.json
 

@@ -28,7 +28,7 @@ def get_eplb_dispatch_mode(is_prefill: bool) -> str:
     """根据推理阶段和布局算法返回 EPLB 副本分发模式。
 
     Decode 当前固定优先使用本卡副本。Prefill 的分发策略必须与 planner 的
-    负载模型一致：``topology_aware`` 优先使用当前节点的副本，``greedy``
+    负载模型一致：``topology_aware`` 优先使用当前节点的副本，``global_balance``
     直接在全部有效副本之间分发。
     """
     assert is_prefill is not None
@@ -37,7 +37,7 @@ def get_eplb_dispatch_mode(is_prefill: bool) -> str:
 
     plan_mode = get_env_start_args().eplb_plan_mode
     assert plan_mode in (
-        "greedy",
+        "global_balance",
         "topology_aware",
     ), f"unsupported EPLB plan mode: {plan_mode}"
 
@@ -45,6 +45,12 @@ def get_eplb_dispatch_mode(is_prefill: bool) -> str:
         return "current_node_first"
     else:
         return "global_first"
+
+
+def should_record_prefill_route(is_prefill: bool) -> bool:
+    """仅在 prefill 定制模式的 prefill 请求中记录路由负载。"""
+    run_mode = get_env_start_args().eplb_run_mode
+    return run_mode == "prefill" and is_prefill
 
 
 def extract_eplb_expert_tensors(weight: EPLBExpertWeight) -> List[NamedTensor]:

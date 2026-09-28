@@ -726,10 +726,11 @@ PD 分离模式参数
 
 .. option:: --eplb_plan_mode
 
-    EPLB 动态重排使用的专家布局规划算法，默认值为 ``greedy``。当前支持：
+    EPLB 动态重排使用的专家布局规划算法，默认值为 ``topology_aware``。当前支持：
 
-    * ``greedy``：根据各层逻辑专家的全局路由负载生成近似均衡的完整布局，
-      并尽量复用当前 rank 和物理槽位以减少专家迁移；prefill token 在全部有效副本间分发。
+    * ``global_balance``：全局均衡的样板实现。它根据各层逻辑专家的全局路由负载生成
+      近似均衡的完整布局，并尽量复用当前 rank 和物理槽位以减少专家迁移；prefill token
+      在全部有效副本间分发。该模式不适合 grouped top-k 场景。
     * ``topology_aware``：固定每个 rank 的主专家槽，只规划冗余槽位。它保留逐次 prefill
       样本和源节点负载，按节点本地优先分发及 128-token 对齐估算关键路径，并通过
       模型级收益门槛和物理槽位复用减少低收益迁移。prefill 运行时会优先选择源节点内的副本。
@@ -737,6 +738,18 @@ PD 分离模式参数
     同一个 EP 通信组内的所有 rank 必须使用相同的值。PD 分离部署中的 prefill
     和 decode 进程拥有各自独立的 EPLB manager，因此可以分别设置适合各自流量
     特征的规划算法；非 PD 部署则使用一个算法处理该进程采集到的全部路由负载。
+
+.. option:: --eplb_run_mode
+
+    EPLB 针对哪一种推理阶段进行负载均衡，默认值为 ``prefill``。支持：
+
+    * ``prefill``：标识当前 EPLB manager 面向 prefill 负载进行优化；
+    * ``decode``：标识当前 EPLB manager 面向 decode 负载进行优化。
+
+    该参数与 ``--eplb_plan_mode`` 相互独立：``eplb_run_mode`` 选择需要优化的负载类型，
+    ``eplb_plan_mode`` 选择生成专家布局的算法。该模式标识已贯通至 EPLB manager，后续可以为
+    两种运行模式分别接入适合各自负载特点的统计数据结构。选择 ``decode`` 时不会执行现有的
+    prefill 路由统计。
 
 .. option:: --eplb_rebalance_count
 
@@ -763,7 +776,8 @@ PD 分离模式参数
             --model_dir /path/to/model \
             --enable_ep_moe \
             --eplb_num_redundant_experts_per_rank 2 \
-            --eplb_plan_mode greedy \
+            --eplb_run_mode prefill \
+            --eplb_plan_mode topology_aware \
             --eplb_rebalance_count 1 \
             --eplb_config_path /path/to/eplb-placement.json
 

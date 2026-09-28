@@ -3,7 +3,7 @@
 from typing import Callable, Dict
 
 from .topology_aware import TopologyAwareEPLBPlanner
-from .greedy import GreedyEPLBPlanner
+from .global_balance import GlobalBalanceEPLBPlanner
 from .planner import EPLBPlanner
 
 
@@ -16,7 +16,7 @@ def create_eplb_planner(
 ) -> EPLBPlanner:
     """根据启动参数为当前推理进程创建布局规划器。"""
     planner_builders: Dict[str, Callable[[], EPLBPlanner]] = {
-        "greedy": lambda: GreedyEPLBPlanner(
+        "global_balance": lambda: GlobalBalanceEPLBPlanner(
             num_ranks,
             num_redundant_experts_per_rank,
             expert_alignment=expert_alignment,

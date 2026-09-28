@@ -99,9 +99,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             # [0] 是单调递增的 sample index；[1] 用于在同一个 kernel 内协调
             # 目标行清零，并从所有 program 中选出最后完成者。
             self.prefill_route_sample_index = torch.zeros(2, dtype=torch.int64, device="cuda")
-            # 动态 EPLB 默认采集路由负载；以后使用配置文件固定专家布局时，
-            # 可以关闭该开关，避免执行不再需要的 atomic counter 更新。
-            self.recording = True
         else:
             self.num_total_physical_experts = self.n_routed_experts
             num_local_experts = self.n_routed_experts // world_size
@@ -160,15 +157,17 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             # decode 的分发策略统一由 EPLB 模块管理。
             from lightllm.server.router.model_infer.mode_backend.eplb.eplb_utils import (
                 get_eplb_dispatch_mode,
+                should_record_prefill_route,
             )
 
             dispatch_mode = get_eplb_dispatch_mode(is_prefill=is_prefill)
+            update_prefill_route_counter = should_record_prefill_route(is_prefill=is_prefill)
             topk_ids = eplb_repair_topk_ids(
                 logical_topk_ids=topk_ids,
                 logical_to_physical_map=self.logical_to_physical_map,
                 prefill_route_counter=self.prefill_route_counter,
                 prefill_route_sample_index=self.prefill_route_sample_index,
-                update_prefill_route_counter=self.recording and is_prefill is True,
+                update_prefill_route_counter=update_prefill_route_counter,
                 mode=dispatch_mode,
             )
         return topk_weights, topk_ids

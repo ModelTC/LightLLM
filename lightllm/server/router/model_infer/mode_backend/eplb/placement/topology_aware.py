@@ -11,7 +11,7 @@ from .types import ExpertPlacement
 class TopologyAwareEPLBPlanner(EPLBPlanner):
     """根据源节点流量规划冗余专家，并最小化各层关键 rank 的计算负载。
 
-    与会重新排列全部物理槽位的 ``GreedyEPLBPlanner`` 不同，本规划器固定
+    与会重新排列全部物理槽位的 ``GlobalBalanceEPLBPlanner`` 不同，本规划器固定
     每个 rank 的规范主专家，只修改末尾的冗余专家槽位。规划过程保留原始
     sample 维和流量来源节点，使用与 ``current_node_first`` 路由一致的负载
     模型：源节点存在目标专家副本时只使用节点内副本，否则回退到全局副本。
@@ -152,7 +152,7 @@ class TopologyAwareEPLBPlanner(EPLBPlanner):
     ) -> Optional[torch.Tensor]:
         """校验主专家前缀，并提取 ``[layer, rank, redundant_slot]`` 布局。
 
-        ``greedy`` 模式或历史配置可能移动了主专家槽位。这样的完整布局在
+        ``global_balance`` 模式或历史配置可能移动了主专家槽位。这样的完整布局在
         运行时仍然合法，但不符合本 planner 的固定主专家模型，因此返回
         ``None``，通知调用方跳过旧布局收益比较和冗余槽位复用。
         """

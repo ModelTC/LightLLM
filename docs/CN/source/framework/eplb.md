@@ -37,7 +37,8 @@ python -m lightllm.server.api_server \
     --model_dir /path/to/model \
     --enable_ep_moe \
     --eplb_num_redundant_experts_per_rank 2 \
-    --eplb_plan_mode greedy \
+    --eplb_run_mode prefill \
+    --eplb_plan_mode topology_aware \
     --eplb_rebalance_count 1 \
     --eplb_config_path /path/to/eplb-placement.json
 ```
@@ -48,13 +49,19 @@ python -m lightllm.server.api_server \
 | --- | --- | --- |
 | `--enable_ep_moe` | 关闭 | 启用专家并行；EPLB 的前置条件 |
 | `--eplb_num_redundant_experts_per_rank` | `0` | 每个 rank 的额外物理专家槽位数；大于 0 时启用 EPLB |
-| `--eplb_plan_mode` | `greedy` | 选择动态布局规划算法；支持 `greedy` 和 `topology_aware` |
+| `--eplb_run_mode` | `prefill` | 选择 EPLB 面向 prefill 或 decode 负载进行优化 |
+| `--eplb_plan_mode` | `topology_aware` | 选择动态布局规划算法；支持 `global_balance` 和 `topology_aware` |
 | `--eplb_rebalance_count` | `1` | 最多完成的动态重排次数；`-1` 表示不限次数，`0` 表示不动态重排 |
 | `--eplb_config_path` | `None` | 可选的布局加载与回写路径 |
 
 完整命令行说明见 {doc}`../tutorial/api_server_args`。
 
-在 PD 分离部署中，prefill 和 decode 进程各自拥有独立的 EPLB manager，可以分别设置 `--eplb_plan_mode`。同一个 EP 通信组内的所有 rank 必须使用相同配置。非 PD 部署只有一个 manager，它根据该进程采集到的全部路由负载生成统一布局。
+`eplb_run_mode` 和 `eplb_plan_mode` 分别回答“优化哪类负载”和“使用哪种布局算法”，两者相互独立。
+在 PD 分离部署中，prefill 和 decode 进程各自拥有独立的 EPLB manager，可以分别设置运行模式和规划算法。
+同一个 EP 通信组内的所有 rank 必须使用相同配置。非 PD 部署只有一个 manager，由 `eplb_run_mode`
+决定该 manager 面向 prefill 还是 decode 负载进行优化。两种模式后续可以使用各自适合的统计数据结构。
+当 `eplb_run_mode=decode` 时，现有的 prefill 路由统计算子会在编译期关闭，不更新
+`prefill_route_counter`；decode 专用统计结构由后续实现单独接入。
 
 ## 3. 总体架构
 
@@ -92,7 +99,7 @@ prefill_route_counter（最近 24 次 prefill 采样）
 | `eplb/placement/routing.py` | 根据完整布局构建紧凑路由表 |
 | `eplb/placement/planner.py` | 布局规划器抽象接口 |
 | `eplb/placement/factory.py` | 根据 `eplb_plan_mode` 创建具体规划器 |
-| `eplb/placement/greedy.py` | 默认的贪心布局算法 |
+| `eplb/placement/global_balance.py` | 全局均衡的样板布局算法 |
 | `eplb/placement/topology_aware.py` | 固定主专家、仅规划冗余槽位的拓扑感知算法 |
 | `eplb/async_task.py` | 统一后台线程任务的启动、完成与异常处理 |
 | `eplb/async_load_gather_task.py` | 在独立 Gloo 通信组中后台汇集逐 rank、逐 sample 的原始负载 |
@@ -115,7 +122,7 @@ rank 3: [6, 7, 0, 1]
 ```
 
 每行前两个槽位来自原始连续划分，后两个槽位是启动时已经加载完成的冗余副本。运行期的
-可移动范围由 planner 决定：`greedy` 可以重新分配全部物理槽位；`topology_aware` 固定
+可移动范围由 planner 决定：`global_balance` 可以重新分配全部物理槽位；`topology_aware` 固定
 前面的规范主专家槽，只替换末尾的冗余槽。
 
 ### 4.2 从历史布局启动
@@ -188,7 +195,7 @@ _select_experts
 | `global_first` | 直接在全局全部有效副本间选择 |
 
 DeepGEMM 的 decode 路径使用 `current_gpu_first`。prefill 路径与 planner 的负载模型保持一致：
-`greedy` 使用 `global_first`，`topology_aware` 使用 `current_node_first`。当前不实现
+`global_balance` 使用 `global_first`，`topology_aware` 使用 `current_node_first`。当前不实现
 “本卡 -> 本节点 -> 全局”的三级回退。
 
 ### 5.4 副本哈希
@@ -364,7 +371,7 @@ rank 的 `[layer, sample, logical_expert]` 原始快照，并在通信完成后�
 3. **隔离关键路径**：all-gather 在后台线程和专用 Gloo 通信组中运行，主推理线程只在
    `WAIT_LOAD_GATHER_FINISHED` 状态轮询完成标记，不会被大块负载通信直接阻塞。
 
-planner 接口直接接收 `[rank, layer, sample, logical_expert]` CPU Tensor。Greedy 实现进入
+planner 接口直接接收 `[rank, layer, sample, logical_expert]` CPU Tensor。Global Balance 实现进入
 算法主体前沿 rank 和 sample 维求和为 `[layer, logical_expert]`，再转换成嵌套 list；
 Topology-Aware planner 保留 sample 维，并且只聚合同一源节点内的 rank，以匹配逐批次对齐
 和节点本地优先的执行模型。
@@ -382,14 +389,14 @@ logical_expert_load_samples: CPU Tensor[rank, layer, sample, logical_expert]
 
 `create_eplb_planner` 将 `--eplb_plan_mode` 转换成具体实例，使状态机不依赖某个算法类。目前支持：
 
-- `greedy`：规划完整物理布局，prefill 在全局全部副本间分发 token；
+- `global_balance`：全局均衡的样板实现，规划完整物理布局，prefill 在全局全部副本间分发 token；
 - `topology_aware`：固定规范主专家，只规划冗余槽位，prefill 优先使用源节点内的副本。
 
 规划只在 rank 0 的后台线程执行。完成后，目标布局通过控制通信组广播给所有 rank。相同输入必须产生确定结果，便于所有 rank 生成一致的传输计划。
 
-### 8.2 Greedy 规划算法
+### 8.2 Global Balance 样板规划算法
 
-默认算法按层独立规划，主要步骤如下：
+该样板算法按层独立规划，主要步骤如下：
 
 1. **选择全卡冗余专家**：选取负载最高的 `R` 个逻辑专家，在每个 rank 上各放置一份；
 2. **确定额外副本数**：其余专家先各保留一个副本，再把剩余 `R` 个副本逐次分给当前 `load / replica_count` 最大的专家；
@@ -414,7 +421,7 @@ Topology-Aware 模式以源节点拓扑和关键 rank 计算量为规划目标�
 4. 候选布局必须让每个被替换层的关键负载下降，并且模型级预计收益至少达到 5%，否则
    保留当前布局；最终把仍在同一 rank 的副本复用到原物理槽位。
 
-该模式要求规范主槽布局。如果从 `greedy` 生成的全槽布局或旧配置切换到
+该模式要求规范主槽布局。如果从 `global_balance` 生成的全槽布局或旧配置切换到
 `topology_aware`，第一次规划会恢复规范主专家前缀，并重新生成冗余槽位；由于旧布局不满足
 固定主专家假设，这一次无法与旧布局比较收益，也无法复用旧冗余槽位。后续规划只会修改
 冗余槽位，并应用 5% 收益门槛。
@@ -644,3 +651,32 @@ alignment，对跨层向量化和专用逐层原型进行了逐元素结果对�
 该选择明确接受了多线程 CPU 下更长的规划时间。如果后续部署需要高频重排，特别是 16 rank
 及以上拓扑，可以在不改变单层算法的前提下增加小批量 layer 调度，或针对后台 planner
 单独优化并行执行；不应重新把多层状态揉进单层候选逻辑中。
+
+## 附录 B：Global Balance 仅作为全局均衡样板实现
+
+`global_balance` 的目标是用尽量直接的实现展示 EPLB 的完整规划流程：汇总所有 rank 和
+sample 的 logical expert 负载、增加热点专家副本、重新排列全部物理槽位，并通过
+`global_first` 在一个 logical expert 的全部有效副本间分发 token。它便于验证布局合法性、
+负载拆分、槽位复用和权重迁移流程，也可以作为其他 planner 的计算均衡基线。
+
+该算法的目标函数只关心各 rank 的估算计算量，没有表达 expert group、源 rank、节点拓扑和
+跨节点通信代价。因此它不适合使用 grouped top-k 的模型。grouped top-k 会先选择少量 expert
+group，再只在这些 group 内选择专家；这种约束原本提供了利用 group 布局保持 rank 或节点
+局部性的机会。`global_balance` 会把热点 expert 的副本扩散到整个 world，并把 token 在所有
+副本间做全局 hash，从而破坏这种局部性。
+
+在极端情况下，一个原本可以由本 rank 或本节点 expert group 处理的路由结果，会被分发到
+几乎任意 rank：
+
+1. 更多 token 从本地计算变成跨 rank 发送；
+2. 原本节点内可完成的路由变成跨节点发送，显著增加网络字节量；
+3. 单个 batch 触达的目标 rank 数增加，使 all-to-all 流量更分散，也更难合并为大块传输；
+4. planner 即使降低了最繁忙 rank 的计算量，也可能被新增通信开销完全抵消。
+
+放大的是跨 rank、尤其是跨节点的有效通信量和通信 fan-out；每个 token 的 top-k 路由项数量
+本身并没有改变。放大程度取决于 expert group 与 rank/节点的映射、grouped top-k 选择的 group
+数量以及副本分布，不能用一个固定倍数概括，但当原始 group 布局具有较强局部性时会非常明显。
+
+因此 `global_balance` 保留为教学、测试和对照用的样板实现，不应作为 grouped top-k 部署的
+生产方案。此类场景应使用能够显式保留 group/拓扑局部性并把通信代价纳入目标的 planner，
+当前默认使用的 `topology_aware` 比全局均衡样板更接近这一方向。
