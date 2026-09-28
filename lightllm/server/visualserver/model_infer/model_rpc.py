@@ -14,6 +14,7 @@ from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
+from lightllm.models.deepseek_v4.deepseek_v4_visual import DeepseekV4VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
@@ -21,7 +22,6 @@ from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerP
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
-from lightllm.models.neo_chat_moe.neo_visual import NeoVisionTransformerPretrainedModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
@@ -92,6 +92,8 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = (
                     Qwen3VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
+            elif self.model_type == "deepseek_v4" and model_cfg.get("vision_n_layers", 0) > 0:
+                self.model = DeepseekV4VisionModel(kvargs, **model_cfg).eval()
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
@@ -112,6 +114,8 @@ class VisualModelRpcServer(rpyc.Service):
                     .bfloat16()
                 )
             elif self.model_type == "neo_chat":
+                from lightllm.models.neo_chat_moe.neo_visual import NeoVisionTransformerPretrainedModel
+
                 self.model = NeoVisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             else:
                 raise Exception(f"can not support {self.model_type} now")

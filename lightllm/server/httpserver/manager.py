@@ -375,6 +375,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
             await self._log_req_header(request_headers, group_request_id)
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            for image in multimodal_params.images:
+                if image.block_start_idx is not None:
+                    block_token_num = image.block_end_idx - image.block_start_idx
+                    if block_token_num > self.args.batch_max_tokens:
+                        raise ValueError(
+                            f"image prefill block token count {block_token_num} exceeds "
+                            f"batch_max_tokens={self.args.batch_max_tokens}; increase --batch_max_tokens"
+                        )
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -680,8 +688,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         if not prompt_ids:
             raise InvalidRequestError("The input prompt must not be empty.")
         prompt_tokens = len(prompt_ids)
-        # -36 用于保留通用边界余量，MTP overlap 所需的额外 KV 窗口由
-        # get_real_supported_max_req_total_len 单独扣除。
+        # MTP overlap reserves an additional KV window in get_real_supported_max_req_total_len.
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
         if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:

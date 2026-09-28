@@ -57,6 +57,23 @@ def test_dp_backend_reuses_common_engine_outside_overlap():
     assert not issubclass(DPOverlapSpecEngine, SpecEngine)
 
 
+def test_dp_backend_dspark_uses_common_engine_without_overlap():
+    backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
+    backend.args = SimpleNamespace(mtp_mode="dspark", mtp_dynamic_verify=False, dp=2)
+    backend.max_draft_step = 5
+    backend.dp_size = 2
+    backend.draft_models = [SimpleNamespace(block_size=5, graph=None)]
+    backend.enable_prefill_microbatch_overlap = False
+    backend.enable_decode_microbatch_overlap = False
+
+    backend.init_spec_engine()
+
+    assert type(backend.spec_engine) is SpecEngine
+    assert backend.dp_overlap_spec_engine is None
+    assert backend.prefill_draft_engine is backend.spec_engine
+    assert backend.decode_draft_engine is backend.spec_engine
+
+
 def test_lightspec_planner_reduces_draft_step_with_max(monkeypatch):
     group = object()
     planner = LightSpecPlanner.__new__(LightSpecPlanner)

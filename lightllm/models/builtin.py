@@ -17,6 +17,13 @@ def _tarsier_text_model_is(model_type):
 ModelRegistry.register("bloom", "lightllm.models.bloom.model:BloomTpPartModel")
 ModelRegistry.register(["deepseek_v2", "deepseek_v3"], "lightllm.models.deepseek2.model:Deepseek2TpPartModel")
 ModelRegistry.register(["deepseek_v32"], "lightllm.models.deepseek3_2.model:Deepseek3_2TpPartModel")
+ModelRegistry.register("deepseek_v4", "lightllm.models.deepseek_v4.model:DeepseekV4TpPartModel")
+ModelRegistry.register(
+    "deepseek_v4",
+    "lightllm.models.deepseek_v4.model:DeepseekV4VisionTpPartModel",
+    is_multimodal=True,
+    condition=lambda cfg: cfg.get("vision_n_layers", 0) > 0,
+)
 ModelRegistry.register("gemma3", "lightllm.models.gemma3.model:Gemma3TpPartModel")
 ModelRegistry.register("gemma4", "lightllm.models.gemma4.model:Gemma4TpPartModel", is_multimodal=True)
 ModelRegistry.register("gemma", "lightllm.models.gemma_2b.model:Gemma_2bTpPartModel")
@@ -145,6 +152,8 @@ ModelRegistry.register(
 
 
 # Draft keys use the draft checkpoint model_type and the speculative mode.
+DraftModelRegistry.register("deepseek_v4", "eagle_with_att", "lightllm.models.deepseek_v4_mtp.model:DeepseekV4MTPModel")
+DraftModelRegistry.register("deepseek_v4", "dspark", "lightllm.models.deepseek_v4_dspark.model:DeepseekV4DSparkModel")
 DraftModelRegistry.register(
     "deepseek_v3",
     ("vanilla_with_att", "eagle_with_att"),

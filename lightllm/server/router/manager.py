@@ -32,7 +32,6 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.config_utils import get_running_max_req_size_per_dp
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
@@ -149,7 +148,11 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "max_req_num": get_running_max_req_size_per_dp(self.args),
+            "max_req_num": (
+                self.args.running_max_req_size
+                if self.args.run_mode in ["prefill", "normal"] and self.args.enable_dp_prompt_cache_fetch
+                else self.args.per_dp_running_max_req_size
+            ),
             # MTP length stopping is asynchronous, so up to mtp_step accepted
             # positions may already be committed when FINISHED_LENGTH is observed.
             # The overlapped iteration then needs mtp_step positions for target

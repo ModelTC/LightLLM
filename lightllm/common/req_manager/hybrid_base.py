@@ -39,30 +39,32 @@ class HybridAttentionReqManager(ReqManager, ABC):
     def init_hybrid_attention_state(self, req: "InferReq"):
         """无前缀缓存命中时，初始化已分配请求槽位的 GPU 运行态。"""
 
-    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
+    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq", checkpoint_len: int):
         """将指定大页槽位的 CPU checkpoint 恢复到请求 GPU 运行态。"""
-        self.restore_state(req, self.big_page_buffers, big_page_buffer_idx)
+        self.restore_state(req, self.big_page_buffers, big_page_buffer_idx, checkpoint_len)
 
-    def restore_small_page_state(self, req: "InferReq"):
+    def restore_small_page_state(self, req: "InferReq", checkpoint_len: int):
         """将 req.shared_kv_node 对应的小页 checkpoint 恢复到请求 GPU 运行态。"""
-        self.restore_state(req, self.small_page_buffers, req.shared_kv_node.small_page_buffer_idx)
+        self.restore_state(req, self.small_page_buffers, req.shared_kv_node.small_page_buffer_idx, checkpoint_len)
 
     @abstractmethod
-    def restore_state(self, req: "InferReq", state_cache_manager, buffer_idx: int):
+    def restore_state(self, req: "InferReq", state_cache_manager, buffer_idx: int, checkpoint_len: int):
         """CPU checkpoint → 请求 GPU 运行态；大小页共用，不负责前缀匹配或 full KV 索引恢复。"""
 
-    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
+    def save_big_page_states(
+        self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int], checkpoint_lens: List[int]
+    ):
         """批量保存请求 GPU 运行态到已分配的大页槽位，buffer_indexes 中的 -1 表示跳过。
 
         b_req_idx 与 req_indexes 分别为同一批请求的 GPU 索引张量和 CPU 索引列表。
         默认逐请求保存，模型可覆盖为批量拷贝算子。
         """
-        for req_idx, buffer_idx in zip(req_indexes, buffer_indexes):
+        for req_idx, buffer_idx, length in zip(req_indexes, buffer_indexes, checkpoint_lens):
             if buffer_idx != -1:
-                self.save_state(req_idx, buffer_idx, self.big_page_buffers)
+                self.save_state(req_idx, buffer_idx, self.big_page_buffers, length)
 
     @abstractmethod
-    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager):
+    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager, checkpoint_len: int):
         """请求 GPU 运行态 → 指定 CPU checkpoint 槽位；大小页共用，调用方负责分配槽位。"""
 
     def update_mtp_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):

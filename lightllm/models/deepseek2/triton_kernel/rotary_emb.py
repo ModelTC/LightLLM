@@ -29,6 +29,8 @@ def _rotary_kernel(
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     NUM_STAGE: tl.constexpr,
+    HAS_K: tl.constexpr,
+    INVERSE: tl.constexpr,
 ):
     head_start_index = tl.program_id(0)
     seq_block_index = tl.program_id(1)
@@ -44,6 +46,8 @@ def _rotary_kernel(
         off_dimcos_sin = seq_index * stride_cosbs + cos_range * stride_cosd
         cos = tl.load(Cos + off_dimcos_sin)
         sin = tl.load(Sin + off_dimcos_sin)
+        if INVERSE:
+            sin = -sin
 
         if HEAD_PARALLEL_NUM == 1:
             for q_head_index in tl.static_range(0, HEAD_Q, step=1):
@@ -56,18 +60,19 @@ def _rotary_kernel(
                 tl.store(Q + off_q0, out_q0)
                 tl.store(Q + off_q1, out_q1)
 
-            for k_head_index in tl.static_range(0, HEAD_K, step=1):
-                off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
-                off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
+            if HAS_K:
+                for k_head_index in tl.static_range(0, HEAD_K, step=1):
+                    off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
+                    off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
 
-                k0 = tl.load(K + off_k0)
-                k1 = tl.load(K + off_k1)
+                    k0 = tl.load(K + off_k0)
+                    k1 = tl.load(K + off_k1)
 
-                out_k0 = k0 * cos - k1 * sin
-                out_k1 = k0 * sin + k1 * cos
+                    out_k0 = k0 * cos - k1 * sin
+                    out_k1 = k0 * sin + k1 * cos
 
-                tl.store(K + off_k0, out_k0)
-                tl.store(K + off_k1, out_k1)
+                    tl.store(K + off_k0, out_k0)
+                    tl.store(K + off_k1, out_k1)
         else:
             for q_head_index in tl.range(head_start_index, HEAD_Q, step=HEAD_PARALLEL_NUM, num_stages=NUM_STAGE):
                 off_q0 = seq_index * stride_qbs + q_head_index * stride_qh + dim_range0 * stride_qd
@@ -79,18 +84,19 @@ def _rotary_kernel(
                 tl.store(Q + off_q0, out_q0)
                 tl.store(Q + off_q1, out_q1)
 
-            for k_head_index in tl.range(head_start_index, HEAD_K, step=HEAD_PARALLEL_NUM, num_stages=NUM_STAGE):
-                off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
-                off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
+            if HAS_K:
+                for k_head_index in tl.range(head_start_index, HEAD_K, step=HEAD_PARALLEL_NUM, num_stages=NUM_STAGE):
+                    off_k0 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range0 * stride_kd
+                    off_k1 = seq_index * stride_kbs + k_head_index * stride_kh + dim_range1 * stride_kd
 
-                k0 = tl.load(K + off_k0)
-                k1 = tl.load(K + off_k1)
+                    k0 = tl.load(K + off_k0)
+                    k1 = tl.load(K + off_k1)
 
-                out_k0 = k0 * cos - k1 * sin
-                out_k1 = k0 * sin + k1 * cos
+                    out_k0 = k0 * cos - k1 * sin
+                    out_k1 = k0 * sin + k1 * cos
 
-                tl.store(K + off_k0, out_k0)
-                tl.store(K + off_k1, out_k1)
+                    tl.store(K + off_k0, out_k0)
+                    tl.store(K + off_k1, out_k1)
     return
 
 
@@ -109,7 +115,10 @@ def get_test_configs():
 
 
 def get_static_key(q, k):
-    head_num_q, head_num_k, head_dim = q.shape[1], k.shape[1], q.shape[2]
+    assert q is not None, "q can not be None"
+    head_num_q = q.shape[1]
+    head_num_k = k.shape[1] if k is not None else 0
+    head_dim = q.shape[2]
     return {
         "Q_HEAD_NUM": head_num_q,
         "K_HEAD_NUM": head_num_k,
@@ -126,12 +135,17 @@ def get_static_key(q, k):
     mutates_args=["q", "k"],
 )
 @torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin, run_config=None):
+def rotary_emb_fwd(q, k, cos, sin, inverse=False, run_config=None):
+    assert q is not None, "q can not be None"
+    has_k = k is not None and k.shape[1] != 0
     total_len = q.shape[0]
-    head_num_q, head_num_k = q.shape[1], k.shape[1]
+    head_num_q = q.shape[1]
+    head_num_k = k.shape[1] if k is not None else 0
     head_dim = q.shape[2]
     assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
-    assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
+    if k is not None:
+        assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
+        assert k.shape[2] == head_dim, f"k shape {k.shape} q head_dim {head_dim}"
     assert triton.next_power_of_2(head_dim) == head_dim
 
     if not run_config:
@@ -157,9 +171,9 @@ def rotary_emb_fwd(q, k, cos, sin, run_config=None):
         stride_qbs=q.stride(0),
         stride_qh=q.stride(1),
         stride_qd=q.stride(2),
-        stride_kbs=k.stride(0),
-        stride_kh=k.stride(1),
-        stride_kd=k.stride(2),
+        stride_kbs=k.stride(0) if k is not None else 0,
+        stride_kh=k.stride(1) if k is not None else 0,
+        stride_kd=k.stride(2) if k is not None else 0,
         stride_cosbs=cos.stride(0),
         stride_cosd=cos.stride(1),
         stride_sinbs=sin.stride(0),
@@ -171,6 +185,8 @@ def rotary_emb_fwd(q, k, cos, sin, run_config=None):
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=head_dim,
         NUM_STAGE=num_stages,
+        HAS_K=has_k,
+        INVERSE=inverse,
         num_warps=num_warps,
         num_stages=num_stages,
     )

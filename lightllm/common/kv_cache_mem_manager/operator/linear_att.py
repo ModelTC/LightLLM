@@ -95,6 +95,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         g_infer_context.req_manager.restore_big_page_state(
             big_page_buffer_idx=big_page_buffer_ids_cpu[-1],
             req=req,
+            checkpoint_len=req.cur_kv_len,
         )
 
         return

@@ -50,8 +50,9 @@ class DiskCacheWorker:
         # 读写同时进行时，分配8线程用来写，16线程用来读
         max_concurrent_write_tasks = 8
 
-        cache_dir = disk_cache_dir
-        if not cache_dir:
+        if disk_cache_dir:
+            cache_dir = os.path.join(disk_cache_dir, f"lightllm_disk_cache_{get_unique_server_name()}")
+        else:
             cache_dir = os.path.join(tempfile.gettempdir(), f"lightllm_disk_cache_{get_unique_server_name()}")
         os.makedirs(cache_dir, exist_ok=True)
         cache_file = os.path.join(cache_dir, "cache_file")

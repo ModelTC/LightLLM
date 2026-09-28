@@ -43,6 +43,8 @@ class EagleWithAttProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
+        accept_len_cpu: torch.Tensor | None = None,
+        accept_len_ready_event: torch.cuda.Event | None = None,
     ) -> EagleSpecProposal:
         """提交验证结果对应的 draft KV，并递归生成下一轮 EAGLE proposal。
 
@@ -134,6 +136,23 @@ class EagleWithAttProposer(BaseSpecProposer):
         draft_input.b_shared_radix_node_id = selected_rows.b_shared_radix_node_id
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(req_num)]
 
+        if self.backend.is_deepseek_v4 and req_num > 0:
+            # DSV4's SWA allocator is host-owned. Reuse the accept-length D2H
+            # already issued for post-processing, then keep both mirrors in step.
+            accept_len_ready_event.synchronize()
+            req_start_rows_cpu = torch.nonzero(
+                target_model_input.b_mtp_index_cpu == 0,
+                as_tuple=False,
+            ).flatten()
+            accepted_tail_rows_cpu = req_start_rows_cpu + accept_len_cpu - 1
+            draft_input.b_req_idx_cpu = target_model_input.b_req_idx_cpu.index_select(0, accepted_tail_rows_cpu)
+            draft_input.b_mtp_index_cpu = torch.zeros(
+                (req_num,),
+                dtype=target_model_input.b_mtp_index_cpu.dtype,
+                device="cpu",
+            )
+            draft_input.b_seq_len_cpu = target_model_input.b_seq_len_cpu.index_select(0, accepted_tail_rows_cpu) + 1
+
         for step in range(1, draft_step):
             draft_input.input_ids = draft_token_ids
             draft_input.mtp_draft_input_hiddens = draft_hidden
@@ -149,6 +168,8 @@ class EagleWithAttProposer(BaseSpecProposer):
                 draft_token_ids = self._gen_argmax_token_ids(draft_output)
             proposal_token_ids_by_step.append(draft_token_ids.unsqueeze(1))
             draft_seq_lens.add_(1)
+            if self.backend.is_deepseek_v4 and req_num > 0:
+                draft_input.b_seq_len_cpu.add_(1)
 
         proposal_token_ids = torch.cat(proposal_token_ids_by_step, dim=1)
         schedule_scores = torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None
