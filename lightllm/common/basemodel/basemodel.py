@@ -304,7 +304,6 @@ class TpPartBaseModel:
                 self.graph.warmup(self)
 
     def _init_prefill_cuda_graph(self):
-        # Draft models use self.run_mode="normal" even when the node is decode-only.
         self.prefill_graph = (
             None
             if self.args.run_mode == "decode" or not get_env_start_args().enable_prefill_cudagraph
