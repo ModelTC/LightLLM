@@ -167,10 +167,6 @@ class MultiLevelKvCacheModule(object):
         true_finished_reqs = []
         cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
         for req in finished_reqs:
-            if CacheTier.CPU not in req.cache_tiers:
-                true_finished_reqs.append(req)
-                continue
-
             # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
             # 这个限制是为了兼容 diverse 模式下的请求处理, 只有主请求才 offload kv 到 cpu
             # cache 中

@@ -69,7 +69,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
             # pending 期间优先重新匹配 radix；准入失败时释放引用，留待下轮重试。
-            if req_obj.pd_task_num == 0 and not req_obj.infer_aborted:
+            if self.is_deepseek_v4 and req_obj.pd_task_num == 0 and not req_obj.infer_aborted:
                 if g_infer_context.is_hybrid_att_model:
                     req_obj._hybrid_match_radix_cache()
                 else:

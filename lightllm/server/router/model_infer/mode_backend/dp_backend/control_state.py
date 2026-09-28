@@ -1,5 +1,8 @@
+import numpy as np
 from enum import Enum
+from typing import List
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from ..base_backend import ModeBackend
 
 
@@ -17,8 +20,10 @@ class DPControlState:
 
     def select_run_way(
         self,
-        has_prefill: bool,
-        has_decode: bool,
+        dp_prefill_req_nums: np.ndarray,
+        dp_decode_req_nums: np.ndarray,
+        prefill_reqs: List[InferReq],
+        decode_reqs: List[InferReq],
     ) -> "RunWay":
         """
         判断决策运行方式：
@@ -27,41 +32,55 @@ class DPControlState:
         self.step_count += 1
         if self.is_aggressive_schedule:
             return self._agressive_way(
-                has_prefill=has_prefill,
-                has_decode=has_decode,
+                dp_prefill_req_nums=dp_prefill_req_nums,
+                dp_decode_req_nums=dp_decode_req_nums,
+                prefill_reqs=prefill_reqs,
+                decode_reqs=decode_reqs,
             )
         else:
             return self._normal_way(
-                has_prefill=has_prefill,
-                has_decode=has_decode,
+                dp_prefill_req_nums=dp_prefill_req_nums,
+                dp_decode_req_nums=dp_decode_req_nums,
+                prefill_reqs=prefill_reqs,
+                decode_reqs=decode_reqs,
             )
 
     def _agressive_way(
         self,
-        has_prefill: bool,
-        has_decode: bool,
+        dp_prefill_req_nums: np.ndarray,
+        dp_decode_req_nums: np.ndarray,
+        prefill_reqs: List[InferReq],
+        decode_reqs: List[InferReq],
     ):
-        if has_prefill:
+        max_prefill_num = np.max(dp_prefill_req_nums)
+        if max_prefill_num > 0:
             return RunWay.PREFILL
-        if has_decode:
+        max_decode_num = np.max(dp_decode_req_nums)
+        if max_decode_num > 0:
             return RunWay.DECODE
         return RunWay.PASS
 
     def _normal_way(
         self,
-        has_prefill: bool,
-        has_decode: bool,
+        dp_prefill_req_nums: np.ndarray,
+        dp_decode_req_nums: np.ndarray,
+        prefill_reqs: List[InferReq],
+        decode_reqs: List[InferReq],
     ):
-        if self.left_decode_num > 0 and has_decode:
+        # use_ratio = np.count_nonzero(dp_prefill_req_nums) / dp_prefill_req_nums.shape[0]
+        max_decode_num = np.max(dp_decode_req_nums)
+        max_prefill_num = np.max(dp_prefill_req_nums)
+
+        if self.left_decode_num > 0 and max_decode_num > 0:
             self.left_decode_num -= 1
             return RunWay.DECODE
 
-        if has_prefill:
+        if max_prefill_num > 0:
             # prefill 一次允许进行几次 decode 操作。
             self.left_decode_num = self.decode_max_step
             return RunWay.PREFILL
         else:
-            if has_decode:
+            if max_decode_num > 0:
                 return RunWay.DECODE
             else:
                 return RunWay.PASS

@@ -135,13 +135,15 @@ class DPChunkedPrefillBackend(ModeBackend):
                     recover_paused=self.control_state_machine.try_recover_paused_reqs(),
                 )
 
-                has_prefill, has_decode = self._dp_all_reduce_req_presence(
+                dp_prefill_req_nums, dp_decode_req_nums = self._dp_all_gather_prefill_and_decode_req_num(
                     prefill_reqs=prefill_reqs, decode_reqs=decode_reqs
                 )
 
                 run_way = self.control_state_machine.select_run_way(
-                    has_prefill=has_prefill,
-                    has_decode=has_decode,
+                    dp_prefill_req_nums=dp_prefill_req_nums,
+                    dp_decode_req_nums=dp_decode_req_nums,
+                    prefill_reqs=prefill_reqs,
+                    decode_reqs=decode_reqs,
                 )
 
                 if run_way.is_prefill():

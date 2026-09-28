@@ -298,7 +298,7 @@ class DPKVSharedMoudle:
                             checkpoint_len=end,
                         )
 
-        if self.backend.is_deepseek_v4:
+        if self.backend.is_deepseek_v4 and self.backend.args.enable_cpu_cache:
             # CPU-cache restore can evict source radix pages before the scheduler all-gather fences this stream.
             dist.barrier(group=self.backend.node_nccl_group)
 

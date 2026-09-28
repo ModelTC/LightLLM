@@ -24,6 +24,7 @@ from lightllm.utils.config_utils import (
     get_model_type,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
+    get_running_max_req_size_per_dp,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -136,17 +137,6 @@ def _launch_subprocesses(args: StartArgs):
             f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
             f"graph_max_batch_size to 32"
         )
-
-    dp_size_in_node = max(1, args.dp // args.nnodes)
-    args.per_dp_running_max_req_size = args.running_max_req_size // dp_size_in_node
-    args.graph_max_batch_size = min(args.graph_max_batch_size, args.per_dp_running_max_req_size)
-    logger.info(
-        "set per-DP running request limit: global=%d, local_dp=%d, per_dp=%d, graph_max_batch_size=%d",
-        args.running_max_req_size,
-        dp_size_in_node,
-        args.per_dp_running_max_req_size,
-        args.graph_max_batch_size,
-    )
 
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
@@ -366,14 +356,7 @@ def _launch_subprocesses(args: StartArgs):
         from lightllm.utils.config_utils import get_dtype
 
         args.data_type = get_dtype(args.model_dir)
-        assert args.data_type in [
-            "fp16",
-            "float16",
-            "bf16",
-            "bfloat16",
-            "fp32",
-            "float32",
-        ]
+        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     set_unique_server_name(args)
 
@@ -399,7 +382,7 @@ def _launch_subprocesses(args: StartArgs):
         )
 
     auto_configure_allreduce_flags_from_args(args)
-    local_request_capacity = args.per_dp_running_max_req_size
+    local_request_capacity = get_running_max_req_size_per_dp(args)
 
     # Limit CUDA Graph batches to the local request capacity.
     if not args.disable_cudagraph and args.graph_max_batch_size > local_request_capacity:
@@ -621,14 +604,7 @@ def visual_only_start(args):
         from lightllm.utils.config_utils import get_dtype
 
         args.data_type = get_dtype(args.model_dir)
-        assert args.data_type in [
-            "fp16",
-            "float16",
-            "bf16",
-            "bfloat16",
-            "fp32",
-            "float32",
-        ]
+        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     args.visual_node_id = uuid.uuid4().int
 

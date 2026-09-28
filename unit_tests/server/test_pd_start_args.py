@@ -19,6 +19,8 @@ def test_dsv4_page_and_checkpoint_configuration(monkeypatch, page_size, hash_pag
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda model_dir: True)
 
     def validation_finished(args):
+        assert args.page_size == 256
+        assert args.linear_att_hash_page_size == 256
         assert args.cpu_cache_token_page_size == 2048
         raise RuntimeError("DSV4 page-size validation passed")
 
@@ -36,10 +38,7 @@ def test_dsv4_page_and_checkpoint_configuration(monkeypatch, page_size, hash_pag
         disable_audio=True,
         disable_shm_warning=True,
     )
-    if page_size != 256 or hash_page_size != 256:
-        with pytest.raises(ValueError, match="DeepSeek-V4 requires"):
-            _launch_subprocesses(args)
-    elif cpu_page_size is not None:
+    if cpu_page_size is not None:
         with pytest.raises(ValueError, match="CPU cache pages must match"):
             _launch_subprocesses(args)
     else:

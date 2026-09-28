@@ -37,31 +37,6 @@ def set_env_start_args(args):
     if not isinstance(args, dict):
         args = vars(args)
     os.environ["LIGHTLLM_START_ARGS"] = json.dumps(args)
-    if args["enable_ep_moe"]:
-        if args["run_mode"] == "prefill":
-            decode_capacity = args["running_max_req_size"] * (args["mtp_step"] + 1)
-            decode_capacity = ((decode_capacity + 7) // 8) * 8
-            configured_decode_capacity = int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", decode_capacity))
-            if configured_decode_capacity != decode_capacity:
-                logger.warning(
-                    "NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=%d differs from the automatically derived value %d.",
-                    configured_decode_capacity,
-                    decode_capacity,
-                )
-            decode_capacity = max(configured_decode_capacity, decode_capacity)
-        else:
-            decode_capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
-        min_qp_depth = 2 * (decode_capacity + 1)
-        # NVSHMEM IBGDA rejects QP depths below NVSHMEMI_IBGDA_MIN_QP_DEPTH.
-        derived_qp_depth = max(128, 1 << (min_qp_depth - 1).bit_length())
-        configured_qp_depth = int(os.getenv("NVSHMEM_QP_DEPTH", derived_qp_depth))
-        if configured_qp_depth < derived_qp_depth:
-            logger.warning(
-                "NVSHMEM_QP_DEPTH=%d is below the required minimum; using %d instead.",
-                configured_qp_depth,
-                derived_qp_depth,
-            )
-        os.environ["NVSHMEM_QP_DEPTH"] = str(max(configured_qp_depth, derived_qp_depth))
     return
 
 
@@ -118,27 +93,8 @@ def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_decode():
-    args = get_env_start_args()
-    per_dp_running_max_req_size = getattr(args, "per_dp_running_max_req_size", None)
-    if per_dp_running_max_req_size is None:
-        per_dp_running_max_req_size = args.running_max_req_size
-
-    graph_max_batch_size = 0
-    if not args.disable_cudagraph:
-        graph_max_batch_size = args.graph_max_batch_size
-        if args.enable_decode_microbatch_overlap:
-            graph_max_batch_size //= 2
-
-    required = max(per_dp_running_max_req_size, graph_max_batch_size) * (args.mtp_step + 1)
-    required = ((required + 7) // 8) * 8
-    configured = int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", required))
-    if configured != required:
-        logger.warning(
-            "NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=%d differs from the automatically derived value %d.",
-            configured,
-            required,
-        )
-    return max(configured, required)
+    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
+    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
 
 
 @lru_cache(maxsize=None)

@@ -61,9 +61,15 @@ def get_tokenizer(
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
     except ValueError as e:
-        if tokenizer_mode == "slow" or "Tokenizer class TokenizersBackend does not exist" not in str(e):
+        if (
+            model_type != "deepseek_v4"
+            or tokenizer_mode == "slow"
+            or "Tokenizer class TokenizersBackend does not exist" not in str(e)
+        ):
             raise
-        logger.warning("Transformers does not provide TokenizersBackend; loading tokenizer.json as a fast tokenizer")
+        logger.warning(
+            "Transformers does not provide DeepSeek-V4 TokenizersBackend; loading tokenizer.json as a fast tokenizer"
+        )
         tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments, using slow mode.

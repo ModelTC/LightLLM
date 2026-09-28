@@ -288,8 +288,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--dp_balancer",
         type=str,
         default="bs_balancer",
-        choices=["round_robin", "bs_balancer", "cache_aware"],
-        help="the DP balancer type; cache_aware adds token-prefix affinity, default is bs_balancer",
+        choices=["round_robin", "bs_balancer"],
+        help="the dp balancer type, default is bs_balancer",
     )
     parser.add_argument(
         "--max_req_total_len",
@@ -726,11 +726,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default=None,
         choices=["fp8", "fp4"],
-        help="""Requested dtype for MoE expert weights, fp8 or fp4. Resolves the fused_moe
-            quant method: fp8 -> fp8w8a8-b128-deepgemm; fp4 -> fp4fp8-b32-deepgemm (online
-            quantization) on SM100 GPUs, or mxfp4w4a16-b32-marlin (Marlin W4A16, TP only) on other GPUs.
-            Defaults to `expert_dtype` in config.json if present. Per-layer override:
-            --quant_cfg mix_bits with name `fused_moe`.""",
+        help="""Expert quantization dtype for EP MoE. Supported values are
+            fp8 and fp4. Note that fp4 is only supported on SM100 GPUs.""",
     )
     parser.add_argument(
         "--vit_quant_type",
@@ -910,8 +907,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--disk_cache_dir",
         type=str,
         default=None,
-        help="""Base directory used to persist disk cache data. A unique service name is appended so every server
-        instance uses a separate subdirectory. Defaults to a temp directory when not set.""",
+        help="""Directory used to persist disk cache data. Defaults to a temp directory when not set.""",
     )
     parser.add_argument(
         "--enable_dp_prompt_cache_fetch",

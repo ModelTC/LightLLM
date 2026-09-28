@@ -309,6 +309,8 @@ def test_dp_overlap_engine_delegates_raw_verify_layout_to_proposer():
     calls = {}
 
     class _Proposer:
+        backend = SimpleNamespace(is_deepseek_v4=False)
+
         def propose_next_overlap(self, **kwargs):
             calls.update(kwargs)
             return SpecProposal(token_ids=kwargs["target_next_token_ids0"].new_empty((3, 7)))

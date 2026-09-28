@@ -81,11 +81,13 @@ def get_config_json(model_path: str):
     return normalize_deepseek_v4_config(json_obj)
 
 
-def get_generation_config_diff_dict(model_path: str) -> Dict[str, Any]:
+def get_generation_config_dict(model_path: str) -> Dict[str, Any]:
     from transformers import GenerationConfig
 
-    generation_cfg = GenerationConfig.from_pretrained(model_path, trust_remote_code=True).to_diff_dict()
-    return {key: value for key, value in generation_cfg.items() if value is not None}
+    generation_cfg = GenerationConfig.from_pretrained(model_path, trust_remote_code=True)
+    if get_model_type(model_path) == "deepseek_v4":
+        return {key: value for key, value in generation_cfg.to_diff_dict().items() if value is not None}
+    return generation_cfg.to_dict()
 
 
 def get_running_max_req_size_per_dp(args) -> int:
@@ -647,8 +649,12 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     ]:
         return "qwen3"
 
-    # DeepSeek V3 / V4 (share the <think>...</think> reasoning format, request-gated)
-    if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32", "deepseek_v4"]:
+    # DeepSeek V4
+    if model_type == "deepseek_v4":
+        return "deepseek-v4"
+
+    # DeepSeek V3
+    if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32"]:
         return "deepseek-v3"
 
     # DeepSeek R1

@@ -45,3 +45,23 @@
 | `ca4f075860e00649ea73554780b33a417ead21bc` (`synchronize PDL top-k and fail fast on model thread errors`) | DeepSeek-V4 PDL top-k 同步 | 通用 fatal thread excepthook |
 
 整理阶段产生的临时 revert 提交已经压平，因此最终分支相对 `7369626` 只多一个汇总清理提交；本文件记录被排除的原始提交，便于后续追溯。
+
+## 2026-09-28 二次模型边界清理
+
+本节是在 `support_dsv4_model@c370e9213f1632423f4c9478258bdf377b18715c` 上追加的第二次清理记录，不改写上面的首次拆分历史。本轮仍保留 DeepSeek-V4 基础模型、MTP、DSpark、Vision、PD、多级缓存及其必要的共享层契约；专家能力和通用稳定性/运维继续按上文排除。
+
+| 类别 | 回退内容 | 对应原提交或路径 |
+| --- | --- | --- |
+| 通用 DP 调度与容量架构 | 恢复既有 NCCL 调度控制、统一请求容量和通用 DP 状态；仅为 DSV4 跨 DP CPU checkpoint 保留节点内 Gloo group | `94fdfdeca05f3f94619a0c183088114c42e65124`、`f2e8f1429dccd199750bc5d9334dc4a30622dd15`、`c211f485aa0c5dcd392a22104f5b37cf44056c2e` |
+| DP cache-aware 调度 | 删除新增的 router DP cache-aware balancer，并恢复 `req_queue`、router manager 和控制状态 | `fbe49a2227d714ce373a0fde9d5701c77368ed85` |
+| 通用 HTTP/PD 传输优化 | 回退 compact token payload、streaming/serialization、async queue 和 PD-master 增量；保留 DSV4 packed cache 所需的变长字节传输 | `cfce08726b09e44182ff63df2978ae95cfea1337`、`baadd7ea316861c089956d46021e0b216a51bcf8`、`095c043d4781c8cc8f8b515d4e4e618958ff5a6f` |
+| MXFP4 Marlin 运行时后端 | 删除 `mxfp4w4a16-b32-marlin` 注册、实现、权重 finalize 和 CLI 暴露；保留 DSV4 MTP checkpoint 转 BF16 工具 | `e8009cb3e053ffe7dbe465c027e4fe6a676181c8` 中的可选 Marlin 路径 |
+| xgrammar 通用 tokenizer 兼容 | 删除 `get_xgrammar_tokenizer` 及底层 HF tokenizer 旁路；DSV4 tokenizer 回退只对 DSV4 生效 | `b8073f843c71dcd3f837b3b17522383dc3688b9d` |
+| structured-output 通用降级 | 恢复原有约束输出行为，不在 xgrammar 缺失时静默关闭 | `f14dd40738daf817d66ea8d025a93fe154fa8a8b`、`8ee409a5610d5a4a1023942a07ead1f020d269ec` |
+| Disk cache 实例目录隔离 | 恢复原有 disk worker/目录语义 | `0ed251199d7df166be65974e9846599409de94f8` |
+| Benchmark 与 autotune 产物 | 删除 static benchmark 增量及本 PR 新增的 H100/H200 autotune JSON | `388dd29de8a000500279ad273c06a6d7874f7cf1`、`4ac53e82fd3ecabef8ff0bbd4100a5fec3202821`、`0a48e27bcbfa8fec91f52bebb874616e1a2a95a0` |
+| DeepEP 环境自动调参 | 回退 decode dispatch capacity、NVSHMEM QP depth 等通用自动派生，恢复原有默认值 | `9a071ca5e0e53bab4bca63586f78e92b493cfb68`、`97ae2d12acdd77bcf87a786a710c0f1f049d8196`、`69c260f4a5f193fcd9170d06d0c77187a2ee18c1` |
+| B300 通用对齐 | 恢复设备判断；UE8M0 只在 SM100 上启用，不再无条件应用到所有设备 | `f5f3ed2cc74857ef8821840d5ca0d42c4f2a3e67` |
+| DSV4 DP 结束 barrier review | 不纳入无条件 DSV4 barrier；保留此前 CPU-cache 场景已有的条件 barrier | `a2a7052d1a9ffdf765e81f7c43bf59807d484f08` |
+
+清理后，`lightllm/server/httpserver_for_pd_master/`、`lightllm/server/router/req_queue/`、`lightllm/server/multi_level_kv_cache/disk_cache_worker.py` 和 `lightllm/utils/device_utils.py` 相对拆分基线无额外差异；`communication_op.py` 只保留 DSV4 `experts_` 字段兼容，HTTP server 只保留 Vision 图像块不可跨 prefill 切分的校验。此前确认的 MTP CUDA Graph hidden 输入修复继续保留。

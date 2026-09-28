@@ -5,7 +5,7 @@ import uuid
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
 
-from lightllm.utils.config_utils import get_generation_config_diff_dict
+from lightllm.utils.config_utils import get_generation_config_dict
 
 MAX_SEED = (1 << 63) - 1
 
@@ -163,7 +163,7 @@ class CompletionRequest(BaseModel):
     def load_generation_cfg(cls, weight_dir: str):
         """Load default values from model generation config."""
         try:
-            generation_cfg = get_generation_config_diff_dict(weight_dir)
+            generation_cfg = get_generation_config_dict(weight_dir)
             cls._loaded_defaults = {
                 "do_sample": generation_cfg.get("do_sample", True),
                 "presence_penalty": generation_cfg.get("presence_penalty", 0.0),
@@ -245,7 +245,7 @@ class ChatCompletionRequest(BaseModel):
     def load_generation_cfg(cls, weight_dir: str):
         """Load default values from model generation config."""
         try:
-            generation_cfg = get_generation_config_diff_dict(weight_dir)
+            generation_cfg = get_generation_config_dict(weight_dir)
             cls._loaded_defaults = {
                 "do_sample": generation_cfg.get("do_sample", True),
                 "presence_penalty": generation_cfg.get("presence_penalty", 0.0),

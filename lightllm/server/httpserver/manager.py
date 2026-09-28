@@ -688,7 +688,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         if not prompt_ids:
             raise InvalidRequestError("The input prompt must not be empty.")
         prompt_tokens = len(prompt_ids)
-        # MTP overlap reserves an additional KV window in get_real_supported_max_req_total_len.
+        # -36 用于保留通用边界余量，MTP overlap 所需的额外 KV 窗口由
+        # get_real_supported_max_req_total_len 单独扣除。
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
         if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:

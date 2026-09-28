@@ -1481,14 +1481,11 @@ class DeepSeekV32Detector(BaseFormatDetector):
     Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
     """
 
-    def __init__(self, block_name: str = "function_calls"):
+    def __init__(self):
         super().__init__()
         self.dsml_token = "｜DSML｜"
-        # DeepSeek V3.2 wraps tool calls in a `function_calls` block; V4 uses
-        # `tool_calls`. Only the outer block name differs — the invoke/parameter
-        # grammar is identical — so subclasses just override block_name.
-        self.bot_token = f"<{self.dsml_token}{block_name}>"
-        self.eot_token = f"</{self.dsml_token}{block_name}>"
+        self.bot_token = f"<{self.dsml_token}function_calls>"
+        self.eot_token = f"</{self.dsml_token}function_calls>"
         self.invoke_start_prefix = f"<{self.dsml_token}invoke"
         self.invoke_end_token = f"</{self.dsml_token}invoke>"
         self.param_end_token = f"</{self.dsml_token}parameter>"
@@ -1513,8 +1510,6 @@ class DeepSeekV32Detector(BaseFormatDetector):
         self._last_arguments = ""
         self._accumulated_params: List[tuple] = []
         self._in_function_calls = False  # Track if we're inside a function_calls block
-        # Text after a closed block is held unless it is whitespace before another block.
-        self._after_function_calls = False
 
     def has_tool_call(self, text: str) -> bool:
         return self.bot_token in text
@@ -1534,168 +1529,138 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """One-time parsing for DSML format tool calls."""
-        first_block_start = text.find(self.bot_token)
-        if first_block_start == -1:
-            return StreamingParseResult(normal_text=text, calls=[])
+        idx = text.find(self.bot_token)
+        normal_text = text[:idx].strip() if idx != -1 else text
+        if self.bot_token not in text:
+            return StreamingParseResult(normal_text=normal_text, calls=[])
 
-        normal_text = text[:first_block_start].removesuffix("\n\n")
+        tool_indices = self._get_tool_indices(tools)
         calls = []
-        search_pos = first_block_start
 
-        while True:
-            block_start = text.find(self.bot_token, search_pos)
-            if block_start == -1:
-                break
-            if text[search_pos:block_start].strip():
-                break
+        invoke_matches = self.invoke_regex.findall(text)
+        for func_name, invoke_body in invoke_matches:
+            if func_name not in tool_indices:
+                logger.warning(f"Model attempted to call undefined function: {func_name}")
+                continue
 
-            block_body_start = block_start + len(self.bot_token)
-            block_end = text.find(self.eot_token, block_body_start)
-            if block_end == -1:
-                break
+            param_matches = self.param_regex.findall(invoke_body)
+            args_json = self._dsml_params_to_json(param_matches)
 
-            invoke_matches = self.invoke_regex.findall(text[block_body_start:block_end])
-            for func_name, invoke_body in invoke_matches:
-                param_matches = self.param_regex.findall(invoke_body)
-                args_json = self._dsml_params_to_json(param_matches)
-                match_result = {
-                    "name": func_name,
-                    "parameters": json.loads(args_json),
-                }
-                for item in self.parse_base_json(match_result, tools):
-                    item.tool_index = len(calls)
-                    calls.append(item)
-
-            search_pos = block_end + len(self.eot_token)
+            calls.append(
+                ToolCallItem(
+                    tool_index=tool_indices[func_name],
+                    name=func_name,
+                    parameters=args_json,
+                )
+            )
 
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Streaming incremental parsing for DSML format tool calls."""
-        overlap = len(self.param_end_token) - 1
-        has_new_param_end = self.param_end_token in self._buffer[-overlap:] + new_text
         self._buffer += new_text
-        normal_text_parts = []
+        current_text = self._buffer
+
+        # Check if we're inside a function_calls block or starting one
+        has_tool = self.has_tool_call(current_text) or self._in_function_calls
+
+        if not has_tool:
+            partial_len = self._ends_with_partial_token(current_text, self.bot_token)
+            if partial_len:
+                return StreamingParseResult()
+
+            self._buffer = ""
+            for e_token in [self.eot_token, self.invoke_end_token]:
+                if e_token in new_text:
+                    new_text = new_text.replace(e_token, "")
+            return StreamingParseResult(normal_text=new_text)
+
+        # Mark that we're inside a function_calls block
+        if self.has_tool_call(current_text):
+            self._in_function_calls = True
+
+        # Check if function_calls block has ended
+        if self.eot_token in current_text:
+            self._in_function_calls = False
+
+        if not hasattr(self, "_tool_indices"):
+            self._tool_indices = self._get_tool_indices(tools)
+
         calls: List[ToolCallItem] = []
 
         try:
-            while True:
-                current_text = self._buffer
+            # Try to find complete invoke blocks first
+            complete_invoke_match = self.invoke_regex.search(current_text)
+            if complete_invoke_match:
+                func_name = complete_invoke_match.group(1)
+                invoke_body = complete_invoke_match.group(2)
 
-                if not self._in_function_calls:
-                    block_start = current_text.find(self.bot_token)
-                    if block_start == -1:
-                        if self._after_function_calls:
-                            return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
-
-                        partial_len = self._ends_with_partial_token(current_text, self.bot_token)
-                        if partial_len:
-                            normal_text_parts.append(current_text[:-partial_len])
-                            self._buffer = current_text[-partial_len:]
-                        else:
-                            normal_text_parts.append(current_text)
-                            self._buffer = ""
-                        return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
-
-                    outside_text = current_text[:block_start]
-                    if self._after_function_calls:
-                        if outside_text.strip():
-                            return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
-                    else:
-                        normal_text_parts.append(outside_text.removesuffix("\n\n"))
-
-                    self._buffer = current_text[block_start + len(self.bot_token) :]
-                    self._in_function_calls = True
-                    self._after_function_calls = False
-                    continue
-
-                self._buffer = current_text.lstrip()
-                current_text = self._buffer
-                if not current_text:
-                    return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
-
-                if current_text.startswith(self.eot_token):
-                    self._buffer = current_text[len(self.eot_token) :]
-                    self._in_function_calls = False
-                    self._after_function_calls = True
-                    continue
-
-                if self.eot_token.startswith(current_text):
-                    return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
-
-                complete_invoke_match = self.invoke_regex.match(current_text)
-                if complete_invoke_match:
-                    func_name = complete_invoke_match.group(1)
-                    invoke_body = complete_invoke_match.group(2)
-
-                    if self.current_tool_id == -1:
-                        self.current_tool_id = 0
-                        self.prev_tool_call_arr = []
-                        self.streamed_args_for_tool = [""]
-                        self._accumulated_params = []
-
-                    while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                        self.prev_tool_call_arr.append({})
-                    while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                        self.streamed_args_for_tool.append("")
-
-                    param_matches = self.param_regex.findall(invoke_body)
-                    args_json = self._dsml_params_to_json(param_matches)
-
-                    if not self.current_tool_name_sent:
-                        calls.append(
-                            ToolCallItem(
-                                tool_index=self.current_tool_id,
-                                name=func_name,
-                                parameters="",
-                            )
-                        )
-                        self.current_tool_name_sent = True
-
-                    sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                    argument_diff = args_json[sent:]
-                    if argument_diff:
-                        calls.append(
-                            ToolCallItem(
-                                tool_index=self.current_tool_id,
-                                name=None,
-                                parameters=argument_diff,
-                            )
-                        )
-                        self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-
-                    try:
-                        self.prev_tool_call_arr[self.current_tool_id] = {
-                            "name": func_name,
-                            "arguments": json.loads(args_json),
-                        }
-                    except json.JSONDecodeError:
-                        self.prev_tool_call_arr[self.current_tool_id] = {
-                            "name": func_name,
-                            "arguments": {},
-                        }
-
-                    self._buffer = current_text[complete_invoke_match.end() :]
-                    self.current_tool_id += 1
-                    self._last_arguments = ""
-                    self.current_tool_name_sent = False
+                if self.current_tool_id == -1:
+                    self.current_tool_id = 0
+                    self.prev_tool_call_arr = []
+                    self.streamed_args_for_tool = [""]
                     self._accumulated_params = []
-                    self.streamed_args_for_tool.append("")
-                    continue
 
-                if self.current_tool_name_sent and not has_new_param_end:
+                while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                    self.prev_tool_call_arr.append({})
+                while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                    self.streamed_args_for_tool.append("")
+
+                param_matches = self.param_regex.findall(invoke_body)
+                args_json = self._dsml_params_to_json(param_matches)
+
+                if not self.current_tool_name_sent:
                     calls.append(
                         ToolCallItem(
                             tool_index=self.current_tool_id,
+                            name=func_name,
                             parameters="",
                         )
                     )
-                    return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
+                    self.current_tool_name_sent = True
 
-                partial_match = self.partial_invoke_regex.match(current_text)
-                if not partial_match:
-                    return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
+                # Send complete arguments (or remaining diff)
+                sent = len(self.streamed_args_for_tool[self.current_tool_id])
+                argument_diff = args_json[sent:]
+                if argument_diff:
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=None,
+                            parameters=argument_diff,
+                        )
+                    )
+                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
 
+                try:
+                    self.prev_tool_call_arr[self.current_tool_id] = {
+                        "name": func_name,
+                        "arguments": json.loads(args_json),
+                    }
+                except json.JSONDecodeError:
+                    self.prev_tool_call_arr[self.current_tool_id] = {
+                        "name": func_name,
+                        "arguments": {},
+                    }
+
+                # Remove processed invoke from buffer
+                invoke_end_pos = current_text.find(self.invoke_end_token, complete_invoke_match.start())
+                if invoke_end_pos != -1:
+                    self._buffer = current_text[invoke_end_pos + len(self.invoke_end_token) :]
+                else:
+                    self._buffer = current_text[complete_invoke_match.end() :]
+
+                self.current_tool_id += 1
+                self._last_arguments = ""
+                self.current_tool_name_sent = False
+                self._accumulated_params = []
+                self.streamed_args_for_tool.append("")
+
+                return StreamingParseResult(normal_text="", calls=calls)
+
+            # Partial invoke: name is known but parameters are still streaming
+            partial_match = self.partial_invoke_regex.search(current_text)
+            if partial_match:
                 func_name = partial_match.group(1)
                 partial_body = partial_match.group(2)
 
@@ -1711,28 +1676,28 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     self.streamed_args_for_tool.append("")
 
                 if not self.current_tool_name_sent:
-                    calls.append(
-                        ToolCallItem(
-                            tool_index=self.current_tool_id,
-                            name=func_name,
-                            parameters="",
+                    if func_name in self._tool_indices:
+                        calls.append(
+                            ToolCallItem(
+                                tool_index=self.current_tool_id,
+                                name=func_name,
+                                parameters="",
+                            )
                         )
-                    )
-                    self.current_tool_name_sent = True
-                    self.prev_tool_call_arr[self.current_tool_id] = {
-                        "name": func_name,
-                        "arguments": {},
-                    }
+                        self.current_tool_name_sent = True
+                        self.prev_tool_call_arr[self.current_tool_id] = {
+                            "name": func_name,
+                            "arguments": {},
+                        }
                 else:
                     # Stream arguments as complete parameters are parsed
                     param_matches = self.param_regex.findall(partial_body)
                     if param_matches and len(param_matches) > len(self._accumulated_params):
                         self._accumulated_params = param_matches
                         current_args_json = self._dsml_params_to_json(param_matches)
-                        open_args_json = current_args_json[:-1]  # drop trailing '}'
 
                         sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                        argument_diff = open_args_json[sent:]
+                        argument_diff = current_args_json[sent:]
 
                         if argument_diff:
                             calls.append(
@@ -1749,11 +1714,11 @@ class DeepSeekV32Detector(BaseFormatDetector):
                         except json.JSONDecodeError:
                             pass
 
-                return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
+            return StreamingParseResult(normal_text="", calls=calls)
 
         except Exception as e:
             logger.error(f"Error in DeepSeekV32 parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
+            return StreamingParseResult(normal_text="", calls=calls)
 
 
 class Qwen3CoderDetector(BaseFormatDetector):
@@ -2049,29 +2014,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
 
 class DeepSeekV4Detector(DeepSeekV32Detector):
-    """
-    Detector for DeepSeek V4 model function call format using DSML.
-
-    Identical grammar to V3.2 (``<｜DSML｜invoke name="...">`` blocks with
-    ``<｜DSML｜parameter name="k" string="true|false">v</｜DSML｜parameter>``
-    tags), except the outer block is named ``tool_calls`` instead of
-    ``function_calls`` — matching the model's own encoding (encoding_dsv4.py:
-    ``tool_calls_block_name = "tool_calls"``) and system prompt.
-
-    Format Structure:
-    ```
-    <｜DSML｜tool_calls>
-    <｜DSML｜invoke name="get_weather">
-    <｜DSML｜parameter name="location" string="true">Hangzhou</｜DSML｜parameter>
-    </｜DSML｜invoke>
-    </｜DSML｜tool_calls>
-    ```
-
-    Reference: https://huggingface.co/deepseek-ai/DeepSeek-V4
-    """
+    """DeepSeek-V4 uses the V3.2 DSML payload with a tool_calls wrapper."""
 
     def __init__(self):
-        super().__init__(block_name="tool_calls")
+        super().__init__()
+        self.bot_token = f"<{self.dsml_token}tool_calls>"
+        self.eot_token = f"</{self.dsml_token}tool_calls>"
 
 
 class FunctionCallParser:

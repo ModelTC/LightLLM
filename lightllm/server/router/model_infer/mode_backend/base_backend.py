@@ -45,7 +45,10 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
-from lightllm.server.multi_level_kv_cache import create_cache_placement_controller
+from lightllm.server.multi_level_kv_cache import (
+    CacheTier,
+    create_cache_placement_controller,
+)
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from .dsv4_multi_level_kv_cache import Dsv4MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
@@ -199,11 +202,15 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_control_tensor = torch.zeros(2, dtype=torch.int32, device="cpu", requires_grad=False)
             self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_all_gather_tensor = torch.tensor(
+                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+            )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.zeros(1, dtype=torch.int32, device="cpu", requires_grad=False)
+        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        # DeepSeek-V4 DP prompt-cache checkpoints live in process-local CPU memory.
         self.node_gloo_group = create_new_group_for_current_node("gloo")
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
@@ -472,8 +479,8 @@ class ModeBackend:
                 self.node_broadcast_tensor.fill_(0)
 
         src_rank_id = self.args.node_rank * self.node_world_size
-        broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_gloo_group, async_op=False)
-        new_buffer_is_ready = self.node_broadcast_tensor.item()
+        broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
+        new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
@@ -486,8 +493,8 @@ class ModeBackend:
                     self.node_broadcast_tensor.fill_(0)
 
             src_rank_id = self.args.node_rank * self.node_world_size
-            broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_gloo_group, async_op=False)
-            new_buffer_is_ready = self.node_broadcast_tensor.item()
+            broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
+            new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
             if new_buffer_is_ready:
                 self._read_pd_trans_io_buffer_and_update_req_status()
         return
@@ -823,14 +830,24 @@ class ModeBackend:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 
-        # 先由控制器确定请求需要写入的缓存层级。
+        # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller
         new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
         cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
-            true_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
-                finished_reqs=finished_reqs
+            offload_reqs = [
+                req for req in finished_reqs if CacheTier.CPU in req.cache_tiers or CacheTier.DISK in req.cache_tiers
+            ]
+            offload_finished_reqs = self.multi_level_cache_module.offload_finished_reqs_to_cpu_cache(
+                finished_reqs=offload_reqs
             )
+            offload_finished_req_ids = {req.req_id for req in offload_finished_reqs}
+            true_finished_reqs = [
+                req
+                for req in finished_reqs
+                if (CacheTier.CPU not in req.cache_tiers and CacheTier.DISK not in req.cache_tiers)
+                or req.req_id in offload_finished_req_ids
+            ]
         else:
             true_finished_reqs = finished_reqs
 
@@ -1008,26 +1025,23 @@ class ModeBackend:
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
-    def _dp_all_reduce_req_presence(
+    def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
-    ) -> tuple[bool, bool]:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Return whether any DP rank has prefill or decode requests.
+        Gather the number of prefill requests across all DP ranks.
+        """
+        current_dp_prefill_num = len(prefill_reqs)
+        self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
+        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
+        dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
 
-        Request counts originate on the CPU and the scheduler only needs their
-        global presence. Keep this control-plane collective on the CPU so it can
-        overlap the previous CUDA graph instead of synchronizing that graph back
-        to the host every decode step.
-        """
-        self.dp_control_tensor[0] = bool(prefill_reqs)
-        self.dp_control_tensor[1] = bool(decode_reqs)
-        all_reduce(
-            self.dp_control_tensor,
-            op=dist.ReduceOp.MAX,
-            group=dist_group_manager.dp_control_group,
-            async_op=False,
-        )
-        return bool(self.dp_control_tensor[0]), bool(self.dp_control_tensor[1])
+        current_dp_decode_num = len(decode_reqs)
+        self.dp_gather_item_tensor.fill_(current_dp_decode_num)
+        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
+        dp_decode_req_nums = self.dp_all_gather_tensor.cpu().numpy()
+
+        return dp_prefill_req_nums, dp_decode_req_nums
 
     def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
         """

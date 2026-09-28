@@ -330,7 +330,7 @@ class TpPartBaseModel:
         model_input.to_cuda()
 
         if model_input.is_prefill:
-            return self._prefill(model_input)
+            return self._prefill(model_input=model_input)
         else:
             return self._decode(model_input)
 
@@ -720,6 +720,7 @@ class TpPartBaseModel:
         post_output: PostLayerOutput = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
+
         hidden_collector.add_final_hidden(last_input_embs)
         model_output = self._create_model_output(post_output, infer_state)
         del post_output
@@ -922,6 +923,7 @@ class TpPartBaseModel:
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
         g_cache_manager.cache_env_out()
+
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = self._create_model_output(post_output, infer_state)
@@ -963,6 +965,7 @@ class TpPartBaseModel:
         post_output, post_output1 = self.post_infer.overlap_tpsp_token_forward(
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
+
         hidden_collector0.add_final_hidden(last_input_embs)
         hidden_collector1.add_final_hidden(last_input_embs1)
         model_output = self._create_model_output(post_output, infer_state)

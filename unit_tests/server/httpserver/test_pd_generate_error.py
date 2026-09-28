@@ -36,7 +36,7 @@ class _SuccessfulManager:
     args = SimpleNamespace(run_mode="prefill")
 
     async def generate(self, **_kwargs):
-        yield 123, "token", {"count_output_tokens": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
+        yield 123, "token", {}, FinishStatus(FinishStatus.FINISHED_STOP)
 
 
 class _StopPrefillManager:

@@ -16,7 +16,6 @@ try:
     from nixl._api import nixl_agent as NixlWrapper
     from nixl._api import nixlBind
     from nixl._api import nixl_agent_config
-    from nixl._api import nixl_thread_sync_t
 
     logger.info("Nixl is available")
 except ImportError:
@@ -34,13 +33,13 @@ class NixlKVTransporter:
             "yes",
             "on",
         )
-        conf = nixl_agent_config(sync_mode=nixl_thread_sync_t.NIXL_THREAD_SYNC_RW)
+        conf = None
         if self.capture_telemetry:
+            conf = nixl_agent_config()
             conf.capture_telemetry = True
             logger.info("NIXL telemetry enabled")
         self.nixl_agent = NixlWrapper(self.agent_name, conf)
         self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
-        self._remote_agents_lock = threading.Lock()
         self.remote_agents: Dict[str, PDAgentMetadata] = {}
         # Serialize complete peer add/remove operations, including native NIXL
         # calls and descriptor cleanup, across worker threads (see GH-1470).
@@ -129,8 +128,7 @@ class NixlKVTransporter:
             }
 
             logger.info(
-                f"Added remote agent {peer_name} with mem desc {page_mem_desc} "
-                f"cost time: {time.time() - start_time} s"
+                f"Added remote agent {peer_name} with mem desc {page_mem_desc} cost time: {time.time() - start_time} s"
             )
 
             self.remote_agents[remote_agent.agent_name] = remote_agent
@@ -314,12 +312,7 @@ class NixlKVTransporter:
     def check_task_status(self, trans_task: PDChunckedTransTask) -> str:
         assert trans_task.xfer_handle is not None
         handle = trans_task.xfer_handle
-        try:
-            xfer_state = self.nixl_agent.check_xfer_state(handle)
-        except Exception as e:
-            logger.error(f"Check transfer state failed with trans task {trans_task.to_str()} for handle {handle}")
-            logger.exception(str(e))
-            return "ERR"
+        xfer_state = self.nixl_agent.check_xfer_state(handle)
         if xfer_state == "ERR":
             logger.warning(f"Transfer failed with trans task {trans_task.to_str()} for handle {handle}")
         return xfer_state

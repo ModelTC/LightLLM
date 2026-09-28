@@ -148,11 +148,12 @@ async def build_prompt(request, tools) -> str:
     if request.role_settings:
         kwargs["role_setting"] = request.role_settings
 
+    if request.reasoning_effort is not None:
+        kwargs["reasoning_effort"] = request.reasoning_effort
+
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
 
-    if request.reasoning_effort is not None and "reasoning_effort" not in kwargs:
-        kwargs["reasoning_effort"] = request.reasoning_effort
     # 修复一些parser类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
     # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
     from .api_openai import _is_force_thinking_mode
@@ -169,11 +170,5 @@ async def build_prompt(request, tools) -> str:
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except Exception as e:
-        logger.exception(
-            "Failed to build prompt. request=%s tools=%s template_kwargs=%s",
-            json.dumps(request.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False, default=str),
-            json.dumps(tools, ensure_ascii=False, default=str),
-            json.dumps(kwargs, ensure_ascii=False, default=str),
-        )
-        raise ValueError(f"Failed to build prompt: {e}") from e
+        raise ValueError(f"Failed to build prompt: {e}") from None
     return input_str

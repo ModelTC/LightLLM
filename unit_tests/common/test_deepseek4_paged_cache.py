@@ -45,7 +45,7 @@ def cache(monkeypatch, tmp_path):
         compress_rates=[4, 128, 0],
         max_request_num=2,
         mtp_step=3,
-        swa_full_tokens_ratio=1.0,
+        swa_page_num=64,
     )
     requests = DeepseekV4ReqManager(2, 4096, manager, sliding_window=128)
     yield manager, requests
@@ -628,7 +628,7 @@ def _checkpoint_transfer_worker(rank, rendezvous):
 
     torch.cuda.set_device(rank)
     dist.init_process_group(
-        "nccl", init_method="file://" + rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=60)
+        "gloo", init_method="file://" + rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=60)
     )
     try:
         buffers = DeepseekV4StateCacheManager(2, DeepseekV4CpuCacheLayout.from_compress_rates([4, 128]))
@@ -638,7 +638,7 @@ def _checkpoint_transfer_worker(rank, rendezvous):
         module = DPKVSharedMoudle.__new__(DPKVSharedMoudle)
         module.backend = SimpleNamespace(
             args=SimpleNamespace(linear_att_hash_page_size=256, linear_att_page_block_num=8, max_req_total_len=8192),
-            node_nccl_group=dist.group.WORLD,
+            node_gloo_group=dist.group.WORLD,
             model=SimpleNamespace(mem_manager=SimpleNamespace(big_page_buffers=buffers)),
             radix_cache=SimpleNamespace(get_big_page_ids_by_node=lambda node: [0, 1]),
         )
@@ -671,6 +671,6 @@ def _checkpoint_transfer_worker(rank, rendezvous):
         dist.destroy_process_group()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices for NCCL")
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
 def test_dp_checkpoint_transfer_between_processes(tmp_path):
     torch.multiprocessing.spawn(_checkpoint_transfer_worker, args=(str(tmp_path / "rendezvous"),), nprocs=2, join=True)

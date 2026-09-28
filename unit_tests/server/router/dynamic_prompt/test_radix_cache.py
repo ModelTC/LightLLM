@@ -249,12 +249,7 @@ def test_case10():
     测试场景：测试 flush_cache 函数
     """
     print("\nTest Case 10: Testing flush_cache function\n")
-    allocator = SimpleNamespace(can_use_mem_size=95)
-
-    def free(indexes):
-        allocator.can_use_mem_size += len(indexes)
-
-    tree = RadixCache(100, 0, mem_manager=SimpleNamespace(page_size=1, allocator=allocator, free=free))
+    tree = RadixCache(100, 0)
     tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
     tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
     tree_node, size, values = tree.match_prefix(
@@ -262,9 +257,7 @@ def test_case10():
     )
     assert tree_node is not None
     assert size == 3
-    tree.dec_node_ref_counter(tree_node)
     tree.flush_cache()
-    assert allocator.can_use_mem_size == 100
     tree_node, size, values = tree.match_prefix(
         torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True
     )

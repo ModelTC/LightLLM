@@ -54,6 +54,7 @@ class StartArgs:
                 "qwen",
                 "deepseekv31",
                 "deepseekv32",
+                "deepseekv4",
                 "glm47",
                 "kimi_k2",
                 "qwen3_coder",
@@ -84,7 +85,6 @@ class StartArgs:
     )
     chat_template: Optional[str] = field(default=None)
     running_max_req_size: int = field(default=256)
-    per_dp_running_max_req_size: Optional[int] = field(default=None, init=False)
     tp: int = field(default=1)
     dp: int = field(default=1)
     nnodes: int = field(default=1)
@@ -226,7 +226,7 @@ class StartArgs:
     multinode_httpmanager_port: int = field(default=12345)
 
     disable_shm_warning: bool = field(default=False)
-    dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer", "cache_aware"]})
+    dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer"]})
     enable_fused_shared_experts: bool = field(default=False)
     enable_mps: bool = field(default=False)
     multinode_router_gloo_port: int = field(default=20001)
