@@ -230,7 +230,7 @@ class HttpServerManagerForPDMaster:
         origin_request_id: int,
         input_token_num: int,
     ):
-        """节点繁忙时重新选择 P/D 节点，并在配置的探测周期内重试。"""
+        """处理节点繁忙错误；配置正数探测周期时重新选择 P/D 节点并重试。"""
         retry_start_time = time.monotonic()
         has_yielded_result = False
 
@@ -338,11 +338,13 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
-                # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
-                # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧
-                # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
-                # 紧张导致分段续跑失败。
-                sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
+                # high_priority_request 只影响 HTTP 资源申请和 Router 等待队列：首段仅在
+                # 输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍有效时提升；
+                # 第二段及后续分段统一提升，避免因临时资源紧张导致分段续跑失败。
+                sampling_params.high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
+                # infer_high_priority 是 PD 内部通信字段，不接受外部请求设置。
+                # 仅第二段及后续分段在推理进程中优先排队。
+                sampling_params.infer_high_priority = -1 if segment_index > 0 else 0
                 # 仅在 Master 开启限流时下发资源等待超时。续跑分段已经产生了部分结果，
                 # 使用独立配置的等待时间，提高请求最终完成的成功率。
                 if self.enable_pd_node_self_request_limit:

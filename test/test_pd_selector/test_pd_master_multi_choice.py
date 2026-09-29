@@ -394,6 +394,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
         dispatched_loads = []
         dispatched_req_counts = []
         high_priority_request_flags = []
+        infer_high_priorities = []
         dispatched_max_new_tokens = []
 
         async def wait_to_token_package(
@@ -404,7 +405,8 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
             dispatched_prompts.append(block_prompt)
             dispatched_loads.append(selected_p_node.dispatched_prompt_chars)
             dispatched_req_counts.append(selected_p_node.dispatched_req_num)
-            high_priority_request_flags.append(sampling_params.pd_high_priority_request)
+            high_priority_request_flags.append(sampling_params.high_priority_request)
+            infer_high_priorities.append(sampling_params.infer_high_priority)
             dispatched_max_new_tokens.append(sampling_params.max_new_tokens)
             yield (
                 sampling_params.group_request_id,
@@ -447,6 +449,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
         assert dispatched_loads == [other_request_load + len("prompt"), other_request_load + len("promptx")]
         assert dispatched_req_counts == [other_request_count + 1, other_request_count + 1]
         assert high_priority_request_flags == [False, True]
+        assert infer_high_priorities == [0, -1]
         assert dispatched_max_new_tokens == [2, 1]
         assert p_node.dispatched_prompt_chars == other_request_load
         assert p_node.dispatched_req_num == other_request_count
@@ -561,7 +564,7 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
         high_priority_request_flags = []
 
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
-            high_priority_request_flags.append(sampling_params.pd_high_priority_request)
+            high_priority_request_flags.append(sampling_params.high_priority_request)
             yield (
                 sampling_params.group_request_id,
                 "x",
@@ -619,7 +622,7 @@ def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expecte
         async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
             captured_request_settings.append(
                 (
-                    sampling_params.pd_high_priority_request,
+                    sampling_params.high_priority_request,
                     sampling_params.pd_node_resource_wait_timeout_seconds,
                 )
             )

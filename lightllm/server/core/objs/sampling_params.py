@@ -286,9 +286,10 @@ class SamplingParams(ctypes.Structure):
         ("stop_sequences", StopSequenceGroups),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
-        # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
-        # 以高优先级插入 Router 调度队列。
-        ("pd_high_priority_request", ctypes.c_bool),
+        # 由 PD Master 设置，仅用于 HTTP 资源申请和 Router 等待队列调度。
+        ("high_priority_request", ctypes.c_bool),
+        # PD 内部通信使用的 prefill 排队优先级；0 表示普通请求，负值表示高优先级请求。
+        ("infer_high_priority", ctypes.c_int),
         # P/D 节点的资源等待超时，由 PD Master 下发。非负值用于控制 shm_req 申请和
         # Router 等待进入推理系统的时限；负数表示永久等待。
         ("pd_node_resource_wait_timeout_seconds", ctypes.c_int),
@@ -337,8 +338,9 @@ class SamplingParams(ctypes.Structure):
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
-        # 这两个字段是 PD Master 的内部调度信息，不能由外部请求参数开启或修改。
-        self.pd_high_priority_request = False
+        # PD Master 的内部调度信息，不能由外部请求参数开启或修改。
+        self.high_priority_request = False
+        self.infer_high_priority = 0
         self.pd_node_resource_wait_timeout_seconds = -1
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
@@ -508,7 +510,8 @@ class SamplingParams(ctypes.Structure):
             "allowed_token_ids": self.allowed_token_ids.to_list(),
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
-            "pd_high_priority_request": self.pd_high_priority_request,
+            "high_priority_request": self.high_priority_request,
+            "infer_high_priority": self.infer_high_priority,
             "pd_node_resource_wait_timeout_seconds": self.pd_node_resource_wait_timeout_seconds,
             "skip_special_tokens": self.skip_special_tokens,
             "add_special_tokens": self.add_special_tokens,
