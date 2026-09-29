@@ -978,14 +978,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="""Extra ops plugin(s) to load at startup, comma-separated names.
-                Each name must match a pip-installed plugin."""
+                Each name must match a pip-installed plugin.""",
     )
     parser.add_argument(
         "--extra_att",
         type=str,
         default=None,
         help="""Extra att plugin(s) to load at startup, comma-separated names.
-                Each name must match a pip-installed plugin."""
+                Each name must match a pip-installed plugin.""",
     )
     return parser
 

@@ -22,12 +22,13 @@ def get_hardware_backend() -> HardwareBackend:
     platform_name = get_env_start_args().hardware_platform
     spec = get_platform_spec(platform_name)
 
-    backend_cls = spec.backend_cls
-    _backend = backend_cls()
+    backend_cls = spec.load_backend_cls()
+    backend = backend_cls()
 
-    if not _backend.runtime.is_available():
+    if not backend.runtime.is_available():
         raise RuntimeError(f"Hardware backend {backend_cls.__name__} is not available.")
 
+    _backend = backend
     return _backend
 
 
