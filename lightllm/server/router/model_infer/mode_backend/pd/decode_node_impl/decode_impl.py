@@ -138,7 +138,10 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 and not req_obj.infer_aborted
                 and req_obj.cur_kv_len == req_obj.shm_req.input_len
                 and req_obj.hybrid_cache_len > 0
-                and req_obj.hybrid_cache_len == (req_obj.shm_req.input_len - 1) // 256 * 256
+                and req_obj.hybrid_cache_len
+                == (req_obj.shm_req.input_len - 1)
+                // self.args.linear_att_hash_page_size
+                * self.args.linear_att_hash_page_size
                 and req_obj.tail_small_page_buffer_id is None
                 and self.radix_cache is not None
             ):
@@ -201,8 +204,6 @@ class PDDecodeNode(ChunkedPrefillBackend):
                     return False
                 if self.radix_cache is not None:
                     self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
-                if need_mem_size > mem_manager.allocator.can_use_mem_size:
-                    return False
 
                 prompt_page = req_manager.get_prompt_cache_page_size()
                 swa_start = max(0, (input_len - 1) // prompt_page * prompt_page - prompt_page)
