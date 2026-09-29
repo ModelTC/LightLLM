@@ -103,7 +103,7 @@ class HttpServerManagerForPDMaster:
             up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
             up_status_event.upkv_status = upkv_status
             up_status_event.set()
-        except:
+        except Exception:
             pass
         return
 
@@ -414,7 +414,7 @@ class HttpServerManagerForPDMaster:
 
             try:
                 await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
-            except:
+            except Exception:
                 await self.abort(block_group_request_id)
             raise e
 
@@ -724,17 +724,17 @@ class HttpServerManagerForPDMaster:
             del self.req_id_to_out_inf[group_request_id]
             p_node = req_status.p_node
             d_node = req_status.d_node
-        except:
+        except Exception:
             pass
 
         try:
             await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
+        except Exception:
             pass
 
         try:
             await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
+        except Exception:
             pass
 
         return
@@ -742,7 +742,7 @@ class HttpServerManagerForPDMaster:
     async def remove_req(self, group_request_id):
         try:
             del self.req_id_to_out_inf[group_request_id]
-        except:
+        except Exception:
             pass
 
     async def timer_log(self):
@@ -782,7 +782,7 @@ class HttpServerManagerForPDMaster:
                                 async with req_status.lock:
                                     req_status.out_token_info_list.append((sub_req_id, text, metadata, finish_status))
                                     req_status.event.set()
-                            except:
+                            except Exception:
                                 pass
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
@@ -791,7 +791,7 @@ class HttpServerManagerForPDMaster:
                             async with req_status.lock:
                                 req_status.prefill_prompt_ids_event.prompt_ids = prompt_ids
                                 req_status.prefill_prompt_ids_event.set()
-                        except:
+                        except Exception:
                             logger.error(
                                 f"PD_UPLOAD_PREFILL_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
                             )

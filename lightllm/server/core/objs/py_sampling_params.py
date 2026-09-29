@@ -125,7 +125,7 @@ class SamplingParams:
             cls._top_p = _cfg("top_p", 1.0)
             cls._top_k = _cfg("top_k", -1)
             cls._stop_sequences = generation_cfg.get("stop", None)
-        except:
+        except Exception:
             pass
 
     def verify(self):

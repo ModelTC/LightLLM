@@ -58,7 +58,7 @@ def tokenizer_supports_force_thinking() -> bool:
         logger.debug(f"chat_template: {tokenizer.chat_template}")
         logger.info(f"tokenizer_supports_force_thinking : {ans}")
         return ans
-    except:
+    except (AttributeError, TypeError):
         pass
 
     try:
@@ -66,7 +66,7 @@ def tokenizer_supports_force_thinking() -> bool:
         logger.debug(f"tokenizer.tokenizer.chat_template: {tokenizer.tokenizer.chat_template}")
         logger.info(f"tokenizer_supports_force_thinking : {ans}")
         return ans
-    except:
+    except (AttributeError, TypeError):
         pass
 
     logger.info("tokenizer_supports_force_thinking : False")
