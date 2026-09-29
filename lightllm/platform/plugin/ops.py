@@ -1,43 +1,39 @@
-from dataclasses import dataclass, field
-from typing import Callable
+from dataclasses import fields, replace
+from typing import Callable, TypeVar
 
-# The default order of fallback implementations.
-DEFAULT_ORDER = ("triton", "torch")
+from lightllm.platform.ops import PlatformOps
 
-OPS_TABLE: dict[str, "OpEntry"] = {}
-
-
-@dataclass
-class OpEntry:
-    fns: dict[str, Callable] = field(default_factory=dict)
-    extras: list[str] = field(default_factory=list)
-
-    @property
-    def impls(self) -> tuple[str, ...]:
-        extras = tuple(name for name in self.extras if name in self.fns)
-        defaults = tuple(kind for kind in DEFAULT_ORDER if kind in self.fns)
-        return extras + defaults
+OpsGroupT = TypeVar("OpsGroupT")
 
 
-def register_op(op_name: str, *, impl: str):
-    def decorator(fn: Callable) -> Callable:
-        entry = OPS_TABLE.setdefault(op_name, OpEntry())
-        if impl in entry.fns:
-            raise RuntimeError(f"The {op_name} op has already been registered with the {impl!r} implementation.")
-        entry.fns[impl] = fn
-        if impl not in DEFAULT_ORDER:
-            entry.extras.insert(0, impl)
-        return fn
-
-    return decorator
+OPS_PLUGINS: dict[tuple[str, str], dict[str, Callable]] = {}
 
 
-def get_op(op_name: str) -> Callable:
-    entry = OPS_TABLE.get(op_name)
-    if entry is None:
-        raise NotImplementedError(f"The {op_name!r} op is not registered.")
-    for impl in entry.impls:
-        fn = entry.fns.get(impl)
-        if fn is not None:
-            return fn
-    raise NotImplementedError(f"The {op_name!r} op has no usable implementation in {entry.impls}.")
+def register_ops(name: str, platforms: tuple[str, ...] = ("cuda",), **ops: Callable) -> None:
+    for platform in platforms:
+        current = OPS_PLUGINS.setdefault((platform, name), {})
+        duplicates = current.keys() & ops.keys()
+        if duplicates:
+            raise ValueError(
+                f"Ops {sorted(duplicates)} are already registered for platform {platform!r}, group {name!r}."
+            )
+        current.update(ops)
+
+
+def build_ops_group(name: str, platform: str, default: OpsGroupT) -> OpsGroupT:
+    updates = OPS_PLUGINS.get((platform, name), {})
+    if not updates:
+        return default
+    return replace(default, **updates)
+
+
+def build_platform_ops(platform: str, default: PlatformOps) -> PlatformOps:
+    ops = {
+        field.name: build_ops_group(
+            field.name,
+            platform,
+            getattr(default, field.name),
+        )
+        for field in fields(default)
+    }
+    return replace(default, **ops)
