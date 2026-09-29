@@ -174,7 +174,6 @@ class FusedMoeWeight(BaseWeightTpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
-        alloc_tensor_func=torch.empty,
     ) -> torch.Tensor:
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
@@ -189,7 +188,6 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            alloc_tensor_func=alloc_tensor_func,
         )
 
     def low_latency_dispatch(

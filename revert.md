@@ -62,6 +62,7 @@
 | Benchmark 与 autotune 产物 | 删除 static benchmark 增量及本 PR 新增的 H100/H200 autotune JSON | `388dd29de8a000500279ad273c06a6d7874f7cf1`、`4ac53e82fd3ecabef8ff0bbd4100a5fec3202821`、`0a48e27bcbfa8fec91f52bebb874616e1a2a95a0` |
 | DeepEP 环境自动调参 | 回退 decode dispatch capacity、NVSHMEM QP depth 等通用自动派生，恢复原有默认值 | `9a071ca5e0e53bab4bca63586f78e92b493cfb68`、`97ae2d12acdd77bcf87a786a710c0f1f049d8196`、`69c260f4a5f193fcd9170d06d0c77187a2ee18c1` |
 | B300 通用对齐 | 恢复设备判断；UE8M0 只在 SM100 上启用，不再无条件应用到所有设备 | `f5f3ed2cc74857ef8821840d5ca0d42c4f2a3e67` |
+| 通用采样默认值优化 | 恢复 `core/objs` 直接通过 Transformers 加载完整 generation config，不再使用为改变默认 `top_k` 引入的共享 helper | `c19b8537134c66040a8dc1468c0b848650155967` (`default topk from huggingface's 50 to -1, if_inverse 70.6 -> 73`) |
 | DSV4 DP 结束 barrier review | 不纳入无条件 DSV4 barrier；保留此前 CPU-cache 场景已有的条件 barrier | `a2a7052d1a9ffdf765e81f7c43bf59807d484f08` |
 | mHC TileLang 启动预热 | 回退通用 `_kernel_warmup` hook、DSV4 mHC 预热流程及 split-K token 枚举；保留 MTP hidden 准备所需的 `hc_post` 引用 | `fc8b7ec411774fab269e1e3799efff4ac15f826e` (`warmup tilelang`) |
 

@@ -67,7 +67,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
-        alloc_tensor_func=torch.empty,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -102,7 +101,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
-        alloc_tensor_func=torch.empty,
     ):
         return self._fused_experts(
             input_tensor=input_tensor,
@@ -114,7 +112,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            alloc_tensor_func=alloc_tensor_func,
         )
 
     def __call__(

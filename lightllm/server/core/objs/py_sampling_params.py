@@ -4,7 +4,7 @@
 """
 import os
 from typing import List, Optional, Union, Tuple
-from lightllm.utils.config_utils import get_generation_config_dict
+from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
 from .sampling_params import MAX_SEED
 
@@ -111,11 +111,11 @@ class SamplingParams:
     @classmethod
     def load_generation_cfg(cls, weight_dir):
         try:
-            generation_cfg = get_generation_config_dict(weight_dir)
+            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
 
             def _cfg(key, default):
-                value = generation_cfg.get(key)
-                return value if value is not None else default
+                v = generation_cfg.get(key)
+                return v if v is not None else default
 
             cls._do_sample = _cfg("do_sample", False)
             cls._presence_penalty = _cfg("presence_penalty", 0.0)

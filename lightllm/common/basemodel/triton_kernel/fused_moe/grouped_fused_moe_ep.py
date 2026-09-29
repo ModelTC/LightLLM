@@ -78,18 +78,15 @@ def masked_group_gemm(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    alloc_tensor_func: Callable = torch.empty,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
     block_size = 128
     # groupgemm (masked layout)
-    gemm_out_a = alloc_tensor_func((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
+    gemm_out_a = torch.empty((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
     expected_m = min(expected_m, padded_m)
-    qsilu_out_scale = alloc_tensor_func(
-        (E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32
-    )
-    qsilu_out = alloc_tensor_func((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
+    qsilu_out_scale = torch.empty((E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32)
+    qsilu_out = torch.empty((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
     silu_and_mul_masked_post_quant_fwd(
@@ -103,7 +100,7 @@ def masked_group_gemm(
         clamp_up_add_one=clamp_up_add_one,
     )
     del gemm_out_a
-    gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
+    gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
@@ -219,7 +216,6 @@ def fused_experts(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    alloc_tensor_func: Callable = torch.empty,
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
     check_ep_expert_dtype(quant_method)
@@ -247,7 +243,6 @@ def fused_experts(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
-        alloc_tensor_func=alloc_tensor_func,
     )
 
 
@@ -269,7 +264,6 @@ def fused_experts_impl(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    alloc_tensor_func: Callable = torch.empty,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -291,9 +285,7 @@ def fused_experts_impl(
 
     combined_x = None
     if is_prefill:
-        qinput_tensor, input_scale = per_token_group_quant_fp8(
-            hidden_states, block_size_k, dtype=w1.dtype, alloc_func=alloc_tensor_func
-        )
+        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
         #   recv_x[0]: [num_expanded_tokens, hidden]
@@ -403,7 +395,6 @@ def fused_experts_impl(
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            alloc_tensor_func=alloc_tensor_func,
         )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
