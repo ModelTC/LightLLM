@@ -25,6 +25,9 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
+_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS = 5
+_PD_RECONNECT_DELAY_SECONDS = 10
+
 
 async def timer_log(manager: HttpServerManager):
     while True:
@@ -78,10 +81,9 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
     pd_handle_loop 主要负责与 pd master 进行注册连接，然后接收pd master发来的请求，然后
     将推理结果转发给 pd master进行处理。
     """
-    # 创建转发队列
-    forwarding_queue = AsyncQueue()
-
     while True:
+        # Each connection owns its queue; stale generators must not report to a new peer.
+        forwarding_queue = AsyncQueue()
         forwarding_tokens_task = None
         heartbeat_task = None
         generation_tasks: Dict[int, asyncio.Task] = {}
@@ -125,6 +127,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
+                        manager.begin_pd_request_registration(group_req_id)
                         generation_task = asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
@@ -138,9 +141,12 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         )
                         generation_tasks[group_req_id] = generation_task
 
-                        def remove_generation_task(task: asyncio.Task, request_id: int = group_req_id):
-                            if generation_tasks.get(request_id) is task:
-                                generation_tasks.pop(request_id, None)
+                        def remove_generation_task(
+                            task: asyncio.Task, request_id: int = group_req_id, tasks=generation_tasks
+                        ):
+                            if tasks.get(request_id) is task:
+                                tasks.pop(request_id, None)
+                                manager.cancel_pd_request_registration(request_id)
 
                         generation_task.add_done_callback(remove_generation_task)
                     elif obj[0] == ObjType.ABORT:
@@ -149,15 +155,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         generation_task = generation_tasks.get(group_req_id)
                         if generation_task is not None and not generation_task.done():
                             generation_task.cancel()
-                        if not (await manager.abort(group_req_id)):
-
-                            async def delayed_abort_task(group_req_id, retry_count):
-                                for _ in range(retry_count):
-                                    await asyncio.sleep(5.0)
-                                    if await manager.abort(group_req_id):
-                                        break
-
-                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
+                        await manager.abort(group_req_id)
 
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
@@ -179,15 +177,24 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
         finally:
+            for group_req_id in list(generation_tasks):
+                await manager.abort(group_req_id)
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
-                await asyncio.gather(*child_tasks, return_exceptions=True)
+                done_tasks, pending_tasks = await asyncio.wait(
+                    child_tasks, timeout=_PD_CHILD_TASK_CLEANUP_TIMEOUT_SECONDS
+                )
+                if done_tasks:
+                    await asyncio.gather(*done_tasks, return_exceptions=True)
+                if pending_tasks:
+                    logger.warning("Timed out cleaning up %s PD child task(s); reconnecting", len(pending_tasks))
+                    for task in pending_tasks:
+                        task.cancel()
 
-        await asyncio.sleep(10)
-        await forwarding_queue.get_all_data()
+        await asyncio.sleep(_PD_RECONNECT_DELAY_SECONDS)
         logger.info("reconnection to pd_master")
 
 
@@ -268,6 +275,8 @@ async def _pd_process_generate(
             )
         except Exception:
             logger.exception(f"report pd node generate error failed, group_request_id: {group_request_id}")
+    finally:
+        manager.cancel_pd_request_registration(sampling_params.group_request_id)
 
 
 # 转发token的task
