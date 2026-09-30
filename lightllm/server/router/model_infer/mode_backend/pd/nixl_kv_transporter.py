@@ -84,24 +84,6 @@ class NixlKVTransporter:
         descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
 
-    def _get_local_page_xfer_handles(self, transfer_nbytes: int):
-        if transfer_nbytes not in self.page_local_xfer_handles:
-            self.page_local_xfer_handles[transfer_nbytes] = self._create_paged_xfer_handles(
-                self.page_reg_desc, self.num_pages, transfer_nbytes
-            )
-        return self.page_local_xfer_handles[transfer_nbytes]
-
-    def _get_remote_page_xfer_handles(self, remote_agent: PDAgentMetadata, transfer_nbytes: int):
-        if transfer_nbytes not in remote_agent.page_xfer_handles:
-            page_mem_desc = self.nixl_agent.deserialize_descs(remote_agent.page_reg_desc)
-            remote_agent.page_xfer_handles[transfer_nbytes] = self._create_paged_xfer_handles(
-                page_mem_desc,
-                remote_agent.num_pages,
-                transfer_nbytes,
-                agent_name=remote_agent.agent_name,
-            )
-        return remote_agent.page_xfer_handles[transfer_nbytes]
-
     def connect_add_remote_agent(self, remote_agent: PDAgentMetadata):
         with self._remote_agents_lock:
             if remote_agent.agent_name in self.remote_agents:
@@ -292,8 +274,22 @@ class NixlKVTransporter:
         assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None
         assert trans_task.transfer_nbytes is not None
         remote_agent: PDAgentMetadata = self.remote_agents[decode_agent_name]
-        src_handle = self._get_local_page_xfer_handles(trans_task.transfer_nbytes)
-        dst_handle = self._get_remote_page_xfer_handles(remote_agent, trans_task.transfer_nbytes)
+        transfer_nbytes = trans_task.transfer_nbytes
+        if transfer_nbytes not in self.page_local_xfer_handles:
+            self.page_local_xfer_handles[transfer_nbytes] = self._create_paged_xfer_handles(
+                self.page_reg_desc, self.num_pages, transfer_nbytes
+            )
+        src_handle = self.page_local_xfer_handles[transfer_nbytes]
+
+        if transfer_nbytes not in remote_agent.page_xfer_handles:
+            page_mem_desc = self.nixl_agent.deserialize_descs(remote_agent.page_reg_desc)
+            remote_agent.page_xfer_handles[transfer_nbytes] = self._create_paged_xfer_handles(
+                page_mem_desc,
+                remote_agent.num_pages,
+                transfer_nbytes,
+                agent_name=remote_agent.agent_name,
+            )
+        dst_handle = remote_agent.page_xfer_handles[transfer_nbytes]
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             src_handle,
