@@ -765,3 +765,161 @@ decode forward 中的活跃 token 数，通常对应活跃请求数，不是单�
 当前仍使用 `[E, E]` tensor，并让下三角保持为零，优点是索引、对角线负载提取和后续 planner
 读取都很直接。若后续确认控制面通信量成为瓶颈，可以再把上三角打包为 `E(E+1)/2` 的连续
 存储；这属于数据布局优化，不改变本节的计数语义。
+
+## 附录 D：尝试改善 CUDA Graph 捕获期间的跨 Stream 显存复用
+
+### D.1 使用 Graph 拓扑改善 allocator 复用判断
+
+DeepEP 的异步 dispatch/combine 会让部分 tensor 在通信 stream 和计算 stream 之间流转。
+为了保证异步访问安全，allocator 必须等所有记录过的 stream 都使用完一块存储后，才能把它
+分配给后续 tensor。普通 eager 执行时，GPU 会在 CPU 提交后续层的同时持续完成前序工作，
+allocator 有机会观察到 CUDA event 已完成并复用存储；CUDA Graph 捕获则会连续记录整个模型
+的工作，跨 stream event 在捕获过程中通常还不能提供同样的完成信息。
+
+因此，即使前一层 tensor 的 Python 生命周期已经结束，默认 allocator 也可能无法证明相关
+通信和计算均已完成，只能为后续层申请新的 block。这个问题主要影响 DeepEP 接收结果、
+grouped GEMM 输出以及 combine 输入等跨 stream tensor；只在同一计算 stream 内使用且及时
+释放的临时 tensor，仍然能够按常规规则复用。表现到服务上，就是 CUDA Graph 捕获阶段的
+显存高水位明显升高，而不是某个小型计数 tensor 本身占用了大量显存。
+
+可以在启动服务前尝试启用 PyTorch 的实验性 allocator 配置：
+
+```bash
+export PYTORCH_ALLOC_CONF=graph_capture_record_stream_reuse:True
+```
+
+启用后，PyTorch caching allocator 会在 CUDA Graph 捕获期间尝试使用 Graph 拓扑，而不只依赖
+CUDA event，判断一个经由 `record_stream()` 登记的已释放 block 是否能够安全复用。当通信
+stream 与计算 stream 在后续 event/wait 节点重新汇合时，allocator 可能据此证明旧 block 的
+所有使用都已结束，并让后续层复用同一块显存。该机制尤其适合捕获时间较长、多个 stream
+反复分叉和汇合、并持续释放和重新申请大块临时 tensor 的场景，与当前 decode DeepEP 路径
+要解决的捕获期显存累积问题相符。
+
+该选项不能降低 Elastic dispatch 为 CUDA Graph 准备的单份最坏容量，也不能让仍然存活或确实
+并发使用的 tensor 共用地址；它只改善 allocator 原本因跨 stream 安全判断保守而错过的复用
+机会。项目已经通过 `torch.cuda.graph_pool_handle()` 让多个 capture 使用同一个私有内存池，
+但共享内存池只提供复用的基础，不能替代单次捕获内部的跨 stream Graph 拓扑分析。
+
+该配置目前是实验性能力，默认关闭，并可能增加 Graph 捕获时间，因此暂不作为 LightLLM
+默认值。验证时应至少对比以下数据：
+
+1. 开关配置前后的输出精度和长时间稳定性；
+2. 捕获单个最大 batch Graph 和全部 batch bucket 后的 `max_memory_allocated`；
+3. 对应的 `max_memory_reserved` 以及 `nvidia-smi` 常驻显存；
+4. Graph 捕获耗时和稳态 replay 吞吐；
+5. 开启 decode microbatch overlap 时是否仍有相同收益。
+
+如果显存显著下降且结果与吞吐保持稳定，说明主要浪费来自捕获期间保守的跨 stream 生命周期
+判断；如果收益有限，则应继续检查固定最大容量、多个 batch bucket 的静态输出，以及实际需要
+并发存活的 dispatch/combine buffer，而不是继续调整该 allocator 选项。
+
+### D.2 DeepEP 内部分配对显式 Buffer 复用的限制
+
+Elastic dispatch 会在 DeepEP C++ 内部根据运行模式计算 `num_allocated_tokens`，随后直接通过
+`torch::empty` 创建 `recv_x`。`recv_sf`、`recv_topk_weights` 和 `recv_src_metadata` 等配套
+tensor 也由同一接口内部创建。当前接口没有接收 caller-provided output 或 workspace 的参数，
+因此 LightLLM 只能在 dispatch 返回后取得这些 tensor，不能在调用前指定其存储地址，也不能
+直接要求下一层复用某个已经准备好的 block。
+
+在 CUDA Graph 场景中，“释放 tensor”也不等于立即把显存交还 CUDA。一个 block 至少需要满足
+以下条件，才可能在 Graph 私有内存池中被后续节点复用：
+
+1. Python 和 DeepEP C++ 对象不再持有对应 tensor；
+2. DeepEP 返回的 handle/event 不再为了异步安全保留它；
+3. 通信 stream 和计算 stream 都已经完成对该地址的访问；
+4. allocator 能够证明后续复用不会破坏 Graph 重放时的固定地址和执行依赖。
+
+因此，在 LightLLM 中提前执行 `del recv_x` 只能缩短 Python 引用生命周期，不能绕过异步 stream
+和 CUDA Graph 的地址安全约束。即使 block 已经逻辑释放，它通常仍属于 Graph 私有内存池；
+优化目标是让后续节点安全地复用该地址，而不是在每次 forward 中把它真正退还给 CUDA。
+
+DeepEP 默认通过对相关 tensor 调用 `record_stream()`，同时登记通信 stream 和计算 stream，
+保证任一 stream 尚未完成时 allocator 都不会过早复用其存储。DeepEP 还提供以下可实验配置：
+
+```bash
+export EP_AVOID_RECORD_STREAM=1
+```
+
+启用后，DeepEP 不再用 `record_stream()` 登记这些 tensor，而是把引用保存在返回的 event handle
+中，用 event 对象的生命周期保证异步访问安全。DeepEP 将这种方式作为可能更适合 CUDA Graph
+的生命周期管理方法，但它仍然不是外部 workspace 接口，也不能降低单份 expanded layout 的
+最坏容量。该配置需要与 `graph_capture_record_stream_reuse` 分别进行 A/B 测试，检查精度、
+多 stream wait、overlap 稳定性、捕获显存和稳态吞吐，不能在缺少验证时直接设为默认值。
+
+如果 allocator 拓扑复用和 DeepEP event 生命周期方案仍无法消除明显的逐层显存累积，才考虑
+修改 DeepEP 接口，使 dispatch 接收由 LightLLM 预分配的 `recv_x`、scale、top-k weight 和
+metadata workspace。该方案能够精确固定地址和容量，但必须同时处理 dtype、stride、TMA scale
+布局、expert alignment、handle metadata 以及跨 stream 依赖，不能只替换 `recv_x` 一项。
+
+显式 workspace 也不能无条件让所有层使用同一块地址。存在 dispatch/GEMM/combine 流水或
+decode microbatch overlap 时，多个任务可能真实并发，需要按照最大在途任务数准备双缓冲或
+环形缓冲：只有确认上一使用者的 combine 已经结束后，后续层才能覆盖同一槽位。推荐的尝试
+顺序如下：
+
+1. 使用 `graph_capture_record_stream_reuse` 改善 PyTorch allocator 的拓扑判断；
+2. 独立评估 `EP_AVOID_RECORD_STREAM=1` 的显存收益和正确性；
+3. 调整 decode dispatch 的最大 token 容量及 CUDA Graph batch bucket；
+4. 仍有明显收益空间时，再为 DeepEP 设计 caller-provided workspace 和显式环形复用协议。
+
+这个顺序优先使用已有的安全机制，只有在确认 allocator 保守判断仍是主要瓶颈后，才承担维护
+DeepEP 分支和显式管理多 stream 生命周期的复杂度。
+
+## 附录 E：Decode 通信布局优化的性能对比
+
+### E.1 测试方法
+
+本节对比旧版 DeepEP low-latency decode 路径和按目标 rank 去重发送、在接收端展开为 expert
+连续布局的新路径。测试使用 8 张 H200、DeepSeek-R1、TP=8、DP=8 和 EP MoE，不启用 EPLB
+冗余专家。每轮固定 128 个并发请求，输入为相同的短 prompt，每个请求生成 8192 个 token；
+只使用每个请求后 4096 个 token 统计稳态 decode 性能，以排除 prefill、首 token 和 batch
+拼接阶段的影响。旧路径固定在提交 `2580ca3d`，新路径使用本文对应实现；测试日期为
+2026-09-29。服务配置 `max_total_token_num=160000`、`graph_max_batch_size=16`，DeepEP 的
+`NUM_MAX_DISPATCH_TOKENS_PER_RANK=256`。每种配置均独立冷启动服务并重新捕获 CUDA Graph。
+
+### E.2 128 并发结果
+
+不开启 decode microbatch overlap 时，新路径的后 4096 token 稳态吞吐从 4025.74 token/s
+提高到 4269.44 token/s，提升 6.05%；完整 8192 token 吞吐从 4354.94 token/s 提高到
+4564.37 token/s，提升 4.81%。稳态 token 间隔的 p50 从 31.45 ms 降低到 29.37 ms，
+降低 6.60%。
+
+开启 prefill 和 decode microbatch overlap 后，新路径的稳态吞吐从 2514.62 token/s 提高到
+2709.86 token/s，提升 7.76%；完整 8192 token 吞吐从 2625.94 token/s 提高到
+2854.66 token/s，提升 8.71%。稳态 token 间隔的 p50 从 50.60 ms 降低到 47.13 ms，
+降低 6.86%。四组测试均完整接收并校验了 1048576 个输出 token，未出现请求错误或
+CUDA/NCCL 异常。
+
+| microbatch overlap | 实现 | 稳态吞吐（token/s） | 完整吞吐（token/s） | 稳态 token 间隔 p50（ms） |
+| --- | --- | ---: | ---: | ---: |
+| 关闭 | 旧路径 | 4025.74 | 4354.94 | 31.45 |
+| 关闭 | 新路径 | 4269.44 | 4564.37 | 29.37 |
+| 开启 | 旧路径 | 2514.62 | 2625.94 | 50.60 |
+| 开启 | 新路径 | 2709.86 | 2854.66 | 47.13 |
+
+该结果说明新布局在是否开启 overlap 的两种情况下都能降低稳态 decode 延迟。不过在这组固定
+高并发长输出负载中，开启 overlap 会让新旧路径的稳态吞吐分别下降 36.53% 和 37.54%，因此
+不能因为新路径支持 overlap 就默认启用该模式；是否启用仍需结合实际调度负载单独验证。
+
+### E.3 CUDA Graph 40、256 并发结果
+
+为了让每个 DP rank 上约 32 个活跃请求能够命中完整 CUDA Graph，本组把
+`graph_max_batch_size` 从 16 提高到 40，并关闭 microbatch overlap。其余条件与 E.1 相同，
+全局并发提高到 256；每个请求仍生成 8192 个 token，并使用后 4096 个 token 统计间隔。
+日志确认实际捕获的 batch size 包含 1 到 32 和 40。由于 256 个长请求不能同时驻留在配置的
+KV cache 中，请求会分批进入运行态，因此本组以每个请求实际生成期间的 token 间隔 p50 为
+主要指标，而不把“所有请求同时活跃窗口”作为有效指标。
+
+新路径将稳态 token 间隔 p50 从 35.25 ms 降低到 34.68 ms，降低 1.63%；p95 从
+41.74 ms 降低到 39.66 ms，降低 4.97%。每个请求生成后 4096 个 token 所需时间的 p50
+从 157.45 秒降低到 151.25 秒，降低 3.94%。完整 8192 token 吞吐从 3962.14 token/s
+提高到 4116.41 token/s，提升 3.89%。两组测试均完整接收并校验了 2097152 个输出 token，
+未出现请求错误或 CUDA/NCCL 异常。
+
+| 实现 | 完整吞吐（token/s） | 后 4096 token 全局跨度吞吐（token/s） | token 间隔 p50（ms） | token 间隔 p95（ms） | 单请求后 4096 token 耗时 p50（s） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 旧路径 | 3962.14 | 2638.55 | 35.25 | 41.74 | 157.45 |
+| 新路径 | 4116.41 | 2722.22 | 34.68 | 39.66 | 151.25 |
+
+相比 128 并发时 6.60% 的 token 间隔 p50 降幅，256 并发下 p50 降幅收窄到 1.63%，但
+p95、单请求后半程耗时和完整吞吐仍一致改善。该结果表明扩大 CUDA Graph 覆盖范围后，新路径
+在更大并发下仍有收益，但收益会同时受到 KV 容量导致的分批调度和不同运行 batch 的影响。

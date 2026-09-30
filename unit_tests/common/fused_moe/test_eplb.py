@@ -1657,10 +1657,15 @@ def test_manager_wait_load_gather_does_not_advance_until_every_rank_finishes(mon
 
 
 def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
+    class Event:
+        def current_stream_wait(self):
+            pass
+
     class Buffer:
-        def low_latency_dispatch(self, **kwargs):
+        def dispatch(self, _qinput_tensor, **kwargs):
             calls.append(kwargs)
-            return "recv", "masked", "handle", "event", "hook"
+            handle = SimpleNamespace(psum_num_recv_tokens_per_expert="masked")
+            return "recv", None, "recv_topk_weights", handle, Event()
 
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.quant_method = type("Quant", (), {"method_name": "fp8"})()
@@ -1689,10 +1694,16 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
         "get_deepep_num_max_dispatch_tokens_per_rank_decode",
         lambda: 16,
     )
-    monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_low_latency_buffer", Buffer())
+    monkeypatch.setattr(
+        deepgemm_module.grouped_fused_moe_ep,
+        "quantize_fused_experts_input",
+        lambda *_args: "qinput",
+    )
+    monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
 
-    result = impl.low_latency_dispatch(
+    recv_x, ep_handle, recv_topk_weights, hook = impl.decode_dispatch(
         torch.empty((1, 4)),
+        object(),
         torch.empty((1, 128)),
         None,
         False,
@@ -1703,13 +1714,18 @@ def test_decode_dispatch_uses_physical_ids_and_total_expert_count(monkeypatch):
         "softmax",
     )
 
-    assert result[2].tolist() == [[128, 143]]
+    assert recv_x == "recv"
+    assert ep_handle.psum_num_recv_tokens_per_expert == "masked"
+    assert recv_topk_weights == "recv_topk_weights"
+    assert callable(hook)
+    assert calls[0]["topk_idx"].tolist() == [[128, 143]]
     assert repairs[0]["logical_topk_ids"] is logical_ids
     assert not repairs[0]["update_prefill_route_counter"]
     assert repairs[0]["update_decode_route_counter"]
     assert repairs[0]["decode_route_counter"] is impl.decode_route_counter
     assert repairs[0]["mode"] == "current_gpu_first"
     assert calls[0]["num_experts"] == 144
+    assert calls[0]["allocate_on_comm_stream"] is False
 
 
 def test_select_returns_logical_ids_and_applies_expert_scale(monkeypatch):
@@ -1764,7 +1780,11 @@ def test_eplb_prefill_repairs_ids_after_selection(monkeypatch):
         "get_env_start_args",
         lambda: SimpleNamespace(eplb_plan_mode="global_balance", eplb_run_mode="prefill"),
     )
-    monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
+    monkeypatch.setattr(
+        deepgemm_module.grouped_fused_moe_ep,
+        "quantize_fused_experts_input",
+        lambda *_args: "qinput",
+    )
 
     weights, topk_idx, qinput = impl.select_experts_and_quant_input(
         torch.empty((1, 4)),
@@ -1824,14 +1844,22 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
         "get_env_start_args",
         lambda: SimpleNamespace(eplb_plan_mode="global_balance", eplb_run_mode="prefill"),
     )
-    monkeypatch.setattr(deepgemm_module, "quantize_fused_experts_input", lambda *_args: "qinput")
+    monkeypatch.setattr(
+        deepgemm_module.grouped_fused_moe_ep,
+        "quantize_fused_experts_input",
+        lambda *_args: "qinput",
+    )
     monkeypatch.setattr(deepgemm_module.dist_group_manager, "ep_buffer", Buffer())
     monkeypatch.setattr(
         deepgemm_module,
         "get_deepep_num_max_dispatch_tokens_per_rank_prefill",
         lambda: 16,
     )
-    monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
+    monkeypatch.setattr(
+        deepgemm_module.grouped_fused_moe_ep,
+        "get_ep_num_sms",
+        lambda overlap_with_compute: 8,
+    )
 
     weights, topk_idx, qinput = impl.select_experts_and_quant_input(
         torch.empty((1, 4)),
@@ -1846,7 +1874,7 @@ def test_eplb_prefill_dispatch_consumes_physical_ids_and_event(monkeypatch):
         "sigmoid",
     )
     caller_event = object()
-    impl.dispatch(
+    impl.prefill_dispatch(
         qinput,
         topk_idx,
         weights,
@@ -1886,9 +1914,13 @@ def test_prefill_dispatch_preserves_event(monkeypatch):
         "get_deepep_num_max_dispatch_tokens_per_rank_prefill",
         lambda: 16,
     )
-    monkeypatch.setattr(deepgemm_module, "get_ep_num_sms", lambda: 8)
+    monkeypatch.setattr(
+        deepgemm_module.grouped_fused_moe_ep,
+        "get_ep_num_sms",
+        lambda overlap_with_compute: 8,
+    )
 
-    impl.dispatch(
+    impl.prefill_dispatch(
         "qinput",
         torch.tensor([[1, 2]], dtype=torch.long),
         torch.ones((1, 2)),
@@ -2058,23 +2090,25 @@ def test_decode_masked_group_gemm_uses_all_physical_rows_when_eplb_is_enabled(
     _set_deepgemm_runtime(impl, _test_moe_impl(eplb=True, num_logical_experts=8, world_size=1))
     captured = {}
 
-    def masked(*args, **kwargs):
-        captured["w13"] = args[3]
-        captured["w13_scale"] = args[4]
-        captured["w2"] = args[5]
-        captured["w2_scale"] = args[6]
+    def grouped_gemm(**kwargs):
+        captured.update(kwargs)
         return "out"
 
-    monkeypatch.setattr(deepgemm_module, "masked_group_gemm", masked)
+    monkeypatch.setattr(deepgemm_module.grouped_fused_moe_ep, "decode_masked_group_gemm", grouped_gemm)
     pack = lambda: type(
         "Pack",
         (),
         {"weight": torch.empty((10, 4)), "weight_scale": torch.empty((10, 1))},
     )()
 
-    assert impl.masked_group_gemm((torch.empty((1, 4)),), pack(), pack(), torch.empty(8), torch.float16, 1) == "out"
-    assert captured["w13"].shape[0] == captured["w2"].shape[0] == 10
-    assert captured["w13_scale"].shape[0] == captured["w2_scale"].shape[0] == 10
+    ep_handle = SimpleNamespace(
+        psum_num_recv_tokens_per_expert=torch.empty(8),
+        expert_alignment=128,
+    )
+    assert impl.decode_masked_group_gemm((torch.empty((1, 4)),), pack(), pack(), ep_handle, torch.float16, 1) == "out"
+    assert captured["expert_alignment"] == 128
+    assert captured["w1"].shape[0] == captured["w2"].shape[0] == 10
+    assert captured["w1_scale"].shape[0] == captured["w2_scale"].shape[0] == 10
 
 
 def test_decode_fused_experts_uses_full_weight_packs_and_physical_experts(
@@ -2098,7 +2132,7 @@ def test_decode_fused_experts_uses_full_weight_packs_and_physical_experts(
         captured.append(kwargs)
         return "out"
 
-    monkeypatch.setattr(deepgemm_module, "fused_experts", fused)
+    monkeypatch.setattr(deepgemm_module.grouped_fused_moe_ep, "fused_experts", fused)
     pack = lambda: type(
         "Pack",
         (),

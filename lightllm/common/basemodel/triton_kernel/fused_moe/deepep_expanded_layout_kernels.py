@@ -248,6 +248,145 @@ def ep_gather_chunk(
 
 
 @triton.jit
+def _ep_reduce_decode_output_kernel(
+    expert_output,
+    expert_output_stride_m,
+    expert_output_stride_k,
+    route_weights,
+    recv_src_metadata,
+    metadata_stride_m,
+    metadata_stride_k,
+    num_valid_recv_tokens_ptr,
+    dense_output,
+    dense_output_stride_m,
+    dense_output_stride_k,
+    compact_metadata,
+    compact_metadata_stride_m,
+    compact_metadata_stride_k,
+    hidden_size,
+    TOPK: tl.constexpr,
+    NUM_STAGE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_METADATA: tl.constexpr,
+    NEED_HIDDEN_MASK: tl.constexpr,
+):
+    hidden_block_id = tl.program_id(0)
+    first_recv_token_id = tl.program_id(1)
+    recv_token_step = tl.num_programs(1)
+    num_valid_recv_tokens = tl.load(num_valid_recv_tokens_ptr)
+
+    # 行号可能乘以较大的 hidden-size stride。先将行 stride 和后续使用的
+    # 行索引提升为 int64，避免地址偏移在 int32 乘法阶段溢出；列偏移只在
+    # 单行的 hidden/top-k 范围内变化，不需要额外提升。
+    expert_output_stride_m = expert_output_stride_m.to(tl.int64)
+    metadata_stride_m = metadata_stride_m.to(tl.int64)
+    dense_output_stride_m = dense_output_stride_m.to(tl.int64)
+    compact_metadata_stride_m = compact_metadata_stride_m.to(tl.int64)
+
+    hidden_offsets = hidden_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
+    if NEED_HIDDEN_MASK:
+        hidden_mask = hidden_offsets < hidden_size
+        other = 0.0
+    else:
+        hidden_mask = None
+        other = None
+
+    for recv_token_id in range(first_recv_token_id, num_valid_recv_tokens, recv_token_step):
+        recv_token_row = recv_token_id.to(tl.int64)
+        accumulator = tl.zeros((BLOCK_D,), dtype=tl.float32)
+        for topk_id in tl.range(0, TOPK, num_stages=NUM_STAGE):
+            expert_row = tl.load(
+                recv_src_metadata + recv_token_row * metadata_stride_m + (topk_id + 2) * metadata_stride_k
+            )
+            # -1 表示该 token 的这个 top-k expert 不在当前接收 rank。
+            # 只为有效的本地 expert 行读取输出和权重。
+            if expert_row >= 0:
+                expert_output_ptrs = (
+                    expert_output
+                    + expert_row.to(tl.int64) * expert_output_stride_m
+                    + hidden_offsets * expert_output_stride_k
+                )
+                value = tl.load(expert_output_ptrs, mask=hidden_mask, other=other)
+                weight = tl.load(route_weights + expert_row)
+                accumulator += value.to(tl.float32) * weight
+
+        dense_output_ptrs = (
+            dense_output + recv_token_row * dense_output_stride_m + hidden_offsets * dense_output_stride_k
+        )
+        tl.store(dense_output_ptrs, accumulator, mask=hidden_mask)
+
+        if hidden_block_id == 0:
+            metadata_offsets = tl.arange(0, BLOCK_METADATA)
+            source_header = tl.load(
+                recv_src_metadata + recv_token_row * metadata_stride_m + metadata_offsets * metadata_stride_k,
+                mask=metadata_offsets < 2,
+                other=0,
+            )
+            compact_values = tl.where(
+                metadata_offsets < 2,
+                source_header,
+                tl.where(metadata_offsets == 2, recv_token_id, -1),
+            )
+            tl.store(
+                compact_metadata
+                + recv_token_row * compact_metadata_stride_m
+                + metadata_offsets * compact_metadata_stride_k,
+                compact_values,
+                mask=metadata_offsets < TOPK + 2,
+            )
+
+
+@torch.no_grad()
+def ep_reduce_decode_output(
+    expert_output: torch.Tensor,  # [num_expanded_rows, hidden_size]
+    route_weights: torch.Tensor,  # [num_expanded_rows]
+    recv_src_metadata: torch.Tensor,  # [num_recv_tokens, topk + 2]
+    num_valid_recv_tokens: torch.Tensor,  # GPU scalar
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """将 expanded expert 行加权归约，并构造 dense combine metadata。"""
+    num_recv_tokens = recv_src_metadata.shape[0]
+    hidden_size = expert_output.shape[1]
+    dense_output = torch.empty(
+        (num_recv_tokens, hidden_size),
+        dtype=expert_output.dtype,
+        device=expert_output.device,
+    )
+    compact_metadata = torch.empty_like(recv_src_metadata)
+
+    block_d = 1024
+    # TODO: 联合搜索 NUM_STAGE、BLOCK_D 和 token program 数量。
+    num_stage = 1
+    # num_recv_tokens 是接收缓冲区容量，可能大于实际有效 token 数。1024 在
+    # 4K 大并发下能提供更充分的行并行度，小并发下额外空 program 的开销很小。
+    token_programs = min(num_recv_tokens, 1024)
+    grid = (triton.cdiv(hidden_size, block_d), token_programs)
+    _ep_reduce_decode_output_kernel[grid](
+        expert_output=expert_output,
+        expert_output_stride_m=expert_output.stride(0),
+        expert_output_stride_k=expert_output.stride(1),
+        route_weights=route_weights,
+        recv_src_metadata=recv_src_metadata,
+        metadata_stride_m=recv_src_metadata.stride(0),
+        metadata_stride_k=recv_src_metadata.stride(1),
+        num_valid_recv_tokens_ptr=num_valid_recv_tokens,
+        dense_output=dense_output,
+        dense_output_stride_m=dense_output.stride(0),
+        dense_output_stride_k=dense_output.stride(1),
+        compact_metadata=compact_metadata,
+        compact_metadata_stride_m=compact_metadata.stride(0),
+        compact_metadata_stride_k=compact_metadata.stride(1),
+        hidden_size=hidden_size,
+        TOPK=recv_src_metadata.shape[1] - 2,
+        NUM_STAGE=num_stage,
+        BLOCK_D=block_d,
+        BLOCK_METADATA=triton.next_power_of_2(recv_src_metadata.shape[1]),
+        NEED_HIDDEN_MASK=hidden_size % block_d != 0,
+        num_warps=2,
+    )
+    return dense_output, compact_metadata
+
+
+@triton.jit
 def _ep_compact_metadata_kernel(
     recv_src_metadata,
     metadata_stride_m,

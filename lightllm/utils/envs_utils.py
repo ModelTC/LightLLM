@@ -70,21 +70,43 @@ def enable_env_vars(args):
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
-    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大。
-    # 如果未显式配置，则默认至少覆盖当前进程的 `batch_max_tokens`，避免 DeepEP V2 在 autotune
-    # warmup 或大 prefill batch 时因为 buffer 上界过小而报错。
-    configured = os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", None)
-    if configured is not None:
-        return int(configured)
-
+    # 在单卡最大 prefill batch 之外额外保留 128 个 token，并向上对齐到 8，
+    # 避免 autotune warmup 或调度边界波动使实际输入超过 DeepEP buffer 上限。
     batch_max_tokens = get_env_start_args().batch_max_tokens or 256
-    return ((int(batch_max_tokens) + 7) // 8) * 8
+    capacity = ((int(batch_max_tokens) + 128 + 7) // 8) * 8
+    logger.info(
+        "DeepEP prefill buffer capacity: batch_max_tokens=%s, safety_margin=128, capacity=%s",
+        batch_max_tokens,
+        capacity,
+    )
+    return capacity
 
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_decode():
-    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
+    # 每个请求最多产生 mtp_step + 1 个 verify token；额外保留 12 个 token
+    # 处理调度和 CUDA Graph 的边界波动，最后向上对齐到 DeepEP 要求的 8。
+    args = get_env_start_args()
+    required_tokens = int(args.running_max_req_size) * (int(args.mtp_step) + 1)
+    capacity_with_margin = required_tokens + 12
+    capacity = ((capacity_with_margin + 7) // 8) * 8
+    logger.info(
+        "DeepEP decode buffer capacity: running_max_req_size=%s, mtp_step=%s, "
+        "required_tokens=%s, safety_margin=12, capacity=%s",
+        args.running_max_req_size,
+        args.mtp_step,
+        required_tokens,
+        capacity,
+    )
+    return capacity
+
+
+@lru_cache(maxsize=None)
+def get_deepep_num_max_dispatch_tokens_per_rank() -> int:
+    """返回同时覆盖 prefill 和 decode 的单 rank DeepEP buffer 容量。"""
+    prefill_capacity = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+    decode_capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+    return max(prefill_capacity, decode_capacity)
 
 
 @lru_cache(maxsize=None)

@@ -18,9 +18,7 @@
 # limitations under the License.
 
 
-import os
 import torch
-import triton
 import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Set, Union
@@ -28,8 +26,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (
     get_env_start_args,
-    get_deepep_num_max_dispatch_tokens_per_rank_prefill,
-    get_deepep_num_max_dispatch_tokens_per_rank_decode,
+    get_deepep_num_max_dispatch_tokens_per_rank,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
@@ -108,9 +105,9 @@ class DistributeGroupManager:
     def __init__(self):
         self.groups = []
         self.ep_buffer = None
-        self.ep_low_latency_buffer = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
+        self.ep_non_overlap_num_sms = None
 
     def __len__(self):
         return len(self.groups)
@@ -166,19 +163,28 @@ class DistributeGroupManager:
 
         ``expert_quant_method_names`` 是各 MoE 层最终绑定的 quant method 名称集合。
         同一个模型可能逐层混用 FP4 和 FP8：SM100 FP4 层走 Mega MoE，其他层走
-        DeepEP legacy low-latency 路径。这里只为实际存在的执行路径分配 buffer，
+        DeepEP Elastic 路径。这里只为实际存在的执行路径分配 buffer，
         避免为未使用的路径长期占用显存。
         """
         enable_ep_moe = get_env_start_args().enable_ep_moe
-        prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
-        decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if not enable_ep_moe:
             self.ep_buffer = None
-            self.ep_low_latency_buffer = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
+            self.ep_non_overlap_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
+
+        # ElasticBuffer 按当前服务真正会执行的阶段选择容量。
+        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
+
+        import deep_gemm
+        from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep
+
+        # LightLLM 的 prefill expanded layout 当前按 128 行构造 expert 分段。
+        # 在初始化阶段同步设置 DeepGEMM 的全局 M 对齐值，后续 prefill 和
+        # decode 都通过 getter 读取它，避免通信布局与 GEMM 分块不一致。
+        grouped_fused_moe_ep.set_mk_alignment_for_contiguous_layout(128)
 
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
@@ -189,8 +195,7 @@ class DistributeGroupManager:
             group=deepep_group,
             device_ids=[torch.cuda.current_device()],
         )
-        self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
-        self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
+        self.ll_num_tokens = num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
         total_redundant_experts = get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
         self.ll_num_experts = n_routed_experts + total_redundant_experts
@@ -203,67 +208,17 @@ class DistributeGroupManager:
             allow_multiple_reduction=True,
         )
         self.ep_mega_moe_buffer = None
-        self.ep_low_latency_buffer = None
 
         if not expert_quant_method_names:
             raise ValueError("No valid MoE quant method was found while initializing DeepEP buffers")
 
         mega_moe_quant_method = "fp4fp8-b32-deepgemm"
-        is_sm100 = is_sm100_gpu()
-
-        # Buffer 选择规则：
-        # 1. 非 SM100 不支持 Mega MoE，只初始化 legacy low-latency buffer；
-        # 2. SM100 全部 MoE 层为 FP4，只初始化 Mega MoE buffer；
-        # 3. SM100 全部 MoE 层为 FP8，只初始化 legacy low-latency buffer；
-        # 4. SM100 逐层混合 FP4/FP8，两套 buffer 都要初始化。
-        if is_sm100:
-            # 只要存在一个 FP4 MoE 层，就需要 Mega MoE buffer；只要存在一个非 FP4
-            # MoE 层，就需要 legacy low-latency buffer。FP4/FP8 逐层混用时两者都会初始化。
-            has_mega_moe_layer = mega_moe_quant_method in expert_quant_method_names
-            has_legacy_moe_layer = any(
-                method_name != mega_moe_quant_method for method_name in expert_quant_method_names
-            )
-            enable_mega_moe_buffer = has_mega_moe_layer
-            enable_low_latency_buffer = has_legacy_moe_layer
-        else:
-            enable_mega_moe_buffer = False
-            enable_low_latency_buffer = True
-
-        if enable_low_latency_buffer:
-            # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
-            # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
-            decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
-            )
-            microbatch_count = len(self.groups)
-            min_prefill_reuse_buffer_bytes = _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
-                global_world_size=global_world_size,
-                prefill_tokens_per_rank=prefill_num_max_dispatch_tokens_per_rank,
-                hidden_size=hidden_size,
-                moe_intermediate_size=moe_intermediate_size,
-                hidden_dtype=get_torch_dtype(get_env_start_args().data_type),
-                microbatch_count=microbatch_count,
-            )
-            # Decode 和 prefill 不会同时使用 local RDMA storage，容量取两条路径的较大值。
-            num_rdma_bytes = max(decode_size_hint, min_prefill_reuse_buffer_bytes)
-            # DeepEP 返回的 decode hint 不保证能被 microbatch 均分；最终再对齐一次，
-            # 确保每个 workspace slice 的容量及起始位置仍保持 256-byte 对齐。
-            rdma_alignment = microbatch_count * 256
-            num_rdma_bytes = triton.cdiv(num_rdma_bytes, rdma_alignment) * rdma_alignment
-            self.ep_low_latency_buffer = deep_ep.Buffer(
-                deepep_group,
-                num_rdma_bytes=num_rdma_bytes,
-                low_latency_mode=True,
-                num_qps_per_rank=(self.ll_num_experts // global_world_size),
-            )
+        # SM100 FP4 层额外通过 DeepGEMM Mega MoE 完成通信和计算。
+        enable_mega_moe_buffer = is_sm100_gpu() and mega_moe_quant_method in expert_quant_method_names
 
         if enable_mega_moe_buffer:
-            # SM100 FP4 层通过 DeepGEMM Mega MoE 完成通信和计算，不使用 legacy
-            # low-latency buffer，因此纯 FP4 模型无需承担后者的大块 RDMA 显存。
             if moe_intermediate_size is None:
                 raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
-
-            import deep_gemm
 
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
@@ -274,15 +229,34 @@ class DistributeGroupManager:
                 moe_intermediate_size,
             )
         logger.info(
-            "Initialize DeepEP MoE buffers: low_latency=%s, mega_moe=%s, "
-            "ll_num_experts=%s, expert_quant_method_names=%s",
-            enable_low_latency_buffer,
+            "Initialize DeepEP MoE buffers: elastic=True, mega_moe=%s, "
+            "num_max_dispatch_tokens_per_rank=%s, ll_num_experts=%s, expert_quant_method_names=%s",
             enable_mega_moe_buffer,
+            self.ll_num_tokens,
             self.ll_num_experts,
             sorted(expert_quant_method_names),
         )
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(theoretical_sms)
+
+        # 串行路径会在通信后立即等待，不需要为并行计算预留大部分 SM。
+        # DeepEP 要求 num_sms 为偶数，因此将设备总 SM 数的 60% 向下取偶数。
+        device_sms = get_device_sm_count()
+        non_overlap_num_sms = int(device_sms * 0.6) // 2 * 2
+        self.set_ep_num_sms_for_non_overlap(non_overlap_num_sms)
+        logger.info(
+            "DeepEP SM allocation: overlap=%s, non_overlap=%s, device=%s",
+            self.ep_num_sms,
+            self.ep_non_overlap_num_sms,
+            device_sms,
+        )
+
+    def set_ep_num_sms_for_non_overlap(self, num_sms: int) -> None:
+        """设置非 overlap 通信使用的 SM 数量，不改变 DeepGEMM 的 SM 配额。"""
+        device_sms = get_device_sm_count()
+        assert 4 <= num_sms <= device_sms
+        assert num_sms % 2 == 0
+        self.ep_non_overlap_num_sms = num_sms
 
     def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
         try:
@@ -294,51 +268,15 @@ class DistributeGroupManager:
             device_sms = get_device_sm_count()
             deepep_sms = max(0, min(deepep_sms, max(device_sms - 2, 0)))
             self.ep_num_sms = deepep_sms
-            if self.ep_low_latency_buffer is not None:
-                deep_ep.Buffer.set_num_sms(deepep_sms - deepep_sms % 2)
             set_num_sms(max(device_sms - deepep_sms, 2))
         except BaseException as e:
             logger.warning(f"set num sms for deep_gemm failed: {e}")
 
-    def get_deep_ep_prefill_moe_workspace(self, microbatch_index: int = 0) -> torch.Tensor:
-        """Return a slice of the workspace reused by DeepEP prefill MoE kernels.
-
-        DeepEP's low-latency RDMA buffer is idle during prefill, so its local
-        storage is reused as temporary workspace for the expanded MoE compute
-        path to reduce peak GPU memory. With one communication group, the
-        default ``microbatch_index=0`` receives the whole workspace. With
-        multiple groups, the workspace is split into ``len(self.groups)``
-        equal slices and each in-flight microbatch uses the slice matching its
-        group index.
-
-        Args:
-            microbatch_index: Zero-based microbatch and communication-group
-                index assigned to this in-flight prefill computation.
-
-        Returns:
-            A one-dimensional uint8 tensor view over the selected workspace
-            slice; no additional GPU memory is allocated.
-
-        This workspace is only valid after the DeepEP group has been
-        initialized. The same returned slice must not be used concurrently by
-        overlapping calls.
-        """
-        assert self.ep_low_latency_buffer is not None, "DeepEP low-latency buffer is not initialized"
-        workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(torch.uint8, use_rdma_buffer=True)
-        microbatch_count = len(self.groups)
-        assert 0 <= microbatch_index < microbatch_count
-        workspace_size = workspace.numel() // microbatch_count
-        return workspace.narrow(0, microbatch_index * workspace_size, workspace_size)
-
-    def clear_deepep_buffer(self):
-        """
-        Prefill MoE compute reuses the low-latency RDMA buffer as workspace.
-        Clean it before the buffer is used by low-latency decode kernels.
-        """
-        if self.ep_low_latency_buffer is not None:
-            self.ep_low_latency_buffer.clean_low_latency_buffer(
-                self.ll_decode_num_tokens, self.ll_hidden, self.ll_num_experts
-            )
+    def clear_deepep_buffer(self) -> None:
+        """清理通信组件在当前请求中产生的临时状态。"""
+        # 当前通信组件不需要显式清理。保留统一入口，后续接入需要清理的
+        # 通信实现时，无需再修改模型执行流程。
+        pass
 
 
 def all_reduce(
@@ -424,65 +362,6 @@ def _is_single_group(group: Optional[Union[ProcessGroup, CustomProcessGroup]]) -
         return group.dp_world_size == 1
     else:
         return dist.get_world_size(group=group) == 1
-
-
-def _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
-    global_world_size: int,
-    prefill_tokens_per_rank: int,
-    hidden_size: int,
-    moe_intermediate_size: int,
-    hidden_dtype: torch.dtype,
-    microbatch_count: int,
-) -> int:
-    """计算 ``chunked_expanded_moe_forward`` 极端情况下所需的最小复用 buffer。
-
-    Prefill 阶段会将空闲的 legacy DeepEP local RDMA storage 复用为 expanded
-    grouped GEMM 的 workspace。该函数只计算这条 prefill 路径的容量下限，不包含
-    low-latency decode 自身所需的 RDMA 容量。
-
-    每个 prefill workspace 由全程常驻的 dense gather 输出和分块计算的临时峰值组成。
-    gather 按 ``global_world_size * prefill_tokens_per_rank`` 估算最大可能接收行数，
-    并向 1024 行对齐；这与运行期 workspace 探测使用的保守分桶保持一致。临时计算
-    按最小 128 行 chunk 估算：W1 阶段同时需要 ``gemm_out_a`` 和 ``silu_out``；后续
-    量化/W2 阶段涉及 ``silu_out``、FP8 量化结果、scale 及 ``gemm_out_b``。这里有意
-    沿用保守公式，避免因生命周期估计不足而低估空间。
-
-    多个 microbatch/communication group 并行时，每组独占一个 workspace slice，故
-    prefill 容量乘以 ``microbatch_count``。最后按 ``microbatch_count * 256`` 对齐，
-    保证均分后每个 slice 仍满足 256-byte 对齐。
-    """
-
-    def align(value: int, alignment: int) -> int:
-        return triton.cdiv(value, alignment) * alignment
-
-    def tensor_bytes(rows: int, columns: int, itemsize: int) -> int:
-        # 沿用TensorBufferManager的256对齐规则
-        return align(rows * columns * itemsize, 256)
-
-    chunk_rows = 128
-    hidden_itemsize = hidden_dtype.itemsize
-    scale_cols = moe_intermediate_size // 128
-
-    silu_bytes = tensor_bytes(chunk_rows, moe_intermediate_size, hidden_itemsize)
-    gemm_out_a_bytes = tensor_bytes(chunk_rows, 2 * moe_intermediate_size, hidden_itemsize)
-    quant_bytes = tensor_bytes(chunk_rows, moe_intermediate_size, 1)
-    scale_bytes = tensor_bytes(chunk_rows, scale_cols, torch.float32.itemsize)
-    gemm_out_b_bytes = tensor_bytes(chunk_rows, hidden_size, hidden_itemsize)
-
-    w1_peak_bytes = silu_bytes + gemm_out_a_bytes
-
-    # silu 释放后，B 较小时可复用其 first-fit 空洞；B 更大则需另行预留完整空间。
-    quant_w2_peak_bytes = (
-        silu_bytes + quant_bytes + scale_bytes + (gemm_out_b_bytes if gemm_out_b_bytes > silu_bytes else 0)
-    )
-    temporary_peak_bytes = max(w1_peak_bytes, quant_w2_peak_bytes)
-
-    # 按 _get_max_chunk_rows 的 1024 行对齐规则
-    gather_bytes = tensor_bytes(align(global_world_size * prefill_tokens_per_rank, 1024), hidden_size, hidden_itemsize)
-    per_workspace_bytes = gather_bytes + temporary_peak_bytes
-
-    reuse_buffer_bytes = per_workspace_bytes * microbatch_count
-    return align(reuse_buffer_bytes, microbatch_count * 256)
 
 
 dist_group_manager = DistributeGroupManager()

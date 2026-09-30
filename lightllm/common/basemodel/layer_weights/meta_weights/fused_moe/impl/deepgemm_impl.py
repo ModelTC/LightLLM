@@ -1,5 +1,6 @@
 import torch
 from typing import Optional, Tuple, Any
+
 from .base_impl import FuseMoeBaseImpl
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.quantize_method import WeightPack
@@ -13,16 +14,13 @@ from lightllm.utils.dist_utils import (
     get_global_world_size,
     get_node_world_size,
 )
-from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    fused_experts,
-    get_ep_num_sms,
-    masked_group_gemm,
-    chunked_expanded_moe_forward,
-    quantize_fused_experts_input,
-)
+from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_topk_ids import (
     eplb_repair_topk_ids,
+)
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
+    ep_reduce_decode_output,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
@@ -200,6 +198,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             )
         return topk_weights, topk_ids
 
+    # ==================== Prefill / Decode 公共接口 ====================
+
     def _fused_experts(
         self,
         input_tensor: torch.Tensor,
@@ -210,7 +210,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
     ):
-        output = fused_experts(
+        output = grouped_fused_moe_ep.fused_experts(
             hidden_states=input_tensor,
             w13=w13,
             w2=w2,
@@ -219,48 +219,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_experts=self.num_total_physical_experts,
             quant_method=self.quant_method,
             is_prefill=is_prefill,
-            previous_event=None,  # for overlap
         )
         return output
-
-    def low_latency_dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        e_score_correction_bias: torch.Tensor,
-        use_grouped_topk: bool,
-        num_experts_per_tok: int,
-        norm_topk_prob: bool,
-        topk_group: int,
-        n_group: int,
-        scoring_func: str,
-    ):
-        topk_weights, topk_idx = self._select_experts(
-            input_tensor=hidden_states,
-            router_logits=router_logits,
-            correction_bias=e_score_correction_bias,
-            use_grouped_topk=use_grouped_topk,
-            top_k=num_experts_per_tok,
-            renormalize=norm_topk_prob,
-            topk_group=topk_group,
-            num_expert_group=n_group,
-            scoring_func=scoring_func,
-        )
-        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=False)
-
-        topk_idx = topk_idx.to(torch.long)
-        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
-        use_fp8_w8a8 = self.quant_method.method_name != "none"
-        recv_x, masked_m, handle, event, hook = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
-            topk_idx=topk_idx,
-            x=hidden_states,
-            num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
-            num_experts=self.num_total_physical_experts,
-            use_fp8=use_fp8_w8a8,
-            async_finish=False,
-            return_recv_hook=True,
-        )
-        return recv_x, masked_m, topk_idx, topk_weights, handle, hook
 
     def select_experts_and_quant_input(
         self,
@@ -287,12 +247,133 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             scoring_func=scoring_func,
         )
         topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=True)
-        qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
+        qinput_tensor = grouped_fused_moe_ep.quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
 
-    def dispatch(
+    # ==================== Decode 接口 ====================
+
+    def decode_dispatch(
         self,
-        qinput_tensor: Tuple[torch.Tensor],
+        hidden_states: torch.Tensor,
+        w13: WeightPack,
+        router_logits: torch.Tensor,
+        e_score_correction_bias: torch.Tensor,
+        use_grouped_topk: bool,
+        num_experts_per_tok: int,
+        norm_topk_prob: bool,
+        topk_group: int,
+        n_group: int,
+        scoring_func: str,
+    ):
+        topk_weights, topk_idx = self._select_experts(
+            input_tensor=hidden_states,
+            router_logits=router_logits,
+            correction_bias=e_score_correction_bias,
+            use_grouped_topk=use_grouped_topk,
+            top_k=num_experts_per_tok,
+            renormalize=norm_topk_prob,
+            topk_group=topk_group,
+            num_expert_group=n_group,
+            scoring_func=scoring_func,
+        )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=False)
+
+        topk_idx = topk_idx.to(torch.long)
+        qinput_tensor = grouped_fused_moe_ep.quantize_fused_experts_input(hidden_states, w13, self.quant_method)
+        recv_x, _, recv_topk_weights, ep_handle, event = dist_group_manager.ep_buffer.dispatch(
+            qinput_tensor,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            num_experts=self.num_total_physical_experts,
+            num_max_tokens_per_rank=get_deepep_num_max_dispatch_tokens_per_rank_decode(),
+            expert_alignment=grouped_fused_moe_ep.get_mk_alignment_for_contiguous_layout(),
+            num_sms=grouped_fused_moe_ep.get_ep_num_sms(overlap_with_compute=True),
+            async_with_compute_stream=True,
+            # Decode 不传 previous_event，输出直接归属计算流；DeepEP 会为
+            # 通信流的异步访问登记 allocator 生命周期。
+            allocate_on_comm_stream=False,
+            do_cpu_sync=False,
+            do_handle_copy=False,
+            do_expand=True,
+            do_zero_padding=True,
+            use_tma_aligned_col_major_sf=True,
+        )
+
+        def hook():
+            event.current_stream_wait()
+
+        return recv_x, ep_handle, recv_topk_weights, hook
+
+    def decode_masked_group_gemm(
+        self,
+        recv_x: Tuple[torch.Tensor, torch.Tensor],
+        w13: WeightPack,
+        w2: WeightPack,
+        ep_handle: Any,
+        dtype: torch.dtype,
+        expected_m: int,
+    ):
+        w13_weight, w13_scale = w13.weight, w13.weight_scale
+        w2_weight, w2_scale = w2.weight, w2.weight_scale
+        moe_output = grouped_fused_moe_ep.decode_masked_group_gemm(
+            recv_x=recv_x,
+            expert_token_psum=ep_handle.psum_num_recv_tokens_per_expert,
+            expert_alignment=ep_handle.expert_alignment,
+            dtype=dtype,
+            w1=w13_weight,
+            w1_scale=w13_scale,
+            w2=w2_weight,
+            w2_scale=w2_scale,
+            expected_m=expected_m,
+        )
+        return moe_output
+
+    def decode_combine(
+        self,
+        expert_output: torch.Tensor,
+        ep_handle: Any,
+        recv_topk_weights: torch.Tensor,
+    ):
+        # 阶段 1：把按 expert 展开的输出归约回去重接收 token 布局。
+        # expert_output:    [num_expanded_rows, hidden_size]
+        # recv_topk_weights:[num_expanded_rows]
+        # recv_src_metadata:[num_recv_tokens_capacity, topk + 2]
+        # dense_output:     [num_recv_tokens_capacity, hidden_size]
+        # compact_metadata: [num_recv_tokens_capacity, topk + 2]
+        # psum_num_recv_tokens_per_scaleup_rank 的 shape 为 [num_scaleup_ranks]，
+        # 保存各来源 rank 的去重接收 token 数的 inclusive prefix sum。最后一项
+        # 是 recv_src_metadata 的有效行数，不是按 expert 展开后的有效行数。
+        dense_output, compact_metadata = ep_reduce_decode_output(
+            expert_output=expert_output,
+            route_weights=recv_topk_weights,
+            recv_src_metadata=ep_handle.recv_src_metadata,
+            num_valid_recv_tokens=ep_handle.psum_num_recv_tokens_per_scaleup_rank[-1:],
+        )
+        ep_handle.recv_src_metadata = compact_metadata
+
+        # 阶段 2：compact metadata 的第一个 top-k 槽位指向同序 dense row，
+        # 其余槽位置为 -1。异步 combine 返回 event，由调用方在消费输出前等待。
+        combined_x, _, event = dist_group_manager.ep_buffer.combine(
+            dense_output,
+            ep_handle,
+            topk_weights=None,
+            num_sms=grouped_fused_moe_ep.get_ep_num_sms(overlap_with_compute=True),
+            async_with_compute_stream=True,
+            # Decode combine 没有 previous_event，输出归属计算流；通信流的异步
+            # 生命周期由 DeepEP 内部统一登记。
+            allocate_on_comm_stream=False,
+        )
+
+        def hook():
+            event.current_stream_wait()
+
+        return combined_x, hook
+
+    # ==================== Prefill 接口 ====================
+
+    def prefill_dispatch(
+        self,
+        qinput_tensor: Tuple[torch.Tensor, torch.Tensor],
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
         overlap_event: Optional[Any] = None,
@@ -305,8 +386,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             topk_weights=topk_weights,
             num_experts=self.num_total_physical_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            expert_alignment=128,
-            num_sms=get_ep_num_sms(),
+            expert_alignment=grouped_fused_moe_ep.get_mk_alignment_for_contiguous_layout(),
+            num_sms=grouped_fused_moe_ep.get_ep_num_sms(overlap_with_compute=True),
             previous_event=overlap_event,
             async_with_compute_stream=True,
             allocate_on_comm_stream=True,
@@ -321,47 +402,24 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
 
         return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
-    def masked_group_gemm(
-        self,
-        recv_x: Tuple[torch.Tensor],
-        w13: WeightPack,
-        w2: WeightPack,
-        masked_m: torch.Tensor,
-        dtype: torch.dtype,
-        expected_m: int,
-    ):
-        w13_weight, w13_scale = w13.weight, w13.weight_scale
-        w2_weight, w2_scale = w2.weight, w2.weight_scale
-        return masked_group_gemm(
-            recv_x,
-            masked_m,
-            dtype,
-            w13_weight,
-            w13_scale,
-            w2_weight,
-            w2_scale,
-            expected_m=expected_m,
-        )
-
     def prefilled_group_gemm(
         self,
         num_recv_tokens_per_expert_list,
         num_unaligned_recv_tokens_per_expert: torch.Tensor,
         recv_src_metadata: torch.Tensor,
-        recv_x: Tuple[torch.Tensor],
+        recv_x: Tuple[torch.Tensor, torch.Tensor],
         recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor,
         w13: WeightPack,
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
-        microbatch_index: int = 0,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         assert recv_topk_idx is None
         all_tokens = sum(num_recv_tokens_per_expert_list)
         if all_tokens > 0:
-            gather_out = chunked_expanded_moe_forward(
+            gather_out = grouped_fused_moe_ep.chunked_expanded_moe_forward(
                 num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
                 num_unaligned_recv_tokens_per_expert=num_unaligned_recv_tokens_per_expert,
                 recv_x=recv_x,
@@ -372,7 +430,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 w2=w2_weight,
                 w2_scale=w2_scale,
                 block_size_k=self.quant_method.block_size,
-                workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
             )
         else:
@@ -391,22 +448,15 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
                 silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
                 _gemm_out_a, _silu_out = None, None
+        # 与 decode 一致，只为占显存主体的 recv_x 登记计算流；较小的路由
+        # metadata 继续由 handle 和当前调用栈维持生命周期。
+        compute_stream = torch.cuda.current_stream()
+        recv_x[0].record_stream(compute_stream)
+        recv_x[1].record_stream(compute_stream)
         del recv_x
         return gather_out
 
-    def low_latency_combine(
-        self,
-        gemm_out_b: torch.Tensor,
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        handle: Any,
-    ):
-        combined_x, event_overlap, hook = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
-            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
-        )
-        return combined_x, hook
-
-    def combine(
+    def prefill_combine(
         self,
         gemm_out_b: torch.Tensor,
         handle: Any,
@@ -417,7 +467,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             gemm_out_b,
             handle,
             topk_weights=None,
-            num_sms=get_ep_num_sms(),
+            num_sms=grouped_fused_moe_ep.get_ep_num_sms(overlap_with_compute=True),
             previous_event=overlap_event,
             async_with_compute_stream=True,
             allocate_on_comm_stream=True,

@@ -1,311 +1,428 @@
-import pytest
+"""Tests for the ElasticBuffer expanded-layout DeepEP path."""
 
-pytest.skip(reason="need special env, install deep_ep and deep_gemm", allow_module_level=True)
-
+import copy
+import importlib.util
 import os
+import socket
+
 import torch
 import torch.distributed as dist
-import deep_ep
-import numpy as np
-from lightllm.common.fused_moe.grouped_fused_moe_ep import fused_experts_impl
-from typing import Tuple
-from lightllm.utils.log_utils import init_logger
+import torch.multiprocessing as mp
+import pytest
 
-logger = init_logger(__name__)
-
-seed = 42
-torch.manual_seed(seed)
-
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
+    ep_compact_metadata,
+    ep_gather_chunk,
+    ep_reduce_decode_output,
+)
 
 
-def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2
-    m, n = x.shape
-    from deep_gemm import ceil_div
-
-    x_padded = torch.zeros((ceil_div(m, 128) * 128, ceil_div(n, 128) * 128), dtype=x.dtype, device=x.device)
-    x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
-    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
-    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
-
-
-def init_dist(local_rank: int, num_local_ranks: int):
-    # NOTES: you may rewrite this function with your own cluster settings
-    ip = os.getenv("MASTER_ADDR", "127.0.0.1")
-    port = int(os.getenv("MASTER_PORT", "8361"))
-    num_nodes = int(os.getenv("WORLD_SIZE", 1))
-    node_rank = int(os.getenv("RANK", 0))
-    assert (num_local_ranks < 8 and num_nodes == 1) or num_local_ranks == 8
-
-    dist.init_process_group(
-        backend="nccl",
-        init_method=f"tcp://{ip}:{port}",
-        world_size=num_nodes * num_local_ranks,
-        rank=node_rank * num_local_ranks + local_rank,
-    )
-    torch.set_default_dtype(torch.bfloat16)
-    torch.set_default_device("cuda")
-    torch.cuda.set_device(local_rank)
-
-    return dist.get_rank(), dist.get_world_size(), dist.new_group(list(range(num_local_ranks * num_nodes)))
-
-
-def fused_experts_impl_ref(
-    x: torch.Tensor,  # [M, K]
-    w1: torch.Tensor,  # [group, N, K]
-    w2: torch.Tensor,  # [group, K, N/2]
-    topk_weight: torch.Tensor,  # [M, topk]
-    topk_ids: torch.Tensor,  # [M, topk]
-    num_experts: int,
+def _reference_reduce_decode_output(
+    expert_output: torch.Tensor,
+    route_weights: torch.Tensor,
+    recv_src_metadata: torch.Tensor,
+    num_valid_recv_tokens: int,
 ):
-    N = w1.shape[1]
-    ep_size = torch.distributed.get_world_size()
-    experts_per_rank = num_experts // ep_size
+    metadata = recv_src_metadata[:num_valid_recv_tokens]
+    expert_rows = metadata[:, 2:].to(torch.long)
+    valid_expert_rows = expert_rows >= 0
+    safe_expert_rows = expert_rows.clamp_min(0)
 
-    cnts = topk_ids.new_zeros((topk_ids.shape[0], num_experts))
-    cnts.scatter_(1, topk_ids, 1)
-    tokens_per_expert = cnts.sum(dim=0)
-    idxs = topk_ids.view(-1).argsort()
-    sorted_tokens = x[idxs // topk_ids.shape[1]]
-    sorted_tokens_shape = sorted_tokens.shape
+    contributions = expert_output[safe_expert_rows].float()
+    contributions *= route_weights[safe_expert_rows, None].float()
+    contributions *= valid_expert_rows[:, :, None]
+    dense_output = contributions.sum(dim=1).to(expert_output.dtype)
 
-    if ep_size > 1:
-        tokens_per_ep_rank = tokens_per_expert.view(ep_size, -1).sum(dim=1)
-        tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
-        dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-        output_splits = tokens_per_expert_group.view(ep_size, -1).sum(1).cpu().numpy().tolist()
-        gathered_tokens = sorted_tokens.new_empty(
-            tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
-        )
-        input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
-        dist.all_to_all(
-            list(gathered_tokens.split(output_splits)),
-            list(sorted_tokens.split(input_split_sizes)),
-        )
-        tokens_per_expert_post_gather = tokens_per_expert_group.view(ep_size, experts_per_rank).sum(dim=0)
-        gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
-        s = 0
-        for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
-            gatherd_idxs[s : s + k] = i % experts_per_rank
-            s += k
-        gatherd_idxs = gatherd_idxs.argsort()
-        sorted_tokens = gathered_tokens[gatherd_idxs]
-        tokens_per_expert = tokens_per_expert_post_gather
-    tokens_per_expert = tokens_per_expert.cpu().numpy()
+    compact_metadata = metadata.clone()
+    compact_metadata[:, 2:] = -1
+    compact_metadata[:, 2] = torch.arange(
+        num_valid_recv_tokens,
+        dtype=compact_metadata.dtype,
+        device=compact_metadata.device,
+    )
+    return dense_output, compact_metadata
 
-    outputs = []
-    start_idx = 0
-    for i, num_tokens in enumerate(tokens_per_expert):
-        end_idx = start_idx + num_tokens
-        if num_tokens == 0:
-            continue
-        tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-        w1_out = torch.matmul(tokens_for_this_expert, w1[i, : N // 2, :].T)
-        w2_out = torch.matmul(tokens_for_this_expert, w1[i, N // 2 :, :].T)
-        tmp = torch.nn.functional.silu(w1_out)
-        tmp = tmp * w2_out
-        expert_out = torch.matmul(tmp, w2[i].T)
-        outputs.append(expert_out)
-        start_idx = end_idx
 
-    outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-
-    if ep_size > 1:
-        new_x = torch.empty_like(outs)
-        new_x[gatherd_idxs] = outs
-        gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
-        dist.all_to_all(
-            list(gathered_tokens.split(input_split_sizes)),
-            list(new_x.split(output_splits)),
-        )
-        outs = gathered_tokens
-
-    new_x = torch.empty_like(outs)
-    new_x[idxs] = outs
-    final_out = (
-        new_x.view(*topk_ids.shape, -1)
-        .type(topk_weight.dtype)
-        .mul_(topk_weight.unsqueeze(dim=-1))
-        .sum(dim=1)
-        .type(new_x.dtype)
+def _build_reduce_inputs(
+    num_recv_tokens: int,
+    num_valid_recv_tokens: int,
+    topk: int,
+    hidden_size: int,
+):
+    num_expanded_rows = max(32, num_valid_recv_tokens * topk // 2)
+    generator = torch.Generator(device="cuda").manual_seed(1234)
+    expert_output = torch.randn(
+        (num_expanded_rows, hidden_size),
+        dtype=torch.bfloat16,
+        device="cuda",
+        generator=generator,
+    )
+    route_weights = torch.rand(
+        (num_expanded_rows,),
+        dtype=torch.float32,
+        device="cuda",
+        generator=generator,
     )
 
-    return final_out
+    recv_src_metadata = torch.full(
+        (num_recv_tokens, topk + 2),
+        -1,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    token_ids = torch.arange(num_valid_recv_tokens, dtype=torch.int32, device="cuda")
+    recv_src_metadata[:num_valid_recv_tokens, 0] = 10_000 + token_ids
+    recv_src_metadata[:num_valid_recv_tokens, 1] = token_ids % 8
+    for topk_index in range(topk):
+        expert_rows = (token_ids * topk + topk_index * 7) % num_expanded_rows
+        # 同时覆盖普通映射、部分 top-k 不属于当前 rank，以及所有 top-k
+        # 都不属于当前 rank 的 token。
+        if topk > 1:
+            expert_rows[(token_ids + topk_index) % 5 == 0] = -1
+            expert_rows[token_ids % 17 == 0] = -1
+        recv_src_metadata[:num_valid_recv_tokens, topk_index + 2] = expert_rows
+
+    num_valid_recv_tokens_tensor = torch.tensor(
+        [num_valid_recv_tokens],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    return expert_output, route_weights, recv_src_metadata, num_valid_recv_tokens_tensor
 
 
-def case1(local_rank: int, num_local_ranks: int):
-    # Init dist
-    rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "num_recv_tokens,num_valid_recv_tokens,topk,hidden_size",
+    [
+        # 无 hidden 尾块、top-k=1 的基础路径。
+        (16, 7, 1, 1024),
+        # 非对齐 hidden size、无效 expert 行和全无效 token。
+        (64, 17, 4, 1031),
+        # 接收 buffer 容量远大于真实 token 数。
+        (4096, 17, 8, 257),
+        # 有效 token 数超过 1024，覆盖一个 program 处理多行的循环路径。
+        (1031, 1031, 8, 128),
+    ],
+)
+def test_ep_reduce_decode_output_matches_reference(
+    num_recv_tokens,
+    num_valid_recv_tokens,
+    topk,
+    hidden_size,
+):
+    inputs = _build_reduce_inputs(
+        num_recv_tokens=num_recv_tokens,
+        num_valid_recv_tokens=num_valid_recv_tokens,
+        topk=topk,
+        hidden_size=hidden_size,
+    )
+    expert_output, route_weights, recv_src_metadata, num_valid_recv_tokens_tensor = inputs
 
-    torch.manual_seed(rank)
+    expected_output, expected_metadata = _reference_reduce_decode_output(
+        expert_output=expert_output,
+        route_weights=route_weights,
+        recv_src_metadata=recv_src_metadata,
+        num_valid_recv_tokens=num_valid_recv_tokens,
+    )
+    output, compact_metadata = ep_reduce_decode_output(
+        expert_output=expert_output,
+        route_weights=route_weights,
+        recv_src_metadata=recv_src_metadata,
+        num_valid_recv_tokens=num_valid_recv_tokens_tensor,
+    )
+    torch.cuda.synchronize()
 
-    # Construct inputs
-    seqlen = 16
-    hidden_states = torch.randn((seqlen, 7168), device="cuda", dtype=torch.bfloat16)
-    w1 = torch.randn((256 // num_local_ranks, 4096, 7168), device="cuda", dtype=torch.bfloat16)
-    w2 = torch.randn((256 // num_local_ranks, 7168, 2048), device="cuda", dtype=torch.bfloat16)
+    torch.testing.assert_close(
+        output[:num_valid_recv_tokens],
+        expected_output,
+        atol=1e-2,
+        rtol=1e-2,
+    )
+    assert torch.equal(
+        compact_metadata[:num_valid_recv_tokens],
+        expected_metadata,
+    )
 
-    w1_fp8 = torch.empty_like(w1, dtype=torch.float8_e4m3fn)
-    w2_fp8 = torch.empty_like(w2, dtype=torch.float8_e4m3fn)
-    w1_scale = torch.empty((256 // num_local_ranks, 4096 // 128, 7168 // 128), device="cuda", dtype=torch.float)
-    w2_scale = torch.empty((256 // num_local_ranks, 7168 // 128, 2048 // 128), device="cuda", dtype=torch.float)
 
-    for i in range(256 // num_local_ranks):
-        w1_fp8[i], w1_scale[i] = per_block_cast_to_fp8(w1[i])
-        w2_fp8[i], w2_scale[i] = per_block_cast_to_fp8(w2[i])
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
-    topk_weights = torch.randn((seqlen, 8), device="cuda", dtype=torch.float32)
-    topk_weights = torch.softmax(topk_weights, dim=-1)  # 对每行进行softmax归一化
-    topk_weights = torch.tensor(topk_weights, device="cuda", dtype=torch.float32)
-    topk_ids = torch.zeros((seqlen, 8), device="cuda", dtype=torch.int64)
-    for i in range(seqlen):
-        topk_ids[i] = torch.randperm(254, device="cuda")[:8] + 1
 
-    # Init buffer
-    test_ll_compatibility, num_rdma_bytes = True, 0
-    num_max_dispatch_tokens_per_rank = 512
-    if test_ll_compatibility:
-        ll_num_tokens, ll_hidden, ll_num_experts, _ = num_max_dispatch_tokens_per_rank, 7168, 256, 8
-        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-            ll_num_tokens, ll_hidden, num_ranks, ll_num_experts
+def _per_block_cast_to_fp8(weight: torch.Tensor):
+    """按 DeepGEMM 的 128x128 权重 scale 布局量化二维权重。"""
+    rows, columns = weight.shape
+    padded_rows = (rows + 127) // 128 * 128
+    padded_columns = (columns + 127) // 128 * 128
+    padded_weight = torch.zeros(
+        (padded_rows, padded_columns),
+        dtype=weight.dtype,
+        device=weight.device,
+    )
+    padded_weight[:rows, :columns] = weight
+    weight_blocks = padded_weight.view(
+        padded_rows // 128,
+        128,
+        padded_columns // 128,
+        128,
+    )
+    block_absmax = weight_blocks.abs().float().amax(dim=(1, 3), keepdim=True).clamp_min(1e-10)
+    quantized_weight = (weight_blocks * (448.0 / block_absmax)).to(torch.float8_e4m3fn)
+    return (
+        quantized_weight.view_as(padded_weight)[:rows, :columns].contiguous(),
+        (block_absmax / 448.0).view(padded_rows // 128, padded_columns // 128),
+    )
+
+
+def _build_local_expert_weights(rank: int, num_local_experts: int, hidden_size: int, intermediate_size: int):
+    w1 = []
+    w1_scale = []
+    w2 = []
+    w2_scale = []
+    for local_expert_index in range(num_local_experts):
+        global_expert_index = rank * num_local_experts + local_expert_index
+        generator = torch.Generator(device="cuda").manual_seed(1000 + global_expert_index)
+        expert_w1 = (
+            torch.randn(
+                (intermediate_size * 2, hidden_size),
+                dtype=torch.bfloat16,
+                device="cuda",
+                generator=generator,
+            )
+            / hidden_size ** 0.5
         )
-
-    buffer = deep_ep.Buffer(
-        group,
-        int(1e9),
-        num_rdma_bytes,
-        low_latency_mode=test_ll_compatibility,
-        num_qps_per_rank=(ll_num_experts // num_ranks if test_ll_compatibility else 1),
-    )
-
-    # Test normal
-    ref_output = fused_experts_impl_ref(
-        x=hidden_states, w1=w1, w2=w2, topk_weight=topk_weights, topk_ids=topk_ids, num_experts=256
-    )
-
-    output = fused_experts_impl(
-        hidden_states=hidden_states,
-        w1=w1_fp8,
-        w2=w2_fp8,
-        topk_weights=topk_weights,
-        topk_idx=topk_ids,
-        num_experts=256,
-        buffer=buffer,
-        is_prefill=True,
-        use_fp8_w8a8=True,
-        use_fp8_all2all=True,
-        use_int8_w8a16=False,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        previous_event=None,
-    )
-
-    # Test ll
-    if test_ll_compatibility:
-        buffer.clean_low_latency_buffer(ll_num_tokens, ll_hidden, ll_num_experts)
-        ll_output = fused_experts_impl(
-            hidden_states=hidden_states,
-            w1=w1_fp8,
-            w2=w2_fp8,
-            topk_weights=topk_weights,
-            topk_idx=topk_ids,
-            num_experts=256,
-            buffer=buffer,
-            is_prefill=False,
-            use_fp8_w8a8=True,
-            use_fp8_all2all=True,
-            use_int8_w8a16=False,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            previous_event=None,
+        expert_w2 = (
+            torch.randn(
+                (hidden_size, intermediate_size),
+                dtype=torch.bfloat16,
+                device="cuda",
+                generator=generator,
+            )
+            / intermediate_size ** 0.5
         )
+        quantized_w1, quantized_w1_scale = _per_block_cast_to_fp8(expert_w1)
+        quantized_w2, quantized_w2_scale = _per_block_cast_to_fp8(expert_w2)
+        w1.append(quantized_w1)
+        w1_scale.append(quantized_w1_scale)
+        w2.append(quantized_w2)
+        w2_scale.append(quantized_w2_scale)
+    return tuple(torch.stack(tensors) for tensors in (w1, w1_scale, w2, w2_scale))
 
-    # Check
-    norm_sim = torch.nn.functional.cosine_similarity(ref_output, output).mean()
-    ll_sim = torch.nn.functional.cosine_similarity(ref_output, ll_output).mean()
 
-    assert torch.allclose(norm_sim, torch.ones(1), atol=1e-2, rtol=0)
-    assert torch.allclose(ll_sim, torch.ones(1), atol=1e-2, rtol=0)
-    logger.info(f"deepep cosine {norm_sim}")
-    logger.info(f"deepep ll cosine {ll_sim}")
+def _decode_dispatch_reduce_combine_worker(rank: int, port: int) -> None:
+    import deep_ep
+    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
+        decode_masked_group_gemm,
+        set_mk_alignment_for_contiguous_layout,
+    )
+    from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.deepgemm_impl import (
+        FuseMoeDeepGEMM,
+    )
+    from lightllm.distributed import dist_group_manager
+    from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
+        per_token_group_quant_fp8,
+    )
 
-    # Profile
-    profile = os.getenv("PROFILE", False)
-    if profile:
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-        ) as prof:
-            for i in range(10):
-                output = fused_experts_impl(
-                    hidden_states=hidden_states,
-                    w1=w1_fp8,
-                    w2=w2_fp8,
-                    topk_weights=topk_weights,
-                    topk_idx=topk_ids,
-                    num_experts=256,
-                    buffer=buffer,
-                    is_prefill=True,
-                    use_fp8_w8a8=True,
-                    use_fp8_all2all=True,
-                    use_int8_w8a16=False,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    previous_event=None,
-                )
-            # prof.step()
+    world_size = 2
+    num_tokens = 4
+    num_experts = 4
+    num_local_experts = num_experts // world_size
+    topk = 2
+    hidden_size = 256
+    intermediate_size = 128
+    num_max_tokens_per_rank = 8
+
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    # 单机测试只覆盖 NVLink 通信，不依赖测试机是否配置 NCCL GIN/RDMA。
+    os.environ["EP_DISABLE_GIN"] = "1"
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    group = dist.new_group(list(range(world_size)), backend="nccl")
+    dist.barrier(group=group, device_ids=[rank])
+
+    buffer = None
+    try:
+        buffer = deep_ep.ElasticBuffer(
+            group,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            hidden=hidden_size,
+            num_topk=topk,
+            use_fp8_dispatch=True,
+            deterministic=True,
+            allow_multiple_reduction=True,
+            prefer_overlap_with_compute=False,
+            explicitly_destroy=True,
+        )
+        set_mk_alignment_for_contiguous_layout(128)
+        torch.manual_seed(100 + rank)
+        hidden_states = torch.randn(
+            (num_tokens, hidden_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        # 每个 rank 都包含：两个 expert 位于同一个远端 rank、两个 expert
+        # 位于本地，以及分别命中两个 rank 的 token。
         if rank == 0:
-            print(prof.key_averages().table(sort_by="cuda_time_total"))
-            prof.export_chrome_trace("normal_trace.json")
+            topk_idx = torch.tensor(
+                [[2, 3], [0, 1], [0, 2], [1, 3]],
+                dtype=torch.int64,
+                device="cuda",
+            )
+        else:
+            topk_idx = torch.tensor(
+                [[0, 1], [2, 3], [0, 2], [1, 3]],
+                dtype=torch.int64,
+                device="cuda",
+            )
+        topk_weights = torch.tensor(
+            [[0.25, 0.75], [0.5, 0.5], [0.75, 0.25], [0.25, 0.75]],
+            dtype=torch.float32,
+            device="cuda",
+        )
+        w1, w1_scale, w2, w2_scale = _build_local_expert_weights(
+            rank=rank,
+            num_local_experts=num_local_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+        )
 
-        if test_ll_compatibility:
-            with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-            ) as prof:
-                for i in range(10):
-                    ll_output = fused_experts_impl(
-                        hidden_states=hidden_states,
-                        w1=w1_fp8,
-                        w2=w2_fp8,
-                        topk_weights=topk_weights,
-                        topk_idx=topk_ids,
-                        num_experts=256,
-                        buffer=buffer,
-                        is_prefill=False,
-                        use_fp8_w8a8=True,
-                        use_fp8_all2all=True,
-                        use_int8_w8a16=False,
-                        w1_scale=w1_scale,
-                        w2_scale=w2_scale,
-                        previous_event=None,
-                    )
-            if rank == 0:
-                print(prof.key_averages().table(sort_by="cuda_time_total"))
-                prof.export_chrome_trace("ll_trace.json")
+        def dispatch():
+            qinput_tensor, input_scale = per_token_group_quant_fp8(
+                hidden_states,
+                group_size=128,
+                dtype=torch.float8_e4m3fn,
+            )
+            recv_x, _, recv_topk_weights, handle, event = buffer.dispatch(
+                (qinput_tensor, input_scale),
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                num_experts=num_experts,
+                num_max_tokens_per_rank=num_max_tokens_per_rank,
+                expert_alignment=128,
+                async_with_compute_stream=False,
+                allocate_on_comm_stream=False,
+                do_cpu_sync=False,
+                do_handle_copy=False,
+                do_expand=True,
+                do_zero_padding=True,
+                use_tma_aligned_col_major_sf=True,
+            )
+            assert event.event is None
+            return recv_x, recv_topk_weights, handle
 
-    dist.barrier()
+        def run_experts(recv_x, handle):
+            return decode_masked_group_gemm(
+                recv_x=recv_x,
+                expert_token_psum=handle.psum_num_recv_tokens_per_expert,
+                expert_alignment=handle.expert_alignment,
+                dtype=hidden_states.dtype,
+                w1=w1,
+                w1_scale=w1_scale,
+                w2=w2,
+                w2_scale=w2_scale,
+                expected_m=1,
+            )
+
+        recv_x, recv_topk_weights, handle = dispatch()
+
+        num_valid_recv_tokens = handle.psum_num_recv_tokens_per_scaleup_rank[-1:]
+        # 每个来源 rank 各有 3 个 token 命中当前 rank。若 dispatch 没有按
+        # 目标 rank 去重，这里会得到 8 个 expert 路由项而不是 6 个 token。
+        assert num_valid_recv_tokens.item() == 6
+
+        expert_output = run_experts(recv_x, handle)
+        reference_expert_output = expert_output.clone()
+        reference_recv_topk_weights = recv_topk_weights.clone()
+        reference_handle = copy.copy(handle)
+        reference_handle.recv_src_metadata = handle.recv_src_metadata.clone()
+        reference_dense_output = torch.zeros(
+            (reference_handle.recv_src_metadata.shape[0], hidden_size),
+            dtype=reference_expert_output.dtype,
+            device=reference_expert_output.device,
+        )
+        ep_gather_chunk(
+            chunk=reference_expert_output,
+            chunk_start=0,
+            weights=reference_recv_topk_weights,
+            recv_src_metadata=reference_handle.recv_src_metadata,
+            output=reference_dense_output,
+        )
+        ep_compact_metadata(reference_handle.recv_src_metadata)
+        expected_output, _, event = buffer.combine(
+            reference_dense_output,
+            handle=reference_handle,
+            topk_weights=None,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+        )
+        event.current_stream_wait()
+        expected_output = expected_output.clone()
+
+        sync_handle = copy.copy(handle)
+        sync_handle.recv_src_metadata = handle.recv_src_metadata.clone()
+        sync_dense_output, sync_metadata = ep_reduce_decode_output(
+            expert_output=expert_output,
+            route_weights=recv_topk_weights,
+            recv_src_metadata=sync_handle.recv_src_metadata,
+            num_valid_recv_tokens=sync_handle.psum_num_recv_tokens_per_scaleup_rank[-1:],
+        )
+        sync_handle.recv_src_metadata = sync_metadata
+        sync_output, _, sync_event = buffer.combine(
+            sync_dense_output,
+            handle=sync_handle,
+            topk_weights=None,
+            num_sms=0,
+            async_with_compute_stream=False,
+            allocate_on_comm_stream=False,
+        )
+        assert sync_event.event is None
+        sync_output = sync_output.clone()
+
+        dist_group_manager.ep_buffer = buffer
+        moe_impl = object.__new__(FuseMoeDeepGEMM)
+        overlap_output, hook = moe_impl.decode_combine(
+            expert_output=expert_output,
+            ep_handle=handle,
+            recv_topk_weights=recv_topk_weights,
+        )
+        hook()
+        torch.cuda.synchronize()
+
+        # 对比已有 gather + metadata compact 两步参考实现与新的融合归约。
+        # 三条路径共用相同路由和真实 FP8 grouped GEMM，仅归约和同步方式不同。
+        torch.testing.assert_close(
+            sync_output[:num_tokens],
+            expected_output[:num_tokens],
+            atol=2e-2,
+            rtol=2e-2,
+        )
+        torch.testing.assert_close(
+            overlap_output[:num_tokens],
+            expected_output[:num_tokens],
+            atol=2e-2,
+            rtol=2e-2,
+        )
+    finally:
+        try:
+            if buffer is not None:
+                buffer.destroy()
+        finally:
+            dist.destroy_process_group()
 
 
-def test_end2end():
-    num_processes = 8
-    torch.multiprocessing.spawn(case1, args=(num_processes,), nprocs=num_processes)
-
-
-if __name__ == "__main__":
-    pytest.main()
+@pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or torch.cuda.device_count() < 2
+    or importlib.util.find_spec("deep_ep") is None
+    or importlib.util.find_spec("deep_gemm") is None,
+    reason="requires DeepEP, DeepGEMM, and two CUDA GPUs",
+)
+def test_decode_dispatch_reduce_combine_two_gpu_correctness():
+    mp.spawn(
+        _decode_dispatch_reduce_combine_worker,
+        args=(_free_port(),),
+        nprocs=2,
+        join=True,
+    )
