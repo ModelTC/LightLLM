@@ -1,4 +1,5 @@
 import os
+import shutil
 import ctypes
 import signal
 import subprocess
@@ -18,6 +19,10 @@ class SubmoduleManager:
     def __init__(self):
         self.processes = []
         self.process_names = {}
+        self.disk_cache_dir = None
+
+    def register_disk_cache_dir(self, cache_dir):
+        self.disk_cache_dir = cache_dir
 
     def start_submodule_processes(self, start_funcs=[], start_args=[]):
         assert len(start_funcs) == len(start_args)
@@ -90,6 +95,15 @@ class SubmoduleManager:
         alive_pids = [proc.pid for proc in alive if is_process_active(proc.pid)]
         if alive_pids:
             logger.warning(f"Processes still alive after SIGKILL: {alive_pids}")
+
+        # Only the instance-owned directory may be removed, after its workers exit.
+        if self.disk_cache_dir is not None and not alive_pids:
+            try:
+                shutil.rmtree(self.disk_cache_dir)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception("Failed to remove disk cache directory %s", self.disk_cache_dir)
 
         # recover the gpu compute mode
         is_enable_mps = get_env_start_args().enable_mps
