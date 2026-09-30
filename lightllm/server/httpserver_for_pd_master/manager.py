@@ -175,12 +175,9 @@ class HttpServerManagerForPDMaster:
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
         input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
-        fake_prompt_ids = [0 for _ in range(input_token_num)]
         from lightllm.server.httpserver.manager import HttpServerManager
 
-        await HttpServerManager._check_and_repair_length(
-            self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
-        )
+        HttpServerManager._check_and_repair_length(self, input_token_num, sampling_params)
 
         origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
         origin_group_request_id = self.id_gen.generate_id()
@@ -584,6 +581,7 @@ class HttpServerManagerForPDMaster:
                 )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
+                output_tokens = []
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
                     # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
@@ -595,12 +593,15 @@ class HttpServerManagerForPDMaster:
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                            yield sub_req_id, request_output, metadata, finish_status
+                            output_tokens.append((sub_req_id, request_output, metadata, finish_status))
                         else:
                             continue
                     else:
                         metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                        yield sub_req_id, request_output, metadata, finish_status
+                        output_tokens.append((sub_req_id, request_output, metadata, finish_status))
+                for index, token_info in enumerate(output_tokens):
+                    token_info[2]["_pd_stream_batch_end"] = index == len(output_tokens) - 1
+                    yield token_info
 
         return
 
