@@ -54,6 +54,7 @@ class HttpServerManagerForPDMaster:
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
+        self._abort_notify_tasks = set()
         # 限流开关只在 PD Master 生效；P/D 节点不读取本地开关或超时配置，只执行 Master 下发的值。
         self.enable_pd_node_self_request_limit = not args.disable_pd_node_self_request_limit
         self.pd_node_resource_wait_timeout_seconds = get_pd_node_resource_wait_timeout_seconds()
@@ -90,11 +91,13 @@ class HttpServerManagerForPDMaster:
         return False
 
     async def register_pd(self, pd_info_json, websocket):
-        self.pd_manager.register_pd(pd_info_json, websocket)
-        return
+        return self.pd_manager.register_pd(pd_info_json, websocket)
 
-    async def remove_pd(self, pd_info_json):
-        self.pd_manager.remove_pd(pd_info_json)
+    async def remove_pd(self, pd_client: PD_Client_Obj):
+        self.pd_manager.remove_pd(pd_client)
+        for req_status in list(self.req_id_to_out_inf.values()):
+            if req_status.p_node is pd_client or req_status.d_node is pd_client:
+                await req_status.set_error(f"PD {pd_client.mode} node {pd_client.client_ip_port} disconnected")
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -520,7 +523,7 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.send_control_message(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -539,7 +542,7 @@ class HttpServerManagerForPDMaster:
         logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.websocket.send_bytes(
+        await d_node.send_control_message(
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
@@ -560,7 +563,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
         pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
         decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
-        await p_node.websocket.send_bytes(
+        await p_node.send_control_message(
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
@@ -587,7 +590,10 @@ class HttpServerManagerForPDMaster:
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
                     # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
-                    if output_index == 1:
+                    if output_index == 1 and finish_status.status not in (
+                        FinishStatus.FINISHED_ABORTED,
+                        FinishStatus.FINISHED_ERROR,
+                    ):
                         if first_token_gen is False:
                             first_token_gen = True
                             node_run_mode = metadata.pop("node_mode", None)
@@ -635,6 +641,9 @@ class HttpServerManagerForPDMaster:
                     prompt_cache_len = metadata.get("prompt_cache_len", 0)
                     await req_status.put_tokens_to_front(new_tokens)
                     return prompt_cache_len
+                if token[3].is_finished():
+                    await req_status.put_tokens_to_front(new_tokens)
+                    return ready_kv_len
 
     async def _wait_to_token_package(
         self,
@@ -727,15 +736,18 @@ class HttpServerManagerForPDMaster:
         except:
             pass
 
-        try:
-            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
+        async def notify_node(node):
+            try:
+                await node.send_control_message(pickle.dumps((ObjType.ABORT, group_request_id)))
+            except Exception:
+                logger.exception("Failed to notify PD node of abort: %s", node.client_ip_port)
 
-        try:
-            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
+        tasks = [asyncio.create_task(notify_node(node)) for node in (p_node, d_node) if node is not None]
+        self._abort_notify_tasks.update(tasks)
+        for task in tasks:
+            task.add_done_callback(self._abort_notify_tasks.discard)
+        if tasks:
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks))
 
         return
 
@@ -986,12 +998,14 @@ class PDManager:
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
-        return
+        return pd_client
 
-    def remove_pd(self, pd_info_json):
-        pd_client = PD_Client_Obj(**pd_info_json)
+    def remove_pd(self, pd_client: PD_Client_Obj):
+        pd_client.websocket = None
+        if self.url_to_pd_nodes.get(pd_client.client_ip_port) is not pd_client:
+            return
 
-        self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
+        self.url_to_pd_nodes.pop(pd_client.client_ip_port)
         self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
         self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
 
@@ -1022,4 +1036,10 @@ class PDManager:
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
+        if not self.prefill_nodes or not self.decode_nodes:
+            raise ServerBusyError(
+                "PD nodes unavailable: "
+                f"registered_prefill={len(self.prefill_nodes)}, registered_decode={len(self.decode_nodes)}",
+                status_code=503,
+            )
         return self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)
