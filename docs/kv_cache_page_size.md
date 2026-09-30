@@ -43,3 +43,29 @@ diverse mode 仍只支持 `page_size=1`，启动阶段会对其他取值明确�
   `[HOLD, HOLD+1, ..., HOLD+page_size-1]` 循环填充，而不是重复同一个 token 索引。
 - Radix 子节点用“首个完整 token 页”作为键，避免不同序列仅首 token 相同造成页级分支冲突。
 - 非法的 `page_size < 1` 以及尚未支持的功能组合在模型加载前失败。
+
+## DeepSeek-V4
+
+V4 首版整合固定使用 256-token 分配页和 256-token 小页。启动时需要添加：
+
+```bash
+--page_size 256 --linear_att_hash_page_size 256
+```
+
+启用每 2048 token 一个大页 checkpoint 时，再添加 `--linear_att_page_block_num 8`。
+省略该参数时沿用主线默认值，关闭大页 checkpoint。PD Decode 节点仍按主线规则关闭大页。
+启用大页和 CPU cache 时，`--cpu_cache_token_page_size` 必须等于大页间隔；未指定时自动设置。
+
+- 统一 token 页持有压缩历史。闭合分组的 C4/C128 槽分别由组末 full slot 除以 4/128 得到；
+  不再维护独立压缩槽映射或 allocator。预留容量不改变 attention 的逻辑可见长度。
+- packed 格式保持独立：SWA 每页 128 槽，C4 每页 64 槽，C128 每页 2 槽。
+  历史复制、CPU cache 和 PD 使用 V4 专用算子，不能直接按普通 KV 的 token 维度复制。
+- SWA 页和 compressor 运行态归请求所有，保留完整 prefill chunk 所需的数据。
+  两个请求命中同一前缀时，共享压缩历史，分别恢复自己的 SWA 和 compressor 状态。
+- 大小页 CPU checkpoint 只保存末尾 256 token 的 SWA、C4 和 indexer continuation，
+  不重复保存压缩历史。256 边界已闭合 C128 分组，下一组覆盖状态后再读取。
+- PD 支持任意传输终点，额外保存未闭合分组以及最后可缓存边界的 continuation。
+  PD continuation 布局有变化，P/D 节点需要使用相同代码版本。
+
+验证覆盖分页边界、packed history 复制、大小页命中和分叉、推测拒绝后重试、CUDA Graph 索引、
+CPU/PD pack-unpack、跨进程 NCCL checkpoint 传输及资源回收。完整模型精度和性能仍需另行实测。

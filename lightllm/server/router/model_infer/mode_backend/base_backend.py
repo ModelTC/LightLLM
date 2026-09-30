@@ -13,6 +13,7 @@ from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.req_manager import HybridAttentionReqManager
@@ -150,6 +151,7 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
+        self.is_deepseek_v4 = isinstance(self.model.req_manager, DeepseekV4ReqManager)
 
         if self.is_hybrid_att_model:
             self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
@@ -207,6 +209,8 @@ class ModeBackend:
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        # DeepSeek-V4 DP prompt-cache checkpoints live in process-local CPU memory.
+        self.node_gloo_group = create_new_group_for_current_node("gloo")
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
@@ -289,6 +293,8 @@ class ModeBackend:
                 self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
             else:
                 self.mem_managers.append(self.model.mem_manager)
+        if self.is_deepseek_v4:
+            self.dp_kv_shared_module.init_dsv4_cache_transfer(self.mem_managers)
         return
 
     def get_max_total_token_num(self):
@@ -695,7 +701,7 @@ class ModeBackend:
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
 
-        if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
+        if self.args.enable_cpu_cache:
             self.multi_level_cache_module.update_cpu_cache_task_states()
 
         if req_ids is None:
@@ -722,6 +728,10 @@ class ModeBackend:
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
+        is_deepseek_v4 = self.is_deepseek_v4
+        can_alloc_dsv4_swa_page_num = None
+        if is_deepseek_v4:
+            can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
 
         for req_obj in ready_reqs:
 
@@ -754,16 +764,20 @@ class ModeBackend:
                     is_decode = False
 
             if is_decode:
-                # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
-                # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，
-                # 并将数量向下对齐到 page_size 的整数倍，以减少 alloc 调用次数并保持分页分配约束。
+                # Small pages benefit from reserving a few decode slots per allocation.
                 if alloc_token_num > 0 and self.args.page_size < 8:
                     alloc_token_num += 8 // self.args.page_size * self.args.page_size
-                if alloc_token_num <= can_alloc_token_num:
+                can_run = alloc_token_num <= can_alloc_token_num
+                if can_run and is_deepseek_v4:
+                    swa_page_num = req_obj.get_dsv4_decode_need_swa_page_num()
+                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
+                if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
+                    if is_deepseek_v4:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         if self.args.run_mode == "decode":
@@ -791,17 +805,21 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
-                # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
-                token_num, alloc_token_num = req_obj.prefill_need_token_num(
-                    is_chuncked_prefill=not self.disable_chunked_prefill
-                )
+                is_chuncked_prefill = not self.disable_chunked_prefill
+                token_num, alloc_token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=is_chuncked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                if alloc_token_num <= can_alloc_token_num:
+                can_run = alloc_token_num <= can_alloc_token_num
+                if can_run and is_deepseek_v4:
+                    swa_page_num = req_obj.get_dsv4_prefill_need_swa_page_num(is_chuncked_prefill=is_chuncked_prefill)
+                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
+                if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
+                    if is_deepseek_v4:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
@@ -855,10 +873,13 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
+        cpu_store_reqs = [] if self.args.enable_cpu_cache else None
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
         for req_obj in run_reqs:
             req_obj: InferReq = req_obj
+            if cpu_store_reqs is not None and req_obj.cur_kv_len < req_obj.shm_req.input_len:
+                cpu_store_reqs.append(req_obj)
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
@@ -878,6 +899,12 @@ class ModeBackend:
             req_obj.cur_output_len += 1
             pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
             update_func_objs.append(pack)
+
+        if cpu_store_reqs:
+            self.multi_level_cache_module.store_completed_prefill_pages(
+                reqs=cpu_store_reqs,
+                producer_stream=g_infer_context.get_overlap_stream(),
+            )
         return update_func_objs
 
     # 一些可以复用的通用功能函数

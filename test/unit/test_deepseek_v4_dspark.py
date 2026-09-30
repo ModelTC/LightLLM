@@ -1,0 +1,257 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from lightllm.utils.envs_utils import _get_mtp_draft_backbone_layer_num
+from lightllm.utils.config_utils import get_deepseek_v4_compress_rates
+
+
+def test_dspark_decode_admission_reserves_one_swa_scratch_page(monkeypatch):
+    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+
+    req = InferReq.__new__(InferReq)
+    req.req_idx = 0
+    monkeypatch.setattr(g_infer_context, "req_manager", SimpleNamespace(get_swa_page_need=lambda req, start, end: 0))
+    req.args = SimpleNamespace(mtp_mode="eagle")
+    req.mtp_step = 1
+    req.dsv4_swa_page_size = 128
+    req.get_cur_total_len = lambda: 10
+
+    normal_need = req.get_dsv4_decode_need_swa_page_num()
+    req.args.mtp_mode = "dspark"
+    dspark_need = req.get_dsv4_decode_need_swa_page_num()
+
+    assert dspark_need == normal_need + 1
+
+
+@pytest.mark.parametrize("mtp_step", [1, 4, 5])
+def test_deepseek_v4_dspark_runtime_width_follows_mtp_step(monkeypatch, mtp_step):
+    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    monkeypatch.setattr(DeepseekV4TpPartModel, "_verify_params", lambda self: None)
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.args = SimpleNamespace(mtp_step=mtp_step)
+    model.config = {"block_size": 5, "dspark_block_size": 5}
+    model.enable_tpsp_mix_mode = False
+
+    model._verify_params()
+
+    assert model.config["block_size"] == mtp_step
+
+
+@pytest.mark.parametrize("mtp_step", [0, 6])
+def test_deepseek_v4_dspark_rejects_invalid_runtime_width(monkeypatch, mtp_step):
+    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    monkeypatch.setattr(DeepseekV4TpPartModel, "_verify_params", lambda self: None)
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.args = SimpleNamespace(mtp_step=mtp_step)
+    model.config = {"block_size": 5, "dspark_block_size": 5}
+    model.enable_tpsp_mix_mode = False
+
+    with pytest.raises(AssertionError, match=r"requires --mtp_step in \[1, 5\]"):
+        model._verify_params()
+
+
+def test_deepseek_v4_dspark_layer_count_uses_trailing_swa_layers(tmp_path):
+    config = {
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 43,
+        "compress_ratios": [4] * 43 + [0, 0, 0],
+        "dspark_block_size": 5,
+        "dspark_target_layer_ids": [40, 41, 42],
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    assert _get_mtp_draft_backbone_layer_num(str(tmp_path)) == 3
+
+
+def test_deepseek_v4_dspark_extends_target_compress_rates_for_draft_layers():
+    target_rates = [0, 0] + [value for _ in range(20) for value in (4, 128)] + [4]
+    config = {
+        "num_hidden_layers": 43,
+        "num_nextn_predict_layers": 1,
+        "compress_ratios": target_rates + [0],
+    }
+
+    rates = get_deepseek_v4_compress_rates(config, layer_num=46)
+
+    assert rates == target_rates + [0, 0, 0]
+
+
+def test_dspark_cuda_graph_padding_extends_only_gpu_scratch_pages():
+    from lightllm.common.basemodel.batch_objs import ModelInput
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    block_size = 5
+    batch_size = 14 * block_size
+    graph_batch_size = 16 * block_size
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.block_size = block_size
+    model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=127)
+    model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=255)
+    pages_cpu = torch.arange(14, dtype=torch.int32)
+    model_input = ModelInput(
+        batch_size=batch_size,
+        total_token_num=batch_size,
+        max_q_seq_len=1,
+        max_kv_seq_len=8,
+        input_ids=torch.ones(batch_size, dtype=torch.int64),
+        b_req_idx=torch.arange(batch_size, dtype=torch.int32),
+        b_mtp_index=torch.zeros(batch_size, dtype=torch.int32),
+        b_seq_len=torch.full((batch_size,), 8, dtype=torch.int32),
+        b_position_delta=torch.zeros(batch_size, dtype=torch.int32),
+        b_shared_seq_len=torch.zeros(batch_size, dtype=torch.int32),
+        b_shared_radix_node_id=torch.full((batch_size,), -1, dtype=torch.int64),
+        is_prefill=False,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+        mtp_draft_swa_pages_cpu=pages_cpu,
+        mtp_draft_swa_pages=pages_cpu.clone(),
+    )
+
+    padded_input = model._create_padded_decode_model_input(model_input, graph_batch_size)
+
+    assert padded_input.mtp_draft_swa_pages.shape == (16,)
+    torch.testing.assert_close(padded_input.mtp_draft_swa_pages[:14], pages_cpu)
+    torch.testing.assert_close(padded_input.mtp_draft_swa_pages[14:], torch.zeros(2, dtype=torch.int32))
+    assert padded_input.mtp_draft_swa_pages_cpu is pages_cpu
+
+
+def test_dspark_empty_decode_padding_builds_one_hold_block():
+    from lightllm.common.basemodel.batch_objs import ModelInput
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    block_size = 5
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.block_size = block_size
+    model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=127)
+    model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEX=255)
+    model_input = ModelInput(
+        batch_size=0,
+        total_token_num=0,
+        max_q_seq_len=1,
+        max_kv_seq_len=0,
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        b_mtp_index=torch.empty((0,), dtype=torch.int32),
+        b_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_position_delta=torch.empty((0,), dtype=torch.int32),
+        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
+        is_prefill=False,
+        multimodal_params=[],
+    )
+
+    padded_input = model._create_padded_decode_model_input(model_input, 1)
+
+    assert model_input.batch_size == 0
+    assert padded_input.batch_size == block_size
+    assert padded_input.total_token_num == 2 * block_size
+    assert padded_input.input_ids.tolist() == [1] * block_size
+    assert padded_input.b_req_idx.tolist() == [127] * block_size
+    assert padded_input.b_seq_len.tolist() == [2] * block_size
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_dspark_forward_releases_only_scratch_pages(monkeypatch, fails):
+    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    pages_cpu = torch.tensor([7], dtype=torch.int32)
+    frees = []
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.block_size = 5
+    model.mem_manager = SimpleNamespace(
+        alloc_dspark_swa_block=lambda count, width: (pages_cpu, pages_cpu.clone()),
+        free_dspark_swa_block=lambda pages: frees.append(pages),
+    )
+    model_input = SimpleNamespace(is_prefill=False, mtp_draft_input_hiddens=None, batch_size=5)
+
+    def forward(self, inputs):
+        assert inputs.mtp_draft_swa_pages_cpu is pages_cpu
+        if fails:
+            raise RuntimeError("draft failed")
+        return "output"
+
+    monkeypatch.setattr(DeepseekV4TpPartModel, "forward", forward)
+    if fails:
+        with pytest.raises(RuntimeError, match="draft failed"):
+            model.forward(model_input)
+    else:
+        assert model.forward(model_input) == "output"
+    assert len(frees) == 1
+    assert frees[0] is pages_cpu
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_build_dspark_swa_index_exposes_history_and_complete_block():
+    from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_index import (
+        build_dspark_swa_index,
+    )
+
+    block_size = 3
+    window = 4
+    req_to_swa_pages = torch.tensor([[1], [2], [3]], dtype=torch.int32, device="cuda")
+    req_idx = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device="cuda")
+    positions = torch.tensor([4, 5, 6, 2, 3, 4], dtype=torch.int32, device="cuda")
+    padded_width = 8
+    indices = torch.empty((6, padded_width), dtype=torch.int32, device="cuda")
+    lengths = torch.empty((6,), dtype=torch.int32, device="cuda")
+    write_slots = torch.empty((6,), dtype=torch.int32, device="cuda")
+    scratch_pages = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
+
+    build_dspark_swa_index(
+        req_idx=req_idx,
+        positions=positions,
+        req_to_swa_pages=req_to_swa_pages,
+        scratch_pages=scratch_pages,
+        swa_index=indices,
+        swa_length=lengths,
+        swa_write_slots=write_slots,
+        window=window,
+        block_size=block_size,
+        page_size=128,
+        hold_req_id=2,
+        hold_swa_slot=120,
+    )
+
+    expected_indices = torch.tensor(
+        [
+            [131, 130, 129, 128, 256, 257, 258, -1],
+            [131, 130, 129, 128, 256, 257, 258, -1],
+            [131, 130, 129, 128, 256, 257, 258, -1],
+            [257, 256, 384, 385, 386, -1, -1, -1],
+            [257, 256, 384, 385, 386, -1, -1, -1],
+            [257, 256, 384, 385, 386, -1, -1, -1],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    torch.testing.assert_close(indices, expected_indices)
+    torch.testing.assert_close(lengths, torch.tensor([7, 7, 7, 5, 5, 5], dtype=torch.int32, device="cuda"))
+    torch.testing.assert_close(
+        write_slots,
+        torch.tensor([256, 257, 258, 384, 385, 386], dtype=torch.int32, device="cuda"),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_dspark_swa_block_uses_one_scratch_page_per_request():
+    from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
+        DeepseekV4MemoryManager,
+    )
+
+    manager = DeepseekV4MemoryManager.__new__(DeepseekV4MemoryManager)
+    manager.swa_pool = SimpleNamespace(buffer=torch.empty(0, device="cuda"))
+    manager.swa_page_allocator = SimpleNamespace(
+        alloc=lambda count: torch.tensor([2, 0], dtype=torch.int32, pin_memory=True)
+    )
+    mem_indexes = torch.tensor([3, 4, 5, 8, 9, 10], dtype=torch.int64, device="cuda")
+
+    pages_cpu, pages = manager.alloc_dspark_swa_block(token_num=mem_indexes.numel(), block_size=3)
+
+    torch.testing.assert_close(pages_cpu, torch.tensor([2, 0], dtype=torch.int32))
