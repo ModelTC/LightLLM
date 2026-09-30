@@ -137,6 +137,34 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         # A 256-token checkpoint closes both compressor groups. The next C128
         # group overwrites all of its rows before reading them.
 
+    def restore_cpu_cache_checkpoints(self, req, loaded_start, loaded_end, cpu_cache_client, radix_cache):
+        """Retain loaded continuation checkpoints for subsequent GPU radix reuse."""
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        args = get_env_start_args()
+        layout = self.mem_manager.cpu_cache_layout
+        page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
+        big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        first_boundary = (loaded_start // big_page_tokens + 1) * big_page_tokens
+        for boundary in range(first_boundary, loaded_end + 1, big_page_tokens):
+            buffer_idx = self.big_page_buffers.alloc_one_state_cache()
+            assert buffer_idx is not None
+            page_idx = page_list[boundary // layout.token_page_size - 1]
+            self.big_page_buffers.buffer[buffer_idx].copy_(
+                cpu_cache_client.cpu_kv_cache_tensor[page_idx, layout.swa_offset :]
+            )
+            req.hybrid_len_to_big_page_id[boundary] = buffer_idx
+        if loaded_end == req.hybrid_cache_len and loaded_end % big_page_tokens:
+            radix_cache.free_one_small_page_buffer()
+            req.tail_small_page_buffer_id = self.small_page_buffers.alloc_one_state_cache()
+            if req.tail_small_page_buffer_id is not None:
+                self.save_state(
+                    req.req_idx,
+                    req.tail_small_page_buffer_id,
+                    self.small_page_buffers,
+                    checkpoint_len=loaded_end,
+                )
+
     def clear_runtime_state(self, req_idx):
         pages = self._swa_pages[req_idx]
         if pages:

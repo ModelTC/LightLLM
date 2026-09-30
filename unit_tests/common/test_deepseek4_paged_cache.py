@@ -234,6 +234,140 @@ def test_cpu_cache_roundtrip_uses_derived_history_slots(cache):
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
 
 
+@pytest.mark.parametrize("gpu_prefix_len", [0, 256])
+def test_common_cpu_cache_incrementally_preserves_recycled_checkpoints(cache, monkeypatch, gpu_prefix_len):
+    from collections import deque
+    from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuPageAllocState
+    from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as module
+
+    manager, requests = cache
+    req_idx, src = _reserve(manager, requests, 4096)
+    cpu_pages = torch.empty((2, manager.cpu_cache_layout.page_nbytes), dtype=torch.uint8, pin_memory=True)
+    published = []
+    released = []
+    client = SimpleNamespace(
+        cpu_kv_cache_tensor=cpu_pages,
+        lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
+        allocate_pages=lambda hashes, **kwargs: (list(hashes), [CpuPageAllocState.NEW_STORE_OWNER] * len(hashes)),
+        update_pages_status_to_ready=lambda pages, **kwargs: published.extend(pages),
+        deref_pages=released.extend,
+    )
+    cache_module = module.MultiLevelKvCacheModule.__new__(module.MultiLevelKvCacheModule)
+    cache_module.backend = SimpleNamespace(
+        is_master_in_dp=True, radix_cache=None, model=SimpleNamespace(mem_manager=manager, req_manager=requests)
+    )
+    cache_module.args = SimpleNamespace(enable_disk_cache=False)
+    cache_module.cpu_cache_client = client
+    cache_module.init_sync_group = None
+    cache_module._dsv4_store_sessions = {}
+    cache_module._dsv4_store_tasks = deque()
+    cache_module._dsv4_max_pages_per_store_task = 1
+    cpu_stream = torch.cuda.Stream()
+    monkeypatch.setattr(module.g_infer_context, "is_deepseek_v4", True)
+    monkeypatch.setattr(module.g_infer_context, "req_manager", requests)
+    monkeypatch.setattr(module.g_infer_context, "radix_cache", None)
+    monkeypatch.setattr(module.g_infer_context, "get_cpu_kv_cache_stream", lambda: cpu_stream)
+    monkeypatch.setattr(module.g_infer_context, "get_can_alloc_token_num", lambda: manager.allocator.can_use_mem_size)
+    monkeypatch.setattr(
+        module.g_infer_context, "get_can_alloc_dsv4_swa_page_num", lambda: manager.swa_page_allocator.can_use_mem_size
+    )
+    monkeypatch.setattr(module.dist, "barrier", lambda group: None)
+    req = SimpleNamespace(
+        req_id=1,
+        req_idx=req_idx,
+        cur_kv_len=0,
+        hold_kv_len=4096,
+        image_block_spans=[],
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        shm_req=SimpleNamespace(
+            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: []),
+            token_hash_list=SimpleNamespace(get_all=lambda: [0, 1]),
+            token_hash_page_len_list=SimpleNamespace(get_all=lambda: [2048, 4096]),
+            disk_prompt_cache_len=0,
+        ),
+    )
+    cache_module.load_cpu_cache_to_reqs([req])
+    expected_history = []
+    for start, end in ((0, 2048), (2048, 4096)):
+        requests.prepare_swa(req_idx, start, end)
+        for pool in (manager.c4_pool, manager.c4_indexer_pool, manager.c128_pool, manager.swa_pool):
+            pool.buffer.fill_(11 + start // 2048)
+        manager.c4_state_buffer.fill_(21 + start // 2048)
+        manager.c4_indexer_state_buffer.fill_(31 + start // 2048)
+        expected_history.append(
+            [
+                pool.read(0, src[start + ratio - 1 : end : ratio].long() // ratio).clone()
+                for pool, ratio in ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128))
+            ]
+        )
+        req.cur_kv_len = end
+        with torch.cuda.stream(cpu_stream):
+            torch.cuda._sleep(20_000_000)
+        cache_module.store_completed_prefill_pages([req], torch.cuda.current_stream())
+
+    # Free the source while the independent staging-to-CPU writes may still run.
+    assert cache_module.offload_finished_reqs_to_cpu_cache([req]) == [req]
+    requests.free([req_idx], src)
+    torch.cuda.synchronize()
+    cache_module.update_cpu_cache_task_states()
+    assert sorted(published) == [0, 1]
+    assert released == [1, 0]
+    assert cache_module._dsv4_store_sessions == {}
+    assert not any(slot.in_use for slot in manager.operator.cpu_cache_staging_slots)
+
+    req.req_idx = requests.alloc()
+    req.req_id = 2
+    req.cur_kv_len = req.hold_kv_len = gpu_prefix_len
+    req.hybrid_cache_len = 4096
+    req.hybrid_len_to_big_page_id = {}
+    if gpu_prefix_len:
+        prefix = manager.alloc(gpu_prefix_len).cuda()
+        requests.req_to_token_indexs[req.req_idx, :gpu_prefix_len] = prefix
+        for index, (pool, ratio) in enumerate(
+            ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128))
+        ):
+            pool.write(
+                0, prefix[ratio - 1 :: ratio].long() // ratio, expected_history[0][index][: gpu_prefix_len // ratio]
+            )
+    radix = SimpleNamespace(free_radix_cache_to_get_enough_token=lambda tokens: None)
+    cache_module.backend.radix_cache = radix
+    monkeypatch.setattr(module.g_infer_context, "radix_cache", radix)
+    req.shm_req.cpu_cache_match_page_indexes.get_all = lambda: [0, 1]
+    cache_module.load_cpu_cache_to_reqs([req])
+    assert req.cur_kv_len == req.hold_kv_len == 4096
+    assert req.shm_req.cpu_prompt_cache_len == 4096 - gpu_prefix_len
+    assert list(req.hybrid_len_to_big_page_id) == [2048, 4096]
+    for boundary, index in req.hybrid_len_to_big_page_id.items():
+        torch.testing.assert_close(
+            manager.big_page_buffers.buffer[index],
+            cpu_pages[boundary // 2048 - 1, manager.cpu_cache_layout.swa_offset :],
+        )
+    restored = requests.req_to_token_indexs[req.req_idx, :4096].clone()
+    for page, (start, end) in enumerate(((0, 2048), (2048, 4096))):
+        for index, (pool, ratio) in enumerate(
+            ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128))
+        ):
+            torch.testing.assert_close(
+                pool.read(0, restored[start + ratio - 1 : end : ratio].long() // ratio),
+                expected_history[page][index],
+                rtol=0,
+                atol=0,
+            )
+    swa_slots = requests.get_swa_slots(req.req_idx, torch.arange(3840, 4096, device="cuda")).long()
+    for layer in range(manager.layer_num):
+        assert manager.swa_pool.read(layer, swa_slots).eq(12).all()
+    tail_rows = swa_slots[-4:] // 128 * manager.c4_state_ring + swa_slots[-4:] % manager.c4_state_ring
+    assert manager.c4_state_buffer[:, tail_rows].eq(22).all()
+    assert manager.c4_indexer_state_buffer[:, tail_rows].eq(32).all()
+    cache_module.offload_finished_reqs_to_cpu_cache([req])
+    torch.cuda.synchronize()
+    cache_module.update_cpu_cache_task_states()
+    manager.big_page_buffers.free_state_cache(list(req.hybrid_len_to_big_page_id.values()))
+    requests.free([req.req_idx], restored)
+    assert manager.allocator.can_use_mem_size == manager.size
+    assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
+
+
 @pytest.mark.parametrize("length", [256, 512, 2048])
 def test_shared_history_restores_private_continuation(cache, length):
     manager, requests = cache
@@ -578,11 +712,11 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hit_
 
 
 def test_cpu_load_failure_releases_reserved_history_and_private_swa(cache, monkeypatch):
-    from lightllm.server.router.model_infer.mode_backend import dsv4_multi_level_kv_cache as module
+    from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as module
 
     manager, requests = cache
     req_idx = requests.alloc()
-    cache_module = module.Dsv4MultiLevelKvCacheModule.__new__(module.Dsv4MultiLevelKvCacheModule)
+    cache_module = module.MultiLevelKvCacheModule.__new__(module.MultiLevelKvCacheModule)
     cache_module.backend = SimpleNamespace(
         is_master_in_dp=False, radix_cache=None, model=SimpleNamespace(mem_manager=manager, req_manager=requests)
     )
@@ -594,6 +728,7 @@ def test_cpu_load_failure_releases_reserved_history_and_private_swa(cache, monke
         cur_kv_len=0,
         hold_kv_len=0,
         image_block_spans=[],
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
         shm_req=SimpleNamespace(
             cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [0]),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [2048]),
@@ -605,6 +740,9 @@ def test_cpu_load_failure_releases_reserved_history_and_private_swa(cache, monke
         raise RuntimeError("injected copy failure")
 
     monkeypatch.setattr(manager.operator, "load_cpu_cache_pages", fail)
+    monkeypatch.setattr(module.g_infer_context, "is_deepseek_v4", True)
+    monkeypatch.setattr(module.g_infer_context, "req_manager", requests)
+    monkeypatch.setattr(module.g_infer_context, "radix_cache", None)
     monkeypatch.setattr(module.g_infer_context, "get_can_alloc_token_num", lambda: manager.allocator.can_use_mem_size)
     monkeypatch.setattr(
         module.g_infer_context, "get_can_alloc_dsv4_swa_page_num", lambda: manager.swa_page_allocator.can_use_mem_size

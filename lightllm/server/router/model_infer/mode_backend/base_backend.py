@@ -50,7 +50,6 @@ from lightllm.server.multi_level_kv_cache import (
     create_cache_placement_controller,
 )
 from .multi_level_kv_cache import MultiLevelKvCacheModule
-from .dsv4_multi_level_kv_cache import Dsv4MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
 
@@ -258,8 +257,7 @@ class ModeBackend:
             self.init_spec_engine()
 
         if self.args.enable_cpu_cache:
-            cache_module_cls = Dsv4MultiLevelKvCacheModule if self.is_deepseek_v4 else MultiLevelKvCacheModule
-            self.multi_level_cache_module = cache_module_cls(self)
+            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
 
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
@@ -703,10 +701,7 @@ class ModeBackend:
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
 
-        if self.args.enable_cpu_cache and (
-            (self.is_deepseek_v4 and self.is_master_in_dp)
-            or (not self.is_deepseek_v4 and len(g_infer_context.infer_req_ids) > 0)
-        ):
+        if self.args.enable_cpu_cache:
             self.multi_level_cache_module.update_cpu_cache_task_states()
 
         if req_ids is None:
@@ -878,7 +873,7 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
-        cpu_store_reqs = [] if self.args.enable_cpu_cache and self.is_deepseek_v4 and self.is_master_in_dp else None
+        cpu_store_reqs = [] if self.args.enable_cpu_cache else None
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
         for req_obj in run_reqs:

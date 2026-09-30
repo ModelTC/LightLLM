@@ -67,3 +67,11 @@
 | mHC TileLang 启动预热 | 回退通用 `_kernel_warmup` hook、DSV4 mHC 预热流程及 split-K token 枚举；保留 MTP hidden 准备所需的 `hc_post` 引用 | `fc8b7ec411774fab269e1e3799efff4ac15f826e` (`warmup tilelang`) |
 
 清理后，`lightllm/server/httpserver_for_pd_master/`、`lightllm/server/router/req_queue/`、`lightllm/server/multi_level_kv_cache/disk_cache_worker.py` 和 `lightllm/utils/device_utils.py` 相对拆分基线无额外差异；`communication_op.py` 只保留 DSV4 `experts_` 字段兼容，HTTP server 只保留 Vision 图像块不可跨 prefill 切分的校验。此前确认的 MTP CUDA Graph hidden 输入修复继续保留。
+
+## 2026-09-30 多级缓存架构收敛
+
+删除独立的 `Dsv4MultiLevelKvCacheModule`，统一通过 main 的 `MultiLevelKvCacheModule` 管理 CPU 页面引用、异步任务及磁盘发布。保留 DSV4 必需的 prefill 增量 checkpoint 保存；staging 与 pack/unpack 回归 `DeepseekV4MemOperator`，SWA 和 radix checkpoint 恢复回归 `DeepseekV4ReqManager`。保留原有 CPU 页布局及两阶段完成事件，不改变 PD 传输协议。
+
+prompt-logprobs 请求的过滤、命中长度清零和匹配页引用释放统一放在公共加载入口；普通模型和 DSV4 仅在实际缓存加载阶段分派，不再分别实现过滤策略。
+
+普通模型的正常匹配页也在公共入口统一释放，加载子流程保留结束 barrier；DSV4 的正常匹配页继续由异步 session 持有，公共入口只释放其跳过加载的页面。

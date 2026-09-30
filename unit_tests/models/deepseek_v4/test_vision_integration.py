@@ -245,18 +245,18 @@ def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
     ],
 )
 def test_cpu_cache_load_end_never_splits_an_image(loaded_start, load_end, spans, expected):
-    from lightllm.server.router.model_infer.mode_backend.dsv4_multi_level_kv_cache import (
-        Dsv4MultiLevelKvCacheModule,
+    from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import (
+        MultiLevelKvCacheModule,
     )
 
     req = SimpleNamespace(image_block_spans=spans)
 
-    assert Dsv4MultiLevelKvCacheModule._get_image_safe_load_end(req, loaded_start, load_end, 2048) == expected
+    assert MultiLevelKvCacheModule._get_image_safe_load_end(req, loaded_start, load_end, 2048) == expected
 
 
 def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
     from lightllm.server.router.model_infer.mode_backend import (
-        dsv4_multi_level_kv_cache as cache_module,
+        multi_level_kv_cache as cache_module,
     )
 
     capacity_results = iter([6144, 4096])
@@ -269,9 +269,9 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         capacity_calls.append(args)
         return next(capacity_results)
 
-    def prepare_cpu_cache_load(*, token_num, loaded_end, resume_swa_slots):
+    def prepare_cpu_cache_load(*, token_num, loaded_end, resume_swa_slots, mem_indexes):
         prepare_calls.append((token_num, loaded_end))
-        return SimpleNamespace(mem_indexes=torch.arange(token_num, dtype=torch.int32))
+        return SimpleNamespace(mem_indexes=mem_indexes)
 
     def load_cpu_cache_pages(*, page_indexes, **kwargs):
         loaded_pages.append(page_indexes.tolist())
@@ -290,9 +290,13 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         swa_page_allocator=SimpleNamespace(can_use_mem_size=2),
         get_loadable_cpu_cache_end=get_loadable_cpu_cache_end,
         prepare_cpu_cache_load=prepare_cpu_cache_load,
-        operator=SimpleNamespace(load_cpu_cache_pages=load_cpu_cache_pages),
+        alloc=lambda token_num: torch.arange(token_num, dtype=torch.int32),
     )
-    module = object.__new__(cache_module.Dsv4MultiLevelKvCacheModule)
+    from lightllm.common.kv_cache_mem_manager.operator.deepseek import DeepseekV4MemOperator
+
+    mem_manager.operator = DeepseekV4MemOperator(mem_manager)
+    mem_manager.operator.load_cpu_cache_pages = load_cpu_cache_pages
+    module = object.__new__(cache_module.MultiLevelKvCacheModule)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         radix_cache=None,
@@ -307,6 +311,7 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         req_idx=0,
         cur_kv_len=0,
         image_block_spans=[(3500, 4500)],
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
         shm_req=SimpleNamespace(
             cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [10, 11, 12]),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [2048, 4096, 6144]),
@@ -323,7 +328,11 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         lambda data, **kwargs: real_tensor(data, **{key: value for key, value in kwargs.items() if key != "device"}),
     )
     monkeypatch.setattr(cache_module.torch.cuda, "Event", lambda: SimpleNamespace(record=lambda: None))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
     monkeypatch.setattr(cache_module.dist, "barrier", lambda group: None)
+    monkeypatch.setattr(cache_module.g_infer_context, "is_deepseek_v4", True)
+    monkeypatch.setattr(cache_module.g_infer_context, "req_manager", req_manager)
+    monkeypatch.setattr(cache_module.g_infer_context, "radix_cache", None)
     monkeypatch.setattr(cache_module.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
     monkeypatch.setattr(
         cache_module.g_infer_context,

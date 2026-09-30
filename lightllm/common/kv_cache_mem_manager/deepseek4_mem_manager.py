@@ -686,13 +686,19 @@ class DeepseekV4MemoryManager(MemoryManager):
         return loadable_end if loadable_end > loaded_start else 0
 
     def prepare_cpu_cache_load(
-        self, token_num: int, loaded_end: int, resume_swa_slots: torch.Tensor
+        self,
+        token_num: int,
+        loaded_end: int,
+        resume_swa_slots: torch.Tensor,
+        mem_indexes: Optional[torch.Tensor] = None,
     ) -> DeepseekV4CpuCacheLoadPlan:
-        """Allocate a missing history suffix using the request's continuation slots.
+        """Prepare a missing history suffix using the request's continuation slots.
 
         ``loaded_end`` is the CPU checkpoint boundary.  ``token_num`` may be
         smaller than the checkpoint page when a GPU radix prefix overlaps its
         beginning, but both endpoints remain 256-token aligned.
+        The common CPU-cache path supplies reserved slots; direct callers may
+        request their allocation here.
         """
         token_num = int(token_num)
         loaded_end = int(loaded_end)
@@ -710,9 +716,10 @@ class DeepseekV4MemoryManager(MemoryManager):
 
         block_num = token_num // DSV4_PROMPT_CACHE_PAGE_SIZE
         device = self.swa_pool.buffer.device
-        full_indexes_cpu = self.alloc(token_num)
-
-        mem_indexes = full_indexes_cpu.to(device, non_blocking=True)
+        if mem_indexes is None:
+            mem_indexes = self.alloc(token_num).to(device, non_blocking=True)
+        else:
+            assert mem_indexes.numel() == token_num and mem_indexes.device == device
         history_full_slots = mem_indexes.view(block_num, DSV4_PROMPT_CACHE_PAGE_SIZE)
         history_c4_slots = history_full_slots[:, 3::4] // 4 if self.n_c4 else None
         history_c128_slots = history_full_slots[:, 127::128] // 128 if self.n_c128 else None
