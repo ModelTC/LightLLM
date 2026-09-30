@@ -611,9 +611,10 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     requests.free([source, destination], torch.cat([src, dst]))
 
 
-@pytest.mark.parametrize("hit_len", [2048, 2304])
+@pytest.mark.parametrize("hash_page_size", [256, 512])
+@pytest.mark.parametrize("hit_extra_page", [False, True])
 @pytest.mark.parametrize("chunked", [True, False])
-def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hit_len, chunked):
+def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash_page_size, hit_extra_page, chunked):
     from sortedcontainers import SortedDict
     from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context, CacheTier
     from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
@@ -621,9 +622,13 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hit_
 
     manager, requests = cache
     small = requests.create_small_page_cache_manager(2)
-    radix = HybridAttPagedRadixCache(manager.size, 0, 256, 8, manager, small)
+    radix = HybridAttPagedRadixCache(manager.size, 0, hash_page_size, 2048 // hash_page_size, manager, small)
     args = get_env_start_args()
+    args.linear_att_hash_page_size = hash_page_size
+    args.linear_att_page_block_num = 2048 // hash_page_size
     args.disable_chunked_prefill = not chunked
+    tail_len = 2048 + hash_page_size
+    hit_len = tail_len if hit_extra_page else 2048
     if not chunked:
         args.chunked_prefill_size = args.max_req_total_len
     for name, value in {
@@ -642,13 +647,13 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hit_
         req.shared_kv_node = None
         req.tail_small_page_buffer_id = None
         req.hybrid_len_to_big_page_id = SortedDict()
-        req.hybrid_cache_len = (total_len - 1) // 256 * 256
+        req.hybrid_cache_len = (total_len - 1) // hash_page_size * hash_page_size
         req.image_block_spans = []
         req.cache_tiers = {CacheTier.GPU}
         req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
         req.prompt_selected_logprobs = SimpleNamespace(copy_capture_slots_if_needed=lambda **kwargs: None)
         tokens = list(range(total_len))
-        hashes = compute_token_list_hash(tokens, 256)
+        hashes = compute_token_list_hash(tokens, hash_page_size)
         req.shm_req = SimpleNamespace(
             input_len=total_len,
             shm_prompt_ids=SimpleNamespace(arr=tokens),
@@ -659,10 +664,10 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hit_
         req.get_chuncked_input_token_len = req.get_chuncked_input_token_len_for_hybrid_att
         return req
 
-    source, held = _reserve(manager, requests, 2305)
-    req = request(source, 2305)
+    source, held = _reserve(manager, requests, tail_len + 1)
+    req = request(source, tail_len + 1)
     req.hold_kv_len = held.numel()
-    for end in (2048, 2304) if chunked else (2305,):
+    for end in (2048, tail_len) if chunked else (tail_len + 1,):
         assert req.get_chuncked_input_token_len() == end
         requests.prepare_swa(source, req.cur_kv_len, end)
         for pool in (manager.swa_pool, manager.c4_pool, manager.c4_indexer_pool, manager.c128_pool):
@@ -671,14 +676,14 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hit_
         manager.c4_indexer_state_buffer.uniform_()
         g_infer_context.save_hybrid_state_to_cache(torch.tensor([source], device="cuda"), [req])
         req.cur_kv_len = end
-    requests.prepare_swa(source, req.cur_kv_len, 2305)
-    req.cur_kv_len = 2305
+    requests.prepare_swa(source, req.cur_kv_len, tail_len + 1)
+    req.cur_kv_len = tail_len + 1
     freed = []
     g_infer_context.free_a_req_mem(freed, req)
     manager.free(torch.cat(freed))
     requests.free_req(source)
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
-    assert radix.get_tree_total_tokens_num() == 2304
+    assert radix.get_tree_total_tokens_num() == tail_len
 
     forks = [request(requests.alloc(), hit_len + 1) for _ in range(2)]
     for fork in forks:
@@ -686,7 +691,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hit_
         assert fork.cur_kv_len == hit_len
         assert fork.hold_kv_len == hit_len
         assert fork.shared_kv_node.node_prefix_total_len == 2048
-        if hit_len == 2304:
+        if hit_extra_page:
             assert requests.req_to_token_indexs[fork.req_idx, 2048].item() != held[2048].item()
         restored = requests.req_to_token_indexs[fork.req_idx, :hit_len]
         for pool, ratio in ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128)):

@@ -136,15 +136,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_kv_page_num",
         type=int,
-        default=None,
-        help="pd mode, kv move page_num; defaults to 8 for DeepSeek-V4 and 16 otherwise.",
+        default=16,
+        help="pd mode, kv move page_num",
     )
 
     parser.add_argument(
         "--pd_kv_page_size",
         type=int,
-        default=None,
-        help="pd mode, kv page size; defaults to 2048 for DeepSeek-V4 and 1024 otherwise.",
+        default=1024,
+        help="pd mode, kv page size.",
     )
 
     parser.add_argument(
@@ -874,7 +874,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--cpu_cache_token_page_size",
         type=int,
         default=None,
-        help="""The token page size of cpu cache. Defaults to 2048 for DeepSeek-V4 and 256 otherwise.""",
+        help="""The token page size of cpu cache. Hybrid models use their checkpoint interval.
+        DeepSeek-V4 defaults to 2048 when big-page checkpoints are disabled; non-hybrid models default to 256.""",
     )
     parser.add_argument(
         "--cache_placement_strategy",

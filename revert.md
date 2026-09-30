@@ -79,3 +79,9 @@ prompt-logprobs 请求的过滤、命中长度清零和匹配页引用释放统�
 ## 2026-09-30 MTP CPU 元数据收敛
 
 EAGLE 复用已有 `AsyncPinnedCpuTensor` 传递接受长度和 verify 完成事件，DP overlap 传递一个合并缓冲区，在 proposer 内按 microbatch 请求数拆分视图；不新增 D2H 拷贝或 CUDA event。CPU mirror 的 accepted-tail 选行与序列推进统一由 `ModelInput` 管理，保留 DSV4 host-owned SWA 分配所需的元数据。删除 DSpark 未使用的 CPU 接受长度参数；请求统计仍复用原来的 CPU 缓冲区。
+
+## 2026-09-30 启动参数架构收敛
+
+恢复 main 的 PD 传输默认值 `16/1024`，移除 DSV4 自动改成 `8/2048` 的调参；显式 CLI 配置保持生效。删除 CPU cache 启动时重复设置 `fp8kv_dsa`、不可达的 CPU 页默认分支，以及 pd_master 的 DSV4 专属 CPU cache 禁止条件（master 本身不创建本地 CPU cache）。
+
+必要的模型 KV 参数与 CPU 页/checkpoint 对齐逻辑保留在 `api_start.py` 的对应启动阶段，不新增 `config_utils` helper；模型类型只读取一次并复用。保留物理 KV `page_size=256`；不再覆盖合法的 `linear_att_hash_page_size`，由公共整除校验保证其为 256 的倍数。保留 DSV4 增量 CPU 保存暂时所需的 legacy 策略，以及大页启用时 CPU checkpoint 页长必须相等的约束。
