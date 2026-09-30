@@ -8,9 +8,9 @@
 ``g_objs`` 在 handler 内懒导入，避免与 api_http 循环依赖。
 """
 
-import asyncio
 import pickle
 
+import anyio
 import ujson as json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -38,13 +38,14 @@ async def register_and_keep_alive(websocket: WebSocket):
     try:
         heartbeat_timeout_seconds = 30
         while True:
-            data = await asyncio.wait_for(websocket.receive_bytes(), timeout=heartbeat_timeout_seconds)
+            with anyio.fail_after(heartbeat_timeout_seconds):
+                data = await websocket.receive_bytes()
             obj = pickle.loads(data)
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
                 continue
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(f"client {regist_json} heartbeat timed out after {heartbeat_timeout_seconds} seconds")
         try:
             await websocket.close(code=1011, reason="PD heartbeat timed out")

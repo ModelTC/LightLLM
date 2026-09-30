@@ -382,7 +382,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             prompt_tokens = len(prompt_ids)
-            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+            self._check_and_repair_length(prompt_tokens, sampling_params)
             # 监控
             self.metric_client.counter_inc("lightllm_request_count")
             self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
@@ -676,10 +676,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
             self.max_req_total_len,
         )
 
-    async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
-        if not prompt_ids:
+    def _check_and_repair_length(self, prompt_tokens: int, sampling_params: SamplingParams):
+        if prompt_tokens == 0:
             raise InvalidRequestError("The input prompt must not be empty.")
-        prompt_tokens = len(prompt_ids)
         # -36 用于保留通用边界余量，MTP overlap 所需的额外 KV 窗口由
         # get_real_supported_max_req_total_len 单独扣除。
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
@@ -705,7 +704,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 )
 
         # last repaired
-        req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
+        req_total_len = prompt_tokens + sampling_params.max_new_tokens
         if req_total_len > self.max_req_total_len:
             raise InvalidRequestError(
                 f"This model's maximum context length is {self.max_req_total_len} tokens. "
@@ -714,7 +713,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 f"Please reduce the length of the input prompt or the number of requested output tokens."
             )
 
-        return prompt_ids
+        return
 
     async def transfer_to_next_module_or_node(
         self,
