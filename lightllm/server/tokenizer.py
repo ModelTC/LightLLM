@@ -28,6 +28,11 @@ logger = init_logger(__name__)
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
 
+def get_xgrammar_tokenizer(tokenizer):
+    """Use the HF text tokenizer explicitly exposed by tokenizer wrappers."""
+    return getattr(tokenizer, "xgrammar_tokenizer", tokenizer)
+
+
 def get_tokenizer(
     tokenizer_name: str,
     tokenizer_mode: str = "auto",

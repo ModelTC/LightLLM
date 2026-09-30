@@ -94,7 +94,7 @@ def test_guided_json_schema_initialization():
     schema.initialize(schema_str, None)
     assert schema.to_str() == schema_str
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         schema.initialize("a" * (JSON_SCHEMA_MAX_LENGTH + 1), None)
 
 
