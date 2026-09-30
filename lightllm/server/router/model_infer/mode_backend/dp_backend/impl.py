@@ -95,6 +95,31 @@ class DPChunkedPrefillBackend(ModeBackend):
         current_dp_reqs = [req for req in reqs if req[3] == dp_rank_in_node]
         other_dp_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
 
+        if self.is_deepseek_v4:
+            matches = self.dp_kv_shared_module.probe_dsv4_matches(other_dp_reqs)
+            trans_tasks = []
+            try:
+                infer_reqs = g_infer_context.add_reqs(current_dp_reqs, init_prefix_cache=True)
+                match_lens = self.dp_kv_shared_module.gather_dsv4_match_lens(reqs, matches)
+                trans_tasks, transfer_plan = self.dp_kv_shared_module.build_dsv4_trans_tasks(
+                    reqs, infer_reqs, match_lens
+                )
+                self.dp_kv_shared_module.kv_trans_dsv4(trans_tasks, matches, transfer_plan)
+            finally:
+                # P2P kernels and checkpoint restores must finish before any source pin is dropped.
+                torch.cuda.current_stream().synchronize()
+                for task in trans_tasks:
+                    small_id = task.terminal_small_page_buffer_id
+                    if small_id is not None and small_id != task.req.tail_small_page_buffer_id:
+                        self.small_page_buffers.free_state_cache([small_id])
+                for match in matches.values():
+                    match.release()
+
+            req_ids = [req[0] for req in current_dp_reqs]
+            if self.args.enable_cpu_cache:
+                self._load_cpu_cache_to_reqs(req_ids=req_ids)
+            return req_ids
+
         infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         req_dp_ranks = [req[3] for req in reqs]
         self.dp_kv_shared_module.fill_reqs_info(reqs=infer_reqs)
