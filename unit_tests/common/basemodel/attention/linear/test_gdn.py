@@ -36,6 +36,7 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
         infer_state=SimpleNamespace(
             b1_cu_q_seq_len=torch.tensor([0, 1], dtype=torch.int32),
             b_ready_cache_len=0,
+            max_q_seq_len=1,
         ),
     )
     state.b_conv_buffer_idx = torch.tensor([0], dtype=torch.int64)
