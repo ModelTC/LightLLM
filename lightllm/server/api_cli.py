@@ -941,6 +941,19 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
     )
     parser.add_argument(
+        "--enable_replayssm",
+        action="store_true",
+        default=False,
+        help="Use ReplaySSM for GDN: deferred FP32 decode/MTP or compact BF16 MTP.",
+    )
+    parser.add_argument(
+        "--replayssm_cache_len",
+        type=int,
+        default=16,
+        choices=[16, 32, 64],
+        help="Accepted-history capacity for ReplaySSM; must cover the MTP verify width.",
+    )
+    parser.add_argument(
         "--linear_att_ssm_data_type",
         type=str,
         choices=["bfloat16", "float32"],

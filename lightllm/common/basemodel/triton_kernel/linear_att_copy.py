@@ -25,6 +25,9 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_kv_ssm_stride_l,
     cpu_kv_ssm_stride_d,
     mtp_step,
+    conv_offsets,
+    conv_element_bytes: tl.constexpr,
+    HAS_CONV_OFFSETS: tl.constexpr,
     gpu_conv_dim,  # number of conv rows
     gpu_conv_tail_dim_bytes,  # bytes copied per conv row; equals the CPU/cache row width
     gpu_ssm_tail_dim,
@@ -53,6 +56,8 @@ def _copy_linear_att_state_to_kv_buffer(
     cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
 
     gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + cur_req_idx * gpu_conv_stride_s
+    if HAS_CONV_OFFSETS:
+        gpu_conv_base += tl.load(conv_offsets + cur_req_idx) * conv_element_bytes
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
     conv_tail_dim = gpu_conv_dim * gpu_conv_tail_dim_bytes
     for i in range(tl.cdiv(conv_tail_dim, BLOCK)):
@@ -86,10 +91,12 @@ def copy_linear_att_state_to_kv_buffer(
     cpu_kv_conv_state: torch.Tensor,  # [buffer_num, linear_layer_num, conv_dim, kernel_size]
     cpu_kv_ssm_state: torch.Tensor,  # [buffer_num, linear_layer_num, ...]
     mtp_step: int,
+    conv_offsets: torch.Tensor = None,
 ):
     # gpu_conv_state 的后两维可能是不连续的。
     assert len(b_req_idx) == big_page_buffer_ids.shape[0]
     BLOCK = 4096
+    conv_element_bytes = gpu_conv_state.element_size()
 
     assert gpu_conv_state.dim() == 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
     assert cpu_kv_conv_state.dim() == 4, "cpu_kv_conv_state must be [size, layer, conv_dim, width_narrow]"
@@ -144,6 +151,9 @@ def copy_linear_att_state_to_kv_buffer(
         cpu_kv_ssm_stride_l=cpu_kv_ssm_state.stride(1),
         cpu_kv_ssm_stride_d=cpu_kv_ssm_state.stride(2),
         mtp_step=mtp_step,
+        conv_offsets=conv_offsets,
+        conv_element_bytes=conv_element_bytes,
+        HAS_CONV_OFFSETS=conv_offsets is not None,
         gpu_conv_dim=gpu_conv_dim,
         gpu_conv_tail_dim_bytes=gpu_conv_tail_dim_bytes,
         gpu_ssm_tail_dim=gpu_ssm_tail_dim,

@@ -35,7 +35,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
         pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
-
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
@@ -107,18 +106,17 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        backend: LinearAttBackend = self.backend
-        mtp_step = backend.mtp_step
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * self.infer_state.req_manager.ssm_slots_per_req
+        if self.infer_state.req_manager.replay_cache is not None:
+            self.infer_state.req_manager.replay_cache.materialize(self.infer_state.b_req_idx)
         return
 
     def prefill_att(
@@ -199,11 +197,12 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
+
+    b_replay_positions: torch.Tensor = None
 
     def init_state(self):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
@@ -213,6 +212,11 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state(draft_step + 1)
         else:
             self._init_fixed_mtp_decode_state(draft_step)
+        replay = getattr(self.infer_state.req_manager, "replay_cache", None)
+        if replay is not None:
+            self.b_replay_positions = replay.positions(self.b_conv_buffer_idx)
+            if draft_step == 0:
+                replay.commit(self.b_conv_buffer_idx)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -252,6 +256,9 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
+        if getattr(self.infer_state.req_manager, "replay_cache", None) is not None:
+            self.b_ssm_buffer_idx = self.b_conv_buffer_idx
+            return
         att_batch_size = self.b_conv_buffer_idx.shape[0]
         # Each request owns mtp_size consecutive recurrent-state slots.
         b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
@@ -339,6 +346,27 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
+        replay = infer_state.req_manager.replay_cache
+        if replay is not None:
+            layer = (
+                layer_weight.layer_num_
+                - layer_weight.layer_num_ // infer_state.req_manager.linear_config.full_attention_interval
+            )
+            return (
+                replay.forward(
+                    layer,
+                    query,
+                    key,
+                    value,
+                    a,
+                    b,
+                    layer_weight.linear_A_log.weight,
+                    layer_weight.linear_dt_bias.weight,
+                    self.b_conv_buffer_idx,
+                    self.b_replay_positions,
+                ),
+                z,
+            )
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -384,6 +412,25 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
+        replay = infer_state.req_manager.replay_cache
+        if replay is not None:
+            layer = (
+                layer_weight.layer_num_
+                - layer_weight.layer_num_ // infer_state.req_manager.linear_config.full_attention_interval
+            )
+            return replay.forward(
+                layer,
+                query,
+                key,
+                value,
+                a,
+                b,
+                layer_weight.linear_A_log.weight,
+                layer_weight.linear_dt_bias.weight,
+                self.b_conv_buffer_idx,
+                self.b_replay_positions,
+                cu_seqlens_q,
+            )
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
         # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
