@@ -129,6 +129,41 @@ class InferenceContext:
 
         return req_objs
 
+    def retain_hybrid_prefix(self, shm_req, total_len: int, image_block_spans, pin_checkpoint: bool = False):
+        """Find a resumable prefix and retain its radix path without creating request state."""
+        cache = self.radix_cache
+        if cache is None or shm_req.sample_params.disable_prompt_cache:
+            return None
+        hash_page_size = self.args.linear_att_hash_page_size
+        block_hashs = shm_req.hybrid_token_hash_list.get_all()
+        match_tokens = min(len(block_hashs) * hash_page_size, total_len - 1)
+        match_tokens = max(0, match_tokens) // hash_page_size * hash_page_size
+        block_hashs = block_hashs[: match_tokens // hash_page_size]
+        if match_tokens <= 1:
+            return None
+        key = torch.tensor(shm_req.shm_prompt_ids.arr[:match_tokens], dtype=torch.int64, device="cpu")
+        while block_hashs:
+            node, matched_len, _ = cache.match_prefix(
+                key,
+                block_hashs=block_hashs,
+                update_refs=True,
+                return_mem_indexes=False,
+                pin_checkpoint=pin_checkpoint,
+            )
+            if node is None:
+                return None
+            for image_start, image_end in image_block_spans:
+                if image_start < matched_len < image_end:
+                    limit = image_start // hash_page_size * hash_page_size
+                    if pin_checkpoint:
+                        cache.release_checkpoint_pin(node)
+                    cache.dec_node_ref_counter(node)
+                    key, block_hashs = key[:limit], block_hashs[: limit // hash_page_size]
+                    break
+            else:
+                return node
+        return None
+
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.hold_kv_len])
@@ -704,36 +739,15 @@ class InferReq:
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         if g_infer_context.is_deepseek_v4:
             enable_prompt_cache = enable_prompt_cache and g_infer_context.get_can_alloc_dsv4_swa_page_num() >= 2
-        block_hashs = self.shm_req.hybrid_token_hash_list.get_all()
         hash_page_size = self.args.linear_att_hash_page_size
-        match_tokens = min(len(block_hashs) * hash_page_size, self.get_cur_total_len() - 1)
-        match_tokens = max(0, match_tokens)
-        match_tokens = (match_tokens // hash_page_size) * hash_page_size
-        match_block_num = match_tokens // hash_page_size
-        block_hashs = block_hashs[:match_block_num]
-        assert len(block_hashs) == self.shm_req.hybrid_token_hash_list.size
         big_page_token_num = hash_page_size * self.args.linear_att_page_block_num
         big_page_is_disable = big_page_token_num > self.args.max_req_total_len
-        if enable_prompt_cache and match_tokens > 1 and len(block_hashs) > 0 and self.cur_kv_len == 0:
-            input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
-            key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
-            assert len(key) == len(block_hashs) * hash_page_size
-            if self.image_block_spans:
-                while True:
-                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(
-                        key, block_hashs=block_hashs, update_refs=False
-                    )
-                    for image_start, image_end in self.image_block_spans:
-                        if image_start < matched_len < image_end:
-                            limit = image_start // hash_page_size * hash_page_size
-                            key, block_hashs = key[:limit], block_hashs[: limit // hash_page_size]
-                            break
-                    else:
-                        break
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
-                key, block_hashs=block_hashs, update_refs=True
+        if enable_prompt_cache and self.cur_kv_len == 0:
+            share_node = g_infer_context.retain_hybrid_prefix(
+                self.shm_req, self.get_cur_total_len(), self.image_block_spans
             )
             if share_node is not None:
+                value_tensor = g_infer_context.radix_cache.get_mem_index_value_by_node(share_node)
                 assert self.tail_small_page_buffer_id is None
                 if share_node.is_big_page_node():
                     # 大页匹配
