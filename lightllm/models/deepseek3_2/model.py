@@ -30,6 +30,7 @@ class DeepSeekV32Tokenizer:
 
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
+        self.xgrammar_tokenizer = tokenizer
         # Cache added vocabulary for performance (HuggingFace can be slow).
         self._added_vocab = None
 
