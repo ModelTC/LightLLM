@@ -3,10 +3,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
+from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor
 
 
 def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
@@ -54,6 +56,91 @@ def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
     assert proposal.schedule_scores is None
     assert target_input.input_ids is None
     assert target_input.mtp_draft_input_hiddens is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("draft_step", [1, 2, 3])
+@pytest.mark.parametrize("empty", [False, True])
+def test_dsv4_eagle_reuses_async_accept_lengths_and_preserves_target_mirrors(draft_step, empty):
+    req_idx = torch.tensor([] if empty else [7, 7, 7, 9, 9], dtype=torch.int32)
+    mtp_index = torch.tensor([] if empty else [0, 1, 2, 0, 1], dtype=torch.int32)
+    seq_len = torch.tensor([] if empty else [10, 11, 12, 20, 21], dtype=torch.int32)
+    target_input = ModelInput(
+        batch_size=req_idx.numel(),
+        total_token_num=seq_len.sum().item(),
+        max_q_seq_len=1,
+        max_kv_seq_len=21,
+        input_ids=torch.arange(req_idx.numel(), dtype=torch.int64),
+        b_req_idx=req_idx,
+        b_mtp_index=mtp_index,
+        b_seq_len=seq_len,
+        b_position_delta=torch.zeros_like(req_idx),
+        b_shared_seq_len=torch.zeros_like(req_idx),
+        b_shared_radix_node_id=req_idx.long(),
+        multimodal_params=[{"images": [], "audios": []} for _ in range(req_idx.numel())],
+    )
+    target_input.to_cuda()
+    hidden = torch.ones((req_idx.numel(), 2), device="cuda")
+    accept_len = torch.tensor([] if empty else [2, 1], dtype=torch.int32, device="cuda")
+    accept_len_cpu = torch.zeros(accept_len.shape, dtype=accept_len.dtype, pin_memory=True)
+    copy_stream = torch.cuda.Stream()
+    copy_stream.wait_stream(torch.cuda.current_stream())
+    ready_event = torch.cuda.Event()
+    with torch.cuda.stream(copy_stream):
+        torch.cuda._sleep(20_000_000)
+        accept_len_cpu.copy_(accept_len, non_blocking=True)
+        ready_event.record()
+    waits = []
+
+    def synchronize():
+        waits.append(True)
+        ready_event.synchronize()
+
+    calls = []
+
+    def forward(model_input):
+        if calls and not empty:
+            assert torch.equal(model_input.b_req_idx_cpu, model_input.b_req_idx.cpu())
+            assert torch.equal(model_input.b_mtp_index_cpu, model_input.b_mtp_index.cpu())
+            assert torch.equal(model_input.b_seq_len_cpu, model_input.b_seq_len.cpu())
+        calls.append(model_input.b_seq_len.clone())
+        return ModelOutput(
+            logits=model_input.b_seq_len.float().unsqueeze(1),
+            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((model_input.batch_size, 2), device="cuda")),
+        )
+
+    backend = SimpleNamespace(
+        is_deepseek_v4=True,
+        draft_models=[SimpleNamespace(forward=forward)],
+        _gen_argmax_token_ids=lambda output: output.logits[:, 0].long(),
+    )
+    engine = SpecEngine.__new__(SpecEngine)
+    engine.backend = backend
+    engine.proposer = EagleWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
+    proposal = engine.propose_next(
+        target_model_input=target_input,
+        target_model_output=ModelOutput(logits=hidden, mtp_collector=ModelMtpOutputCollector(spec_hidden=hidden)),
+        target_next_token_ids=target_input.input_ids,
+        b_req_mtp_start_loc=torch.tensor([] if empty else [0, 3], dtype=torch.int32, device="cuda"),
+        draft_step=draft_step,
+        accept_len=accept_len,
+        accept_len_cpu=AsyncPinnedCpuTensor(accept_len_cpu, SimpleNamespace(synchronize=synchronize))
+        if not empty
+        else None,
+    )
+    expected = (
+        torch.empty((0, draft_step), dtype=torch.int64, device="cuda")
+        if empty
+        else (torch.tensor([11, 20], device="cuda")[:, None] + torch.arange(draft_step, device="cuda")[None, :])
+    )
+    torch.testing.assert_close(proposal.token_ids, expected)
+    assert len(calls) == draft_step
+    assert len(waits) == int(not empty and draft_step > 1)
+    assert target_input.b_req_idx_cpu is req_idx
+    assert target_input.b_mtp_index_cpu is mtp_index
+    assert target_input.b_seq_len_cpu is seq_len
+    torch.testing.assert_close(target_input.b_seq_len.cpu(), seq_len)
+    ready_event.synchronize()
 
 
 def test_eagle_with_att_rejects_zero_draft_steps():

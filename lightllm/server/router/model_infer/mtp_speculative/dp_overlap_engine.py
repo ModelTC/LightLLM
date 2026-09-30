@@ -11,6 +11,9 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers imp
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
     BaseDpOverlapProposer,
 )
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_with_att import (
+    DpOverlapEagleWithAttProposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.planner import SpecDecodePlan
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
@@ -150,9 +153,7 @@ class DPOverlapSpecEngine:
         target_next_token_ids1: torch.Tensor,  # [verify_batch_size1]
         accept_len1: torch.Tensor,  # [real_req_num1]
         draft_step: int,
-        accept_len_cpu0: Optional[torch.Tensor] = None,  # [real_req_num0]
-        accept_len_cpu1: Optional[torch.Tensor] = None,  # [real_req_num1]
-        accept_len_ready_event: Optional[torch.cuda.Event] = None,
+        accept_len_cpu: Optional[AsyncPinnedCpuTensor] = None,  # [real_req_num0 + real_req_num1]
     ) -> SpecProposal:
         assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
         assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
@@ -160,12 +161,8 @@ class DPOverlapSpecEngine:
         assert accept_len1.ndim == 1
 
         proposer_kwargs = {}
-        if self.proposer.backend.is_deepseek_v4:
-            proposer_kwargs = {
-                "accept_len_cpu0": accept_len_cpu0,
-                "accept_len_cpu1": accept_len_cpu1,
-                "accept_len_ready_event": accept_len_ready_event,
-            }
+        if self.proposer.backend.is_deepseek_v4 and isinstance(self.proposer, DpOverlapEagleWithAttProposer):
+            proposer_kwargs = {"accept_len_cpu": accept_len_cpu}
         return self.proposer.propose_next_overlap(
             target_model_input0=target_model_input0,
             target_model_output0=target_model_output0,

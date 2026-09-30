@@ -75,3 +75,7 @@
 prompt-logprobs 请求的过滤、命中长度清零和匹配页引用释放统一放在公共加载入口；普通模型和 DSV4 仅在实际缓存加载阶段分派，不再分别实现过滤策略。
 
 普通模型的正常匹配页也在公共入口统一释放，加载子流程保留结束 barrier；DSV4 的正常匹配页继续由异步 session 持有，公共入口只释放其跳过加载的页面。
+
+## 2026-09-30 MTP CPU 元数据收敛
+
+EAGLE 复用已有 `AsyncPinnedCpuTensor` 传递接受长度和 verify 完成事件，DP overlap 传递一个合并缓冲区，在 proposer 内按 microbatch 请求数拆分视图；不新增 D2H 拷贝或 CUDA event。CPU mirror 的 accepted-tail 选行与序列推进统一由 `ModelInput` 管理，保留 DSV4 host-owned SWA 分配所需的元数据。删除 DSpark 未使用的 CPU 接受长度参数；请求统计仍复用原来的 CPU 缓冲区。

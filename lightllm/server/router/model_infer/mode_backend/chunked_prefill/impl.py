@@ -11,7 +11,7 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 )
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
 from lightllm.utils.log_utils import init_logger
@@ -310,8 +310,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
-                accept_len_cpu=mtp_accept_len_cpu,
-                accept_len_ready_event=verify_event,
+                accept_len_cpu=AsyncPinnedCpuTensor(tensor=mtp_accept_len_cpu, ready_event=verify_event),
             )
             mtp_utils.scatter_mtp_next_tokens(
                 backend=self,

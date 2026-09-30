@@ -74,6 +74,17 @@ class ModelInput:
         self._capture_cpu_mirror("b_ready_cache_len", "b_ready_cache_len_cpu")
         return
 
+    def select_mtp_cpu_mirrors(self, accept_len: torch.Tensor) -> None:
+        """Select accepted tails on a draft copy and advance to its first decode token."""
+        req_start_rows = torch.nonzero(self.b_mtp_index_cpu == 0, as_tuple=False).flatten()
+        accepted_tail_rows = req_start_rows + accept_len - 1
+        self.b_req_idx_cpu = self.b_req_idx_cpu.index_select(0, accepted_tail_rows)
+        self.b_mtp_index_cpu = torch.zeros_like(self.b_req_idx_cpu, dtype=self.b_mtp_index_cpu.dtype)
+        self.b_seq_len_cpu = self.b_seq_len_cpu.index_select(0, accepted_tail_rows) + 1
+
+    def advance_cpu_seq_len(self) -> None:
+        self.b_seq_len_cpu.add_(1)
+
     def to_cuda(self):
         self.check_input()
 

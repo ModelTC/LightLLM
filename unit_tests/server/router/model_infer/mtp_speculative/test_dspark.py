@@ -2,8 +2,9 @@ from types import SimpleNamespace
 
 import torch
 
+from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 
 
 def test_dspark_prefill_uses_a_shallow_copy_for_target_hidden():
@@ -126,7 +127,10 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         mtp_draft_input_hiddens=None,
     )
 
-    proposal = proposer.propose_next(
+    engine = SpecEngine.__new__(SpecEngine)
+    engine.backend = SimpleNamespace(is_deepseek_v4=True)
+    engine.proposer = proposer
+    proposal = engine.propose_next(
         target_model_input=model_input,
         target_model_output=SimpleNamespace(
             mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
@@ -135,6 +139,7 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32),
         draft_step=2,
         accept_len=torch.tensor([2, 2], dtype=torch.int32),
+        accept_len_cpu=AsyncPinnedCpuTensor(torch.tensor([2, 2]), None),
     )
 
     assert len(forwarded_inputs) == 2

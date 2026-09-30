@@ -15,7 +15,7 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
@@ -559,8 +559,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
-                accept_len_cpu=mtp_accept_len_cpu,
-                accept_len_ready_event=verify_event,
+                accept_len_cpu=(
+                    AsyncPinnedCpuTensor(tensor=mtp_accept_len_cpu, ready_event=verify_event) if req_num > 0 else None
+                ),
             )
             if req_num > 0:
                 mtp_utils.scatter_mtp_next_tokens(
@@ -765,8 +766,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             logits0 = model_output0.logits
             logits1 = model_output1.logits
             run_reqs = run_reqs0 + run_reqs1
-            mtp_accept_len_cpu0 = None
-            mtp_accept_len_cpu1 = None
             if req_num > 0:
                 assert len(run_reqs) == verify_row_num
                 logits = torch.empty(
@@ -831,13 +830,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                 target_model_output0=model_output0,
                 target_next_token_ids0=target_next_token_ids0,
                 accept_len0=mtp_accept_len0,
-                accept_len_cpu0=mtp_accept_len_cpu0,
                 target_model_input1=model_input1,
                 target_model_output1=model_output1,
                 target_next_token_ids1=target_next_token_ids1,
                 accept_len1=mtp_accept_len1,
-                accept_len_cpu1=mtp_accept_len_cpu1,
-                accept_len_ready_event=verify_event,
+                accept_len_cpu=(
+                    AsyncPinnedCpuTensor(tensor=mtp_accept_len_cpu, ready_event=verify_event) if req_num > 0 else None
+                ),
                 draft_step=spec_plan.draft_step,
             )
             if req_num > 0:
