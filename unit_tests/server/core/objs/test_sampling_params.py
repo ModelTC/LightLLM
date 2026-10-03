@@ -14,6 +14,7 @@ from lightllm.server.core.objs.sampling_params import (
     ALLOWED_TOKEN_IDS_MAX_LENGTH,
     JSON_SCHEMA_MAX_LENGTH,
     GRAMMAR_CONSTRAINT_MAX_LENGTH,
+    MAX_BEST_OF,
 )
 
 grammar_str = r"""root ::= (expr "=" term)+
@@ -168,6 +169,90 @@ def test_sampling_params_initialization():
     assert params.stop_sequences.size == 2
     assert params.pd_master_node_id.get() == pd_master_node_id
     assert params.pd_kv_trans_params.get() == pd_kv_trans_params
+
+
+def _make_params(**overrides):
+    """Build a SamplingParams whose fields are valid by default, applying overrides.
+
+    ``do_sample=True`` is used so that the sampling-related fields (temperature, top_p,
+    top_k) are kept as provided; with greedy decoding ``init`` overrides them to defaults.
+    """
+    data = {
+        "best_of": 1,
+        "n": 1,
+        "do_sample": True,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "max_new_tokens": 16,
+        "min_new_tokens": 1,
+    }
+    data.update(overrides)
+    params = SamplingParams()
+    params.init(None, **data)
+    return params
+
+
+def test_verify_accepts_valid_defaults():
+    # A minimally specified, valid configuration must pass verification.
+    _make_params().verify()
+
+
+def test_verify_accepts_n_equal_best_of_greater_than_one():
+    params = _make_params(best_of=2, n=2)
+    params.verify()
+    assert params.n == params.best_of == 2
+
+
+def test_verify_rejects_n_not_equal_best_of():
+    # The engine currently only supports n == best_of; a mismatch must be rejected.
+    with pytest.raises(ValueError):
+        _make_params(best_of=2, n=1).verify()
+
+
+@pytest.mark.parametrize("best_of", [0, -1, MAX_BEST_OF + 1])
+def test_verify_rejects_best_of_out_of_range(best_of):
+    with pytest.raises(ValueError):
+        _make_params(best_of=best_of, n=best_of).verify()
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("presence_penalty", -0.1),
+        ("frequency_penalty", -0.1),
+        ("repetition_penalty", 0.5),
+        ("temperature", -1.0),
+        ("top_p", 0.0),
+        ("top_p", 1.5),
+        ("top_k", 0),
+        ("top_k", -2),
+        ("max_new_tokens", 0),
+        ("min_new_tokens", 0),
+    ],
+)
+def test_verify_rejects_invalid_sampling_fields(field, value):
+    with pytest.raises(ValueError):
+        _make_params(**{field: value}).verify()
+
+
+def test_verify_rejects_min_new_tokens_greater_than_max():
+    with pytest.raises(ValueError):
+        _make_params(min_new_tokens=8, max_new_tokens=4).verify()
+
+
+@pytest.mark.parametrize("top_k", [-1, 1, 50])
+def test_verify_accepts_valid_top_k(top_k):
+    _make_params(top_k=top_k).verify()
+
+
+def test_verify_rejects_regular_constraint_with_allowed_token_ids():
+    # regular_constraint and allowed_token_ids are mutually exclusive.
+    with pytest.raises(ValueError):
+        _make_params(regular_constraint="[a-z]+", allowed_token_ids=[1, 2, 3]).verify()
 
 
 # Mock tokenizer for testing
