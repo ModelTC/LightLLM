@@ -127,6 +127,34 @@ def test_node_uuid_initialization():
     assert node_uuid.get() == node_id
 
 
+def test_allowed_token_ids_rejects_non_int():
+    allowed_ids = AllowedTokenIds()
+    with pytest.raises(AssertionError):
+        allowed_ids.initialize([1, "2", 3])
+
+
+@pytest.mark.parametrize(
+    "stop_sequences, expected_token_ids, expected_strings",
+    [
+        # 全部有效，无过滤，token id 组与字符串一一对应。
+        (["stop1", "stop2"], [[1, 2], [3, 4]], ["stop1", "stop2"]),
+        # 前置的空字符串会被过滤掉，后面的条目不能因此错位。
+        (["", "stop1"], [[1, 2]], ["stop1"]),
+        # 前置的空 id 列表同理。
+        ([[], "stop2"], [[3, 4]], ["stop2"]),
+        # 被过滤掉的字符串条目不能把自己的字符串挂到后一个条目的 token id 上。
+        (["unknown", "stop2"], [[3, 4]], ["stop2"]),
+        # 纯 id 条目不携带字符串。
+        ([[7, 8], "stop1"], [[7, 8], [1, 2]], ["stop1"]),
+    ],
+)
+def test_stop_sequence_groups_keeps_ids_and_strings_aligned(stop_sequences, expected_token_ids, expected_strings):
+    groups = StopSequenceGroups()
+    groups.initialize(stop_sequences, MockTokenizer())
+    assert groups.to_list() == expected_token_ids
+    assert sorted(groups.to_strings()) == sorted(expected_strings)
+
+
 def test_sampling_params_initialization():
     params = SamplingParams()
     pd_master_node_id = 12345678901234567890
