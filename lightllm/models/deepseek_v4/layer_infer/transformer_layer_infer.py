@@ -3,6 +3,7 @@ import triton
 from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_mega_moe
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.deepgemm_impl import FuseMoeDeepGEMM
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.triton_ep_impl import FuseMoeTritonEP
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
@@ -20,6 +21,8 @@ import deep_gemm
 from lightllm.models.deepseek_v4.triton_kernel.topk_transform import topk_transform_512
 from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 from lightllm.models.deepseek_v4.workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES
+from lightllm.common.quantization.deepgemm import _deepgemm_fp8_nt
+from lightllm.models.deepseek_v4.triton_kernel.silu_mul_fp8 import can_fuse_shared_silu_fp8, fused_silu_mul_quant_fp8
 
 
 class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
@@ -55,7 +58,10 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.tp_q_head_num_ = self.num_heads // self.tp_world_size_
         self.flashmla_q_head_num_ = self.tp_q_head_num_
         self.tp_groups = self.o_groups // self.tp_world_size_
-        self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        start_args = get_env_start_args()
+        self.enable_ep_moe = start_args.enable_ep_moe
+        self._dsv4_prefill_role = start_args.run_mode == "prefill"
+        self._dsv4_decode_role = start_args.run_mode == "decode"
         self.compressor = CompressorInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
@@ -384,8 +390,16 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             # one group per rank -> a single fp8 GEMM (deepgemm .mm quantizes o to fp8 internally)
             o = layer_weight.wo_a_.mm(o.reshape(T, -1))  # [T, o_lora]
         else:
-            o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
-            o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
+            if infer_state.is_prefill or self._dsv4_decode_role:
+                grouped_input = o.reshape(T, self.tp_groups, -1).transpose(0, 1)
+                grouped_output = self.alloc_tensor(
+                    (T, self.tp_groups, layer_weight.wo_a_.weight.shape[2]), dtype=o.dtype, device=o.device
+                )
+                layer_weight.wo_a_.bmm(grouped_input, out=grouped_output.transpose(0, 1))
+                o = grouped_output.reshape(T, -1)
+            else:
+                o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()
+                o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)
         o = layer_weight.wo_b_.mm(o)
         return self._tpsp_reduce(input=o, infer_state=infer_state)
 
@@ -558,6 +572,18 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
+        if can_fuse_shared_silu_fp8(gate_up, layer_weight.down_proj, self.swiglu_limit):
+            rows, dtype, device = input.size(0), input.dtype, input.device
+            quantized, scales = fused_silu_mul_quant_fp8(gate_up, self.alloc_tensor)
+            gate_up = None
+            input = None
+            out = self.alloc_tensor((rows, self.embed_dim_), dtype, device=device)
+            _deepgemm_fp8_nt(
+                (quantized, scales),
+                (layer_weight.down_proj.mm_param.weight, layer_weight.down_proj.mm_param.weight_scale),
+                out,
+            )
+            return out
         shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
         silu_and_mul_fwd(gate_up, shared, limit=self.swiglu_limit)
         input = None
@@ -565,6 +591,34 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         out = layer_weight.down_proj.mm(shared)
         shared = None
         return out
+
+    def _ffn_prefill_shared_overlap(self, x, weights, indices, infer_state, layer_weight):
+        """Overlap shared-expert compute with prefill expert dispatch."""
+        from deep_ep import ElasticBuffer
+
+        experts = layer_weight.experts_
+        indices = indices.to(torch.long)
+        qinput = experts.quantize_dispatch_input(x)
+        ready = ElasticBuffer.capture()
+        shared = self._ffn_tp(x, infer_state, layer_weight)
+        recv_x, recv_indices, recv_weights, recv_count, handle, dispatch_hook = experts.dispatch(
+            qinput, indices, weights, overlap_event=ready
+        )
+        dispatch_hook()
+        routed_temp = experts.prefilled_group_gemm(
+            recv_count,
+            handle.num_unaligned_recv_tokens_per_expert,
+            handle.recv_src_metadata,
+            recv_x,
+            recv_indices,
+            recv_weights,
+            hidden_dtype=x.dtype,
+            microbatch_index=infer_state.microbatch_index,
+            clamp_limit=self.swiglu_limit,
+        )
+        routed, combine_hook = experts.combine(routed_temp, handle)
+        combine_hook()
+        return routed + shared
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
@@ -575,6 +629,27 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         weights, indices, logical_topk_ids = self._select_experts(
             logits, infer_state, layer_weight, return_logical_ids=need_logical_ids
         )
+        experts = layer_weight.experts_
+        qmethod = getattr(experts, "quant_method", None)
+        impl = getattr(experts, "fuse_moe_impl", None)
+        ep_state = getattr(experts, "expert_parallel_state", None)
+        overlap_ok = (
+            self._dsv4_prefill_role
+            and infer_state.is_prefill
+            and self.enable_ep_moe
+            and x.shape[0] >= 4096
+            and infer_state.microbatch_index == 0
+            and not need_logical_ids
+            and ep_state is not None
+            and ep_state.eplb is None
+            and type(impl) is FuseMoeDeepGEMM
+            and getattr(qmethod, "method_name", None) == "fp8w8a8-b128-deepgemm"
+            and getattr(qmethod, "block_size", None) == 128
+            and getattr(getattr(experts, "w13", None), "weight", None) is not None
+            and experts.w13.weight.dtype == torch.float8_e4m3fn
+        )
+        if overlap_ok:
+            return self._ffn_prefill_shared_overlap(x, weights, indices, infer_state, layer_weight)
         # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
         # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
         # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
@@ -1003,6 +1078,92 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             self.index_head_dim + 4,
         )
         top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
+        ragged_plan = getattr(infer_state, "dsv4_c4_ragged_pair_plan", None)
+        if (
+            infer_state.is_prefill
+            and not torch.cuda.is_current_stream_capturing()
+            and ragged_plan is not None
+            and ragged_plan.kind == "ragged"
+            and idx_q_fp8.shape[0] >= 256
+        ):
+            self._c4_score_topk_ragged_pair(
+                infer_state,
+                ragged_plan,
+                idx_q_fp8,
+                weights,
+                indexer_k_cache,
+                valid_len,
+                row_page_table,
+                top_slots,
+                c4_cap,
+                page_size,
+                rows_per_chunk,
+                c4_aux_workspace,
+            )
+            return top_slots.unsqueeze(1), topk_lengths
+        pair_enabled = (
+            infer_state.is_prefill
+            and not torch.cuda.is_current_stream_capturing()
+            and getattr(infer_state, "dsv4_c4_pair_eligible", False)
+            and idx_q_fp8.shape[0] >= 256
+        )
+        if pair_enabled:
+            pair_cached = getattr(infer_state, "_c4_paged_pair_meta", None)
+            if pair_cached is None:
+                pair_rows = max(2, (rows_per_chunk or idx_q_fp8.shape[0]) // 2 * 2)
+                pair_ctx = ctx_lens.reshape(-1, 2)
+                pair_pages = row_page_table[::2].contiguous()
+                if idx_q_fp8.shape[0] > pair_rows:
+                    pair_meta = tuple(
+                        deep_gemm.get_paged_mqa_logits_metadata(
+                            pair_ctx[i : i + pair_rows // 2], page_size, deep_gemm.get_num_sms()
+                        )
+                        for i in range(0, pair_ctx.shape[0], pair_rows // 2)
+                    )
+                else:
+                    pair_meta = deep_gemm.get_paged_mqa_logits_metadata(
+                        pair_ctx, page_size, deep_gemm.get_num_sms()
+                    )
+                pair_cached = (pair_rows, pair_ctx, pair_pages, pair_meta)
+                infer_state._c4_paged_pair_meta = pair_cached
+            pair_rows, pair_ctx, pair_pages, pair_meta = pair_cached
+            if isinstance(pair_meta, tuple):
+                for chunk_idx, start in enumerate(range(0, idx_q_fp8.shape[0], pair_rows)):
+                    end = min(start + pair_rows, idx_q_fp8.shape[0])
+                    self._c4_score_topk_pair(
+                        idx_q_fp8[start:end].reshape(-1, 2, self.index_n_heads, self.index_head_dim),
+                        indexer_k_cache,
+                        weights[start:end],
+                        pair_ctx[start // 2 : end // 2],
+                        pair_pages[start // 2 : end // 2],
+                        pair_meta[chunk_idx],
+                        c4_cap,
+                        valid_len[start:end],
+                        row_page_table[start:end],
+                        top_slots[start:end],
+                        page_size,
+                        logits_out=(
+                            c4_aux_workspace.logits(end - start, c4_cap) if c4_aux_workspace is not None else None
+                        ),
+                    )
+            else:
+                self._c4_score_topk_pair(
+                    idx_q_fp8.reshape(-1, 2, self.index_n_heads, self.index_head_dim),
+                    indexer_k_cache,
+                    weights,
+                    pair_ctx,
+                    pair_pages,
+                    pair_meta,
+                    c4_cap,
+                    valid_len,
+                    row_page_table,
+                    top_slots,
+                    page_size,
+                    logits_out=(
+                        c4_aux_workspace.logits(idx_q_fp8.shape[0], c4_cap) if c4_aux_workspace is not None else None
+                    ),
+                )
+            return top_slots.unsqueeze(1), topk_lengths
         if chunk_metadata is not None:
             for chunk_idx, start in enumerate(range(0, idx_q_fp8.shape[0], rows_per_chunk)):
                 end = min(start + rows_per_chunk, idx_q_fp8.shape[0])
@@ -1035,6 +1196,109 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             logits_out=(c4_aux_workspace.logits(idx_q_fp8.shape[0], c4_cap) if c4_aux_workspace is not None else None),
         )
         return top_slots.unsqueeze(1), topk_lengths
+
+    def _c4_score_topk_ragged_pair(
+        self,
+        infer_state,
+        plan,
+        idx_q_fp8,
+        weights,
+        indexer_k_cache,
+        valid_len,
+        row_page_table,
+        top_slots,
+        c4_cap,
+        page_size,
+        rows_per_chunk,
+        c4_aux_workspace=None,
+    ):
+        """Run C4 scoring in request-local N=2 packed order and scatter real rows."""
+        from lightllm.models.deepseek_v4.c4_ragged_pair import materialize_ragged_gpu_plan
+
+        cached = getattr(infer_state, "_c4_ragged_pair_gpu", None)
+        if cached is None:
+            cached = materialize_ragged_gpu_plan(plan, idx_q_fp8.device)
+            infer_state._c4_ragged_pair_gpu = cached
+        packed_to_original = cached["packed_to_original"]
+        original_to_packed = cached["original_to_packed"]
+        packed_rows = packed_to_original.numel()
+        if packed_rows <= idx_q_fp8.shape[0] or packed_rows % 2:
+            raise RuntimeError("invalid C4 ragged packed plan")
+        packed_q = torch.index_select(idx_q_fp8, 0, packed_to_original)
+        packed_weights = torch.index_select(weights, 0, packed_to_original)
+        num_sms = deep_gemm.get_num_sms()
+        budget_rows = max(2, (rows_per_chunk or packed_rows) // 2 * 2)
+        signature = (packed_rows, c4_cap, page_size, budget_rows, num_sms)
+        metadata = getattr(infer_state, "_c4_ragged_pair_metadata", None)
+        if metadata is None or metadata["signature"] != signature:
+            packed_valid = torch.index_select(valid_len, 0, packed_to_original)
+            packed_pages = torch.index_select(row_page_table, 0, packed_to_original)
+            pair_ctx = torch.clamp(packed_valid, min=1).reshape(-1, 2)
+            pair_pages = packed_pages[::2].contiguous()
+            chunk_meta = tuple(
+                deep_gemm.get_paged_mqa_logits_metadata(
+                    pair_ctx[start // 2 : min(start + budget_rows, packed_rows) // 2], page_size, num_sms
+                )
+                for start in range(0, packed_rows, budget_rows)
+            )
+            metadata = {
+                "signature": signature,
+                "packed_valid": packed_valid,
+                "packed_pages": packed_pages,
+                "pair_ctx": pair_ctx,
+                "pair_pages": pair_pages,
+                "chunk_meta": chunk_meta,
+            }
+            infer_state._c4_ragged_pair_metadata = metadata
+        workspace = getattr(infer_state, "_c4_ragged_pair_workspace", None)
+        if workspace is None or workspace.shape != (packed_rows, self.index_topk) or workspace.dtype != top_slots.dtype:
+            workspace = self.alloc_tensor((packed_rows, self.index_topk), top_slots.dtype, device=top_slots.device)
+            infer_state._c4_ragged_pair_workspace = workspace
+        for chunk_idx, start in enumerate(range(0, packed_rows, budget_rows)):
+            end = min(start + budget_rows, packed_rows)
+            self._c4_score_topk_pair(
+                packed_q[start:end].reshape(-1, 2, self.index_n_heads, self.index_head_dim),
+                indexer_k_cache,
+                packed_weights[start:end],
+                metadata["pair_ctx"][start // 2 : end // 2],
+                metadata["pair_pages"][start // 2 : end // 2],
+                metadata["chunk_meta"][chunk_idx],
+                c4_cap,
+                metadata["packed_valid"][start:end],
+                metadata["packed_pages"][start:end],
+                workspace[start:end],
+                page_size,
+                logits_out=(c4_aux_workspace.logits(end - start, c4_cap) if c4_aux_workspace is not None else None),
+            )
+        torch.index_select(workspace, 0, original_to_packed, out=top_slots)
+
+    @staticmethod
+    def _c4_score_topk_pair(
+        idx_q_fp8,
+        indexer_k_cache,
+        weights,
+        pair_ctx_lens,
+        pair_page_table,
+        metadata,
+        c4_cap,
+        valid_len,
+        row_page_table,
+        top_slots,
+        page_size,
+        logits_out=None,
+    ):
+        logits = deep_gemm.fp8_paged_mqa_logits(
+            idx_q_fp8,
+            indexer_k_cache,
+            weights,
+            pair_ctx_lens,
+            pair_page_table,
+            metadata,
+            c4_cap,
+            False,
+            **({"out": logits_out} if logits_out is not None else {}),
+        )
+        topk_transform_512(logits, valid_len, row_page_table, top_slots, page_size)
 
     @staticmethod
     def _c4_score_topk(

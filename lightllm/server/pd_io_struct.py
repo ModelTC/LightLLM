@@ -2,8 +2,9 @@ import asyncio
 import enum
 import time
 import copy
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
@@ -151,6 +152,15 @@ class _PD_Client_RunStatus:
 
 
 @dataclass
+class _PD_ControlSendItem:
+    """One queued control frame and its caller-visible completion."""
+
+    payload: Optional[bytes]
+    completion: asyncio.Future
+    started: bool = False
+
+
+@dataclass
 class PD_Client_Obj:
     node_id: int
     client_ip_port: str
@@ -162,8 +172,8 @@ class PD_Client_Obj:
     dispatched_prompt_chars: int = 0
     # 当前派发到该节点且尚未产出首 token 的请求数。
     dispatched_req_num: int = 0
-    _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
-    _send_task: Optional[asyncio.Task] = field(default=None, init=False, repr=False, compare=False)
+    _send_queue: Deque[_PD_ControlSendItem] = field(default_factory=deque, init=False, repr=False, compare=False)
+    _send_drain_task: Optional[asyncio.Task] = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
@@ -176,44 +186,88 @@ class PD_Client_Obj:
         return f"http://{self.client_ip_port}/pd_generate_stream"
 
     async def send_control_message(self, payload: bytes) -> None:
-        # A disconnected client may still have an old send holding the lock. Do not
-        # let cleanup messages wait for that send before noticing the invalidation.
         if self.websocket is None:
             raise ConnectionError(f"PD control connection unavailable: {self.client_ip_port}")
-
-        # Waiting requests remain cancellable BEFORE they advance the compression dictionary.
-        await self._send_lock.acquire()
+        loop = asyncio.get_running_loop()
+        item = _PD_ControlSendItem(payload=payload, completion=loop.create_future())
+        self._send_queue.append(item)
+        if self._send_drain_task is None:
+            self._send_drain_task = asyncio.create_task(self._drain_control_messages())
         try:
-            if self.websocket is None:
-                raise ConnectionError(f"PD control connection unavailable: {self.client_ip_port}")
-            send_task = asyncio.create_task(self.websocket.send_bytes(payload))
-            self._send_task = send_task
-        except BaseException:
-            self._send_lock.release()
-            raise
-
-        def finish_send(task: asyncio.Task):
-            self._send_task = None
-            try:
-                task.result()
-            except BaseException:
-                self.websocket = None
-                logger.exception("PD control send failed: peer=%s", self.client_ip_port)
-            finally:
-                self._send_lock.release()
-
-        # The connection owns the task AND the lock until the complete frame is sent.
-        # Hypercorn compresses before awaiting its TCP send lock. Cancelling that wait
-        # drops the frame but leaves the deflate dictionary advanced for later messages.
-        send_task.add_done_callback(finish_send)
-        try:
-            await asyncio.shield(send_task)
+            await item.completion
         except asyncio.CancelledError:
+            if not item.started:
+                item.payload = None
+            if not item.completion.done():
+                item.completion.cancel()
             logger.warning(
-                "PD control send caller cancelled; connection-owned send continues: " "peer=%s",
+                "PD control send caller cancelled; connection-owned writer continues: peer=%s",
                 self.client_ip_port,
             )
             raise
+
+    def _fail_queued_control_sends(self, current: Optional[_PD_ControlSendItem], error: BaseException) -> None:
+        if current is not None and not current.completion.done():
+            current.completion.set_exception(error)
+        while self._send_queue:
+            item = self._send_queue.popleft()
+            item.payload = None
+            if not item.completion.done():
+                item.completion.set_exception(ConnectionError(f"PD control connection unavailable: {self.client_ip_port}"))
+
+    async def _drain_control_messages(self) -> None:
+        processed = 0
+        quantum_started = time.monotonic()
+        current: Optional[_PD_ControlSendItem] = None
+        try:
+            while True:
+                if not self._send_queue:
+                    self._send_drain_task = None
+                    return
+                current = self._send_queue.popleft()
+                processed += 1
+                if current.completion.cancelled():
+                    current.payload = None
+                    if self._send_queue and (processed >= 16 or time.monotonic() - quantum_started >= 0.005):
+                        processed = 0
+                        await asyncio.sleep(0)
+                        quantum_started = time.monotonic()
+                    continue
+                websocket = self.websocket
+                if websocket is None:
+                    self._fail_queued_control_sends(
+                        current, ConnectionError(f"PD control connection unavailable: {self.client_ip_port}")
+                    )
+                    self._send_drain_task = None
+                    return
+                current.started = True
+                payload = current.payload
+                current.payload = None
+                try:
+                    await websocket.send_bytes(payload)
+                except Exception as error:
+                    if self.websocket is websocket:
+                        self.websocket = None
+                    logger.exception("PD control send failed: peer=%s", self.client_ip_port)
+                    self._fail_queued_control_sends(current, error)
+                    self._send_drain_task = None
+                    return
+                if not current.completion.done():
+                    current.completion.set_result(None)
+                if self._send_queue and (processed >= 16 or time.monotonic() - quantum_started >= 0.005):
+                    processed = 0
+                    await asyncio.sleep(0)
+                    quantum_started = time.monotonic()
+        except asyncio.CancelledError:
+            self.websocket = None
+            self._fail_queued_control_sends(current, ConnectionError(f"PD control writer cancelled: {self.client_ip_port}"))
+            self._send_drain_task = None
+            raise
+        except Exception as error:
+            logger.exception("PD control writer stopped unexpectedly: peer=%s", self.client_ip_port)
+            self.websocket = None
+            self._fail_queued_control_sends(current, error)
+            self._send_drain_task = None
 
 
 @dataclass

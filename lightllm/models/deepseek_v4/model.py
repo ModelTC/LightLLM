@@ -309,6 +309,30 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
         return streams.mean(dim=1)
 
+    @staticmethod
+    def _c4_pair_prefill_plan(model_input: ModelInput):
+        """Build the CPU-only C4 pair plan without a D2H transfer or graph path."""
+        if not bool(model_input.is_prefill) or bool(getattr(model_input, "is_cuda_graph", False)):
+            return None
+        seq = getattr(model_input, "b_seq_len_cpu", None)
+        ready = getattr(model_input, "b_ready_cache_len_cpu", None)
+        if seq is None or ready is None or not isinstance(seq, torch.Tensor) or not isinstance(ready, torch.Tensor):
+            return None
+        if seq.device.type != "cpu" or ready.device.type != "cpu" or seq.ndim != 1 or ready.ndim != 1:
+            return None
+        if seq.dtype.is_floating_point or ready.dtype.is_floating_point or seq.dtype == torch.bool or ready.dtype == torch.bool:
+            return None
+        from lightllm.models.deepseek_v4.c4_ragged_pair import build_c4_ragged_pair_plan
+
+        return build_c4_ragged_pair_plan(seq.tolist(), ready.tolist(), int(model_input.input_ids.shape[0]))
+
+    def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
+        infer_state = super()._create_inferstate(model_input=model_input, microbatch_index=microbatch_index)
+        plan = self._c4_pair_prefill_plan(model_input) if self.run_mode == "prefill" else None
+        infer_state.dsv4_c4_ragged_pair_plan = plan
+        infer_state.dsv4_c4_pair_eligible = plan is not None and plan.kind == "all_even"
+        return infer_state
+
     def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
         if model_input.batch_size == 0 or (model_input.is_prefill and self.is_mtp_draft_model):
             return
