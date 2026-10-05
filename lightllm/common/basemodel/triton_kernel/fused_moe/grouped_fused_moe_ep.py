@@ -10,6 +10,9 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import s
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
     silu_and_mul_masked_post_quant_fwd,
 )
+from lightllm.common.basemodel.triton_kernel.fused_moe.routed_silu_mul_quant_fp8 import (
+    alloc_routed_silu_mul_quant_fp8,
+)
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     lightllm_per_token_group_quant_fp8,
     per_token_group_quant_fp8,
@@ -589,6 +592,16 @@ def chunked_expanded_moe_forward(
             f"chunk_rows={alignment}"
         )
     max_chunk_rows = min(all_tokens, max_chunk_rows)
+    use_fused_routed_activation = (
+        HAS_SGL_KERNEL
+        and hidden_dtype == torch.bfloat16
+        and hidden_size == 4096
+        and intermediate_size == 2048
+        and intermediate_twice == 4096
+        and w2.dtype == torch.float8_e4m3fn
+        and block_size_k == 128
+        and clamp_limit == 10.0
+    )
 
     workspace_manager = TensorBufferManager(workspace)
     gather_out = workspace_manager.alloc((gather_rows, hidden_size), hidden_dtype)
@@ -606,7 +619,8 @@ def chunked_expanded_moe_forward(
 
             chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
             chunk_rows = chunk_end - chunk_start
-            silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
+            if not use_fused_routed_activation:
+                silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
             gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
             deepgemm_grouped_fp8_nt_contiguous(
                 (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
@@ -614,10 +628,6 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out, limit=clamp_limit)
-            workspace_manager.free(gemm_out_a)
-            del gemm_out_a
-
             quant_buffers = []
 
             def workspace_quant_alloc(shape, dtype, device):
@@ -627,16 +637,28 @@ def chunked_expanded_moe_forward(
                 quant_buffers.append(quant_buffer)
                 return quant_buffer
 
-            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-                silu_out,
-                block_size_k,
-                dtype=w2.dtype,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                alloc_func=workspace_quant_alloc,
-            )
-            workspace_manager.free(silu_out)
-            del silu_out
+            if use_fused_routed_activation:
+                qsilu_out, qsilu_out_scale = alloc_routed_silu_mul_quant_fp8(
+                    gemm_out_a,
+                    workspace_quant_alloc,
+                    limit=clamp_limit,
+                )
+                workspace_manager.free(gemm_out_a)
+                del gemm_out_a
+            else:
+                silu_and_mul_fwd(gemm_out_a, silu_out, limit=clamp_limit)
+                workspace_manager.free(gemm_out_a)
+                del gemm_out_a
+                qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                    silu_out,
+                    block_size_k,
+                    dtype=w2.dtype,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    alloc_func=workspace_quant_alloc,
+                )
+                workspace_manager.free(silu_out)
+                del silu_out
 
             gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
             deepgemm_grouped_fp8_nt_contiguous(

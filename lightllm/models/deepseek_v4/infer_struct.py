@@ -34,6 +34,11 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # other c4 layers in the same forward. Plain tuple (not a tensor attr) so copy_for_cuda_graph
         # ignores it -- it's a capture-time wiring of layer0->others, not a staged graph input.
         self._c4_paged_meta = None
+        self._c4_paged_pair_meta = None
+        self.dsv4_c4_pair_eligible = False
+        self.dsv4_c4_ragged_pair_plan = None
+        self._c4_ragged_pair_gpu = None
+        self._c4_ragged_pair_workspace = None
 
     def _dsv4_index_max_kv_seq_len(self, model):
         if (
@@ -46,6 +51,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
 
     def init_some_extra_state(self, model):
         self._c4_paged_meta = None  # reset per forward before any c4 layer runs
+        self._c4_paged_pair_meta = None
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
         pos = self.position_ids
         self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
