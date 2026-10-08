@@ -17,6 +17,23 @@ def _unpack_scales(packed, groups):
     return torch.exp2(exponents[:, :groups].float() - 127)
 
 
+@pytest.mark.skipif(not activation.HAS_SGL_KERNEL, reason="requires SGL kernel")
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
+def test_sgl_dispatch_uses_ue8m0_flag(monkeypatch, use_ue8m0_scales):
+    quantize = activation.sgl_ops.sgl_per_token_group_quant_fp8
+    calls = []
+
+    def record_call(*args, **kwargs):
+        calls.append(kwargs["scale_ue8m0"])
+        return quantize(*args, **kwargs)
+
+    monkeypatch.setattr(activation.sgl_ops, "sgl_per_token_group_quant_fp8", record_call)
+    x = torch.ones((3, 512), device="cuda", dtype=torch.bfloat16)
+    _, scales = activation.per_token_group_quant_fp8(x, 128, use_ue8m0_scales=use_ue8m0_scales)
+    assert calls == [use_ue8m0_scales]
+    assert scales.dtype == (torch.int32 if use_ue8m0_scales else torch.float32)
+
+
 def test_ue8m0_rounding_at_power_of_two_boundaries(monkeypatch):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr(activation, "HAS_SGL_KERNEL", False)
@@ -96,7 +113,7 @@ def test_packed_ue8m0_scales(monkeypatch, rows, groups, group_size, use_sgl):
     reference_q = (x.float().reshape(rows, groups, group_size) / reference_scales[..., None]).to(q.dtype)
     torch.testing.assert_close(scales, reference_scales, rtol=0, atol=0)
     torch.testing.assert_close(q.float(), reference_q.reshape_as(x).float(), rtol=0, atol=0)
-    fp32_scales = activation.tma_align_input_scale(packed_scales, groups)
+    fp32_scales = activation.tma_align_input_scale(packed_scales, groups, use_ue8m0_scales=True)
     assert fp32_scales.dtype == torch.float32
     assert fp32_scales.stride() == packed_scales.stride()
     torch.testing.assert_close(fp32_scales, reference_scales, rtol=0, atol=0)

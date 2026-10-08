@@ -32,7 +32,7 @@ def _per_token_group_quant_fp8(
     NEED_MASK: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
 ):
-    if y_s_ptr.dtype.element_ty == tl.int32:
+    if USE_UE8M0_SCALE:
         row_id = tl.program_id(0)
         packed_col = tl.program_id(1)
         byte_ids = tl.arange(0, 4)
@@ -76,11 +76,7 @@ def _per_token_group_quant_fp8(
     y = tl.load(y_ptr + cols, mask=mask, other=other).to(tl.float32)
     # Quant
     _absmax = tl.max(tl.abs(y))
-    if USE_UE8M0_SCALE:
-        y_s = tl.maximum(_absmax, 1.0e-4) / fp8_max
-        y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
-    else:
-        y_s = tl.maximum(_absmax, eps) / fp8_max
+    y_s = tl.maximum(_absmax, eps) / fp8_max
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
@@ -101,7 +97,7 @@ def lightllm_per_token_group_quant_fp8(
         x: The input tenosr with ndim >= 2.
         group_size: The group size used for quantization.
         x_q: the tensor to save the quantized result of x.
-        x_s: the tensor to save the scale of x.
+        x_s: packed INT32 scales when use_ue8m0_scales is True, otherwise FP32 scales.
         eps: The minimum to avoid dividing zero.
         dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn` is supported for now.
     """
@@ -109,11 +105,8 @@ def lightllm_per_token_group_quant_fp8(
     assert x.is_contiguous(), "`x` is not contiguous"
 
     xs_row_major = x_s.is_contiguous()
-    xs_m, xs_n = x_s.shape
-    packed_scales = x_s.dtype == torch.int32
-    if packed_scales:
-        xs_m = x_s.stride(1)
-        xs_n = x.shape[-1] // group_size
+    xs_m = x_s.stride(1) if use_ue8m0_scales else x_s.shape[0]
+    xs_n = x.shape[-1] // group_size
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max
 
@@ -125,7 +118,7 @@ def lightllm_per_token_group_quant_fp8(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    grid = (x.shape[-2], triton.cdiv(xs_n, 4)) if packed_scales else (M,)
+    grid = (x.shape[-2], triton.cdiv(xs_n, 4)) if use_ue8m0_scales else (M,)
     _per_token_group_quant_fp8[grid](
         x,
         x_q,
@@ -166,19 +159,7 @@ def per_token_group_quant_fp8(
         groups = x.shape[-1] // group_size
         aligned_size = (x.shape[-2] + 3) // 4 * 4
         x_s = alloc_func(((groups + 3) // 4, aligned_size), device=x.device, dtype=torch.int32).t()[: x.shape[-2], :]
-        if HAS_SGL_KERNEL:
-            finfo = torch.finfo(dtype)
-            sgl_ops.sgl_per_token_group_quant_fp8(
-                x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=True, enable_v2=True
-            )
-        else:
-            lightllm_per_token_group_quant_fp8(x, group_size, x_q, x_s, eps=1e-10, dtype=dtype, use_ue8m0_scales=True)
-        return x_q, x_s
-
-    if HAS_SGL_KERNEL:
-        finfo = torch.finfo(dtype)
-        fp8_max, fp8_min = finfo.max, finfo.min
-
+    elif HAS_SGL_KERNEL:
         # 创建scale张量
         if column_major_scales:
             if scale_tma_aligned:
@@ -201,20 +182,25 @@ def per_token_group_quant_fp8(
                 device=x.device,
                 dtype=torch.float32,
             )
-
-        # 使用SGL kernel进行量化
-        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False, enable_v2=True)
     else:
-        # 使用LightLLM kernel进行量化
         x_s = alloc_func(
             x.shape[:-1] + (x.shape[-1] // group_size,),
             device=x.device,
             dtype=torch.float32,
         )
-        lightllm_per_token_group_quant_fp8(
-            x, group_size, x_q, x_s, eps=1e-10, dtype=torch.float8_e4m3fn, use_ue8m0_scales=use_ue8m0_scales
+
+    if HAS_SGL_KERNEL:
+        finfo = torch.finfo(dtype)
+        # 使用SGL kernel进行量化
+        sgl_ops.sgl_per_token_group_quant_fp8(
+            x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=use_ue8m0_scales, enable_v2=True
         )
-        if column_major_scales and scale_tma_aligned:
+    else:
+        # 使用LightLLM kernel进行量化
+        lightllm_per_token_group_quant_fp8(
+            x, group_size, x_q, x_s, eps=1e-10, dtype=dtype, use_ue8m0_scales=use_ue8m0_scales
+        )
+        if not use_ue8m0_scales and column_major_scales and scale_tma_aligned:
             x_s = tma_align_input_scale(x_s)
     return x_q, x_s
 
@@ -251,13 +237,14 @@ def _tma_align_input_scale_kernel(
     output_stride_m,
     output_stride_k,
     BLOCK_SIZE_K: tl.constexpr,
+    USE_UE8M0_SCALE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     grid_m = tl.num_programs(0)
     k_offsets = tl.arange(0, BLOCK_SIZE_K)
 
     for m_base in range(pid_m, m, grid_m):
-        if input_scale_ptr.dtype.element_ty == tl.int32:
+        if USE_UE8M0_SCALE:
             input_offset = input_scale_ptr + m_base * input_scale_stride_m + (k_offsets // 4) * input_scale_stride_k
             packed = tl.load(input_offset, mask=k_offsets < k_div_block_size, other=0)
             exponents = (packed >> ((k_offsets % 4) * 8)) & 255
@@ -271,7 +258,10 @@ def _tma_align_input_scale_kernel(
 
 
 def tma_align_input_scale(
-    input_scale: torch.Tensor, k_div_block_size: Optional[int] = None, alloc_func: Callable = torch.empty
+    input_scale: torch.Tensor,
+    k_div_block_size: Optional[int] = None,
+    alloc_func: Callable = torch.empty,
+    use_ue8m0_scales: bool = False,
 ):
     """Align scales for TMA; packed UE8M0 requires the logical scale count in k_div_block_size."""
     assert input_scale.dim() == 2
@@ -279,7 +269,7 @@ def tma_align_input_scale(
     if k_div_block_size is None:
         k_div_block_size = input_scale.shape[1]
     padd_m = get_tma_aligned_size(m, input_scale.element_size())
-    output_dtype = torch.float32 if input_scale.dtype == torch.int32 else input_scale.dtype
+    output_dtype = torch.float32 if use_ue8m0_scales else input_scale.dtype
     output = alloc_func((k_div_block_size, padd_m), dtype=output_dtype, device=input_scale.device)
 
     grid_m = min(m, 8192)
@@ -295,6 +285,7 @@ def tma_align_input_scale(
         output_stride_m=output.stride(1),  # Note: these are swapped
         output_stride_k=output.stride(0),  # for column-major
         BLOCK_SIZE_K=BLOCK_SIZE_K,
+        USE_UE8M0_SCALE=use_ue8m0_scales,
     )
     return output.t()[:m]
 
