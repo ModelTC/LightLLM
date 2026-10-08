@@ -245,6 +245,7 @@ def copy_dsv4_dp_caches(
     dst_mem_manager,
     task_meta: torch.Tensor,
     history_meta: torch.Tensor,
+    copy_runtime: bool = True,
 ) -> None:
     """Copy aligned DP suffixes; history_meta rows are (task index, local 256-token block)."""
     task_num = task_meta.numel() // _TASK_META_WIDTH
@@ -266,7 +267,7 @@ def copy_dsv4_dp_caches(
     c4_indexer_page_nbytes = dst_mem_manager.c4_indexer_pool.bytes_per_page if has_c4 else 0
     c4_state_row_nbytes = dst_c4_state.shape[-1] if has_c4 else 0
     c4_indexer_state_row_nbytes = dst_c4_indexer_state.shape[-1] if has_c4 else 0
-    program_num = history_program_num + task_num * (swa_program_num + c4_state_program_num)
+    program_num = history_program_num + (task_num * (swa_program_num + c4_state_program_num) if copy_runtime else 0)
 
     _copy_dsv4_dp_caches_kernel[(program_num,)](
         source_pool_ptrs,
