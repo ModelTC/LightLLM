@@ -4,6 +4,7 @@ import triton.language as tl
 
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
+from lightllm.utils.device_utils import is_sm100_gpu
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -134,6 +135,17 @@ def per_token_group_quant_fp8(
     x_s = None
     # Adapted from
     # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
+    # SGL packs four UE8M0 exponents into each INT32; Hopper DeepGEMM requires FP32 scales.
+    if HAS_SGL_KERNEL and use_ue8m0_scales and column_major_scales and scale_tma_aligned and is_sm100_gpu():
+        groups = x.shape[-1] // group_size
+        aligned_size = (x.shape[-2] + 3) // 4 * 4
+        x_s = alloc_func(((groups + 3) // 4, aligned_size), device=x.device, dtype=torch.int32).t()[: x.shape[-2], :]
+        finfo = torch.finfo(dtype)
+        sgl_ops.sgl_per_token_group_quant_fp8(
+            x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=True, enable_v2=True
+        )
+        return x_q, x_s
+
     if HAS_SGL_KERNEL and not use_ue8m0_scales:
         finfo = torch.finfo(dtype)
         fp8_max, fp8_min = finfo.max, finfo.min

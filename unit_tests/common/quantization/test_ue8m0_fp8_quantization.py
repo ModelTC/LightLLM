@@ -59,16 +59,50 @@ def test_activation_scales_and_quantized_values(monkeypatch, layout, group_size,
     assert scales.stride() == ((1, 20) if layout == "tma" else (groups, 1))
 
 
-def test_ue8m0_bypasses_sgl_kernel(monkeypatch):
+def test_hopper_ue8m0_uses_float_scales(monkeypatch):
     monkeypatch.setattr(activation, "HAS_SGL_KERNEL", True)
+    monkeypatch.setattr(activation, "is_sm100_gpu", lambda: False)
 
     def unexpected_sgl_call(*args, **kwargs):
-        pytest.fail("UE8M0 quantization must use the kernel that rounds scales")
+        pytest.fail("Hopper requires FP32 scales rather than SGL's packed INT32 scales")
 
     monkeypatch.setattr(activation, "sgl_ops", SimpleNamespace(sgl_per_token_group_quant_fp8=unexpected_sgl_call))
     x = torch.full((3, 128), 1.0, device="cuda", dtype=torch.bfloat16)
-    _, scales = activation.per_token_group_quant_fp8(x, 128, use_ue8m0_scales=True)
+    _, scales = activation.per_token_group_quant_fp8(
+        x, 128, column_major_scales=True, scale_tma_aligned=True, use_ue8m0_scales=True
+    )
+    assert scales.dtype == torch.float32
     torch.testing.assert_close(scales, torch.full_like(scales, 2.0 ** -8), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not activation.HAS_SGL_KERNEL, reason="requires SGL kernel")
+@pytest.mark.parametrize("rows", [1, 17])
+@pytest.mark.parametrize("groups", [1, 2, 3, 4, 5, 8])
+@pytest.mark.parametrize("group_size", [64, 128])
+def test_sgl_packed_ue8m0_scales(monkeypatch, rows, groups, group_size):
+    # Packing can be checked on Hopper independently of the SM100-only GEMM consumer.
+    monkeypatch.setattr(activation, "is_sm100_gpu", lambda: True)
+    torch.manual_seed(20261008)
+    x = torch.randn(rows, groups * group_size, device="cuda", dtype=torch.bfloat16)
+    x[0].zero_()
+    if rows > 1:
+        x[1].fill_(1e-12)
+    q, packed_scales = activation.per_token_group_quant_fp8(
+        x, group_size, column_major_scales=True, scale_tma_aligned=True, use_ue8m0_scales=True
+    )
+
+    assert packed_scales.dtype == torch.int32
+    assert packed_scales.shape == (rows, (groups + 3) // 4)
+    assert packed_scales.stride() == (1, (rows + 3) // 4 * 4)
+    shifts = torch.arange(4, device="cuda") * 8
+    exponents = ((packed_scales.to(torch.int64)[..., None] >> shifts) & 255).flatten(1)
+    assert torch.count_nonzero(exponents[:, groups:]) == 0
+    scales = torch.exp2(exponents[:, :groups].float() - 127)
+    amax = x.float().reshape(rows, groups, group_size).abs().amax(-1)
+    reference_scales = torch.exp2(torch.ceil(torch.log2(amax.clamp_min(1e-10) / 448.0)))
+    reference_q = (x.float().reshape(rows, groups, group_size) / reference_scales[..., None]).to(q.dtype)
+    torch.testing.assert_close(scales, reference_scales, rtol=0, atol=0)
+    torch.testing.assert_close(q.float(), reference_q.reshape_as(x).float(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("experts", [None, 2])
@@ -141,8 +175,11 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
 
     def check_activation_scales(*args, **kwargs):
         result = quantize_activation(*args, **kwargs)
-        log_scales = torch.log2(result[1])
-        assert torch.equal(log_scales, log_scales.round()) == use_ue8m0_scales
+        packed = use_ue8m0_scales and activation.HAS_SGL_KERNEL and activation.is_sm100_gpu()
+        assert result[1].dtype == (torch.int32 if packed else torch.float32)
+        if not packed:
+            log_scales = torch.log2(result[1])
+            assert torch.equal(log_scales, log_scales.round()) == use_ue8m0_scales
         return result
 
     monkeypatch.setattr(deepgemm, "per_token_group_quant_fp8", check_activation_scales)
