@@ -4,6 +4,7 @@ import triton.language as tl
 
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
+from lightllm.utils.device_utils import is_sm100_gpu
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -128,6 +129,17 @@ def per_token_group_quant_fp8(
     use_ue8m0_scales: bool = False,
 ):
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
+    # SGL packs four UE8M0 exponents into each INT32; Hopper DeepGEMM requires FP32 scales.
+    if HAS_SGL_KERNEL and use_ue8m0_scales and column_major_scales and scale_tma_aligned and is_sm100_gpu():
+        groups = x.shape[-1] // group_size
+        aligned_size = (x.shape[-2] + 3) // 4 * 4
+        x_s = alloc_func(((groups + 3) // 4, aligned_size), device=x.device, dtype=torch.int32).t()[: x.shape[-2], :]
+        finfo = torch.finfo(dtype)
+        sgl_ops.sgl_per_token_group_quant_fp8(
+            x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=True, enable_v2=True
+        )
+        return x_q, x_s
+
     if column_major_scales:
         if scale_tma_aligned:
             aligned_size = (x.shape[-2] + 3) // 4 * 4
