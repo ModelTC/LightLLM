@@ -58,11 +58,17 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def method_name(self):
         return "fp8w8a8-b128-deepgemm"
 
+    @property
+    def use_ue8m0_scales(self):
+        if self.hf_quantization_config is None:
+            return False
+        return self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size, use_ue8m0_scales=True)
+        weight, scale = weight_quant(weight.cuda(device), self.block_size, use_ue8m0_scales=self.use_ue8m0_scales)
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -90,7 +96,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=alloc_func,
-                use_ue8m0_scales=True,
+                use_ue8m0_scales=self.use_ue8m0_scales,
             )
 
         if out is None:
