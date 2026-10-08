@@ -135,6 +135,8 @@ def per_token_group_quant_fp8(
     use_ue8m0_scales: bool = False,
 ):
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
+    # Adapted from
+    # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
     if column_major_scales:
         if scale_tma_aligned:
             aligned_size = (x.shape[-2] + 3) // 4 * 4
