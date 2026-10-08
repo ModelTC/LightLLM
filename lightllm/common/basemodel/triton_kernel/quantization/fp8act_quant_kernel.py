@@ -16,10 +16,7 @@ except:
 
 @triton.jit
 def _ceil_to_ue8m0(x):
-    bits = x.to(tl.float32).to(tl.int32, bitcast=True)
-    exp = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0)
-    exp = tl.maximum(tl.minimum(exp, 254), 1)
-    return (exp << 23).to(tl.float32, bitcast=True)
+    return tl.exp2(tl.ceil(tl.log2(x)))
 
 
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/quantization/fp8_kernel.py
