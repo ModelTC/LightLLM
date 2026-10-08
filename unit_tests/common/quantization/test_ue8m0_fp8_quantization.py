@@ -101,11 +101,24 @@ def test_weight_quantization_partial_blocks(monkeypatch, experts, use_ue8m0_scal
     torch.testing.assert_close(q.float(), (x.float() / expanded).to(q.dtype).float(), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("env_value", ["1", "0"])
+def test_ue8m0_env_preserves_unquantized_method(monkeypatch, env_value):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", env_value)
+    method = Quantcfg({"n_layer": 1}).get_quant_method(0, "q_proj")
+    assert method.method_name == "none"
+
+
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
+@pytest.mark.parametrize("env_value", [None, "1", "0"])
 @pytest.mark.parametrize("scale_fmt", ["no_config", None, "ue8m0", "float32"])
 @pytest.mark.parametrize("rows", [1, 17, 32])
-def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt):
+def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt, env_value):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    if env_value is None:
+        monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES", raising=False)
+    else:
+        monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", env_value)
     torch.manual_seed(20261008)
     x = torch.randn(rows, 1024, device="cuda", dtype=torch.bfloat16)
     w = torch.randn(256, 1024, device="cuda", dtype=torch.bfloat16)
@@ -115,7 +128,9 @@ def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt):
         if scale_fmt is not None:
             config["quantization_config"]["scale_fmt"] = scale_fmt
     method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
-    use_ue8m0_scales = scale_fmt == "ue8m0"
+    use_ue8m0_scales = scale_fmt == "ue8m0" if env_value is None else env_value == "1"
+    # The environment is read once when the method is constructed.
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
     assert method.use_ue8m0_scales == use_ue8m0_scales
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
     method.quantize(w, weight_pack)
