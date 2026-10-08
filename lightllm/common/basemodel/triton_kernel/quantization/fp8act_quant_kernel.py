@@ -33,9 +33,9 @@ def _per_token_group_quant_fp8(
     eps,
     fp8_min,
     fp8_max,
+    xs_m,
     xs_n,
-    xs_stride_m,
-    xs_stride_n,
+    xs_row_major: tl.constexpr,
     BLOCK: tl.constexpr,
     NEED_MASK: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
@@ -43,9 +43,12 @@ def _per_token_group_quant_fp8(
     g_id = tl.program_id(0)
     y_ptr += g_id * y_stride
     y_q_ptr += g_id * y_stride
-    row_id = g_id // xs_n
-    col_id = g_id % xs_n
-    y_s_ptr += row_id * xs_stride_m + col_id * xs_stride_n
+    if xs_row_major:
+        y_s_ptr += g_id
+    else:
+        row_id = g_id // xs_n
+        col_id = g_id % xs_n
+        y_s_ptr += col_id * xs_m + row_id  # col major
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
 
@@ -90,8 +93,8 @@ def lightllm_per_token_group_quant_fp8(
     assert x.shape[-1] % group_size == 0, "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
-    xs_n = x_s.shape[-1]
-    xs_stride_m, xs_stride_n = x_s.stride()
+    xs_row_major = x_s.is_contiguous()
+    xs_m, xs_n = x_s.shape
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max
 
@@ -112,9 +115,9 @@ def lightllm_per_token_group_quant_fp8(
         eps,
         fp8_min=fp8_min,
         fp8_max=fp8_max,
+        xs_m=xs_m,
         xs_n=xs_n,
-        xs_stride_m=xs_stride_m,
-        xs_stride_n=xs_stride_n,
+        xs_row_major=xs_row_major,
         BLOCK=BLOCK,
         NEED_MASK=BLOCK != group_size,
         USE_UE8M0_SCALE=use_ue8m0_scales,
@@ -135,45 +138,50 @@ def per_token_group_quant_fp8(
     use_ue8m0_scales: bool = False,
 ):
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
+    x_s = None
     # Adapted from
     # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
-    if column_major_scales:
-        if scale_tma_aligned:
-            aligned_size = (x.shape[-2] + 3) // 4 * 4
-            x_s = alloc_func(
-                x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
-                device=x.device,
-                dtype=torch.float32,
-            ).permute(-1, -2)[: x.shape[-2], :]
+    if HAS_SGL_KERNEL and not use_ue8m0_scales:
+        finfo = torch.finfo(dtype)
+        fp8_max, fp8_min = finfo.max, finfo.min
+
+        # 创建scale张量
+        if column_major_scales:
+            if scale_tma_aligned:
+                # 对齐到4 * sizeof(float)
+                aligned_size = (x.shape[-2] + 3) // 4 * 4
+                x_s = alloc_func(
+                    x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)[: x.shape[-2], :]
+            else:
+                x_s = alloc_func(
+                    (x.shape[-1] // group_size,) + x.shape[:-1],
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)
         else:
             x_s = alloc_func(
-                (x.shape[-1] // group_size,) + x.shape[:-1],
+                x.shape[:-1] + (x.shape[-1] // group_size,),
                 device=x.device,
                 dtype=torch.float32,
-            ).permute(-1, -2)
+            )
+
+        # 使用SGL kernel进行量化
+        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False, enable_v2=True)
     else:
+        # 使用LightLLM kernel进行量化
         x_s = alloc_func(
             x.shape[:-1] + (x.shape[-1] // group_size,),
             device=x.device,
             dtype=torch.float32,
         )
-
-    if HAS_SGL_KERNEL and not use_ue8m0_scales:
-        finfo = torch.finfo(dtype)
-        fp8_max, fp8_min = finfo.max, finfo.min
-        # 使用SGL kernel进行量化
-        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False, enable_v2=True)
-    else:
-        # 使用LightLLM kernel进行量化
         lightllm_per_token_group_quant_fp8(
-            x,
-            group_size,
-            x_q,
-            x_s,
-            eps=eps,
-            dtype=dtype,
-            use_ue8m0_scales=use_ue8m0_scales,
+            x, group_size, x_q, x_s, eps=1e-10, dtype=torch.float8_e4m3fn, use_ue8m0_scales=use_ue8m0_scales
         )
+        if column_major_scales and scale_tma_aligned:
+            x_s = tma_align_input_scale(x_s)
     return x_q, x_s
 
 
