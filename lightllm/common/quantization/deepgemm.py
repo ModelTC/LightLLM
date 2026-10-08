@@ -48,7 +48,6 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
 class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
-        self.use_ue8m0_scales = None
         self.block_size = 128
         self.weight_suffix = "weight"
         self.weight_zero_point_suffix = None
@@ -60,14 +59,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def method_name(self):
         return "fp8w8a8-b128-deepgemm"
 
-    def _init_ue8m0_scales(self):
-        self.use_ue8m0_scales = (
-            self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
-        ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
-
     def quantize(self, weight: torch.Tensor, output: WeightPack):
-        if self.use_ue8m0_scales is None:
-            self._init_ue8m0_scales()
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
@@ -85,8 +77,6 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if self.use_ue8m0_scales is None:
-            self._init_ue8m0_scales()
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         input_scale = None
@@ -112,6 +102,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> Tuple[WeightPack, List[WeightPack]]:
+        self.use_ue8m0_scales = (
+            self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+        ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
         divisible_by_block_size = [_out_dim % self.block_size != 0 for _out_dim in out_dims]

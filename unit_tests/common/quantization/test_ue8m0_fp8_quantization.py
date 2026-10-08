@@ -156,17 +156,16 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
             config["quantization_config"]["scale_fmt"] = scale_fmt
     method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
     use_ue8m0_scales = scale_fmt == "ue8m0" or env_value == "1"
-    assert method.use_ue8m0_scales is None
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
+    assert method.use_ue8m0_scales == use_ue8m0_scales
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
     if prequantized:
         qweight, scales = weight.weight_quant(w, use_ue8m0_scales=use_ue8m0_scales)
         method.load_weight(qweight, weight_pack)
         method.load_weight_scale(scales, weight_pack)
-        assert method.use_ue8m0_scales is None
     else:
         method.load_weight(w, weight_pack)
         assert method.use_ue8m0_scales == use_ue8m0_scales
-        monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
     assert torch.all(weight_pack.weight_scale > 0)
     log_scales = torch.log2(weight_pack.weight_scale)
     assert torch.equal(log_scales, log_scales.round()) == use_ue8m0_scales
@@ -186,7 +185,7 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
 
     out = method.apply(x, weight_pack, use_custom_tensor_mananger=False)
     assert method.use_ue8m0_scales == use_ue8m0_scales
-    # Later calls reuse the choice made at the first quantize/apply call.
+    # Later calls reuse the choice made when creating the weight.
     monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
     method.apply(x, weight_pack, out=out, use_custom_tensor_mananger=False)
     reference = x.float() @ w.float().T
