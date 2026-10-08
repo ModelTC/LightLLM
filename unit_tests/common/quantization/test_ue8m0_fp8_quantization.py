@@ -121,7 +121,7 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
         if scale_fmt is not None:
             config["quantization_config"]["scale_fmt"] = scale_fmt
     method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
-    use_ue8m0_scales = scale_fmt == "ue8m0" if env_value is None else env_value == "1"
+    use_ue8m0_scales = scale_fmt == "ue8m0" or env_value == "1"
     assert method.use_ue8m0_scales is None
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
     if prequantized:

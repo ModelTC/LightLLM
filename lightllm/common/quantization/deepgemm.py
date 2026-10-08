@@ -63,10 +63,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def _init_ue8m0_scales(self):
         self.use_ue8m0_scales = (
             self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
-        )
-        env_use_ue8m0_scales = os.getenv("LIGHTLLM_USE_UE8M0_SCALES")
-        if env_use_ue8m0_scales is not None:
-            self.use_ue8m0_scales = env_use_ue8m0_scales.upper() in ["ON", "TRUE", "1"]
+        ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         if self.use_ue8m0_scales is None:
