@@ -8,7 +8,8 @@ import triton.language as tl
 
 from lightllm.common.basemodel.triton_kernel.quantization import fp8act_quant_kernel as activation
 from lightllm.common.basemodel.triton_kernel.quantization import fp8w8a8_block_quant_kernel as weight
-from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM, DeepGEMMFP8w8a8B128QuantizationMethod
+from lightllm.common.quantization import Quantcfg
+from lightllm.common.quantization import deepgemm
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -100,18 +101,37 @@ def test_weight_quantization_partial_blocks(monkeypatch, experts, use_ue8m0_scal
     torch.testing.assert_close(q.float(), (x.float() / expanded).to(q.dtype).float(), rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not HAS_DEEPGEMM, reason="requires DeepGEMM")
+@pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
+@pytest.mark.parametrize("scale_fmt", ["no_config", None, "ue8m0", "float32"])
 @pytest.mark.parametrize("rows", [1, 17, 32])
-def test_deepgemm_quantize_and_apply(monkeypatch, rows):
+def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     torch.manual_seed(20261008)
     x = torch.randn(rows, 1024, device="cuda", dtype=torch.bfloat16)
     w = torch.randn(256, 1024, device="cuda", dtype=torch.bfloat16)
-    method = DeepGEMMFP8w8a8B128QuantizationMethod()
+    config = {"n_layer": 1}
+    if scale_fmt != "no_config":
+        config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+        if scale_fmt is not None:
+            config["quantization_config"]["scale_fmt"] = scale_fmt
+    method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
+    use_ue8m0_scales = scale_fmt != "float32"
+    assert method.use_ue8m0_scales == use_ue8m0_scales
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
     method.quantize(w, weight_pack)
     assert torch.all(weight_pack.weight_scale > 0)
-    assert torch.equal(torch.log2(weight_pack.weight_scale), torch.log2(weight_pack.weight_scale).round())
+    log_scales = torch.log2(weight_pack.weight_scale)
+    assert torch.equal(log_scales, log_scales.round()) == use_ue8m0_scales
+
+    quantize_activation = deepgemm.per_token_group_quant_fp8
+
+    def check_activation_scales(*args, **kwargs):
+        result = quantize_activation(*args, **kwargs)
+        log_scales = torch.log2(result[1])
+        assert torch.equal(log_scales, log_scales.round()) == use_ue8m0_scales
+        return result
+
+    monkeypatch.setattr(deepgemm, "per_token_group_quant_fp8", check_activation_scales)
 
     out = method.apply(x, weight_pack, use_custom_tensor_mananger=False)
     reference = x.float() @ w.float().T
