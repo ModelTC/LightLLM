@@ -66,8 +66,23 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         device = output.weight.device
         weight, scale = weight_quant(weight.cuda(device), self.block_size, use_ue8m0_scales=self.use_ue8m0_scales)
         output.weight.copy_(weight)
-        output.weight_scale.copy_(scale)
+        self.load_weight_scale(scale, output)
         return
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
+        if weight_scale is None:
+            return
+        if self.use_packed_ue8m0 and weight_scale.dtype == torch.float32:
+            n, k = weight_pack.weight.shape[-2:]
+            weight_scale = deep_gemm.transform_sf_into_required_layout(
+                weight_scale.cuda(weight_pack.weight.device),
+                n,
+                k,
+                (1, self.block_size, self.block_size),
+                num_groups=weight_scale.shape[0] if weight_scale.ndim == 3 else None,
+                is_sfa=False,
+            )
+        super().load_weight_scale(weight_scale, weight_pack)
 
     def apply(
         self,
@@ -120,9 +135,18 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         weight_scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty(
-            expert_prefix + (weight_scale_out_dim, weight_scale_in_dim), dtype=torch.float32
-        ).cuda(device_id)
+        if self.use_packed_ue8m0:
+            aligned_out_dim = (out_dim + 3) // 4 * 4
+            weight_scale = torch.empty(
+                expert_prefix + ((weight_scale_in_dim + 3) // 4, aligned_out_dim),
+                dtype=torch.int32,
+                device=f"cuda:{device_id}",
+            ).transpose(-1, -2)[..., :out_dim, :]
+            weight_scale_out_dims = out_dims
+        else:
+            weight_scale = torch.empty(
+                expert_prefix + (weight_scale_out_dim, weight_scale_in_dim), dtype=torch.float32
+            ).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         mm_param_list = self._split_weight_pack(
             mm_param,

@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from .fused_moe_weight import FusedMoeWeight
+from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.log_utils import init_logger
 from typing import Dict
 
@@ -176,19 +177,22 @@ class FusedMoeWeightEPAutoRedundancy:
                 self.w2_scale_list[i] = weights[w2_scale]
 
     def commit(self):
-        for index, dest_tensor in enumerate([self._ep_w.w13.weight, self._ep_w.w13.weight_scale]):
-            if dest_tensor is not None:
-                assert isinstance(
-                    dest_tensor, torch.Tensor
-                ), f"dest_tensor should be a torch.Tensor, but got {type(dest_tensor)}"
-                dest_tensor[-self.redundancy_expert_num :, :, :] = self.w13[index][:, :, :]
-
-        for index, dest_tensor in enumerate([self._ep_w.w2.weight, self._ep_w.w2.weight_scale]):
-            if dest_tensor is not None:
-                assert isinstance(
-                    dest_tensor, torch.Tensor
-                ), f"dest_tensor should be a torch.Tensor, but got {type(dest_tensor)}"
-                dest_tensor[-self.redundancy_expert_num :, :, :] = self.w2[index][:, :, :]
+        for weight_pack, source in [(self._ep_w.w13, self.w13), (self._ep_w.w2, self.w2)]:
+            for index, dest_tensor in enumerate([weight_pack.weight, weight_pack.weight_scale]):
+                if dest_tensor is not None:
+                    assert isinstance(
+                        dest_tensor, torch.Tensor
+                    ), f"dest_tensor should be a torch.Tensor, but got {type(dest_tensor)}"
+                    if index == 1 and dest_tensor.dtype == torch.int32 and source[index].dtype == torch.float32:
+                        self._ep_w.quant_method.load_weight_scale(
+                            source[index],
+                            WeightPack(
+                                weight=weight_pack.weight[-self.redundancy_expert_num :],
+                                weight_scale=dest_tensor[-self.redundancy_expert_num :],
+                            ),
+                        )
+                    else:
+                        dest_tensor[-self.redundancy_expert_num :, :, :] = source[index][:, :, :]
 
         self._ep_w.redundancy_expert_ids_tensor.copy_(
             torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cpu")
