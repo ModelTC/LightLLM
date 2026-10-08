@@ -28,7 +28,7 @@ def test_ue8m0_rounding_at_power_of_two_boundaries():
     above = torch.nextafter(powers, torch.full_like(powers, float("inf")))
     below = torch.nextafter(powers, torch.zeros_like(powers))
     scales = torch.cat((powers, above, below, powers.new_zeros(1)))
-    expected = torch.cat((powers, (powers * 2).clamp_max(2.0 ** 127), powers, powers.new_tensor([2.0 ** -126])))
+    expected = torch.exp2(torch.ceil(torch.log2(scales)))
     act_out = torch.empty_like(scales)
     weight_out = torch.empty_like(scales)
 
