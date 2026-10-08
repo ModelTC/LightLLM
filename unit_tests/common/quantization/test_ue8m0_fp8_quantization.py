@@ -18,8 +18,8 @@ def _unpack_scales(packed, groups):
 
 
 @pytest.mark.skipif(not activation.HAS_SGL_KERNEL, reason="requires SGL kernel")
-@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
-def test_sgl_dispatch_uses_ue8m0_flag(monkeypatch, use_ue8m0_scales):
+@pytest.mark.parametrize("use_ue8m0_scales,use_packed_ue8m0", [(False, False), (True, False), (True, True)])
+def test_sgl_dispatch_uses_ue8m0_flag(monkeypatch, use_ue8m0_scales, use_packed_ue8m0):
     quantize = activation.sgl_ops.sgl_per_token_group_quant_fp8
     calls = []
 
@@ -29,12 +29,18 @@ def test_sgl_dispatch_uses_ue8m0_flag(monkeypatch, use_ue8m0_scales):
 
     monkeypatch.setattr(activation.sgl_ops, "sgl_per_token_group_quant_fp8", record_call)
     x = torch.ones((3, 512), device="cuda", dtype=torch.bfloat16)
-    _, scales = activation.per_token_group_quant_fp8(x, 128, use_ue8m0_scales=use_ue8m0_scales)
-    assert calls == [use_ue8m0_scales]
-    assert scales.dtype == (torch.int32 if use_ue8m0_scales else torch.float32)
+    _, scales = activation.per_token_group_quant_fp8(
+        x, 128, use_ue8m0_scales=use_ue8m0_scales, use_packed_ue8m0=use_packed_ue8m0
+    )
+    assert calls == ([use_packed_ue8m0] if not use_ue8m0_scales or use_packed_ue8m0 else [])
+    assert scales.dtype == (torch.int32 if use_packed_ue8m0 else torch.float32)
+    if use_ue8m0_scales:
+        actual = _unpack_scales(scales, 4) if use_packed_ue8m0 else scales
+        torch.testing.assert_close(actual, torch.full_like(actual, 2.0 ** -8), rtol=0, atol=0)
 
 
-def test_ue8m0_rounding_at_power_of_two_boundaries(monkeypatch):
+@pytest.mark.parametrize("use_packed_ue8m0", [False, True])
+def test_ue8m0_rounding_at_power_of_two_boundaries(monkeypatch, use_packed_ue8m0):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr(activation, "HAS_SGL_KERNEL", False)
     powers = torch.tensor([2.0 ** exponent for exponent in (-16, -8, 0, 8, 16, 118)], device="cuda")
@@ -45,17 +51,20 @@ def test_ue8m0_rounding_at_power_of_two_boundaries(monkeypatch):
     expected_act = torch.exp2(torch.ceil(torch.log2(magnitudes.clamp_min(1e-10) / 448.0)))
     expected_weight = torch.exp2(torch.ceil(torch.log2(magnitudes.clamp_min(1e-4) / 448.0)))
 
-    _, act_scales = activation.per_token_group_quant_fp8(x, 128, use_ue8m0_scales=True)
+    _, act_scales = activation.per_token_group_quant_fp8(
+        x, 128, use_ue8m0_scales=True, use_packed_ue8m0=use_packed_ue8m0
+    )
     _, weight_scales = weight.weight_quant(x.repeat_interleave(128, dim=0), use_ue8m0_scales=True)
 
-    torch.testing.assert_close(_unpack_scales(act_scales, 1)[:, 0], expected_act, rtol=0, atol=0)
+    actual = _unpack_scales(act_scales, 1) if use_packed_ue8m0 else act_scales
+    torch.testing.assert_close(actual[:, 0], expected_act, rtol=0, atol=0)
     torch.testing.assert_close(weight_scales[:, 0], expected_weight, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("layout", ["row", "column", "tma"])
 @pytest.mark.parametrize("group_size", [64, 128])
-@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
-def test_activation_scales_and_quantized_values(monkeypatch, layout, group_size, use_ue8m0_scales):
+@pytest.mark.parametrize("use_ue8m0_scales,use_packed_ue8m0", [(False, False), (True, False), (True, True)])
+def test_activation_scales_and_quantized_values(monkeypatch, layout, group_size, use_ue8m0_scales, use_packed_ue8m0):
     monkeypatch.setattr(activation, "HAS_SGL_KERNEL", False)
     torch.manual_seed(20261008)
     rows, groups = 17, 4
@@ -68,6 +77,7 @@ def test_activation_scales_and_quantized_values(monkeypatch, layout, group_size,
         column_major_scales=layout != "row",
         scale_tma_aligned=layout == "tma",
         use_ue8m0_scales=use_ue8m0_scales,
+        use_packed_ue8m0=use_packed_ue8m0,
     )
 
     amax = x.float().reshape(rows, groups, group_size).abs().amax(dim=-1)
@@ -75,12 +85,12 @@ def test_activation_scales_and_quantized_values(monkeypatch, layout, group_size,
     if use_ue8m0_scales:
         reference_scales = torch.exp2(torch.ceil(torch.log2(reference_scales.double()))).float()
     reference_q = (x.float().reshape(rows, groups, group_size) / reference_scales[..., None]).to(q.dtype)
-    actual_scales = _unpack_scales(scales, groups) if use_ue8m0_scales else scales
+    actual_scales = _unpack_scales(scales, groups) if use_packed_ue8m0 else scales
     torch.testing.assert_close(actual_scales, reference_scales, rtol=0, atol=0)
     torch.testing.assert_close(q.float(), reference_q.reshape_as(x).float(), rtol=0, atol=0)
-    assert scales.dtype == (torch.int32 if use_ue8m0_scales else torch.float32)
+    assert scales.dtype == (torch.int32 if use_packed_ue8m0 else torch.float32)
     # UE8M0 always follows SGL's packed TMA layout, including with default layout flags.
-    if use_ue8m0_scales or layout == "tma":
+    if use_packed_ue8m0 or layout == "tma":
         assert scales.stride() == (1, 20)
     elif layout == "row":
         assert scales.stride() == (groups, 1)
@@ -100,7 +110,7 @@ def test_packed_ue8m0_scales(monkeypatch, rows, groups, group_size, use_sgl):
     if rows > 1:
         x[1].fill_(1e-12)
         x[-1, -group_size:].fill_(2.0 ** 16)
-    q, packed_scales = activation.per_token_group_quant_fp8(x, group_size, use_ue8m0_scales=True)
+    q, packed_scales = activation.per_token_group_quant_fp8(x, group_size, use_ue8m0_scales=True, use_packed_ue8m0=True)
 
     assert packed_scales.dtype == torch.int32
     assert packed_scales.shape == (rows, (groups + 3) // 4)
@@ -113,10 +123,6 @@ def test_packed_ue8m0_scales(monkeypatch, rows, groups, group_size, use_sgl):
     reference_q = (x.float().reshape(rows, groups, group_size) / reference_scales[..., None]).to(q.dtype)
     torch.testing.assert_close(scales, reference_scales, rtol=0, atol=0)
     torch.testing.assert_close(q.float(), reference_q.reshape_as(x).float(), rtol=0, atol=0)
-    fp32_scales = activation.tma_align_input_scale(packed_scales, groups, use_ue8m0_scales=True)
-    assert fp32_scales.dtype == torch.float32
-    assert fp32_scales.stride() == packed_scales.stride()
-    torch.testing.assert_close(fp32_scales, reference_scales, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("experts", [None, 2])
@@ -150,6 +156,30 @@ def test_ue8m0_env_preserves_unquantized_method(monkeypatch, env_value):
 
 
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
+@pytest.mark.parametrize("sm100", [False, True])
+def test_deepgemm_selects_scale_format_for_machine(monkeypatch, sm100):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
+    monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: sm100)
+    method = Quantcfg({"n_layer": 1}, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
+    weight_pack, _ = method.create_weight([128], 512, torch.bfloat16, 0)
+    method.load_weight(torch.ones((128, 512), dtype=torch.bfloat16, device="cuda"), weight_pack)
+    seen = []
+
+    def check_gemm_inputs(a, b, out):
+        seen.append(a[1].dtype)
+        scales = _unpack_scales(a[1], 4) if sm100 else a[1]
+        torch.testing.assert_close(scales, torch.full_like(scales, 2.0 ** -8), rtol=0, atol=0)
+        out.zero_()
+
+    # Exercise format selection and real quantization on Hopper; SM100 GEMM needs a separate machine.
+    monkeypatch.setattr(deepgemm, "_deepgemm_fp8_nt", check_gemm_inputs)
+    method.apply(
+        torch.ones((3, 512), dtype=torch.bfloat16, device="cuda"), weight_pack, use_custom_tensor_mananger=False
+    )
+    assert seen == [torch.int32 if sm100 else torch.float32]
+
+
+@pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
 @pytest.mark.parametrize("prequantized", [False, True])
 @pytest.mark.parametrize("env_value", [None, "1", "0"])
 @pytest.mark.parametrize("scale_fmt", ["no_config", None, "ue8m0", "float32"])
@@ -172,6 +202,7 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
     use_ue8m0_scales = scale_fmt == "ue8m0" or env_value == "1"
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
     assert method.use_ue8m0_scales == use_ue8m0_scales
+    assert method.use_packed_ue8m0 == (use_ue8m0_scales and deepgemm.is_sm100_gpu())
     monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
     if prequantized:
         qweight, scales = weight.weight_quant(w, use_ue8m0_scales=use_ue8m0_scales)
@@ -188,7 +219,8 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
 
     def check_activation_scales(*args, **kwargs):
         result = quantize_activation(*args, **kwargs)
-        packed = use_ue8m0_scales
+        packed = use_ue8m0_scales and deepgemm.is_sm100_gpu()
+        assert kwargs["use_packed_ue8m0"] == packed
         assert result[1].dtype == (torch.int32 if packed else torch.float32)
         if not packed:
             log_scales = torch.log2(result[1])

@@ -4,10 +4,7 @@ from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
-from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
-    per_token_group_quant_fp8,
-    tma_align_input_scale,
-)
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.log_utils import init_logger
 
@@ -96,12 +93,8 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 scale_tma_aligned=True,
                 alloc_func=alloc_func,
                 use_ue8m0_scales=self.use_ue8m0_scales,
+                use_packed_ue8m0=self.use_packed_ue8m0,
             )
-            # Hopper DeepGEMM consumes FP32 scales; quantization itself supports packed UE8M0 on all GPUs.
-            if self.use_ue8m0_scales and not is_sm100_gpu():
-                input_scale = tma_align_input_scale(
-                    input_scale, k // self.block_size, alloc_func=alloc_func, use_ue8m0_scales=True
-                )
 
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
@@ -114,6 +107,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         self.use_ue8m0_scales = (
             self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
         ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
+        self.use_packed_ue8m0 = self.use_ue8m0_scales and is_sm100_gpu()
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
         divisible_by_block_size = [_out_dim % self.block_size != 0 for _out_dim in out_dims]
