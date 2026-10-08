@@ -14,11 +14,6 @@ except:
     pass
 
 
-@triton.jit
-def _ceil_to_ue8m0(x):
-    return tl.exp2(tl.ceil(tl.log2(x)))
-
-
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/quantization/fp8_kernel.py
 @triton.jit
 def _per_token_group_quant_fp8(
@@ -57,7 +52,8 @@ def _per_token_group_quant_fp8(
     # Quant
     _absmax = tl.max(tl.abs(y))
     if USE_UE8M0_SCALE:
-        y_s = _ceil_to_ue8m0(tl.maximum(_absmax, 1.0e-4) / fp8_max)
+        y_s = tl.maximum(_absmax, 1.0e-4) / fp8_max
+        y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
     else:
         y_s = tl.maximum(_absmax, eps) / fp8_max
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)

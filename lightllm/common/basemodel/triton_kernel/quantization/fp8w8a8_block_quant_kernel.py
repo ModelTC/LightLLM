@@ -5,11 +5,6 @@ from lightllm.utils.dist_utils import get_current_device_id
 
 
 @triton.jit
-def _ceil_to_ue8m0(x):
-    return tl.exp2(tl.ceil(tl.log2(x)))
-
-
-@triton.jit
 def weight_quant_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr, USE_UE8M0_SCALE: tl.constexpr):
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
@@ -26,7 +21,8 @@ def weight_quant_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr, USE
 
     max_fp8e4m3_val = 448.0
     if USE_UE8M0_SCALE:
-        scale = _ceil_to_ue8m0(tl.maximum(amax, 1.0e-4) / max_fp8e4m3_val)
+        scale = tl.maximum(amax, 1.0e-4) / max_fp8e4m3_val
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
         denom = scale
     else:
         scale = amax / max_fp8e4m3_val
