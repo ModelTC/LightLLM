@@ -26,7 +26,7 @@ class QuantMethodFactory:
         quant_method_class = quant_method_class_dict.get(platform)
         if quant_method_class is None:
             raise ValueError(f"QuantMethod '{key}' for platform '{platform}' not supported.")
-        return quant_method_class(*args, **kwargs)
+        return quant_method_class()
 
 
 QUANTMETHODS = QuantMethodFactory()

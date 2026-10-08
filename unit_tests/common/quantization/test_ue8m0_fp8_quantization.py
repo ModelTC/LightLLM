@@ -110,10 +110,11 @@ def test_ue8m0_env_preserves_unquantized_method(monkeypatch, env_value):
 
 
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
+@pytest.mark.parametrize("prequantized", [False, True])
 @pytest.mark.parametrize("env_value", [None, "1", "0"])
 @pytest.mark.parametrize("scale_fmt", ["no_config", None, "ue8m0", "float32"])
 @pytest.mark.parametrize("rows", [1, 17, 32])
-def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt, env_value):
+def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequantized):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     if env_value is None:
         monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES", raising=False)
@@ -129,11 +130,17 @@ def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt, env_value):
             config["quantization_config"]["scale_fmt"] = scale_fmt
     method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
     use_ue8m0_scales = scale_fmt == "ue8m0" if env_value is None else env_value == "1"
-    # The environment is read once when the method is constructed.
-    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
-    assert method.use_ue8m0_scales == use_ue8m0_scales
+    assert method.use_ue8m0_scales is None
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
-    method.quantize(w, weight_pack)
+    if prequantized:
+        qweight, scales = weight.weight_quant(w, use_ue8m0_scales=use_ue8m0_scales)
+        method.load_weight(qweight, weight_pack)
+        method.load_weight_scale(scales, weight_pack)
+        assert method.use_ue8m0_scales is None
+    else:
+        method.load_weight(w, weight_pack)
+        assert method.use_ue8m0_scales == use_ue8m0_scales
+        monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
     assert torch.all(weight_pack.weight_scale > 0)
     log_scales = torch.log2(weight_pack.weight_scale)
     assert torch.equal(log_scales, log_scales.round()) == use_ue8m0_scales
@@ -149,6 +156,10 @@ def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt, env_value):
     monkeypatch.setattr(deepgemm, "per_token_group_quant_fp8", check_activation_scales)
 
     out = method.apply(x, weight_pack, use_custom_tensor_mananger=False)
+    assert method.use_ue8m0_scales == use_ue8m0_scales
+    # Later calls reuse the choice made at the first quantize/apply call.
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
+    method.apply(x, weight_pack, out=out, use_custom_tensor_mananger=False)
     reference = x.float() @ w.float().T
     nrmse = (out.float() - reference).square().mean().sqrt() / reference.square().mean().sqrt()
     cosine = F.cosine_similarity(out.float().flatten(), reference.flatten(), dim=0)

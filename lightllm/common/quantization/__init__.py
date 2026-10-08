@@ -125,11 +125,6 @@ class Quantcfg:
 
     def get_quant_method(self, layer_num, name):
         quant_type = self.get_quant_type(layer_num, name)
-        quant_kwargs = {}
-        if quant_type == "fp8w8a8-b128-deepgemm":
-            quant_kwargs["use_ue8m0_scales"] = (
-                self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
-            )
-        quant_method = QUANTMETHODS.get(quant_type, **quant_kwargs)
+        quant_method = QUANTMETHODS.get(quant_type)
         quant_method.hf_quantization_config = self.hf_quantization_config
         return quant_method
