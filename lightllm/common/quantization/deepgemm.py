@@ -72,9 +72,10 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
         if weight_scale is None:
             return
+        repack_weight_scale = weight_scale
         if self.use_packed_ue8m0 and weight_scale.dtype == torch.float32:
             n, k = weight_pack.weight.shape[-2:]
-            weight_scale = deep_gemm.transform_sf_into_required_layout(
+            repack_weight_scale = deep_gemm.transform_sf_into_required_layout(
                 weight_scale.cuda(weight_pack.weight.device),
                 n,
                 k,
@@ -82,7 +83,8 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 num_groups=weight_scale.shape[0] if weight_scale.ndim == 3 else None,
                 is_sfa=False,
             )
-        super().load_weight_scale(weight_scale, weight_pack)
+        weight_pack.weight_scale.copy_(repack_weight_scale)
+        weight_pack.load_ok[1] = True
 
     def apply(
         self,
