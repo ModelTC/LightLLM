@@ -3,8 +3,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn.functional as F
-import triton
-import triton.language as tl
 
 from lightllm.common.basemodel.triton_kernel.quantization import fp8act_quant_kernel as activation
 from lightllm.common.basemodel.triton_kernel.quantization import fp8w8a8_block_quant_kernel as weight
@@ -15,27 +13,21 @@ from lightllm.common.quantization import deepgemm
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
-@triton.jit
-def _round_scales_kernel(x, act_out, weight_out, N: tl.constexpr, BLOCK: tl.constexpr):
-    offsets = tl.arange(0, BLOCK)
-    values = tl.load(x + offsets, mask=offsets < N, other=1.0)
-    tl.store(act_out + offsets, activation._ceil_to_ue8m0(values), mask=offsets < N)
-    tl.store(weight_out + offsets, weight._ceil_to_ue8m0(values), mask=offsets < N)
-
-
-def test_ue8m0_rounding_at_power_of_two_boundaries():
-    powers = torch.tensor([2.0 ** exponent for exponent in (-126, -24, -8, 0, 8, 126, 127)], device="cuda")
+def test_ue8m0_rounding_at_power_of_two_boundaries(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    monkeypatch.setattr(activation, "HAS_SGL_KERNEL", False)
+    powers = torch.tensor([2.0 ** exponent for exponent in (-16, -8, 0, 8, 16, 118)], device="cuda")
     above = torch.nextafter(powers, torch.full_like(powers, float("inf")))
     below = torch.nextafter(powers, torch.zeros_like(powers))
-    scales = torch.cat((powers, above, below, powers.new_zeros(1)))
-    expected = torch.exp2(torch.ceil(torch.log2(scales)))
-    act_out = torch.empty_like(scales)
-    weight_out = torch.empty_like(scales)
+    magnitudes = torch.cat((powers, above, below, powers.new_zeros(1))) * 448.0
+    x = magnitudes[:, None].expand(-1, 128).contiguous()
+    expected = torch.exp2(torch.ceil(torch.log2(magnitudes.clamp_min(1e-4) / 448.0)))
 
-    _round_scales_kernel[(1,)](scales, act_out, weight_out, scales.numel(), triton.next_power_of_2(scales.numel()))
+    _, act_scales = activation.per_token_group_quant_fp8(x, 128, use_ue8m0_scales=True)
+    _, weight_scales = weight.weight_quant(x.repeat_interleave(128, dim=0), use_ue8m0_scales=True)
 
-    torch.testing.assert_close(act_out, expected, rtol=0, atol=0)
-    torch.testing.assert_close(weight_out, expected, rtol=0, atol=0)
+    torch.testing.assert_close(act_scales[:, 0], expected, rtol=0, atol=0)
+    torch.testing.assert_close(weight_scales[:, 0], expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("layout", ["row", "column", "tma"])
