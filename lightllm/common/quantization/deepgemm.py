@@ -98,8 +98,10 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 use_ue8m0_scales=self.use_ue8m0_scales,
             )
             # Hopper DeepGEMM consumes FP32 scales; quantization itself supports packed UE8M0 on all GPUs.
-            if input_scale.dtype == torch.int32 and not is_sm100_gpu():
-                input_scale = tma_align_input_scale(input_scale, k // self.block_size, alloc_func=alloc_func)
+            if self.use_ue8m0_scales and not is_sm100_gpu():
+                input_scale = tma_align_input_scale(
+                    input_scale, k // self.block_size, alloc_func=alloc_func, use_ue8m0_scales=True
+                )
 
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
