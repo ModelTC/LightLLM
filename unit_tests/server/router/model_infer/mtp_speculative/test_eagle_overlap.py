@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers import eagle_with_att
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.utils import (
     get_dp_overlap_req_start_rows,
@@ -20,6 +21,7 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eag
 from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import (
     Eagle3Proposer,
 )
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor
 
 
 class _DraftModel:
@@ -101,10 +103,91 @@ def test_dp_overlap_req_start_rows_rejects_nonempty_cpu_input():
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("draft_step", [1, 3])
+@pytest.mark.parametrize("empty_batches", [(False, False), (True, False), (False, True), (True, True)])
+def test_dsv4_overlap_eagle_uses_one_cpu_accept_buffer(draft_step, empty_batches):
+    layouts = ([0, 1, 0, 1, 2], [0, 1])
+    accept_lengths = ([2, 1], [1])
+    model_inputs, accepts, expected_tails = [], [], []
+    for empty, layout, lengths in zip(empty_batches, layouts, accept_lengths):
+        mtp_index = torch.tensor([] if empty else layout, dtype=torch.int32)
+        model_input = ModelInput(**vars(_target_input(mtp_index.numel(), mtp_index)), max_q_seq_len=1)
+        cpu_accept = torch.tensor([] if empty else lengths, dtype=torch.int32)
+        start_rows = torch.nonzero(mtp_index == 0, as_tuple=False).flatten()
+        expected_tails.append(model_input.b_seq_len.index_select(0, start_rows + cpu_accept - 1).long())
+        model_input.to_cuda()
+        model_inputs.append(model_input)
+        accepts.append(cpu_accept.cuda())
+
+    calls = []
+
+    def forward(input0, input1):
+        outputs = []
+        for model_input in (input0, input1):
+            assert torch.equal(model_input.b_req_idx_cpu, model_input.b_req_idx.cpu())
+            assert torch.equal(model_input.b_mtp_index_cpu, model_input.b_mtp_index.cpu())
+            assert torch.equal(model_input.b_seq_len_cpu, model_input.b_seq_len.cpu())
+            outputs.append(
+                ModelOutput(
+                    logits=model_input.b_seq_len.float().unsqueeze(1),
+                    mtp_collector=ModelMtpOutputCollector(
+                        spec_hidden=torch.ones((model_input.batch_size, 2), device="cuda")
+                    ),
+                )
+            )
+        calls.append(True)
+        return tuple(outputs)
+
+    waits = []
+    combined_cpu = torch.zeros(sum(accept.numel() for accept in accepts), dtype=torch.int32)
+
+    def synchronize():
+        # Sentinel contents must not be read/split into accepted tails before the wait.
+        waits.append(True)
+        combined_cpu.copy_(torch.cat(accepts).cpu())
+
+    backend = SimpleNamespace(
+        is_deepseek_v4=True,
+        draft_models=[SimpleNamespace(_microbatch_overlap_decode_cuda=forward)],
+        _gen_argmax_token_ids=lambda output: output.logits[:, 0].long(),
+    )
+    engine = DPOverlapSpecEngine.__new__(DPOverlapSpecEngine)
+    engine.proposer = DpOverlapEagleWithAttProposer(backend=backend, enable_dynmaic_mtp=False)
+    outputs = [
+        ModelOutput(
+            logits=torch.empty((model_input.batch_size, 1), device="cuda"),
+            mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.ones((model_input.batch_size, 2), device="cuda")),
+        )
+        for model_input in model_inputs
+    ]
+    proposal = engine.propose_next_overlap(
+        target_model_input0=model_inputs[0],
+        target_model_output0=outputs[0],
+        target_next_token_ids0=model_inputs[0].input_ids,
+        accept_len0=accepts[0],
+        target_model_input1=model_inputs[1],
+        target_model_output1=outputs[1],
+        target_next_token_ids1=model_inputs[1].input_ids,
+        accept_len1=accepts[1],
+        draft_step=draft_step,
+        accept_len_cpu=AsyncPinnedCpuTensor(combined_cpu, SimpleNamespace(synchronize=synchronize))
+        if combined_cpu.numel()
+        else None,
+    )
+    expected = torch.cat(expected_tails)[:, None] + torch.arange(draft_step)[None, :]
+    torch.testing.assert_close(proposal.token_ids.cpu(), expected)
+    assert len(calls) == draft_step
+    assert len(waits) == int(combined_cpu.numel() > 0 and draft_step > 1)
+    for model_input in model_inputs:
+        torch.testing.assert_close(model_input.b_seq_len.cpu(), model_input.b_seq_len_cpu)
+
+
 def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -145,6 +228,7 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
 def test_overlap_eagle_supports_empty_verify_rows():
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -182,6 +266,7 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -232,6 +317,7 @@ def test_overlap_eagle_no_att_supports_dynamic_draft_step():
     device = "cuda"
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=3,
         draft_models=[draft_model],
         _gen_argmax_token_ids_and_prob=lambda output: (
@@ -284,6 +370,7 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
+        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -328,6 +415,7 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
 def test_eagle3_maps_draft_token_ids_in_proposer():
     proposer = Eagle3Proposer.__new__(Eagle3Proposer)
     proposer.backend = SimpleNamespace(
+        is_deepseek_v4=False,
         draft_models=[SimpleNamespace(map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100)],
         _gen_argmax_token_ids=lambda _: torch.tensor([1, 2]),
         _gen_argmax_token_ids_and_prob=lambda _: (
@@ -347,6 +435,7 @@ def test_eagle3_maps_draft_token_ids_in_proposer():
 def test_dp_overlap_eagle3_maps_draft_token_ids_in_proposer():
     proposer = DpOverlapEagle3Proposer.__new__(DpOverlapEagle3Proposer)
     proposer.backend = SimpleNamespace(
+        is_deepseek_v4=False,
         draft_models=[SimpleNamespace(map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100)],
         _gen_argmax_token_ids=lambda _: torch.tensor([1, 2]),
         _gen_argmax_token_ids_and_prob=lambda _: (

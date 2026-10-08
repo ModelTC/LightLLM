@@ -196,9 +196,7 @@ def quantize_fused_experts_input(
             use_packed_ue8m0=True,
         )
 
-    block_size_k = 0
-    if w13.weight.ndim == 3:
-        block_size_k = w13.weight.shape[2] // w13.weight_scale.shape[2]
+    block_size_k = quant_method.block_size
     assert block_size_k == 128, "block_size_k must be 128"
     return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
 
@@ -232,6 +230,7 @@ def fused_experts(
         topk_weights=topk_weights,
         topk_idx=topk_idx,
         num_experts=num_experts,
+        block_size_k=quant_method.block_size,
         buffer=buffer,
         is_prefill=is_prefill,
         use_fp8_w8a8=True,
@@ -264,6 +263,7 @@ def fused_experts_impl(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    block_size_k: int = 128,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -275,11 +275,6 @@ def fused_experts_impl(
 
     # qaunt hidden_states
     assert use_fp8_w8a8 and use_fp8_all2all, "use_fp8_w8a8 and use_fp8_all2all must be True"
-
-    block_size_k = 0
-
-    if w1.ndim == 3:
-        block_size_k = w1.shape[2] // w1_scale.shape[2]
 
     assert block_size_k == 128, "block_size_k must be 128"
 
@@ -554,8 +549,10 @@ def chunked_expanded_moe_forward(
 
     if max_chunk_rows == 0:
         raise RuntimeError(
-            f"DeepEP workspace with {workspace.numel()} bytes cannot hold the dense output and "
-            f"one {alignment}-row temporary chunk"
+            "RDMA workspace sizing invariant violated: "
+            f"workspace_bytes={workspace.numel()}, gather_rows={gather_rows}, "
+            f"hidden_size={hidden_size}, intermediate_size={intermediate_size}, "
+            f"chunk_rows={alignment}"
         )
     max_chunk_rows = min(all_tokens, max_chunk_rows)
 

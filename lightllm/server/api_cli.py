@@ -214,6 +214,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "qwen",
             "deepseekv31",
             "deepseekv32",
+            "deepseekv4",
             "glm47",
             "kimi_k2",
             "qwen3_coder",
@@ -227,6 +228,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         choices=[
             "deepseek-r1",
             "deepseek-v3",
+            "deepseek-v4",
             "glm45",
             "gpt-oss",
             "kimi",
@@ -871,8 +873,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu_cache_token_page_size",
         type=int,
-        default=256,
-        help="""The token page size of cpu cache""",
+        default=None,
+        help="""The token page size of cpu cache. Hybrid models use their checkpoint interval.
+        DeepSeek-V4 defaults to 2048 when big-page checkpoints are disabled; non-hybrid models default to 256.""",
     )
     parser.add_argument(
         "--cache_placement_strategy",

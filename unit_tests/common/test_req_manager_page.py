@@ -61,6 +61,7 @@ def _make_context(monkeypatch):
     monkeypatch.setattr(base_backend, "g_infer_context", context)
     backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
     backend.args = context.args
+    backend.is_deepseek_v4 = False
     return context, backend
 
 

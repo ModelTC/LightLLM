@@ -29,6 +29,6 @@ class Glm5NextReqManager(ReqManagerForMamba):
         super().init_hybrid_attention_state(req)
         self.req_to_indexer_tail.buffer[:, req.req_idx].zero_()
 
-    def restore_state(self, req, state_cache_manager, buffer_idx):
-        super().restore_state(req, state_cache_manager, buffer_idx)
+    def restore_state(self, req, state_cache_manager, buffer_idx, checkpoint_len=None):
+        super().restore_state(req, state_cache_manager, buffer_idx, checkpoint_len)
         self.req_to_indexer_tail.buffer[:, req.req_idx].zero_()

@@ -15,7 +15,7 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
@@ -32,8 +32,12 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
-            if spec_mode in ("dspark", "dflash"):
-                raise NotImplementedError("DP backend does not support DFlash/DSpark parallel block drafting yet.")
+            if spec_mode == "dflash":
+                raise NotImplementedError("DP backend does not support DFlash parallel block drafting yet.")
+            if spec_mode == "dspark" and (
+                self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap
+            ):
+                raise NotImplementedError("DP DSpark does not support prefill/decode microbatch overlap yet.")
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
             else:
@@ -69,10 +73,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
         )
 
-        self.dp_overlap_spec_engine = DPOverlapSpecEngine(
-            **engine_kwargs,
-            common_engine=self.spec_engine,
-        )
+        self.dp_overlap_spec_engine = None
+        if self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap:
+            self.dp_overlap_spec_engine = DPOverlapSpecEngine(
+                **engine_kwargs,
+                common_engine=self.spec_engine,
+            )
         self.prefill_draft_engine = (
             self.dp_overlap_spec_engine if self.enable_prefill_microbatch_overlap else self.spec_engine
         )
@@ -496,6 +502,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
 
+            mtp_accept_len_cpu = None
             if req_num > 0:
                 next_token_ids, next_token_logprobs = sample(
                     model_output.logits,
@@ -552,6 +559,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
+                accept_len_cpu=(
+                    AsyncPinnedCpuTensor(tensor=mtp_accept_len_cpu, ready_event=verify_event) if req_num > 0 else None
+                ),
             )
             if req_num > 0:
                 mtp_utils.scatter_mtp_next_tokens(
@@ -824,6 +834,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 target_model_output1=model_output1,
                 target_next_token_ids1=target_next_token_ids1,
                 accept_len1=mtp_accept_len1,
+                accept_len_cpu=(
+                    AsyncPinnedCpuTensor(tensor=mtp_accept_len_cpu, ready_event=verify_event) if req_num > 0 else None
+                ),
                 draft_step=spec_plan.draft_step,
             )
             if req_num > 0:

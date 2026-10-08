@@ -200,6 +200,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     module.need_sync_compute_stream = lambda: False
     module.cpu_cache_client = SimpleNamespace()
     context = SimpleNamespace(
+        is_deepseek_v4=False,
         req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
         get_can_alloc_token_num=lambda: 200,
     )
@@ -226,3 +227,123 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     assert req.hold_kv_len == 132
     assert loaded_indexes == list(range(132))
     assert table[0, :132].tolist() == list(range(132))
+
+
+@pytest.mark.parametrize("disk_cache", [False, True])
+def test_dsv4_store_survives_request_finish_and_waits_for_load(disk_cache, monkeypatch):
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    slot = SimpleNamespace(in_use=True)
+    module.backend = SimpleNamespace(
+        is_master_in_dp=True,
+        model=SimpleNamespace(mem_manager=SimpleNamespace(operator=SimpleNamespace(cpu_cache_staging_slots=[slot]))),
+    )
+    module.args = SimpleNamespace(enable_disk_cache=disk_cache, cpu_cache_token_page_size=2048)
+    load_event = SimpleNamespace(ready=False)
+    load_event.query = lambda: load_event.ready
+    store_event = SimpleNamespace(ready=False)
+    store_event.query = lambda: store_event.ready
+    session = multi_level_kv_cache_impl.Dsv4CpuStoreSession(
+        request_id=3, leased_pages=[5, 7], pending_task_num=1, load_submitted=True, load_event=load_event
+    )
+    module._dsv4_store_sessions = {3: session}
+    module._dsv4_store_tasks = deque(
+        [multi_level_kv_cache_impl.Dsv4StoreTask([7], [session], 0, object(), store_event)]
+    )
+    published = []
+    released = []
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
+        update_pages_status_to_ready=lambda page_list, **kwargs: published.append((list(page_list), kwargs)),
+        deref_pages=lambda pages: released.extend(pages),
+        check_allpages_ready=lambda pages: True,
+    )
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_deepseek_v4", True)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "infer_req_ids", [])
+    req = SimpleNamespace(req_id=3)
+
+    assert module.offload_finished_reqs_to_cpu_cache([req]) == [req]
+    assert session.closing and session.pending_task_num == 1
+    assert published == released == []
+    assert slot.in_use
+
+    store_event.ready = True
+    module.update_cpu_cache_task_states()
+    assert published == [([7], {"deref": False})]
+    assert released == [] and 3 in module._dsv4_store_sessions
+    assert session.pending_task_num == 0 and not slot.in_use
+
+    load_event.ready = True
+    module.update_cpu_cache_task_states()
+    assert module._dsv4_store_sessions == {}
+    if disk_cache:
+        assert published[-1] == ([5, 7], {"deref": True, "disk_offload_enable": True, "token_num_in_page_list": 4096})
+    else:
+        assert released == [7, 5]
+
+
+@pytest.mark.parametrize("is_deepseek_v4", [False, True])
+@pytest.mark.parametrize("is_master_in_dp", [False, True])
+@pytest.mark.parametrize("mixed_batch", [False, True])
+def test_prompt_logprobs_filter_is_shared_by_models(is_deepseek_v4, is_master_in_dp, mixed_batch, monkeypatch):
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(is_master_in_dp=is_master_in_dp)
+    loaded = []
+    released = []
+    module._load_dsv4_cpu_cache_to_reqs = loaded.extend
+    module._load_standard_cpu_cache_to_reqs = loaded.extend
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
+        deref_pages=released.extend,
+    )
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_deepseek_v4", is_deepseek_v4)
+    req = SimpleNamespace(
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=0)),
+        shm_req=SimpleNamespace(
+            cpu_prompt_cache_len=2048,
+            disk_prompt_cache_len=2048,
+            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [4, 5]),
+        ),
+    )
+    cache_req = SimpleNamespace(
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        shm_req=SimpleNamespace(cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [7])),
+    )
+    module.load_cpu_cache_to_reqs([req, cache_req] if mixed_batch else [req])
+    assert loaded == ([cache_req] if mixed_batch else [])
+    expected_pages = [4, 5, 7] if mixed_batch and not is_deepseek_v4 else [4, 5]
+    assert released == (expected_pages if is_master_in_dp else [])
+    assert req.shm_req.cpu_prompt_cache_len == req.shm_req.disk_prompt_cache_len == (0 if is_master_in_dp else 2048)
+
+
+def test_standard_load_releases_skipped_and_matched_pages_once_after_barrier(monkeypatch):
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(is_master_in_dp=True)
+    module.init_sync_group = object()
+    events = []
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(
+            acquire_sleep1ms=lambda: events.append("lock"),
+            release=lambda: events.append("unlock"),
+        ),
+        deref_pages=lambda pages: events.append(("deref", list(pages))),
+    )
+    reqs = [
+        SimpleNamespace(
+            cur_kv_len=0,
+            sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=logprobs)),
+            shm_req=SimpleNamespace(
+                input_len=64,
+                disk_prompt_cache_len=0,
+                cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda page=page: [page]),
+                token_hash_page_len_list=SimpleNamespace(get_all=lambda: [64]),
+            ),
+        )
+        for page, logprobs in ((4, 0), (7, -1))
+    ]
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_deepseek_v4", False)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 128)
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))
+
+    module.load_cpu_cache_to_reqs(reqs)
+
+    assert events == ["barrier", "lock", ("deref", [4, 7]), "unlock"]

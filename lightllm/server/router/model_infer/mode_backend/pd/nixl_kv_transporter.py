@@ -66,13 +66,21 @@ class NixlKVTransporter:
         self.dtype_byte_size = kv_move_buffer.element_size()
         self.page_len = self.page_size * self.num_layers * self.kv_head_num * self.head_dims * self.dtype_byte_size
         self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
-        self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
+        self.page_local_xfer_handles = {
+            self.page_len: self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages, self.page_len)
+        }
 
-    def _create_paged_xfer_handles(self, reg_desc: "nixlBind.nixlRegDList", page_num: int, agent_name: str = ""):
+    def _create_paged_xfer_handles(
+        self,
+        reg_desc: "nixlBind.nixlRegDList",
+        page_num: int,
+        transfer_nbytes: int,
+        agent_name: str = "",
+    ):
         base_addr, _, device_id, _ = reg_desc[0]
         pages_data = []
         for page_id in range(page_num):
-            pages_data.append((base_addr + page_id * self.page_len, self.page_len, device_id))
+            pages_data.append((base_addr + page_id * self.page_len, transfer_nbytes, device_id))
         descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
 
@@ -92,10 +100,14 @@ class NixlKVTransporter:
             ), f"Peer name {peer_name} does not match remote name {remote_agent.agent_name}"
 
             page_mem_desc = self.nixl_agent.deserialize_descs(remote_agent.page_reg_desc)
-            kv_page_xfer_handles = self._create_paged_xfer_handles(
-                page_mem_desc, remote_agent.num_pages, agent_name=peer_name
-            )
-            remote_agent.page_xfer_handles = kv_page_xfer_handles
+            remote_agent.page_xfer_handles = {
+                self.page_len: self._create_paged_xfer_handles(
+                    page_mem_desc,
+                    remote_agent.num_pages,
+                    self.page_len,
+                    agent_name=peer_name,
+                )
+            }
 
             logger.info(
                 f"Added remote agent {peer_name} with mem desc {page_mem_desc} cost time: {time.time() - start_time} s"
@@ -113,7 +125,8 @@ class NixlKVTransporter:
                     assert remote_agent.agent_name == peer_name
                     self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
                     if remote_agent.page_xfer_handles is not None:
-                        self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
+                        for handles in remote_agent.page_xfer_handles.values():
+                            self.nixl_agent.release_dlist_handle(handles)
                     logger.info(f"Removed remote agent {peer_name}, cost time: {time.monotonic() - start_time:.6f} s")
                 except BaseException as e:
                     logger.error(
@@ -259,9 +272,24 @@ class NixlKVTransporter:
             self.connect_add_remote_agent(_remote_agent)
 
         assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None
+        assert trans_task.transfer_nbytes is not None
         remote_agent: PDAgentMetadata = self.remote_agents[decode_agent_name]
-        src_handle = self.page_local_xfer_handles
-        dst_handle = remote_agent.page_xfer_handles
+        transfer_nbytes = trans_task.transfer_nbytes
+        if transfer_nbytes not in self.page_local_xfer_handles:
+            self.page_local_xfer_handles[transfer_nbytes] = self._create_paged_xfer_handles(
+                self.page_reg_desc, self.num_pages, transfer_nbytes
+            )
+        src_handle = self.page_local_xfer_handles[transfer_nbytes]
+
+        if transfer_nbytes not in remote_agent.page_xfer_handles:
+            page_mem_desc = self.nixl_agent.deserialize_descs(remote_agent.page_reg_desc)
+            remote_agent.page_xfer_handles[transfer_nbytes] = self._create_paged_xfer_handles(
+                page_mem_desc,
+                remote_agent.num_pages,
+                transfer_nbytes,
+                agent_name=remote_agent.agent_name,
+            )
+        dst_handle = remote_agent.page_xfer_handles[transfer_nbytes]
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             src_handle,
@@ -291,7 +319,8 @@ class NixlKVTransporter:
 
     def shutdown(self):
         self.nixl_agent.deregister_memory(self.page_reg_desc)
-        self.nixl_agent.release_dlist_handle(self.page_local_xfer_handles)
+        for handles in self.page_local_xfer_handles.values():
+            self.nixl_agent.release_dlist_handle(handles)
         agent_names = list(self.remote_agents.keys())
         for agent_name in agent_names:
             self.remove_remote_agent(agent_name)
