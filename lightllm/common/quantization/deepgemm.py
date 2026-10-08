@@ -61,8 +61,8 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     @property
     def use_ue8m0_scales(self):
         if self.hf_quantization_config is None:
-            return True
-        return self.hf_quantization_config.get("scale_fmt", "ue8m0") == "ue8m0"
+            return False
+        return self.hf_quantization_config.get("scale_fmt") == "ue8m0"
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant

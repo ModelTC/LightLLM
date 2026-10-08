@@ -115,7 +115,7 @@ def test_deepgemm_quantize_and_apply(monkeypatch, rows, scale_fmt):
         if scale_fmt is not None:
             config["quantization_config"]["scale_fmt"] = scale_fmt
     method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
-    use_ue8m0_scales = scale_fmt != "float32"
+    use_ue8m0_scales = scale_fmt == "ue8m0"
     assert method.use_ue8m0_scales == use_ue8m0_scales
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
     method.quantize(w, weight_pack)
