@@ -4,7 +4,11 @@ from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
-from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
+    per_token_group_quant_fp8,
+    tma_align_input_scale,
+)
+from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -93,6 +97,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 alloc_func=alloc_func,
                 use_ue8m0_scales=self.use_ue8m0_scales,
             )
+            # Hopper DeepGEMM consumes FP32 scales; quantization itself supports packed UE8M0 on all GPUs.
+            if input_scale.dtype == torch.int32 and not is_sm100_gpu():
+                input_scale = tma_align_input_scale(input_scale, k // self.block_size, alloc_func=alloc_func)
 
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)

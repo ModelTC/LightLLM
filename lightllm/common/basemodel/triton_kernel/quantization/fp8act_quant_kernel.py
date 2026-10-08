@@ -4,7 +4,6 @@ import triton.language as tl
 
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
-from lightllm.utils.device_utils import is_sm100_gpu
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -33,6 +32,25 @@ def _per_token_group_quant_fp8(
     NEED_MASK: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
 ):
+    if y_s_ptr.dtype.element_ty == tl.int32:
+        row_id = tl.program_id(0)
+        packed_col = tl.program_id(1)
+        byte_ids = tl.arange(0, 4)
+        group_ids = packed_col * 4 + byte_ids
+        cols = tl.arange(0, BLOCK)
+        offsets = (row_id * xs_n + group_ids[:, None]) * y_stride + cols[None, :]
+        mask = (group_ids[:, None] < xs_n) & (cols[None, :] < N)
+        y = tl.load(y_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        y_s = tl.maximum(tl.max(tl.abs(y), axis=1), eps) / fp8_max
+        y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
+        y_q = tl.clamp(y / y_s[:, None], fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        tl.store(y_q_ptr + offsets, y_q, mask=mask)
+        exponents = (y_s.to(tl.int32, bitcast=True) >> 23) & 255
+        packed = tl.sum(tl.where(group_ids < xs_n, exponents << (byte_ids * 8), 0), axis=0)
+        scale_offset = row_id * xs_stride_m + packed_col * xs_stride_n
+        tl.store(y_s_ptr + scale_offset, packed)
+        return
+
     g_id = tl.program_id(0)
     y_ptr += g_id * y_stride
     y_q_ptr += g_id * y_stride
@@ -84,7 +102,8 @@ def lightllm_per_token_group_quant_fp8(
     assert x.shape[-1] % group_size == 0, "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
-    xs_n = x_s.shape[-1]
+    packed_scales = x_s.dtype == torch.int32
+    xs_n = x.shape[-1] // group_size if packed_scales else x_s.shape[-1]
     xs_stride_m, xs_stride_n = x_s.stride()
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max
@@ -97,7 +116,8 @@ def lightllm_per_token_group_quant_fp8(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    _per_token_group_quant_fp8[(M,)](
+    grid = (x.shape[-2], triton.cdiv(xs_n, 4)) if packed_scales else (M,)
+    _per_token_group_quant_fp8[grid](
         x,
         x_q,
         x_s,
@@ -129,15 +149,18 @@ def per_token_group_quant_fp8(
     use_ue8m0_scales: bool = False,
 ):
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
-    # SGL packs four UE8M0 exponents into each INT32; Hopper DeepGEMM requires FP32 scales.
-    if HAS_SGL_KERNEL and use_ue8m0_scales and column_major_scales and scale_tma_aligned and is_sm100_gpu():
+    # UE8M0 uses SGL's packed INT32, column-major TMA-aligned scale layout.
+    if use_ue8m0_scales:
         groups = x.shape[-1] // group_size
         aligned_size = (x.shape[-2] + 3) // 4 * 4
         x_s = alloc_func(((groups + 3) // 4, aligned_size), device=x.device, dtype=torch.int32).t()[: x.shape[-2], :]
-        finfo = torch.finfo(dtype)
-        sgl_ops.sgl_per_token_group_quant_fp8(
-            x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=True, enable_v2=True
-        )
+        if HAS_SGL_KERNEL:
+            finfo = torch.finfo(dtype)
+            sgl_ops.sgl_per_token_group_quant_fp8(
+                x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=True, enable_v2=True
+            )
+        else:
+            lightllm_per_token_group_quant_fp8(x, group_size, x_q, x_s, eps=1e-10, dtype=dtype, use_ue8m0_scales=True)
         return x_q, x_s
 
     if column_major_scales:
@@ -161,7 +184,7 @@ def per_token_group_quant_fp8(
             dtype=torch.float32,
         )
 
-    if HAS_SGL_KERNEL and not use_ue8m0_scales:
+    if HAS_SGL_KERNEL:
         finfo = torch.finfo(dtype)
         fp8_max, fp8_min = finfo.max, finfo.min
         # 使用SGL kernel进行量化
@@ -218,18 +241,30 @@ def _tma_align_input_scale_kernel(
     k_offsets = tl.arange(0, BLOCK_SIZE_K)
 
     for m_base in range(pid_m, m, grid_m):
-        input_offset = input_scale_ptr + m_base * input_scale_stride_m + k_offsets * input_scale_stride_k
-        input_data = tl.load(input_offset, mask=k_offsets < k_div_block_size)
+        if input_scale_ptr.dtype.element_ty == tl.int32:
+            input_offset = input_scale_ptr + m_base * input_scale_stride_m + (k_offsets // 4) * input_scale_stride_k
+            packed = tl.load(input_offset, mask=k_offsets < k_div_block_size, other=0)
+            exponents = (packed >> ((k_offsets % 4) * 8)) & 255
+            input_data = tl.exp2(exponents.to(tl.float32) - 127)
+        else:
+            input_offset = input_scale_ptr + m_base * input_scale_stride_m + k_offsets * input_scale_stride_k
+            input_data = tl.load(input_offset, mask=k_offsets < k_div_block_size)
 
         output_offset = output_ptr + k_offsets * output_stride_k + m_base * output_stride_m
         tl.store(output_offset, input_data, mask=k_offsets < k_div_block_size)
 
 
-def tma_align_input_scale(input_scale: torch.Tensor):
+def tma_align_input_scale(
+    input_scale: torch.Tensor, k_div_block_size: Optional[int] = None, alloc_func: Callable = torch.empty
+):
+    """Align scales for TMA; packed UE8M0 requires the logical scale count in k_div_block_size."""
     assert input_scale.dim() == 2
-    m, k_div_block_size = input_scale.shape
+    m = input_scale.shape[0]
+    if k_div_block_size is None:
+        k_div_block_size = input_scale.shape[1]
     padd_m = get_tma_aligned_size(m, input_scale.element_size())
-    output = torch.empty((k_div_block_size, padd_m), dtype=input_scale.dtype, device=input_scale.device)
+    output_dtype = torch.float32 if input_scale.dtype == torch.int32 else input_scale.dtype
+    output = alloc_func((k_div_block_size, padd_m), dtype=output_dtype, device=input_scale.device)
 
     grid_m = min(m, 8192)
     BLOCK_SIZE_K = triton.next_power_of_2(k_div_block_size)
