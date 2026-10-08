@@ -1,4 +1,6 @@
 import torch
+from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.layers.rope import RotaryEmbedding
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.glm4_moe_lite.layer_infer.transformer_layer_infer import Glm4MoeLiteTransformerLayerInfer
 from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import Glm4MoeLiteTransformerLayerWeight
@@ -52,5 +54,8 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
         t = torch.arange(max_seq_len, device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self.rope = RotaryEmbedding(
+            torch.cos(freqs).to(self.data_type).cuda(),
+            torch.sin(freqs).to(self.data_type).cuda(),
+            rotary_impl=rotary_emb_fwd,
+        )

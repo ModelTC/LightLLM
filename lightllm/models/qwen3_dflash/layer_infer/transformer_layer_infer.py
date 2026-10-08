@@ -2,7 +2,7 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.layers.rope.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
 

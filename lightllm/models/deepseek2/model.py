@@ -1,5 +1,7 @@
 import torch
 from typing import final
+from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.layers.rope import RotaryEmbedding
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -71,7 +73,11 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return
 
     def _init_to_get_yarn_rotary(self):
-        from lightllm.models.llama.yarn_rotary_utils import find_correction_range, linear_ramp_mask, get_deepseek_mscale
+        from lightllm.common.layers.rope.yarn_rotary_utils import (
+            find_correction_range,
+            linear_ramp_mask,
+            get_deepseek_mscale,
+        )
 
         dim = self.qk_rope_head_dim
         max_position_embeddings = self.config.get("max_position_embeddings", 2048)
@@ -107,7 +113,10 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         t = torch.arange(max_seq_len_cached, device="cuda", dtype=torch.float32)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        self._cos_cached = (freqs.cos() * _mscale).to(self.data_type).cuda()
-        self._sin_cached = (freqs.sin() * _mscale).to(self.data_type).cuda()
+        self.rope = RotaryEmbedding(
+            (freqs.cos() * _mscale).to(self.data_type).cuda(),
+            (freqs.sin() * _mscale).to(self.data_type).cuda(),
+            rotary_impl=rotary_emb_fwd,
+        )
 
         return

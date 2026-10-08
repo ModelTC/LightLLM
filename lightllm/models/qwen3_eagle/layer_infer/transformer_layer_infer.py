@@ -1,7 +1,7 @@
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.layers.rope.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 

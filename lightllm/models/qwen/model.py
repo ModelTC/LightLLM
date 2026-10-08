@@ -4,6 +4,7 @@ import torch
 import math
 import numpy as np
 
+from lightllm.common.layers.rope import RotaryEmbedding
 from .layer_infer.transformer_layer_infer import QwenTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import QwenPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import QwenTransformerLayerWeight
@@ -59,8 +60,8 @@ class QWenTpPartModel(LlamaTpPartModel):
         total_seq_len_supported = self.config.get("max_position_embeddings", 8 * 1024)
 
         ntk_alphas = self._init_nkt_alpha(total_seq_len_supported)
-        self._cos_cached = []
-        self._sin_cached = []
+        cos_cached = []
+        sin_cached = []
 
         for ntk_alpha in ntk_alphas:
 
@@ -72,11 +73,12 @@ class QWenTpPartModel(LlamaTpPartModel):
 
             t = torch.arange(total_seq_len_supported + 128 * 1024, device="cpu", dtype=torch.float32)
             freqs = torch.outer(t, inv_freq)
-            self._cos_cached.append(torch.cos(freqs).to(self.data_type).cuda())
-            self._sin_cached.append(torch.sin(freqs).to(self.data_type).cuda())
+            cos_cached.append(torch.cos(freqs).to(self.data_type).cuda())
+            sin_cached.append(torch.sin(freqs).to(self.data_type).cuda())
 
-        self._cos_cached = torch.stack(self._cos_cached, dim=0).contiguous()
-        self._sin_cached = torch.stack(self._sin_cached, dim=0).contiguous()
+        cos_cached = torch.stack(cos_cached, dim=0).contiguous()
+        sin_cached = torch.stack(sin_cached, dim=0).contiguous()
+        self.rope = RotaryEmbedding(cos_cached, sin_cached)
         return
 
     def _init_qwen_logn_attn(self):

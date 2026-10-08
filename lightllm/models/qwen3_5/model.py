@@ -57,6 +57,11 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
 
     infer_state_class = Qwen35InferStateInfo
 
+    def _init_rope(self):
+        super()._init_rope(
+            mrope_section=self.config.get("rope_scaling", {}).get("mrope_section", [11, 11, 10]), mrope_interleaved=True
+        )
+
     def _init_config(self):
         config_path = os.path.join(self.weight_dir_, "config.json")
 

@@ -39,6 +39,7 @@ from lightllm.common.basemodel.hidden_collector import (
     NoopHiddenCollector,
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
+from lightllm.common.layers.rope import get_rope
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
@@ -313,6 +314,17 @@ class TpPartBaseModel:
 
     def _init_custom(self):
         pass
+
+    def _init_rope(self, **rope_kwargs):
+        self.rope = get_rope(
+            self.config,
+            self.head_dim_,
+            self.max_seq_length,
+            self.data_type,
+            device=torch.device("cuda", torch.cuda.current_device()),
+            **rope_kwargs,
+        )
+        return
 
     def _init_hidden_collector(self):
         self.hidden_collector_prototype = self.mtp_manager.create_hidden_collector(model=self)

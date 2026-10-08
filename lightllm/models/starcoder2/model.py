@@ -1,4 +1,5 @@
 import torch
+from lightllm.common.layers.rope import RotaryEmbedding
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.starcoder2.layer_weights.pre_and_post_layer_weight import Starcoder2PreAndPostLayerWeight
 from lightllm.models.starcoder2.layer_weights.transformer_layer_weight import Starcoder2TransformerLayerWeight
@@ -82,6 +83,7 @@ class Starcoder2TpPartModel(TpPartBaseModel):
         t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self.rope = RotaryEmbedding(
+            torch.cos(freqs).to(self.data_type).cuda(), torch.sin(freqs).to(self.data_type).cuda()
+        )
         return

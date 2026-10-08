@@ -25,8 +25,7 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
 
     def _init_custom(self):
-        self._cos_cached = self.main_model._cos_cached
-        self._sin_cached = self.main_model._sin_cached
+        self.rope = self.main_model.rope
 
     def _init_req_manager(self):
         self.req_manager = self.main_model.req_manager

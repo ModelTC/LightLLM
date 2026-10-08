@@ -32,8 +32,8 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             self._apply_mrope_position_delta()
 
         self.position_ids = self.position_ids.contiguous()
-        self.position_cos = model._cos_cached[self.position_ids]
-        self.position_sin = model._sin_cached[self.position_ids]
+        self.rope = model.rope
+        self.position_cos, self.position_sin = self.rope.get_cos_sin(self.position_ids)
         return
 
     def _apply_mrope_position_delta(self):

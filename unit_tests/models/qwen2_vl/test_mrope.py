@@ -2,7 +2,7 @@ import torch
 import pytest
 
 # Import the Triton kernel function under test. Adjust the import path as needed.
-from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
+from lightllm.common.layers.rope.triton_kernel.mrope import mrope_triton_fused
 
 # Reference Python implementation for multimodal rotary positional embeddings
 

@@ -1,0 +1,1 @@
+"""Reusable model components."""

@@ -109,6 +109,9 @@ class Qwen2VLTpPartModel(Qwen2TpPartModel):
         super().__init__(kvargs)
         return
 
+    def _init_rope(self):
+        super()._init_rope(mrope_section=self.config["rope_scaling"]["mrope_section"], mrope_interleaved=False)
+
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             self.config = json.load(json_file)

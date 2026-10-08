@@ -18,6 +18,7 @@ class QwenInferStateInfo(LlamaInferStateInfo):
             return
 
         InferStateInfo.init_some_extra_state(self, model)
+        self.rope = model.rope
         if self.is_prefill:
             position_ids = self.position_ids
             self.position_sin = []
@@ -30,8 +31,8 @@ class QwenInferStateInfo(LlamaInferStateInfo):
             for i in range(len(infer_ntk_id)):
                 _start = self.b1_cu_q_seq_len[i].item()
                 _end = self.b1_cu_q_seq_len[i + 1].item()
-                self.position_sin.append(model._sin_cached[infer_ntk_id[i]][position_ids[_start:_end]])
-                self.position_cos.append(model._cos_cached[infer_ntk_id[i]][position_ids[_start:_end]])
+                self.position_sin.append(model.rope.sin_cached[infer_ntk_id[i]][position_ids[_start:_end]])
+                self.position_cos.append(model.rope.cos_cached[infer_ntk_id[i]][position_ids[_start:_end]])
 
             self.position_sin = torch.cat(self.position_sin, dim=0)
             self.position_cos = torch.cat(self.position_cos, dim=0)
@@ -45,8 +46,8 @@ class QwenInferStateInfo(LlamaInferStateInfo):
                 model.max_ntk_alpha,
             ).long()
             position_ids = self.position_ids
-            self.position_cos = model._cos_cached[infer_ntk_id, position_ids].view(position_ids.shape[0], -1)
-            self.position_sin = model._sin_cached[infer_ntk_id, position_ids].view(position_ids.shape[0], -1)
+            self.position_cos = model.rope.cos_cached[infer_ntk_id, position_ids].view(position_ids.shape[0], -1)
+            self.position_sin = model.rope.sin_cached[infer_ntk_id, position_ids].view(position_ids.shape[0], -1)
             if model.logn_tensor is not None:
                 self.logn_values = torch.index_select(model.logn_tensor, 0, position_ids).view(-1)
             position_ids = None

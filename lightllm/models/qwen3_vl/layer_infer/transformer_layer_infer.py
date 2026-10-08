@@ -1,7 +1,6 @@
 import torch
 from typing import Tuple
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
@@ -14,9 +13,6 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
-        self.mrope_section = torch.tensor(
-            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
-        )
 
     def _get_qkv(
         self,
@@ -34,13 +30,11 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
             eps=self.eps_,
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-        mrope_triton_fused(
+        infer_state.rope(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
             infer_state.position_cos,
             infer_state.position_sin,
-            self.mrope_section,
-            is_interleaved=True,
         )
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)

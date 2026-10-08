@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.layers.rope import RotaryEmbedding
 from lightllm.common.basemodel import batch_objs
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
 from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
@@ -46,8 +47,8 @@ def test_parallel_block_rejects_mtp_step_above_checkpoint_capacity(monkeypatch):
 )
 def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model = model_class.__new__(model_class)
-    model._cos_cached = torch.arange(24).view(6, 4)
-    model._sin_cached = model._cos_cached + 100
+    cache = torch.arange(24).view(6, 4)
+    model.rope = RotaryEmbedding(cache, cache + 100)
     model.mem_manager = object()
     model.pre_post_weight = object()
 
@@ -89,8 +90,8 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     infer_state = observed_states[0]
     assert infer_state.mem_manager is model.mem_manager
     assert infer_state.mem_index is mem_indexes
-    assert torch.equal(infer_state.position_cos, model._cos_cached[[2, 4]])
-    assert torch.equal(infer_state.position_sin, model._sin_cached[[2, 4]])
+    assert torch.equal(infer_state.position_cos, model.rope.cos_cached[[2, 4]])
+    assert torch.equal(infer_state.position_sin, model.rope.sin_cached[[2, 4]])
 
 
 @pytest.mark.parametrize("model_class", [Qwen3DSparkModel, Qwen3_5DSparkModel])

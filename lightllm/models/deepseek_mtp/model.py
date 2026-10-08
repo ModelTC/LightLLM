@@ -24,8 +24,7 @@ class Deepseek3MTPModel(Deepseek2TpPartModel):
         return
 
     def _init_custom(self):
-        self._cos_cached = self.main_model._cos_cached
-        self._sin_cached = self.main_model._sin_cached
+        self.rope = self.main_model.rope
         return
 
     def _init_req_manager(self):

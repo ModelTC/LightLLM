@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+from lightllm.common.layers.rope import RotaryEmbedding
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
@@ -123,14 +124,14 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         freqs_global = torch.outer(t, inv_freq_global)
         freqs_local = torch.outer(t, inv_freq_local)
 
-        self._cos_cached = torch.cos(freqs_global).to(torch.float32).cuda()
-        self._sin_cached = torch.sin(freqs_global).to(torch.float32).cuda()
+        self.rope_global = RotaryEmbedding(
+            torch.cos(freqs_global).to(torch.float32).cuda(), torch.sin(freqs_global).to(torch.float32).cuda()
+        )
+        self.rope = self.rope_global
 
-        self._cos_cached_global = torch.cos(freqs_global).to(torch.float32).cuda()
-        self._sin_cached_global = torch.sin(freqs_global).to(torch.float32).cuda()
-
-        self._cos_cached_local = torch.cos(freqs_local).to(torch.float32).cuda()
-        self._sin_cached_local = torch.sin(freqs_local).to(torch.float32).cuda()
+        self.rope_local = RotaryEmbedding(
+            torch.cos(freqs_local).to(torch.float32).cuda(), torch.sin(freqs_local).to(torch.float32).cuda()
+        )
         return
 
     def _init_custom(self):

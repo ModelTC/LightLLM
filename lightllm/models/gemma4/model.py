@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+from lightllm.common.layers.rope import RotaryEmbedding
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.build_utils import repair_config
@@ -181,8 +182,9 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             sliding_theta ** (torch.arange(0, sliding_rot_dim, 2, dtype=torch.float32) / sliding_rot_dim)
         )
         freqs_s = torch.outer(t, inv_freq_sliding)
-        self._cos_cached_sliding = torch.cos(freqs_s).to(self.data_type).cuda()
-        self._sin_cached_sliding = torch.sin(freqs_s).to(self.data_type).cuda()
+        self.rope_sliding = RotaryEmbedding(
+            torch.cos(freqs_s).to(self.data_type).cuda(), torch.sin(freqs_s).to(self.data_type).cuda()
+        )
 
         # Full-attention layers: proportional RoPE, theta=1_000_000,
         # partial_rotary_factor=0.25 over global_head_dim=512.
@@ -210,6 +212,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             inv_freq_full = 1.0 / (full_theta ** (torch.arange(0, full_rot_dim, 2, dtype=torch.float32) / full_rot_dim))
 
         freqs_f = torch.outer(t, inv_freq_full)
-        self._cos_cached_full = torch.cos(freqs_f).to(self.data_type).cuda()
-        self._sin_cached_full = torch.sin(freqs_f).to(self.data_type).cuda()
+        self.rope_full = RotaryEmbedding(
+            torch.cos(freqs_f).to(self.data_type).cuda(), torch.sin(freqs_f).to(self.data_type).cuda()
+        )
         return

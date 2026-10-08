@@ -43,8 +43,7 @@ class Qwen3EagleModel(LlamaTpPartModel):
         assert not self.enable_tpsp_mix_mode, "Qwen3 Eagle draft model does not support TP-SP"
 
     def _init_custom(self):
-        self._cos_cached = self.main_model._cos_cached
-        self._sin_cached = self.main_model._sin_cached
+        self.rope = self.main_model.rope
 
     def _init_req_manager(self):
         self.req_manager = self.main_model.req_manager

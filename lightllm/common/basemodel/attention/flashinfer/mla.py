@@ -39,7 +39,7 @@ class MlaFlashInferAttBackend(BaseAttBackend):
             ),
         ]
 
-        from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
+        from lightllm.common.layers.rope.yarn_rotary_utils import get_deepseek_mscale
 
         if model.config["rope_scaling"] is not None:
             rope_scaling = model.config["rope_scaling"]

@@ -7,18 +7,10 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35TransformerLayerWeight,
 )
-from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 
 
 class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
-    def __init__(self, layer_num, network_config):
-        super().__init__(layer_num, network_config)
-        # Initialize mrope section from config
-        rope_scaling = network_config.get("rope_scaling", {})
-        mrope_section = rope_scaling.get("mrope_section", [11, 11, 10])
-        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
-
     def _get_qkv(
         self,
         input: torch.Tensor,
@@ -48,14 +40,11 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
-        mrope_triton_fused(
+        infer_state.rope(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
             infer_state.position_cos,
             infer_state.position_sin,
-            self.mrope_section,
-            is_interleaved=True,  # Qwen3 uses interleaved mrope
-            partial_rotary_factor=self.partial_rotary_factor,
         )
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)

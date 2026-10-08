@@ -277,7 +277,7 @@ class NsaInfer:
         k = layer_weight.k_norm_(k, eps=self.eps)
 
         # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
-        from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+        from lightllm.common.layers.rope.triton_kernel.rotary_emb import rotary_emb_fwd
 
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],

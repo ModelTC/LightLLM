@@ -1,6 +1,7 @@
 from typing import Optional, List
 import torch
 import numpy as np
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.neo_chat_moe.triton_kernel.get_neo_position import get_neo_position_triton
@@ -20,8 +21,9 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
         self.position_ids = None
 
     def init_some_extra_state(self, model: LlamaTpPartModel):
-        LlamaInferStateInfo.init_some_extra_state(self, model)
+        InferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
+            self.max_seq_len = self.max_kv_seq_len
             self.b_image_token_end = torch.zeros([self.position_ids.size(0)], dtype=torch.int32, device="cpu").cuda(
                 non_blocking=True
             )
@@ -38,12 +40,9 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             self.position_ids[1:].zero_()
 
         self.position_ids = self.position_ids.contiguous()
-        self.position_cos = model._cos_cached[self.position_ids[0]]
-        self.position_sin = model._sin_cached[self.position_ids[0]]
-        self.position_cos_h = model._hw_cos_cached[self.position_ids[1]]
-        self.position_sin_h = model._hw_sin_cached[self.position_ids[1]]
-        self.position_cos_w = model._hw_cos_cached[self.position_ids[2]]
-        self.position_sin_w = model._hw_sin_cached[self.position_ids[2]]
+        self.position_cos, self.position_sin = model.rope.get_cos_sin(self.position_ids[0])
+        self.position_cos_h, self.position_sin_h = model.rope_hw.get_cos_sin(self.position_ids[1])
+        self.position_cos_w, self.position_sin_w = model.rope_hw.get_cos_sin(self.position_ids[2])
         return
 
     def get_neo_position(self, multimodal_params: List[dict]) -> torch.Tensor:

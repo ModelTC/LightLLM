@@ -11,7 +11,7 @@ from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.layers.rope.triton_kernel.rotary_emb import rotary_emb_fwd
 
 
 class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):

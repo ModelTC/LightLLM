@@ -2,6 +2,7 @@ import os
 import json
 import torch
 from lightllm.common.build_utils import repair_config
+from lightllm.common.layers.rope import RotaryEmbedding, get_rope_type
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
@@ -32,6 +33,12 @@ logger = init_logger(__name__)
 
 
 class NeoModelBase:
+    def _init_rope(self):
+        if get_rope_type(self.config) in ("default", "mrope"):
+            self._init_to_get_rotary()
+        else:
+            super()._init_rope()
+
     def _init_custom(self):
 
         super()._init_custom()
@@ -77,8 +84,9 @@ class NeoModelBase:
         )
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self.rope = RotaryEmbedding(
+            torch.cos(freqs).to(self.data_type).cuda(), torch.sin(freqs).to(self.data_type).cuda()
+        )
         return
 
     def _init_to_get_hw_rotary(self, default_base=10000):
@@ -117,8 +125,9 @@ class NeoModelBase:
         )
         freqs = torch.outer(t, inv_freq)
 
-        self._hw_cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._hw_sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self.rope_hw = RotaryEmbedding(
+            torch.cos(freqs).to(self.data_type).cuda(), torch.sin(freqs).to(self.data_type).cuda()
+        )
         return
 
 

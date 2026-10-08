@@ -5,7 +5,7 @@ import torch
 from transformers.modeling_rope_utils import _compute_yarn_parameters
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
-from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
+from lightllm.common.layers.rope import rotary_embedding as rope
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
 
 
@@ -48,8 +48,13 @@ def test_mrope_respects_explicit_scaling_type(qwen35_model, monkeypatch, type_ke
     rope_scaling.pop("rope_type")
     rope_scaling[type_key] = rope_type
     selected = []
-    monkeypatch.setattr(qwen35_model, "_init_to_get_rotary", lambda: selected.append("default"))
-    monkeypatch.setattr(qwen35_model, "_init_to_get_yarn_rotary", lambda: selected.append("yarn"))
+
+    def get_cache(scaling_type):
+        selected.append(scaling_type)
+        return None, None
+
+    monkeypatch.setattr(rope, "get_default_rope", lambda *args: get_cache("default"))
+    monkeypatch.setattr(rope, "get_yarn_rope", lambda *args: get_cache("yarn"))
 
     qwen35_model._init_custom()
 
@@ -84,13 +89,13 @@ def test_yarn_cache_matches_transformers(qwen35_model, data_type, partial_rotary
     model._init_custom()
 
     half_rotary_dim = int(model.head_dim_ * partial_rotary_factor) // 2
-    assert model._cos_cached.shape == (model.max_seq_length, half_rotary_dim)
-    assert model._sin_cached.shape == model._cos_cached.shape
+    assert model.rope.cos_cached.shape == (model.max_seq_length, half_rotary_dim)
+    assert model.rope.sin_cached.shape == model.rope.cos_cached.shape
     # Include both sides of the original context boundary.
     positions = torch.tensor([0, 1, 127, 8191, 262143, 262144, 262147], device="cuda")
     expected_cos, expected_sin = _reference_yarn_cache(model, positions)
-    torch.testing.assert_close(model._cos_cached[positions], expected_cos, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(model._sin_cached[positions], expected_sin, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(model.rope.cos_cached[positions], expected_cos, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(model.rope.sin_cached[positions], expected_sin, rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the MRoPE kernel")
@@ -125,15 +130,8 @@ def test_qwen35_yarn_interleaved_mrope_matches_reference(qwen35_model, data_type
     k = torch.randn((position_ids.shape[1], 4, 256), dtype=data_type, device="cuda")
     expected_q, expected_k = rotate_reference(q), rotate_reference(k)
 
-    mrope_triton_fused(
-        q,
-        k,
-        model._cos_cached[position_ids],
-        model._sin_cached[position_ids],
-        torch.tensor(model.config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"),
-        is_interleaved=True,
-        partial_rotary_factor=model.config["partial_rotary_factor"],
-    )
+    position_cos, position_sin = model.rope.get_cos_sin(position_ids)
+    model.rope(q, k, position_cos, position_sin)
 
     tolerance = 1e-5 if data_type == torch.float32 else 2e-2
     torch.testing.assert_close(q, expected_q, rtol=tolerance, atol=tolerance)

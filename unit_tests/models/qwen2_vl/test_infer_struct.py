@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.layers.rope import RotaryEmbedding
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 
@@ -18,8 +19,10 @@ def _patch_base_position_ids(monkeypatch):
 def _make_model():
     return SimpleNamespace(
         config={"rope_scaling": {}},
-        _cos_cached=torch.arange(32, dtype=torch.float32).view(32, 1),
-        _sin_cached=torch.arange(32, dtype=torch.float32).view(32, 1),
+        rope=RotaryEmbedding(
+            torch.arange(32, dtype=torch.float32).view(32, 1),
+            torch.arange(32, dtype=torch.float32).view(32, 1),
+        ),
     )
 
 

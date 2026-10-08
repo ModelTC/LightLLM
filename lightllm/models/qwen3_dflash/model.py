@@ -43,8 +43,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.config["block_size"] = self.args.mtp_step
 
     def _init_custom(self):
-        self._cos_cached = self.main_model._cos_cached
-        self._sin_cached = self.main_model._sin_cached
+        self.rope = self.main_model.rope
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
 
@@ -98,8 +97,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         position_ids = model_input.b_seq_len - 1
         infer_state = self.infer_state_class()
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
-        infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
-        infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
+        infer_state.position_cos, infer_state.position_sin = self.rope.get_cos_sin(position_ids)
         infer_state.mem_manager = self.mem_manager
         infer_state.mem_index = self._select_mem_indexes(model_input)
 

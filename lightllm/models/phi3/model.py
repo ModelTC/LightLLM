@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+from lightllm.models.phi3.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.phi3.layer_weights.transformer_layer_weight import Phi3TransformerLayerWeight
 from lightllm.models.phi3.layer_infer.transformer_layer_infer import Phi3TransformerLayerInfer
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -14,3 +15,6 @@ class Phi3TpPartModel(LlamaTpPartModel):
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
+
+    def _init_rope(self):
+        super()._init_rope(rotary_impl=rotary_emb_fwd)
