@@ -1,7 +1,6 @@
 import os
 import json
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
@@ -23,7 +22,6 @@ class QWen3VLTokenizer(QWen2VLTokenizer):
         self.image_token_id = kwargs["model_cfg"]["image_token_id"]
 
 
-@ModelRegistry(["qwen3_vl"], is_multimodal=True)
 class Qwen3VLTpPartModel(Qwen3TpPartModel):
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer

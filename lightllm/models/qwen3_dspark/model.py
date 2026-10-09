@@ -1,10 +1,8 @@
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import Qwen3DSparkPreAndPostLayerWeight
 
 
-@DraftModelRegistry(model_type="qwen3", spec_modes="dspark")
 class Qwen3DSparkModel(Qwen3DFlashModel):
     """Qwen3 DSpark draft model.
 
@@ -15,3 +13,7 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
 
     pre_and_post_weight_class = Qwen3DSparkPreAndPostLayerWeight
     post_layer_infer_class = Qwen3DSparkPostLayerInfer
+
+    def _verify_params(self):
+        self.config.setdefault("block_size", self.args.mtp_step)
+        super()._verify_params()

@@ -410,7 +410,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         prompt_tokens = prompt_tokens_dict[sub_ids[0]]
         completion_tokens = sum(count_output_tokens_dict[sub_req_id] for sub_req_id in sub_ids)
         cached_tokens = prompt_cache_len_dict.get(sub_ids[0], 0)
-        reasoning_tokens = sum(reasoning_parser_dict[sub_req_id].reasoning_tokens for sub_req_id in sub_ids)
+        reasoning_tokens = sum(
+            getattr(reasoning_parser_dict.get(sub_req_id), "reasoning_tokens", 0) for sub_req_id in sub_ids
+        )
 
         for i in range(request.n):
             sub_req_id = sub_ids[i]

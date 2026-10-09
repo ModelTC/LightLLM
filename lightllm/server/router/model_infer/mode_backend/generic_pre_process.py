@@ -65,11 +65,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
-    # dynamic prompt cache 准备 token
-    if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0])
-
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
@@ -77,7 +72,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         max_kv_seq_len=max_kv_seq_len,
         max_cache_len=max_cache_len,
         input_ids=input_ids,
-        mem_indexes_cpu=mem_indexes,
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
@@ -140,18 +134,12 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         device="cpu",
     )
 
-    # dynamic prompt cache 准备 token
-    if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0])
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0])
-
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
         max_q_seq_len=max_q_seq_len,
         max_kv_seq_len=max_kv_seq_len,
         input_ids=None,
-        mem_indexes_cpu=mem_indexes,
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,

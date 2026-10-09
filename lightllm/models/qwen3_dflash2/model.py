@@ -1,4 +1,3 @@
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dflash2.layer_infer.post_layer_infer import Qwen3DFlash2PostLayerInfer
@@ -11,7 +10,6 @@ from lightllm.models.qwen3_dflash2.layer_weights.transformer_layer_weight import
 )
 
 
-@DraftModelRegistry(model_type="qwen3", spec_modes="dflash2")
 class Qwen3DFlash2Model(Qwen3DFlashModel):
     """Qwen3 DFlash2 draft model."""
 

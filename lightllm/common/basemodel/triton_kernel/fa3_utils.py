@@ -12,52 +12,59 @@ def page_table_copy_kernel(
     page_table_ptr,
     req_to_token_indexs_ptr,
     b_req_idx,
-    max_seq_len_k,
+    max_page_num,
     b_req_idx_stride_0,
     page_table_stride_0,
     page_table_stride_1,
     req_to_token_stride_0,
     req_to_token_stride_1,
+    PAGE_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     cur_batch = tl.program_id(axis=0)
     cur_block = tl.program_id(axis=1)
     cur_req_idx = tl.load(b_req_idx + cur_batch * b_req_idx_stride_0)
 
-    offs = cur_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < max_seq_len_k
+    page_offsets = cur_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    page_mask = page_offsets < max_page_num
 
-    input_pos = cur_req_idx * req_to_token_stride_0 + offs * req_to_token_stride_1
-    output_pos = cur_batch * page_table_stride_0 + offs * page_table_stride_1
+    # 源表按 token 索引，每个逻辑页只读取页首 token（page_offsets * PAGE_SIZE）。
+    token_index_offsets = cur_req_idx * req_to_token_stride_0 + page_offsets * PAGE_SIZE * req_to_token_stride_1
+    page_table_offsets = cur_batch * page_table_stride_0 + page_offsets * page_table_stride_1
 
-    mem_index = tl.load(req_to_token_indexs_ptr + input_pos, mask=mask)
-    tl.store(page_table_ptr + output_pos, mem_index, mask=mask)
+    # 物理页首按 PAGE_SIZE 对齐，物理 token 索引除以页大小即为物理页号。
+    physical_token_index = tl.load(req_to_token_indexs_ptr + token_index_offsets, mask=page_mask)
+    physical_page_index = physical_token_index // PAGE_SIZE
+    tl.store(page_table_ptr + page_table_offsets, physical_page_index, mask=page_mask)
 
 
 def page_table_copy(
-    page_table,  # destination tensor [batch, seq]
-    req_to_token_indexs,  # source tensor [batch, seq]
-    b_req_idx,  # request index to copy from
+    page_table,  # [batch_size, max_page_num]，物理页号
+    req_to_token_indexs,  # [max_req_num, max_token_num]，物理 token 索引
+    b_req_idx,  # [batch_size]，请求槽位编号
+    page_size: int = 1,  # 每个 KV 页包含的 token 数
 ):
     assert page_table.dim() == 2, "page_table should be 2D"
     assert req_to_token_indexs.dim() == 2, "req_to_token_indexs should be 2D"
 
-    max_seq_len_k = page_table.shape[1]
+    # 页表宽度以页为单位。
+    max_page_num = page_table.shape[1]
     batch_size = page_table.size(0)
     BLOCK_SIZE = 128
 
-    grid = (batch_size, triton.cdiv(max_seq_len_k, BLOCK_SIZE))
+    grid = (batch_size, triton.cdiv(max_page_num, BLOCK_SIZE))
 
     page_table_copy_kernel[grid](
         page_table_ptr=page_table,
         req_to_token_indexs_ptr=req_to_token_indexs,
         b_req_idx=b_req_idx,
-        max_seq_len_k=max_seq_len_k,
+        max_page_num=max_page_num,
         b_req_idx_stride_0=b_req_idx.stride(0),
         page_table_stride_0=page_table.stride(0),
         page_table_stride_1=page_table.stride(1),
         req_to_token_stride_0=req_to_token_indexs.stride(0),
         req_to_token_stride_1=req_to_token_indexs.stride(1),
+        PAGE_SIZE=page_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 

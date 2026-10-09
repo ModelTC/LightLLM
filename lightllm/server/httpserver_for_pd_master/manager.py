@@ -22,7 +22,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
@@ -857,6 +857,8 @@ class ReqStatus:
         if self.error_info is not None:
             if self.is_server_busy:
                 raise ServerBusyError(self.error_info)
+            if self.error_info.startswith("InvalidRequestError: "):
+                raise InvalidRequestError(self.error_info.removeprefix("InvalidRequestError: "))
             logger.error(
                 f"group_request_id: {self.req_id} detected PD node generate error, "
                 f"raise exception to end the request flow early: {self.error_info}"

@@ -14,6 +14,19 @@ def get_config_json(model_path: str):
     return json_obj
 
 
+def get_running_max_req_size_per_dp(args) -> int:
+    """Return the request capacity for one local DP rank."""
+    if args.running_max_req_size < 1:
+        raise ValueError("running_max_req_size must be >= 1")
+
+    local_dp_size = max(1, args.dp // args.nnodes)
+    # Cache fetch and beam groups need the full capacity.
+    requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
+    if local_dp_size > 1 and not requires_global_capacity:
+        return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
+    return args.running_max_req_size
+
+
 def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
     """
     Derive `max_req_total_len` from model config.json.
@@ -373,7 +386,10 @@ def get_fixed_kv_len():
     start_args = get_env_start_args()
     model_cfg = get_config_json(start_args.model_dir)
     if "prompt_cache_token_ids" in model_cfg:
-        return len(model_cfg["prompt_cache_token_ids"])
+        fixed_kv_len = len(model_cfg["prompt_cache_token_ids"])
+        # 固定 KV 最终会插入 radix cache，只加载完整的模型 KV 页面；不足一页
+        # 的尾部直接截断，因此 router 也只扣除实际常驻的页面容量。
+        return fixed_kv_len // start_args.page_size * start_args.page_size
     else:
         return 0
 
@@ -397,7 +413,7 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen2_5_VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
-        elif model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+        elif model_type in ["qwen3_vl", "qwen3_vl_moe", "glm5_next"]:
             # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
@@ -419,6 +435,8 @@ def has_vision_module(model_path: str) -> bool:
             == "qwen3_omni_moe_vision_encoder"
         ):
             # Qwen3OmniMoeVisionTransformerPretrainedModel
+            return True
+        elif model_type == "neo_chat":
             return True
         elif model_type in ["qwen3_5", "qwen3_5_moe"]:
             return True
@@ -459,7 +477,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "glm5_next", "glm5_next_text"]:
             return True
         else:
             return False

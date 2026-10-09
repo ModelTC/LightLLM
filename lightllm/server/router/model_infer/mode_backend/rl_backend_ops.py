@@ -69,8 +69,11 @@ class RlBackendOps:
 
     def _resume_memory_tags(self, tags: Optional[List[MemoryTag]]):
         self._clear_cuda_cache()
-        for tag in self._iter_memory_tags(tags):
+        memory_tags = self._iter_memory_tags(tags)
+        for tag in memory_tags:
             self.backend.model.torch_memory_saver.resume(tag=tag)
+        if MemoryTag.KV_CACHE in memory_tags:
+            self.backend.model.req_manager.init_hold_request_indexs()
 
     def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
         try:

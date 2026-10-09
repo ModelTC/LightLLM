@@ -1,7 +1,6 @@
 import torch
 from typing import Optional
 import triton
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
     Qwen3NextTransformerLayerWeight,
@@ -25,7 +24,6 @@ from lightllm.common.state_cache_manager import LinearAttCacheConfig
 logger = init_logger(__name__)
 
 
-@ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     # weight class

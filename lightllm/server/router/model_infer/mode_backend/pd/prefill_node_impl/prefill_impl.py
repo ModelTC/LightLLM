@@ -70,6 +70,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         assert req_obj.cur_kv_len <= req_obj.shm_req.input_len
         input_len = req_obj.shm_req.input_len
         page_size = self.args.pd_kv_page_size
+        assert page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
         prefill_finished = req_obj.cur_kv_len == input_len
         trans_task_list: List[PDChunckedTransTask] = []
         while req_obj.pd_trans_kv_start_index < req_obj.cur_kv_len:

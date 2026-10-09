@@ -3,6 +3,7 @@ import os
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import gc
 import copy
+import math
 import json
 import torch
 import torch.nn.functional as F
@@ -15,9 +16,11 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
+    select_kv_index_from_req,
+    select_kv_index_from_req_prefill,
+)
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
@@ -82,15 +85,10 @@ class TpPartBaseModel:
         self.return_all_prompt_logics = kvargs.get("return_all_prompt_logics", False)
         self.data_type = get_llm_data_type()
         self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
-        self.graph_max_batch_size = (
-            self.graph_max_batch_size // 2
-            if get_env_start_args().enable_decode_microbatch_overlap
-            else self.graph_max_batch_size
-        )
+        if self.args.enable_decode_microbatch_overlap:
+            self.graph_max_batch_size //= 2
         self.mtp_manager = MtpManager.get_instance()
-        self.graph_max_batch_size = self.graph_max_batch_size * self.mtp_manager.get_decode_batch_multiplier(
-            self.is_mtp_draft_model
-        )
+        self.graph_max_batch_size *= self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -100,6 +98,7 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
+        self.graph_max_batch_size = self._align_decode_batch_size(self.graph_max_batch_size)
 
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.prefill_graph: PrefillCudaGraph = None
@@ -117,9 +116,10 @@ class TpPartBaseModel:
             self._init_req_manager()
             self._init_mem_manager()
 
-        # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
-        # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
-        self.req_manager.mem_manager = self.mem_manager
+        # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
+        # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
+        # 因此 req_manager 创建时暂不传入 mem_manager，需要在两者初始化完成后再进行绑定。
+        self.req_manager.bind_mem_manager(self.mem_manager)
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -270,15 +270,25 @@ class TpPartBaseModel:
         self.decode_att_backend1: BaseAttBackend = None
         return
 
+    def _align_decode_batch_size(self, batch_size: int) -> int:
+        alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
+        if self.args.enable_tpsp_mix_mode:
+            alignment = math.lcm(alignment, self.tp_world_size_)
+        return triton.cdiv(batch_size, alignment) * alignment
+
     def _init_cudagraph(self):
-        decode_batch_multiplier = self.mtp_manager.get_decode_batch_multiplier(self.is_mtp_draft_model)
-        cuda_graph_grow_step_size = self.mtp_manager.get_decode_cuda_graph_grow_step_size(self.is_mtp_draft_model)
+        # When graph covers the configured request length, it must also cover MTP's internal token margin.
+        if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
+            self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
+
+        decode_tokens_per_request = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
+        cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
             None
             if self.disable_cudagraph
             else CudaGraph(
                 batch_step_size_before_split=cuda_graph_grow_step_size,
-                split_batch_size=self.args.graph_split_batch_size * decode_batch_multiplier,
+                split_batch_size=self.args.graph_split_batch_size * decode_tokens_per_request,
                 batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
@@ -313,12 +323,28 @@ class TpPartBaseModel:
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
         model_input.to_cuda()
-        assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
             return self._prefill(model_input=model_input)
         else:
             return self._decode(model_input)
+
+    def _select_mem_indexes(self, model_input: ModelInput):
+        if model_input.is_prefill:
+            return select_kv_index_from_req_prefill(
+                req_to_token_indexs=self.req_manager.req_to_token_indexs,
+                b_req_idx=model_input.b_req_idx,
+                b_seq_len=model_input.b_seq_len,
+                b_ready_cache_len=model_input.b_ready_cache_len,
+                b_start_loc=model_input.b_prefill_start_loc,
+                max_q_seq_len=model_input.max_q_seq_len,
+                token_num=model_input.input_ids.shape[0],
+            )
+        return select_kv_index_from_req(
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            b_req_idx=model_input.b_req_idx,
+            b_seq_len=model_input.b_seq_len,
+        )
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
@@ -351,7 +377,7 @@ class TpPartBaseModel:
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
 
-        infer_state.mem_index = model_input.mem_indexes
+        infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
 
@@ -396,12 +422,6 @@ class TpPartBaseModel:
             new_model_input.b_position_delta = F.pad(
                 new_model_input.b_position_delta, (0, padded_batch_size), mode="constant", value=0
             )
-        new_model_input.mem_indexes = F.pad(
-            new_model_input.mem_indexes,
-            (0, padded_batch_size),
-            mode="constant",
-            value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
-        )
         new_model_input.multimodal_params = new_model_input.multimodal_params + [
             {"images": [], "audios": []} for _ in range(padded_batch_size)
         ]
@@ -439,12 +459,6 @@ class TpPartBaseModel:
         new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
         new_model_input.max_cache_len = max(0, model_input.max_cache_len)
         new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_token_num), mode="constant", value=1)
-        new_model_input.mem_indexes = F.pad(
-            new_model_input.mem_indexes,
-            (0, padded_token_num),
-            mode="constant",
-            value=self.mem_manager.HOLD_TOKEN_MEMINDEX,
-        )
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
         )
@@ -545,15 +559,6 @@ class TpPartBaseModel:
         )
 
         infer_state = self._create_inferstate(model_input)
-        init_req_to_token_indexes(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state.b_req_idx,
-            b_seq_len=infer_state.b_seq_len,
-            b_ready_cache_len=infer_state.b_ready_cache_len,
-            b_start_loc=model_input.b_prefill_start_loc,
-            alloc_mem_index=infer_state.mem_index,
-            max_q_seq_len=infer_state.max_q_seq_len,
-        )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
@@ -590,11 +595,8 @@ class TpPartBaseModel:
                 )
 
         origin_batch_size = model_input.batch_size
-        # 空 DP rank 先补出一个 dummy request；TPSP 模式下继续将 batch size
-        # 向上对齐到 TP world size 的整数倍，保证后续切分得到合法 shape。
-        infer_batch_size = max(1, origin_batch_size)
-        if self.args.enable_tpsp_mix_mode:
-            infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
+        # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
+        infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size))
 
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
@@ -613,12 +615,6 @@ class TpPartBaseModel:
         # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
         # 因此必须在 init_att_state 之前完成赋值。
         infer_state.is_cuda_graph = need_capture
-        copy_kv_index_to_req(
-            self.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
-            infer_state.b_seq_len,
-            infer_state.mem_index,
-        )
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
 
@@ -744,9 +740,6 @@ class TpPartBaseModel:
         return self._microbatch_overlap_prefill_cuda(model_input0, model_input1)
 
     def _microbatch_overlap_prefill_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
-        assert model_input0.mem_indexes.is_cuda
-        assert model_input1.mem_indexes.is_cuda
-
         assert self.args.enable_tpsp_mix_mode
         origin_handle_token_num0 = model_input0.input_ids.shape[0]
         origin_handle_token_num1 = model_input1.input_ids.shape[0]
@@ -769,28 +762,10 @@ class TpPartBaseModel:
         )
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        init_req_to_token_indexes(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state0.b_req_idx,
-            b_seq_len=infer_state0.b_seq_len,
-            b_ready_cache_len=infer_state0.b_ready_cache_len,
-            b_start_loc=model_input0.b_prefill_start_loc,
-            alloc_mem_index=infer_state0.mem_index,
-            max_q_seq_len=infer_state0.max_q_seq_len,
-        )
         infer_state0.init_some_extra_state(self)
         infer_state0.init_att_state()
 
         infer_state1 = self._create_inferstate(model_input1, 1)
-        init_req_to_token_indexes(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state1.b_req_idx,
-            b_seq_len=infer_state1.b_seq_len,
-            b_ready_cache_len=infer_state1.b_ready_cache_len,
-            b_start_loc=model_input1.b_prefill_start_loc,
-            alloc_mem_index=infer_state1.mem_index,
-            max_q_seq_len=infer_state1.max_q_seq_len,
-        )
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
 
@@ -839,14 +814,11 @@ class TpPartBaseModel:
 
     def _microbatch_overlap_decode_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
         assert self.args.enable_tpsp_mix_mode
-        assert model_input0.mem_indexes.is_cuda
-        assert model_input1.mem_indexes.is_cuda
 
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
         max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
-        infer_batch_size = max(1, origin_batch_size0, origin_batch_size1)
-        infer_batch_size = triton.cdiv(infer_batch_size, self.tp_world_size_) * self.tp_world_size_
+        infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size0, origin_batch_size1))
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
@@ -855,23 +827,11 @@ class TpPartBaseModel:
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             infer_state0.is_cuda_graph = need_capture
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state1.is_cuda_graph = need_capture
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -893,22 +853,10 @@ class TpPartBaseModel:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state0.b_req_idx,
-                infer_state0.b_seq_len,
-                infer_state0.mem_index,
-            )
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(model_input1, 1)
-            copy_kv_index_to_req(
-                self.req_manager.req_to_token_indexs,
-                infer_state1.b_req_idx,
-                infer_state1.b_seq_len,
-                infer_state1.mem_index,
-            )
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -1037,7 +985,10 @@ class TpPartBaseModel:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-            mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+            page_size = self.mem_manager.page_size
+            alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
+            mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
+            self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1052,7 +1003,6 @@ class TpPartBaseModel:
                 max_kv_seq_len=self.batch_max_tokens,
                 max_cache_len=0,
                 input_ids=dummy_input_ids,
-                mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
@@ -1116,7 +1066,10 @@ class TpPartBaseModel:
                     0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-                mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
+                page_size = self.mem_manager.page_size
+                alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
+                mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
+                self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1131,7 +1084,6 @@ class TpPartBaseModel:
                     max_kv_seq_len=input_len,
                     max_cache_len=0,
                     input_ids=dummy_input_ids,
-                    mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
                     b_mtp_index=b_mtp_index,
@@ -1180,9 +1132,6 @@ class TpPartBaseModel:
         b_req_idx = torch.tensor(
             [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
         )
-        mem_indexes = torch.tensor(
-            [self.mem_manager.HOLD_TOKEN_MEMINDEX for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-        )
         b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
         b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
         b_q_seq_len = b_seq_len - b_ready_cache_len
@@ -1197,7 +1146,6 @@ class TpPartBaseModel:
             max_kv_seq_len=prefill_input_len,
             max_cache_len=0,
             input_ids=dummy_input_ids,
-            mem_indexes=mem_indexes,
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,
             b_seq_len=b_seq_len,
@@ -1216,7 +1164,6 @@ class TpPartBaseModel:
         del model_input
         del dummy_input_ids
         del b_req_idx
-        del mem_indexes
         del b_seq_len
         del b_ready_cache_len
         del model_output

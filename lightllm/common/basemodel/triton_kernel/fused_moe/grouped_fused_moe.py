@@ -114,7 +114,6 @@ def moe_align1_kernel(
     TOKEN_BLOCK_SIZE: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
-
     expert_id = tl.program_id(axis=0)
 
     off_n = tl.arange(0, TOKEN_BLOCK_SIZE)
@@ -406,7 +405,6 @@ def moe_align2_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_EXPERT: tl.constexpr,
 ):
-
     expert_id = tl.program_id(axis=0)
     off_expert = tl.arange(0, BLOCK_EXPERT)
     expert_to_token_num = tl.load(experts_token_num_ptr + off_expert, mask=off_expert < expert_num, other=0)
@@ -529,6 +527,7 @@ def grouped_matmul_kernel(
     OUT_SORTED: tl.constexpr = False,
     TOKEN_INPUT_USE_TMA: tl.constexpr = False,
     WEIGHT_USE_TMA: tl.constexpr = False,
+    USE_PACKED_UE8M0: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
 
@@ -667,7 +666,12 @@ def grouped_matmul_kernel(
             if block_size_k > 0 and block_size_n > 0:
                 offs_ks = k_start // block_size_k
                 a_scale = tl.load(a_scale_ptrs + offs_ks, mask=token_mask, other=0.0)
-                b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
+                if USE_PACKED_UE8M0:
+                    packed_scale = tl.load(b_scale_ptrs + (offs_ks // 4) * weight_scale_stride2)
+                    exponent = (packed_scale >> ((offs_ks % 4) * 8)) & 255
+                    b_scale = tl.exp2(exponent.to(tl.float32) - 127)
+                else:
+                    b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
                 if NEED_TRANS:
                     if BLOCK_SIZE_N > block_size_n:
                         accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
@@ -817,8 +821,12 @@ def grouped_matmul(
     # for deepseek_v3 block-wise quant
     block_size_n = 0
     block_size_k = 0
+    use_packed_ue8m0 = use_fp8_w8a8 and expert_to_weights_scale.dtype == torch.int32
     if use_fp8_w8a8:
-        if expert_to_weights_scale.ndim == 3:
+        if use_packed_ue8m0:
+            # DeepGEMM's packed weight scales have one row per output channel and four K blocks per INT32.
+            block_size_n, block_size_k = 1, 128
+        elif expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
 
@@ -985,6 +993,7 @@ def grouped_matmul(
         OUT_SORTED=OUT_SORTED,
         TOKEN_INPUT_USE_TMA=TOKEN_INPUT_USE_TMA,
         WEIGHT_USE_TMA=WEIGHT_USE_TMA,
+        USE_PACKED_UE8M0=use_packed_ue8m0,
     )
     return (mblocks_to_tuple_info, BLOCK_SIZE_M)
 
@@ -1009,6 +1018,7 @@ def fused_experts_impl(
     layout="blocked",
     limit=None,
     alpha=None,
+    clamp_up_add_one=True,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -1087,6 +1097,7 @@ def fused_experts_impl(
             intermediate_cache2.view(-1, N // 2),
             limit=limit,
             alpha=alpha,
+            clamp_up_add_one=clamp_up_add_one,
             layout=layout,
         )
 
@@ -1133,6 +1144,7 @@ def inplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1152,6 +1164,7 @@ def inplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
+        clamp_up_add_one=clamp_up_add_one,
     )
 
 
@@ -1173,6 +1186,7 @@ def inplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     pass
 
@@ -1203,6 +1217,7 @@ def outplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     return fused_experts_impl(
         hidden_states,
@@ -1222,6 +1237,7 @@ def outplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
+        clamp_up_add_one=clamp_up_add_one,
     )
 
 
@@ -1243,6 +1259,7 @@ def outplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ) -> None:
     return torch.empty_like(hidden_states)
 
@@ -1274,6 +1291,7 @@ def fused_experts(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ):
     if inplace:
         torch.ops.lightllm.inplace_fused_experts_impl(
@@ -1293,6 +1311,7 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
         return hidden_states
     else:
@@ -1313,4 +1332,5 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )

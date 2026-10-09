@@ -13,7 +13,6 @@ class SelectedMtpRows(NamedTuple):
     b_req_idx: torch.Tensor
     b_mtp_index: torch.Tensor
     b_seq_len: torch.Tensor
-    mem_indexes: torch.Tensor
     b_shared_seq_len: torch.Tensor
     b_shared_radix_node_id: torch.Tensor
     b_position_delta: torch.Tensor
@@ -34,8 +33,6 @@ def _select_accepted_tail_rows_kernel(
     b_mtp_index_stride,
     b_seq_len,
     b_seq_len_stride,
-    mem_indexes,
-    mem_indexes_stride,
     b_shared_seq_len,
     b_shared_seq_len_stride,
     b_shared_radix_node_id,
@@ -49,7 +46,6 @@ def _select_accepted_tail_rows_kernel(
     out_b_req_idx,
     out_b_mtp_index,
     out_b_seq_len,
-    out_mem_indexes,
     out_b_shared_seq_len,
     out_b_shared_radix_node_id,
     out_b_position_delta,
@@ -64,7 +60,6 @@ def _select_accepted_tail_rows_kernel(
     tl.store(out_b_req_idx + out_row, tl.load(b_req_idx + src_row * b_req_idx_stride))
     tl.store(out_b_mtp_index + out_row, tl.load(b_mtp_index + src_row * b_mtp_index_stride))
     tl.store(out_b_seq_len + out_row, tl.load(b_seq_len + src_row * b_seq_len_stride))
-    tl.store(out_mem_indexes + out_row, tl.load(mem_indexes + src_row * mem_indexes_stride))
     tl.store(
         out_b_shared_seq_len + out_row,
         tl.load(b_shared_seq_len + src_row * b_shared_seq_len_stride),
@@ -103,7 +98,6 @@ def select_accepted_tail_rows(
     b_req_idx: torch.Tensor,
     b_mtp_index: torch.Tensor,
     b_seq_len: torch.Tensor,
-    mem_indexes: torch.Tensor,
     b_shared_seq_len: torch.Tensor,
     b_shared_radix_node_id: torch.Tensor,
     b_position_delta: torch.Tensor,
@@ -121,7 +115,6 @@ def select_accepted_tail_rows(
         b_req_idx,
         b_mtp_index,
         b_seq_len,
-        mem_indexes,
         b_shared_seq_len,
         b_shared_radix_node_id,
         b_position_delta,
@@ -134,7 +127,6 @@ def select_accepted_tail_rows(
         b_req_idx=b_req_idx.new_empty((req_num,)),
         b_mtp_index=b_mtp_index.new_empty((req_num,)),
         b_seq_len=b_seq_len.new_empty((req_num,)),
-        mem_indexes=mem_indexes.new_empty((req_num,)),
         b_shared_seq_len=b_shared_seq_len.new_empty((req_num,)),
         b_shared_radix_node_id=b_shared_radix_node_id.new_empty((req_num,)),
         b_position_delta=b_position_delta.new_empty((req_num,)),
@@ -159,8 +151,6 @@ def select_accepted_tail_rows(
         b_mtp_index_stride=b_mtp_index.stride(0),
         b_seq_len=b_seq_len,
         b_seq_len_stride=b_seq_len.stride(0),
-        mem_indexes=mem_indexes,
-        mem_indexes_stride=mem_indexes.stride(0),
         b_shared_seq_len=b_shared_seq_len,
         b_shared_seq_len_stride=b_shared_seq_len.stride(0),
         b_shared_radix_node_id=b_shared_radix_node_id,
@@ -174,7 +164,6 @@ def select_accepted_tail_rows(
         out_b_req_idx=selected.b_req_idx,
         out_b_mtp_index=selected.b_mtp_index,
         out_b_seq_len=selected.b_seq_len,
-        out_mem_indexes=selected.mem_indexes,
         out_b_shared_seq_len=selected.b_shared_seq_len,
         out_b_shared_radix_node_id=selected.b_shared_radix_node_id,
         out_b_position_delta=selected.b_position_delta,

@@ -5,10 +5,6 @@ from lightllm.server.router.req_queue.base_queue import BaseQueue
 
 
 class ChunkedPrefillQueue(BaseQueue):
-    def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
-        super().__init__(args, router, dp_index, dp_size_in_node)
-        self.batch_max_tokens = self.batch_max_tokens * 2
-
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
             self.cache_len_list = [
@@ -21,7 +17,7 @@ class ChunkedPrefillQueue(BaseQueue):
         return
 
     # @calculate_time(show=True, min_cost_ms=0.1)
-    def _can_add_new_req(self, req: Req, is_busy, new_batch_first_router_need_tokens):
+    def _can_add_new_req(self, req: Req, is_busy):
         self.cache_len_list.append(
             req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
         )  # hard to analysis
@@ -37,43 +33,29 @@ class ChunkedPrefillQueue(BaseQueue):
 
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 
-        new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
-        # 长短请求模式由 Infer 控制单轮 prefill token 上限。
-        ok_prefill = (
-            self.args.short_prefill_token_threshold is not None
-            or new_batch_first_router_need_tokens <= self.batch_max_tokens
-        )
-
-        if ok_token_num and ok_req_num and ok_prefill:
+        if ok_token_num and ok_req_num:
             self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
                 need_max_token_num / self.max_total_tokens,
                 self.dp_index,
             )
-            return True, new_batch_first_router_need_tokens
+            return True
         else:
-            return False, new_batch_first_router_need_tokens
+            return False
 
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
-        if len(self.waiting_req_list) == 0:
+        # 即使调度容量已满，也要先清理 abort 请求，避免继续占用共享请求槽位。
+        self.filter_aborted_reqs()
+        if not self.waiting_req_list:
             return None
 
         # 如果当前已经被调度的请求数量超过了上限，直接不调度新的请求了。
         exist_req_num = self.get_batch_dp_req_size(current_batch)
-        req_is_full = exist_req_num >= self.running_max_req_size
-        if req_is_full:
-            return None
-
-        self.filter_aborted_reqs()
-        if len(self.waiting_req_list) == 0:
+        if exist_req_num >= self.running_max_req_size:
             return None
 
         is_busy = self.is_busy()
-
-        new_batch_first_router_need_tokens = (
-            0 if current_batch is None else current_batch.get_batch_decode_need_tokens()[self.dp_index]
-        )
 
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
@@ -82,9 +64,7 @@ class ChunkedPrefillQueue(BaseQueue):
         waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
-            ok_insert, new_batch_first_router_need_tokens = self._can_add_new_req(
-                req, is_busy, new_batch_first_router_need_tokens
-            )
+            ok_insert = self._can_add_new_req(req, is_busy)
             if ok_insert:
                 consumed_req_count += 1
                 can_run_list.append(req)
@@ -109,7 +89,4 @@ class ChunkedPrefillQueue(BaseQueue):
         else:
             need_max_token_num = 0
 
-        return (
-            need_max_token_num,
-            need_max_token_num / self.max_total_tokens,
-        )
+        return (need_max_token_num, need_max_token_num / self.max_total_tokens)

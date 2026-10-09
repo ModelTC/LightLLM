@@ -8,12 +8,10 @@ from .layer_infer.transformer_layer_infer import QwenTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import QwenPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import QwenTransformerLayerWeight
 from .infer_struct import QwenInferStateInfo
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.build_utils import repair_config
 
 
-@ModelRegistry("qwen")
 class QWenTpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = QwenPreAndPostLayerWeight

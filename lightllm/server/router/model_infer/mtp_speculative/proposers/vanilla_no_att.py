@@ -35,7 +35,6 @@ class VanillaNoAttProposer(BaseSpecProposer):
         if draft_step == 0:
             return VanillaSpecProposal(
                 token_ids=target_next_token_ids.new_empty((req_num, 0)),
-                extra_mem_indexes_cpu=[],
                 schedule_scores=(
                     torch.empty((req_num, 0), dtype=torch.float32, device=target_next_token_ids.device)
                     if self.enable_dynmaic_mtp
@@ -56,7 +55,6 @@ class VanillaNoAttProposer(BaseSpecProposer):
             b_req_idx=target_model_input.b_req_idx,
             b_mtp_index=target_model_input.b_mtp_index,
             b_seq_len=target_model_input.b_seq_len,
-            mem_indexes=target_model_input.mem_indexes,
             b_shared_seq_len=target_model_input.b_shared_seq_len,
             b_shared_radix_node_id=target_model_input.b_shared_radix_node_id,
             b_position_delta=target_model_input.b_position_delta,
@@ -69,11 +67,9 @@ class VanillaNoAttProposer(BaseSpecProposer):
         draft_input.b_req_idx = selected_rows.b_req_idx
         draft_input.b_mtp_index = selected_rows.b_mtp_index
         draft_input.b_seq_len = selected_rows.b_seq_len
-        draft_input.mem_indexes = selected_rows.mem_indexes
         draft_input.b_shared_seq_len = selected_rows.b_shared_seq_len
         draft_input.b_shared_radix_node_id = selected_rows.b_shared_radix_node_id
         draft_input.b_position_delta = selected_rows.b_position_delta
-        draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(req_num)]
 
         for step in range(draft_step):
@@ -95,6 +91,5 @@ class VanillaNoAttProposer(BaseSpecProposer):
         schedule_scores = torch.cat(schedule_scores_by_step, dim=1) if self.enable_dynmaic_mtp else None
         return VanillaSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )

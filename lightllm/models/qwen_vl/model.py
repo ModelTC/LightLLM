@@ -1,7 +1,6 @@
 import unicodedata
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.server.core.objs import SamplingParams
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen.model import QWenTpPartModel
 from .layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
@@ -91,7 +90,6 @@ class QWenVLTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry("qwen", is_multimodal=True, condition=lambda cfg: "visual" in cfg)
 class QWenVLTpPartModel(QWenTpPartModel):
 
     # infer class

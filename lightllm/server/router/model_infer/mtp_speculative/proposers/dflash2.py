@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import torch
 
 from lightllm.common.basemodel.batch_objs import ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import DFlashSpecProposal
 
@@ -17,7 +15,6 @@ class DFlash2Proposer(DFlashProposer):
         req_num: int,
         block_size: int,
         draft_step: int,
-        extra_mem_indexes_cpu: torch.Tensor,
     ) -> DFlashSpecProposal:
         mtp_collector = draft_output.mtp_collector
         selected_token_ids = mtp_collector.draft_token_ids
@@ -34,6 +31,5 @@ class DFlash2Proposer(DFlashProposer):
 
         return DFlashSpecProposal(
             token_ids=selected_token_ids[:, :draft_step].contiguous(),
-            extra_mem_indexes_cpu=[MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)],
             schedule_scores=schedule_scores,
         )

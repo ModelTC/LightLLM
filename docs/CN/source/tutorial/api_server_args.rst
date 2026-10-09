@@ -238,7 +238,10 @@ PD 分离模式参数
 
 .. option:: --running_max_req_size
 
-    同时进行前向推理的最大请求数量，默认为 ``1000``
+    本机共享请求槽总数，默认为 ``256``。
+    DP 模式按 ``ceil(running_max_req_size / 本机 DP rank 数)``
+    分配每个 rank 的请求状态槽，调度并发和 CUDA Graph batch 上限也受此限制。
+    diverse 模式及 DP prompt cache fetch 模式保持原有容量。
 
 .. option:: --max_req_total_len
 

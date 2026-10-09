@@ -32,6 +32,7 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.config_utils import get_running_max_req_size_per_dp
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
@@ -148,15 +149,15 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "max_req_num": self.args.running_max_req_size,
+            "max_req_num": get_running_max_req_size_per_dp(self.args),
             # MTP length stopping is asynchronous, so up to mtp_step accepted
             # positions may already be committed when FINISHED_LENGTH is observed.
             # The overlapped iteration then needs mtp_step positions for target
             # verification and another mtp_step for the DSpark/DFlash draft block.
             # Thus the page table needs 3 * mtp_step positions of MTP headroom.
-            # Keep eight additional positions as a safety margin for future overlap
-            # changes while preserving the historical +8 for non-MTP runs.
-            "max_seq_length": self.args.max_req_total_len + 3 * self.args.mtp_step + 8,
+            # Keep 16 additional positions: eight preserve the historical safety
+            # margin and eight cover the small-page decode preallocation window.
+            "max_seq_length": self.args.max_req_total_len + 3 * self.args.mtp_step + 16,
             "nccl_host": self.args.nccl_host,
             "nccl_port": get_shm_port_args().nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,

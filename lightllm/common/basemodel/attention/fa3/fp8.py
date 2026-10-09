@@ -3,12 +3,25 @@ import torch
 from ..base_att import AttControl
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_static_fp8_quant
+from lightllm.utils.log_utils import init_logger
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
 
+logger = init_logger(__name__)
+
+
 class Fp8Fa3AttBackend(Fa3AttBackend):
-    def __init__(self, model):
-        super().__init__(model=model)
+    def _init_infer_page_size(self):
+        # TODO: FP8 FA3 完成多 token 推理页适配后，改为继承模型 page_size。
+        self.infer_page_size = 1
+        assert self.model.args.page_size % self.infer_page_size == 0, (
+            f"model page_size {self.model.args.page_size} "
+            f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
+        logger.warning(
+            f"Fp8Fa3AttBackend temporarily uses infer_page_size=1 with model page_size={self.model.args.page_size}; "
+            "multi-token FP8 inference pages are not implemented yet."
+        )
 
     def create_att_prefill_state(self, infer_state) -> "Fp8Fa3PrefillAttState":
         return Fp8Fa3PrefillAttState(backend=self, infer_state=infer_state)

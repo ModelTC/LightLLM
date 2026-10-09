@@ -16,11 +16,9 @@ def test_dflash2_proposal_returns_greedy_tokens(dynamic_verify):
     output = SimpleNamespace(
         mtp_collector=ModelMtpOutputCollector(draft_token_ids=tokens, confidence_logits=confidence)
     )
-    mem = torch.tensor([7, 8], dtype=torch.int32)
-    proposal = proposer._build_proposal(output, 2, 4, 3, mem)
+    proposal = proposer._build_proposal(output, 2, 4, 3)
     assert type(proposal) is DFlashSpecProposal
     torch.testing.assert_close(proposal.token_ids, tokens)
-    torch.testing.assert_close(proposal.extra_mem_indexes_cpu[0].mem_indexes_cpu, mem)
     if dynamic_verify:
         torch.testing.assert_close(proposal.schedule_scores, confidence.sigmoid().clamp(0.01, 0.99))
     else:
@@ -42,7 +40,7 @@ def test_dflash2_dynamic_verification_requires_confidence():
         logits=torch.empty(4, 1), mtp_collector=ModelMtpOutputCollector(draft_token_ids=torch.ones(1, 3))
     )
     with pytest.raises(RuntimeError, match="selector confidence"):
-        proposer._build_proposal(output, 1, 4, 3, torch.arange(4))
+        proposer._build_proposal(output, 1, 4, 3)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

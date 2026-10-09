@@ -179,6 +179,7 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
             layout="interleaved",
             alpha=self.alpha,
             limit=self.limit,
+            clamp_up_add_one=True,
         )
         return output_tensor
 
