@@ -18,6 +18,27 @@ LightLLM 提供了与 OpenAI API 完全兼容的接口，支持所有标准的 O
         --port 8088 \
         --tp 1
 
+停止字符串
+----------
+
+``/v1/chat/completions`` 和 ``/v1/completions`` 支持 ``stop`` 和
+``include_stop_str_in_output``。默认返回文本不包含匹配到的 stop 字符串，
+设置 ``include_stop_str_in_output=true`` 可保留 stop。两种设置都会移除同一
+token 内 stop 之后的文本。流式、非流式以及 PD 部署遵循相同设置。
+
+使用 OpenAI Python 客户端时，通过 ``extra_body`` 传入：
+
+.. code-block:: python
+
+    response = client.chat.completions.create(
+        model="your_model_name",
+        messages=[{"role": "user", "content": "你好"}],
+        stop=["END"],
+        extra_body={"include_stop_str_in_output": True},
+    )
+
+例如生成 ``helloEND`` 时，默认返回 ``hello``，开启后返回 ``helloEND``。
+
 基础对话示例
 ------------
 

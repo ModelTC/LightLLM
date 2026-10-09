@@ -1,5 +1,8 @@
 import asyncio
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from lightllm.server import api_openai
 from lightllm.server.api_models import ChatCompletionRequest, CompletionRequest
@@ -7,6 +10,8 @@ from lightllm.server.api_openai import (
     _build_completion_response,
     _collect_generation_results,
 )
+from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs.stop_sequence_output import StopSequenceOutput
 
 
 class _FinishStatus:
@@ -43,9 +48,7 @@ def test_collect_generation_results_keeps_choices_separate(monkeypatch):
         max_tokens=2,
         logprobs=1,
     )
-    sampling_params = SimpleNamespace(stop_sequences=SimpleNamespace(size=0))
-
-    results = asyncio.run(_collect_generation_results(generate_results(), request, "Prompt", sampling_params))
+    results = asyncio.run(_collect_generation_results(generate_results(), request, "Prompt"))
 
     assert [result["text"] for result in results] == ["A1", "B2", "C3"]
     assert [result["completion_tokens"] for result in results] == [2, 2, 2]
@@ -128,3 +131,63 @@ def test_non_streaming_chat_usage_sums_all_choices(monkeypatch):
     assert response.usage.completion_tokens == 6
     assert response.usage.total_tokens == 10
     assert response.usage.prompt_tokens_details.cached_tokens == 1
+
+
+@pytest.mark.parametrize("api", ["chat", "completion"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("include", [None, False, True])
+def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
+    from lightllm.server.api_http import g_objs
+
+    def generate(prompt, sampling_params, multimodal_params, request):
+        assert sampling_params.include_stop_str_in_output is (include is True)
+        assert sampling_params.stop_sequences.to_strings() == ["END"]
+
+        async def results():
+            output = StopSequenceOutput(sampling_params)
+            metadata = {"prompt_tokens": 4, "prompt_cache_len": 0, "logprobs": {}}
+            for index, text in enumerate(["helloE", "NDextra"], 1):
+                finish = FinishStatus(FinishStatus.FINISHED_STOP if index == 2 else FinishStatus.NO_FINISH)
+                for result in output.process(80, text, {**metadata, "id": index, "logprob": -index}, finish):
+                    yield result
+
+        return results()
+
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
+
+    async def build_prompt(*args):
+        return "Prompt"
+
+    monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
+    kwargs = {"include_stop_str_in_output": include} if include is not None else {}
+
+    async def run():
+        common = dict(model="test-model", stop=["END"], stream=stream, max_completion_tokens=10, **kwargs)
+        if api == "chat":
+            request = ChatCompletionRequest(messages=[{"role": "user", "content": "Hello"}], **common)
+            response = await api_openai.chat_completions_impl(request, SimpleNamespace())
+        else:
+            request = CompletionRequest(prompt="Prompt", **common)
+            response = await api_openai.completions_impl(request, SimpleNamespace())
+
+        if stream:
+            body = "".join(
+                [chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator]
+            )
+            events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: {")]
+            choices = [choice for event in events for choice in event["choices"]]
+            text = (
+                "".join(choice["delta"].get("content") or "" for choice in choices)
+                if api == "chat"
+                else "".join(choice.get("text", "") for choice in choices)
+            )
+            assert choices[-1]["finish_reason"] == "stop"
+        else:
+            text = response.choices[0].message.content if api == "chat" else response.choices[0].text
+            assert response.choices[0].finish_reason == "stop"
+            assert response.usage.completion_tokens == 2
+        assert text == ("helloEND" if include else "hello")
+
+    asyncio.run(run())

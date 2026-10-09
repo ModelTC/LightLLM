@@ -18,6 +18,29 @@ First, ensure that the LightLLM service is started:
         --port 8088 \
         --tp 1
 
+Stop Strings
+------------
+
+``/v1/chat/completions`` and ``/v1/completions`` accept ``stop`` and
+``include_stop_str_in_output``. By default, the matched stop string is excluded
+from returned text. Set ``include_stop_str_in_output`` to ``true`` to include it.
+Text after the stop string in the same token is excluded in either case. This
+applies to streaming and non-streaming requests, including PD deployments.
+
+With the OpenAI Python client, pass the option through ``extra_body``:
+
+.. code-block:: python
+
+    response = client.chat.completions.create(
+        model="your_model_name",
+        messages=[{"role": "user", "content": "Hello"}],
+        stop=["END"],
+        extra_body={"include_stop_str_in_output": True},
+    )
+
+For example, generated text ``helloEND`` is returned as ``hello`` by default,
+or ``helloEND`` with this option enabled.
+
 Basic Conversation Examples
 ---------------------------
 
