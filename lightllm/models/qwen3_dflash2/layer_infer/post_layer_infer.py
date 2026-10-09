@@ -147,7 +147,7 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
         unary = unary.view(req_num, self.block_size_ - 1, self.selector_top_k_)
         anchor_token_ids = infer_state.input_ids.view(req_num, self.block_size_)[:, 0]
         draft_token_ids, confidence_logits = self._select_path(
-            hidden=block_hidden[:, 1:, :],
+            hidden=candidate_hidden.view(req_num, self.block_size_ - 1, -1),
             candidate_ids=candidate_ids,
             unary=unary,
             anchor_token_ids=anchor_token_ids,
