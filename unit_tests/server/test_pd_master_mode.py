@@ -127,7 +127,7 @@ def test_fixed_pd_nodes_are_ready_only_with_exact_node_counts():
     manager = PDManager(StartArgs(pd_master_mode="2p1d"))
     assert manager.is_pd_nodes_ready() is False
 
-    manager.prefill_nodes = [object(), object()]
+    manager.prefill_nodes = [SimpleNamespace(client_ip_port="p1:8000"), SimpleNamespace(client_ip_port="p2:8000")]
     manager.decode_nodes = [object()]
     assert manager.is_pd_nodes_ready() is True
 
@@ -218,8 +218,6 @@ def test_prefill_registration_preserves_existing_inflight_prompt_chars():
                 "client_ip_port": client_ip_port,
                 "mode": "prefill",
                 "start_args": {
-                    "dp": args.dp,
-                    "nnodes": args.nnodes,
                     "max_req_total_len": args.max_req_total_len,
                     "max_image_pixels": args.max_image_pixels,
                     "disable_image_resize": args.disable_image_resize,
@@ -248,8 +246,6 @@ def test_prefill_reconnection_preserves_other_nodes_inflight_prompt_chars():
             "client_ip_port": client_ip_port,
             "mode": "prefill",
             "start_args": {
-                "dp": args.dp,
-                "nnodes": args.nnodes,
                 "max_req_total_len": args.max_req_total_len,
                 "max_image_pixels": args.max_image_pixels,
                 "disable_image_resize": args.disable_image_resize,
@@ -364,7 +360,7 @@ def test_fixed_pd_master_health_endpoint_combines_ready_and_health_status(monkey
     }
     assert pd_node_health_check_count == 0
 
-    pd_manager.prefill_nodes = [object(), object()]
+    pd_manager.prefill_nodes = [SimpleNamespace(client_ip_port="p1:8000"), SimpleNamespace(client_ip_port="p2:8000")]
     pd_manager.decode_nodes = [object()]
     response = asyncio.run(api_http.healthcheck(None))
     assert response.status_code == 200

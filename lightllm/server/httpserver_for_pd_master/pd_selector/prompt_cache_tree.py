@@ -13,7 +13,8 @@ from sortedcontainers import SortedDict
 class PromptCacheMatchResult:
     """prefix_match 的返回结果。"""
 
-    # 匹配终点上的调度目标标识（节点注册实例 + 本地 DP rank）；root 为 None。
+    # 匹配终点关联的 prefill 连接标识（connection_key），可区分同一服务的不同 DP 连接；
+    # 匹配停在 root 时为 None。该标识记录历史处理位置，不保证 KV cache 仍然驻留。
     prefill_node: Optional[str]
     # 匹配到的原始 prompt 字符数：从 text[0] 到最后一个命中采样点（含）的连续前缀长度。
     matched_char_count: int
@@ -92,7 +93,7 @@ class PromptCacheTree:
 
         Args:
             text: 原始 prompt 文本。
-            prefill_node: 处理该 prompt 的调度目标标识，不可为 None。
+            prefill_node: 处理该 prompt 的 prefill 连接标识（connection_key），不可为 None。
 
         Raises:
             ValueError: prefill_node 为 None 时抛出。

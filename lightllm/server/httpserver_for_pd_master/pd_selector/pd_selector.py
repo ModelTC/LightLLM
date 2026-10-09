@@ -17,8 +17,6 @@ class PDSelectionExtraInfo:
 
     estimated_cache_hit_rate: float = 0.0
     cache_last_insert_time: Optional[float] = None
-    # Local DP rank in the selected P service; None preserves worker-local scheduling.
-    prefill_dp_rank: Optional[int] = None
 
 
 class PDSelector:
@@ -40,7 +38,7 @@ class PDSelector:
         """记录推理侧返回的 prompt cache 命中率；非 cache-aware 策略无需处理。"""
         return
 
-    def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj, dp_rank: int) -> None:
+    def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
         """记录成功进入推理的 prompt；非 cache-aware 策略无需处理。"""
         return
 
@@ -92,7 +90,7 @@ class AdaptiveLoadSelector(PDSelector):
 
 
 class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
-    """按 prompt 前缀亲和及负载选择 P 节点和本地 DP rank；D 仍按节点选点。"""
+    """Cache-aware prefill 选点：按抽稀后的 prompt 前缀匹配 + 负载均衡。"""
 
     def __init__(self, pd_manager):
         from .cache_aware import CacheAwareConfig, CacheAwarePolicy
@@ -104,19 +102,14 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
-        p_rank = self.policy.select_worker(
-            [rank for node in self.prefill_nodes for rank in node.dp_ranks], request_text=prompt
-        )
-        p_node = p_rank.node
+        p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
         d_node = self._importance_sampling(self.decode_nodes)
-        # 选点完成后再查询一次前缀树；只有历史记录属于最终选中的 P 节点及 DP rank
+        # 选点完成后再查询一次前缀树；只有 cache 实际属于最终选中的 P 节点
         # 时才返回命中率，避免负载均衡改派节点后误判为高命中。
-        selection_extra_info = self.policy.get_estimated_cache_info(p_rank, prompt)
-        selection_extra_info.prefill_dp_rank = p_rank.dp_rank
+        selection_extra_info = self.policy.get_estimated_cache_info(p_node, prompt)
 
         logger.info(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
-            f"prefill_dp_rank={p_rank.dp_rank}, "
             f"d_node={d_node.client_ip_port}, "
             f"cache_last_insert_time={selection_extra_info.cache_last_insert_time}"
         )
@@ -126,7 +119,5 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         self.policy.record_prompt_cache_hit_rate(cache_hit_rate)
 
-    def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj, dp_rank: int) -> None:
-        if not p_node.start_args["disable_dynamic_prompt_cache"]:
-            assert 0 <= dp_rank < len(p_node.dp_ranks)
-            self.policy.insert_prompt_cache(prompt, p_node.dp_ranks[dp_rank])
+    def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
+        self.policy.insert_prompt_cache(prompt, p_node)

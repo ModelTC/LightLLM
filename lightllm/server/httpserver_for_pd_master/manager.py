@@ -294,7 +294,6 @@ class HttpServerManagerForPDMaster:
         p_node = None
         d_node = None
         pending_prefill_load_chars = None
-        prefill_dp_object = None
 
         try:
             p_node, d_node, selection_extra_info = await self.select_p_d_node(
@@ -303,9 +302,6 @@ class HttpServerManagerForPDMaster:
             if not p_node or not d_node:
                 logger.error(f"{origin_request_id}: No p_node or d_node found")
                 raise Exception(f"{origin_request_id}: No p_node or d_node found")
-
-            prefill_dp_rank = selection_extra_info.prefill_dp_rank
-            prefill_dp_object = p_node if prefill_dp_rank is None else p_node.dp_ranks[prefill_dp_rank]
 
             cache_age_seconds = None
             if selection_extra_info.cache_last_insert_time is not None:
@@ -359,8 +355,8 @@ class HttpServerManagerForPDMaster:
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
                 block_prompt = prompt + "".join(history_gen_token_strs)
                 pending_prefill_load_chars = len(block_prompt)
-                prefill_dp_object.dispatched_prompt_chars += pending_prefill_load_chars
-                prefill_dp_object.dispatched_req_num += 1
+                p_node.dispatched_prompt_chars += pending_prefill_load_chars
+                p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
@@ -369,21 +365,19 @@ class HttpServerManagerForPDMaster:
                     sampling_params,
                     multimodal_params,
                     request,
-                    prefill_dp_rank=prefill_dp_rank,
                 )
                 raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
-                    actual_prefill_dp_rank = metadata.pop("_prefill_dp_rank", None)
 
                     # 收到当前分段的任意输出，说明该请求已经完成 P 节点的 prefill 派发阶段。
                     # 立即归还 selector 中记录的在途 prompt 字符数和请求数，并通过置空确保每段只更新一次。
                     if pending_prefill_load_chars is not None:
-                        prefill_dp_object.dispatched_prompt_chars = max(
-                            0, prefill_dp_object.dispatched_prompt_chars - pending_prefill_load_chars
+                        p_node.dispatched_prompt_chars = max(
+                            0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
                         )
-                        prefill_dp_object.dispatched_req_num = max(0, prefill_dp_object.dispatched_req_num - 1)
+                        p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
                         pending_prefill_load_chars = None
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
@@ -398,12 +392,11 @@ class HttpServerManagerForPDMaster:
                     if origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
-                        if actual_prefill_dp_rank is not None:
-                            self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
-                        if actual_prefill_dp_rank is not None and not raw_finish_status.is_error_finished():
+                        self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
+                        if not raw_finish_status.is_error_finished():
                             # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
                             # 推理或已失败的请求被后续请求误判为可复用 cache。
-                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node, actual_prefill_dp_rank)
+                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_request_id, request_output, metadata, raw_finish_status
 
@@ -426,11 +419,9 @@ class HttpServerManagerForPDMaster:
             raise e
 
         finally:
-            if prefill_dp_object is not None and pending_prefill_load_chars is not None:
-                prefill_dp_object.dispatched_prompt_chars = max(
-                    0, prefill_dp_object.dispatched_prompt_chars - pending_prefill_load_chars
-                )
-                prefill_dp_object.dispatched_req_num = max(0, prefill_dp_object.dispatched_req_num - 1)
+            if p_node is not None and pending_prefill_load_chars is not None:
+                p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - pending_prefill_load_chars)
+                p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
             await self.remove_req(block_group_request_id)
         return
 
@@ -517,7 +508,6 @@ class HttpServerManagerForPDMaster:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
-        prefill_dp_rank: Optional[int] = None,
     ):
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
@@ -529,15 +519,8 @@ class HttpServerManagerForPDMaster:
         prefill_prompt_ids_event = req_status.prefill_prompt_ids_event
 
         old_max_new_tokens = sampling_params.max_new_tokens
-        p_params = SamplingParams.from_buffer_copy(sampling_params)
-        d_params = SamplingParams.from_buffer_copy(sampling_params)
-        p_params.max_new_tokens = 1
-        if prefill_dp_rank is not None:
-            assert 0 <= prefill_dp_rank < len(p_node.dp_ranks)
-            p_params.suggested_dp_index = prefill_dp_rank
-            # The P service's DP rank is unrelated to ranks in the D service.
-            d_params.suggested_dp_index = -1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, p_params, multimodal_params))))
+        sampling_params.max_new_tokens = 1
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -555,7 +538,10 @@ class HttpServerManagerForPDMaster:
         prompt_ids = prefill_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
-        await d_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, d_params, MultimodalParams()))))
+        sampling_params.max_new_tokens = old_max_new_tokens
+        await d_node.websocket.send_bytes(
+            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+        )
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -609,7 +595,6 @@ class HttpServerManagerForPDMaster:
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                            metadata["_prefill_dp_rank"] = req_status.prefill_dp_rank
                             yield sub_req_id, request_output, metadata, finish_status
                         else:
                             continue
@@ -648,8 +633,6 @@ class HttpServerManagerForPDMaster:
                 metadata = token[2]
                 if metadata.get("node_mode") == "prefill":
                     prompt_cache_len = metadata.get("prompt_cache_len", 0)
-                    if not token[3].is_error_finished():
-                        req_status.prefill_dp_rank = metadata["dp_rank"]
                     await req_status.put_tokens_to_front(new_tokens)
                     return prompt_cache_len
 
@@ -662,7 +645,6 @@ class HttpServerManagerForPDMaster:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
-        prefill_dp_rank: Optional[int] = None,
     ):
         if sampling_params.disable_prompt_cache:
             assert False, "pd mode dont support set disable_prompt_cache to True"
@@ -677,7 +659,7 @@ class HttpServerManagerForPDMaster:
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
         async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
-            p_node, d_node, prompt, sampling_params, multimodal_params, request, prefill_dp_rank=prefill_dp_rank
+            p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
                 raise ClientDisconnected(
@@ -802,8 +784,6 @@ class HttpServerManagerForPDMaster:
                                     req_status.event.set()
                             except:
                                 pass
-                    elif obj[0] == ObjType.HEARTBEAT:
-                        self.pd_manager.update_node_load_info(obj[1])
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
@@ -856,7 +836,6 @@ class ReqStatus:
         self.d_node: PD_Client_Obj = d_node
         self.error_info: Optional[str] = None
         self.is_server_busy = False
-        self.prefill_dp_rank: Optional[int] = None
 
     async def wait_to_ready(self):
         try:
@@ -925,6 +904,10 @@ class PDManager:
         if self.args.pd_master_mode == "elastic":
             return prefill_node_count >= 1 and decode_node_count >= 1
 
+        # pd_master_mode="1p1d" 等固定拓扑配置中的 P 数量表示 prefill 服务数。
+        # 例如一个 P 服务开启 DP 拆分后注册了 4 条连接，仍应计为 1 个 P 服务，
+        # 因此按 client_ip_port 去重，避免将其计为 4 个 P 而导致就绪检查失败。
+        prefill_node_count = len({node.client_ip_port for node in self.prefill_nodes})
         try:
             expected_prefill_node_count, expected_decode_node_count = (
                 int(node_count) for node_count in self.args.pd_master_mode[:-1].split("p")
@@ -993,13 +976,13 @@ class PDManager:
                     raise ValueError(error_info)
 
         pd_client.websocket = websocket
-        self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
+        self.url_to_pd_nodes[pd_client.connection_key] = pd_client
 
         if pd_client.mode == "prefill":
-            self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
+            self.prefill_nodes = [e for e in self.prefill_nodes if e.connection_key != pd_client.connection_key]
             self.prefill_nodes.append(pd_client)
         elif pd_client.mode == "decode":
-            self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
+            self.decode_nodes = [e for e in self.decode_nodes if e.connection_key != pd_client.connection_key]
             self.decode_nodes.append(pd_client)
         else:
             assert False, f"mode must in ['prefill', 'decode'], but get {pd_client.mode}"
@@ -1011,14 +994,18 @@ class PDManager:
 
     def remove_pd(self, pd_info_json):
         pd_client = PD_Client_Obj(**pd_info_json)
+        current = self.url_to_pd_nodes.get(pd_client.connection_key)
+        # 同一 key 可能已重新注册；旧连接退出时不能删除新连接。
+        if current is None or current.connection_id != pd_client.connection_id:
+            return
 
-        self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
-        self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
-        self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
+        self.url_to_pd_nodes.pop(pd_client.connection_key, None)
+        self.prefill_nodes = [e for e in self.prefill_nodes if e.connection_key != pd_client.connection_key]
+        self.decode_nodes = [e for e in self.decode_nodes if e.connection_key != pd_client.connection_key]
 
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
-        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
+        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} dp_index: {pd_client.dp_index} removed")
         return
 
     def update_node_load_info(self, load_info: Optional[dict]):
@@ -1026,22 +1013,16 @@ class PDManager:
         load_info: 节点负载信息字典，内容格式如下，可以为 None
         {
         "total_token_usage_rate": xxxx,
-        "dp_loads": [xxxx, ...],  # 仅 P 节点上报
-        "client_ip_port": xxxx,
+        "connection_key": xxxx,
         }
         """
         try:
             if load_info is None:
                 return
-            client_ip_port = load_info["client_ip_port"]
+            connection_key = load_info["connection_key"]
             total_token_usage_rate = load_info["total_token_usage_rate"]
-            pd_client = self.url_to_pd_nodes.get(client_ip_port)
+            pd_client = self.url_to_pd_nodes.get(connection_key)
             pd_client.run_status.total_token_usage_rate = total_token_usage_rate
-            if pd_client.mode == "prefill":
-                dp_loads = load_info["dp_loads"]
-                assert len(dp_loads) == len(pd_client.dp_ranks)
-                for rank, load in zip(pd_client.dp_ranks, dp_loads):
-                    rank.token_usage_rate = float(load)
         except BaseException as e:
             logger.warning(f"udpate node load info failed, load_info: {load_info} error: {str(e)}")
         return

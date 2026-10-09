@@ -996,9 +996,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
             asyncio.create_task(self.loop_for_request())
 
         if self.pd_mode.is_P_or_D():
-            from lightllm.server.httpserver.pd_loop import pd_handle_loop
+            from lightllm.server.httpserver.pd_loop import pd_handle_loop, timer_log
 
-            asyncio.create_task(pd_handle_loop(self))
+            asyncio.create_task(timer_log(self))
+            if self.pd_mode.is_P() and self.args.use_dp_split_mode_connect_pd_master:
+                for dp_index in range(max(1, self.args.dp // self.args.nnodes)):
+                    asyncio.create_task(pd_handle_loop(self, dp_index))
+            else:
+                asyncio.create_task(pd_handle_loop(self))
 
         while True:
             try:
@@ -1038,8 +1043,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     "mtp_verify_step_num": req.mtp_verify_step_num,
                                 }
                                 metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
-                                if self.args.run_mode in ("prefill", "decode"):
-                                    metadata["dp_rank"] = req.sample_params.suggested_dp_index
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
 
