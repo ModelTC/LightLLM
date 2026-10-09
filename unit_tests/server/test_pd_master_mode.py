@@ -344,7 +344,9 @@ def test_pd_master_stop_output_keeps_choices_separate(include):
         # Prefill's first token and subsequent decode tokens arrive in one stream.
         yield 80, "firstE", {"id": 1}, FinishStatus()
         yield 81, "second", {"id": 2}, FinishStatus()
-        yield 80, "NDextra", {"id": 3}, FinishStatus(FinishStatus.FINISHED_STOP)
+        yield 80, "NDextra", {"id": 3, "_stop_output_offset": -5 if include else -8}, FinishStatus(
+            FinishStatus.FINISHED_STOP
+        )
         yield 81, "EN", {"id": 4}, FinishStatus(FinishStatus.FINISHED_LENGTH)
 
     manager._generate = fake_generate

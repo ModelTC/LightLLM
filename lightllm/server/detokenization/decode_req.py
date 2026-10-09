@@ -50,10 +50,10 @@ class DecodeReq:
                 self.reasoning_stop_state = ReasoningStopState(
                     args.reasoning_parser,
                     tokenizer,
-                    self.req.sample_params._stop_force_reasoning,
+                    self.req.sample_params._reasoning_status,
                     self.prompt_ids[:-1] if is_pd_decode_mode else self.prompt_ids,
                 )
-                self.req._stop_reasoning = self.reasoning_stop_state.in_reasoning
+                self.req._in_reasoning = self.reasoning_stop_state.in_reasoning
 
     def match_stop_sequences(self, token_id, new_text) -> bool:
         # Simulated finish markers must not change the reasoning state of a PD continuation.
@@ -64,7 +64,7 @@ class DecodeReq:
             return False
         if self.reasoning_stop_state is not None:
             allowed = self.reasoning_stop_state.update(token_id)
-            self.req._stop_reasoning = self.reasoning_stop_state.in_reasoning
+            self.req._in_reasoning = self.reasoning_stop_state.in_reasoning
             if not allowed:
                 self.stop_str_tail = ""
                 self.stop_token_tail.clear()
@@ -80,8 +80,8 @@ class DecodeReq:
                 matched_stop = stop_str
         self.stop_str_tail = tail_str[-(self.stop_str_max_len - 1) :] if self.stop_str_max_len > 1 else ""
         if matched_stop:
-            self.req.stop_sequence_match_length = len(matched_stop)
-            self.req.stop_sequence_match_suffix_length = len(tail_str) - stop_index - len(matched_stop)
+            stop_end = stop_index + (len(matched_stop) if self.req.sample_params.include_stop_str_in_output else 0)
+            self.req.stop_output_offset = stop_end - len(tail_str)
             logger.debug(
                 f"req_id {self.request_id} Found stop sequence: stop_str='{matched_stop}', tail_str='{tail_str}'"
             )

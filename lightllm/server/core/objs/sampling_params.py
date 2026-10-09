@@ -285,7 +285,7 @@ class SamplingParams(ctypes.Structure):
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
         ("include_stop_str_in_output", ctypes.c_bool),
-        ("_stop_force_reasoning", ctypes.c_int),  # -1 uses the configured detector's default
+        ("_reasoning_status", ctypes.c_int),  # -1 uses the configured detector's default
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
         # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
@@ -383,7 +383,8 @@ class SamplingParams(ctypes.Structure):
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences, tokenizer)
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
-        self._stop_force_reasoning = kwargs.get("_stop_force_reasoning", -1)
+        # Initial state for stop matching: -1 uses the detector default, 0 content, 1 reasoning.
+        self._reasoning_status = kwargs.get("_reasoning_status", -1)
 
         # Initialize allowed_token_ids
         allowed_token_ids = kwargs.get("allowed_token_ids", [])
@@ -505,7 +506,7 @@ class SamplingParams(ctypes.Structure):
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
             "include_stop_str_in_output": self.include_stop_str_in_output,
-            "_stop_force_reasoning": self._stop_force_reasoning,
+            "_reasoning_status": self._reasoning_status,
             "best_of": self.best_of,
             "input_penalty": self.input_penalty,
             "regular_constraint": self.regular_constraint.to_str(),

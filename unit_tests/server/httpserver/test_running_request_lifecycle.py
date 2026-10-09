@@ -77,7 +77,9 @@ def test_stop_output_is_filtered_only_for_complete_normal_requests(mode, include
 
         async def results(*args):
             yield 123, "helloE", {"id": 1}, FinishStatus()
-            yield 123, "NDextra", {"id": 2}, FinishStatus(FinishStatus.FINISHED_STOP)
+            yield 123, "NDextra", {"id": 2, "_stop_output_offset": -5 if include else -8}, FinishStatus(
+                FinishStatus.FINISHED_STOP
+            )
 
         manager._wait_to_token_package = results
         params = _sampling_params()
