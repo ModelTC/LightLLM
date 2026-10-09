@@ -245,6 +245,7 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
+        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
         p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
@@ -285,6 +286,7 @@ def test_pd_master_request_rejection_becomes_server_busy_error():
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
+        manager.metric_client = MagicMock()
         manager.infos_queues = None
 
         req_status = ReqStatus(123, MagicMock(), MagicMock())

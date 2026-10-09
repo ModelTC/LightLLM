@@ -19,10 +19,37 @@ original behavior for clients and proxies that require response status and
 headers immediately.
 """
 
+import time
+
 from fastapi.responses import StreamingResponse
 from starlette.types import Send
 
 from lightllm.utils.envs_utils import get_env_start_args
+
+
+_pd_send_next_metric_time = 0.0
+_pd_send_max_duration = 0.0
+_pd_send_max_bytes = 0
+
+
+def _record_pd_send_metrics(duration, body_size):
+    global _pd_send_next_metric_time, _pd_send_max_duration, _pd_send_max_bytes
+
+    _pd_send_max_duration = max(_pd_send_max_duration, duration)
+    _pd_send_max_bytes = max(_pd_send_max_bytes, body_size)
+    now = time.monotonic()
+    if now < _pd_send_next_metric_time:
+        return
+
+    from lightllm.server.api_http import g_objs
+
+    g_objs.httpserver_manager.metric_client.histogram_observe(
+        "lightllm_pd_master_http_send_duration", _pd_send_max_duration
+    )
+    g_objs.httpserver_manager.metric_client.gauge_set("lightllm_pd_master_http_send_bytes", _pd_send_max_bytes)
+    _pd_send_max_duration = 0.0
+    _pd_send_max_bytes = 0
+    _pd_send_next_metric_time = now + 1.0
 
 
 class CustomStreamingResponse(StreamingResponse):
@@ -39,6 +66,17 @@ class CustomStreamingResponse(StreamingResponse):
     """
 
     async def stream_response(self, send: Send) -> None:
+        if get_env_start_args().run_mode == "pd_master":
+            original_send = send
+
+            async def send(message):
+                if message["type"] != "http.response.body" or not message.get("body"):
+                    await original_send(message)
+                    return
+                send_start = time.monotonic()
+                await original_send(message)
+                _record_pd_send_metrics(time.monotonic() - send_start, len(message["body"]))
+
         # Some clients and proxies require headers before first-token work is
         # complete. Let deployments opt out of the delayed response start.
         if get_env_start_args().disable_delay_response_start:

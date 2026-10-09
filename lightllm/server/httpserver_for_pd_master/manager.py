@@ -574,6 +574,7 @@ class HttpServerManagerForPDMaster:
             ready_kv_len=decode_node_info.ready_kv_len,
         )
 
+        next_request_queue_metric_time = 0.0
         while True:
             await req_status.wait_to_ready()
             req_status.raise_if_error()
@@ -583,6 +584,11 @@ class HttpServerManagerForPDMaster:
                     reason="fetch_pd_stream decode period check network disconnected",
                 )
             if await req_status.can_read(self.req_id_to_out_inf):
+                queue_duration = req_status.oldest_age()
+                now = time.monotonic()
+                if now >= next_request_queue_metric_time:
+                    self.metric_client.histogram_observe("lightllm_pd_master_request_queue_duration", queue_duration)
+                    next_request_queue_metric_time = now + 1.0
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
@@ -756,6 +762,7 @@ class HttpServerManagerForPDMaster:
 
     async def handle_loop(self):
         self.infos_queues = AsyncQueue()
+        next_ingress_queue_metric_time = 0.0
         asyncio.create_task(self.timer_log())
 
         use_config_server = self.args.config_server_host and self.args.config_server_port
@@ -766,7 +773,13 @@ class HttpServerManagerForPDMaster:
             asyncio.create_task(register_loop(self))
 
         while True:
-            objs = await self.infos_queues.wait_to_get_all_data()
+            await self.infos_queues.wait_to_ready()
+            queue_duration = self.infos_queues.oldest_age()
+            objs = await self.infos_queues.get_all_data()
+            now = time.monotonic()
+            if objs and now >= next_ingress_queue_metric_time:
+                self.metric_client.histogram_observe("lightllm_pd_master_ingress_queue_duration", queue_duration)
+                next_ingress_queue_metric_time = now + 1.0
 
             try:
                 for obj in objs:
@@ -780,6 +793,8 @@ class HttpServerManagerForPDMaster:
                             try:
                                 req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
                                 async with req_status.lock:
+                                    if not req_status.out_token_info_list:
+                                        req_status.oldest_token_time = time.monotonic()
                                     req_status.out_token_info_list.append((sub_req_id, text, metadata, finish_status))
                                     req_status.event.set()
                             except:
@@ -832,6 +847,7 @@ class ReqStatus:
         self.up_status_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
+        self.oldest_token_time = None
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
         self.error_info: Optional[str] = None
@@ -876,13 +892,21 @@ class ReqStatus:
         async with self.lock:
             ans = self.out_token_info_list.copy()
             self.out_token_info_list.clear()
+            self.oldest_token_time = None
         return ans
+
+    def oldest_age(self):
+        if self.oldest_token_time is None:
+            return 0.0
+        return time.monotonic() - self.oldest_token_time
 
     async def put_tokens_to_front(self, token_list: List[Tuple[int, str, dict, FinishStatus]]):
         if not token_list:
             return
 
         async with self.lock:
+            if not self.out_token_info_list:
+                self.oldest_token_time = time.monotonic()
             merged_tokens = token_list + self.out_token_info_list
             self.out_token_info_list.clear()
             self.out_token_info_list.extend(merged_tokens)
