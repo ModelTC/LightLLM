@@ -25,6 +25,7 @@ from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
+from lightllm.server.core.objs.stop_sequence_output import StopSequenceOutput
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
@@ -495,13 +496,21 @@ class HttpServerManager(HttpRlManagerHelper, object):
             }
 
             is_first_gen_token = True
+            filter_stop_output = self.pd_mode.is_normal() and bool(sampling_params.stop_sequences.to_strings())
+            stop_outputs = {}
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
                 # 只有第一个生成的 token 的 metadata 中包含 input_usage
                 if is_first_gen_token:
                     metadata["input_usage"] = input_usage
                     is_first_gen_token = False
 
-                yield sub_req_id, request_output, metadata, finish_status
+                if filter_stop_output:
+                    if sub_req_id not in stop_outputs:
+                        stop_outputs[sub_req_id] = StopSequenceOutput(sampling_params)
+                    for output in stop_outputs[sub_req_id].process(sub_req_id, request_output, metadata, finish_status):
+                        yield output
+                else:
+                    yield sub_req_id, request_output, metadata, finish_status
 
         except (asyncio.CancelledError, BaseException) as e:
             if isinstance(e, ClientDisconnected):

@@ -105,6 +105,19 @@
     data:{"token": {"id": 279, "text": " the", "logprob": -1.5594439506530762, "special": false, "count_output_tokens": 3, "prompt_tokens": 4}, "generated_text": null, "finished": true, "finish_reason": "length", "details": null}
 
 
+停止字符串
+~~~~~~~~~~~~
+
+``/generate`` 和 ``/generate_stream`` 使用 ``parameters.stop_sequences`` 设置
+停止字符串，可以传入字符串或字符串列表。``parameters.include_stop_str_in_output``
+默认为 ``false``，返回文本会移除匹配到的 stop 字符串及同一 token 中其后的文本；
+设为 ``true`` 则保留 stop 字符串。此参数只影响字符串 stop，token ID 序列的行为保持不变。
+
+流式和非流式遵循相同设置。默认排除 stop 时，流式输出会暂存覆盖末尾
+``最长 stop 字符数 - 1`` 个字符的完整 token，防止跨 token 的 stop 片段提前发出。
+请求结束时会返回未匹配的尾部。token ID、logprob、输出 token 计数和结束原因的含义保持不变。
+
+
 :code:`POST /get_score`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 reward 类模型，获取对话分数

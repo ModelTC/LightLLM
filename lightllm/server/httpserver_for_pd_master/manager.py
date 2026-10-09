@@ -14,6 +14,7 @@ from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
 from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInfo
 from lightllm.server.core.objs import SamplingParams, StartArgs
+from lightllm.server.core.objs.stop_sequence_output import StopSequenceOutput
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
 from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
@@ -156,9 +157,18 @@ class HttpServerManagerForPDMaster:
         if was_idle:
             self.latest_success_infer_time = time.time()
         try:
+            filter_stop_output = bool(sampling_params.stop_sequences.to_strings())
+            stop_outputs = {}
             async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
                 async for result in generator:
-                    yield result
+                    if filter_stop_output:
+                        sub_req_id = result[0]
+                        if sub_req_id not in stop_outputs:
+                            stop_outputs[sub_req_id] = StopSequenceOutput(sampling_params)
+                        for output in stop_outputs[sub_req_id].process(*result):
+                            yield output
+                    else:
+                        yield result
         finally:
             self.running_request_count -= 1
 

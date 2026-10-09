@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lightllm.server.core.objs import SamplingParams
+from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
@@ -60,6 +60,49 @@ def _sampling_params():
 
 def _multimodal_params():
     return SimpleNamespace(audios=[], images=[], verify_and_preload=AsyncMock())
+
+
+@pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D, NodeRole.P])
+@pytest.mark.parametrize("include", [False, True])
+def test_stop_output_is_filtered_only_for_complete_normal_requests(mode, include):
+    async def run():
+        manager = _make_manager(mode)
+        manager.tokenizer = None
+        manager.enable_multimodal = False
+        manager.args.chunked_prefill_size = 1
+        manager._alloc_shm_req_indexes = AsyncMock(return_value=[0])
+        manager.shm_req_manager.async_get_req_obj_by_index = AsyncMock(return_value=MagicMock())
+        manager.transfer_to_next_module_or_node = AsyncMock()
+
+        async def results(*args):
+            yield 123, "helloE", {"id": 1}, FinishStatus()
+            yield 123, "NDextra", {"id": 2}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        manager._wait_to_token_package = results
+        params = _sampling_params()
+        params.stop_sequences.initialize([[1, 2]], None)
+        params.stop_sequences.groups[0].sequence_str = b"END"
+        params.stop_sequences.groups[0].sequence_str_len = 3
+        params.include_stop_str_in_output = include
+        websocket = AsyncMock() if mode == NodeRole.P else None
+        pd_event = None
+        if mode == NodeRole.P:
+            pd_event = asyncio.Event()
+            pd_event.decode_node_info = SimpleNamespace(ready_kv_len=1)
+            pd_event.set()
+
+        results = [
+            result
+            async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
+        ]
+        expected = "helloENDextra" if mode != NodeRole.NORMAL else ("helloEND" if include else "hello")
+        assert "".join(result[1] for result in results) == expected
+        assert [result[2]["id"] for result in results] == [1, 2]
+        assert results[0][2]["input_usage"]["input_text_tokens"] == 3
+        assert results[-1][3].get_finish_reason() == "stop"
+        manager._unregister_running_request.assert_awaited_once()
+
+    asyncio.run(run())
 
 
 def _req_status(reqs):
