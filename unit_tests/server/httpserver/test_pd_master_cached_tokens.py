@@ -165,18 +165,18 @@ def test_pd_continuation_carries_reasoning_stop_state(monkeypatch, in_reasoning)
     params = SamplingParams()
     params.n = params.best_of = 1
     params.max_new_tokens = 3
-    params._stop_force_reasoning = 1
+    params._reasoning_status = 1
     segment_modes = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
-        segment_modes.append(sp._stop_force_reasoning)
+        segment_modes.append(sp._reasoning_status)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segment_modes) == 1:
             yield sp.group_request_id, "reason", dict(metadata), FinishStatus()
             yield (
                 sp.group_request_id,
                 "",
-                {**metadata, "_stop_reasoning": in_reasoning},
+                {**metadata, "_in_reasoning": in_reasoning},
                 FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
             )
         else:

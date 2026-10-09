@@ -355,7 +355,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     if request.stop is not None:
         sampling_params_dict["stop_sequences"] = request.stop
         if get_env_start_args().reasoning_parser:
-            sampling_params_dict["_stop_force_reasoning"] = int(_is_force_thinking_mode(request))
+            # The prompt may already open reasoning; generated tokens may omit the opening marker.
+            sampling_params_dict["_reasoning_status"] = int(_is_force_thinking_mode(request))
 
     # Structured output handling
     if request.response_format:

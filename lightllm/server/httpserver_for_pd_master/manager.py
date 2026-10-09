@@ -14,7 +14,6 @@ from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
 from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInfo
 from lightllm.server.core.objs import SamplingParams, StartArgs
-from lightllm.server.core.objs.stop_sequence_output import StopSequenceOutput
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
 from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
@@ -22,7 +21,7 @@ from fastapi import Request
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
-from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.server.httpserver.manager import AsyncQueue, StopSequenceOutput
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -390,8 +389,8 @@ class HttpServerManagerForPDMaster:
                         p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
                         pending_prefill_load_chars = None
 
-                    if "_stop_reasoning" in metadata:
-                        origin_sampling_params._stop_force_reasoning = int(metadata["_stop_reasoning"])
+                    if "_in_reasoning" in metadata:
+                        origin_sampling_params._reasoning_status = int(metadata["_in_reasoning"])
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。

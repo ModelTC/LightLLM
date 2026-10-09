@@ -11,6 +11,7 @@ import hashlib
 import datetime
 import pickle
 from array import array
+from collections import deque
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -25,7 +26,6 @@ from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
-from lightllm.server.core.objs.stop_sequence_output import StopSequenceOutput
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
@@ -1068,17 +1068,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                         self.tokenizer,
                                         enable_return_routed_experts=self.args.enable_return_routed_experts,
                                     )
-                                    if (
-                                        req.sample_params.stop_sequences.size > 0
-                                        and self.args.reasoning_parser
-                                        and not get_stop_in_reasoning()
-                                    ):
-                                        metadata["_stop_sequence_match"] = (
-                                            (req.stop_sequence_match_length, req.stop_sequence_match_suffix_length)
-                                            if req.stop_str_matched and req.stop_sequence_match_length > 0
-                                            else None
-                                        )
-                                        metadata["_stop_reasoning"] = req._stop_reasoning
+                                    if req.sample_params.stop_sequences.size > 0:
+                                        metadata["_stop_output_offset"] = req.stop_output_offset
+                                        if self.args.reasoning_parser and not get_stop_in_reasoning():
+                                            metadata["_in_reasoning"] = req._in_reasoning
 
                                     # mark_simulated_finished 追加的 EOS 只负责唤醒 Detoken/HTTP wait。
                                     # 对外将它转换成无 token 的 finish marker，VERL 会按 id=None
@@ -1120,6 +1113,37 @@ class HttpServerManager(HttpRlManagerHelper, object):
         """注销一个结束运行的请求，必须在 finally 中与登记操作配对调用。"""
         async with self._run_reqs_count_lock:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
+
+
+class StopSequenceOutput:
+    """Buffer one choice's text at the complete request boundary, preserving token metadata."""
+
+    def __init__(self, sampling_params: SamplingParams):
+        stops = sampling_params.stop_sequences.to_strings()
+        self.buffer_length = (
+            max((len(stop) for stop in stops), default=1) - 1 if not sampling_params.include_stop_str_in_output else 0
+        )
+        self.pending_tokens = deque()
+        self.pending_length = 0
+
+    def process(self, sub_req_id, text, metadata, finish_status):
+        stop_offset = metadata.pop("_stop_output_offset", 0)
+        metadata.pop("_in_reasoning", None)
+        self.pending_tokens.append((sub_req_id, text, metadata, finish_status))
+        self.pending_length += len(text)
+        finished = finish_status.is_finished()
+        output_end = self.pending_length + stop_offset if finished else self.pending_length - self.buffer_length
+
+        while self.pending_tokens:
+            sub_req_id, token_text, metadata, token_finish_status = self.pending_tokens[0]
+            # Hold whole tokens so text stays associated with its original ID/logprob.
+            if not finished and len(token_text) > output_end:
+                break
+            self.pending_tokens.popleft()
+            self.pending_length -= len(token_text)
+            visible_text = token_text[: max(0, output_end)]
+            output_end -= len(token_text)
+            yield sub_req_id, visible_text, metadata, token_finish_status
 
 
 class ReqStatus:

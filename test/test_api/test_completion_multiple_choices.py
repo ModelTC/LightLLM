@@ -11,7 +11,7 @@ from lightllm.server.api_openai import (
     _collect_generation_results,
 )
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.core.objs.stop_sequence_output import StopSequenceOutput
+from lightllm.server.httpserver.manager import StopSequenceOutput
 
 
 class _FinishStatus:
@@ -148,7 +148,10 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
             metadata = {"prompt_tokens": 4, "prompt_cache_len": 0, "logprobs": {}}
             for index, text in enumerate(["helloE", "NDextra"], 1):
                 finish = FinishStatus(FinishStatus.FINISHED_STOP if index == 2 else FinishStatus.NO_FINISH)
-                for result in output.process(80, text, {**metadata, "id": index, "logprob": -index}, finish):
+                token_metadata = {**metadata, "id": index, "logprob": -index}
+                if index == 2:
+                    token_metadata["_stop_output_offset"] = -5 if include else -8
+                for result in output.process(80, text, token_metadata, finish):
                     yield result
 
         return results()
@@ -199,7 +202,7 @@ def test_stop_scope_receives_request_thinking_mode(monkeypatch, thinking):
     from lightllm.server import reasoning_parser
 
     def generate(prompt, sampling_params, multimodal_params, request):
-        assert sampling_params._stop_force_reasoning == int(thinking)
+        assert sampling_params._reasoning_status == int(thinking)
 
         async def results():
             yield 80, "hello", {"prompt_tokens": 4, "id": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
