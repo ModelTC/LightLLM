@@ -218,6 +218,8 @@ def test_prefill_registration_preserves_existing_inflight_prompt_chars():
                 "client_ip_port": client_ip_port,
                 "mode": "prefill",
                 "start_args": {
+                    "dp": args.dp,
+                    "nnodes": args.nnodes,
                     "max_req_total_len": args.max_req_total_len,
                     "max_image_pixels": args.max_image_pixels,
                     "disable_image_resize": args.disable_image_resize,
@@ -246,6 +248,8 @@ def test_prefill_reconnection_preserves_other_nodes_inflight_prompt_chars():
             "client_ip_port": client_ip_port,
             "mode": "prefill",
             "start_args": {
+                "dp": args.dp,
+                "nnodes": args.nnodes,
                 "max_req_total_len": args.max_req_total_len,
                 "max_image_pixels": args.max_image_pixels,
                 "disable_image_resize": args.disable_image_resize,

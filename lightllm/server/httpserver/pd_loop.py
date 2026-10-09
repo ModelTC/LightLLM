@@ -283,7 +283,7 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: Clien
 async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
     heartbeat_interval_seconds = 15
     while True:
-        await websocket.send(pickle.dumps((ObjType.HEARTBEAT,)))
+        await websocket.send(pickle.dumps((ObjType.HEARTBEAT, _get_load_info())))
         await asyncio.sleep(heartbeat_interval_seconds)
 
 
@@ -306,4 +306,6 @@ def _get_load_info() -> dict:
         "total_token_usage_rate": mean_node_load,
         "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}",
     }
+    if args.run_mode == "prefill":
+        load_info["dp_loads"] = current_load
     return load_info

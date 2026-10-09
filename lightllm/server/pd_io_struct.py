@@ -1,6 +1,7 @@
 import enum
 import time
 import copy
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
@@ -62,16 +63,38 @@ class PD_Client_Obj:
     dispatched_prompt_chars: int = 0
     # 当前派发到该节点且尚未产出首 token 的请求数。
     dispatched_req_num: int = 0
+    dp_ranks: List["PDDPRank"] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
             error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""
             logger.error(error_info)
             raise ValueError(error_info)
+        if self.mode == "prefill":
+            self.dp_ranks = [
+                PDDPRank(self, dp_rank) for dp_rank in range(max(1, self.start_args["dp"] // self.start_args["nnodes"]))
+            ]
         return
 
     def to_llm_url(self):
         return f"http://{self.client_ip_port}/pd_generate_stream"
+
+
+@dataclass
+class PDDPRank:
+    """A node-local data-parallel rank, not a TP rank or CUDA device ID."""
+
+    node: PD_Client_Obj = field(repr=False)
+    dp_rank: int
+    dispatched_prompt_chars: int = 0
+    dispatched_req_num: int = 0
+    token_usage_rate: float = 0.0
+    # New registration objects must not inherit a previous process's cache history.
+    registration_id: str = field(default_factory=lambda: uuid.uuid4().hex, init=False)
+
+    @property
+    def cache_key(self) -> str:
+        return f"{self.node.client_ip_port}/dp{self.dp_rank}/{self.registration_id}"
 
 
 @dataclass

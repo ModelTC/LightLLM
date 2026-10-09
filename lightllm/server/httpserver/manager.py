@@ -1038,6 +1038,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     "mtp_verify_step_num": req.mtp_verify_step_num,
                                 }
                                 metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
+                                if self.args.run_mode in ("prefill", "decode"):
+                                    metadata["dp_rank"] = req.sample_params.suggested_dp_index
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
 

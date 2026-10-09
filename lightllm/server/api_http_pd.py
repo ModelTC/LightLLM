@@ -14,7 +14,6 @@ import pickle
 import ujson as json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
 
@@ -40,8 +39,6 @@ async def register_and_keep_alive(websocket: WebSocket):
         while True:
             data = await asyncio.wait_for(websocket.receive_bytes(), timeout=heartbeat_timeout_seconds)
             obj = pickle.loads(data)
-            if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
-                continue
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
     except asyncio.TimeoutError:

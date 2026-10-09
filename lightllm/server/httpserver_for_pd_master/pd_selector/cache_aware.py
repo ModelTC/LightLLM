@@ -2,13 +2,13 @@
 PD Master 的 cache-aware prefill 选点策略。
 
 目标：
-  在多 prefill 节点场景下，尽量把 prompt 前缀相近的请求打到同一 P 节点，
-  以提高该节点上的前缀 KV cache 命中率；同时在节点负载差距过大时优先做
+  在多 prefill 节点场景下，尽量把 prompt 前缀相近的请求打到同一节点的 DP rank，
+  以提高 DP 本地前缀 KV cache 命中率；同时在 rank 负载差距过大时优先做
   负载均衡，避免热点。
 
 实现要点：
   - 用前缀树（见 PromptCacheTree）记录「成功进入推理的 prompt -> 处理它的 worker」；
-  - 树中的 prefill_node 对应 worker.client_ip_port；
+  - 树中的 prefill_node 对应节点注册实例 + 本地 DP rank，不保证 KV 仍然驻留；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
   - 根据推理侧返回的平均 prompt cache 命中率，动态调整 cache 亲和与负载均衡的权重；
   - 优先使用 dispatched_req_num 为 0 的空闲节点，避免 GPU 闲置；
@@ -19,10 +19,11 @@ PD Master 的 cache-aware prefill 选点策略。
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.server.pd_io_struct import PDDPRank
 from lightllm.utils.envs_utils import get_pd_master_recursion_limit
 from lightllm.utils.log_utils import init_logger
 
@@ -113,7 +114,7 @@ class CacheAwarePolicy:
         )
         self.balance_rel_threshold_controller = BalanceRelThresholdController()
 
-    def select_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
+    def select_worker(self, workers: List[PDDPRank], request_text: str) -> Optional[PDDPRank]:
         """
         为一次请求选择 prefill worker。
 
@@ -139,6 +140,10 @@ class CacheAwarePolicy:
         if len(request_text) <= 1:
             raise ValueError(f"request_text length must be > 1, got {len(request_text)}")
 
+        # Capacity pressure is reported by the worker; retain a choice if all ranks are full.
+        available_workers = [worker for worker in workers if worker.token_usage_rate < 1.0]
+        workers = available_workers or workers
+
         # ---- 1. 空闲优先：避免有可用 GPU 闲置 ----
         idle_worker = self._select_idle_worker(workers, request_text)
         if idle_worker is not None:
@@ -149,26 +154,26 @@ class CacheAwarePolicy:
         selected_worker = self._select_worker_by_cache_and_load(workers, cache_worker, len(request_text))
         return selected_worker
 
-    def get_estimated_cache_info(self, selected_worker: PD_Client_Obj, request_text: str) -> PDSelectionExtraInfo:
+    def get_estimated_cache_info(self, selected_worker: PDDPRank, request_text: str) -> PDSelectionExtraInfo:
         """查询最终选中节点的输入 cache 命中率和最近插入时间。"""
         result = self.prompt_cache_tree.prefix_match(request_text)
-        if result.prefill_node != selected_worker.client_ip_port or result.input_char_count == 0:
+        if result.prefill_node != selected_worker.cache_key or result.input_char_count == 0:
             return PDSelectionExtraInfo()
         return PDSelectionExtraInfo(
             estimated_cache_hit_rate=result.matched_char_count / result.input_char_count,
             cache_last_insert_time=result.last_insert_time,
         )
 
-    def insert_prompt_cache(self, request_text: str, selected_worker: PD_Client_Obj) -> None:
+    def insert_prompt_cache(self, request_text: str, selected_worker: PDDPRank) -> None:
         """在请求成功进入推理后，记录 prompt 与实际执行的 Prefill 节点。"""
-        self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
+        self.prompt_cache_tree.insert(request_text, selected_worker.cache_key)
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         """记录推理侧上报的真实 cache 命中率，并更新动态负载阈值。"""
         self.balance_rel_threshold_controller.append(cache_hit_rate)
         self.balance_rel_threshold_controller.update_config(self.config)
 
-    def _get_cache_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
+    def _get_cache_worker(self, workers: List[PDDPRank], request_text: str) -> Optional[PDDPRank]:
         """在指定候选节点中返回达到匹配阈值的 cache 节点。"""
         result = self.prompt_cache_tree.prefix_match(request_text)
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
@@ -184,37 +189,40 @@ class CacheAwarePolicy:
             return None
 
         for worker in workers:
-            if worker.client_ip_port == result.prefill_node:
+            if worker.cache_key == result.prefill_node:
                 return worker
         return None
 
-    def _select_idle_worker(self, workers: List[PD_Client_Obj], request_text: str) -> Optional[PD_Client_Obj]:
+    def _select_idle_worker(self, workers: List[PDDPRank], request_text: str) -> Optional[PDDPRank]:
         """优先选择空闲节点；多个空闲节点之间优先复用 cache。"""
         idle_workers = [worker for worker in workers if worker.dispatched_req_num == 0]
         if not idle_workers:
             return None
 
         cache_worker = self._get_cache_worker(idle_workers, request_text) if len(idle_workers) > 1 else None
-        selected_worker = cache_worker or min(
-            idle_workers,
-            key=lambda worker: (worker.dispatched_prompt_chars, worker.client_ip_port),
+        min_load = min(worker.dispatched_prompt_chars for worker in idle_workers)
+        selected_worker = cache_worker or random.choice(
+            [worker for worker in idle_workers if worker.dispatched_prompt_chars == min_load]
         )
         logger.info(
             f"CacheAwarePolicy: select idle worker, idle_worker_num={len(idle_workers)}, "
-            f"cache_worker={cache_worker.client_ip_port if cache_worker else None}, "
+            f"cache_worker={cache_worker.cache_key if cache_worker else None}, "
             f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
-            f"selected_worker={selected_worker.client_ip_port}"
+            f"selected_worker={selected_worker.cache_key}"
         )
         return selected_worker
 
     def _select_worker_by_cache_and_load(
         self,
-        workers: List[PD_Client_Obj],
-        cache_worker: Optional[PD_Client_Obj],
+        workers: List[PDDPRank],
+        cache_worker: Optional[PDDPRank],
         request_load: int,
-    ) -> PD_Client_Obj:
+    ) -> PDDPRank:
         """所有节点都忙时，在 cache 亲和与 prompt 负载之间选择节点。"""
-        least_loaded_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
+        min_load = min(worker.dispatched_prompt_chars for worker in workers)
+        least_loaded_worker = random.choice(
+            [worker for worker in workers if worker.dispatched_prompt_chars == min_load]
+        )
         least_projected_load = least_loaded_worker.dispatched_prompt_chars + request_load
         cache_projected_load = None
         cache_worker_is_overloaded = False
@@ -228,14 +236,14 @@ class CacheAwarePolicy:
             selected_worker = cache_worker
 
         logger.info(
-            f"CacheAwarePolicy: cache_worker={cache_worker.client_ip_port if cache_worker else None}, "
+            f"CacheAwarePolicy: cache_worker={cache_worker.cache_key if cache_worker else None}, "
             f"cache_worker_load={cache_worker.dispatched_prompt_chars if cache_worker else None}, "
             f"cache_projected_load={cache_projected_load}, "
-            f"least_loaded_worker={least_loaded_worker.client_ip_port}, "
+            f"least_loaded_worker={least_loaded_worker.cache_key}, "
             f"least_loaded_worker_load={least_loaded_worker.dispatched_prompt_chars}, "
             f"least_projected_load={least_projected_load}, "
             f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
             f"cache_worker_is_overloaded={cache_worker_is_overloaded}, "
-            f"selected_worker={selected_worker.client_ip_port}"
+            f"selected_worker={selected_worker.cache_key}"
         )
         return selected_worker

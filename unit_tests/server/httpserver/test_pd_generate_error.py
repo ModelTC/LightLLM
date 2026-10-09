@@ -12,7 +12,7 @@ from lightllm.server.httpserver_for_pd_master.manager import (
     HttpServerManagerForPDMaster,
     ReqStatus,
 )
-from lightllm.server.pd_io_struct import ObjType
+from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
 
 
@@ -275,6 +275,106 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
             handle_task.cancel()
             with suppress(asyncio.CancelledError):
                 await handle_task
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+def test_heartbeat_reports_and_updates_role_specific_loads(monkeypatch, mode):
+    from lightllm.server import api_http
+    from lightllm.server.httpserver import pd_loop
+    from lightllm.server.httpserver_for_pd_master.manager import PDManager
+    from lightllm.server.core.objs import StartArgs
+
+    node = PD_Client_Obj(1, "p:8000", mode, {"dp": 8, "nnodes": 2})
+    manager = PDManager(StartArgs())
+    manager.url_to_pd_nodes = {node.client_ip_port: node}
+    monkeypatch.setattr(
+        api_http,
+        "g_objs",
+        SimpleNamespace(
+            args=SimpleNamespace(dp=8, nnodes=2, run_mode=mode),
+            shared_token_load=SimpleNamespace(get_dynamic_max_load=lambda rank: [0.1, 0.2, 0.9, 1.1][rank]),
+            httpserver_manager=SimpleNamespace(host_ip="p"),
+        ),
+    )
+    monkeypatch.setattr(pd_loop, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
+    payloads = []
+
+    async def send(payload):
+        payloads.append(pickle.loads(payload))
+        raise asyncio.CancelledError()
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await pd_loop._send_heartbeat_to_pd_master(SimpleNamespace(send=send))
+
+    asyncio.run(run())
+    assert payloads[0][0] == ObjType.HEARTBEAT
+    manager.update_node_load_info(payloads[0][1])
+    if mode == "prefill":
+        assert payloads[0][1]["dp_loads"] == [0.1, 0.2, 0.9, 1.1]
+        assert [rank.token_usage_rate for rank in node.dp_ranks] == [0.1, 0.2, 0.9, 1.1]
+    else:
+        assert "dp_loads" not in payloads[0][1]
+        assert node.dp_ranks == []
+    assert node.run_status.total_token_usage_rate == pytest.approx(0.575)
+    load_info = {"client_ip_port": "p:8000", "total_token_usage_rate": 0.3}
+    if mode == "prefill":
+        load_info["dp_loads"] = [0.2, 0.3, 0.3, 0.4]
+    manager.update_node_load_info(load_info)
+    assert node.run_status.total_token_usage_rate == 0.3
+    if mode == "prefill":
+        assert [rank.token_usage_rate for rank in node.dp_ranks] == [0.2, 0.3, 0.3, 0.4]
+
+
+def test_pd_registration_forwards_load_heartbeat(monkeypatch):
+    from lightllm.server import api_http, api_http_pd
+    from fastapi import WebSocketDisconnect
+    import ujson
+
+    load_info = {"client_ip_port": "p:8000", "total_token_usage_rate": 0.2, "dp_loads": [0.1, 0.3]}
+    messages = iter([(ObjType.HEARTBEAT, load_info)])
+
+    async def receive_bytes():
+        try:
+            return pickle.dumps(next(messages))
+        except StopIteration:
+            raise WebSocketDisconnect()
+
+    websocket = SimpleNamespace(
+        accept=AsyncMock(),
+        client=("p", 8000),
+        receive_text=AsyncMock(return_value=ujson.dumps({"node_id": 1})),
+        receive_bytes=receive_bytes,
+    )
+    manager = SimpleNamespace(register_pd=AsyncMock(), put_to_handle_queue=AsyncMock(), remove_pd=AsyncMock())
+    monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(httpserver_manager=manager))
+    asyncio.run(api_http_pd.register_and_keep_alive(websocket))
+    manager.put_to_handle_queue.assert_awaited_once_with((ObjType.HEARTBEAT, load_info))
+
+
+def test_pd_master_consumes_load_heartbeat():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(config_server_host=None)
+        updated = asyncio.Event()
+        load_info = {"client_ip_port": "p:8000", "dp_loads": [0.1, 0.9]}
+        manager.pd_manager = SimpleNamespace(
+            update_node_load_info=lambda value: updated.set() if value == load_info else None
+        )
+        manager.timer_log = AsyncMock()
+        manager.infos_queues = None
+        task = asyncio.create_task(manager.handle_loop())
+        try:
+            while manager.infos_queues is None:
+                await asyncio.sleep(0)
+            await manager.put_to_handle_queue((ObjType.HEARTBEAT, load_info))
+            await asyncio.wait_for(updated.wait(), timeout=1)
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     asyncio.run(run())
 

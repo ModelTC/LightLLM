@@ -111,7 +111,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default="cache_aware",
         choices=["random", "round_robin", "adaptive_load", "cache_aware"],
-        help="pd master use this strategy to select p d node; default cache_aware",
+        help="PD master selection strategy; cache_aware selects a P node and local DP rank; default cache_aware",
     )
     parser.add_argument(
         "--config_server_host",
