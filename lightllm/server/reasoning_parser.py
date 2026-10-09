@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import re
+from collections import deque
 from dataclasses import dataclass
 from typing import Iterator, List, Tuple, Dict, Optional, Type
 
@@ -975,3 +976,36 @@ class ReasoningParser:
         """Flush remaining buffered content when generation ends prematurely."""
         ret = self.detector.flush()
         return ret.reasoning_text, ret.normal_text
+
+
+class ReasoningStopState:
+    """Track reasoning boundaries by token IDs, including hidden special tokens."""
+
+    def __init__(self, model_type, tokenizer, force_reasoning, prompt_ids):
+        detector_class = ReasoningParser.DetectorMap[model_type.lower()]
+        kwargs = {} if force_reasoning == -1 else {"force_reasoning": bool(force_reasoning)}
+        detector = detector_class(**kwargs)
+        self.in_reasoning = detector._in_reasoning
+        self.start_ids = tokenizer.encode(detector.think_start_token, add_special_tokens=False)
+        self.end_ids = tokenizer.encode(detector.think_end_token, add_special_tokens=False)
+        assert self.start_ids and self.end_ids, "Reasoning delimiters must encode to non-empty token sequences"
+        window_size = max(len(self.start_ids), len(self.end_ids))
+        self.recent_ids = deque(prompt_ids[len(prompt_ids) - window_size + 1 :], maxlen=window_size)
+
+    def update(self, token_id) -> bool:
+        """Return whether this token belongs to content eligible for stop matching."""
+        self.recent_ids.append(int(token_id))
+        recent = list(self.recent_ids)
+        if recent[-len(self.start_ids) :] == self.start_ids:
+            self.in_reasoning = True
+            return False
+        if recent[-len(self.end_ids) :] == self.end_ids:
+            self.in_reasoning = False
+            return False
+        if self.in_reasoning:
+            return False
+        # A multi-token opening delimiter must not trigger a stop halfway through.
+        for length in range(1, min(len(recent) + 1, len(self.start_ids))):
+            if recent[-length:] == self.start_ids[:length]:
+                return False
+        return True

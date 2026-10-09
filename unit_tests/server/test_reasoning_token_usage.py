@@ -1,6 +1,8 @@
 from unittest.mock import patch
 
-from lightllm.server.reasoning_parser import ReasoningParser
+import pytest
+
+from lightllm.server.reasoning_parser import ReasoningParser, ReasoningStopState
 
 
 def _create_parser(model_type: str, force_reasoning: bool) -> ReasoningParser:
@@ -52,3 +54,30 @@ def test_minimax_append_think_output_is_not_counted_as_reasoning():
     reasoning_tokens = _count_tokens(parser, [1, 2, 99])
 
     assert reasoning_tokens == 0
+
+
+class _StopTokenizer:
+    def encode(self, text, **kwargs):
+        return {"<think>": [90, 91], "</think>": [92, 93]}[text]
+
+
+def test_stop_state_tracks_multi_token_delimiters():
+    state = ReasoningStopState("qwen3", _StopTokenizer(), 0, [])
+    tokens = [1, 90, 91, 2, 92, 93, 3]
+    assert [state.update(token) for token in tokens] == [True, False, False, False, False, False, True]
+
+
+@pytest.mark.parametrize("model,force", [("qwen3", 1), ("deepseek-r1", -1)])
+def test_stop_state_starts_in_forced_reasoning(model, force):
+    state = ReasoningStopState(model, _StopTokenizer(), force, [])
+    assert state.update(1) is False
+    assert state.update(92) is False
+    assert state.update(93) is False
+    assert state.update(2) is True
+
+
+def test_stop_state_carries_a_partial_delimiter_from_pd_prompt():
+    state = ReasoningStopState("qwen3", _StopTokenizer(), 1, [1, 92])
+    assert state.update(93) is False
+    assert state.in_reasoning is False
+    assert state.update(2) is True
