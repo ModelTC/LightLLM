@@ -20,7 +20,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_stop_in_reasoning
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
@@ -924,6 +924,9 @@ class InferReq:
         return
 
     def _stop_sequences_matched(self, output_len: int):
+        # Detokenization owns reasoning-aware matching and reports the exact stop token.
+        if self.args.reasoning_parser and not get_stop_in_reasoning():
+            return False
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
             if stop_len > 0:

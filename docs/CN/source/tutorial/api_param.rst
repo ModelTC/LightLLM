@@ -117,6 +117,10 @@
 ``最长 stop 字符数 - 1`` 个字符的完整 token，防止跨 token 的 stop 片段提前发出。
 请求结束时会返回未匹配的尾部。token ID、logprob、输出 token 计数和结束原因的含义保持不变。
 
+配置 reasoning parser 后，字符串 stop 和 token ID stop 默认都跳过 reasoning，
+只作用于回答 content。启动服务前设置 ``LIGHTLLM_STOP_IN_REASONING=1``，可使其在两个阶段
+都生效。EOS 和输出 token 上限仍在两个阶段生效。部署说明见 :ref:`OpenAI 接口示例 <openai_api>`。
+
 
 :code:`POST /get_score`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

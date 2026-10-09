@@ -110,6 +110,12 @@ excluding stop strings, so a stop split across tokens cannot leak into output.
 An unmatched tail is returned when generation finishes. Token IDs, logprobs,
 output token counts, and the finish reason retain their original meanings.
 
+With a configured reasoning parser, both string and token-ID stop sequences
+ignore reasoning and apply only to answer content by default. Set
+``LIGHTLLM_STOP_IN_REASONING=1`` before service startup to enable them in both
+phases. EOS and the output token limit remain active in both phases. See the
+:ref:`OpenAI API examples <openai_api>` for deployment details.
+
 :code:`POST /get_score`
 ~~~~~~~~~~~~~~~~~~~~~~~
 Reward model, get conversation score

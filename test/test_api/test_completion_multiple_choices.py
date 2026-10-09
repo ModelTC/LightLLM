@@ -191,3 +191,34 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
         assert text == ("helloEND" if include else "hello")
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_stop_scope_receives_request_thinking_mode(monkeypatch, thinking):
+    from lightllm.server.api_http import g_objs
+    from lightllm.server import reasoning_parser
+
+    def generate(prompt, sampling_params, multimodal_params, request):
+        assert sampling_params._stop_force_reasoning == int(thinking)
+
+        async def results():
+            yield 80, "hello", {"prompt_tokens": 4, "id": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        return results()
+
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))
+    monkeypatch.setattr(api_openai, "_is_force_thinking_mode", lambda request: thinking)
+    monkeypatch.setattr(reasoning_parser, "get_token_id", lambda token: 1001)
+
+    async def build_prompt(*args):
+        return "Prompt"
+
+    monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
+    request = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Hello"}],
+        stop=["END"],
+        max_completion_tokens=10,
+    )
+    asyncio.run(api_openai.chat_completions_impl(request, SimpleNamespace()))

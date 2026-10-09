@@ -157,3 +157,44 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
 
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.2)]
     assert mgr.inserted_prompt_caches == []
+
+
+@pytest.mark.parametrize("in_reasoning", [False, True])
+def test_pd_continuation_carries_reasoning_stop_state(monkeypatch, in_reasoning):
+    manager = _make_manager(monkeypatch)
+    params = SamplingParams()
+    params.n = params.best_of = 1
+    params.max_new_tokens = 3
+    params._stop_force_reasoning = 1
+    segment_modes = []
+
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        segment_modes.append(sp._stop_force_reasoning)
+        metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
+        if len(segment_modes) == 1:
+            yield sp.group_request_id, "reason", dict(metadata), FinishStatus()
+            yield (
+                sp.group_request_id,
+                "",
+                {**metadata, "_stop_reasoning": in_reasoning},
+                FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+            )
+        else:
+            yield sp.group_request_id, "answer", dict(metadata), FinishStatus(FinishStatus.FINISHED_STOP)
+
+    monkeypatch.setattr(manager, "_wait_to_token_package", fake_wait)
+
+    async def run():
+        return [
+            result
+            async for result in manager.generate(
+                "hello",
+                params,
+                SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
+                None,
+            )
+        ]
+
+    results = asyncio.run(run())
+    assert segment_modes == [1, int(in_reasoning)]
+    assert "".join(result[1] for result in results) == "reasonanswer"

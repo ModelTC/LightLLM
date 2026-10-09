@@ -54,7 +54,7 @@ class DeTokenizationManager:
             )
 
             # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-            decode_req = DecodeReq(req, self.is_pd_decode_mode)
+            decode_req = DecodeReq(req, self.is_pd_decode_mode, self.tokenizer)
             if self.is_pd_decode_mode:
                 decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
             self.req_id_to_out[req.request_id] = decode_req
@@ -112,10 +112,8 @@ class DeTokenizationManager:
                     self.eos_id,
                 )
 
-                decode_req.output_strs.append(new_text)
-
                 # 停止字符串匹配
-                if not decode_req.req.finish_status.is_stopped() and decode_req.stop_sequences_str_match():
+                if decode_req.match_stop_sequences(new_token_id, new_text):
                     decode_req.req.stop_str_matched_token_index = src_index
                     decode_req.req.stop_str_matched = True
 

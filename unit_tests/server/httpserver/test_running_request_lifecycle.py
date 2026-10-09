@@ -70,6 +70,7 @@ def test_stop_output_is_filtered_only_for_complete_normal_requests(mode, include
         manager.tokenizer = None
         manager.enable_multimodal = False
         manager.args.chunked_prefill_size = 1
+        manager.args.reasoning_parser = None
         manager._alloc_shm_req_indexes = AsyncMock(return_value=[0])
         manager.shm_req_manager.async_get_req_obj_by_index = AsyncMock(return_value=MagicMock())
         manager.transfer_to_next_module_or_node = AsyncMock()

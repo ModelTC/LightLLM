@@ -354,6 +354,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         sampling_params_dict["max_new_tokens"] = request.max_tokens
     if request.stop is not None:
         sampling_params_dict["stop_sequences"] = request.stop
+        if get_env_start_args().reasoning_parser:
+            sampling_params_dict["_stop_force_reasoning"] = int(_is_force_thinking_mode(request))
 
     # Structured output handling
     if request.response_format:

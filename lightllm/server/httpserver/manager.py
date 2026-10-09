@@ -37,6 +37,7 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
+from lightllm.utils.envs_utils import get_stop_in_reasoning
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import (
     ClientDisconnected,
@@ -496,7 +497,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             }
 
             is_first_gen_token = True
-            filter_stop_output = self.pd_mode.is_normal() and bool(sampling_params.stop_sequences.to_strings())
+            filter_stop_output = self.pd_mode.is_normal() and sampling_params.stop_sequences.size > 0
             stop_outputs = {}
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
                 # 只有第一个生成的 token 的 metadata 中包含 input_usage
@@ -1067,6 +1068,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                         self.tokenizer,
                                         enable_return_routed_experts=self.args.enable_return_routed_experts,
                                     )
+                                    if (
+                                        req.sample_params.stop_sequences.size > 0
+                                        and self.args.reasoning_parser
+                                        and not get_stop_in_reasoning()
+                                    ):
+                                        metadata["_stop_sequence_match"] = (
+                                            (req.stop_sequence_match_length, req.stop_sequence_match_suffix_length)
+                                            if req.stop_str_matched and req.stop_sequence_match_length > 0
+                                            else None
+                                        )
+                                        metadata["_stop_reasoning"] = req._stop_reasoning
 
                                     # mark_simulated_finished 追加的 EOS 只负责唤醒 Detoken/HTTP wait。
                                     # 对外将它转换成无 token 的 finish marker，VERL 会按 id=None

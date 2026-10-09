@@ -157,7 +157,7 @@ class HttpServerManagerForPDMaster:
         if was_idle:
             self.latest_success_infer_time = time.time()
         try:
-            filter_stop_output = bool(sampling_params.stop_sequences.to_strings())
+            filter_stop_output = sampling_params.stop_sequences.size > 0
             stop_outputs = {}
             async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
                 async for result in generator:
@@ -389,6 +389,9 @@ class HttpServerManagerForPDMaster:
                         )
                         p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
                         pending_prefill_load_chars = None
+
+                    if "_stop_reasoning" in metadata:
+                        origin_sampling_params._stop_force_reasoning = int(metadata["_stop_reasoning"])
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。

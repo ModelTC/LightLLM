@@ -20,12 +20,19 @@ class StopSequenceOutput:
         self.emitted_tail = ""
 
     def process(self, sub_req_id, text, metadata, finish_status):
+        scoped_match = "_stop_sequence_match" in metadata
+        stop_match = metadata.pop("_stop_sequence_match", None)
+        metadata.pop("_stop_reasoning", None)
         self.pending_tokens.append((sub_req_id, text, metadata, finish_status))
         self.pending_text += text
         finished = finish_status.is_finished()
         output_end = len(self.pending_text) if finished else len(self.pending_text) - self.buffer_length
 
-        if finish_status.is_stopped():
+        if finish_status.is_stopped() and scoped_match:
+            if stop_match is not None:
+                stop_length, suffix_length = stop_match
+                output_end = len(self.pending_text) - suffix_length - (0 if self.include_stop else stop_length)
+        elif finish_status.is_stopped():
             search_text = self.emitted_tail + self.pending_text
             stop_index = len(search_text)
             matched_stop = ""
