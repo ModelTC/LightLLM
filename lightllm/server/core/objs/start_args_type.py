@@ -200,6 +200,7 @@ class StartArgs:
                 "eagle3",
                 "dspark",
                 "dflash",
+                "dflash2",
                 None,
             ]
         },

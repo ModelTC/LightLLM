@@ -134,23 +134,25 @@ class ModelMtpOutputCollector:
     # MTP drafter 使用的 hidden 特征。
     # - Vanilla MTP、EAGLE 主模型收集最终层 hidden；对应 draft 模型也会返回最终层 hidden，
     #   供串行的下一层 MTP 模块或下一步自回归 draft 使用。
-    # - EAGLE3、DFlash、DSpark 主模型收集 checkpoint 配置指定的若干 target layer hidden，
+    # - EAGLE3、DFlash、DFlash2、DSpark 主模型收集 checkpoint 配置指定的若干 target layer hidden，
     #   拼接后交给 draft 模型；EAGLE3 draft 模型还会返回最终层 hidden。
-    # - DFlash、DSpark 的 block draft 模型不需要返回 hidden，因此该字段为 None。
+    # - DFlash、DFlash2、DSpark 的 block draft 模型不需要返回 hidden，因此该字段为 None。
     # - 未启用 MTP 时不收集投机特征，该字段同样为 None。
     spec_hidden: Optional[torch.Tensor] = None
 
-    # DSpark block draft 模型直接生成的 token id，形状通常为
-    # [request_count * block_size]。
-    # - 仅 DSpark 启用 Markov head（markov_rank > 0）时由 head 直接生成并返回。
-    # - DSpark 未启用 Markov head 时为 None，调用方从普通 logits 执行 argmax。
+    # MTP head 直接生成的候选 token id。
+    # - DSpark 启用 Markov head（markov_rank > 0）时为 [request_count * block_size]；
+    #   未启用时为 None，调用方从普通 logits 执行 argmax。
+    # - DFlash2 selector 返回 [request_count, block_size - 1]，不包含 anchor；
+    #   proposer 再按本轮 draft_step 截取候选，collector 始终保存完整 block 的候选。
     # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
     draft_token_ids: Optional[torch.Tensor] = None
 
-    # DSpark confidence head 输出的原始置信度 logits，形状通常为
-    # [request_count, block_size]，供动态 MTP verify 计算各 draft 位置的调度分数。
-    # - 仅 DSpark checkpoint 启用 confidence head 时返回；动态 verify 模式要求该字段存在。
-    # - 固定 verify 且未启用 confidence head 的 DSpark 模型可以返回 None。
+    # MTP head 输出的置信度 logits。
+    # - DSpark 启用 confidence head 时为 [request_count, block_size]；
+    #   动态 verify 要求启用该字段存在，固定 verify 且未启用 confidence head 时为 None。
+    # - DFlash2 为 [request_count, block_size - 1]，与 draft_token_ids 对齐；
+    #   仅在启用动态 verify 时返回，固定 verify 时为 None。
     # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
     confidence_logits: Optional[torch.Tensor] = None
 
@@ -166,14 +168,23 @@ class ModelMtpOutputCollector:
         collector = copy.copy(self)
         if collector.spec_hidden is not None:
             collector.spec_hidden = collector.spec_hidden[:origin_batch_size]
+
+        def unpad_head_rows(value: torch.Tensor) -> torch.Tensor:
+            # batch_size 按物理行计数；head 输出可能按物理行或请求计数。
+            # DFlash2 每个请求占 block_size 行，候选宽度 block_size - 1
+            # 不用于换算请求数，避免把 anchor 算入候选或裁掉真实请求。
+            row_count = value.shape[0]
+            if row_count == padded_batch_size:
+                return value[:origin_batch_size]
+            assert row_count > 0 and padded_batch_size % row_count == 0
+            physical_rows_per_output = padded_batch_size // row_count
+            assert origin_batch_size % physical_rows_per_output == 0
+            return value[: origin_batch_size // physical_rows_per_output]
+
         if collector.draft_token_ids is not None:
-            collector.draft_token_ids = collector.draft_token_ids[:origin_batch_size]
+            collector.draft_token_ids = unpad_head_rows(collector.draft_token_ids)
         if collector.confidence_logits is not None:
-            confidence_row_count = collector.confidence_logits.shape[0]
-            assert confidence_row_count > 0 and padded_batch_size % confidence_row_count == 0
-            rows_per_confidence = padded_batch_size // confidence_row_count
-            assert origin_batch_size % rows_per_confidence == 0
-            collector.confidence_logits = collector.confidence_logits[: origin_batch_size // rows_per_confidence]
+            collector.confidence_logits = unpad_head_rows(collector.confidence_logits)
         return collector
 
     def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutputCollector":

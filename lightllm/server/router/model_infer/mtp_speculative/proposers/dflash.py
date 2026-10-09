@@ -145,6 +145,22 @@ class DFlashProposer(BaseSpecProposer):
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         draft_output = draft_model.forward(draft_input)
 
+        return self._build_proposal(
+            draft_output=draft_output,
+            req_num=req_num,
+            block_size=block_size,
+            draft_step=draft_step,
+            extra_mem_indexes_cpu=extra_mem_indexes_cpu,
+        )
+
+    def _build_proposal(
+        self,
+        draft_output: ModelOutput,
+        req_num: int,
+        block_size: int,
+        draft_step: int,
+        extra_mem_indexes_cpu: torch.Tensor,
+    ) -> DFlashSpecProposal:
         if self.enable_dynmaic_mtp:
             flat_draft_token_ids, flat_draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
         else:

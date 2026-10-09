@@ -51,6 +51,7 @@ from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
 from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
 from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
+from lightllm.models.qwen3_dflash2.model import Qwen3DFlash2Model
 from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
 from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel

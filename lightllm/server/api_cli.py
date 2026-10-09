@@ -792,12 +792,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle3",
             "dspark",
             "dflash",
+            "dflash2",
             None,
         ],
         default=None,
         help="""Speculative decoding mode.
         *_with_att and *_no_att select attention or non-attention draft models;
         eagle3 uses autoregressive EAGLE-3 drafting; dflash uses block-diffusion drafting;
+        dflash2 uses block-diffusion drafting with local convolutions and candidate reranking;
         dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(

@@ -47,6 +47,9 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import (
     DFlashProposer,
 )
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash2 import (
+    DFlash2Proposer,
+)
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import (
     DSparkProposer,
 )
@@ -307,6 +310,12 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
     assert isinstance(dflash_planner, LightSpecPlanner)
     assert dflash_planner.draft_steps == (3,)
 
+    dflash2_planner = build_planner("dflash2", enable_dynmaic_mtp=False)
+    assert isinstance(dflash2_planner, FixedSpecPlanner)
+    dflash2_dynamic_planner = build_planner("dflash2")
+    assert isinstance(dflash2_dynamic_planner, LightSpecPlanner)
+    assert dflash2_dynamic_planner.draft_steps == (3,)
+
     eagle_planner = build_planner("eagle3")
     assert isinstance(eagle_planner, LightSpecPlanner)
     assert eagle_planner.draft_steps == (1, 2, 3)
@@ -376,6 +385,7 @@ def test_each_mode_proposer_inherits_its_expected_implementation_base():
     for proposer_type in proposer_types:
         assert proposer_type.__bases__ == (BaseSpecProposer,)
     assert Eagle3Proposer.__bases__ == (EagleWithAttProposer,)
+    assert DFlash2Proposer.__bases__ == (DFlashProposer,)
     for proposer_type in dp_overlap_proposer_types:
         assert proposer_type.__bases__ == (BaseDpOverlapProposer,)
     assert DpOverlapEagle3Proposer.__bases__ == (DpOverlapEagleWithAttProposer,)
@@ -390,6 +400,7 @@ def test_each_mtp_mode_builds_its_own_proposer():
         "eagle_no_att": EagleNoAttProposer,
         "eagle3": Eagle3Proposer,
         "dflash": DFlashProposer,
+        "dflash2": DFlash2Proposer,
         "dspark": DSparkProposer,
     }
 
@@ -600,11 +611,12 @@ def test_lightspec_keeps_vanilla_attention_chained_depth_fixed():
     assert plan.draft_step == plan.pre_draft_step == 3
 
 
-def test_lightspec_compacts_block_verify_without_changing_draft_shape():
+@pytest.mark.parametrize("spec_mode,block_size", [("dflash", 7), ("dflash2", 8)])
+def test_lightspec_compacts_block_verify_without_changing_draft_shape(spec_mode, block_size):
     planner = build_lightspec_planner(
         max_draft_step=7,
-        spec_mode="dflash",
-        block_size=7,
+        spec_mode=spec_mode,
+        block_size=block_size,
     )
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 3.0), (16, 8.0)):
         planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
@@ -799,11 +811,12 @@ def test_autoregressive_eagle_planner_prices_extend_and_decode_rows():
         assert draft_cost_ms == 64.0
 
 
-def test_block_planner_prices_commit_and_complete_block():
+@pytest.mark.parametrize("spec_mode,block_size,expected_cost", [("dflash", 7, 1.5), ("dflash2", 8, 1.6)])
+def test_block_planner_prices_commit_and_complete_block(spec_mode, block_size, expected_cost):
     planner = build_lightspec_planner(
         max_draft_step=7,
-        spec_mode="dflash",
-        block_size=7,
+        spec_mode=spec_mode,
+        block_size=block_size,
     )
     planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=0.4)
 
@@ -813,7 +826,7 @@ def test_block_planner_prices_commit_and_complete_block():
         draft_step=7,
     )
 
-    assert np.isclose(draft_cost_ms, 1.5)
+    assert np.isclose(draft_cost_ms, expected_cost)
 
 
 def test_dspark_planner_prices_commit_and_complete_block():

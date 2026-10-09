@@ -149,6 +149,23 @@ class LMHeadWeight(EmbeddingWeight):
         torch.mm(self.weight, input, out=out)
         return out
 
+    def project_token_logits(
+        self, hidden: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        """Project [token_num, hidden_size] to [token_num, TP-local vocab_size].
+
+        The weight transpose is a view. Writing token-major logits directly avoids
+        transposing the full vocabulary output before per-token top-k selection.
+        """
+        assert hidden.ndim == 2
+        if out is None:
+            out = alloc_func(
+                (hidden.shape[0], self.weight.shape[0]),
+                dtype=hidden.dtype,
+                device=hidden.device,
+            )
+        return torch.mm(hidden, self.weight.t(), out=out)
+
     def __call__(self, input: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty) -> torch.Tensor:
         return self._forward(input=input, out=out, alloc_func=alloc_func)
 
