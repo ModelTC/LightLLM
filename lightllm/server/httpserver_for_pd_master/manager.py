@@ -389,13 +389,16 @@ class HttpServerManagerForPDMaster:
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
+                    needs_prefill_first_token = metadata.pop("needs_prefill_first_token", True)
                     if origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
                         self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
-                        if not raw_finish_status.is_error_finished():
-                            # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
-                            # 推理或已失败的请求被后续请求误判为可复用 cache。
+                        if needs_prefill_first_token and not raw_finish_status.is_error_finished():
+                            # 只有内层确认所需的 Prefill 输出且请求成功后才记录缓存，避免
+                            # 尚未进入推理、已失败或 Decode 完整命中而跳过 Prefill 的请求
+                            # 被后续请求误判为可复用的 P 缓存。首个返回 token 可能来自
+                            # Decode，不能仅根据 node_mode 判断 P 是否完成推理。
                             self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_request_id, request_output, metadata, raw_finish_status
@@ -590,11 +593,12 @@ class HttpServerManagerForPDMaster:
                     if output_index == 1:
                         if first_token_gen is False:
                             first_token_gen = True
-                            node_run_mode = metadata.pop("node_mode", None)
+                            node_run_mode = metadata.get("node_mode")
                             if node_run_mode == "prefill":
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
+                            metadata["needs_prefill_first_token"] = needs_prefill_first_token
                             yield sub_req_id, request_output, metadata, finish_status
                         else:
                             continue
