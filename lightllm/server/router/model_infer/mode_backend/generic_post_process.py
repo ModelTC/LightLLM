@@ -1,14 +1,22 @@
 import torch
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
+from lightllm.common.basemodel.triton_kernel.post_process.apply_constraint_mask import apply_constraint_mask
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
+def sample(
+    logits: torch.Tensor,
+    reqs: List[InferReq],
+    eos_id: List[int] = [2],
+    has_output=None,
+    b_mtp_index: Optional[torch.Tensor] = None,
+):
+    sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
     (
         b_req_idx,
         b_temperatures,
@@ -23,10 +31,9 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
-    ) = _get_post_sample_tensors(reqs)
+        has_output_constraints,
+    ) = _get_post_sample_tensors(reqs, sampling_params_manager, has_output)
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
-
-    sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
 
     # 这里需要区分历史token的频率惩罚类的系数的生效模式，目前支持两种在线统计方式:
     # 一种是基于 cpu 的，每个 req 对象利用其上绑定的dict对象out_token_id_count，每生成一个token就进行相应
@@ -76,6 +83,17 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         )
 
     logits.div_(b_temperatures.view((-1, 1)))
+    # Apply hard constraints after all penalties. In particular, the EOS length
+    # penalty must not turn a masked -inf into NaN or re-enable a forbidden EOS.
+    if has_output_constraints:
+        apply_constraint_mask(
+            logits,
+            b_req_idx,
+            sampling_params_manager.req_to_bitmask,
+            sampling_params_manager.req_to_bitmask_enabled,
+            sampling_params_manager.vocab_size,
+            b_mtp_index,
+        )
     probs = torch.softmax(logits, dim=-1)
 
     if is_all_greedy:
@@ -154,7 +172,8 @@ def _random_sample(probs: torch.Tensor, reqs: List[InferReq], exist_req_use_rand
     return probs.div(q).argmax(dim=-1).view(-1)
 
 
-def _get_post_sample_tensors(reqs: List[InferReq]):
+def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_output=None):
+    """Collect per-logit sampling parameters and fill each request's masks once."""
     req_idxes: List[int] = []
     temperatures: List[float] = []
     top_ps: List[float] = []
@@ -165,6 +184,7 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     skip_top_k = True
     skip_top_p = True
     exist_req_use_random_seed = False
+    has_output_constraints = False
 
     # invalid token ids
     invalid_token_ids: List[int] = []
@@ -199,6 +219,29 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
             has_invalid_token_ids = True
             invalid_token_ids.extend(req_obj.sampling_param.invalid_token_ids)
 
+        # Each request's verify rows are contiguous; prepare its masks on the first row.
+        if sampling_params_manager.req_to_bitmask_enabled is None or (i > 0 and reqs[i - 1] is req_obj):
+            continue
+        enabled = False
+        state = req_obj.output_constraint
+        if state is not None and not req_obj.finish_status.is_finished() and (has_output is None or has_output[i]):
+            mtp_verify_len = 1
+            while i + mtp_verify_len < len(reqs) and reqs[i + mtp_verify_len] is req_obj:
+                mtp_verify_len += 1
+            # The previous post_handle handoff already covers GPU scatter into
+            # this pinned table. Column zero is committed; only consume drafts.
+            draft_tokens = (
+                sampling_params_manager.req_to_next_token_ids[req_obj.req_idx, 1:mtp_verify_len].tolist()
+                if mtp_verify_len > 1
+                else []
+            )
+            enabled = state.fill_masks(
+                sampling_params_manager.req_to_bitmask[req_obj.req_idx, :mtp_verify_len], draft_tokens
+            )
+        # Also clear ordinary/partial requests' reused slots.
+        sampling_params_manager.req_to_bitmask_enabled[req_obj.req_idx] = enabled
+        has_output_constraints |= enabled
+
     req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
     temperatures_cpu = g_pin_mem_manager.gen_from_list(key="temperatures", data=temperatures, dtype=torch.float32)
     top_ps_cpu = g_pin_mem_manager.gen_from_list(key="top_ps", data=top_ps, dtype=torch.float32)
@@ -230,4 +273,5 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
+        has_output_constraints,
     )

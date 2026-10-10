@@ -57,13 +57,9 @@ class ModeBackend:
         self.shm_req_manager = ShmReqManager()
 
         self.overlap_event_manager = OverlapEventManager()
-        # 标识是否支持 overlap 功能，很多子类模式如 xgrammar 和 outlines 当前不支持 overlap 高性能模式
+        # Backend-specific scheduling; output constraints preserve overlap.
         self.support_overlap = True
 
-        # prefill_mask_func 和 decode_mask_func 用于控制在采样输出前，通过对logics的调整，改变输出的选择空间，
-        # 主要是为约束输出模式进行定制的操作
-        self.prefill_mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None
-        self.decode_mask_func: Optional[Callable[[List[InferReq], torch.Tensor], None]] = None
         # extra_post_req_handle_func 用于添加请求InferReq的状态变化中添加额外的后处理信息，主要是状态机相关的调整等。
         self.extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None
 
@@ -724,7 +720,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -955,14 +950,10 @@ class ModeBackend:
         run_reqs: List[InferReq],
         is_prefill: bool,
         b_prefill_has_output_cpu: torch.Tensor = None,
-        mask_func: Optional[Callable] = None,
     ):
-
-        if mask_func is not None:
-            assert len(run_reqs) == logits.shape[0]
-            mask_func(run_reqs, logits)
-
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+        next_token_ids, next_token_logprobs = sample(
+            logits, run_reqs, self.eos_id, has_output=b_prefill_has_output_cpu if is_prefill else None
+        )
         next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
         b_has_out = None
         if is_prefill:

@@ -42,6 +42,11 @@ def test_req_init(req):
     assert req.input_len == 3
 
 
+def test_req_init_validates_dictionary_params():
+    with pytest.raises(ValueError, match="max_new_tokens must be at least 1"):
+        Req().init(1, [1], {"max_new_tokens": 0}, None)
+
+
 def test_create_prompt_ids_shm_array(req):
     assert hasattr(req, "shm_prompt_ids")
 

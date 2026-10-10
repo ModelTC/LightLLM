@@ -37,11 +37,9 @@ Vocabulary Parallel Sampling
     Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary
     results. Examples include the complete token ranks required by ``--enable_rl`` or a large logit bias that
     would have promoted a non-candidate token into the selected set.
-    ``--target_vocab_topk_sampling`` cannot be combined with ``--output_constraint_mode outlines/xgrammar``
-    or ``--first_token_constraint_mode``; inference nodes reject these combinations with a startup assertion.
-    Non-candidate scores are ``-10000000.0``, while constraint masks set forbidden-token scores to ``-1000000.0``.
-    If all allowed tokens are pruned, forbidden tokens receive higher scores. Disable target candidate pruning
-    when using these output constraints. This check does not restrict ``--draft_vocab_topk_sampling``.
+    ``--target_vocab_topk_sampling`` requires ``--output_constraint_mode none``;
+    combining it with ``xgrammar`` causes a startup error.
+    This check does not restrict ``--draft_vocab_topk_sampling``.
     Use matching settings on PD master, prefill, and decode services.
 
     Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
@@ -379,14 +377,20 @@ Output Constraint Parameters
 
     Set the output constraint backend, optional values:
     
-    * ``outlines``: Use outlines backend
-    * ``xgrammar``: Use xgrammar backend
-    * ``none``: No output constraint (default)
+    * ``xgrammar``: Default; enabled per request, supporting JSON Schema, JSON objects, EBNF, and regex
+    * ``none``: Disable the output constraint backend
 
-.. option:: --first_token_constraint_mode
+    Supports TP/DP, MTP, and microbatch overlap. The Outlines backend has been removed;
+    ``regular_constraint`` uses XGrammar regex syntax.
 
-    Constrain the allowed range of the first token
-    Use environment variable FIRST_ALLOWED_TOKENS to set the range, e.g., FIRST_ALLOWED_TOKENS=1,2
+    ChatCompletion JSON Schema / JSON object constraints apply after thinking ends,
+    as indicated by the configured reasoning parser's closing marker.
+    With thinking disabled, constraints apply from the first output token.
+
+.. option:: --grammar_compile_timeout
+
+    HTTP grammar compilation wait timeout in seconds. Defaults to ``30.0`` and must be positive.
+    Invalid grammars, compilation failures, or timeouts return HTTP 400 before inference or streaming starts.
 
 Multimodal Parameters
 ---------------------

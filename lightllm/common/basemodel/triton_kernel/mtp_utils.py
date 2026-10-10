@@ -163,8 +163,8 @@ def mtp_verify(
     num_reqs = b_req_mtp_start_loc.shape[0]
     verify_batch_size = b_req_idx.shape[0]
     assert new_next_token_ids.shape == b_req_idx.shape
-    mtp_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=req_to_next_token_ids.device)
-    accepted_index = torch.empty((verify_batch_size,), dtype=torch.int32, device=req_to_next_token_ids.device)
+    mtp_accept_len = torch.empty((num_reqs,), dtype=torch.int32, device=new_next_token_ids.device)
+    accepted_index = torch.empty((verify_batch_size,), dtype=torch.int32, device=new_next_token_ids.device)
 
     grid = (num_reqs,)
     num_warps = 1
@@ -203,7 +203,6 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     HAS_NEXT_TOKEN_SCORES: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-
     cur_index = tl.program_id(0)
     req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
     accept_len = tl.load(mtp_accept_len + cur_index)

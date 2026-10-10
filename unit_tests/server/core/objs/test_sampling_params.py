@@ -6,7 +6,6 @@ from lightllm.server.core.objs.sampling_params import (
     StopSequence,
     StopSequenceGroups,
     RegularConstraint,
-    AllowedTokenIds,
     ExponentialDecayLengthPenalty,
     NodeUUId,
     SamplingParams,
@@ -14,7 +13,6 @@ from lightllm.server.core.objs.sampling_params import (
     GuidedJsonSchema,
     STOP_SEQUENCE_MAX_LENGTH,
     REGULAR_CONSTRAINT_MAX_LENGTH,
-    ALLOWED_TOKEN_IDS_MAX_LENGTH,
     JSON_SCHEMA_MAX_LENGTH,
     GRAMMAR_CONSTRAINT_MAX_LENGTH,
 )
@@ -131,16 +129,6 @@ def test_guided_json_schema_initialization():
         schema.initialize("a" * (JSON_SCHEMA_MAX_LENGTH + 1), None)
 
 
-def test_allowed_token_ids_initialization():
-    allowed_ids = AllowedTokenIds()
-    allowed_ids.initialize([1, 2, 3])
-    assert allowed_ids.size == 3
-    assert allowed_ids.to_list() == [1, 2, 3]
-
-    with pytest.raises(AssertionError):
-        allowed_ids.initialize([1] * (ALLOWED_TOKEN_IDS_MAX_LENGTH + 1))
-
-
 def test_exponential_decay_length_penalty_initialization():
     penalty = ExponentialDecayLengthPenalty()
     penalty.initialize((5, 1.5))
@@ -185,7 +173,6 @@ def test_sampling_params_initialization():
         "add_spaces_between_special_tokens": True,
         "print_eos_token": False,
         "regular_constraint": "",
-        "allowed_token_ids": [1, 2, 3],
         "stop_sequences": [[2, 1], [3, 4]],
         "exponential_decay_length_penalty": (1, 1.0),
         "pd_master_node_id": pd_master_node_id,

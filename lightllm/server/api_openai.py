@@ -185,6 +185,16 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     return True  # default
 
 
+def _get_guided_reasoning_end(request: ChatCompletionRequest, tokenizer) -> List[int]:
+    """Use the same thinking mode as the chat template for grammar activation."""
+    if not _is_force_thinking_mode(request):
+        return []
+    parser_name = get_env_start_args().reasoning_parser
+    detector = ReasoningParser.DetectorMap[parser_name.lower()]()
+    token_ids = tokenizer.encode(detector.grammar_start_token, add_special_tokens=False)
+    return token_ids
+
+
 def _process_reasoning_stream(
     index: int,
     delta: str,
@@ -377,10 +387,15 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+        if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
+            sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
+                request, g_objs.httpserver_manager.tokenizer
+            )
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
-    sampling_params.verify()
+    await sampling_params.verify_async(g_objs.httpserver_manager.output_grammar_compiler)
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
@@ -898,7 +913,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-    sampling_params.verify()
+    await sampling_params.verify_async(g_objs.httpserver_manager.output_grammar_compiler)
 
     # v1/completions does not support multimodal inputs, so we use an empty MultimodalParams
     multimodal_params = MultimodalParams()
@@ -937,7 +952,7 @@ async def _process_prompts_completion(
         # SamplingParams 是 ctypes.Structure，包含嵌套结构和数组；这里通过 from_buffer_copy
         # 深拷贝整个结构体缓冲区，确保每个 prompt 的参数（含嵌套字段）拥有独立内存，
         # 避免仅复制引用或创建共享缓冲区视图时，原地修改仍影响其他请求。
-        individual_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
+        individual_sampling_params = sampling_params.copy()
 
         # Convert token array to string for _collect_generation_results
         prompt_str = prompt
