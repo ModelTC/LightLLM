@@ -71,6 +71,9 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def write_to_shm(self, req_manager):
+        self.ssm_update_cache = req_manager.ssm_update_cache
+        self.ssm_slots_per_req = req_manager.ssm_slots_per_req
+        self.req_to_mtp_state_index = req_manager.req_to_mtp_state_index
         self.req_to_conv_state = req_manager.req_to_conv_state
         self.req_to_ssm_state = req_manager.req_to_ssm_state
         # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
@@ -264,9 +267,7 @@ class Qwen3NextLinearAttPageHelper:
         return
 
     def _get_req_state_indexes(self, req_idx: int):
-        mtp_size = get_env_start_args().mtp_step + 1
-        # Conv is one widened slot per request; SSM keeps the historical S+1 block layout.
-        return req_idx, req_idx * mtp_size
+        return req_idx, req_idx * self.mem_manager.ssm_slots_per_req
 
     def _write_one_rank(
         self,
@@ -276,9 +277,17 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
+        ssm_updates = mem.ssm_update_cache
         conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
-        ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
+        if ssm_updates is not None and mem.req_to_mtp_state_index is not None:
+            offsets = torch.arange(self.conv_shape[-1], device=conv_state.device) + mem.req_to_mtp_state_index[req_idx]
+            conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx].index_select(-1, offsets)
+        ssm_state = (
+            ssm_updates.snapshot_accepted_state(req_idx)
+            if ssm_updates is not None
+            else mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
+        )
         self._copy_conv_state_to_page(conv_state, conv_page, mem, tp_index)
         self._copy_ssm_state_to_page(ssm_state, ssm_page, mem, tp_index)
         return
@@ -456,6 +465,11 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
+        ssm_updates = mem.ssm_update_cache
+        if ssm_updates is not None:
+            ssm_updates.clear_history(req_idx)
+            if mem.req_to_mtp_state_index is not None:
+                mem.req_to_mtp_state_index[req_idx].zero_()
         conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
         conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
         ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]

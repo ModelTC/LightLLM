@@ -64,6 +64,7 @@ class InferStateInfo:
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
         # 在一些细节场景下需要有该信息区分一些资源的申请和管理。
         self.microbatch_index: int = 0
+        self.ssm_run_config: Optional[dict] = None
 
         # 当前 forward 独占的 hidden state 收集器。普通推理使用短生命周期实例；
         # Prefill CUDA Graph 使用随 graph infer state 长期保存的实例。

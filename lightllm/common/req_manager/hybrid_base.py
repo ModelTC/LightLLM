@@ -65,6 +65,8 @@ class HybridAttentionReqManager(ReqManager, ABC):
     def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager):
         """请求 GPU 运行态 → 指定 CPU checkpoint 槽位；大小页共用，调用方负责分配槽位。"""
 
-    def update_mtp_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
+    def update_mtp_state(
+        self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width, ssm_accept_batches=None
+    ):
         """接受推测 token 后更新运行态位置；需要调整状态索引的模型覆写。"""
         return

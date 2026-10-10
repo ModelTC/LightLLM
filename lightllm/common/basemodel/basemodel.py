@@ -491,6 +491,7 @@ class TpPartBaseModel:
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
+            ssm_run_config=infer_state.ssm_run_config,
         )
         return output
 

@@ -276,7 +276,7 @@ def _gather_paged_pools(
     rows = tl.arange(0, 64)
     cols = tl.arange(0, 128)
     # A fixed grid is replayable at 1M; the GPU length bounds the work.
-    for page in range(tl.program_id(0), tl.cdiv(length, 64), tl.num_programs(0)):
+    for page in range(tl.program_id(0), tl.cdiv(tl.maximum(length, 1), 64), tl.num_programs(0)):
         pools = page * 64 + rows
         valid = pools < length
         locs = tl.load(ReqTable + req * REQ_STRIDE + pools * 4 + 3, valid, 0).to(tl.int64)
@@ -289,7 +289,7 @@ def _gather_paged_pools(
 
 
 def gather_paged_pools(packed_buffer, req_table, req_idx, pool_lengths, max_pools):
-    """Pack valid pools into DeepGEMM pages; unused pages remain unread."""
+    """Pack valid pools, including one zero-key dummy page for empty rows."""
     batch = req_idx.numel()
     max_pages = triton.cdiv(max_pools, 64)
     pages = torch.empty((batch * max_pages, 64, 1, 132), device=packed_buffer.device, dtype=torch.uint8)

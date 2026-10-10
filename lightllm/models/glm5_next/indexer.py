@@ -113,12 +113,15 @@ class Glm5NextNsaInfer:
             lengths,
             max_pools,
         )
-        metadata = deep_gemm.get_paged_mqa_logits_metadata(lengths, 64, deep_gemm.get_num_sms())
+        # DeepGEMM's SM90 scheduler cannot handle a large batch of empty HOLD rows.
+        # Their initialized dummy pool is discarded by top-k's original lengths.
+        schedule_lengths = lengths.clamp_min(1)
+        metadata = deep_gemm.get_paged_mqa_logits_metadata(schedule_lengths, 64, deep_gemm.get_num_sms())
         # Each MTP position has its own pool length; HOLD rows have no valid pools.
         # Fixed-width mtp_step=2 gives Q=[3 * num_requests, 1, heads, dim], so next_n stays 1.
         # All three verify positions are preserved despite the SM90 kernel's native next_n limit of 2.
         logits = deep_gemm.fp8_paged_mqa_logits(
-            q_fp8.unsqueeze(1), pages, weights, lengths, block_table, metadata, max_pools, clean_logits=False
+            q_fp8.unsqueeze(1), pages, weights, schedule_lengths, block_table, metadata, max_pools, clean_logits=False
         )
         groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
         self.select_topk_indices(logits, lengths.view(-1), groups)

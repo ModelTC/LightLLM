@@ -22,6 +22,7 @@ def verify_mtp_tokens(
     b_req_idx: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
     b_mtp_index: torch.Tensor,
+    ssm_accept_batches=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Verify target tokens and update recurrent MTP state when required."""
 
@@ -38,6 +39,7 @@ def verify_mtp_tokens(
             b_mtp_index=b_mtp_index,
             accepted_index=accepted_index,
             verify_width=backend.max_draft_step + 1,
+            ssm_accept_batches=ssm_accept_batches,
         )
     return accept_lengths, accepted_index
 

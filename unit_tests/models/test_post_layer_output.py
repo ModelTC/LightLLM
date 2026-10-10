@@ -290,7 +290,7 @@ def test_model_output_and_unpadding_preserve_candidate_mapping() -> None:
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     logits = torch.randn(3, 2)
     ids = torch.tensor([[10, 20], [30, 40], [50, 60]])
-    state = SimpleNamespace(hidden_collector=NoopHiddenCollector(), prompt_logics=None)
+    state = SimpleNamespace(hidden_collector=NoopHiddenCollector(), prompt_logics=None, ssm_run_config=None)
     output = model._create_model_output(PostLayerOutput(logits, ids), state)
     unpadded = model._create_unpad_decode_model_output(output, 2)
     torch.testing.assert_close(unpadded.logits, logits[:2])

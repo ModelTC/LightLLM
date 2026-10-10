@@ -122,7 +122,8 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
+@pytest.mark.parametrize("mode,mtp_step", [("native", 2), ("compact", 2), ("replay", 2), ("native", 0), ("replay", 0)])
+def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, mode, mtp_step):
     from types import SimpleNamespace
 
     from lightllm.common.basemodel.attention.base_att import AttControl
@@ -130,20 +131,20 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
     from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
 
     torch.manual_seed(53)
-    heads, dim, width = 2, 128, 3
+    heads, dim, width = 2, 128, mtp_step + 1
     hidden = heads * dim
-    lengths = [2, 1, 3] if dynamic else [3, 3, 3]
+    lengths = ([2, 1, 3] if dynamic else [3, 3, 3]) if mtp_step else [1, 1, 1]
     requests = [2, 0, 1]
     request_rows = [req for req, length in zip(requests, lengths) for _ in range(length)]
     offsets = [offset for length in lengths for offset in range(length)]
-    if dynamic:
+    if dynamic and mtp_step:
         request_rows += [3, 3]
         offsets += [0, 0]
     tokens = len(request_rows)
-    conv = torch.randn(4, 3 * hidden, 5, device="cuda", dtype=torch.bfloat16)
+    conv = torch.randn(4, 3 * hidden, 3 + mtp_step, device="cuda", dtype=torch.bfloat16)
     ssm = torch.randn(4 * width, heads, dim, dim, device="cuda") * 0.01
     old_conv, expected_ssm = conv.clone(), ssm.clone()
-    accepted_offsets = torch.tensor([1, 2, 0, 0], dtype=torch.int32, device="cuda")
+    accepted_offsets = torch.tensor([1, 2, 0, 0] if mtp_step else [0, 0, 0, 0], dtype=torch.int32, device="cuda")
     mixed = torch.randn(tokens, 3 * hidden, device="cuda", dtype=torch.bfloat16)
     gate = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
     beta = torch.randn(tokens, heads, device="cuda", dtype=torch.bfloat16)
@@ -181,7 +182,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
             expected_ssm[req * width + token] = state[0]
             row += 1
     backend = SimpleNamespace(
-        mtp_step=2,
+        mtp_step=mtp_step,
         tp_num_heads=heads,
         head_dim=dim,
         tp_hidden_size=hidden,
@@ -190,8 +191,25 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
         split_qkv=lambda x: x.split(hidden, -1),
     )
     manager = SimpleNamespace(
-        req_to_mtp_state_index=accepted_offsets, HOLD_REQUEST_ID=3, get_mamba_cache=lambda layer: (conv, ssm)
+        req_to_mtp_state_index=accepted_offsets,
+        HOLD_REQUEST_ID=3,
+        get_mamba_cache=lambda layer: (conv, ssm),
+        ssm_update_cache=None,
+        ssm_slots_per_req=width,
+        linear_config=SimpleNamespace(full_attention_interval=4),
     )
+    if mode != "native":
+        from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
+        from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
+
+        indexes = torch.arange(4, device="cuda") * width + accepted_offsets
+        ssm = ssm[indexes].clone()
+        before_verify = ssm.clone()
+        manager.ssm_slots_per_req = 1
+        if mode == "replay":
+            manager.ssm_update_cache = ReplaySSMCache(ssm.unsqueeze(0), 8, width, kda=True)
+        else:
+            manager.ssm_update_cache = CompactSSMCache(ssm.unsqueeze(0), width, torch.bfloat16, kda=True)
     infer = SimpleNamespace(
         batch_size=tokens,
         b_req_idx=torch.tensor(request_rows, device="cuda", dtype=torch.int32),
@@ -217,6 +235,107 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
         ),
     )
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
-    torch.testing.assert_close(ssm, expected_ssm, atol=2e-3, rtol=1e-2)
-    if dynamic:
+    if mode == "native":
+        torch.testing.assert_close(ssm, expected_ssm, atol=2e-3, rtol=1e-2)
+    else:
+        assert torch.equal(ssm, before_verify)
+        accepted = torch.zeros(4, device="cuda", dtype=torch.int32)
+        for req, length in zip(requests, lengths):
+            accepted[req] = min(length, 2) - 1
+        if mtp_step:
+            manager.ssm_update_cache.accept_updates(state.b_conv_buffer_idx, accepted)
+        manager.ssm_update_cache.merge_accepted_updates(state.b_conv_buffer_idx)
+        for req in requests:
+            torch.testing.assert_close(ssm[req], expected_ssm[req * width + accepted[req]], atol=2e-3, rtol=1e-2)
+    if dynamic and mtp_step:
         assert torch.equal(conv[3], old_conv[3])
+
+
+@pytest.mark.parametrize("mode", ["compact", "replay"])
+def test_kda_prefill_materializes_accepted_history_and_uses_single_state_slot(mode):
+    import triton
+    from types import SimpleNamespace
+    from lightllm.common.basemodel.attention.base_att import AttControl
+    from lightllm.common.basemodel.attention.linear.kda import KDAPrefillAttState
+    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
+    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
+
+    torch.manual_seed(1353)
+    triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
+    heads, dim, width, tokens = 2, 128, 3, 5
+    hidden = heads * dim
+    checkpoint = torch.randn(1, 4, heads, dim, dim, device="cuda") * 0.01
+    if mode == "replay":
+        updates = ReplaySSMCache(checkpoint, 8, width, kda=True)
+    else:
+        updates = CompactSSMCache(checkpoint, width, torch.bfloat16, kda=True)
+    ids = torch.tensor([1], dtype=torch.int32, device="cuda")
+    verify = torch.randn(1, width, heads, dim, dtype=torch.bfloat16, device="cuda")
+    gate = torch.randn(width, hidden, dtype=torch.bfloat16, device="cuda")
+    beta = torch.randn(width, heads, dtype=torch.bfloat16, device="cuda")
+    alog = torch.randn(heads, device="cuda") * 0.1
+    bias = torch.randn(hidden, device="cuda") * 0.1
+    updates.prepare_decode(ids, ids.new_tensor([0, width]))
+    updates.forward(0, verify, verify, verify, gate, beta, alog, bias, ids, ids.new_tensor([0, width]))
+    updates.accept_updates(ids, ids.new_tensor([0, 1, 0, 0]))
+    canonical = updates.snapshot_accepted_state(1).clone()
+    if mode == "replay":
+        assert updates.cursors[1] == 2
+
+    conv = torch.randn(4, 3 * hidden, 5, dtype=torch.bfloat16, device="cuda") * 0.1
+    native_conv = conv.clone()
+    native_ssm = torch.randn(4 * width, heads, dim, dim, device="cuda")
+    native_ssm[width].copy_(canonical[0])
+    weight = SimpleNamespace(
+        get_merged_kda_conv_weight=lambda: conv_weight,
+        linear_A_log=SimpleNamespace(weight=alog),
+        linear_dt_bias=SimpleNamespace(weight=bias),
+    )
+    conv_weight = torch.randn(3 * hidden, 4, dtype=torch.bfloat16, device="cuda") * 0.1
+    backend = SimpleNamespace(
+        mtp_step=2,
+        tp_num_heads=heads,
+        head_dim=dim,
+        tp_hidden_size=hidden,
+        conv_kernel_size=4,
+        lower_bound=-5.0,
+        split_qkv=lambda x: x.split(hidden, -1),
+    )
+    mixed = torch.randn(tokens, 3 * hidden, dtype=torch.bfloat16, device="cuda")
+    gate = torch.randn(tokens, hidden, dtype=torch.bfloat16, device="cuda")
+    beta = torch.randn(tokens, heads, dtype=torch.bfloat16, device="cuda")
+    outputs = []
+    for cache, conv_pool, ssm_pool, slots in [
+        (None, native_conv, native_ssm, width),
+        (updates, conv, checkpoint[0], 1),
+    ]:
+        manager = SimpleNamespace(
+            ssm_update_cache=cache, ssm_slots_per_req=slots, get_mamba_cache=lambda layer: (conv_pool, ssm_pool)
+        )
+        infer = SimpleNamespace(
+            b_req_idx=ids,
+            b_ready_cache_len=ids.new_tensor([2]),
+            b1_cu_q_seq_len=ids.new_tensor([0, tokens]),
+            req_manager=manager,
+        )
+        state = KDAPrefillAttState(backend=backend, infer_state=infer)
+        state.init_state()
+        assert state.b_ssm_buffer_idx.tolist() == [slots]
+        outputs.append(
+            state.prefill_att(
+                None,
+                None,
+                None,
+                AttControl(
+                    linear_att_prefill=True,
+                    linear_att_prefill_dict=dict(
+                        layer_weight=weight, layer_num=0, mixed_qkv=mixed.clone(), raw_gate=gate, raw_beta=beta
+                    ),
+                ),
+            )
+        )
+    torch.testing.assert_close(outputs[1], outputs[0], atol=0, rtol=0)
+    torch.testing.assert_close(checkpoint[0, 1], native_ssm[width], atol=0, rtol=0)
+    torch.testing.assert_close(conv[1], native_conv[1], atol=0, rtol=0)
+    if mode == "replay":
+        assert updates.cursors[1] == 0

@@ -45,6 +45,8 @@ class KDALinearAttBackend(BaseAttBackend):
         self.conv_kernel_size = config["short_conv_kernel_size"]
         self.lower_bound = config.get("gate_lower_bound", -5.0)
         self.mtp_step = model.args.mtp_step
+        if model.req_manager.ssm_update_cache is not None:
+            model.req_manager.ssm_update_cache.lower_bound = self.lower_bound
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return KDAPrefillAttState(backend=self, infer_state=infer_state)
@@ -63,7 +65,10 @@ class KDAPrefillAttState(BasePrefillAttState):
 
     def init_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.mtp_step + 1)
+        manager = self.infer_state.req_manager
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * manager.ssm_slots_per_req
+        if manager.ssm_update_cache is not None:
+            manager.ssm_update_cache.merge_accepted_updates(self.infer_state.b_req_idx)
 
     def prefill_att(
         self,
@@ -137,6 +142,11 @@ class KDADecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state(mtp_step + 1)
         else:
             self._init_fixed_mtp_decode_state(mtp_step)
+        updates = self.infer_state.req_manager.ssm_update_cache
+        if updates is not None:
+            updates.prepare_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+            if mtp_step == 0:
+                updates.accept_updates(self.b_conv_buffer_idx)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -176,6 +186,9 @@ class KDADecodeAttState(BaseDecodeAttState):
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
+        if self.infer_state.req_manager.ssm_update_cache is not None:
+            self.b_ssm_buffer_idx = self.b_conv_buffer_idx
+            return
         att_batch_size = self.b_conv_buffer_idx.shape[0]
         # Each request owns mtp_size consecutive recurrent-state slots.
         b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
@@ -221,6 +234,27 @@ class KDADecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
+        updates = self.infer_state.req_manager.ssm_update_cache
+        if updates is not None:
+            layer = layer_num - layer_num // self.infer_state.req_manager.linear_config.full_attention_interval
+            args = (
+                q,
+                k,
+                v,
+                raw_gate.view(-1, backend.tp_hidden_size),
+                raw_beta.view(-1, backend.tp_num_heads),
+                layer_weight.linear_A_log.weight,
+                layer_weight.linear_dt_bias.weight,
+            )
+            if layer == 0:
+                self.infer_state.ssm_run_config = updates.get_run_config(*args, self.b1_mtp_cu_q_seq_len)
+            return updates.forward(
+                layer,
+                *args,
+                self.b_conv_buffer_idx,
+                self.b1_mtp_cu_q_seq_len,
+                run_config=self.infer_state.ssm_run_config,
+            )
         output, _ = fused_recurrent_kda(
             q=q,
             k=k,

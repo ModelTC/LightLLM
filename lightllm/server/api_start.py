@@ -34,6 +34,40 @@ def _set_envs_and_config(args: StartArgs):
     mp.set_start_method("spawn", force=True)
 
 
+def _validate_ssm_state_mode(args: StartArgs):
+    assert args.ssm_state_mode in ("native", "compact", "replay"), "Invalid ssm_state_mode"
+    assert args.replayssm_projection_mode in ("inline", "precompute"), "Invalid replayssm_projection_mode"
+    assert (
+        args.replayssm_projection_mode == "inline" or args.ssm_state_mode == "replay"
+    ), "replayssm_projection_mode=precompute requires ssm_state_mode=replay"
+    if args.ssm_state_mode == "native":
+        return
+    assert args.linear_att_ssm_data_type in (
+        "float32",
+        "bfloat16",
+    ), "Non-native SSM state modes require FP32 or BF16 state"
+    from lightllm.utils.config_utils import get_model_type
+
+    assert get_model_type(args.model_dir) in (
+        "glm5_next",
+        "glm5_next_text",
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3_5_text",
+        "qwen3_5_moe_text",
+    ), "Non-native SSM state modes currently require a GDN or KDA model"
+    if args.ssm_state_mode == "compact":
+        assert args.mtp_step > 0, "ssm_state_mode=compact requires MTP (mtp_step > 0)"
+    else:
+        assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
+        capacity = args.replayssm_cache_len
+        assert (
+            capacity >= 4 and capacity & (capacity - 1) == 0
+        ), "ReplaySSM capacity must be a power of two and at least 4"
+        assert args.replayssm_cache_len >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"
+
+
 def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
@@ -280,6 +314,8 @@ def _launch_subprocesses(args: StartArgs):
             "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
+
+    _validate_ssm_state_mode(args)
 
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:

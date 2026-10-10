@@ -13,11 +13,13 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     out_num_accepted_tokens,
     batch_size,
     hold_req_id,
+    SEQUENCE_CAPACITY: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK_SIZE)
     token_mask = offsets < batch_size
-    cu_mask = offsets <= batch_size
+    sequence_mask = offsets < SEQUENCE_CAPACITY
+    cu_mask = offsets <= SEQUENCE_CAPACITY
 
     req_idx = tl.load(b_req_idx + offsets, mask=token_mask, other=hold_req_id)
     mtp_index = tl.load(b_mtp_index + offsets, mask=token_mask, other=0)
@@ -25,12 +27,11 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     valid_row = token_mask & (req_idx != hold_req_id)
     actual_token_num = tl.sum(tl.where(valid_row, 1, 0), axis=0)
 
-    # Keep tensor shapes dependent only on the target graph batch size. The
-    # unused tail represents zero-length sequences, so one captured graph can
-    # replay arbitrary compact per-request widths at the same token batch size.
+    # A request contributes at most one sequence, regardless of verify width.
+    # Both the request-pool capacity and graph token bucket are static.
     tl.store(out_cu_q_seq_len + offsets, actual_token_num, mask=cu_mask)
-    tl.store(out_conv_buffer_idx + offsets, hold_req_id, mask=token_mask)
-    tl.store(out_num_accepted_tokens + offsets, 1, mask=token_mask)
+    tl.store(out_conv_buffer_idx + offsets, hold_req_id, mask=sequence_mask)
+    tl.store(out_num_accepted_tokens + offsets, 1, mask=sequence_mask)
     tl.debug_barrier()
 
     # mtp_index restarts at zero on the first row of every request group.
@@ -81,8 +82,9 @@ def build_dynamic_mtp_linear_att_state_params(
     ``b_conv_buffer_idx`` therefore changes from one request id per query row
     to one request id per GDN sequence. Repeated cumulative lengths describe
     zero-length tail sequences. Keeping every output shape dependent only on
-    the padded input batch allows the same CUDA Graph to replay different
-    per-request query lengths.
+    the padded input batch and request-pool capacity allows the same CUDA Graph
+    to replay different per-request query lengths. The request table includes
+    one HOLD slot; the number of real sequences cannot exceed the other slots.
     """
 
     assert b_req_idx.is_cuda and b_mtp_index.is_cuda and req_to_mtp_state_index.is_cuda
@@ -90,10 +92,12 @@ def build_dynamic_mtp_linear_att_state_params(
     assert b_req_idx.dtype == torch.int32 and b_mtp_index.dtype == torch.int32
     batch_size = b_req_idx.shape[0]
     assert batch_size > 0
+    sequence_capacity = min(batch_size, req_to_mtp_state_index.numel() - 1)
+    assert sequence_capacity > 0
 
-    b1_cu_q_seq_len = torch.empty((batch_size + 1,), dtype=torch.int32, device=b_req_idx.device)
-    b_conv_buffer_idx = torch.empty_like(b_req_idx)
-    b_num_accepted_tokens = torch.empty_like(b_req_idx)
+    b1_cu_q_seq_len = torch.empty((sequence_capacity + 1,), dtype=torch.int32, device=b_req_idx.device)
+    b_conv_buffer_idx = torch.empty((sequence_capacity,), dtype=torch.int32, device=b_req_idx.device)
+    b_num_accepted_tokens = torch.empty_like(b_conv_buffer_idx)
 
     _build_dynamic_mtp_linear_att_state_params_kernel[(1,)](
         b_req_idx=b_req_idx,
@@ -104,6 +108,7 @@ def build_dynamic_mtp_linear_att_state_params(
         out_num_accepted_tokens=b_num_accepted_tokens,
         batch_size=batch_size,
         hold_req_id=int(hold_req_id),
+        SEQUENCE_CAPACITY=sequence_capacity,
         BLOCK_SIZE=triton.next_power_of_2(batch_size + 1),
         num_warps=8,
         num_stages=1,

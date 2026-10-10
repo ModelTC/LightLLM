@@ -515,6 +515,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=model_input.b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=model_input.b_mtp_index,
+                    ssm_accept_batches=((req_num, model_output.ssm_run_config),),
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -576,6 +577,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
+
             # 第二阶段
             event_pack.notify_post_handle_and_wait_pre_post_handle()
             if spec_plan.skip_verify_sync:
@@ -788,6 +790,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=b_mtp_index,
+                    ssm_accept_batches=(
+                        (real_request_num0, model_output0.ssm_run_config),
+                        (real_request_num1, model_output1.ssm_run_config),
+                    ),
                 )
                 mtp_accept_len0 = mtp_accept_len[:real_request_num0]
                 mtp_accept_len1 = mtp_accept_len[real_request_num0:]

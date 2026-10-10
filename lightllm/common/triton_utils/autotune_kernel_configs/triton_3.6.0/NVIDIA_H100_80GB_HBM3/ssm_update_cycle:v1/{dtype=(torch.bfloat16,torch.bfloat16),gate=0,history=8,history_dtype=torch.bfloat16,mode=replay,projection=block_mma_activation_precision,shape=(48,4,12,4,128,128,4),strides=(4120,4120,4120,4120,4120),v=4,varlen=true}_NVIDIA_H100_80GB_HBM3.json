@@ -1,0 +1,12 @@
+{
+  "192": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "128": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 1
+  }
+}

@@ -202,6 +202,9 @@ class ModelOutput:
     # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
     logits_token_ids: Optional[torch.Tensor] = None
 
+    # Layout selected by this verify graph; preserved when logits are unpadded.
+    ssm_run_config: Optional[dict] = None
+
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()

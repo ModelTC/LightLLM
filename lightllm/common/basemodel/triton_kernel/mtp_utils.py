@@ -203,7 +203,6 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     HAS_NEXT_TOKEN_SCORES: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-
     cur_index = tl.program_id(0)
     req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
     accept_len = tl.load(mtp_accept_len + cur_index)
@@ -349,6 +348,8 @@ def _fwd_kernel_linear_att_mtp_state_index_update(
     b_mtp_index,
     accepted_index,
     req_mtp_all_num,
+    replay_cursors,
+    HOLD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
@@ -369,6 +370,9 @@ def _fwd_kernel_linear_att_mtp_state_index_update(
     max_mtp_index = tl.max(valid_mtp_index, axis=0)
 
     tl.store(req_to_mtp_state_index + cur_req_idx, max_mtp_index)
+    if replay_cursors is not None:
+        cursor = tl.load(replay_cursors + cur_req_idx, mask=cur_req_idx != HOLD, other=0)
+        tl.store(replay_cursors + cur_req_idx, cursor + max_mtp_index + 1, mask=cur_req_idx != HOLD)
     return
 
 
@@ -379,6 +383,7 @@ def linear_att_mtp_state_index_update(
     b_mtp_index: torch.Tensor,
     accepted_index: torch.Tensor,
     verify_width: int,
+    replay_cursors: torch.Tensor = None,
 ):
     """
     Update req_to_mtp_state_index with the max b_mtp_index among accepted tokens per request.
@@ -406,6 +411,8 @@ def linear_att_mtp_state_index_update(
         b_mtp_index=b_mtp_index,
         accepted_index=accepted_index,
         req_mtp_all_num=req_mtp_all_num,
+        replay_cursors=replay_cursors,
+        HOLD=req_to_mtp_state_index.numel() - 1,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
         num_stages=1,
