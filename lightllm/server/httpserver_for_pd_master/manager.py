@@ -27,7 +27,7 @@ from fastapi import Request
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
-from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.server.httpserver.manager import AsyncQueue, StopSequenceOutput
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -167,9 +167,18 @@ class HttpServerManagerForPDMaster:
         if was_idle:
             self.latest_success_infer_time = time.time()
         try:
+            filter_stop_output = sampling_params.stop_sequences.size > 0
+            stop_outputs = {}
             async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
                 async for result in generator:
-                    yield result
+                    if filter_stop_output:
+                        sub_req_id = result[0]
+                        if sub_req_id not in stop_outputs:
+                            stop_outputs[sub_req_id] = StopSequenceOutput(sampling_params)
+                        for output in stop_outputs[sub_req_id].process(*result):
+                            yield output
+                    else:
+                        yield result
         finally:
             self.running_request_count -= 1
 
@@ -391,6 +400,9 @@ class HttpServerManagerForPDMaster:
                         )
                         p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
                         pending_prefill_load_chars = None
+
+                    if "_in_reasoning" in metadata:
+                        origin_sampling_params._reasoning_status = int(metadata["_in_reasoning"])
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。

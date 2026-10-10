@@ -138,12 +138,15 @@ class Req(ctypes.Structure):
         ("mtp_verify_step_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
-        # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
+        # detokenization 判定的 stop 匹配结果，包含 reasoning-aware token 序列；router 进程读取
         # 然后router发停止命令给推理进程，推理进程停止输出
         ("stop_str_matched", ctypes.c_bool),
         # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
         # 该变量为 detokenization 进程写入，http_server 读取
         ("stop_str_matched_token_index", ctypes.c_int),
+        # 相对最后一个输出 token 文本末尾的截断偏移；0 表示保留全部文本。
+        ("stop_output_offset", ctypes.c_int),
+        ("_in_reasoning", ctypes.c_bool),
         # hybrid 模型按 checkpoint 粒度提前计算输入 hash，供大小页 radix 匹配。
         ("hybrid_token_hash_list", TokenHashList),
         # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
@@ -211,6 +214,8 @@ class Req(ctypes.Structure):
         self._mtp_step = get_env_start_args().mtp_step
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
+        self.stop_output_offset = 0
+        self._in_reasoning = False
 
         self.post_init()
 

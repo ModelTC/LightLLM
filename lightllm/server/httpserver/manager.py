@@ -11,6 +11,7 @@ import hashlib
 import datetime
 import pickle
 from array import array
+from collections import deque
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -36,6 +37,7 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
+from lightllm.utils.envs_utils import get_stop_in_reasoning
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import (
     ClientDisconnected,
@@ -516,13 +518,21 @@ class HttpServerManager(HttpRlManagerHelper, object):
             }
 
             is_first_gen_token = True
+            filter_stop_output = self.pd_mode.is_normal() and sampling_params.stop_sequences.size > 0
+            stop_outputs = {}
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
                 # 只有第一个生成的 token 的 metadata 中包含 input_usage
                 if is_first_gen_token:
                     metadata["input_usage"] = input_usage
                     is_first_gen_token = False
 
-                yield sub_req_id, request_output, metadata, finish_status
+                if filter_stop_output:
+                    if sub_req_id not in stop_outputs:
+                        stop_outputs[sub_req_id] = StopSequenceOutput(sampling_params)
+                    for output in stop_outputs[sub_req_id].process(sub_req_id, request_output, metadata, finish_status):
+                        yield output
+                else:
+                    yield sub_req_id, request_output, metadata, finish_status
 
         except (asyncio.CancelledError, BaseException) as e:
             if isinstance(e, ClientDisconnected):
@@ -1079,6 +1089,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                         self.tokenizer,
                                         enable_return_routed_experts=self.args.enable_return_routed_experts,
                                     )
+                                    if req.sample_params.stop_sequences.size > 0:
+                                        metadata["_stop_output_offset"] = req.stop_output_offset
+                                        if self.args.reasoning_parser and not get_stop_in_reasoning():
+                                            metadata["_in_reasoning"] = req._in_reasoning
 
                                     # mark_simulated_finished 追加的 EOS 只负责唤醒 Detoken/HTTP wait。
                                     # 对外将它转换成无 token 的 finish marker，VERL 会按 id=None
@@ -1120,6 +1134,40 @@ class HttpServerManager(HttpRlManagerHelper, object):
         """注销一个结束运行的请求，必须在 finally 中与登记操作配对调用。"""
         async with self._run_reqs_count_lock:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
+
+
+class StopSequenceOutput:
+    """Buffer one choice's text at the complete request boundary, preserving token metadata."""
+
+    def __init__(self, sampling_params: SamplingParams):
+        stops = sampling_params.stop_sequences.to_strings()
+        self.buffer_length = (
+            max((len(stop) for stop in stops), default=1) - 1 if not sampling_params.include_stop_str_in_output else 0
+        )
+        self.pending_tokens = deque()
+        self.pending_length = 0
+
+    def process(self, sub_req_id, text, metadata, finish_status):
+        # Consume internal metadata; negative offsets trim trailing text.
+        stop_offset = metadata.pop("_stop_output_offset", 0)
+        metadata.pop("_in_reasoning", None)
+        self.pending_tokens.append((sub_req_id, text, metadata, finish_status))
+        self.pending_length += len(text)
+        finished = finish_status.is_finished()
+        # Hold possible stop prefixes; apply the trim offset on finish.
+        output_end = self.pending_length + stop_offset if finished else self.pending_length - self.buffer_length
+
+        while self.pending_tokens:
+            sub_req_id, token_text, metadata, token_finish_status = self.pending_tokens[0]
+            # Keep whole tokens paired with their ID/logprob.
+            if not finished and len(token_text) > output_end:
+                break
+            self.pending_tokens.popleft()
+            self.pending_length -= len(token_text)
+            # Trim text while preserving metadata and finish status.
+            visible_text = token_text[: max(0, output_end)]
+            output_end -= len(token_text)
+            yield sub_req_id, visible_text, metadata, token_finish_status
 
 
 class ReqStatus:

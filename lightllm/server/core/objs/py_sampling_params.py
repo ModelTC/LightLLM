@@ -62,6 +62,8 @@ class SamplingParams:
         # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         suggested_dp_index: Optional[int] = None,
         seed: Optional[int] = -1,
+        include_stop_str_in_output: bool = False,
+        _reasoning_status: int = -1,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -82,6 +84,9 @@ class SamplingParams:
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
+        self.include_stop_str_in_output = include_stop_str_in_output
+        # Initial state for stop matching: -1 uses the detector default, 0 content, 1 reasoning.
+        self._reasoning_status = _reasoning_status
         self.skip_special_tokens = skip_special_tokens
         self.add_special_tokens = add_special_tokens
         self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
@@ -267,6 +272,8 @@ class SamplingParams:
         ret["ignore_eos"] = self.ignore_eos
         ret["max_new_tokens"] = self.max_new_tokens
         ret["stop_sequences"] = self.stop_sequences
+        ret["include_stop_str_in_output"] = self.include_stop_str_in_output
+        ret["_reasoning_status"] = self._reasoning_status
         ret["best_of"] = self.best_of
         ret["input_penalty"] = self.input_penalty
         ret["regular_constraint"] = self.regular_constraint

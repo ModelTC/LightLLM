@@ -15,6 +15,7 @@ from lightllm.server.core.objs.sampling_params import (
     JSON_SCHEMA_MAX_LENGTH,
     GRAMMAR_CONSTRAINT_MAX_LENGTH,
 )
+from lightllm.server.core.objs.py_sampling_params import SamplingParams as PySamplingParams
 
 grammar_str = r"""root ::= (expr "=" term)+
 expr ::= term ([-+*/] term)*
@@ -168,6 +169,26 @@ def test_sampling_params_initialization():
     assert params.stop_sequences.size == 2
     assert params.pd_master_node_id.get() == pd_master_node_id
     assert params.pd_kv_trans_params.get() == pd_kv_trans_params
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [({}, False), ({"include_stop_str_in_output": False}, False), ({"include_stop_str_in_output": True}, True)],
+)
+def test_include_stop_str_in_output_round_trip(kwargs, expected):
+    params = SamplingParams()
+    params.init(None, **kwargs)
+    assert params.include_stop_str_in_output is expected
+    assert params.to_dict()["include_stop_str_in_output"] is expected
+    assert SamplingParams.from_buffer_copy(params).include_stop_str_in_output is expected
+
+    restored = SamplingParams()
+    restored.init(None, **params.to_dict())
+    assert restored.include_stop_str_in_output is expected
+
+    py_params = PySamplingParams(**kwargs)
+    assert py_params.include_stop_str_in_output is expected
+    assert py_params.to_dict()["include_stop_str_in_output"] is expected
 
 
 # Mock tokenizer for testing

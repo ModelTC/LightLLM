@@ -95,6 +95,27 @@ Stream return text completion results
 
     data:{"token": {"id": 279, "text": " the", "logprob": -1.5594439506530762, "special": false, "count_output_tokens": 3, "prompt_tokens": 4}, "generated_text": null, "finished": true, "finish_reason": "length", "details": null}
 
+Stop strings
+~~~~~~~~~~~~
+
+For ``/generate`` and ``/generate_stream``, set ``parameters.stop_sequences`` to a
+string or a list of strings. ``parameters.include_stop_str_in_output`` defaults to
+``false``: the matched stop string and any following text in the same token are
+removed. Set it to ``true`` to retain the stop string. This option applies to
+string stops; token-ID stop sequences keep their existing behavior.
+
+Both streaming and non-streaming output follow this setting. Streaming holds
+whole tokens covering the last ``max_stop_string_length - 1`` characters when
+excluding stop strings, so a stop split across tokens cannot leak into output.
+An unmatched tail is returned when generation finishes. Token IDs, logprobs,
+output token counts, and the finish reason retain their original meanings.
+
+With a configured reasoning parser, both string and token-ID stop sequences
+ignore reasoning and apply only to answer content by default. Set
+``LIGHTLLM_STOP_IN_REASONING=1`` before service startup to enable them in both
+phases. EOS and the output token limit remain active in both phases. See the
+:ref:`OpenAI API examples <openai_api>` for deployment details.
+
 :code:`POST /get_score`
 ~~~~~~~~~~~~~~~~~~~~~~~
 Reward model, get conversation score

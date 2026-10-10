@@ -18,6 +18,47 @@ First, ensure that the LightLLM service is started:
         --port 8088 \
         --tp 1
 
+Stop Strings
+------------
+
+``/v1/chat/completions`` and ``/v1/completions`` accept ``stop`` and
+``include_stop_str_in_output``. By default, the matched stop string is excluded
+from returned text. Set ``include_stop_str_in_output`` to ``true`` to include it.
+Text after the stop string in the same token is excluded in either case. This
+applies to streaming and non-streaming requests, including PD deployments.
+
+With the OpenAI Python client, pass the option through ``extra_body``:
+
+.. code-block:: python
+
+    response = client.chat.completions.create(
+        model="your_model_name",
+        messages=[{"role": "user", "content": "Hello"}],
+        stop=["END"],
+        extra_body={"include_stop_str_in_output": True},
+    )
+
+For example, generated text ``helloEND`` is returned as ``hello`` by default,
+or ``helloEND`` with this option enabled.
+
+When a reasoning parser is configured (automatically or via ``--reasoning_parser``),
+user stop sequences apply only to final answer ``content`` by default. A matching
+string inside reasoning does not end generation. This also applies when
+``separate_reasoning=False`` combines reasoning and content in the response.
+EOS and the output token limit still end generation in either phase.
+
+To enable stop sequences in reasoning as well, set this environment variable
+before starting the service:
+
+.. code-block:: bash
+
+    export LIGHTLLM_STOP_IN_REASONING=1
+
+The default is ``0``; ``1``, ``true``, and ``ON`` enable the option. Restart the
+service after changing it. For PD deployments, set the same value on the master
+and all prefill/decode nodes. Without a reasoning parser, stop sequences continue
+to apply to all generated text.
+
 Basic Conversation Examples
 ---------------------------
 
