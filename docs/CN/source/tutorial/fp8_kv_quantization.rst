@@ -12,7 +12,7 @@ FP8 KV 量化与校准指南
 功能概览
 --------
 
-LightLLM 的 FP8 KV 推理需要准备好的校准文件（``kv_cache_calib.json``），
+LightLLM 的静态 FP8 KV 推理需要准备好的校准文件（``kv_cache_calib.json``），
 并通过 ``--kv_quant_calibration_config_path`` 加载。
 你可以直接使用 ``test/advanced_config/`` 目录下已有的校准文件，
 也可以使用 `LightCompress <https://github.com/ModelTC/LightCompress>`_ 工具导出，或使用自有兼容文件。
@@ -20,10 +20,11 @@ LightLLM 的 FP8 KV 推理需要准备好的校准文件（``kv_cache_calib.json
 量化模式与后端对应
 ------------------
 
-LightLLM 支持两种 FP8 KV 量化模式：
+LightLLM 支持三种 FP8 KV 量化模式：
 
 - ``fp8kv_sph``: FP8 静态按 head 量化（Static Per-Head），每个 head 独立 scale，对应 ``fa3`` 后端
 - ``fp8kv_spt``: FP8 静态按 tensor 量化（Static Per-Tensor），K/V 各一个标量 scale，对应 ``flashinfer`` 后端
+- ``fp8kv_dsa``: 面向 DeepSeek-V3.2 和 GLM-5.3 Flash 稀疏 MLA，按 token、每 128 维动态量化，无需校准文件
 
 校准文件与量化模式强相关：
 
@@ -31,6 +32,36 @@ LightLLM 支持两种 FP8 KV 量化模式：
 - ``fp8kv_spt`` 对应 ``per_tensor`` 校准文件
 
 不建议混用不同模式的校准文件。
+
+GLM-5.3 Flash 动态 FP8 KV
+-------------------------
+
+``glm5_next`` 和 ``glm5_next_text`` 两种入口均支持 ``fp8kv_dsa``，计算精度使用 BF16：
+
+.. code-block:: console
+
+    $ python -m lightllm.server.api_server \
+        --model_dir /path/to/GLM-5.3-Flash --tp 4 \
+        --data_type bfloat16 --llm_kv_type fp8kv_dsa
+
+稀疏 MLA KV 使用 FlashMLA V4 格式：前 448 维按 64 维分组使用 E4M3 存储，
+最后 64 维保留真实 BF16 值，并附带七个 E8M0 scale 和一个对齐字节。
+query 保持 512 维 NoPE，不附加全零 RoPE 区域。
+包含 indexer 和 16 字节行对齐开销，每个稀疏层每 token 从 1168 字节降至 720 字节，减少约 38.4%。
+KDA 卷积、SSM 状态以及 indexer 的原始请求尾部仍使用原计算精度，因此总模型显存不会同比减少 38.4%。
+
+Prefill 直接使用本次计算的 BF16 KV，对命中的历史前缀进行分块反量化。
+所有请求使用同一分块流程，BF16 gather buffer 每卡最多 64 MiB，短输入按实际长度分配。
+每块通过 FA3 的 ``only_qv`` 接口计算稀疏注意力，并使用 FP32 在线合并结果；
+gather buffer 不随历史上下文长度增长。索引和注意力计算工作区仍需额外显存。
+原生 MTP draft 层、CPU 前缀缓存和 P/D 传输使用同一存储布局。
+P/D 两端都需要设置 ``--llm_kv_type fp8kv_dsa``；使用
+``test/start_scripts/glm53/glm53_pd_1p1d.sh`` 时可设置环境变量 ``LLM_KV_TYPE=fp8kv_dsa``。
+传输页仍须容纳完整的 KDA/indexer 状态；量化后 token 页变小，可能需要增大 ``--pd_kv_page_size``。
+
+除原有 GLM-5.3 Flash 依赖外，此路径需要安装支持 Hopper V4 稀疏 FP8 decode 的 ``flash_mla`` 包。
+Dockerfile 固定使用最后兼容 Hopper 的提交 ``ba89a3466e9470ad08ab39738d4e7bb66989e1e7``。
+该模型不支持 ``fp8kv_sph`` 和 ``fp8kv_spt``。
 
 使用校准文件启动 FP8 推理
 -------------------------

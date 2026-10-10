@@ -517,8 +517,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 quant way is static per head kv quant.
                 fp8kv_spt: use float8_e4m3fn to store kv cache for inference,
                 quant way is static per tensor kv quant.
-                fp8kv_dsa: use DeepSeek-V3.2 DSA-specific FlashMLA FP8 sparse KV cache,
-                intended for the deepseek_v32 model path.
+                fp8kv_dsa: use dynamic per-token/group FlashMLA FP8 sparse KV cache
+                for DeepSeek-V3.2 or GLM-5.3 Flash.
                 fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
                 to load pre-computed FP8 scales.
                 Note: fp8kv_spt requires flashinfer-python>=0.6.5 (default is 0.6.3,
