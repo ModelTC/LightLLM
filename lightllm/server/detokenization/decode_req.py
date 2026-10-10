@@ -16,7 +16,6 @@ class DecodeReq:
     def __init__(
         self,
         req: Req,
-        is_pd_decode_mode: bool,
         tokenizer,
     ) -> None:
         self.request_id = req.request_id
@@ -25,11 +24,7 @@ class DecodeReq:
         self.output_ids = []
         self.prefix_offset = max(len(self.prompt_ids) - LIGHTLLM_DECODE_PREFIX_LENGTH, 0)
 
-        if is_pd_decode_mode:
-            # pd decode mode 需要模拟一下 prefill 输出的第一个token
-            self.read_offset = max(0, len(self.prompt_ids) - 1)
-        else:
-            self.read_offset = len(self.prompt_ids)
+        self.read_offset = len(self.prompt_ids)
 
         self.req = req
         self.input_len = self.req.input_len
@@ -52,7 +47,7 @@ class DecodeReq:
                     args.reasoning_parser,
                     tokenizer,
                     self.req.sample_params._reasoning_status,
-                    self.prompt_ids[:-1] if is_pd_decode_mode else self.prompt_ids,
+                    self.prompt_ids,
                 )
                 self.req._in_reasoning = self.reasoning_stop_state.in_reasoning
 
