@@ -100,3 +100,48 @@ Common Issues
 3. Abnormal quality after mode switch
 
    Use a calibration file that matches the target quantization mode instead of reusing an incompatible file.
+
+Different Target and Draft Head Layouts
+--------------------------------------
+
+For ``fp8kv_sph``, a shared KV buffer may contain layers with different head
+layouts. Supply ``layouts`` instead of the top-level ``num_head``, ``scales``
+and ``q_calibration`` fields. Each entry describes consecutive physical KV
+layers: target full-attention layers first, followed by each draft's layers
+in configured order. Linear-attention layers are not counted.
+
+Keep ``num_layers``, ``num_target_layers`` and ``num_draft_layers`` at the top
+level. For a target with 16 full-attention layers and a five-layer draft,
+these are 21, 16 and 5. The two layout entries contain:
+
+.. list-table:: Per-layout calibration fields
+   :header-rows: 1
+
+   * - Field
+     - Target
+     - Draft
+   * - ``num_layers``
+     - 16
+     - 5
+   * - ``num_head`` / ``head_dim``
+     - 4 / 256
+     - 8 / 128
+   * - ``scales_shape``
+     - [16, 8]
+     - [5, 16]
+   * - ``q_calibration.num_head``
+     - 4
+     - 8
+   * - ``q_calibration.scales_shape``
+     - [16, 4]
+     - [5, 8]
+
+Each entry's ``scales`` contains its independently calibrated K heads followed
+by V heads. ``q_calibration.scales`` contains one Q scale per KV-head group,
+not per query head. Values must be finite and positive; all declared layers
+must be covered. TP slicing uses each entry's own head count.
+
+Use the same file on P and D nodes. Target-only servers may also load this file
+and use only the target rows. An old uniform-head calibration file cannot supply
+independent eight-head draft scales for a four-head target; requesting that
+layout now fails explicitly instead of duplicating scale values.

@@ -223,6 +223,31 @@ Multimodal Testing (Image Input)
                "max_tokens": 200
               }'
 
+DSpark and DFlash Draft KV Layouts
+---------------------------------
+
+Qwen3.5-family targets can use a parallel block draft with a different attention
+head dimension when both the global and per-TP-rank KV widths match. For example,
+a target with four KV heads of dimension 256 can share cache slots with a draft
+with eight KV heads of dimension 128 at TP=1, 2 or 4. TP=8 is rejected for this
+pair because the target replicates KV heads while the draft shards them.
+Use the TP size within each DP group when checking this condition.
+
+The draft uses a zero-copy cache view; the target continues to own token slots,
+padding pages, CPU cache and PD transfers. Prefill and decode nodes may use
+different supported TP sizes, with matching KV dtype and global KV calibration.
+BF16/FP16 KV and ``fp8kv_sph`` use the same storage layout. For different head
+layouts, per-head FP8 requires independent native KV and Q scales for each
+model, using the ``layouts`` calibration format described in
+:doc:`../tutorial/fp8_kv_quantization`. Scales are never inferred by repeating
+or merging another layout's calibration. Legacy uniform-head files remain
+supported for matching layouts. Regenerate calibration when changing checkpoints.
+
+Parallel block decode still requires FA3. ``fp8kv_spt`` only supports FlashInfer
+and is therefore unavailable for DSpark/DFlash; this layout adaptation does not
+change that backend restriction. Target and draft with unequal KV widths require
+separate cache storage and are rejected at initialization.
+
 Hardware Requirements
 ---------------------
 

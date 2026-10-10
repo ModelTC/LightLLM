@@ -222,6 +222,27 @@ OpenAI 兼容聊天接口
                "max_tokens": 200
               }'
 
+DSpark 和 DFlash 草稿模型 KV 布局
+-------------------------------
+
+Qwen3.5 系列主模型可以搭配 attention head dimension 不同的并行块草稿模型，
+前提是全局和每个 TP rank 的 KV 宽度都相同。例如，主模型的四个 256 维 KV head
+可以与草稿模型的八个 128 维 KV head 在 TP=1、2、4 时共享缓存槽位。
+这组模型的 TP=8 会被拒绝，因为主模型复制 KV head，而草稿模型仍在分片。
+使用 DP 时，应按每个 DP 组内的 TP 大小检查。
+
+草稿模型使用零拷贝缓存视图；token 槽位、padding 页、CPU cache 和 PD 传输
+仍由主模型管理。P、D 节点可以使用不同的受支持 TP 大小，但 KV dtype 和全局 KV 校准必须一致。
+BF16/FP16 KV 和 ``fp8kv_sph`` 使用相同的存储布局。
+head 布局不同时，per-head FP8 必须使用各模型独立的原生 KV 和 Q scale，
+采用 :doc:`../tutorial/fp8_kv_quantization` 中的 ``layouts`` 校准格式。
+不会通过重复或合并其他布局的 scale 推断校准值。旧的统一 head 格式仍支持同布局模型；
+更换 checkpoint 后需要重新校准。
+
+并行块 decode 仍要求 FA3。``fp8kv_spt`` 仅支持 FlashInfer，因此不能用于
+DSpark/DFlash；此布局兼容不改变已有后端限制。
+KV 宽度不同的主模型和草稿模型需要独立缓存存储，初始化时会明确拒绝。
+
 硬件要求
 --------
 

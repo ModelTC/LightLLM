@@ -100,3 +100,45 @@ LightLLM 支持两种 FP8 KV 量化模式：
 3. 切换量化模式后效果异常
 
    建议使用与目标量化模式匹配的校准文件，不要跨模式复用不兼容文件。
+
+主模型与草稿模型的 head 布局不同
+--------------------------------
+
+使用 ``fp8kv_sph`` 时，共享 KV buffer 中的层可以使用不同的 head 布局。
+用 ``layouts`` 列表代替顶层的 ``num_head``、``scales`` 和 ``q_calibration``。
+每个条目描述连续的物理 KV 层：先排列主模型 full-attention 层，再按配置顺序
+排列各个 draft 的层，不计入 linear-attention 层。
+
+顶层保留 ``num_layers``、``num_target_layers`` 和 ``num_draft_layers``。
+例如主模型有 16 个 full-attention 层、draft 有 5 层时，这三个值分别为 21、16、5。
+两个 layout 条目分别包含：
+
+.. list-table:: 各布局的校准字段
+   :header-rows: 1
+
+   * - 字段
+     - 主模型
+     - Draft
+   * - ``num_layers``
+     - 16
+     - 5
+   * - ``num_head`` / ``head_dim``
+     - 4 / 256
+     - 8 / 128
+   * - ``scales_shape``
+     - [16, 8]
+     - [5, 16]
+   * - ``q_calibration.num_head``
+     - 4
+     - 8
+   * - ``q_calibration.scales_shape``
+     - [16, 4]
+     - [5, 8]
+
+各条目的 ``scales`` 保存对应模型独立校准的 K head scale，然后是 V head scale。
+``q_calibration.scales`` 为每个 KV-head group 保存一个 Q scale，并非每个 query head 一个。
+所有值必须有限且为正数，条目必须覆盖声明的全部层；TP 切分使用各条目自己的 head 数。
+
+P、D 节点使用同一份文件。不开启 draft 的服务也可以加载该文件，仅使用主模型行。
+旧的统一 head 校准文件无法为 4-head 主模型提供独立的 8-head draft scale；
+请求这种布局会明确报错，不再自动重复 scale。

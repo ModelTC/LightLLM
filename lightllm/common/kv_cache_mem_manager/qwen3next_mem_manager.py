@@ -1,3 +1,4 @@
+import copy
 import torch
 import triton
 from lightllm.utils.log_utils import init_logger
@@ -37,6 +38,47 @@ class Qwen3NextMemManager(MemoryManager):
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
+
+    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int, *, layer_start=0, layer_num=None):
+        """Return a KV layout view, validating calibration for the given physical layer range.
+
+        Layer indices and storage ownership stay with the original manager.
+        """
+        layer_num = self.layer_num - layer_start if layer_num is None else layer_num
+        if layer_start < 0 or layer_num <= 0 or layer_start + layer_num > self.layer_num:
+            raise ValueError("KV layout layer range is outside the cache")
+        head_num = self._validate_kv_layout(num_kv_heads, head_dim)
+        if (head_num, head_dim) == (self.head_num, self.head_dim):
+            return self
+
+        # Allocation and transport remain owned by the original manager.
+        view = copy.copy(self)
+        view.head_num = head_num
+        view.head_dim = head_dim
+        view.kv_buffer = self.kv_buffer.view(*self.kv_buffer.shape[:2], 2 * head_num, head_dim)
+        view.operator = self.operator_class(view)
+        return view
+
+    def _validate_kv_layout(self, num_kv_heads: int, head_dim: int) -> int:
+        config = self.linear_config
+        current_heads = config.full_att_all_num_kv_heads * config.full_att_head_dim // self.head_dim
+        tp_size = self.linear_config.tp_world_size
+        for heads in (current_heads, num_kv_heads):
+            if heads <= 0 or not (heads % tp_size == 0 or tp_size % heads == 0):
+                raise ValueError(f"KV heads {heads} cannot be sharded or replicated across TP={tp_size}")
+        if head_dim <= 0 or num_kv_heads * head_dim != current_heads * self.head_dim:
+            raise ValueError(
+                "KV layouts must have equal global KV widths, "
+                f"got requested=({num_kv_heads}, {head_dim}), current=({current_heads}, {self.head_dim})"
+            )
+        head_num = max(num_kv_heads // tp_size, 1)
+        if head_num * head_dim != self.head_num * self.head_dim:
+            raise ValueError(
+                f"KV layouts have different per-rank KV widths at TP={tp_size}: "
+                f"requested={head_num * head_dim}, current={self.head_num * self.head_dim}. "
+                "Use a TP size that divides both KV head counts."
+            )
+        return head_num
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
@@ -163,6 +205,21 @@ class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
 
 class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerHeadQuantMemManager):
     operator_class = _FP8StaticPerHeadQuantLinearAttMemOperator
+
+    def get_kv_layout_view(self, num_kv_heads: int, head_dim: int, *, layer_start=0, layer_num=None):
+        view = super().get_kv_layout_view(num_kv_heads, head_dim, layer_start=layer_start, layer_num=layer_num)
+        scales = self._kv_layout_scales.get((view.head_num, head_dim))
+        if scales is None:
+            raise ValueError(
+                f"No per-head FP8 calibration for KV layout ({num_kv_heads}, {head_dim}); "
+                "provide calibration layouts with native KV and Q scales"
+            )
+        layer_end = self.layer_num if layer_num is None else layer_start + layer_num
+        for tensor, heads in zip(scales, (2 * view.head_num, view.head_num)):
+            if tensor.shape != (self.layer_num, heads) or not torch.isfinite(tensor[layer_start:layer_end]).all():
+                raise ValueError(f"Missing FP8 calibration for KV layers [{layer_start}, {layer_end})")
+        view.scales, view.q_scales = scales
+        return view
 
 
 class FP8StaticPerTensorQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerTensorQuantMemManager):
