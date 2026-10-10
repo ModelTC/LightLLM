@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -42,10 +43,11 @@ def _make_manager(monkeypatch):
 
     mgr.id_gen = SimpleNamespace(generate_id=gen_id)
     mgr.metric_client = SimpleNamespace(counter_inc=lambda *a, **k: None, histogram_observe=lambda *a, **k: None)
-    mgr.tokens = lambda *a, **k: 10
+    mgr._encode_prompt = lambda *a, **k: ([1, 2], 10)
     mgr._log_req_header = lambda *a, **k: asyncio.sleep(0)
     mgr.recorded_cache_hit_rates = []
     mgr.inserted_prompt_caches = []
+    mgr.segment_inputs = []
     mgr.pd_manager = SimpleNamespace(
         selector=SimpleNamespace(
             record_prompt_cache_hit_rate=mgr.recorded_cache_hit_rates.append,
@@ -66,7 +68,8 @@ def _make_manager(monkeypatch):
 def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefill", needs_prefill_first_token=True):
     segment_iter = iter(segments)
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request):
+        mgr.segment_inputs.append(pickle.loads(pickle.dumps((prompt_ids, sp.pd_previous_output_len))))
         sub_req_id = sp.group_request_id
         token_count, final_status = next(segment_iter)
         hit = sampling_params.max_new_tokens * 10
@@ -75,6 +78,7 @@ def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefi
             if token_index == token_count:
                 finish_status = FinishStatus(final_status)
             metadata = {
+                "id": ord("x"),
                 "prompt_tokens": 100,
                 "prompt_cache_len": hit if token_index == 1 else 0,
                 "count_output_tokens": token_index,
@@ -82,7 +86,7 @@ def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefi
             }
             if token_index == 1 and needs_prefill_first_token is not None:
                 metadata["needs_prefill_first_token"] = needs_prefill_first_token
-            yield sub_req_id, "x", metadata, finish_status
+            yield sub_req_id, "" if token_index == 1 else "x", metadata, finish_status
 
     monkeypatch.setattr(mgr, "_wait_to_token_package", fake_wait)
 
@@ -150,7 +154,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         # 分段内仍由真实 InferReq 判断；跨分段匹配由对外生成流的包装层完成。
         from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 
-        raw_generator = manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)
+        raw_generator = manager._generate_one_attempt("prompt", [1, 2], params, None, None, 0, 80, 2)
         results = [result async for result in wrap_stop_match_stream(manager, raw_generator, params, "prompt")]
         assert [result[2]["id"] for result in results] == stop_ids
         assert results[-1][3].is_stopped()
@@ -173,13 +177,21 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
         monkeypatch,
         segments=[
             (3, FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+            (2, FinishStatus.FINISHED_PD_DECODE_CAPACITY),
             (1, FinishStatus.FINISHED_STOP),
         ],
     )
-    assert cached == [50, 50, 50], cached
+    assert cached == [50, 50, 50, 50], cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.5)]
     assert len(mgr.inserted_prompt_caches) == 1
     assert mgr.inserted_prompt_caches[0][0] == "hello"
+    # Empty detokenized text still represents a committed token. Capacity
+    # markers are excluded, and every continuation carries the full history.
+    assert mgr.segment_inputs == [
+        ([1, 2], 0),
+        ([1, 2] + [ord("x")] * 2, 2),
+        ([1, 2] + [ord("x")] * 3, 3),
+    ]
 
 
 def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch):
@@ -190,11 +202,11 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     sampling_params.best_of = 1
     sampling_params.max_new_tokens = 1
 
-    async def failed_wait(_p_node, _d_node, _start_time, _prompt, sp, *_args):
+    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args):
         yield (
             sp.group_request_id,
             "",
-            {"prompt_tokens": 100, "prompt_cache_len": 20, "count_output_tokens": 0, "needs_prefill_first_token": True},
+            {"id": None, "prompt_tokens": 100, "prompt_cache_len": 20, "count_output_tokens": 0, "needs_prefill_first_token": True},
             FinishStatus(FinishStatus.FINISHED_ERROR),
         )
 
@@ -584,14 +596,14 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
     caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
 
     async def raw_stream(_p_node, _d_node, _prompt, sampling_params, *_args):
-        metadata = {"prompt_tokens": 10, "prompt_cache_len": 3}
+        metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
         yield sampling_params.group_request_id, "first", dict(metadata), FinishStatus()
         yield sampling_params.group_request_id, "late", dict(metadata), FinishStatus(late_status)
 
     manager.fetch_pd_stream = raw_stream
 
     async def run():
-        generator = manager._generate_one("prompt", params, None, request, time.time(), 80, 10)
+        generator = manager._generate_one("prompt", [1, 2], params, None, request, time.time(), 80, 10)
         assert (await generator.__anext__())[1] == "first"
         await manager.stop_request(80)
         # stop_request 只做标记，恢复生成时才停止当前 P/D 分段。

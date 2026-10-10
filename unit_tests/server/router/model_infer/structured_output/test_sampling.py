@@ -41,6 +41,7 @@ def sampling_req(compiler, sampling_manager, req_idx=5, **constraints):
     req = make_req(**({"regular_constraint": "abc"} | constraints))
     req.req_idx = req_idx
     req.sampling_param.shm_param = SimpleNamespace(
+        pd_previous_output_len=0,
         presence_penalty=0.0,
         frequency_penalty=0.0,
         repetition_penalty=1.0,

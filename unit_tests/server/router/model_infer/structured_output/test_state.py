@@ -227,21 +227,31 @@ def test_mixed_batch_partial_prefill_and_finished_requests(compiler):
 
 @pytest.mark.parametrize("is_master_in_dp", [False, True])
 @pytest.mark.parametrize(
-    "reasoning_end,first_token,expected_next",
-    [(b"", ord("a"), ord("b")), (b"]", ord("]"), ord("a")), (b"]>", ord("]"), None), (b"", ord("!"), None)],
+    "reasoning_end,history,first_token,expected_next",
+    [
+        (b"", b"", ord("a"), ord("b")),
+        (b"]", b"", ord("]"), ord("a")),
+        (b"]>", b"", ord("]"), None),
+        (b"", b"", ord("!"), None),
+        (b"", b"a", ord("b"), 256),
+        (b"]>", b"thought]", ord(">"), ord("a")),
+    ],
 )
 def test_pd_first_token_updates_constraint_before_sampling(
-    compiler, monkeypatch, is_master_in_dp, reasoning_end, first_token, expected_next
+    compiler, monkeypatch, is_master_in_dp, reasoning_end, history, first_token, expected_next
 ):
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
     req = make_req(regular_constraint="ab", guided_reasoning_end=tuple(reasoning_end))
+    req.shm_req.shm_prompt_ids.arr.extend(history)
+    req.shm_req.input_len += len(history)
+    req.sampling_param.shm_param.pd_previous_output_len = len(history)
     good = make_req(regular_constraint="cd")
     for request in (req, good):
         init_request(compiler, request)
     req.pd_task_success_num = 0
     req.shm_req.shm_prompt_ids.arr.append(0)
-    req.shm_req.shm_logprobs = SimpleNamespace(arr=[None, None])
+    req.shm_req.shm_logprobs = SimpleNamespace(arr=[None] * (req.shm_req.input_len + 1))
     req.set_next_gen_token_id = MethodType(infer_batch.InferReq.set_next_gen_token_id, req)
     req.update_finish_status = lambda **kwargs: None
     sampling_params = make_mask_buffers([req, good])
@@ -266,7 +276,7 @@ def test_pd_first_token_updates_constraint_before_sampling(
     ModeBackend._read_pd_trans_io_buffer_and_update_req_status(backend)
 
     assert req.cur_output_len == 1 and req.pd_task_success_num == 1
-    assert req.shm_req.shm_prompt_ids.arr == [ord("P"), first_token]
+    assert req.shm_req.shm_prompt_ids.arr == [ord("P")] + list(history) + [first_token]
     assert sampling_params.req_to_next_token_ids[req.req_idx, 0].item() == first_token
     if is_master_in_dp:
         assert req.shm_req.shm_cur_output_len == 1
