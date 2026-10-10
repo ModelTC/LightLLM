@@ -2,6 +2,7 @@ from copy import deepcopy
 
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
+from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -66,7 +67,10 @@ class Glm5NextMTPModel(TpPartBaseModel):
         self.mem_manager = self.main_model.mem_manager
 
     def _init_att_backend(self):
-        self.prefill_att_backend = Glm5NextSparseAttBackend(model=self)
+        backend_class = (
+            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+        )
+        self.prefill_att_backend = backend_class(model=self)
         self.decode_att_backend = self.prefill_att_backend
 
     def autotune_layers(self):
