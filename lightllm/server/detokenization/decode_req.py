@@ -37,6 +37,7 @@ class DecodeReq:
         # to_strings()已经做了倒序排列，第一个元素就是最长字符串
         self.stop_str_max_len = len(self.stop_strs[0]) if self.stop_strs else 0
         self.stop_str_tail = ""
+        # 非 None 表示 reasoning 忽略 stop；当前是否在思考由 in_reasoning 表示。
         self.reasoning_stop_state = None
         self.stop_token_sequences = [
             group.to_list()
@@ -63,9 +64,10 @@ class DecodeReq:
         ):
             return False
         if self.reasoning_stop_state is not None:
-            allowed = self.reasoning_stop_state.update(token_id)
+            # 按 token ID 更新reasoning状态；返回值表示当前 token 是否允许参与 stop 匹配。
+            can_match_stop = self.reasoning_stop_state.update(token_id)
             self.req._in_reasoning = self.reasoning_stop_state.in_reasoning
-            if not allowed:
+            if not can_match_stop:
                 self.stop_str_tail = ""
                 self.stop_token_tail.clear()
                 return False
@@ -87,10 +89,13 @@ class DecodeReq:
             )
             return True
 
-        if self.reasoning_stop_state is not None:
+        # 普通模式由推理进程匹配 token stop；思考阶段忽略 stop 时，推理进程跳过匹配，交给这里处理。
+        # 思考内容和边界标记已在上面返回并清空尾巴，这里只匹配正文中连续的 token 序列。
+        if self.reasoning_stop_state is not None and self.stop_token_sequences:
             self.stop_token_tail.append(int(token_id))
             tail_ids = list(self.stop_token_tail)
             for stop_ids in self.stop_token_sequences:
+                # 例如 stop_ids=[101, 102]，仅当最近两个 token 按此顺序连续出现时命中。
                 if tail_ids[-len(stop_ids) :] == stop_ids:
                     return True
         return False
