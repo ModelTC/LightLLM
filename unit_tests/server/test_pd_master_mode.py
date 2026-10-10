@@ -331,7 +331,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle():
 
 
 @pytest.mark.parametrize("include", [False, True])
-def test_pd_master_stop_output_keeps_choices_separate(include):
+def test_pd_master_forwards_filtered_choices(include):
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.running_request_count = 0
     params = SamplingParams()
@@ -342,11 +342,9 @@ def test_pd_master_stop_output_keeps_choices_separate(include):
 
     async def fake_generate(*args):
         # Prefill's first token and subsequent decode tokens arrive in one stream.
-        yield 80, "firstE", {"id": 1}, FinishStatus()
+        yield 80, "first", {"id": 1}, FinishStatus()
         yield 81, "second", {"id": 2}, FinishStatus()
-        yield 80, "NDextra", {"id": 3, "_stop_output_offset": -5 if include else -8}, FinishStatus(
-            FinishStatus.FINISHED_STOP
-        )
+        yield 80, "END" if include else "", {"id": 3}, FinishStatus(FinishStatus.FINISHED_STOP)
         yield 81, "EN", {"id": 4}, FinishStatus(FinishStatus.FINISHED_LENGTH)
 
     manager._generate = fake_generate

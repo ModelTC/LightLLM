@@ -11,7 +11,7 @@ from lightllm.server.api_openai import (
     _collect_generation_results,
 )
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.httpserver.manager import StopSequenceOutput
+from lightllm.server.detokenization.stop_sequence import StopSequenceBuffer
 
 
 class _FinishStatus:
@@ -144,21 +144,27 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
         assert sampling_params.stop_sequences.to_strings() == ["END"]
 
         async def results():
-            output = StopSequenceOutput(sampling_params)
+            output = StopSequenceBuffer(sampling_params, tokenizer, [])
             metadata = {"prompt_tokens": 4, "prompt_cache_len": 0, "logprobs": {}}
             for index, text in enumerate(["helloE", "NDextra"], 1):
                 finish = FinishStatus(FinishStatus.FINISHED_STOP if index == 2 else FinishStatus.NO_FINISH)
                 token_metadata = {**metadata, "id": index, "logprob": -index}
-                if index == 2:
-                    token_metadata["_stop_output_offset"] = -5 if include else -8
-                for result in output.process(80, text, token_metadata, finish):
-                    yield result
+                output.append(index, text, (token_metadata, finish))
+                if finish.is_finished():
+                    output.flush()
+                while output.ready_tokens:
+                    visible_text, (metadata, status) = output.ready_tokens.popleft()
+                    yield 80, visible_text, metadata, status
 
         return results()
 
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
     monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
+    monkeypatch.setattr(
+        "lightllm.server.detokenization.stop_sequence.get_env_start_args",
+        lambda: SimpleNamespace(reasoning_parser=None),
+    )
 
     async def build_prompt(*args):
         return "Prompt"
@@ -202,7 +208,7 @@ def test_stop_scope_receives_request_thinking_mode(monkeypatch, thinking):
     from lightllm.server import reasoning_parser
 
     def generate(prompt, sampling_params, multimodal_params, request):
-        assert sampling_params._reasoning_status == int(thinking)
+        assert sampling_params._initial_reasoning_state == int(thinking)
 
         async def results():
             yield 80, "hello", {"prompt_tokens": 4, "id": 1}, FinishStatus(FinishStatus.FINISHED_STOP)

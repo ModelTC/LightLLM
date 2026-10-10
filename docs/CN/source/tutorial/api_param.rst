@@ -113,8 +113,8 @@
 默认为 ``false``，返回文本会移除匹配到的 stop 字符串及同一 token 中其后的文本；
 设为 ``true`` 则保留 stop 字符串。此参数只影响字符串 stop，token ID 序列的行为保持不变。
 
-流式和非流式遵循相同设置。默认排除 stop 时，流式输出会暂存覆盖末尾
-``最长 stop 字符数 - 1`` 个字符的完整 token，防止跨 token 的 stop 片段提前发出。
+流式和非流式遵循相同设置。输出尾部匹配任意 stop 字符串的前缀时，流式输出会暂存
+覆盖该前缀的完整 token，直到能够确认是否命中 stop，防止跨 token 的 stop 片段提前发出。
 请求结束时会返回未匹配的尾部。token ID、logprob、输出 token 计数和结束原因的含义保持不变。
 
 配置 reasoning parser 后，字符串 stop 和 token ID stop 默认都跳过 reasoning，

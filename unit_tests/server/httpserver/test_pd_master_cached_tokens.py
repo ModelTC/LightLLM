@@ -160,27 +160,35 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
 
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
-def test_pd_continuation_carries_reasoning_stop_state(monkeypatch, in_reasoning):
+def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
+    from lightllm.server.detokenization import stop_sequence
+
+    monkeypatch.setattr(stop_sequence, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))
+    monkeypatch.setattr(stop_sequence, "get_stop_in_reasoning", lambda: False)
     manager = _make_manager(monkeypatch)
+    manager.tokenizer = SimpleNamespace(
+        encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
+    )
     params = SamplingParams()
-    params.n = params.best_of = 1
-    params.max_new_tokens = 3
-    params._reasoning_status = 1
+    params.init(manager.tokenizer, stop_sequences="END", max_new_tokens=3, _initial_reasoning_state=1)
     segment_modes = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
-        segment_modes.append(sp._reasoning_status)
+        segment_modes.append(sp._initial_reasoning_state)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segment_modes) == 1:
-            yield sp.group_request_id, "reason", dict(metadata), FinishStatus()
+            yield sp.group_request_id, "reason", {**metadata, "id": 10}, FinishStatus()
+            if not in_reasoning:
+                yield sp.group_request_id, "", {**metadata, "id": 1001}, FinishStatus()
+            # A simulated delimiter at the capacity boundary must not change state.
             yield (
                 sp.group_request_id,
                 "",
-                {**metadata, "_in_reasoning": in_reasoning},
+                {**metadata, "id": 1001},
                 FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
             )
         else:
-            yield sp.group_request_id, "answer", dict(metadata), FinishStatus(FinishStatus.FINISHED_STOP)
+            yield sp.group_request_id, "END", {**metadata, "id": 11}, FinishStatus(FinishStatus.FINISHED_STOP)
 
     monkeypatch.setattr(manager, "_wait_to_token_package", fake_wait)
 
@@ -197,7 +205,7 @@ def test_pd_continuation_carries_reasoning_stop_state(monkeypatch, in_reasoning)
 
     results = asyncio.run(run())
     assert segment_modes == [1, int(in_reasoning)]
-    assert "".join(result[1] for result in results) == "reasonanswer"
+    assert "".join(result[1] for result in results) == "reason" + ("END" if in_reasoning else "")
 
 
 @pytest.mark.parametrize("node_mode", ["decode", None])
@@ -236,3 +244,76 @@ def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch
     assert cached == [30, 30, 30]
     assert len(mgr.inserted_prompt_caches) == 1
     assert mgr.inserted_prompt_caches[0][0] == "hello"
+
+
+@pytest.mark.parametrize("include", [False, True])
+@pytest.mark.parametrize("parser", [None, "qwen3"])
+@pytest.mark.parametrize(
+    "continuation,node_finish",
+    [
+        ("NDextra", FinishStatus.NO_FINISH),
+        ("NDextra", FinishStatus.FINISHED_STOP),
+        ("NX", FinishStatus.FINISHED_LENGTH),
+        ("N", FinishStatus.FINISHED_LENGTH),
+    ],
+)
+def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, continuation, node_finish):
+    from unittest.mock import AsyncMock
+    from lightllm.server.detokenization import stop_sequence
+
+    monkeypatch.setattr(stop_sequence, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=parser))
+    monkeypatch.setattr(stop_sequence, "get_stop_in_reasoning", lambda: False)
+    manager = _make_manager(monkeypatch)
+    manager.tokenizer = SimpleNamespace(
+        encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
+    )
+    manager.abort = AsyncMock()
+    params = SamplingParams()
+    params.init(
+        manager.tokenizer,
+        stop_sequences="END",
+        include_stop_str_in_output=include,
+        _initial_reasoning_state=int(parser is not None),
+        max_new_tokens=10,
+    )
+    segments = []
+
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        segments.append(prompt)
+        metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
+        if len(segments) == 1:
+            if parser:
+                yield sp.group_request_id, "END", {**metadata, "id": 10}, FinishStatus()
+                yield sp.group_request_id, "", {**metadata, "id": 1001}, FinishStatus()
+            yield sp.group_request_id, "helloE", {**metadata, "id": 11}, FinishStatus()
+            yield sp.group_request_id, "", dict(metadata), FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY)
+        else:
+            yield sp.group_request_id, continuation, {**metadata, "id": 12}, FinishStatus(node_finish)
+            if continuation == "NDextra" and node_finish == FinishStatus.NO_FINISH:
+                pytest.fail("Master must stop the active segment as soon as the cross-segment stop matches")
+
+    monkeypatch.setattr(manager, "_wait_to_token_package", fake_wait)
+
+    async def run():
+        return [
+            result
+            async for result in manager.generate(
+                "prompt",
+                params,
+                SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
+                None,
+            )
+        ]
+
+    results = asyncio.run(run())
+    assert len(segments) == 2
+    assert segments[1] == "prompt" + ("END" if parser else "") + "helloE"
+    expected = "hello" + ("END" if include else "") if continuation == "NDextra" else "helloE" + continuation
+    assert "".join(result[1] for result in results) == ("END" if parser else "") + expected
+    assert [result[2]["id"] for result in results] == ([10, 1001] if parser else []) + [11, 12]
+    assert results[-1][3].get_finish_reason() == ("stop" if continuation == "NDextra" else "length")
+    assert all(not result[3].is_finished() for result in results[:-1])
+    if continuation == "NDextra" and node_finish == FinishStatus.NO_FINISH:
+        manager.abort.assert_awaited_once()
+    else:
+        manager.abort.assert_not_awaited()
