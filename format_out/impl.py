@@ -5,7 +5,7 @@ import requests
 from lightllm.server.core.objs.py_sampling_params import SamplingParams
 from pydantic import BaseModel
 from typing import List
-from outlines_core.fsm.json_schema import build_regex_from_schema
+import xgrammar as xgr
 
 
 from lightllm.utils.log_utils import init_logger
@@ -31,14 +31,21 @@ class ChatSession:
         self.chat_his = self.chat_his[:-len]
         return
 
-    def generate(self, regex: str = None, max_new_tokens=None, prefix_regex=None, retry_count=1):
+    def generate(self, regex: str = None, max_new_tokens=None, prefix_regex=None, retry_count=1, grammar=None):
         sampling_param = copy.copy(self.sampling_param)
         if max_new_tokens is not None:
             sampling_param.max_new_tokens = max_new_tokens
         if prefix_regex is not None and regex is not None:
             regex = prefix_regex + "(" + regex + ")"
 
+        if regex is not None and grammar is not None:
+            raise ValueError("Specify either regex or grammar")
+        if grammar is not None and prefix_regex is not None:
+            grammar = xgr.Grammar.concat(xgr.Grammar.from_regex(prefix_regex), grammar)
         sampling_param.regular_constraint = regex
+        if regex is not None or grammar is not None:
+            sampling_param.guided_json = None
+            sampling_param.guided_grammar = str(grammar) if grammar is not None else None
         sampling_param.verify()
 
         data = {"inputs": self.chat_his, "parameters": sampling_param.to_dict()}
@@ -112,24 +119,23 @@ class ChatSession:
         obj: BaseModel,
         max_new_tokens=512,
         prefix_regex=None,
-        whitespace_pattern=r"[\s]{0,12}",
+        max_whitespace_cnt=12,
         ensure_ascii=False,
     ):
         """
         当json schema 中包含对中文的支持时, ensure_ascii 设置为 False。
         否则，设置为 True。
+        max_whitespace_cnt 限制 JSON 空白字符数量，替代原 Outlines 的 whitespace_pattern。
         """
         json_schema = obj.model_json_schema()
         # 当 ensure_ascii 为 true 时，如果 json_schema 包含中文，
         # 会导致，生成的新描述中，中文被转成了 \uxxxx 的格式。
         json_schema = json.dumps(json_schema, ensure_ascii=ensure_ascii)
-        regex_str = build_regex_from_schema(json_schema, whitespace_pattern=whitespace_pattern)
-
-        # 将正则表达式中用 \uxxxx 表达的中文，替换回中文字符，否则 outlines 依赖的 interegular
-        # 无法正确解析这个正则表达式。
-        regex_str = regex_str.replace(r"\\u", r"\u")
-        regex_str = regex_str.encode("utf-8").decode("unicode_escape")
+        grammar = xgr.Grammar.from_json_schema(json_schema, max_whitespace_cnt=max_whitespace_cnt)
 
         return self.generate(
-            regex_str, max_new_tokens=max_new_tokens, prefix_regex=prefix_regex, retry_count=self.default_retry_count
+            grammar=grammar,
+            max_new_tokens=max_new_tokens,
+            prefix_regex=prefix_regex,
+            retry_count=self.default_retry_count,
         )

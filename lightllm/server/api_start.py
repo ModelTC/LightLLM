@@ -40,9 +40,8 @@ def _launch_subprocesses(args: StartArgs):
     if args.target_vocab_topk_sampling is not None:
         # 在加载模型和启动子进程前拒绝该组合，避免候选裁剪使输出约束失效。
         # 数值冲突与后续兼容方案见 LlamaPostLayerInfer._target_lm_head_and_gather。
-        assert args.output_constraint_mode == "none" and not args.first_token_constraint_mode, (
-            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode outlines/xgrammar "
-            "or --first_token_constraint_mode: candidate pruning can cause forbidden tokens to be selected. "
+        assert args.output_constraint_mode == "none", (
+            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode xgrammar "
             "Disable --target_vocab_topk_sampling when using output constraints."
         )
 
@@ -136,9 +135,6 @@ def _launch_subprocesses(args: StartArgs):
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # mode setting check.
-    if args.output_constraint_mode != "none":
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
     if args.diverse_mode:
         assert args.disable_dynamic_prompt_cache is False
         assert args.disable_chunked_prefill is False

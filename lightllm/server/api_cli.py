@@ -384,7 +384,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         choices=vocab_topk_choices,
         default=None,
-        help="Top-k communication width per TP rank for target-model logits; disabled by default.",
+        help="Top-k communication width per TP rank for target-model logits; disabled by default. "
+        "Requires --output_constraint_mode none.",
     )
     parser.add_argument(
         "--draft_vocab_topk_sampling",
@@ -397,15 +398,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--output_constraint_mode",
         type=str,
-        choices=["outlines", "xgrammar", "none"],
-        default="none",
-        help="set the output constraint backend, none means no output constraint",
+        choices=["xgrammar", "none"],
+        default="xgrammar",
+        help="Output constraint backend used on demand in the regular inference pipeline; none rejects constraints.",
     )
     parser.add_argument(
-        "--first_token_constraint_mode",
-        action="store_true",
-        help="""constraint the first token allowed range,
-                        use env FIRST_ALLOWED_TOKENS to set the range, like FIRST_ALLOWED_TOKENS=1,2 ..""",
+        "--grammar_compile_timeout",
+        type=float,
+        default=30.0,
+        help="HTTP grammar compilation timeout in seconds; failures and timeouts return HTTP 400 before inference.",
     )
     parser.add_argument(
         "--disable_vision",

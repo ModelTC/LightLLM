@@ -12,7 +12,6 @@ def _make_args(run_mode: str):
         run_mode=run_mode,
         diverse_mode=False,
         output_constraint_mode="none",
-        first_token_constraint_mode=False,
         disable_chunked_prefill=False,
     )
 

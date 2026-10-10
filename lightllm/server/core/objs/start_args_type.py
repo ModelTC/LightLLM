@@ -109,8 +109,8 @@ class StartArgs:
     draft_vocab_topk_sampling: Optional[int] = field(
         default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
     )
-    output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
-    first_token_constraint_mode: bool = field(default=False)
+    output_constraint_mode: str = field(default="xgrammar", metadata={"choices": ["xgrammar", "none"]})
+    grammar_compile_timeout: float = field(default=30.0)
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
     disable_audio: Optional[bool] = field(default=None)

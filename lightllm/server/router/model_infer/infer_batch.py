@@ -25,9 +25,11 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
+from lightllm.server.router.model_infer.structured_output.state import ConstraintState
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.server.router.model_infer.structured_output.grammar_cache import OutputGrammarCache
 
 logger = init_logger(__name__)
 
@@ -42,6 +44,7 @@ class InferenceContext:
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
     cache_placement_controller: Optional[CachePlacementController] = None
+    output_grammar_cache: Optional["OutputGrammarCache"] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -70,8 +73,26 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_hybrid_att_model = isinstance(self.req_manager, HybridAttentionReqManager)
+        self.output_grammar_cache = self._init_output_grammar_cache()
 
         return
+
+    def _init_output_grammar_cache(self) -> Optional["OutputGrammarCache"]:
+        if self.args.output_constraint_mode != "xgrammar":
+            return None
+        from lightllm.server.router.model_infer.structured_output.grammar_cache import OutputGrammarCache
+        from lightllm.server.tokenizer import get_tokenizer
+
+        # HTTP workers already compiled the grammar. Inference needs only the
+        # shared tokenizer information to deserialize their artifacts.
+        tokenizer = get_tokenizer(
+            self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+        )
+        return OutputGrammarCache(
+            tokenizer=tokenizer,
+            vocab_size=self.vocab_size,
+            eos_ids=self.args.eos_id,
+        )
 
     def init_cpu_embed_cache_client(self):
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
@@ -91,7 +112,7 @@ class InferenceContext:
         req_objs = []
         request_ids = []
         for r in requests:
-            r_id, r_index, multimodal_params, _ = r
+            r_id, r_index, multimodal_params, dp_rank_in_node = r
             assert r_id not in self.requests_mapping.keys()
             r_obj = InferReq(
                 req_id=r_id,
@@ -101,6 +122,10 @@ class InferenceContext:
                 vocab_size=self.vocab_size,
                 init_prefix_cache=init_prefix_cache,
             )
+            # Other DP ranks' requests are temporary KV cache donors. Only
+            # requests generating tokens on this rank need grammar state.
+            if dp_rank_in_node == self.backend.dp_rank_in_node and self.output_grammar_cache is not None:
+                r_obj.output_constraint = self.output_grammar_cache.create_state(r_obj.shm_req, r_obj.sampling_param)
             self.requests_mapping[r_id] = r_obj
             request_ids.append(r_id)
             req_objs.append(r_obj)
@@ -348,7 +373,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -461,30 +485,11 @@ class InferSamplingParams:
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
-        # output constraint states
-        self.regular_constraint = self.shm_param.regular_constraint.to_str()
-        self.guided_grammar = self.shm_param.guided_grammar.to_str()
-        self.guided_json = self.shm_param.guided_json.to_str()
-        if len(self.regular_constraint) == 0:
-            self.regular_constraint = None
-        if len(self.guided_grammar) == 0:
-            self.guided_grammar = None
-        if len(self.guided_json) == 0:
-            self.guided_json = None
-
-        self.fsm_current_state: int = 0
-        self.allowed_token_ids = self.shm_param.allowed_token_ids.to_list()
-        if len(self.allowed_token_ids) == 0:
-            self.allowed_token_ids = None
+        # Grammar compilation is complete; inference only needs its activation marker.
+        self.guided_reasoning_end = tuple(self.shm_param.guided_reasoning_end.to_list())
 
         # if provided, invalid_token_ids are masked to -inf during sampling (see generic_post_process.sample)
         self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
-
-        # this check is not very good to placed here. to do...
-        if self.allowed_token_ids is not None:
-            if not all(e < vocab_size for e in self.allowed_token_ids):
-                logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
-                self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
 
         if len(self.invalid_token_ids) > 0:
             if not all(e < vocab_size for e in self.invalid_token_ids):
@@ -500,14 +505,6 @@ class InferSamplingParams:
         # only pd mode used.
         self.pd_master_node_id: int = self.shm_param.pd_master_node_id.get()
         return
-
-    def has_constraint_setting(self) -> bool:
-        return (
-            self.regular_constraint is not None
-            or self.allowed_token_ids is not None
-            or self.guided_grammar is not None
-            or self.guided_json is not None
-        )
 
 
 class InferReq:
@@ -612,6 +609,7 @@ class InferReq:
         self.shm_req.link_prompt_ids_shm_array()
         self.shm_req.link_logprobs_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
+        self.output_constraint: Optional[ConstraintState] = None
 
         # 更新 pd 分离模式下， prefill 节点需要开始传输的起始位置
         if self.sampling_param.pd_decode_node is not None:
@@ -1020,6 +1018,16 @@ class InferReqUpdatePack:
 
         # 更新判断请求的 finished 状态
         req_obj.update_finish_status(eos_ids=eos_ids, output_len=self.output_len)
+
+        constraint = req_obj.output_constraint
+        if constraint is not None:
+            # Commit local output and PD's first token before the next sampling step.
+            # MTP commits only accepted tokens; speculative mask traversal is rolled back.
+            constraint.commit(next_token_id)
+            if constraint.error is not None:
+                finish_status.set_status(FinishStatus.FINISHED_ERROR)
+            elif constraint.is_terminated():
+                finish_status.set_status(FinishStatus.FINISHED_STOP)
 
         if extra_post_req_handle_func is not None:
             extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)

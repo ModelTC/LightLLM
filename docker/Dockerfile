@@ -146,3 +146,5 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir
+# Check the shared FFI runtime without requiring a GPU on the image builder.
+RUN python -c "import xgrammar; import tilelang"

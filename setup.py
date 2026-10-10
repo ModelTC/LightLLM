@@ -27,6 +27,9 @@ setup(
         "safetensors",
         "triton",
         "orjson",
+        # Keep the final image install on the FFI version tested with TileLang 0.1.9.
+        "apache-tvm-ffi==0.1.11",
+        "xgrammar>=0.2.8,<0.3",
     ],
     package_data=package_data,
 )

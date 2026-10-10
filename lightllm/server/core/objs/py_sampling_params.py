@@ -6,6 +6,7 @@ import os
 from typing import List, Optional, Union, Tuple
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
+from lightllm.utils.grammar_utils import validate_grammar
 from .sampling_params import MAX_SEED
 
 
@@ -51,10 +52,6 @@ class SamplingParams:
         regular_constraint: Optional[str] = None,  # Regular expressions constrain the output.
         guided_grammar: Optional[str] = None,  # EBNF constrain the output.
         guided_json: Optional[Union[str, dict]] = None,  # JSON schema constrain the output.
-        # If provided, the engine will construct a logits,
-        # processor which only retains scores for the given token ids. Defaults to None.
-        # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
-        allowed_token_ids: Optional[List[int]] = None,
         # if provided, the invalid token ids will be ignored during generation
         invalid_token_ids: Optional[List[int]] = None,
         # p d mode used params
@@ -62,6 +59,7 @@ class SamplingParams:
         # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         suggested_dp_index: Optional[int] = None,
         seed: Optional[int] = -1,
+        guided_reasoning_end: Optional[List[int]] = None,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -89,7 +87,7 @@ class SamplingParams:
         self.regular_constraint = regular_constraint
         self.guided_grammar = guided_grammar
         self.guided_json = guided_json
-        self.allowed_token_ids = allowed_token_ids
+        self.guided_reasoning_end = guided_reasoning_end
         self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.suggested_dp_index = suggested_dp_index
@@ -185,9 +183,7 @@ class SamplingParams:
         if self.regular_constraint is not None:
             # check regex format
             try:
-                import interegular
-
-                interegular.parse_pattern(self.regular_constraint)
+                validate_grammar("regex", self.regular_constraint)
             except Exception as e:
                 raise ValueError(f"regular_expression '{self.regular_constraint}' has parse_pattern_error: {str(e)}")
 
@@ -199,8 +195,6 @@ class SamplingParams:
 
         self._verify_stop_sentences()
 
-        self._verify_allowed_token_ids()
-
         return
 
     @staticmethod
@@ -209,16 +203,6 @@ class SamplingParams:
         if not -1 <= seed <= MAX_SEED:
             raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {seed}")
         return seed
-
-    def _verify_allowed_token_ids(self):
-        if self.allowed_token_ids is not None:
-            if (not isinstance(self.allowed_token_ids, list)) or (
-                not all(isinstance(token_id, int) for token_id in self.allowed_token_ids)
-            ):
-                raise ValueError(f"allowed_token_ids need format List[int], but get {self.allowed_token_ids}")
-            if self.regular_constraint is not None:
-                raise ValueError("allowed_token_ids and regular_constraint can not be used in same time")
-        return
 
     def _verify_stop_sentences(self):
         if self.stop_sequences is not None:
@@ -277,7 +261,7 @@ class SamplingParams:
         ret["regular_constraint"] = self.regular_constraint
         ret["guided_grammar"] = self.guided_grammar
         ret["guided_json"] = self.guided_json
-        ret["allowed_token_ids"] = self.allowed_token_ids
+        ret["guided_reasoning_end"] = self.guided_reasoning_end
         ret["invalid_token_ids"] = self.invalid_token_ids
         ret["seed"] = self.seed
         return ret

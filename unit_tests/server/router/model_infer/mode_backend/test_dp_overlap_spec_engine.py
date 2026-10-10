@@ -260,6 +260,7 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.spec_engine = _CommonEngine()
+    backend.args = SimpleNamespace(penalty_counter_mode="gpu_counter")
     backend.model = SimpleNamespace(forward=lambda _: model_output)
     event_pack = SimpleNamespace(
         notify_post_handle_and_wait_pre_post_handle=lambda: calls.append("post_wait"),
@@ -281,8 +282,8 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
     assert calls == [
         "plan",
         "prepare",
-        "propose",
         "post_wait",
+        "propose",
         "forward_wait",
         "pre_post",
     ]
@@ -442,6 +443,7 @@ def test_dp_overlap_decode_delegates_empty_layout(monkeypatch):
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.decode_draft_engine = _OverlapEngine()
+    backend.args = SimpleNamespace(penalty_counter_mode="gpu_counter")
     backend.model = SimpleNamespace(
         microbatch_overlap_decode=lambda input0, input1: (model_output0, model_output1),
     )
@@ -465,8 +467,8 @@ def test_dp_overlap_decode_delegates_empty_layout(monkeypatch):
     assert calls == [
         "plan",
         "prepare",
-        "propose",
         "post_wait",
+        "propose",
         "forward_wait",
         "pre_post",
     ]

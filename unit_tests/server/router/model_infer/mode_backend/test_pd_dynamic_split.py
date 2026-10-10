@@ -154,14 +154,13 @@ def test_pd_decode_capacity_limit_never_extends_original_length(monkeypatch):
 
 @pytest.mark.parametrize(
     "overrides",
-    [{}, {"diverse_mode": True}, {"output_constraint_mode": "outlines"}, {"first_token_constraint_mode": True}],
+    [{}, {"diverse_mode": True}, {"output_constraint_mode": "xgrammar"}],
 )
 def test_pd_nodes_use_pd_queue(overrides):
     base_args = {
         "diverse_mode": False,
         "token_healing_mode": False,
         "output_constraint_mode": "none",
-        "first_token_constraint_mode": False,
         "disable_chunked_prefill": False,
     }
 

@@ -15,7 +15,7 @@ async def lightllm_get_score(request: Request, httpserver_manager: HttpServerMan
     sample_params_dict = {"max_new_tokens": 1}
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
-    sampling_params.verify()
+    await sampling_params.verify_async(httpserver_manager.output_grammar_compiler)
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
     results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
@@ -41,7 +41,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     )
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
-    sampling_params.verify()
+    await sampling_params.verify_async(httpserver_manager.output_grammar_compiler)
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
 
@@ -124,7 +124,7 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
     _ = sample_params_dict.pop("return_routed_experts", None)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
-    sampling_params.verify()
+    await sampling_params.verify_async(httpserver_manager.output_grammar_compiler)
     if sampling_params.best_of != 1:
         raise Exception("stream api only support best_of == 1")
 

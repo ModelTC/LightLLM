@@ -422,6 +422,8 @@ async def anthropic_messages(raw_request: Request) -> Response:
 
     try:
         return await anthropic_messages_impl(raw_request)
+    except ValueError as e:
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
         logger.warning("Server busy detail: %s", e.message)
         g_objs.metric_client.counter_inc("lightllm_request_failure")
@@ -511,6 +513,8 @@ async def tokens(request: Request):
             },
             status_code=200,
         )
+    except ValueError as e:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)

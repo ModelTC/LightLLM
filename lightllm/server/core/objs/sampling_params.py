@@ -1,4 +1,5 @@
 import os
+import json
 import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
@@ -13,10 +14,10 @@ SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "False").upper() in ["ON"
 # 从环境变量获取最大长度限制
 STOP_SEQUENCE_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_MAX_LENGTH", 256))
 STOP_SEQUENCE_STR_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_STR_MAX_LENGTH", 256))
-ALLOWED_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_ALLOWED_TOKEN_IDS_MAX_LENGTH", 256))
 MAX_STOP_SEQUENCES = int(os.getenv("LIGHTLLM_MAX_STOP_SEQUENCES", 10))
 REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_LENGTH", 2048))
-GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 2048))
+# EBNF expanded from a small JSON schema is often several kilobytes.
+GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 8192))
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
@@ -117,12 +118,6 @@ class RegularConstraint(ctypes.Structure):
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
-        try:
-            import interegular
-
-            interegular.parse_pattern(constraint)
-        except Exception as e:
-            raise ValueError(f"regular_expression '{constraint}' has parse_pattern_error: {str(e)}")
         return
 
     def to_str(self):
@@ -142,15 +137,6 @@ class GuidedGrammar(ctypes.Structure):
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
-        try:
-            if self.length > 0 and tokenizer is not None and constraint != "json":
-                import xgrammar as xgr
-
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
-                xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-                xgrammar_compiler.compile_grammar(constraint)
-        except Exception as e:
-            raise ValueError(f"guided_grammar '{constraint}' has compile_grammar_error: {str(e)}")
         return
 
     def to_str(self):
@@ -167,40 +153,19 @@ class GuidedJsonSchema(ctypes.Structure):
     ]
 
     def initialize(self, constraint: str, tokenizer):
+        if isinstance(constraint, dict):
+            constraint = json.dumps(constraint, ensure_ascii=False, separators=(",", ":"))
         constraint_bytes = constraint.encode("utf-8")
         assert len(constraint_bytes) < JSON_SCHEMA_MAX_LENGTH, "Guided json schema is too long."
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
-        try:
-            if self.length > 0 and tokenizer is not None:
-                import xgrammar as xgr
-
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
-                xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-                xgrammar_compiler.compile_json_schema(constraint)
-        except Exception as e:
-            raise ValueError(f"guided_grammar '{constraint}' has compile_grammar_error: {str(e)}")
         return
 
     def to_str(self):
         if self.length == 0:
             return ""
         return bytes(self.constraint[0 : self.length]).decode("utf-8").rstrip("\x00")
-
-
-class AllowedTokenIds(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [
-        ("ids", ctypes.c_int * ALLOWED_TOKEN_IDS_MAX_LENGTH),
-        ("size", ctypes.c_int),
-    ]
-
-    def initialize(self, ids: List[int]):
-        self.size = _check_and_store_int_token_ids(self.ids, ids, ALLOWED_TOKEN_IDS_MAX_LENGTH, "allowed token ids")
-
-    def to_list(self):
-        return list(self.ids[: self.size])
 
 
 class InvalidTokenIds(ctypes.Structure):
@@ -277,10 +242,8 @@ class SamplingParams(ctypes.Structure):
         ("regular_constraint", RegularConstraint),
         ("guided_grammar", GuidedGrammar),
         ("guided_json", GuidedJsonSchema),
-        # If provided, the engine will construct a logits,
-        # processor which only retains scores for the given token ids. Defaults to None.
-        # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
-        ("allowed_token_ids", AllowedTokenIds),
+        # Generated marker after which grammar constraints start; not a stop condition.
+        ("guided_reasoning_end", StopSequence),
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
@@ -317,9 +280,14 @@ class SamplingParams(ctypes.Structure):
     _temperature: float = 1.0
     _top_p: float = 1.0
     _top_k: int = -1  # -1 is for all
+    # Internal HTTP/PD transport data, excluded from the fixed-size SHM struct
+    # and public request JSON. Req.init writes it to the request's SHM slot.
+    compiled_grammar: bytes = b""
 
     def init(self, tokenizer, **kwargs):
+        """Populate fields; callers run verify() or await verify_async() before admission."""
         super().__init__()
+        self.compiled_grammar = b""
         self.best_of = kwargs.get("best_of", 1)
         self.n = kwargs.get("n", self.best_of)
         self.do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
@@ -362,29 +330,29 @@ class SamplingParams(ctypes.Structure):
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
         # Initialize regular_constraint
-        regular_constraint = kwargs.get("regular_constraint", "")
+        regular_constraint = kwargs.get("regular_constraint") or ""
         self.regular_constraint = RegularConstraint()
         self.regular_constraint.initialize(regular_constraint)
 
         # Initialize guided_grammar
-        guided_grammar = kwargs.get("guided_grammar", "")
+        guided_grammar = kwargs.get("guided_grammar") or ""
         self.guided_grammar = GuidedGrammar()
         self.guided_grammar.initialize(guided_grammar, tokenizer)
 
         # Initialize guided_json
-        guided_json = kwargs.get("guided_json", "")
+        guided_json = kwargs.get("guided_json")
+        if guided_json is None:
+            guided_json = ""
         self.guided_json = GuidedJsonSchema()
         self.guided_json.initialize(guided_json, tokenizer)
+
+        self.guided_reasoning_end = StopSequence()
+        self.guided_reasoning_end.initialize(kwargs.get("guided_reasoning_end") or [])
 
         # Initialize stop_sequence_groups
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences, tokenizer)
-
-        # Initialize allowed_token_ids
-        allowed_token_ids = kwargs.get("allowed_token_ids", [])
-        self.allowed_token_ids = AllowedTokenIds()
-        self.allowed_token_ids.initialize(allowed_token_ids)
 
         # Initialize invalid_token_ids
         invalid_token_ids = map(int, kwargs.get("logit_bias", {}).keys())
@@ -400,8 +368,6 @@ class SamplingParams(ctypes.Structure):
         ):  # temperature is too slow, change to greedy search
             self.temperature = 1.0
             self.top_k = 1
-
-        self.verify()
 
     @classmethod
     def load_generation_cfg(cls, weight_dir):
@@ -453,7 +419,6 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
         if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
-        self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 
         return
@@ -473,15 +438,25 @@ class SamplingParams(ctypes.Structure):
                 raise ValueError("guided_grammar and guided_json can not be used in same time")
         return
 
-    def _verify_allowed_token_ids(self):
-        if self.allowed_token_ids.size != 0:
-            if self.regular_constraint.length != 0:
-                raise ValueError("allowed_token_ids and regular_constraint can not be used in same time")
-            if self.guided_grammar.length != 0:
-                raise ValueError("allowed_token_ids and guided_grammar can not be used in same time")
-            if self.guided_json.length != 0:
-                raise ValueError("allowed_token_ids and guided_json can not be used in same time")
-        return
+    async def verify_async(self, compiler) -> None:
+        """Validate parameters and compile grammar before request admission or HTTP streaming."""
+        self.verify()
+        for kind, constraint in (
+            ("grammar", self.guided_grammar),
+            ("regex", self.regular_constraint),
+            ("json", self.guided_json),
+        ):
+            if constraint.length:
+                if compiler is None:
+                    raise ValueError("Output constraints require --output_constraint_mode xgrammar")
+                self.compiled_grammar = await compiler.compile(kind, constraint.to_str())
+                return
+
+    def copy(self) -> "SamplingParams":
+        """Copy scalar parameters and retain the immutable artifact across PD segments/choices."""
+        result = SamplingParams.from_buffer_copy(self)
+        result.compiled_grammar = self.compiled_grammar
+        return result
 
     def to_dict(self):
         return {
@@ -505,7 +480,7 @@ class SamplingParams(ctypes.Structure):
             "regular_constraint": self.regular_constraint.to_str(),
             "guided_grammar": self.guided_grammar.to_str(),
             "guided_json": self.guided_json.to_str(),
-            "allowed_token_ids": self.allowed_token_ids.to_list(),
+            "guided_reasoning_end": self.guided_reasoning_end.to_list(),
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
             "pd_high_priority_request": self.pd_high_priority_request,

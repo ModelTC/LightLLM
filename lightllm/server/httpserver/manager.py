@@ -23,6 +23,7 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
+from .grammar import create_output_grammar_compiler
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -112,6 +113,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
@@ -1048,7 +1050,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                 if finished_token_index != src_index:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
-                                    if req.stop_str_matched:
+                                    # A stop-string match must not hide a request error/abort.
+                                    if req.stop_str_matched and not req.finish_status.is_error_finished():
                                         finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)

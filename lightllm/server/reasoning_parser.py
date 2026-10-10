@@ -600,6 +600,11 @@ class BaseReasoningFormatDetector:
         self._buffer = ""
         self.stripped_think_start = False
 
+    @property
+    def grammar_start_token(self) -> str:
+        """Generated delimiter after which the final answer's grammar applies."""
+        return self.think_end_token
+
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses reasoning sections in the provided text.
@@ -783,6 +788,11 @@ class GptOssDetector(BaseReasoningFormatDetector):
         )
         self.parser = HarmonyParser()
 
+    @property
+    def grammar_start_token(self) -> str:
+        # Closing analysis is followed by a new message header, not answer text.
+        return "<|channel|>final<|message|>"
+
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         events = self.parser.parse(text)
         # Flush the buffer for one-shot parsing
@@ -879,6 +889,10 @@ class Gemma4Detector(BaseReasoningFormatDetector):
 
     THINK_START_TOKEN = "<|channel>thought\n"
     THINK_END_TOKEN = "<channel|>"
+
+    @property
+    def grammar_start_token(self) -> str:
+        return self.THINK_END_TOKEN + "answer"
 
     def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
         # force_reasoning ignored: Gemma-4's template never starts generation

@@ -14,6 +14,7 @@ from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import Any, Dict, List, Union
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 from .logprob_utils import logprob_info
 from .token_metadata import ReqFinalTokenMetadata
 
@@ -123,6 +124,7 @@ class Req(ctypes.Structure):
         ("finish_token_index", ctypes.c_int),
         ("out_tokens_queue", CircularQueue),
         ("sample_params", SamplingParams),
+        ("compiled_grammar_size", ctypes.c_int64),
         ("chunked_prefill_size", ctypes.c_int),  # 只有chunked prefill模式才使用的参数
         # can_released_mark的作用是：
         # 只有整个流程中的最后一个处理模块，一般是 detokenization 进程，标记这个参数为True后，主管理进程才能真
@@ -198,6 +200,8 @@ class Req(ctypes.Structure):
         else:
             self.sample_params = SamplingParams()
             self.sample_params.init(tokenizer=tokenizer, **sample_param)
+            self.sample_params.verify()
+        self.set_compiled_grammar(sample_param.compiled_grammar if isinstance(sample_param, SamplingParams) else b"")
         self.out_tokens_queue = CircularQueue()
         self.input_len = len(prompt_ids)
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
@@ -277,6 +281,28 @@ class Req(ctypes.Structure):
         hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
         self.hybrid_token_hash_list.fill(hash_values)
         return
+
+    def set_compiled_grammar(self, payload: bytes) -> None:
+        """Publish the HTTP-compiled artifact before this request is sent to router."""
+        self.compiled_grammar_size = len(payload)
+        if not payload:
+            return
+        # Like prompt/logprob arrays, storage belongs to a request slot and is
+        # reused only after the normal request lifecycle releases that slot.
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", len(payload))
+        try:
+            shm.buf[: len(payload)] = payload
+        finally:
+            shm.close()
+
+    def get_compiled_grammar(self) -> bytes:
+        if not self.compiled_grammar_size:
+            return b""
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", self.compiled_grammar_size, force_mode="link")
+        try:
+            return bytes(shm.buf[: self.compiled_grammar_size])
+        finally:
+            shm.close()
 
     def create_prompt_ids_shm_array(self):
         name = f"shm_prompts_{self.index_in_shm_mem}"

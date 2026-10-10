@@ -34,10 +34,8 @@ APIServer 参数详解
 
     依赖非候选原始分数的功能无法恢复完整词表的精确结果，例如 ``--enable_rl`` 所需的完整
     token rank，或通过较大 logit bias 将非候选 token 提升到候选范围内的场景。
-    ``--target_vocab_topk_sampling`` 不能与 ``--output_constraint_mode outlines/xgrammar``
-    或 ``--first_token_constraint_mode`` 同时启用，推理节点启动时会触发断言。
-    原因是非候选分数为 ``-10000000.0``，约束屏蔽分数为 ``-1000000.0``；
-    若合法 token 全部被裁掉，禁止的 token 反而会得分更高。使用这些输出约束时请关闭 target 候选裁剪。
+    启用 ``--target_vocab_topk_sampling`` 时须设置 ``--output_constraint_mode none``；
+    与 ``xgrammar`` 同时启用会在启动时报错。
     ``--draft_vocab_topk_sampling`` 不受此项检查限制。
     PD 部署应在 master、prefill 和 decode 上使用相同配置。
 
@@ -365,14 +363,19 @@ PD 分离模式参数
 
     设置输出约束后端，可选值：
     
-    * ``outlines``: 使用 outlines 后端
-    * ``xgrammar``: 使用 xgrammar 后端
-    * ``none``: 无输出约束（默认）
+    * ``xgrammar``: 默认值，按请求启用，支持 JSON Schema、JSON object、EBNF 和 regex
+    * ``none``: 关闭输出约束后端
 
-.. option:: --first_token_constraint_mode
+    支持 TP/DP、MTP 和 microbatch overlap。Outlines 后端已移除，
+    ``regular_constraint`` 使用 XGrammar 的 regex 语法。
 
-    约束第一个 token 的允许范围
-    使用环境变量 FIRST_ALLOWED_TOKENS 设置范围，例如 FIRST_ALLOWED_TOKENS=1,2
+    ChatCompletion 的 JSON Schema / JSON object 约束在 thinking 结束后生效，
+    以配置的 reasoning parser 结束标记为准；关闭 thinking 时从首个输出 token 生效。
+
+.. option:: --grammar_compile_timeout
+
+    HTTP 侧 grammar 编译等待超时，默认 ``30.0`` 秒，必须大于 0。
+    非法语法、编译失败或超时会在推理和流式响应开始前返回 HTTP 400。
 
 多模态参数
 ----------

@@ -6,7 +6,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 
 def test_mtp_requires_cuda_graph(monkeypatch):
     monkeypatch.setattr("lightllm.server.api_start._set_envs_and_config", lambda args: None)
-    args = StartArgs(mtp_mode="vanilla_no_att", disable_cudagraph=True)
+    args = StartArgs(mtp_mode="vanilla_no_att", disable_cudagraph=True, output_constraint_mode="none")
 
     with pytest.raises(AssertionError, match="only supported on Prefill nodes"):
         _launch_subprocesses(args)
@@ -20,6 +20,7 @@ def test_mtp_prefill_still_requires_positive_step(monkeypatch):
     args = StartArgs(
         run_mode="prefill",
         mtp_mode="dspark",
+        output_constraint_mode="none",
         mtp_draft_model_dir=["draft"],
         mtp_step=0,
         disable_cudagraph=True,

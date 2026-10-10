@@ -22,6 +22,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.server.httpserver.grammar import create_output_grammar_compiler
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -66,6 +67,7 @@ class HttpServerManagerForPDMaster:
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -182,7 +184,7 @@ class HttpServerManagerForPDMaster:
             self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
         )
 
-        origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
+        origin_sampling_params = sampling_params.copy()
         origin_group_request_id = self.id_gen.generate_id()
 
         # Record one user request even when it is expanded into multiple independent
@@ -195,7 +197,7 @@ class HttpServerManagerForPDMaster:
         choice_count = origin_sampling_params.n
         generators = []
         for choice_index in range(choice_count):
-            choice_sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
+            choice_sampling_params = origin_sampling_params.copy()
             choice_sampling_params.n = 1
             choice_sampling_params.best_of = 1
             generators.append(
@@ -333,7 +335,7 @@ class HttpServerManagerForPDMaster:
             # Decode 节点容量不足时会用专用状态结束当前分段。
             # PD Master 吞掉该内部分段 marker，并用剩余 token 限额在同一组 P/D 节点上继续。
             while remaining_max_new_tokens > 0:
-                sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
+                sampling_params = origin_sampling_params.copy()
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")

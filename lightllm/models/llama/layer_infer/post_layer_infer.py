@@ -211,8 +211,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             (token_num, layer_weight.lm_head_weight_.vocab_size),
             dtype=torch.float32,
         )
-        # 非候选分数为 -1e7，而 Outlines、XGrammar 和首 token 约束将禁止的 token 设为 -1e6。
-        # 若合法集合与候选集合没有交集，禁止的 token 反而得分更高；启动入口已断言禁止该组合。
+        # 候选裁剪可能丢弃所有合法 token，其原始分数也无法恢复。
+        # 启动入口拒绝同时启用 xgrammar 和 target 候选裁剪。
         # TODO: 支持先应用输出约束再筛选候选，或为受约束请求回退到完整词表。
         # 仅修改占位分数无法恢复被裁掉的合法 token 原始分数，也必须处理合法候选为空的情况。
         logits.fill_(_MASKED_LOGIT_VALUE)
