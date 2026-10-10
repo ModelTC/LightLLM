@@ -27,6 +27,7 @@ from lightllm.utils import envs_utils
         ("lightllm.models.qwen3_5_moe_mtp.model", "Qwen3_5MoeMTPModel"),
         ("lightllm.models.qwen3_eagle.model", "Qwen3EagleModel"),
         ("lightllm.models.qwen3_dflash.model", "Qwen3DFlashModel"),
+        ("lightllm.models.qwen3_dflash2.model", "Qwen3DFlash2Model"),
         ("lightllm.models.qwen3_5_dflash.model", "Qwen3_5DFlashModel"),
         ("lightllm.models.qwen3_dspark.model", "Qwen3DSparkModel"),
         ("lightllm.models.qwen3_5_dspark.model", "Qwen3_5DSparkModel"),
@@ -54,6 +55,10 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
         ("dspark", True, 7, True, False),
         ("dflash", False, 7, True, True),
         ("dflash", True, 7, True, False),
+        ("dflash2", False, 7, False, False),
+        ("dflash2", True, 7, False, False),
+        ("dflash2", False, 7, True, True),
+        ("dflash2", True, 7, True, False),
         ("vanilla_with_att", True, 7, True, False),
         ("vanilla_with_att", True, 0, True, False),
         ("eagle3", True, 0, True, False),
@@ -90,6 +95,7 @@ def test_attention_backend_selects_dynamic_spec_layout(
         (None, False, True),
         ("dflash", False, True),
         ("dflash", True, False),
+        ("dflash2", True, False),
         ("dspark", True, False),
         ("eagle3", True, True),
         ("vanilla_with_att", True, True),
@@ -119,7 +125,7 @@ def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
         req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4)),
     )
     state = state_class(
-        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1),
+        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1, infer_page_size=1),
         infer_state=infer_state,
     )
 
@@ -212,6 +218,7 @@ def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
         ("qwen3_5_moe", "vanilla_with_att", "Qwen3_5MoeMTPModel"),
         ("qwen3_5_moe_text", "eagle_with_att", "Qwen3_5MoeMTPModel"),
         ("qwen3", "dflash", "Qwen3DFlashModel"),
+        ("qwen3", "dflash2", "Qwen3DFlash2Model"),
         ("qwen3_5", "dflash", "Qwen3_5DFlashModel"),
         ("qwen3_5_text", "dflash", "Qwen3_5DFlashModel"),
         ("qwen3", "dspark", "Qwen3DSparkModel"),
@@ -250,6 +257,7 @@ def test_draft_model_registry_rejects_unsupported_model_type():
         ("qwen3_5_moe", "eagle3"),
         ("qwen3_5_moe", "dspark"),
         ("qwen3_5_moe", "dflash"),
+        ("qwen3_5", "dflash2"),
         ("qwen3", "eagle_no_att"),
     ],
 )
@@ -309,7 +317,8 @@ def test_fixed_added_mtp_kv_layer_num_by_mode(monkeypatch, mtp_mode, mtp_step, e
     assert envs_utils.get_added_mtp_kv_layer_num() == expected_layer_num
 
 
-def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):
+@pytest.mark.parametrize("mtp_mode", ["dflash", "dflash2"])
+def test_dflash_added_kv_layers_come_from_draft_config(tmp_path, mtp_mode):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"num_hidden_layers": 5}))
 
@@ -317,7 +326,7 @@ def test_dflash_added_kv_layers_come_from_draft_config(tmp_path):
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
     envs_utils.set_env_start_args(
         {
-            "mtp_mode": "dflash",
+            "mtp_mode": mtp_mode,
             "mtp_step": 7,
             "mtp_dynamic_verify": False,
             "mtp_draft_model_dir": [str(tmp_path)],

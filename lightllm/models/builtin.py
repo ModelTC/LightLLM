@@ -182,6 +182,7 @@ DraftModelRegistry.register(
     "lightllm.models.qwen3_5_mtp.model:Qwen3_5MTPModel",
 )
 DraftModelRegistry.register("qwen3", "dflash", "lightllm.models.qwen3_dflash.model:Qwen3DFlashModel")
+DraftModelRegistry.register("qwen3", "dflash2", "lightllm.models.qwen3_dflash2.model:Qwen3DFlash2Model")
 DraftModelRegistry.register("qwen3", "dspark", "lightllm.models.qwen3_dspark.model:Qwen3DSparkModel")
 DraftModelRegistry.register("qwen3", "eagle3", "lightllm.models.qwen3_eagle.model:Qwen3EagleModel")
 DraftModelRegistry.register(

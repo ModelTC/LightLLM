@@ -32,8 +32,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
-            if spec_mode in ("dspark", "dflash"):
-                raise NotImplementedError("DP backend does not support DFlash/DSpark parallel block drafting yet.")
+            if spec_mode in ("dspark", "dflash", "dflash2"):
+                raise NotImplementedError(
+                    "DP backend does not support DFlash/DFlash2/DSpark parallel block drafting yet."
+                )
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
             else:
