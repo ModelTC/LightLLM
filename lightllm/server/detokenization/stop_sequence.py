@@ -1,7 +1,7 @@
 from collections import deque
 
 from lightllm.server.reasoning_parser import ReasoningStopState
-from lightllm.utils.envs_utils import get_env_start_args, get_stop_in_reasoning
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class StopSequenceBuffer:
@@ -14,6 +14,7 @@ class StopSequenceBuffer:
     def __init__(self, sampling_params, tokenizer, prompt_ids):
         self.stop_strings = sampling_params.stop_sequences.to_strings()
         self.include_stop = sampling_params.include_stop_str_in_output
+        self.match_token_stops = not sampling_params.enable_stop_str_match_in_inference
         self.stop_prefixes = {stop[:length] for stop in self.stop_strings for length in range(1, len(stop))}
         self.max_prefix_length = max((len(prefix) for prefix in self.stop_prefixes), default=0)
         self.stop_token_sequences = [
@@ -23,9 +24,9 @@ class StopSequenceBuffer:
         ]
         self.token_tail = deque(maxlen=max((len(ids) for ids in self.stop_token_sequences), default=1))
         self.reasoning_state = None
-        if sampling_params.stop_sequences.size:
+        if sampling_params.stop_sequences.size and self.match_token_stops:
             args = get_env_start_args()
-            if args.reasoning_parser and not get_stop_in_reasoning():
+            if args.reasoning_parser:
                 self.reasoning_state = ReasoningStopState(
                     args.reasoning_parser,
                     tokenizer,
@@ -58,7 +59,7 @@ class StopSequenceBuffer:
             self.flush(stop_index + (len(matched_stop) if self.include_stop else 0))
             return True
 
-        if self.reasoning_state is not None and self.stop_token_sequences:
+        if self.match_token_stops and self.stop_token_sequences:
             self.token_tail.append(int(token_id))
             tail = list(self.token_tail)
             if any(tail[-len(ids) :] == ids for ids in self.stop_token_sequences):

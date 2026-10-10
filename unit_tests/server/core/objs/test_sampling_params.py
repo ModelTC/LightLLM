@@ -191,6 +191,22 @@ def test_include_stop_str_in_output_round_trip(kwargs, expected):
     assert py_params.to_dict()["include_stop_str_in_output"] is expected
 
 
+@pytest.mark.parametrize("kwargs,expected", [({}, True), ({"enable_stop_str_match_in_inference": False}, False)])
+def test_enable_stop_str_match_in_inference_round_trip(kwargs, expected):
+    params = SamplingParams()
+    params.init(None, **kwargs)
+    assert params.enable_stop_str_match_in_inference is expected
+    assert params.to_dict()["enable_stop_str_match_in_inference"] is expected
+    assert SamplingParams.from_buffer_copy(params).enable_stop_str_match_in_inference is expected
+
+    restored = SamplingParams()
+    restored.init(None, **params.to_dict())
+    assert restored.enable_stop_str_match_in_inference is expected
+    py_params = PySamplingParams(**kwargs)
+    assert py_params.enable_stop_str_match_in_inference is expected
+    assert py_params.to_dict()["enable_stop_str_match_in_inference"] is expected
+
+
 # Mock tokenizer for testing
 class MockTokenizer:
     def encode(self, text, add_special_tokens=False):
