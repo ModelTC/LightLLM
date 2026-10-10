@@ -24,6 +24,7 @@ from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 
 @pytest.fixture(autouse=True)
 def autotune_environment(monkeypatch):
+    torch.manual_seed(42)
     monkeypatch.delenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", raising=False)
     monkeypatch.setattr(Autotuner, "_autotune_warmup_kernel_type", None)
     monkeypatch.setattr(stage1_module, "get_triton_autotune_level", lambda: AutotuneLevel.ADAPTIVE_AUTOTUNE)

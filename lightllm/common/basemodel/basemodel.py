@@ -17,15 +17,11 @@ from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.build_utils import repair_config
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
-    select_kv_index_from_req,
-    select_kv_index_from_req_prefill,
-)
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import build_kv_indexes_and_input_ids
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
-from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
@@ -329,24 +325,17 @@ class TpPartBaseModel:
         else:
             return self._decode(model_input)
 
-    def _select_mem_indexes(self, model_input: ModelInput):
-        if model_input.is_prefill:
-            return select_kv_index_from_req_prefill(
-                req_to_token_indexs=self.req_manager.req_to_token_indexs,
-                b_req_idx=model_input.b_req_idx,
-                b_seq_len=model_input.b_seq_len,
-                b_ready_cache_len=model_input.b_ready_cache_len,
-                b_start_loc=model_input.b_prefill_start_loc,
-                max_q_seq_len=model_input.max_q_seq_len,
-                token_num=model_input.input_ids.shape[0],
-            )
-        return select_kv_index_from_req(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=model_input.b_req_idx,
-            b_seq_len=model_input.b_seq_len,
-        )
-
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
+        need_build_input_ids = model_input.input_ids is None or (
+            model_input.is_prefill and self.args.enable_prefill_decode_mixed
+        )
+        model_input.mem_indexes, model_input.input_ids = build_kv_indexes_and_input_ids(
+            model_input,
+            self.req_manager.req_to_token_indexs,
+            next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids
+            if need_build_input_ids
+            else None,
+        )
         infer_state = self.infer_state_class()
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
@@ -377,7 +366,7 @@ class TpPartBaseModel:
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
 
-        infer_state.mem_index = self._select_mem_indexes(model_input)
+        infer_state.mem_index = model_input.mem_indexes
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
 
@@ -399,6 +388,29 @@ class TpPartBaseModel:
 
         return infer_state
 
+    def _create_prefill_inferstate(self, model_input: ModelInput, handle_token_num: int, microbatch_index: int = 0):
+        padded_input = self._create_padded_prefill_model_input(model_input, handle_token_num)
+        infer_state = self._create_inferstate(padded_input, microbatch_index)
+        if padded_input is not model_input:
+            token_num = model_input.input_ids.numel()
+            # Expose the real-token views for prompt logprobs and subsequent draft inputs.
+            model_input.mem_indexes = infer_state.mem_index[:token_num]
+            model_input.input_ids = infer_state.input_ids[:token_num]
+        infer_state.init_some_extra_state(self)
+        infer_state.init_att_state()
+        return infer_state
+
+    def _create_decode_inferstate(
+        self, model_input: ModelInput, batch_size: int, need_capture: bool, microbatch_index: int = 0
+    ):
+        model_input = self._create_padded_decode_model_input(model_input, batch_size)
+        infer_state = self._create_inferstate(model_input, microbatch_index)
+        # Attention backends need the capture flag before initializing their state.
+        infer_state.is_cuda_graph = need_capture
+        infer_state.init_some_extra_state(self)
+        infer_state.init_att_state()
+        return infer_state
+
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
         if model_input.batch_size == new_batch_size:
             return model_input
@@ -410,7 +422,8 @@ class TpPartBaseModel:
         new_model_input.batch_size = new_batch_size
         new_model_input.total_token_num += padded_batch_size * 2
         new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
+        if new_model_input.input_ids is not None:
+            new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), value=1)
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
         )
@@ -466,14 +479,12 @@ class TpPartBaseModel:
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
         new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
         new_model_input.b_is_decode_req = F.pad(new_model_input.b_is_decode_req, (0, 1), mode="constant", value=False)
-        b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
-        new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
+        new_model_input.b_prefill_start_loc = F.pad(
+            model_input.b_prefill_start_loc.to(torch.int32), (0, 1), value=handle_token_num
+        )
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
-        new_model_input.b_prefill_has_output_cpu = [e for e in new_model_input.b_prefill_has_output_cpu] + [False]
-
-        new_model_input.multimodal_params = [e for e in new_model_input.multimodal_params] + [
-            {"images": [], "audios": []}
-        ]
+        new_model_input.b_prefill_has_output_cpu = list(model_input.b_prefill_has_output_cpu) + [False]
+        new_model_input.multimodal_params = list(model_input.multimodal_params) + [{"images": [], "audios": []}]
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.mtp_draft_input_hiddens is not None:
@@ -530,16 +541,6 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ):
-        if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
-            gather_token_prefill_decode_mixed(
-                input_ids=model_input.input_ids,
-                req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                b_req_idx=model_input.b_req_idx,
-                b_mtp_index=model_input.b_mtp_index,
-                b_is_decode_req=model_input.b_is_decode_req,
-                b_prefill_start_loc=model_input.b_prefill_start_loc,
-            )
-
         origin_handle_token_num = model_input.input_ids.shape[0]
         origin_batch_size = model_input.batch_size
 
@@ -554,16 +555,7 @@ class TpPartBaseModel:
                 handle_token_num=infer_handle_token_num
             )
 
-        model_input = self._create_padded_prefill_model_input(
-            model_input=model_input, new_handle_token_num=infer_handle_token_num
-        )
-
-        infer_state = self._create_inferstate(model_input)
-        prefill_mem_indexes_ready_event = torch.cuda.Event()
-        prefill_mem_indexes_ready_event.record()
-
-        infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
+        infer_state = self._create_prefill_inferstate(model_input, infer_handle_token_num)
         model_output = self._context_forward(infer_state=infer_state)
 
         model_output = self._create_unpad_prefill_model_output(
@@ -571,29 +563,12 @@ class TpPartBaseModel:
             origin_handle_token_num=origin_handle_token_num,
             origin_batch_size=origin_batch_size,
         )
-        model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         return model_output
 
     def _decode(
         self,
         model_input: ModelInput,
     ) -> ModelOutput:
-        if model_input.input_ids is None:
-            if model_input.batch_size > 0:
-                model_input.input_ids = gather_token(
-                    req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
-                    b_req_idx=model_input.b_req_idx,
-                    b_mtp_index=model_input.b_mtp_index,
-                )
-            else:
-                # 空 DP rank 不启动 gather kernel，但仍将 input_ids 规范化为
-                # CUDA 空 tensor；后续内部 padding 会为 dummy request 填入 token id 1。
-                model_input.input_ids = torch.empty(
-                    (0,),
-                    dtype=torch.int64,
-                    device=model_input.b_req_idx.device,
-                )
-
         origin_batch_size = model_input.batch_size
         # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
         infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size))
@@ -610,13 +585,7 @@ class TpPartBaseModel:
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
             need_capture = self.graph.need_capture(infer_batch_size)
 
-        model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
-        infer_state = self._create_inferstate(model_input)
-        # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
-        # 因此必须在 init_att_state 之前完成赋值。
-        infer_state.is_cuda_graph = need_capture
-        infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
+        infer_state = self._create_decode_inferstate(model_input, infer_batch_size, need_capture)
 
         if use_cuda_graph:
             if need_capture:
@@ -630,7 +599,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -728,15 +696,6 @@ class TpPartBaseModel:
 
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
-            if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
-                gather_token_prefill_decode_mixed(
-                    input_ids=model_input.input_ids,
-                    req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
-                    b_req_idx=model_input.b_req_idx,
-                    b_mtp_index=model_input.b_mtp_index,
-                    b_is_decode_req=model_input.b_is_decode_req,
-                    b_prefill_start_loc=model_input.b_prefill_start_loc,
-                )
         return self._microbatch_overlap_prefill_cuda(model_input0, model_input1)
 
     def _microbatch_overlap_prefill_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
@@ -754,24 +713,8 @@ class TpPartBaseModel:
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
 
-        model_input0 = self._create_padded_prefill_model_input(
-            model_input=model_input0, new_handle_token_num=infer_handle_token_num0
-        )
-        model_input1 = self._create_padded_prefill_model_input(
-            model_input=model_input1, new_handle_token_num=infer_handle_token_num1
-        )
-
-        infer_state0 = self._create_inferstate(model_input0, 0)
-        infer_state0.init_some_extra_state(self)
-        infer_state0.init_att_state()
-
-        infer_state1 = self._create_inferstate(model_input1, 1)
-        infer_state1.init_some_extra_state(self)
-        infer_state1.init_att_state()
-
-        prefill_mem_indexes_ready_event = torch.cuda.Event()
-        prefill_mem_indexes_ready_event.record()
-
+        infer_state0 = self._create_prefill_inferstate(model_input0, infer_handle_token_num0, 0)
+        infer_state1 = self._create_prefill_inferstate(model_input1, infer_handle_token_num1, 1)
         model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
 
         model_output0 = self._create_unpad_prefill_model_output(
@@ -787,8 +730,6 @@ class TpPartBaseModel:
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
         dist_group_manager.clear_deepep_buffer()
-        model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
-        model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         return model_output0, model_output1
 
     @torch.no_grad()
@@ -797,19 +738,6 @@ class TpPartBaseModel:
 
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
-            if model_input.input_ids is None:
-                if model_input.batch_size > 0:
-                    model_input.input_ids = gather_token(
-                        req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
-                        b_req_idx=model_input.b_req_idx,
-                        b_mtp_index=model_input.b_mtp_index,
-                    )
-                else:
-                    model_input.input_ids = torch.empty(
-                        (0,),
-                        dtype=torch.int64,
-                        device=model_input.b_req_idx.device,
-                    )
         return self._microbatch_overlap_decode_cuda(model_input0, model_input1)
 
     def _microbatch_overlap_decode_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
@@ -820,21 +748,16 @@ class TpPartBaseModel:
         max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
         infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size0, origin_batch_size1))
 
-        if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
+        use_cuda_graph = self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch)
+        need_capture = False
+        if use_cuda_graph:
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
             need_capture = self.graph.need_capture(infer_batch_size)
-            padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
-            padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state0.is_cuda_graph = need_capture
-            infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
 
-            infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            infer_state1.is_cuda_graph = need_capture
-            infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
+        infer_state0 = self._create_decode_inferstate(model_input0, infer_batch_size, need_capture, 0)
+        infer_state1 = self._create_decode_inferstate(model_input1, infer_batch_size, need_capture, 1)
 
+        if use_cuda_graph:
             if need_capture:
                 model_output0, model_output1 = self.graph.capture_decode(
                     self._overlap_tpsp_token_forward,
@@ -847,23 +770,11 @@ class TpPartBaseModel:
                     infer_state1=infer_state1,
                 )
 
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
         else:
-            model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
-            model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            infer_state0 = self._create_inferstate(model_input0, 0)
-            infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
-
-            infer_state1 = self._create_inferstate(model_input1, 1)
-            infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
-
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
 
+        model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
+        model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
         return model_output0, model_output1
 
     @final

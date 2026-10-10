@@ -6,6 +6,7 @@ from lightllm.common.basemodel.attention import (
 )
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import build_kv_indexes_and_input_ids
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
@@ -101,7 +102,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
         infer_state.mem_manager = self.mem_manager
-        infer_state.mem_index = self._select_mem_indexes(model_input)
+        infer_state.mem_index, _ = build_kv_indexes_and_input_ids(model_input, self.req_manager.req_to_token_indexs)
 
         # 这里调用的是 DFlash 覆写后的 context_forward：pre layer 只投影 target hidden，
         # transformer layer 只生成带 RoPE 的 K/V 并写入 draft cache，不会计算 attention、FFN 和 logits。

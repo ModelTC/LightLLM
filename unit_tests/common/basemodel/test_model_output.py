@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import torch
 import pytest
 
-from lightllm.common.basemodel import basemodel
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 
@@ -131,7 +130,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
         graph_flags_at_att_init = []
 
-        def create_infer_state(model_input):
+        def create_infer_state(model_input, microbatch_index=0):
             infer_state = SimpleNamespace(
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,

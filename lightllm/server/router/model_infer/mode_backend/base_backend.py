@@ -5,7 +5,7 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional, Union
+from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
@@ -411,11 +411,11 @@ class ModeBackend:
             return
 
         mgr = PromptLogprobsCaptureManager.get_instance()
-        mem_indexes = self.model._select_mem_indexes(model_input)
+        mem_indexes = model_input.mem_indexes
 
         start_loc = 0
         for req_obj in run_reqs:
-            q_len, _ = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+            q_len = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
             topk = req_obj.sampling_param.shm_param.prompt_logprobs
             capture_count = min(q_len, req_obj.shm_req.input_len - req_obj.cur_kv_len - 1)
             if capture_count > 0 and topk == 0 and self.is_master_in_dp:
@@ -555,9 +555,7 @@ class ModeBackend:
                                 req_to_next_token_ids = (
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
                                 )
-                                # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -643,30 +641,6 @@ class ModeBackend:
             ready_reqs.insert(0, target_req)
         return ready_reqs
 
-    # 一些可以复用的通用功能函数
-    def _alloc_req_kv_mem(
-        self,
-        req_obj: InferReq,
-        alloc_token_num: int,
-        no_blcoking_copy: bool = False,
-    ) -> Optional[torch.Tensor]:
-        if alloc_token_num == 0:
-            return None
-
-        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
-
-        old_hold_kv_len = req_obj.hold_kv_len
-        new_hold_kv_len = old_hold_kv_len + alloc_token_num
-        mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
-        # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
-        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
-            mem_indexes, non_blocking=no_blcoking_copy
-        )
-        req_obj.hold_kv_len = new_hold_kv_len
-        return mem_indexes
-
     def _get_classed_reqs(
         self,
         req_ids: List[int] = None,
@@ -691,6 +665,8 @@ class ModeBackend:
         3. finished_reqs 需要释放的请求, 包含正常结束和aborted退出的请求。
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
+
+        为通过预算检查的两组请求预留 KV，保持尚未执行请求的跨轮容量。
         """
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
@@ -712,100 +688,70 @@ class ModeBackend:
         wait_pause_reqs = []
         paused_reqs = []
         finished_reqs = []
-        prefill_reqs = []
-        decode_reqs = []
 
         # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
         # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
         pause_max_req_num = 2
-        wait_pause_count = 0
-        prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
-        for req_obj in ready_reqs:
-
-            if req_obj.filter_mark:
-                finished_reqs.append(req_obj)
-                continue
-
-            if req_obj.wait_pause:
-                wait_pause_reqs.append(req_obj)
-                continue
-
-            if req_obj.paused:
-                paused_reqs.append(req_obj)
-                continue
-
-            if req_obj.infer_aborted or req_obj.finish_status.is_finished():
-                if support_overlap:
-                    # 延迟处理
-                    req_obj.filter_mark = True
-                    continue
-                else:
+        def candidates():
+            for req_obj in ready_reqs:
+                if req_obj.filter_mark:
                     finished_reqs.append(req_obj)
                     continue
 
-            if no_decode:
-                is_decode = False
-            else:
-                is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
-                if is_decode and strict_prefill and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
+                if req_obj.wait_pause:
+                    wait_pause_reqs.append(req_obj)
+                    continue
+
+                if req_obj.paused:
+                    paused_reqs.append(req_obj)
+                    continue
+
+                if req_obj.infer_aborted or req_obj.finish_status.is_finished():
+                    if support_overlap:
+                        # 延迟处理
+                        req_obj.filter_mark = True
+                        continue
+                    else:
+                        finished_reqs.append(req_obj)
+                        continue
+
+                if no_decode:
                     is_decode = False
-
-            if is_decode:
-                # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
-                _, alloc_token_num = req_obj.decode_need_token_num()
-                # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，
-                # 并将数量向下对齐到 page_size 的整数倍，以减少 alloc 调用次数并保持分页分配约束。
-                if alloc_token_num > 0 and self.args.page_size < 8:
-                    alloc_token_num += 8 // self.args.page_size * self.args.page_size
-                if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
-                    decode_reqs.append(req_obj)
-                    can_alloc_token_num -= alloc_token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
-                        if self.args.run_mode == "decode":
-                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
-                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
-                            wait_pause_count += 1
-                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
-                            if support_overlap:
-                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
-                                req_obj.filter_mark = True
-                            else:
-                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
-                                finished_reqs.append(req_obj)
-                            self.logger.info(
-                                f"force early finish for PD decode req_id={req_obj.req_id} "
-                                f"because token capacity is insufficient"
-                            )
-                        else:
-                            req_obj.wait_pause = True
-                            wait_pause_count += 1
-            else:
-                # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
-                # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
-                # 放入到 prefill reqs 队列中，在其他模式下，所有请求都是 master状态，所以也不受影响
-                if req_obj.is_slave_req():
-                    continue
+                    is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
+                    if is_decode and strict_prefill and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
+                        is_decode = False
 
-                # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
-                token_num, alloc_token_num = req_obj.prefill_need_token_num(
-                    is_chuncked_prefill=not self.disable_chunked_prefill
+                if is_decode:
+                    token_num = req_obj.decode_need_token_num()
+                else:
+                    # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
+                    # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
+                    # 放入到 prefill reqs 队列中，在其他模式下，所有请求都是 master状态，所以也不受影响
+                    if req_obj.is_slave_req():
+                        continue
+
+                    token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+                yield req_obj, is_decode, token_num
+
+        prefill_reqs, decode_reqs, rejected, prefill_tokens = g_infer_context.req_manager.classify_reqs_and_alloc_kv(
+            candidates(), can_alloc_token_num, self.batch_max_tokens, g_infer_context.radix_cache
+        )
+        for req_obj, is_decode in rejected[:pause_max_req_num]:
+            if is_decode and self.args.run_mode == "decode":
+                req_obj.finished_by_pd_decode_capacity = True
+                if support_overlap:
+                    req_obj.filter_mark = True
+                else:
+                    finished_reqs.append(req_obj)
+                self.logger.info(
+                    f"force early finish for PD decode req_id={req_obj.req_id} because token capacity is insufficient"
                 )
-                if prefill_tokens + token_num > self.batch_max_tokens:
-                    continue
-                if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
-                    prefill_tokens += token_num
-                    prefill_reqs.append(req_obj)
-                    can_alloc_token_num -= alloc_token_num
-                else:
-                    if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+            else:
+                req_obj.wait_pause = True
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller
@@ -832,10 +778,7 @@ class ModeBackend:
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
         if recover_paused:
-            g_infer_context.recover_paused_reqs(
-                paused_reqs=paused_reqs,
-                is_master_in_dp=self.is_master_in_dp,
-            )
+            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp)
 
         # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，
         # 并且 prefill 请求需要的 token 数量 + decode 请求需要的 token 数量小于等于 batch_max_tokens，
@@ -957,7 +900,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)

@@ -32,6 +32,8 @@ class ModelInput:
     # Decode 逐行携带的 radix node 标识。相同 id 表示请求引用同一个共享
     # radix node；该 id 只用于重建 diverse attention 的 b_mark_shared_group。
     b_shared_radix_node_id: torch.Tensor = None
+    # GPU write slots are resolved after padding, from the final row positions.
+    mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
     # Request/row-aligned MRoPE position offset. It is decode-only; prefill
@@ -54,27 +56,29 @@ class ModelInput:
 
     def to_cuda(self):
         self.check_input()
+        tensors = (self.b_req_idx, self.b_seq_len, self.b_mtp_index)
+        tensors += (
+            (self.b_ready_cache_len, self.b_prefill_start_loc)
+            if self.is_prefill
+            else (self.b_position_delta, self.b_shared_seq_len)
+        )
+        if all(t.is_cpu and t.dtype == torch.int32 for t in tensors):
+            packt = torch.empty((len(tensors), self.batch_size), dtype=torch.int32, device="cpu", pin_memory=True)
+            tensors = torch.stack(tensors, out=packt).cuda(non_blocking=True).unbind()
+        else:
+            tensors = (tensor.cuda(non_blocking=True) for tensor in tensors)
 
-        # Prefill 和 decode 都必须提供的公共张量。
-        self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
-        self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
-        self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
-
+        self.b_req_idx, self.b_seq_len, self.b_mtp_index, tensor3, tensor4 = tensors
         if self.is_prefill:
-            # Prefill 必须提供的张量。
-            self.input_ids = self.input_ids.cuda(non_blocking=True)
-            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
-            self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
+            self.b_ready_cache_len, self.b_prefill_start_loc = tensor3, tensor4
             self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
         else:
-            # Decode 必须提供的张量。
-            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
-            self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+            self.b_position_delta, self.b_shared_seq_len = tensor3, tensor4
             self.b_shared_radix_node_id = self.b_shared_radix_node_id.cuda(non_blocking=True)
 
-            # Decode 可以显式提供 input_ids；未提供时会在模型内部按请求索引收集。
-            if self.input_ids is not None:
-                self.input_ids = self.input_ids.cuda(non_blocking=True)
+        # Decode 可以显式提供 input_ids；未提供时会在模型内部按请求索引收集。
+        if self.input_ids is not None:
+            self.input_ids = self.input_ids.cuda(non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
@@ -189,9 +193,6 @@ class ModelOutput:
     # attached here. ModelOutput therefore owns a stable output view instead
     # of the mutable collector used while the forward is still running.
     mtp_collector: Optional[ModelMtpOutputCollector] = None
-    # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
-    prefill_mem_indexes_ready_event: torch.Event = None
-
     # prompt_logics 用于在开启 return_all_prompt_logics 模式（如 enable_prompt_logprobs）时，
     # 保存整个 prefill 阶段每一个 token 位置对应的 logits（而非仅最后一个位置的 logits）。
     # 此时 logits 依然只保存每个请求最后一个位置的 logits，prompt_logics 为可选项，仅在

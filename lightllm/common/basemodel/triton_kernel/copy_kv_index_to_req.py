@@ -1,204 +1,102 @@
 import torch
-
 import triton
 import triton.language as tl
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 @triton.jit
-def _fwd_kernel_copy_kv_index_to_req(
-    req_to_token_indexs, b_req_idx, b_seq_len, memindex, stride_req_to_token_b, stride_req_to_token_s
-):
-    cur_index = tl.program_id(0)
-    cur_req_idx = tl.load(b_req_idx + cur_index)
-    cur_token_index = tl.load(memindex + cur_index)
-    cur_seq_len = tl.load(b_seq_len + cur_index)
-    dest_offset = req_to_token_indexs + cur_req_idx * stride_req_to_token_b + (cur_seq_len - 1) * stride_req_to_token_s
-    tl.store(dest_offset, cur_token_index)
-    return
-
-
-@torch.no_grad()
-def copy_kv_index_to_req(req_to_token_indexs, b_req_idx, b_seq_len, memindex):
-    seq_len = b_seq_len.shape[0]
-    assert b_seq_len.shape[0] == memindex.shape[0] and b_req_idx.shape[0] == b_seq_len.shape[0]
-    grid = (seq_len,)
-    num_warps = 1
-
-    _fwd_kernel_copy_kv_index_to_req[grid](
-        req_to_token_indexs,
-        b_req_idx,
-        b_seq_len,
-        memindex,
-        req_to_token_indexs.stride(0),
-        req_to_token_indexs.stride(1),
-        num_warps=num_warps,
-        num_stages=1,
-    )
-    return
-
-
-@triton.jit
-def _fwd_kernel_select_kv_index_from_req(
-    req_to_token_indexs,
-    b_req_idx,
-    b_seq_len,
-    out_memindex,
-    stride_req_to_token_b,
-    stride_req_to_token_s,
-):
-    cur_index = tl.program_id(0)
-    cur_req_idx = tl.load(b_req_idx + cur_index)
-    cur_seq_len = tl.load(b_seq_len + cur_index)
-    src_offset = req_to_token_indexs + cur_req_idx * stride_req_to_token_b + (cur_seq_len - 1) * stride_req_to_token_s
-    tl.store(out_memindex + cur_index, tl.load(src_offset))
-
-
-@torch.no_grad()
-def select_kv_index_from_req(req_to_token_indexs, b_req_idx, b_seq_len):
-    """Select the one logical KV slot consumed by each decode row."""
-    out_memindex = torch.empty_like(b_req_idx)
-    _fwd_kernel_select_kv_index_from_req[(b_req_idx.shape[0],)](
-        req_to_token_indexs,
-        b_req_idx,
-        b_seq_len,
-        out_memindex,
-        req_to_token_indexs.stride(0),
-        req_to_token_indexs.stride(1),
-        num_warps=1,
-        num_stages=1,
-    )
-    return out_memindex
-
-
-@triton.jit
-def _fwd_kernel_copy_kv_index_to_req_prefill(
-    req_to_token_indexs,
-    b_req_idx,
-    b_seq_len,
-    b_ready_cache_len,
-    b_start_loc,
-    memindex,
-    stride_req_to_token_b,
-    stride_req_to_token_s,
+def _build_kv_indexes_and_input_ids(
+    Table,
+    Req,
+    Ends,
+    Ready,
+    Starts,
+    Out,
+    Tokens,
+    Next,
+    Mtp,
+    Mixed,
+    SB: tl.constexpr,
+    SS: tl.constexpr,
+    NEXT_STRIDE: tl.constexpr,
+    BATCH: tl.constexpr,
+    PREFILL: tl.constexpr,
+    GATHER: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-
-    block_index = tl.program_id(0)
-    batch_index = tl.program_id(1)
-    cur_req_idx = tl.load(b_req_idx + batch_index)
-    cur_seq_len = tl.load(b_seq_len + batch_index)
-    cur_ready_cache_len = tl.load(b_ready_cache_len + batch_index)
-    cur_start_loc = tl.load(b_start_loc + batch_index)
-    copy_len = cur_seq_len - cur_ready_cache_len
-
-    block_range = block_index * BLOCK + tl.arange(0, BLOCK)
-    block_mask = block_range < copy_len
-    cur_token_index = tl.load(memindex + cur_start_loc + block_range, mask=block_mask)
-    dest_offset = (
-        req_to_token_indexs
-        + cur_req_idx * stride_req_to_token_b
-        + (cur_ready_cache_len + block_range) * stride_req_to_token_s
-    )
-    tl.store(dest_offset, cur_token_index, mask=block_mask)
-
-    return
-
-
-def get_triton_config(max_q_seq_len: int) -> tuple[int, int]:
-    if max_q_seq_len <= 512:
-        return 256, 2
-    elif max_q_seq_len <= 4096:
-        return 512, 4
+    pos = tl.arange(0, BLOCK)
+    if PREFILL:
+        batch = tl.program_id(0)
+        req, end = tl.load(Req + batch), tl.load(Ends + batch)
+        start, out_start = tl.load(Ready + batch), tl.load(Starts + batch)
+        pos += tl.program_id(1) * BLOCK
+        index = tl.load(Table + req * SB + (start + pos) * SS, pos < end - start, other=0)
+        tl.store(Out + out_start + pos, index, pos < end - start)
+        if GATHER:
+            if tl.program_id(1) == 0 and tl.load(Mixed + batch):
+                token = tl.load(Next + req * NEXT_STRIDE + tl.load(Mtp + batch))
+                tl.store(Tokens + out_start, token)
     else:
-        return 1024, 8
+        row = tl.program_id(0) * BLOCK + pos
+        valid = row < BATCH
+        req, end = tl.load(Req + row, valid, other=0), tl.load(Ends + row, valid, other=1)
+        tl.store(Out + row, tl.load(Table + req * SB + (end - 1) * SS, valid, other=0), valid)
+        if GATHER:
+            step = tl.load(Mtp + row, valid, other=0)
+            tl.store(Tokens + row, tl.load(Next + req * NEXT_STRIDE + step, valid, other=0), valid)
 
 
-@torch.no_grad()
-def copy_kv_index_to_req_prefill(
-    req_to_token_indexs: torch.Tensor,
-    b_req_idx: torch.Tensor,
-    b_seq_len: torch.Tensor,
-    b_ready_cache_len: torch.Tensor,
-    b_start_loc: torch.Tensor,
-    memindex: torch.Tensor,
-    max_q_seq_len: int,
-):
-    batch_size = b_req_idx.shape[0]
-    BLOCK, num_warps = get_triton_config(max_q_seq_len)
-    grid = (triton.cdiv(max_q_seq_len, BLOCK), batch_size)
-    num_warps = 1
-
-    _fwd_kernel_copy_kv_index_to_req_prefill[grid](
+def build_kv_indexes_and_input_ids(model_input: ModelInput, req_to_token_indexs, next_token_ids=None):
+    """Return KV write indexes and input IDs, gathering into supplied or newly allocated IDs in one launch."""
+    prefill = model_input.is_prefill
+    batch = model_input.batch_size
+    b_req_idx = model_input.b_req_idx
+    input_ids = model_input.input_ids
+    max_q_seq_len = model_input.max_q_seq_len
+    if input_ids is None and next_token_ids is not None:
+        input_ids = torch.empty_like(b_req_idx, dtype=torch.int64)
+    out = (
+        torch.empty(input_ids.numel(), dtype=torch.int32, device=req_to_token_indexs.device)
+        if prefill
+        else torch.empty_like(b_req_idx, dtype=torch.int32)
+    )
+    block = min(triton.next_power_of_2(max(1, max_q_seq_len)), 1024) if prefill else 256
+    grid = (batch, triton.cdiv(max_q_seq_len, block)) if prefill else (triton.cdiv(batch, block),)
+    _build_kv_indexes_and_input_ids[grid](
         req_to_token_indexs,
         b_req_idx,
-        b_seq_len,
-        b_ready_cache_len,
-        b_start_loc,
-        memindex,
-        req_to_token_indexs.stride(0),
-        req_to_token_indexs.stride(1),
-        BLOCK=BLOCK,
-        num_warps=num_warps,
-        num_stages=1,
+        model_input.b_seq_len,
+        model_input.b_ready_cache_len if prefill else None,
+        model_input.b_prefill_start_loc if prefill else None,
+        out,
+        input_ids,
+        next_token_ids,
+        model_input.b_mtp_index,
+        model_input.b_is_decode_req,
+        *req_to_token_indexs.stride(),
+        0 if next_token_ids is None else next_token_ids.stride(0),
+        batch,
+        prefill,
+        next_token_ids is not None,
+        block,
+        num_warps=max(1, block // 128) if prefill else 1,
     )
+    return out, input_ids
 
 
 @triton.jit
-def _fwd_kernel_select_kv_index_from_req_prefill(
-    req_to_token_indexs,
-    b_req_idx,
-    b_seq_len,
-    b_ready_cache_len,
-    b_start_loc,
-    out_memindex,
-    stride_req_to_token_b,
-    stride_req_to_token_s,
-    BLOCK: tl.constexpr,
-):
-    block_index = tl.program_id(0)
-    batch_index = tl.program_id(1)
-    cur_req_idx = tl.load(b_req_idx + batch_index)
-    cur_seq_len = tl.load(b_seq_len + batch_index)
-    cur_ready_cache_len = tl.load(b_ready_cache_len + batch_index)
-    cur_start_loc = tl.load(b_start_loc + batch_index)
-    copy_len = cur_seq_len - cur_ready_cache_len
+def _update_req_token_indexes(Table, Packet, STRIDE: tl.constexpr, BLOCK: tl.constexpr, PAGE: tl.constexpr):
+    row, block = tl.program_id(0), tl.program_id(1)
+    req = tl.load(Packet + 4 * row)
+    start = tl.load(Packet + 4 * row + 1)
+    size = tl.load(Packet + 4 * row + 2)
+    offset = tl.load(Packet + 4 * row + 3)
+    pos = block * BLOCK + tl.arange(0, BLOCK)
+    value = tl.load(Packet + offset + pos // PAGE, pos < size, other=0) + pos % PAGE
+    tl.store(Table + req * STRIDE + start + pos, value, pos < size)
 
-    block_range = block_index * BLOCK + tl.arange(0, BLOCK)
-    block_mask = block_range < copy_len
-    src_offset = (
-        req_to_token_indexs
-        + cur_req_idx * stride_req_to_token_b
-        + (cur_ready_cache_len + block_range) * stride_req_to_token_s
+
+def update_req_token_indexes(table, packet, count, max_size, page_size=1):
+    _update_req_token_indexes[(count, triton.cdiv(max_size, 256))](
+        table, packet, table.stride(0), 256, page_size, num_warps=4
     )
-    memindex = tl.load(src_offset, mask=block_mask)
-    tl.store(out_memindex + cur_start_loc + block_range, memindex, mask=block_mask)
-
-
-@torch.no_grad()
-def select_kv_index_from_req_prefill(
-    req_to_token_indexs,
-    b_req_idx,
-    b_seq_len,
-    b_ready_cache_len,
-    b_start_loc,
-    max_q_seq_len,
-    token_num,
-):
-    """Select the logical KV slots consumed by the current prefill step."""
-    out_memindex = torch.empty((token_num,), dtype=torch.int32, device=req_to_token_indexs.device)
-    block, num_warps = get_triton_config(max_q_seq_len)
-    grid = (triton.cdiv(max_q_seq_len, block), b_req_idx.shape[0])
-    _fwd_kernel_select_kv_index_from_req_prefill[grid](
-        req_to_token_indexs,
-        b_req_idx,
-        b_seq_len,
-        b_ready_cache_len,
-        b_start_loc,
-        out_memindex,
-        req_to_token_indexs.stride(0),
-        req_to_token_indexs.stride(1),
-        BLOCK=block,
-        num_warps=num_warps,
-        num_stages=1,
-    )
-    return out_memindex

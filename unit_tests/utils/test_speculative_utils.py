@@ -119,7 +119,7 @@ def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
         req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4)),
     )
     state = state_class(
-        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1),
+        backend=SimpleNamespace(uses_causal_attention=lambda: False, infer_page_size=1),
         infer_state=infer_state,
     )
 
