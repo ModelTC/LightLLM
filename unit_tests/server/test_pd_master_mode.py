@@ -292,6 +292,7 @@ def test_pd_master_restores_request_count_when_preload_fails():
             raise RuntimeError("preload failed")
 
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = SimpleNamespace(reasoning_parser=None)
     manager.running_request_count = 0
 
     async def consume_generate():
@@ -304,15 +305,22 @@ def test_pd_master_restores_request_count_when_preload_fails():
     assert manager.running_request_count == 0
 
 
-def test_pd_master_request_count_covers_async_generator_lifecycle():
+@pytest.mark.parametrize(
+    "parser,enabled,match_in_inference", [(None, False, True), ("qwen3", False, False), ("qwen3", True, True)]
+)
+def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, parser, enabled, match_in_inference):
+    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.get_stop_in_reasoning", lambda: enabled)
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = SimpleNamespace(reasoning_parser=None)
     manager.running_request_count = 0
+    manager.args.reasoning_parser = parser
     inner_generator_closed = False
 
     async def fake_generate(prompt, sampling_params, multimodal_params, request):
         nonlocal inner_generator_closed
         try:
             assert manager.running_request_count == 1
+            assert sampling_params.enable_stop_str_match_in_inference is match_in_inference
             yield "result"
         finally:
             inner_generator_closed = True
@@ -333,6 +341,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle():
 @pytest.mark.parametrize("include", [False, True])
 def test_pd_master_forwards_filtered_choices(include):
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = SimpleNamespace(reasoning_parser=None)
     manager.running_request_count = 0
     params = SamplingParams()
     params.stop_sequences.initialize([[1, 2]], None)

@@ -25,6 +25,7 @@ from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.server.detokenization.stop_sequence import StopSequenceBuffer
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
+    get_stop_in_reasoning,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
@@ -151,6 +152,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         await self._wait_for_pd_master_request_slot()
+        sampling_params.enable_stop_str_match_in_inference = not self.args.reasoning_parser or get_stop_in_reasoning()
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1

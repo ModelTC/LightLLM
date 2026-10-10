@@ -16,7 +16,7 @@ def _make_manager(monkeypatch):
     )
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
-    mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True)
+    mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True, reasoning_parser=None)
     mgr.enable_pd_node_self_request_limit = True
     mgr.pd_node_resource_wait_timeout_seconds = -1
     mgr.pd_node_continuation_resource_wait_timeout_seconds = 60
@@ -164,8 +164,9 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
     from lightllm.server.detokenization import stop_sequence
 
     monkeypatch.setattr(stop_sequence, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))
-    monkeypatch.setattr(stop_sequence, "get_stop_in_reasoning", lambda: False)
+    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.get_stop_in_reasoning", lambda: False)
     manager = _make_manager(monkeypatch)
+    manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(
         encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
     )
@@ -175,6 +176,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segment_modes.append(sp._initial_reasoning_state)
+        assert sp.enable_stop_str_match_in_inference is False
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segment_modes) == 1:
             yield sp.group_request_id, "reason", {**metadata, "id": 10}, FinishStatus()
@@ -262,8 +264,9 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     from lightllm.server.detokenization import stop_sequence
 
     monkeypatch.setattr(stop_sequence, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=parser))
-    monkeypatch.setattr(stop_sequence, "get_stop_in_reasoning", lambda: False)
+    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.get_stop_in_reasoning", lambda: False)
     manager = _make_manager(monkeypatch)
+    manager.args.reasoning_parser = parser
     manager.tokenizer = SimpleNamespace(
         encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
     )
@@ -280,6 +283,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segments.append(prompt)
+        assert sp.enable_stop_str_match_in_inference is (parser is None)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
             if parser:

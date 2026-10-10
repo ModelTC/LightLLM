@@ -35,7 +35,6 @@ def _stop_environment(monkeypatch):
         "get_env_start_args",
         lambda: SimpleNamespace(reasoning_parser=None),
     )
-    monkeypatch.setattr(stop_sequence_module, "get_stop_in_reasoning", lambda: False)
 
 
 def _decode_req(
@@ -53,12 +52,13 @@ def _decode_req(
         "get_env_start_args",
         lambda: SimpleNamespace(reasoning_parser=parser),
     )
-    monkeypatch.setattr(stop_sequence_module, "get_stop_in_reasoning", lambda: stop_in_reasoning)
+    params = _params(stop, include, force)
+    params.enable_stop_str_match_in_inference = not parser or stop_in_reasoning
     req = SimpleNamespace(
         request_id=80,
         group_req_id=80,
         input_len=2,
-        sample_params=_params(stop, include, force),
+        sample_params=params,
         shm_prompt_ids=SimpleNamespace(arr=np.array([1, 2, *tokens])),
         finish_token_index=1 + len(tokens) if tokens else -1,
         finish_status=FinishStatus(finish),
@@ -122,6 +122,15 @@ def test_no_string_stops_emit_immediately():
     buffer = StopSequenceBuffer(_params([[10, 11]]), _ReasoningTokenizer(), [])
     assert not buffer.append(1, "hello", 1)
     assert list(buffer.ready_tokens) == [("hello", 1)]
+
+
+def test_token_stops_can_be_delegated_without_reasoning_parser():
+    params = _params([[10, 11]])
+    params.enable_stop_str_match_in_inference = False
+    buffer = StopSequenceBuffer(params, _ReasoningTokenizer(), [])
+    assert not buffer.append(10, "first", 1)
+    assert buffer.append(11, "second", 2)
+    assert list(buffer.ready_tokens) == [("first", 1), ("second", 2)]
 
 
 @pytest.mark.parametrize("stop_in_reasoning,stop_at", [(False, 3), (True, 0)])
@@ -241,19 +250,19 @@ def test_detokenization_drains_buffer_before_release(monkeypatch, finish, matche
     assert decode.req.stop_str_matched is matched_stop
 
 
-@pytest.mark.parametrize(
-    "parser,enabled,should_stop", [(None, False, True), ("qwen3", False, False), ("qwen3", True, True)]
-)
-def test_inference_stop_gate_preserves_legacy_and_opt_in(monkeypatch, parser, enabled, should_stop):
-    monkeypatch.setattr(infer_batch, "get_stop_in_reasoning", lambda: enabled)
+@pytest.mark.parametrize("match_in_inference", [False, True])
+def test_inference_stop_gate_uses_sampling_params(match_in_inference):
     req = infer_batch.InferReq.__new__(infer_batch.InferReq)
-    req.args = SimpleNamespace(reasoning_parser=parser)
     req.stop_sequences = [[10]]
     req.shm_req = SimpleNamespace(input_len=1, shm_prompt_ids=SimpleNamespace(arr=np.array([1, 10])))
-    req.sampling_param = SimpleNamespace(shm_param=SimpleNamespace(ignore_eos=False, max_new_tokens=100))
+    req.sampling_param = SimpleNamespace(
+        shm_param=SimpleNamespace(
+            ignore_eos=False, max_new_tokens=100, enable_stop_str_match_in_inference=match_in_inference
+        )
+    )
     req.finish_status = FinishStatus()
     req.update_finish_status([], output_len=1)
-    assert req.finish_status.is_stopped() is should_stop
+    assert req.finish_status.is_stopped() is match_in_inference
 
     # EOS and the output length limit remain independent of user stop sequences.
     req.finish_status = FinishStatus()

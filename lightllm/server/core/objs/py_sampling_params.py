@@ -64,6 +64,7 @@ class SamplingParams:
         seed: Optional[int] = -1,
         include_stop_str_in_output: bool = False,
         _initial_reasoning_state: int = -1,
+        enable_stop_str_match_in_inference: bool = True,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -84,6 +85,7 @@ class SamplingParams:
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
+        self.enable_stop_str_match_in_inference = enable_stop_str_match_in_inference
         self.include_stop_str_in_output = include_stop_str_in_output
         # Internal initial-state hint for stop matching: -1 parser default, 0 content, 1 reasoning.
         self._initial_reasoning_state = _initial_reasoning_state
@@ -277,6 +279,7 @@ class SamplingParams:
         ret["ignore_eos"] = self.ignore_eos
         ret["max_new_tokens"] = self.max_new_tokens
         ret["stop_sequences"] = self.stop_sequences
+        ret["enable_stop_str_match_in_inference"] = self.enable_stop_str_match_in_inference
         ret["include_stop_str_in_output"] = self.include_stop_str_in_output
         ret["_initial_reasoning_state"] = self._initial_reasoning_state
         ret["best_of"] = self.best_of

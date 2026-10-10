@@ -27,6 +27,7 @@ def _make_manager(mode: NodeRole):
     manager.args = SimpleNamespace(
         run_mode=mode.value,
         running_max_req_size=2,
+        reasoning_parser=None,
     )
     manager.pd_mode = mode
     manager.is_multinode_tp_slave = False
@@ -64,13 +65,16 @@ def _multimodal_params():
 
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D, NodeRole.P])
 @pytest.mark.parametrize("include", [False, True])
-def test_http_forwards_detokenization_text_unchanged(mode, include):
+@pytest.mark.parametrize("parser,enabled", [(None, False), ("qwen3", False), ("qwen3", True)])
+def test_http_forwards_detokenization_text_unchanged(monkeypatch, mode, include, parser, enabled):
+    monkeypatch.setattr("lightllm.server.httpserver.manager.get_stop_in_reasoning", lambda: enabled)
+
     async def run():
         manager = _make_manager(mode)
         manager.tokenizer = None
         manager.enable_multimodal = False
         manager.args.chunked_prefill_size = 1
-        manager.args.reasoning_parser = None
+        manager.args.reasoning_parser = parser
         manager._alloc_shm_req_indexes = AsyncMock(return_value=[0])
         manager.shm_req_manager.async_get_req_obj_by_index = AsyncMock(return_value=MagicMock())
         manager.transfer_to_next_module_or_node = AsyncMock()
@@ -85,6 +89,8 @@ def test_http_forwards_detokenization_text_unchanged(mode, include):
         params.stop_sequences.groups[0].sequence_str = b"END"
         params.stop_sequences.groups[0].sequence_str_len = 3
         params.include_stop_str_in_output = include
+        # P/D nodes keep the matching policy supplied by Master.
+        params.enable_stop_str_match_in_inference = False
         websocket = AsyncMock() if mode == NodeRole.P else None
         pd_event = None
         if mode == NodeRole.P:
@@ -96,6 +102,9 @@ def test_http_forwards_detokenization_text_unchanged(mode, include):
             result
             async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
         ]
+        assert params.enable_stop_str_match_in_inference is (
+            (not parser or enabled) if mode == NodeRole.NORMAL else False
+        )
         expected = "helloEND" if include else "hello"
         assert "".join(result[1] for result in results) == expected
         assert [result[2]["id"] for result in results] == [1, 2]

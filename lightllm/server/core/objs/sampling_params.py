@@ -284,6 +284,8 @@ class SamplingParams(ctypes.Structure):
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
+        # False delegates token-ID stop matching to detokenization.
+        ("enable_stop_str_match_in_inference", ctypes.c_bool),
         ("include_stop_str_in_output", ctypes.c_bool),
         # Internal initial-state hint for stop matching: -1 parser default, 0 content, 1 reasoning.
         ("_initial_reasoning_state", ctypes.c_int),
@@ -383,6 +385,7 @@ class SamplingParams(ctypes.Structure):
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences, tokenizer)
+        self.enable_stop_str_match_in_inference = kwargs.get("enable_stop_str_match_in_inference", True)
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
         # Initial-state hint for stop matching; the running state lives in StopSequenceBuffer.
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
@@ -506,6 +509,7 @@ class SamplingParams(ctypes.Structure):
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
+            "enable_stop_str_match_in_inference": self.enable_stop_str_match_in_inference,
             "include_stop_str_in_output": self.include_stop_str_in_output,
             "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,
