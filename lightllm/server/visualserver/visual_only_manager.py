@@ -5,7 +5,8 @@ import inspect
 import setproctitle
 import threading
 import uuid
-import pickle
+import dataclasses
+import json
 import websockets
 import socket
 import sys
@@ -80,7 +81,7 @@ class VisualOnlyManager(rpyc.Service):
 
                     vit_obj = VIT_Obj(node_id=args.visual_node_id, host_ip=host_ip, port=ports.visual_rpyc_port)
 
-                    await websocket.send(pickle.dumps(vit_obj))
+                    await websocket.send(json.dumps(dataclasses.asdict(vit_obj)))
                     logger.info(f"Sent registration vit_obj: {vit_obj}")
 
                     while True:
