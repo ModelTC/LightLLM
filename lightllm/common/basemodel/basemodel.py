@@ -686,7 +686,9 @@ class TpPartBaseModel:
 
         post_output = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         hidden_collector = infer_state.hidden_collector
-        hidden_collector.add_final_hidden(last_input_embs)
+        hidden_collector.add_final_hidden(
+            last_input_embs if post_output.final_hidden is None else post_output.final_hidden
+        )
         model_output = self._create_model_output(post_output, infer_state)
         del post_output
 
@@ -712,7 +714,9 @@ class TpPartBaseModel:
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
-        hidden_collector.add_final_hidden(last_input_embs)
+        hidden_collector.add_final_hidden(
+            last_input_embs if post_output.final_hidden is None else post_output.final_hidden
+        )
         model_output = self._create_model_output(post_output, infer_state)
         del post_output
 
@@ -915,8 +919,12 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        hidden_collector0.add_final_hidden(last_input_embs)
-        hidden_collector1.add_final_hidden(last_input_embs1)
+        hidden_collector0.add_final_hidden(
+            last_input_embs if post_output.final_hidden is None else post_output.final_hidden
+        )
+        hidden_collector1.add_final_hidden(
+            last_input_embs1 if post_output1.final_hidden is None else post_output1.final_hidden
+        )
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
@@ -957,8 +965,12 @@ class TpPartBaseModel:
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        hidden_collector0.add_final_hidden(last_input_embs)
-        hidden_collector1.add_final_hidden(last_input_embs1)
+        hidden_collector0.add_final_hidden(
+            last_input_embs if post_output.final_hidden is None else post_output.final_hidden
+        )
+        hidden_collector1.add_final_hidden(
+            last_input_embs1 if post_output1.final_hidden is None else post_output1.final_hidden
+        )
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
