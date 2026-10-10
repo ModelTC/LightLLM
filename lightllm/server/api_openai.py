@@ -164,14 +164,15 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     """Whether this request uses forced thinking / reasoning (parser + template)."""
     from .build_prompt import tokenizer_supports_force_thinking
 
-    if not tokenizer_supports_force_thinking():
-        return False
-
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
-    if reasoning_parser in ["qwen3-thinking", "gpt-oss", "minimax"]:
+    # Always-thinking models may have no thinking switch in their chat template.
+    # Their answer grammar must wait for the reasoning delimiter nonetheless.
+    if reasoning_parser in ["deepseek-r1", "qwen3-thinking", "gpt-oss", "minimax"]:
         return True
+    if not tokenizer_supports_force_thinking():
+        return False
     if reasoning_parser in ["deepseek-v3"]:
         return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
