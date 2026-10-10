@@ -252,6 +252,9 @@ class SamplingParams(ctypes.Structure):
         # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
         # 以高优先级插入 Router 调度队列。
         ("pd_high_priority_request", ctypes.c_bool),
+        # Committed output appended to a PD continuation's prompt. Inference
+        # replays this suffix once when restoring the request's grammar state.
+        ("pd_previous_output_len", ctypes.c_int),
         # P/D 节点的资源等待超时，由 PD Master 下发。非负值用于控制 shm_req 申请和
         # Router 等待进入推理系统的时限；负数表示永久等待。
         ("pd_node_resource_wait_timeout_seconds", ctypes.c_int),
@@ -305,8 +308,9 @@ class SamplingParams(ctypes.Structure):
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
-        # 这两个字段是 PD Master 的内部调度信息，不能由外部请求参数开启或修改。
+        # PD Master 的内部续跑和调度信息，不能由外部请求参数开启或修改。
         self.pd_high_priority_request = False
+        self.pd_previous_output_len = 0
         self.pd_node_resource_wait_timeout_seconds = -1
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 

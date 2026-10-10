@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -33,10 +34,11 @@ def _make_manager(monkeypatch):
 
     mgr.id_gen = SimpleNamespace(generate_id=gen_id)
     mgr.metric_client = SimpleNamespace(counter_inc=lambda *a, **k: None, histogram_observe=lambda *a, **k: None)
-    mgr.tokens = lambda *a, **k: 10
+    mgr._encode_prompt = lambda *a, **k: ([1, 2], 10)
     mgr._log_req_header = lambda *a, **k: asyncio.sleep(0)
     mgr.recorded_cache_hit_rates = []
     mgr.inserted_prompt_caches = []
+    mgr.segment_inputs = []
     mgr.pd_manager = SimpleNamespace(
         selector=SimpleNamespace(
             record_prompt_cache_hit_rate=mgr.recorded_cache_hit_rates.append,
@@ -52,7 +54,8 @@ def _make_manager(monkeypatch):
 def _collect(mgr, sampling_params, monkeypatch, segments):
     segment_iter = iter(segments)
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request):
+        mgr.segment_inputs.append(pickle.loads(pickle.dumps((prompt_ids, sp.pd_previous_output_len))))
         sub_req_id = sp.group_request_id
         token_count, final_status = next(segment_iter)
         hit = sampling_params.max_new_tokens * 10
@@ -62,8 +65,9 @@ def _collect(mgr, sampling_params, monkeypatch, segments):
                 finish_status = FinishStatus(final_status)
             yield (
                 sub_req_id,
-                "x",
+                "" if token_index == 1 else "x",
                 {
+                    "id": ord("x"),
                     "prompt_tokens": 100,
                     "prompt_cache_len": hit if token_index == 1 else 0,
                     "count_output_tokens": token_index,
@@ -113,7 +117,8 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
         sp,
         monkeypatch,
         segments=[
-            (3, FinishStatus.FINISHED_LENGTH),
+            (3, FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+            (2, FinishStatus.FINISHED_PD_DECODE_CAPACITY),
             (1, FinishStatus.FINISHED_STOP),
         ],
     )
@@ -121,6 +126,13 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.5)]
     assert len(mgr.inserted_prompt_caches) == 1
     assert mgr.inserted_prompt_caches[0][0] == "hello"
+    # Empty detokenized text still represents a committed token. Capacity
+    # markers are excluded, and every continuation carries the full history.
+    assert mgr.segment_inputs == [
+        ([1, 2], 0),
+        ([1, 2] + [ord("x")] * 2, 2),
+        ([1, 2] + [ord("x")] * 3, 3),
+    ]
 
 
 def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch):
@@ -130,11 +142,11 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     sampling_params.best_of = 1
     sampling_params.max_new_tokens = 1
 
-    async def failed_wait(_p_node, _d_node, _start_time, _prompt, sp, *_args):
+    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args):
         yield (
             sp.group_request_id,
             "",
-            {"prompt_tokens": 100, "prompt_cache_len": 20, "count_output_tokens": 0},
+            {"id": None, "prompt_tokens": 100, "prompt_cache_len": 20, "count_output_tokens": 0},
             FinishStatus(FinishStatus.FINISHED_ERROR),
         )
 

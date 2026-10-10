@@ -14,7 +14,7 @@ from array import array
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator
+from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator, Sequence
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
@@ -262,24 +262,23 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     self.cache_client.root.release(ids_to_release)
         return
 
-    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
+    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
-        img_count = 0
         audio_tokens = 0
         audio_count = 0
         for img in multimodal_params.images:
-            img_count += 1
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
             token_num = self.tokenizer.get_image_token_length(img)
             self._assert_image_token_count(token_num)
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
-        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
+        # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
+        return len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def loop_for_request(self):
         assert self.args.node_rank > 0
@@ -678,7 +677,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             self.max_req_total_len,
         )
 
-    async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
+    async def _check_and_repair_length(self, prompt_ids: Sequence[int], sampling_params: SamplingParams):
         if not prompt_ids:
             raise InvalidRequestError("The input prompt must not be empty.")
         prompt_tokens = len(prompt_ids)

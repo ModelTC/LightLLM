@@ -109,16 +109,19 @@ class HttpServerManagerForPDMaster:
             pass
         return
 
-    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
+    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
+        _, token_count = self._encode_prompt(prompt, multimodal_params, sampling_params, kwargs)
+        return token_count
+
+    def _encode_prompt(self, prompt: str, multimodal_params, sampling_params: SamplingParams, kwargs=None):
+        """Return unexpanded prompt IDs and the input length after media expansion."""
         kwargs = {} if kwargs is None else kwargs
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
-        img_count = 0
         audio_tokens = 0
         audio_count = 0
         for img in multimodal_params.images:
-            img_count += 1
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
             token_num = self.tokenizer.get_image_token_length(img)
             if token_num > self.args.max_image_token_count:
                 err_msg = (
@@ -131,12 +134,13 @@ class HttpServerManagerForPDMaster:
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
-        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
+        # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
+        return prompt_ids, len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def select_p_d_node(
-        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+        self, prompt: str, sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         return self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
@@ -166,7 +170,7 @@ class HttpServerManagerForPDMaster:
 
     async def _generate(
         self,
-        prompt: Union[str, List[int]],
+        prompt: str,
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -176,8 +180,17 @@ class HttpServerManagerForPDMaster:
         await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
-        input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
-        fake_prompt_ids = [0 for _ in range(input_token_num)]
+        # Reuse the IDs from length checking for every choice, retry and segment.
+        # Multimodal cache IDs are allocated later on P, so only placeholders are kept here.
+        prompt_ids, input_token_num = await asyncio.to_thread(
+            self._encode_prompt,
+            prompt,
+            multimodal_params,
+            sampling_params,
+            {"add_special_tokens": sampling_params.add_special_tokens},
+        )
+        # Length validation only checks emptiness and len(); no token list is needed.
+        fake_prompt_ids = range(input_token_num)
         from lightllm.server.httpserver.manager import HttpServerManager
 
         await HttpServerManager._check_and_repair_length(
@@ -203,6 +216,7 @@ class HttpServerManagerForPDMaster:
             generators.append(
                 self._generate_one(
                     prompt,
+                    prompt_ids,
                     choice_sampling_params,
                     multimodal_params,
                     request,
@@ -225,6 +239,7 @@ class HttpServerManagerForPDMaster:
     async def _generate_one(
         self,
         prompt: str,
+        prompt_ids: List[int],
         origin_sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -240,6 +255,7 @@ class HttpServerManagerForPDMaster:
             try:
                 generator = self._generate_one_attempt(
                     prompt,
+                    prompt_ids,
                     origin_sampling_params,
                     multimodal_params,
                     request,
@@ -279,6 +295,7 @@ class HttpServerManagerForPDMaster:
     async def _generate_one_attempt(
         self,
         prompt: str,
+        prompt_ids: List[int],
         origin_sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -291,6 +308,7 @@ class HttpServerManagerForPDMaster:
         本函数负责选择 P/D 节点、执行所有分段生成，以及在结束或异常时清理请求和节点负载；
         它不处理重试。若节点返回 ``ServerBusyError``，异常会在本次清理完成后交给
         ``_generate_one``，由外层决定是否重新选择节点并发起下一次尝试。
+        prompt 用于选点、缓存前缀记录和字符负载统计；节点请求只发送 token IDs。
         """
         block_group_request_id = origin_request_id
         p_node = None
@@ -324,12 +342,13 @@ class HttpServerManagerForPDMaster:
                 and input_token_num >= self.pd_cache_high_priority_min_prompt_tokens
             )
 
-            history_gen_token_strs = []
+            history_output_token_ids = []
+            history_output_text_len = 0
             origin_prompt_cache_len = None
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
             # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
-            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的 block_prompt 长度。
+            # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的 segment_prompt_ids 长度。
             prompt_tokens = sys.maxsize
 
             # Decode 节点容量不足时会用专用状态结束当前分段。
@@ -340,6 +359,7 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
+                sampling_params.pd_previous_output_len = len(history_output_token_ids)
                 # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
                 # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧
                 # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
@@ -353,17 +373,19 @@ class HttpServerManagerForPDMaster:
                         resource_wait_timeout_seconds = self.pd_node_continuation_resource_wait_timeout_seconds
                     sampling_params.pd_node_resource_wait_timeout_seconds = resource_wait_timeout_seconds
 
-                # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
-                # prompt 更新该节点的在途 prefill 负载，不会重新选点。
-                block_prompt = prompt + "".join(history_gen_token_strs)
-                pending_prefill_load_chars = len(block_prompt)
+                # 分段请求始终复用循环外选定的 P 节点；按原始文本和累计输出的字符数
+                # 更新该节点的在途 prefill 负载，不会重新选点。
+                # Preserve actual output IDs: re-tokenizing decoded text can
+                # merge tokens or lose text still buffered by the detokenizer.
+                segment_prompt_ids = prompt_ids + history_output_token_ids
+                pending_prefill_load_chars = len(prompt) + history_output_text_len
                 p_node.dispatched_prompt_chars += pending_prefill_load_chars
                 p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
                     start_time,
-                    block_prompt,
+                    segment_prompt_ids,
                     sampling_params,
                     multimodal_params,
                     request,
@@ -388,7 +410,8 @@ class HttpServerManagerForPDMaster:
 
                     # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
                     remaining_max_new_tokens -= 1
-                    history_gen_token_strs.append(request_output)
+                    history_output_token_ids.append(metadata["id"])
+                    history_output_text_len += len(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
                     if origin_prompt_cache_len is None:
@@ -506,7 +529,7 @@ class HttpServerManagerForPDMaster:
         self,
         p_node: PD_Client_Obj,
         d_node: PD_Client_Obj,
-        prompt: Union[str, List[int]],
+        prompt_ids: List[int],
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -522,7 +545,7 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, multimodal_params))))
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -537,12 +560,13 @@ class HttpServerManagerForPDMaster:
             raise
         req_status.raise_if_error()
 
-        prompt_ids = prefill_prompt_ids_event.prompt_ids
-        logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
+        # P has expanded media placeholders; D must receive these final IDs.
+        prefill_prompt_ids = prefill_prompt_ids_event.prompt_ids
+        logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prefill_prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(
-            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+            pickle.dumps((ObjType.REQ, (prefill_prompt_ids, sampling_params, MultimodalParams())))
         )
 
         try:
@@ -567,7 +591,7 @@ class HttpServerManagerForPDMaster:
         )
 
         first_token_gen = False
-        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prefill_prompt_ids) - 1
         prompt_cache_len_from_prefill = await self._wait_for_prefill_token_if_needed(
             req_status=req_status,
             request=request,
@@ -643,7 +667,7 @@ class HttpServerManagerForPDMaster:
         p_node: PD_Client_Obj,
         d_node: PD_Client_Obj,
         start_time: float,
-        prompt: str,
+        prompt_ids: List[int],
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -661,7 +685,7 @@ class HttpServerManagerForPDMaster:
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
         async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
-            p_node, d_node, prompt, sampling_params, multimodal_params, request
+            p_node, d_node, prompt_ids, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
                 raise ClientDisconnected(
@@ -787,11 +811,11 @@ class HttpServerManagerForPDMaster:
                             except:
                                 pass
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
-                        _, group_req_id, prompt_ids = obj
+                        _, group_req_id, prefill_prompt_ids = obj
                         try:
                             req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
                             async with req_status.lock:
-                                req_status.prefill_prompt_ids_event.prompt_ids = prompt_ids
+                                req_status.prefill_prompt_ids_event.prompt_ids = prefill_prompt_ids
                                 req_status.prefill_prompt_ids_event.set()
                         except:
                             logger.error(
@@ -1022,6 +1046,6 @@ class PDManager:
         return
 
     def select_p_d_node(
-        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+        self, prompt: str, sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         return self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)

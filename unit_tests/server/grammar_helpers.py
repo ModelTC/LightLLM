@@ -45,6 +45,7 @@ def make_req(**constraints):
         guided_reasoning_end=(),
         invalid_token_ids=[],
         shm_param=SimpleNamespace(
+            pd_previous_output_len=0,
             exponential_decay_length_penalty=SimpleNamespace(to_tuple=lambda: (0, 1.0)),
             min_new_tokens=0,
             temperature=1.0,

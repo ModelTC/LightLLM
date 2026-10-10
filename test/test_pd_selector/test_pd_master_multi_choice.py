@@ -20,7 +20,7 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.id_gen.generate_id.return_value = 800
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
-    manager.tokens = MagicMock(return_value=2)
+    manager._encode_prompt = MagicMock(return_value=([1, 2], 2))
     manager.enable_pd_node_self_request_limit = True
     manager.pd_node_resource_wait_timeout_seconds = 10
     manager.pd_node_continuation_resource_wait_timeout_seconds = 60
@@ -56,7 +56,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
             selected_p_node,
             selected_d_node,
             start_time,
-            prompt,
+            prompt_ids,
             choice_sampling_params,
             child_multimodal_params,
             child_request,
@@ -71,7 +71,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
                 yield (
                     choice_sampling_params.group_request_id,
                     f"internal-{choice_sampling_params.group_request_id}-{token_index}",
-                    {"prompt_tokens": 2, "count_output_tokens": token_index + 1},
+                    {"id": token_index, "prompt_tokens": 2, "count_output_tokens": token_index + 1},
                     finish_status,
                 )
 
@@ -125,6 +125,7 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
 
         async def generate_one(
             prompt,
+            prompt_ids,
             choice_sampling_params,
             child_multimodal_params,
             child_request,
@@ -216,12 +217,12 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment(
         segment_index = 0
         resource_wait_timeouts = []
 
-        async def wait_to_token_package(_p_node, _d_node, _start_time, prompt, params, *_args):
+        async def wait_to_token_package(_p_node, _d_node, _start_time, prompt_ids, params, *_args):
             nonlocal segment_index
             segment_index += 1
             resource_wait_timeouts.append(params.pd_node_resource_wait_timeout_seconds)
             if segment_index == 1:
-                assert prompt == "prompt"
+                assert prompt_ids == [1, 2]
                 assert params.max_new_tokens == 4
                 yield (
                     808,
@@ -236,7 +237,7 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment(
                     FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
                 )
             else:
-                assert prompt == "promptvisible"
+                assert prompt_ids == [1, 2, 10]
                 assert params.max_new_tokens == 3
                 yield (
                     816,
@@ -252,6 +253,7 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment(
         results = []
         async for result in manager._generate_one(
             "prompt",
+            [1, 2],
             sampling_params,
             MagicMock(),
             MagicMock(),
@@ -357,6 +359,7 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
             # 空 prompt 的字符负载为 0，但已派发请求数仍必须在异常路径释放。
             async for _ in manager._generate_one(
                 "",
+                [],
                 sampling_params,
                 MagicMock(),
                 MagicMock(),
@@ -390,18 +393,18 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
         manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         dispatched_nodes = []
         dispatched_d_nodes = []
-        dispatched_prompts = []
+        dispatched_prompt_ids = []
         dispatched_loads = []
         dispatched_req_counts = []
         high_priority_request_flags = []
         dispatched_max_new_tokens = []
 
         async def wait_to_token_package(
-            selected_p_node, selected_d_node, _start_time, block_prompt, sampling_params, *_args
+            selected_p_node, selected_d_node, _start_time, segment_prompt_ids, sampling_params, *_args
         ):
             dispatched_nodes.append(selected_p_node)
             dispatched_d_nodes.append(selected_d_node)
-            dispatched_prompts.append(block_prompt)
+            dispatched_prompt_ids.append(segment_prompt_ids)
             dispatched_loads.append(selected_p_node.dispatched_prompt_chars)
             dispatched_req_counts.append(selected_p_node.dispatched_req_num)
             high_priority_request_flags.append(sampling_params.pd_high_priority_request)
@@ -410,6 +413,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
                 sampling_params.group_request_id,
                 "x",
                 {
+                    "id": ord("x"),
                     "prompt_tokens": 1 if len(dispatched_max_new_tokens) == 1 else 2,
                     "count_output_tokens": 1,
                 },
@@ -431,6 +435,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
         multimodal_params = MagicMock()
         async for result in manager._generate_one(
             "prompt",
+            [1, 2],
             sampling_params,
             multimodal_params,
             MagicMock(),
@@ -443,7 +448,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
         manager.select_p_d_node.assert_awaited_once_with("prompt", sampling_params, multimodal_params)
         assert dispatched_nodes == [p_node, p_node]
         assert dispatched_d_nodes == [d_node, d_node]
-        assert dispatched_prompts == ["prompt", "promptx"]
+        assert dispatched_prompt_ids == [[1, 2], [1, 2, ord("x")]]
         assert dispatched_loads == [other_request_load + len("prompt"), other_request_load + len("promptx")]
         assert dispatched_req_counts == [other_request_count + 1, other_request_count + 1]
         assert high_priority_request_flags == [False, True]
@@ -482,7 +487,7 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
                 yield (
                     sampling_params.group_request_id,
                     "x",
-                    {"prompt_tokens": 1, "count_output_tokens": 100},
+                    {"id": ord("x"), "prompt_tokens": 1, "count_output_tokens": 100},
                     finish_status,
                 )
             if is_first_segment:
@@ -499,6 +504,7 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
         sampling_params.max_new_tokens = 3
         async for _ in manager._generate_one(
             "prompt",
+            [1, 2],
             sampling_params,
             MagicMock(),
             MagicMock(),
@@ -565,7 +571,7 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
             yield (
                 sampling_params.group_request_id,
                 "x",
-                {"prompt_tokens": 1, "count_output_tokens": 1},
+                {"id": ord("x"), "prompt_tokens": 1, "count_output_tokens": 1},
                 FinishStatus(FinishStatus.FINISHED_STOP),
             )
 
@@ -579,6 +585,7 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
         ):
             async for _ in manager._generate_one(
                 "prompt",
+                [1, 2],
                 sampling_params,
                 MagicMock(),
                 MagicMock(),
@@ -626,7 +633,7 @@ def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expecte
             yield (
                 sampling_params.group_request_id,
                 "x",
-                {"prompt_tokens": 1, "count_output_tokens": 1},
+                {"id": ord("x"), "prompt_tokens": 1, "count_output_tokens": 1},
                 FinishStatus(FinishStatus.FINISHED_STOP),
             )
 
@@ -637,6 +644,7 @@ def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expecte
         sampling_params.max_new_tokens = 1
         async for _ in manager._generate_one(
             "prompt",
+            [1, 2],
             sampling_params,
             MagicMock(),
             MagicMock(),
@@ -671,6 +679,7 @@ def test_pd_master_retries_generate_one_when_node_is_busy():
             result
             async for result in manager._generate_one(
                 "prompt",
+                [1, 2],
                 SamplingParams(),
                 MagicMock(),
                 request,
@@ -705,6 +714,7 @@ def test_pd_master_stops_busy_retry_when_client_disconnects():
         with pytest.raises(ClientDisconnected) as exc_info:
             async for _ in manager._generate_one(
                 "prompt",
+                [1, 2],
                 SamplingParams(),
                 MagicMock(),
                 request,
@@ -738,6 +748,7 @@ def test_pd_master_does_not_retry_busy_error_when_self_limit_is_disabled():
         with pytest.raises(ServerBusyError, match="node is busy"):
             async for _ in manager._generate_one(
                 "prompt",
+                [1, 2],
                 SamplingParams(),
                 MagicMock(),
                 MagicMock(),
@@ -769,6 +780,7 @@ def test_pd_master_stops_busy_retry_when_probe_period_expires():
         with pytest.raises(ServerBusyError, match="node is busy"):
             async for _ in manager._generate_one(
                 "prompt",
+                [1, 2],
                 SamplingParams(),
                 MagicMock(),
                 MagicMock(),
@@ -800,6 +812,7 @@ def test_pd_master_does_not_retry_busy_error_after_streaming_output():
         with pytest.raises(ServerBusyError, match="node is busy"):
             async for result in manager._generate_one(
                 "prompt",
+                [1, 2],
                 SamplingParams(),
                 MagicMock(),
                 MagicMock(),
@@ -831,7 +844,7 @@ def test_pd_master_releases_prefill_load_when_stream_is_closed():
         manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
 
         async def wait_to_token_package(*_args, **_kwargs):
-            yield 808, "first", {"prompt_tokens": 1, "count_output_tokens": 1}, FinishStatus()
+            yield 808, "first", {"id": 1, "prompt_tokens": 1, "count_output_tokens": 1}, FinishStatus()
             await asyncio.sleep(10)
 
         manager._wait_to_token_package = wait_to_token_package
@@ -839,6 +852,7 @@ def test_pd_master_releases_prefill_load_when_stream_is_closed():
         sampling_params.max_new_tokens = 4
         generator = manager._generate_one(
             "prompt",
+            [1, 2],
             sampling_params,
             MagicMock(),
             MagicMock(),
