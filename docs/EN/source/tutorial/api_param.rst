@@ -104,9 +104,10 @@ string or a list of strings. ``parameters.include_stop_str_in_output`` defaults 
 removed. Set it to ``true`` to retain the stop string. This option applies to
 string stops; token-ID stop sequences keep their existing behavior.
 
-Both streaming and non-streaming output follow this setting. Streaming holds
-whole tokens covering the last ``max_stop_string_length - 1`` characters when
-excluding stop strings, so a stop split across tokens cannot leak into output.
+Both streaming and non-streaming output follow this setting. When the output
+ends with a prefix of any stop string, streaming holds the complete tokens
+covering that prefix until the match is resolved. This prevents a stop split
+across tokens from leaking into output.
 An unmatched tail is returned when generation finishes. Token IDs, logprobs,
 output token counts, and the finish reason retain their original meanings.
 

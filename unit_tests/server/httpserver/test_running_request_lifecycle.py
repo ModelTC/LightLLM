@@ -64,7 +64,7 @@ def _multimodal_params():
 
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D, NodeRole.P])
 @pytest.mark.parametrize("include", [False, True])
-def test_stop_output_is_filtered_only_for_complete_normal_requests(mode, include):
+def test_http_forwards_detokenization_text_unchanged(mode, include):
     async def run():
         manager = _make_manager(mode)
         manager.tokenizer = None
@@ -76,10 +76,8 @@ def test_stop_output_is_filtered_only_for_complete_normal_requests(mode, include
         manager.transfer_to_next_module_or_node = AsyncMock()
 
         async def results(*args):
-            yield 123, "helloE", {"id": 1}, FinishStatus()
-            yield 123, "NDextra", {"id": 2, "_stop_output_offset": -5 if include else -8}, FinishStatus(
-                FinishStatus.FINISHED_STOP
-            )
+            yield 123, "hello", {"id": 1}, FinishStatus()
+            yield 123, "END" if include else "", {"id": 2}, FinishStatus(FinishStatus.FINISHED_STOP)
 
         manager._wait_to_token_package = results
         params = _sampling_params()
@@ -98,7 +96,7 @@ def test_stop_output_is_filtered_only_for_complete_normal_requests(mode, include
             result
             async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
         ]
-        expected = "helloENDextra" if mode != NodeRole.NORMAL else ("helloEND" if include else "hello")
+        expected = "helloEND" if include else "hello"
         assert "".join(result[1] for result in results) == expected
         assert [result[2]["id"] for result in results] == [1, 2]
         assert results[0][2]["input_usage"]["input_text_tokens"] == 3

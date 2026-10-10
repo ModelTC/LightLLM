@@ -981,9 +981,9 @@ class ReasoningParser:
 class ReasoningStopState:
     """Track reasoning boundaries by token IDs, including hidden special tokens."""
 
-    def __init__(self, model_type, tokenizer, force_reasoning, prompt_ids):
+    def __init__(self, model_type, tokenizer, initial_reasoning_state, prompt_ids):
         detector_class = ReasoningParser.DetectorMap[model_type.lower()]
-        kwargs = {} if force_reasoning == -1 else {"force_reasoning": bool(force_reasoning)}
+        kwargs = {} if initial_reasoning_state == -1 else {"force_reasoning": bool(initial_reasoning_state)}
         detector = detector_class(**kwargs)
         self.in_reasoning = detector._in_reasoning
         self.start_ids = tokenizer.encode(detector.think_start_token, add_special_tokens=False)
