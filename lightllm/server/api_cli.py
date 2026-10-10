@@ -107,6 +107,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="KV transfer backend for PD disaggregation; default: nccl",
     )
     parser.add_argument(
+        "--use_dp_split_mode_connect_pd_master",
+        action="store_true",
+        help="Prefill only: register a separate PD master connection for each local DP rank",
+    )
+    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
         default="cache_aware",

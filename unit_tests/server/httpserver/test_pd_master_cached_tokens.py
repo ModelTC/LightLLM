@@ -49,7 +49,7 @@ def _make_manager(monkeypatch):
     return mgr
 
 
-def _collect(mgr, sampling_params, monkeypatch, segments):
+def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefill", needs_prefill_first_token=True):
     segment_iter = iter(segments)
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
@@ -60,16 +60,15 @@ def _collect(mgr, sampling_params, monkeypatch, segments):
             finish_status = FinishStatus()
             if token_index == token_count:
                 finish_status = FinishStatus(final_status)
-            yield (
-                sub_req_id,
-                "x",
-                {
-                    "prompt_tokens": 100,
-                    "prompt_cache_len": hit if token_index == 1 else 0,
-                    "count_output_tokens": token_index,
-                },
-                finish_status,
-            )
+            metadata = {
+                "prompt_tokens": 100,
+                "prompt_cache_len": hit if token_index == 1 else 0,
+                "count_output_tokens": token_index,
+                "node_mode": first_node_mode if token_index == 1 else "decode",
+            }
+            if token_index == 1 and needs_prefill_first_token is not None:
+                metadata["needs_prefill_first_token"] = needs_prefill_first_token
+            yield sub_req_id, "x", metadata, finish_status
 
     monkeypatch.setattr(mgr, "_wait_to_token_package", fake_wait)
 
@@ -81,6 +80,7 @@ def _collect(mgr, sampling_params, monkeypatch, segments):
             multimodal_params=SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
             request=None,
         ):
+            assert "needs_prefill_first_token" not in metadata
             out.append(metadata.get("prompt_cache_len", -1))
         return out
 
@@ -113,11 +113,11 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
         sp,
         monkeypatch,
         segments=[
-            (3, FinishStatus.FINISHED_LENGTH),
+            (3, FinishStatus.FINISHED_PD_DECODE_CAPACITY),
             (1, FinishStatus.FINISHED_STOP),
         ],
     )
-    assert cached and all(c == 50 for c in cached), cached
+    assert cached == [50, 50, 50], cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.5)]
     assert len(mgr.inserted_prompt_caches) == 1
     assert mgr.inserted_prompt_caches[0][0] == "hello"
@@ -134,7 +134,7 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
         yield (
             sp.group_request_id,
             "",
-            {"prompt_tokens": 100, "prompt_cache_len": 20, "count_output_tokens": 0},
+            {"prompt_tokens": 100, "prompt_cache_len": 20, "count_output_tokens": 0, "needs_prefill_first_token": True},
             FinishStatus(FinishStatus.FINISHED_ERROR),
         )
 
@@ -198,3 +198,41 @@ def test_pd_continuation_carries_reasoning_stop_state(monkeypatch, in_reasoning)
     results = asyncio.run(run())
     assert segment_modes == [1, int(in_reasoning)]
     assert "".join(result[1] for result in results) == "reasonanswer"
+
+
+@pytest.mark.parametrize("node_mode", ["decode", None])
+def test_skipped_prefill_does_not_insert_prompt_cache(monkeypatch, node_mode):
+    mgr = _make_manager(monkeypatch)
+    sampling_params = SamplingParams()
+    sampling_params.n = sampling_params.best_of = 1
+    sampling_params.max_new_tokens = 3
+    cached = _collect(
+        mgr,
+        sampling_params,
+        monkeypatch,
+        segments=[(3, FinishStatus.FINISHED_STOP)],
+        first_node_mode=node_mode,
+        needs_prefill_first_token=False,
+    )
+    assert cached == [30, 30, 30]
+    assert mgr.recorded_cache_hit_rates == [pytest.approx(0.3)]
+    assert mgr.inserted_prompt_caches == []
+
+
+@pytest.mark.parametrize("needs_prefill_first_token", [True, None])
+def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch, needs_prefill_first_token):
+    mgr = _make_manager(monkeypatch)
+    sampling_params = SamplingParams()
+    sampling_params.n = sampling_params.best_of = 1
+    sampling_params.max_new_tokens = 3
+    cached = _collect(
+        mgr,
+        sampling_params,
+        monkeypatch,
+        segments=[(3, FinishStatus.FINISHED_STOP)],
+        first_node_mode="decode",
+        needs_prefill_first_token=needs_prefill_first_token,
+    )
+    assert cached == [30, 30, 30]
+    assert len(mgr.inserted_prompt_caches) == 1
+    assert mgr.inserted_prompt_caches[0][0] == "hello"

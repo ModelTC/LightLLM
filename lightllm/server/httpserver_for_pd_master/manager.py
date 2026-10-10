@@ -22,7 +22,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue, StopSequenceOutput
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
@@ -401,13 +401,16 @@ class HttpServerManagerForPDMaster:
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
+                    needs_prefill_first_token = metadata.pop("needs_prefill_first_token", True)
                     if origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
                         self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
-                        if not raw_finish_status.is_error_finished():
-                            # 只有收到成功的推理结果后才将 prompt 写入前缀树，避免尚未进入
-                            # 推理或已失败的请求被后续请求误判为可复用 cache。
+                        if needs_prefill_first_token and not raw_finish_status.is_error_finished():
+                            # 只有内层确认所需的 Prefill 输出且请求成功后才记录缓存，避免
+                            # 尚未进入推理、已失败或 Decode 完整命中而跳过 Prefill 的请求
+                            # 被后续请求误判为可复用的 P 缓存。首个返回 token 可能来自
+                            # Decode，不能仅根据 node_mode 判断 P 是否完成推理。
                             self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_request_id, request_output, metadata, raw_finish_status
@@ -602,11 +605,12 @@ class HttpServerManagerForPDMaster:
                     if output_index == 1:
                         if first_token_gen is False:
                             first_token_gen = True
-                            node_run_mode = metadata.pop("node_mode", None)
+                            node_run_mode = metadata.get("node_mode")
                             if node_run_mode == "prefill":
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
+                            metadata["needs_prefill_first_token"] = needs_prefill_first_token
                             yield sub_req_id, request_output, metadata, finish_status
                         else:
                             continue
@@ -869,6 +873,8 @@ class ReqStatus:
         if self.error_info is not None:
             if self.is_server_busy:
                 raise ServerBusyError(self.error_info)
+            if self.error_info.startswith("InvalidRequestError: "):
+                raise InvalidRequestError(self.error_info.removeprefix("InvalidRequestError: "))
             logger.error(
                 f"group_request_id: {self.req_id} detected PD node generate error, "
                 f"raise exception to end the request flow early: {self.error_info}"
@@ -916,6 +922,10 @@ class PDManager:
         if self.args.pd_master_mode == "elastic":
             return prefill_node_count >= 1 and decode_node_count >= 1
 
+        # pd_master_mode="1p1d" 等固定拓扑配置中的 P 数量表示 prefill 服务数。
+        # 例如一个 P 服务开启 DP 拆分后注册了 4 条连接，仍应计为 1 个 P 服务，
+        # 因此按 client_ip_port 去重，避免将其计为 4 个 P 而导致就绪检查失败。
+        prefill_node_count = len({node.client_ip_port for node in self.prefill_nodes})
         try:
             expected_prefill_node_count, expected_decode_node_count = (
                 int(node_count) for node_count in self.args.pd_master_mode[:-1].split("p")
@@ -984,13 +994,13 @@ class PDManager:
                     raise ValueError(error_info)
 
         pd_client.websocket = websocket
-        self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
+        self.url_to_pd_nodes[pd_client.connection_key] = pd_client
 
         if pd_client.mode == "prefill":
-            self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
+            self.prefill_nodes = [e for e in self.prefill_nodes if e.connection_key != pd_client.connection_key]
             self.prefill_nodes.append(pd_client)
         elif pd_client.mode == "decode":
-            self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
+            self.decode_nodes = [e for e in self.decode_nodes if e.connection_key != pd_client.connection_key]
             self.decode_nodes.append(pd_client)
         else:
             assert False, f"mode must in ['prefill', 'decode'], but get {pd_client.mode}"
@@ -1002,14 +1012,18 @@ class PDManager:
 
     def remove_pd(self, pd_info_json):
         pd_client = PD_Client_Obj(**pd_info_json)
+        current = self.url_to_pd_nodes.get(pd_client.connection_key)
+        # 同一 key 可能已重新注册；旧连接退出时不能删除新连接。
+        if current is None or current.connection_id != pd_client.connection_id:
+            return
 
-        self.url_to_pd_nodes.pop(pd_client.client_ip_port, None)
-        self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
-        self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
+        self.url_to_pd_nodes.pop(pd_client.connection_key, None)
+        self.prefill_nodes = [e for e in self.prefill_nodes if e.connection_key != pd_client.connection_key]
+        self.decode_nodes = [e for e in self.decode_nodes if e.connection_key != pd_client.connection_key]
 
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
-        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} removed")
+        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} dp_index: {pd_client.dp_index} removed")
         return
 
     def update_node_load_info(self, load_info: Optional[dict]):
@@ -1017,15 +1031,15 @@ class PDManager:
         load_info: 节点负载信息字典，内容格式如下，可以为 None
         {
         "total_token_usage_rate": xxxx,
-        "client_ip_port": xxxx,
+        "connection_key": xxxx,
         }
         """
         try:
             if load_info is None:
                 return
-            client_ip_port = load_info["client_ip_port"]
+            connection_key = load_info["connection_key"]
             total_token_usage_rate = load_info["total_token_usage_rate"]
-            pd_client = self.url_to_pd_nodes.get(client_ip_port)
+            pd_client = self.url_to_pd_nodes.get(connection_key)
             pd_client.run_status.total_token_usage_rate = total_token_usage_rate
         except BaseException as e:
             logger.warning(f"udpate node load info failed, load_info: {load_info} error: {str(e)}")

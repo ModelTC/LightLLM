@@ -17,6 +17,7 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import (
 def _worker(address: str, dispatched_prompt_chars: int = 0, dispatched_req_num: int = 0):
     return SimpleNamespace(
         client_ip_port=address,
+        connection_key=address,
         dispatched_prompt_chars=dispatched_prompt_chars,
         dispatched_req_num=dispatched_req_num,
     )

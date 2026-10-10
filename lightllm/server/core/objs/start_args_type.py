@@ -23,6 +23,7 @@ class StartArgs:
     pd_master_ip: str = field(default="0.0.0.0")
     pd_master_port: int = field(default=1212)
     pd_master_mode: str = field(default="elastic")
+    use_dp_split_mode_connect_pd_master: bool = field(default=False)
     disable_pd_node_self_request_limit: bool = field(default=False)
     disable_pd_cache_high_priority: bool = field(default=False)
     pd_trans_mode: str = field(default="nccl", metadata={"choices": ["nccl", "nixl"]})
