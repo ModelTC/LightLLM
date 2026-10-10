@@ -1,0 +1,17 @@
+{
+  "1_4096": {
+    "BLOCK_CHANNELS": 64,
+    "BLOCK_TOKENS": 8,
+    "num_warps": 2
+  },
+  "1_512": {
+    "BLOCK_CHANNELS": 64,
+    "BLOCK_TOKENS": 16,
+    "num_warps": 2
+  },
+  "1_8192": {
+    "BLOCK_CHANNELS": 64,
+    "BLOCK_TOKENS": 8,
+    "num_warps": 2
+  }
+}
