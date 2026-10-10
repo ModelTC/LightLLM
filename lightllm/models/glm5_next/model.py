@@ -8,7 +8,8 @@ from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
+from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager, FP8Glm5NextMemManager
 from lightllm.common.req_manager import Glm5NextReqManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.distributed.communication_op import dist_group_manager
@@ -41,6 +42,12 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         super()._verify_params()
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
         assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
+        if self.args.llm_kv_type not in ("None", "fp8kv_dsa"):
+            raise ValueError("GLM-5.3 Flash supports only --llm_kv_type None or fp8kv_dsa")
+        if self.args.llm_kv_type == "fp8kv_dsa" and (
+            self.config["kv_lora_rank"] != 512 or self.data_type != torch.bfloat16
+        ):
+            raise ValueError("GLM-5.3 Flash fp8kv_dsa requires kv_lora_rank=512 and --data_type bfloat16")
 
     def autotune_layers(self):
         return 4
@@ -68,9 +75,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         )
 
     def _init_mem_manager(self):
-        self.mem_manager = Glm5NextMemManager(
+        mem_manager_class = FP8Glm5NextMemManager if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextMemManager
+        self.mem_manager = mem_manager_class(
             size=self.max_total_token_num,
-            dtype=self.data_type,
+            dtype=self.linear_config.full_att_dtype,
             num_kv_heads=1,
             head_dim=self.linear_config.full_att_head_dim,
             full_att_layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
@@ -79,7 +87,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         )
 
     def _init_att_backend(self):
-        self.prefill_att_backend = Glm5NextSparseAttBackend(model=self)
+        backend_class = (
+            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+        )
+        self.prefill_att_backend = backend_class(model=self)
         self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):

@@ -9,6 +9,7 @@ from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManag
 from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
 from .qwen3next_mem_manager import Qwen3NextMemManager
 from .glm5_next_mem_manager import Glm5NextMemManager
+from .fp8_glm5_next_mem_manager import FP8Glm5NextMemManager
 
 __all__ = [
     "KvCacheAllocator",
@@ -23,4 +24,5 @@ __all__ = [
     "FP8StaticPerTensorQuantMemManager",
     "Qwen3NextMemManager",
     "Glm5NextMemManager",
+    "FP8Glm5NextMemManager",
 ]

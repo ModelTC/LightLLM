@@ -16,7 +16,8 @@ class Glm5NextReqManager(ReqManagerForMamba):
         super().__init__(max_request_num, max_sequence_length, mem_manager, linear_config)
         self.req_to_indexer_tail = LayerCache(
             size=max_request_num + 1,
-            dtype=linear_config.full_att_dtype,
+            # Raw keys/gates are computation state, even when packed KV is FP8.
+            dtype=linear_config.conv_state_dtype,
             shape=(linear_config.index_kpool + self.mtp_step, 2 * linear_config.index_head_dim),
             layer_num=linear_config.get_full_att_kv_layer_num_with_draft_model(),
             device="cuda",

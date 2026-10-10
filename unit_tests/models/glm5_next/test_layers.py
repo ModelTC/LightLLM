@@ -344,6 +344,24 @@ def test_glm_weight_loading_requires_hf(config, model_class):
         model._verify_params()
 
 
+@pytest.mark.parametrize(
+    "kv_type, data_type, kv_lora_rank",
+    [
+        ("fp8kv_sph", torch.bfloat16, 512),
+        ("fp8kv_spt", torch.bfloat16, 512),
+        ("fp8kv_dsa", torch.float16, 512),
+        ("fp8kv_dsa", torch.bfloat16, 256),
+    ],
+)
+def test_glm_rejects_unsupported_kv_config(config, kv_type, data_type, kv_lora_rank):
+    model = object.__new__(Glm5NextTpPartModel)
+    model.config = dict(config, kv_lora_rank=kv_lora_rank)
+    model.tp_world_size_, model.data_type = 1, data_type
+    model.args, model.load_way = StartArgs(llm_kv_type=kv_type), "HF"
+    with pytest.raises(ValueError, match="GLM-5.3 Flash"):
+        model._verify_params()
+
+
 @pytest.mark.parametrize("tp_world_size", [1, 2])
 def test_glm_rejects_tpsp(config, tp_world_size):
     model = object.__new__(Glm5NextTpPartModel)
