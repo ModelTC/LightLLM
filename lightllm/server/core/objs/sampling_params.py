@@ -4,6 +4,7 @@ from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.tokenizer import get_xgrammar_tokenizer
 from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
@@ -146,7 +147,7 @@ class GuidedGrammar(ctypes.Structure):
             if self.length > 0 and tokenizer is not None and constraint != "json":
                 import xgrammar as xgr
 
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+                tokenizer_info = xgr.TokenizerInfo.from_huggingface(get_xgrammar_tokenizer(tokenizer))
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_grammar(constraint)
         except Exception as e:
@@ -168,7 +169,8 @@ class GuidedJsonSchema(ctypes.Structure):
 
     def initialize(self, constraint: str, tokenizer):
         constraint_bytes = constraint.encode("utf-8")
-        assert len(constraint_bytes) < JSON_SCHEMA_MAX_LENGTH, "Guided json schema is too long."
+        if len(constraint_bytes) >= JSON_SCHEMA_MAX_LENGTH:
+            raise ValueError("Guided json schema is too long.")
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
@@ -176,7 +178,7 @@ class GuidedJsonSchema(ctypes.Structure):
             if self.length > 0 and tokenizer is not None:
                 import xgrammar as xgr
 
-                tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+                tokenizer_info = xgr.TokenizerInfo.from_huggingface(get_xgrammar_tokenizer(tokenizer))
                 xgrammar_compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
                 xgrammar_compiler.compile_json_schema(constraint)
         except Exception as e:
@@ -368,11 +370,13 @@ class SamplingParams(ctypes.Structure):
 
         # Initialize guided_grammar
         guided_grammar = kwargs.get("guided_grammar", "")
+        guided_json = kwargs.get("guided_json", "")
+        if (guided_grammar or guided_json) and get_env_start_args().output_constraint_mode != "xgrammar":
+            raise ValueError("Structured output requires --output_constraint_mode xgrammar")
         self.guided_grammar = GuidedGrammar()
         self.guided_grammar.initialize(guided_grammar, tokenizer)
 
         # Initialize guided_json
-        guided_json = kwargs.get("guided_json", "")
         self.guided_json = GuidedJsonSchema()
         self.guided_json.initialize(guided_json, tokenizer)
 
