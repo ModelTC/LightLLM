@@ -138,7 +138,7 @@ class Req(ctypes.Structure):
         ("mtp_verify_step_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
-        # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
+        # detokenization 判定的 stop 匹配结果，包含 reasoning-aware token 序列；router 进程读取
         # 然后router发停止命令给推理进程，推理进程停止输出
         ("stop_str_matched", ctypes.c_bool),
         # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。

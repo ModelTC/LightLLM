@@ -335,6 +335,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "best_of": request.n,
         "add_special_tokens": False,
         "seed": request.seed,
+        "include_stop_str_in_output": request.include_stop_str_in_output,
     }
 
     # Gemma-4's reasoning delimiters (<|channel>=100, <channel|>=101) are
@@ -353,6 +354,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         sampling_params_dict["max_new_tokens"] = request.max_tokens
     if request.stop is not None:
         sampling_params_dict["stop_sequences"] = request.stop
+        if get_env_start_args().reasoning_parser:
+            # The prompt may already open reasoning; generated tokens may omit the opening marker.
+            sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
 
     # Structured output handling
     if request.response_format:
@@ -863,6 +867,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         "best_of": request.best_of,
         "add_special_tokens": False,
         "seed": request.seed,
+        "include_stop_str_in_output": request.include_stop_str_in_output,
     }
     if request.max_completion_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
@@ -932,7 +937,7 @@ async def _process_prompts_completion(
             prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
-        return await _collect_generation_results(generator, request, prompt_str, individual_sampling_params)
+        return await _collect_generation_results(generator, request, prompt_str)
 
     tasks = [asyncio.create_task(process_single_prompt(prompt)) for prompt in prompts]
 
@@ -1015,9 +1020,7 @@ async def _handle_streaming_completion(
     )
 
 
-async def _collect_generation_results(
-    generator, request: CompletionRequest, prompt: str, sampling_params: SamplingParams
-):
+async def _collect_generation_results(generator, request: CompletionRequest, prompt: str):
     final_outputs = collections.defaultdict(list)
     output_token_counts = collections.defaultdict(int)
     finish_reasons = {}
@@ -1053,18 +1056,6 @@ async def _collect_generation_results(
     for sub_req_id in sorted(final_outputs)[: request.n]:
         final_text = "".join(final_outputs[sub_req_id])
         finish_reason = finish_reasons.get(sub_req_id)
-
-        if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
-            for stop_str in sampling_params.stop_sequences.to_strings():
-                stop_index = final_text.rfind(
-                    stop_str,
-                    max(0, len(final_text) - len(stop_str) - 20),
-                    len(final_text),
-                )
-                if stop_index != -1:
-                    logger.debug("removed stop sequence in tail: '%s'", final_text[stop_index:])
-                    final_text = final_text[:stop_index]
-                    break
 
         results.append(
             {

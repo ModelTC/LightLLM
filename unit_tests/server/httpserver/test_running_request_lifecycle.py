@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lightllm.server.core.objs import SamplingParams
+from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
@@ -27,6 +27,7 @@ def _make_manager(mode: NodeRole):
     manager.args = SimpleNamespace(
         run_mode=mode.value,
         running_max_req_size=2,
+        reasoning_parser=None,
     )
     manager.pd_mode = mode
     manager.is_multinode_tp_slave = False
@@ -60,6 +61,58 @@ def _sampling_params():
 
 def _multimodal_params():
     return SimpleNamespace(audios=[], images=[], verify_and_preload=AsyncMock())
+
+
+@pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D, NodeRole.P])
+@pytest.mark.parametrize("include", [False, True])
+@pytest.mark.parametrize("parser,enabled", [(None, False), ("qwen3", False), ("qwen3", True)])
+def test_http_forwards_detokenization_text_unchanged(monkeypatch, mode, include, parser, enabled):
+    monkeypatch.setattr("lightllm.server.httpserver.manager.get_stop_in_reasoning", lambda: enabled)
+
+    async def run():
+        manager = _make_manager(mode)
+        manager.tokenizer = None
+        manager.enable_multimodal = False
+        manager.args.chunked_prefill_size = 1
+        manager.args.reasoning_parser = parser
+        manager._alloc_shm_req_indexes = AsyncMock(return_value=[0])
+        manager.shm_req_manager.async_get_req_obj_by_index = AsyncMock(return_value=MagicMock())
+        manager.transfer_to_next_module_or_node = AsyncMock()
+
+        async def results(*args):
+            yield 123, "hello", {"id": 1}, FinishStatus()
+            yield 123, "END" if include else "", {"id": 2}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        manager._wait_to_token_package = results
+        params = _sampling_params()
+        params.stop_sequences.initialize([[1, 2]], None)
+        params.stop_sequences.groups[0].sequence_str = b"END"
+        params.stop_sequences.groups[0].sequence_str_len = 3
+        params.include_stop_str_in_output = include
+        # P/D nodes keep the matching policy supplied by Master.
+        params.enable_stop_str_match_in_inference = False
+        websocket = AsyncMock() if mode == NodeRole.P else None
+        pd_event = None
+        if mode == NodeRole.P:
+            pd_event = asyncio.Event()
+            pd_event.decode_node_info = SimpleNamespace(ready_kv_len=1)
+            pd_event.set()
+
+        results = [
+            result
+            async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
+        ]
+        assert params.enable_stop_str_match_in_inference is (
+            (not parser or enabled) if mode == NodeRole.NORMAL else False
+        )
+        expected = "helloEND" if include else "hello"
+        assert "".join(result[1] for result in results) == expected
+        assert [result[2]["id"] for result in results] == [1, 2]
+        assert results[0][2]["input_usage"]["input_text_tokens"] == 3
+        assert results[-1][3].get_finish_reason() == "stop"
+        manager._unregister_running_request.assert_awaited_once()
+
+    asyncio.run(run())
 
 
 def _req_status(reqs):

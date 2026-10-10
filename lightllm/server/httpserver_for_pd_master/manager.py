@@ -22,8 +22,10 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.server.detokenization.stop_sequence import StopSequenceBuffer
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
+    get_stop_in_reasoning,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
@@ -150,6 +152,7 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         await self._wait_for_pd_master_request_slot()
+        sampling_params.enable_stop_str_match_in_inference = not self.args.reasoning_parser or get_stop_in_reasoning()
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
@@ -322,6 +325,15 @@ class HttpServerManagerForPDMaster:
                 and input_token_num >= self.pd_cache_high_priority_min_prompt_tokens
             )
 
+            # P/D nodes forward raw text. Keep one buffer for the whole choice,
+            # so stop prefixes and reasoning boundaries survive capacity splits.
+            stop_buffer = None
+            if origin_sampling_params.stop_sequences.size:
+                stop_buffer = StopSequenceBuffer(
+                    origin_sampling_params,
+                    self.tokenizer,
+                    self.tokenizer.encode(prompt, add_special_tokens=False),
+                )
             history_gen_token_strs = []
             origin_prompt_cache_len = None
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
@@ -382,6 +394,10 @@ class HttpServerManagerForPDMaster:
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
+                        if stop_buffer is not None and stop_buffer.reasoning_state is not None:
+                            origin_sampling_params._initial_reasoning_state = int(
+                                stop_buffer.reasoning_state.in_reasoning
+                            )
                         break
 
                     # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
@@ -401,8 +417,29 @@ class HttpServerManagerForPDMaster:
                             # Decode，不能仅根据 node_mode 判断 P 是否完成推理。
                             self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
-                    yield origin_request_id, request_output, metadata, raw_finish_status
+                    if stop_buffer is None:
+                        yield origin_request_id, request_output, metadata, raw_finish_status
+                    else:
+                        matched = stop_buffer.append(
+                            metadata.get("id"),
+                            request_output,
+                            (origin_request_id, metadata, raw_finish_status),
+                            simulated=raw_finish_status.is_error_finished() or metadata.get("id") is None,
+                        )
+                        stop_before_node_finish = matched and not raw_finish_status.is_finished()
+                        if matched:
+                            if stop_before_node_finish:
+                                await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
+                            raw_finish_status.status = FinishStatus.FINISHED_STOP
+                        if raw_finish_status.is_finished():
+                            stop_buffer.flush()
+                        while stop_buffer.ready_tokens:
+                            text, (req_id, token_metadata, token_finish) = stop_buffer.ready_tokens.popleft()
+                            yield req_id, text, token_metadata, token_finish
+                        if stop_before_node_finish:
+                            break
 
+                await results_generator.aclose()
                 await self.remove_req(group_request_id=block_group_request_id)
                 segment_index += 1
                 # 只有 PD Decode 容量不足产生的内部分段需要续跑；其他状态都结束整个请求。

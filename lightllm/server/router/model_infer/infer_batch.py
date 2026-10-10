@@ -924,6 +924,14 @@ class InferReq:
         return
 
     def _stop_sequences_matched(self, output_len: int):
+        # 未配置 stop 序列时直接返回，避免读取采样参数中的匹配开关。
+        if not self.stop_sequences:
+            return False
+        # 推理层仅按 token ID 匹配，无法区分 reasoning 和回答阶段。
+        # 配置 reasoning parser 且 stop 需跳过思考内容时，关闭这里的匹配，
+        # 交给 detokenization 按阶段处理，避免思考内容中的 stop 提前结束请求。
+        if not self.sampling_param.shm_param.enable_stop_str_match_in_inference:
+            return False
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
             if stop_len > 0:

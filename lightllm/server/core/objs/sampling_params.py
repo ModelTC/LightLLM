@@ -284,6 +284,15 @@ class SamplingParams(ctypes.Structure):
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
+        # 是否在推理层按 token ID 匹配 stop 序列；False 时交给 detokenization。
+        # 配置 reasoning parser 且 stop 需跳过思考内容时关闭，避免思考内容提前触发停止。
+        ("enable_stop_str_match_in_inference", ctypes.c_bool),
+        # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
+        # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
+        ("include_stop_str_in_output", ctypes.c_bool),
+        # stop 检测的初始推理状态提示：-1 使用 parser 默认值，0 为回答，1 为思考。
+        # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopSequenceBuffer 维护。
+        ("_initial_reasoning_state", ctypes.c_int),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
         # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
@@ -380,6 +389,10 @@ class SamplingParams(ctypes.Structure):
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences, tokenizer)
+        self.enable_stop_str_match_in_inference = kwargs.get("enable_stop_str_match_in_inference", True)
+        self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
+        # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
+        self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
 
         # Initialize allowed_token_ids
         allowed_token_ids = kwargs.get("allowed_token_ids", [])
@@ -500,6 +513,9 @@ class SamplingParams(ctypes.Structure):
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
+            "enable_stop_str_match_in_inference": self.enable_stop_str_match_in_inference,
+            "include_stop_str_in_output": self.include_stop_str_in_output,
+            "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,
             "input_penalty": self.input_penalty,
             "regular_constraint": self.regular_constraint.to_str(),

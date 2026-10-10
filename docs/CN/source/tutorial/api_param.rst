@@ -105,6 +105,23 @@
     data:{"token": {"id": 279, "text": " the", "logprob": -1.5594439506530762, "special": false, "count_output_tokens": 3, "prompt_tokens": 4}, "generated_text": null, "finished": true, "finish_reason": "length", "details": null}
 
 
+停止字符串
+~~~~~~~~~~~~
+
+``/generate`` 和 ``/generate_stream`` 使用 ``parameters.stop_sequences`` 设置
+停止字符串，可以传入字符串或字符串列表。``parameters.include_stop_str_in_output``
+默认为 ``false``，返回文本会移除匹配到的 stop 字符串及同一 token 中其后的文本；
+设为 ``true`` 则保留 stop 字符串。此参数只影响字符串 stop，token ID 序列的行为保持不变。
+
+流式和非流式遵循相同设置。输出尾部匹配任意 stop 字符串的前缀时，流式输出会暂存
+覆盖该前缀的完整 token，直到能够确认是否命中 stop，防止跨 token 的 stop 片段提前发出。
+请求结束时会返回未匹配的尾部。token ID、logprob、输出 token 计数和结束原因的含义保持不变。
+
+配置 reasoning parser 后，字符串 stop 和 token ID stop 默认都跳过 reasoning，
+只作用于回答 content。启动服务前设置 ``LIGHTLLM_STOP_IN_REASONING=1``，可使其在两个阶段
+都生效。EOS 和输出 token 上限仍在两个阶段生效。部署说明见 :ref:`OpenAI 接口示例 <openai_api>`。
+
+
 :code:`POST /get_score`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 reward 类模型，获取对话分数
