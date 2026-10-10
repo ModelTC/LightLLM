@@ -29,7 +29,7 @@ class Glm5NextMemManager(Qwen3NextMemManager):
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         assert head_num == 1
-        self.kv_buffer = torch.empty((layer_num, size + 1, 1, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = torch.empty((layer_num, size + self.page_size, 1, head_dim), dtype=dtype, device="cuda")
         self._init_linear_att_buffers()
 
     def _layer_buffer(self, layer_index):
