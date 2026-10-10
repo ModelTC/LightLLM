@@ -993,19 +993,25 @@ class ReasoningStopState:
         self.recent_ids = deque(prompt_ids[len(prompt_ids) - window_size + 1 :], maxlen=window_size)
 
     def update(self, token_id) -> bool:
-        """Return whether this token belongs to content eligible for stop matching."""
+        """Update reasoning state and return whether the current token can match stop sequences."""
+        # 保留最近的 token ID，用于识别跨多个 token 的思考边界，包括解码时隐藏的特殊 token。
         self.recent_ids.append(int(token_id))
         recent = list(self.recent_ids)
+        # 完整命中开始标记：进入思考阶段，标记本身不参与 stop 匹配。
         if recent[-len(self.start_ids) :] == self.start_ids:
             self.in_reasoning = True
             return False
+        # 完整命中结束标记：退出思考阶段，标记本身仍不参与 stop 匹配。
         if recent[-len(self.end_ids) :] == self.end_ids:
             self.in_reasoning = False
             return False
+        # 思考内容忽略 stop，只有正文才允许匹配。
         if self.in_reasoning:
             return False
-        # A multi-token opening delimiter must not trigger a stop halfway through.
+        # 正文中也可能开始新的思考段；若尾部匹配开始标记的前缀，先禁止 stop 匹配。
+        # 例如开始标记为 [A, B]，收到 A 时就返回 False，避免在收到 B 前误触发 stop。
         for length in range(1, min(len(recent) + 1, len(self.start_ids))):
             if recent[-length:] == self.start_ids[:length]:
                 return False
+        # 当前既不在思考中，也不是思考边界或开始标记的前缀，可以参与 stop 匹配。
         return True

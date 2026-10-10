@@ -1127,20 +1127,23 @@ class StopSequenceOutput:
         self.pending_length = 0
 
     def process(self, sub_req_id, text, metadata, finish_status):
+        # Consume internal metadata; negative offsets trim trailing text.
         stop_offset = metadata.pop("_stop_output_offset", 0)
         metadata.pop("_in_reasoning", None)
         self.pending_tokens.append((sub_req_id, text, metadata, finish_status))
         self.pending_length += len(text)
         finished = finish_status.is_finished()
+        # Hold possible stop prefixes; apply the trim offset on finish.
         output_end = self.pending_length + stop_offset if finished else self.pending_length - self.buffer_length
 
         while self.pending_tokens:
             sub_req_id, token_text, metadata, token_finish_status = self.pending_tokens[0]
-            # Hold whole tokens so text stays associated with its original ID/logprob.
+            # Keep whole tokens paired with their ID/logprob.
             if not finished and len(token_text) > output_end:
                 break
             self.pending_tokens.popleft()
             self.pending_length -= len(token_text)
+            # Trim text while preserving metadata and finish status.
             visible_text = token_text[: max(0, output_end)]
             output_end -= len(token_text)
             yield sub_req_id, visible_text, metadata, token_finish_status
