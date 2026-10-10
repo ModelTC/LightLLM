@@ -230,7 +230,7 @@ class _PrefillTransModule:
                 with self.waiting_dict_lock:
                     self.waiting_dict[key] = trans_task
                 self.transporter.send_write_request_task_to_decode_node(trans_task)
-                logger.info(f"send WRITE request to decode: {key}")
+                logger.debug(f"send WRITE request to decode: {key}")
             except BaseException as e:
                 with self.waiting_dict_lock:
                     self.waiting_dict.pop(key, None)
@@ -275,7 +275,7 @@ class _PrefillTransModule:
                             if trans_task is not None:
                                 trans_task.dst_page_index = notify_obj.dst_page_index
                                 self.write_peer_kv_queue.put(trans_task)
-                                logger.info(
+                                logger.debug(
                                     f"recv WRITE ready from decode request_id={trans_task.request_id} "
                                     f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "
                                     f"srcpage={trans_task.src_page_index} dstpage={trans_task.dst_page_index}"
@@ -323,7 +323,7 @@ class _PrefillTransModule:
                 trans_task.start_trans_time = time.time()
                 with self.waiting_dict_lock:
                     self.waiting_dict[trans_task.get_key()] = trans_task
-                logger.info(f"start WRITE to decode node: {trans_task.to_str()}")
+                logger.debug(f"start WRITE to decode node: {trans_task.to_str()}")
                 continue
             except BaseException as e:
                 logger.error(f"write_blocks_paged failed: {trans_task.to_str()}")
@@ -376,7 +376,7 @@ class _PrefillTransModule:
                             post_us = telem.postDuration
                             backend_us = telem.xferDuration - telem.postDuration
                             nixl_backend = self.transporter.nixl_agent.query_xfer_backend(completed_task.xfer_handle)
-                            logger.info(
+                            logger.debug(
                                 f"write trans task request_id={completed_task.request_id} "
                                 f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
                                 f"src_page={completed_task.src_page_index} "
@@ -396,7 +396,7 @@ class _PrefillTransModule:
                         self.failed_queue.put(completed_task)
                         continue
 
-                    logger.info(
+                    logger.debug(
                         f"send WRITE done nixl notify "
                         f"request_id={completed_task.request_id} "
                         f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
@@ -431,9 +431,9 @@ class _PrefillTransModule:
             self.task_out_queue.put(ret)
 
             if trans_task.start_trans_time is not None:
-                logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
+                logger.debug(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
             else:
-                logger.info(f"trans task ret success:{ret}")
+                logger.debug(f"trans task ret success:{ret}")
 
     @log_exception
     def fail_loop(self):
