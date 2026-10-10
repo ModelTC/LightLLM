@@ -62,8 +62,14 @@ class SamplingParams:
         # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         suggested_dp_index: Optional[int] = None,
         seed: Optional[int] = -1,
+        # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
+        # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
         include_stop_str_in_output: bool = False,
+        # stop 检测的初始推理状态提示：-1 使用 parser 默认值，0 为回答，1 为思考。
+        # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopSequenceBuffer 维护。
         _initial_reasoning_state: int = -1,
+        # 是否在推理层按 token ID 匹配 stop 序列；False 时交给 detokenization。
+        # 配置 reasoning parser 且 stop 需跳过思考内容时关闭，避免思考内容提前触发停止。
         enable_stop_str_match_in_inference: bool = True,
     ) -> None:
         self.best_of = best_of
@@ -87,7 +93,7 @@ class SamplingParams:
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
         self.enable_stop_str_match_in_inference = enable_stop_str_match_in_inference
         self.include_stop_str_in_output = include_stop_str_in_output
-        # Internal initial-state hint for stop matching: -1 parser default, 0 content, 1 reasoning.
+        # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = _initial_reasoning_state
         self.skip_special_tokens = skip_special_tokens
         self.add_special_tokens = add_special_tokens
