@@ -10,7 +10,6 @@ from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from typing import Union, Dict, List
 from .decode import decode_token
-from .decode_mode_fix import decode_mode_fix
 from .decode_req import DecodeReq
 from ..tokenizer import get_tokenizer
 import pickle
@@ -40,7 +39,6 @@ class DeTokenizationManager:
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out: Dict[int, DecodeReq] = {}
         self.eos_id = args.eos_id
-        self.is_pd_decode_mode = False
         self.shm_req_manager = ShmReqManager()
 
     def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
@@ -53,10 +51,7 @@ class DeTokenizationManager:
                 f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
             )
 
-            # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-            decode_req = DecodeReq(req, self.is_pd_decode_mode, self.tokenizer)
-            if self.is_pd_decode_mode:
-                decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
+            decode_req = DecodeReq(req, self.tokenizer)
             self.req_id_to_out[req.request_id] = decode_req
         return
 

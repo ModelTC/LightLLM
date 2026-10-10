@@ -122,7 +122,7 @@ class _ReasoningTokenizer:
 
 
 def _decode_req(
-    monkeypatch, stop_in_reasoning=False, stop="END", force=1, parser="qwen3", pd=False, prompt=(1, 2), include=False
+    monkeypatch, stop_in_reasoning=False, stop="END", force=1, parser="qwen3", prompt=(1, 2), include=False
 ):
     monkeypatch.setattr(decode_req_module, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=parser))
     monkeypatch.setattr(decode_req_module, "get_stop_in_reasoning", lambda: stop_in_reasoning)
@@ -141,7 +141,7 @@ def _decode_req(
         stop_output_offset=0,
         _in_reasoning=False,
     )
-    return DecodeReq(req, pd, tokenizer)
+    return DecodeReq(req, tokenizer)
 
 
 @pytest.mark.parametrize("parser,enabled", [(None, False), ("qwen3", False), ("qwen3", True)])
@@ -241,7 +241,9 @@ def test_disabled_thinking_stops_immediately(monkeypatch):
 
 
 def test_pd_first_token_updates_reasoning_state(monkeypatch):
-    decode = _decode_req(monkeypatch, pd=True, prompt=[1, 1001])
+    decode = _decode_req(monkeypatch)
+    assert decode.read_offset == decode.input_len
+    decode.output_ids.append(1001)
     assert decode.match_stop_sequences(1001, "</think>") is False
     decode.output_ids.append(10)
     assert decode.match_stop_sequences(10, "END") is True
