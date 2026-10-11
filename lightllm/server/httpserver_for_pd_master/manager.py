@@ -22,7 +22,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
-from lightllm.server.detokenization.stop_sequence import StopSequenceBuffer
+from lightllm.server.httpserver.stop_sequence import StopSequenceBuffer
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_stop_in_reasoning,
@@ -152,7 +152,8 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         await self._wait_for_pd_master_request_slot()
-        sampling_params.enable_stop_str_match_in_inference = not self.args.reasoning_parser or get_stop_in_reasoning()
+        if self.args.reasoning_parser and not get_stop_in_reasoning():
+            sampling_params.enable_stop_match_in_backend = False
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
@@ -333,6 +334,7 @@ class HttpServerManagerForPDMaster:
                     origin_sampling_params,
                     self.tokenizer,
                     self.tokenizer.encode(prompt, add_special_tokens=False),
+                    self.args.reasoning_parser if not get_stop_in_reasoning() else None,
                 )
             history_gen_token_strs = []
             origin_prompt_cache_len = None

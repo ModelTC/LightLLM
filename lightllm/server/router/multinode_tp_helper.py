@@ -131,7 +131,11 @@ class RouterMultiNodeTpHelper:
         id_to_req = {req.request_id: req for req in running_reqs}
 
         local_matched_req_ids = [
-            req_id for req_id, req in id_to_req.items() if req.stop_str_matched and not req._router_stop_str_matched
+            req_id
+            for req_id, req in id_to_req.items()
+            if req.sample_params.enable_stop_match_in_backend
+            and req.stop_str_matched
+            and not req._router_stop_str_matched
         ]
 
         matched_req_ids = self._allgather_stop_str_matched_req_ids(local_matched_req_ids)

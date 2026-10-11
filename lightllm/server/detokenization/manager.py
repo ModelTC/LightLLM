@@ -39,8 +39,6 @@ class DeTokenizationManager:
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out: Dict[int, DecodeReq] = {}
         self.eos_id = args.eos_id
-        # PD Master buffers the complete stream after first-token deduplication.
-        self.forward_raw_text = args.run_mode in ("prefill", "decode")
         self.shm_req_manager = ShmReqManager()
 
     def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
@@ -53,7 +51,7 @@ class DeTokenizationManager:
                 f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
             )
 
-            decode_req = DecodeReq(req, self.tokenizer)
+            decode_req = DecodeReq(req)
             self.req_id_to_out[req.request_id] = decode_req
         return
 
@@ -91,16 +89,17 @@ class DeTokenizationManager:
         exist_need_detoken = False
         exist_decode = False
         for decode_req in self.req_id_to_out.values():
-            if (
-                decode_req.need_detoken()
-                and not decode_req.out_queue_is_full()
-                and not decode_req.stop_buffer.ready_tokens
-            ):
+            # 已经满足停止字符串停止条件，则不再处理后续生成 token
+            if decode_req.req.stop_str_matched:
+                continue
+
+            if decode_req.need_detoken() and not decode_req.out_queue_is_full():
                 new_token_id, src_index = decode_req.get_next_token_id_and_index()
                 decode_req.output_ids.append(new_token_id)
                 special = new_token_id in self.all_special_ids
                 count_output_tokens = len(decode_req.output_ids)
 
+                exist_decode = True
                 new_text = decode_token(
                     self.tokenizer,
                     decode_req,
@@ -108,26 +107,16 @@ class DeTokenizationManager:
                     self.eos_id,
                 )
 
+                decode_req.output_strs.append(new_text)
+
                 # 停止字符串匹配
-                if decode_req.match_stop_sequences(new_token_id, new_text):
+                if not decode_req.req.finish_status.is_stopped() and decode_req.stop_sequences_str_match():
                     decode_req.req.stop_str_matched_token_index = src_index
                     decode_req.req.stop_str_matched = True
 
-                if self.forward_raw_text:
-                    decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
-                    decode_req.stop_buffer.ready_tokens.clear()
-                    exist_decode = True
+                decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
 
-            # Drain ready tokens before decoding more, respecting the shared queue's capacity.
-            while decode_req.stop_buffer.ready_tokens and not decode_req.out_queue_is_full():
-                text, (src_index, count_output_tokens) = decode_req.stop_buffer.ready_tokens.popleft()
-                token_id = decode_req.req.shm_prompt_ids.arr[src_index]
-                decode_req.req.out_tokens_queue.push(
-                    text, src_index, token_id in self.all_special_ids, count_output_tokens
-                )
-                exist_decode = True
-
-            if decode_req.need_detoken() or decode_req.stop_buffer.ready_tokens:
+            if decode_req.need_detoken():
                 exist_need_detoken = True
 
         # 通知 httpserver 进程

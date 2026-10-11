@@ -306,9 +306,22 @@ def test_pd_master_restores_request_count_when_preload_fails():
 
 
 @pytest.mark.parametrize(
-    "parser,enabled,match_in_inference", [(None, False, True), ("qwen3", False, False), ("qwen3", True, True)]
+    "parser,enabled,backend,match_in_inference",
+    [
+        (None, False, None, True),
+        ("qwen3", False, None, False),
+        ("qwen3", True, None, True),
+        (None, False, False, False),
+        (None, False, True, True),
+        ("qwen3", False, False, False),
+        ("qwen3", False, True, False),
+        ("qwen3", True, False, False),
+        ("qwen3", True, True, True),
+    ],
 )
-def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, parser, enabled, match_in_inference):
+def test_pd_master_request_count_covers_async_generator_lifecycle(
+    monkeypatch, parser, enabled, backend, match_in_inference
+):
     monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.get_stop_in_reasoning", lambda: enabled)
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.args = SimpleNamespace(reasoning_parser=None)
@@ -320,7 +333,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, p
         nonlocal inner_generator_closed
         try:
             assert manager.running_request_count == 1
-            assert sampling_params.enable_stop_str_match_in_inference is match_in_inference
+            assert sampling_params.enable_stop_match_in_backend is match_in_inference
             yield "result"
         finally:
             inner_generator_closed = True
@@ -328,7 +341,11 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, p
     manager._generate = fake_generate
 
     async def consume_one_result_and_close():
-        results_generator = manager.generate(None, SamplingParams(), None, None)
+        params = SamplingParams()
+        params.init(None)
+        if backend is not None:
+            params.enable_stop_match_in_backend = backend
+        results_generator = manager.generate(None, params, None, None)
         assert await results_generator.__anext__() == "result"
         assert manager.running_request_count == 1
         await results_generator.aclose()

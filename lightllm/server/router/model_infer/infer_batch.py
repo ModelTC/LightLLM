@@ -927,10 +927,9 @@ class InferReq:
         # 未配置 stop 序列时直接返回，避免读取采样参数中的匹配开关。
         if not self.stop_sequences:
             return False
-        # 推理层仅按 token ID 匹配，无法区分 reasoning 和回答阶段。
-        # 配置 reasoning parser 且 stop 需跳过思考内容时，关闭这里的匹配，
-        # 交给 detokenization 按阶段处理，避免思考内容中的 stop 提前结束请求。
-        if not self.sampling_param.shm_param.enable_stop_str_match_in_inference:
+        # HTTP 匹配模式关闭原有后端 stop 路径；EOS 和输出上限不受此开关影响。
+        # 推理层无法区分 reasoning 和回答阶段，需要按阶段匹配时也由 HTTP 处理。
+        if not self.sampling_param.shm_param.enable_stop_match_in_backend:
             return False
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)

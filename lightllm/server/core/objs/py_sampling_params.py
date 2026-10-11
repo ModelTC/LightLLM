@@ -68,9 +68,9 @@ class SamplingParams:
         # stop 检测的初始推理状态提示：-1 使用 parser 默认值，0 为回答，1 为思考。
         # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopSequenceBuffer 维护。
         _initial_reasoning_state: int = -1,
-        # 是否在推理层按 token ID 匹配 stop 序列；False 时交给 detokenization。
-        # 配置 reasoning parser 且 stop 需跳过思考内容时关闭，避免思考内容提前触发停止。
-        enable_stop_str_match_in_inference: bool = True,
+        # True 使用原有推理 / detokenization stop 路径；False 由 HTTP 缓冲、匹配并 abort。
+        # 默认启用后端匹配；需要跳过 reasoning 时由 HTTP 关闭此开关，避免提前结束请求。
+        enable_stop_match_in_backend: bool = True,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -91,7 +91,7 @@ class SamplingParams:
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
-        self.enable_stop_str_match_in_inference = enable_stop_str_match_in_inference
+        self.enable_stop_match_in_backend = enable_stop_match_in_backend
         self.include_stop_str_in_output = include_stop_str_in_output
         # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = _initial_reasoning_state
@@ -285,7 +285,7 @@ class SamplingParams:
         ret["ignore_eos"] = self.ignore_eos
         ret["max_new_tokens"] = self.max_new_tokens
         ret["stop_sequences"] = self.stop_sequences
-        ret["enable_stop_str_match_in_inference"] = self.enable_stop_str_match_in_inference
+        ret["enable_stop_match_in_backend"] = self.enable_stop_match_in_backend
         ret["include_stop_str_in_output"] = self.include_stop_str_in_output
         ret["_initial_reasoning_state"] = self._initial_reasoning_state
         ret["best_of"] = self.best_of

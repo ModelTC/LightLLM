@@ -11,7 +11,7 @@ from lightllm.server.api_openai import (
     _collect_generation_results,
 )
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.detokenization.stop_sequence import StopSequenceBuffer
+from lightllm.server.httpserver.stop_sequence import StopSequenceBuffer
 
 
 class _FinishStatus:
@@ -161,10 +161,6 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
     monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
-    monkeypatch.setattr(
-        "lightllm.server.detokenization.stop_sequence.get_env_start_args",
-        lambda: SimpleNamespace(reasoning_parser=None),
-    )
 
     async def build_prompt(*args):
         return "Prompt"

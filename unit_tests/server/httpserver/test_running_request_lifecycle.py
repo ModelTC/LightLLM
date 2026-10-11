@@ -66,12 +66,13 @@ def _multimodal_params():
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D, NodeRole.P])
 @pytest.mark.parametrize("include", [False, True])
 @pytest.mark.parametrize("parser,enabled", [(None, False), ("qwen3", False), ("qwen3", True)])
-def test_http_forwards_detokenization_text_unchanged(monkeypatch, mode, include, parser, enabled):
+@pytest.mark.parametrize("backend", [None, False, True])
+def test_http_forwards_packaged_tokens_and_preserves_stop_policy(monkeypatch, mode, include, parser, enabled, backend):
     monkeypatch.setattr("lightllm.server.httpserver.manager.get_stop_in_reasoning", lambda: enabled)
 
     async def run():
         manager = _make_manager(mode)
-        manager.tokenizer = None
+        manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
         manager.enable_multimodal = False
         manager.args.chunked_prefill_size = 1
         manager.args.reasoning_parser = parser
@@ -85,12 +86,17 @@ def test_http_forwards_detokenization_text_unchanged(monkeypatch, mode, include,
 
         manager._wait_to_token_package = results
         params = _sampling_params()
-        params.stop_sequences.initialize([[1, 2]], None)
-        params.stop_sequences.groups[0].sequence_str = b"END"
-        params.stop_sequences.groups[0].sequence_str_len = 3
-        params.include_stop_str_in_output = include
+        params.init(
+            manager.tokenizer,
+            stop_sequences="END",
+            include_stop_str_in_output=include,
+            max_new_tokens=1,
+            group_request_id=123,
+            pd_node_resource_wait_timeout_seconds=20,
+        )
         # P/D nodes keep the matching policy supplied by Master.
-        params.enable_stop_str_match_in_inference = False
+        if backend is not None:
+            params.enable_stop_match_in_backend = backend
         websocket = AsyncMock() if mode == NodeRole.P else None
         pd_event = None
         if mode == NodeRole.P:
@@ -102,9 +108,11 @@ def test_http_forwards_detokenization_text_unchanged(monkeypatch, mode, include,
             result
             async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
         ]
-        assert params.enable_stop_str_match_in_inference is (
-            (not parser or enabled) if mode == NodeRole.NORMAL else False
-        )
+        expected_backend = backend is not False
+        if mode == NodeRole.NORMAL and parser and not enabled:
+            expected_backend = False
+        assert params.enable_stop_match_in_backend is expected_backend
+        assert bool(manager.req_id_to_out_inf[123].stop_buffers) is (mode == NodeRole.NORMAL)
         expected = "helloEND" if include else "hello"
         assert "".join(result[1] for result in results) == expected
         assert [result[2]["id"] for result in results] == [1, 2]

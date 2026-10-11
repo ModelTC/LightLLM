@@ -92,8 +92,8 @@ class StopSequenceGroups(ctypes.Structure):
         stop_str_ids = tokenizer.encode(stop_str, add_special_tokens=False)
         return stop_str_ids
 
-    def to_list(self) -> List[List[int]]:
-        return [self.groups[i].to_list() for i in range(self.size)]
+    def to_list(self, include_strings: bool = True) -> List[List[int]]:
+        return [group.to_list() for group in self.groups[: self.size] if include_strings or group.sequence_str_len == 0]
 
     def to_strings(self) -> List[str]:
         # 降序匹配，在出现"\n\n"和"\n"情况时，优先匹配“\n\n”
@@ -284,9 +284,9 @@ class SamplingParams(ctypes.Structure):
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
-        # 是否在推理层按 token ID 匹配 stop 序列；False 时交给 detokenization。
-        # 配置 reasoning parser 且 stop 需跳过思考内容时关闭，避免思考内容提前触发停止。
-        ("enable_stop_str_match_in_inference", ctypes.c_bool),
+        # True 使用原有推理 / detokenization stop 路径；False 由 HTTP 缓冲、匹配并 abort。
+        # 默认启用后端匹配；需要跳过 reasoning 时由 HTTP 关闭此开关，避免提前结束请求。
+        ("enable_stop_match_in_backend", ctypes.c_bool),
         # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
         # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
         ("include_stop_str_in_output", ctypes.c_bool),
@@ -389,7 +389,7 @@ class SamplingParams(ctypes.Structure):
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences, tokenizer)
-        self.enable_stop_str_match_in_inference = kwargs.get("enable_stop_str_match_in_inference", True)
+        self.enable_stop_match_in_backend = kwargs.get("enable_stop_match_in_backend", True)
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
         # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
@@ -513,7 +513,7 @@ class SamplingParams(ctypes.Structure):
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
-            "enable_stop_str_match_in_inference": self.enable_stop_str_match_in_inference,
+            "enable_stop_match_in_backend": self.enable_stop_match_in_backend,
             "include_stop_str_in_output": self.include_stop_str_in_output,
             "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,

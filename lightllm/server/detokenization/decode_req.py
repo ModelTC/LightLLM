@@ -1,6 +1,9 @@
 import os
+from typing import List
 from lightllm.server.core.objs import Req
-from .stop_sequence import StopSequenceBuffer
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 LIGHTLLM_DECODE_PREFIX_LENGTH = int(os.getenv("LIGHTLLM_DECODE_PREFIX_LENGTH", 5))
@@ -10,30 +13,42 @@ class DecodeReq:
     def __init__(
         self,
         req: Req,
-        tokenizer,
     ) -> None:
         self.request_id = req.request_id
         self.group_req_id = req.group_req_id
         self.prompt_ids = req.shm_prompt_ids.arr[0 : req.input_len].tolist()
         self.output_ids = []
+        self.output_strs = []
         self.prefix_offset = max(len(self.prompt_ids) - LIGHTLLM_DECODE_PREFIX_LENGTH, 0)
 
         self.read_offset = len(self.prompt_ids)
 
         self.req = req
         self.input_len = self.req.input_len
-        self.stop_buffer = StopSequenceBuffer(self.req.sample_params, tokenizer, self.prompt_ids)
+        self.stop_strs: List[str] = self.req.sample_params.stop_sequences.to_strings()
+        # to_strings()已经做了倒序排列，第一个元素就是最长字符串
+        self.stop_str_max_len = len(self.stop_strs[0]) if self.stop_strs else 0
 
-    def match_stop_sequences(self, token_id, new_text) -> bool:
-        src_index = self.input_len + len(self.output_ids) - 1
-        # Internal finish markers must not update reasoning or participate in stops.
-        simulated = self.req.finish_token_index == src_index and (
-            self.req.finish_status.is_error_finished() or self.req.finish_status.is_finished_pd_decode_capacity()
-        )
-        matched = self.stop_buffer.append(token_id, new_text, (src_index, len(self.output_ids)), simulated)
-        if matched or self.req.finish_token_index == src_index:
-            self.stop_buffer.flush()
-        return matched
+    def stop_sequences_str_match(self) -> bool:
+        # 需要跳过 reasoning 时由 HTTP 匹配，后端不写入 stop_str_matched。
+        if not self.req.sample_params.enable_stop_match_in_backend:
+            return False
+        stop_strs = self.stop_strs
+        if not stop_strs or self.stop_str_max_len == 0:
+            return False
+
+        tail_token_len = self.stop_str_max_len + 10  # 10 for safety
+        tail_token_strs = self.output_strs[-tail_token_len:]
+        tail_str = "".join(tail_token_strs)
+
+        for stop_str in stop_strs:
+            if stop_str in tail_str:
+                logger.debug(
+                    f"req_id {self.request_id} Found stop sequence in tail: stop_str='{stop_str}', "
+                    f"tail_str='{tail_str}'"
+                )
+                return True
+        return False
 
     def need_detoken(self):
         if (not self.req.stop_str_matched) and len(self.output_ids) < self.req.candetoken_out_len:
@@ -53,8 +68,6 @@ class DecodeReq:
         return prefix_tokens, read_tokens
 
     def can_set_release_mark(self):
-        if self.stop_buffer.ready_tokens or self.stop_buffer.output_strs:
-            return False
         if self.req.stop_str_matched:
             return True
         if (

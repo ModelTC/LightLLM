@@ -23,6 +23,7 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
+from .stop_sequence import StopSequenceBuffer
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -330,10 +331,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
-        if self.pd_mode.is_normal():
-            sampling_params.enable_stop_str_match_in_inference = (
-                not self.args.reasoning_parser or get_stop_in_reasoning()
-            )
+        if self.pd_mode.is_normal() and self.args.reasoning_parser and not get_stop_in_reasoning():
+            sampling_params.enable_stop_match_in_backend = False
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
@@ -466,6 +465,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
+            if self.pd_mode.is_normal() and not self.is_multinode_tp_slave and sampling_params.stop_sequences.size:
+                # 每个候选独立匹配；P/D 节点转发原始文本，由 Master 跨分段统一处理。
+                req_status.stop_buffers = {
+                    req.request_id: StopSequenceBuffer(
+                        sampling_params,
+                        self.tokenizer,
+                        prompt_ids,
+                        self.args.reasoning_parser if not get_stop_in_reasoning() else None,
+                    )
+                    for req in req_objs
+                }
             self.req_id_to_out_inf[group_request_id] = req_status
             # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
             # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
@@ -991,6 +1001,86 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     )
         return
 
+    async def _read_req_tokens(self, req: Req, stop_buffer: Optional[StopSequenceBuffer] = None):
+        """消费原始 token；命中 stop 后只清空队列，不再向请求输出追加 token。"""
+        req_id = req.request_id
+        token_list = []
+        read_token_count = 1
+        if req.out_tokens_queue.is_full():
+            read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
+
+        for _ in range(read_token_count):
+            if req.out_tokens_queue.is_empty():
+                break
+            text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
+            if stop_buffer is not None and stop_buffer.matched:
+                # stop 后可能还有在途 token 和 abort marker，继续消费以完成资源回收。
+                req.out_tokens_queue.pop_no_ret()
+                continue
+            token_logprob = float(req.shm_logprobs.arr["logprob"][src_index])
+            req.cumlogprob += token_logprob
+            metadata = {
+                "id": int(req.shm_prompt_ids.arr[src_index]),
+                "logprob": token_logprob,
+                "cumlogprob": float(req.cumlogprob) / count_output_tokens,
+                "special": special,
+                "count_output_tokens": count_output_tokens,
+                "prompt_cache_len": req.prompt_cache_len,
+                "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
+                "disk_prompt_cache_len": req.disk_prompt_cache_len,
+                "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                "mtp_verify_token_num": req.mtp_verify_token_num,
+                "mtp_verify_step_num": req.mtp_verify_step_num,
+            }
+            metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
+            if self.args.use_reward_model:
+                metadata["score"] = float(req.reward_score)
+
+            backend_stop = req.sample_params.enable_stop_match_in_backend and req.stop_str_matched
+            finish_index = req.stop_str_matched_token_index if backend_stop else req.finish_token_index
+            finish_status = FinishStatus(
+                (FinishStatus.FINISHED_STOP if backend_stop else req.finish_status.status)
+                if finish_index == src_index
+                else FinishStatus.NO_FINISH
+            )
+            if finish_status.status == FinishStatus.FINISHED_ABORTED:
+                # 模拟 EOS 仅用于收尾，不能参与 stop 匹配或输出 token 统计。
+                text = ""
+                metadata["id"] = None
+                metadata["logprob"] = None
+                metadata["logprobs"] = {}
+
+            if stop_buffer is not None:
+                matched = stop_buffer.append(
+                    metadata["id"],
+                    text,
+                    (req_id, metadata, finish_status),
+                    simulated=metadata["id"] is None or finish_status.is_error_finished(),
+                )
+                if matched:
+                    # 只停止当前子请求，保留同组其他候选；对外结束原因始终是 stop。
+                    if not backend_stop and not req.finish_status.is_finished():
+                        req.is_aborted = True
+                    finish_status.set_status(FinishStatus.FINISHED_STOP)
+
+            if finish_status.is_finished():
+                await req.merge_final_token_metadata(
+                    metadata,
+                    self.tokenizer,
+                    enable_return_routed_experts=self.args.enable_return_routed_experts,
+                )
+                if stop_buffer is not None:
+                    stop_buffer.flush()
+
+            req.out_tokens_queue.pop_no_ret()
+            if stop_buffer is None:
+                token_list.append((req_id, text, metadata, finish_status))
+            else:
+                while stop_buffer.ready_tokens:
+                    text, (req_id, metadata, finish_status) = stop_buffer.ready_tokens.popleft()
+                    token_list.append((req_id, text, metadata, finish_status))
+        return token_list
+
     async def handle_loop(self):
         self.recycle_event = asyncio.Event()
         asyncio.create_task(self.recycle_resource_loop())
@@ -1024,64 +1114,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
                     token_list = []
                     for req in req_status.group_req_objs.shm_req_objs:
-                        req_id = req.request_id
-                        read_token_count = 1
-                        if req.out_tokens_queue.is_full():
-                            read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
-
-                        for _ in range(read_token_count):
-                            if not req.out_tokens_queue.is_empty():
-                                text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                                token_logprob = float(req.shm_logprobs.arr["logprob"][src_index])
-                                req.cumlogprob += token_logprob
-                                metadata = {
-                                    "id": int(req.shm_prompt_ids.arr[src_index]),
-                                    "logprob": token_logprob,
-                                    "cumlogprob": float(req.cumlogprob) / count_output_tokens,
-                                    "special": special,
-                                    "count_output_tokens": count_output_tokens,
-                                    "prompt_cache_len": req.prompt_cache_len,
-                                    "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
-                                    "disk_prompt_cache_len": req.disk_prompt_cache_len,
-                                    "mtp_accepted_token_num": req.mtp_accepted_token_num,
-                                    "mtp_verify_token_num": req.mtp_verify_token_num,
-                                    "mtp_verify_step_num": req.mtp_verify_step_num,
-                                }
-                                metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
-                                if self.args.use_reward_model:
-                                    metadata["score"] = float(req.reward_score)
-
-                                finished_token_index = (
-                                    req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
-                                )
-
-                                if finished_token_index != src_index:
-                                    finish_status = FinishStatus(FinishStatus.NO_FINISH)
-                                else:
-                                    if req.stop_str_matched:
-                                        finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
-                                    else:
-                                        finish_status = FinishStatus(req.finish_status.status)
-
-                                    await req.merge_final_token_metadata(
-                                        metadata,
-                                        self.tokenizer,
-                                        enable_return_routed_experts=self.args.enable_return_routed_experts,
-                                    )
-
-                                    # mark_simulated_finished 追加的 EOS 只负责唤醒 Detoken/HTTP wait。
-                                    # 对外将它转换成无 token 的 finish marker，VERL 会按 id=None
-                                    # 跳过 token/logprob，同时仍可读取 finish status 和路由信息。
-                                    if finish_status.status == FinishStatus.FINISHED_ABORTED:
-                                        text = ""
-                                        metadata["id"] = None
-                                        metadata["logprob"] = None
-                                        metadata["logprobs"] = {}
-
-                                req.out_tokens_queue.pop_no_ret()
-                                token_list.append((req_id, text, metadata, finish_status))
-                            else:
-                                break
+                        token_list.extend(await self._read_req_tokens(req, req_status.stop_buffers.get(req.request_id)))
 
                     async with req_status.lock:
                         req_status.out_token_info_list.extend(token_list)
@@ -1122,6 +1155,7 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+        self.stop_buffers: Dict[int, StopSequenceBuffer] = {}
 
     def has_timed_out_waiting_for_inference(self) -> bool:
         """按 PD Master 下发的资源等待上限判断请求是否在 Router 中超时。"""

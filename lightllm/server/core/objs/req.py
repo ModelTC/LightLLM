@@ -116,7 +116,7 @@ class Req(ctypes.Structure):
         ("disk_prompt_cache_len", ctypes.c_int),  # 用于记录从磁盘命中的长度
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
-        # 这个标记变量是http_server 写入，其他进程读取，用于标记该请求是否因为断网被aborted。
+        # 由 HTTP 写入，其他进程读取；用于断网取消或命中 stop 后停止该子请求。
         ("is_aborted", ctypes.c_bool),
         # 当FinishStatus 是正常结束状态时，finish_token_index 用于标识结束的
         # token 的index位置
@@ -138,11 +138,9 @@ class Req(ctypes.Structure):
         ("mtp_verify_step_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
-        # detokenization 判定的 stop 匹配结果，包含 reasoning-aware token 序列；router 进程读取
-        # 然后router发停止命令给推理进程，推理进程停止输出
+        # 后端 stop 匹配模式使用：detokenization 写入，Router 通知推理进程停止。
         ("stop_str_matched", ctypes.c_bool),
-        # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
-        # 该变量为 detokenization 进程写入，http_server 读取
+        # 命中 stop 的 token 索引，HTTP 据此返回 stop 结束原因。
         ("stop_str_matched_token_index", ctypes.c_int),
         # hybrid 模型按 checkpoint 粒度提前计算输入 hash，供大小页 radix 匹配。
         ("hybrid_token_hash_list", TokenHashList),
@@ -425,8 +423,7 @@ class Req(ctypes.Structure):
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        # Infer put_back 前会写好 finish_status；ref_count_ok 已保证 Infer 已退出，
-        # 无需再 or stop_str_matched。
+        # Infer put_back 前会写好 finish_status；ref_count_ok 保证 Infer 已退出。
         if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
             return True
 
@@ -484,8 +481,8 @@ class ChunkedPrefillReq(Req):
         # 2. page_size：KV cache 按页分配，预留一页以覆盖逻辑 token 长度与实际分配容量之间的对齐开销。
         # 3. 2 * (mtp_step + 1)：按每轮最多推进 mtp_step + 1 个 token，预留两轮推理的容量，
         #    为 MTP 和 overlap 执行留出空间；mtp_step 为 0 时仍保留两个普通 decode token 的余量。
-        # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。例如 stop_str 需要先由 detokenization
-        #    进程匹配，再由 router 通知推理端停止请求；在状态传播、停止处理及 KV 释放完成之前，
+        # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。例如 stop_str 需要先由 HTTP
+        #    层匹配，再由 router 通知推理端停止请求；在状态传播、停止处理及 KV 释放完成之前，
         #    请求仍可能继续推进推理或占用 KV。这 16 个 token 是吸收此类延迟的保守余量，
         #    避免调度时过早将这部分容量分配给其他请求；它不表示固定的等待时间或异步延迟上限。
         b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
