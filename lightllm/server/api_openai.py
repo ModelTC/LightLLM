@@ -897,14 +897,13 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
     multimodal_params = MultimodalParams()
 
     return await _process_prompts_completion(
-        prompts, sampling_params, sampling_params_dict, multimodal_params, raw_request, request, created_time
+        prompts, sampling_params, multimodal_params, raw_request, request, created_time
     )
 
 
 async def _process_prompts_completion(
     prompts: Union[List[str], List[List[int]]],
     sampling_params: SamplingParams,
-    sampling_params_dict: Dict,
     multimodal_params: MultimodalParams,
     raw_request: Request,
     request: CompletionRequest,
@@ -925,12 +924,13 @@ async def _process_prompts_completion(
         )
 
     async def process_single_prompt(prompt: Union[str, List[int]]):
-        if len(prompts) > 1:
-            individual_sampling_params = SamplingParams()
-            individual_sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-            individual_sampling_params.verify()
-        else:
-            individual_sampling_params = sampling_params
+        # 各 prompt 会并发调用 generate，后者会原地写入 group_request_id，
+        # 并按各自的 prompt 长度调整 max_new_tokens；共用参数会导致请求 ID 相互覆盖，
+        # 或使较长 prompt 缩减后的生成长度影响其他 prompt。
+        # SamplingParams 是 ctypes.Structure，包含嵌套结构和数组；这里通过 from_buffer_copy
+        # 深拷贝整个结构体缓冲区，确保每个 prompt 的参数（含嵌套字段）拥有独立内存，
+        # 避免仅复制引用或创建共享缓冲区视图时，原地修改仍影响其他请求。
+        individual_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
 
         # Convert token array to string for _collect_generation_results
         prompt_str = prompt
