@@ -4,7 +4,6 @@ from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_mega_moe
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.triton_ep_impl import FuseMoeTritonEP
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
@@ -20,6 +19,8 @@ import deep_gemm
 from lightllm.models.deepseek_v4.triton_kernel.topk_transform import topk_transform_512
 from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 from lightllm.models.deepseek_v4.workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES
+from lightllm.models.deepseek_v4.triton_kernel.silu_mul_fp8 import fused_silu_mul_quant_fp8
+from lightllm.common.quantization.deepgemm import _deepgemm_fp8_nt
 
 
 class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
@@ -558,12 +559,18 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
-        shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(gate_up, shared, limit=self.swiglu_limit)
-        input = None
+        if float(self.swiglu_limit) != 10.0:
+            raise RuntimeError("DeepSeek-V4 shared FP8 requires swiglu_limit=10.0")
+        rows, dtype, device = input.size(0), input.dtype, input.device
+        quantized, scales = fused_silu_mul_quant_fp8(gate_up, self.alloc_tensor)
         gate_up = None
-        out = layer_weight.down_proj.mm(shared)
-        shared = None
+        input = None
+        out = self.alloc_tensor((rows, self.embed_dim_), dtype, device=device)
+        _deepgemm_fp8_nt(
+            (quantized, scales),
+            (layer_weight.down_proj.mm_param.weight, layer_weight.down_proj.mm_param.weight_scale),
+            out,
+        )
         return out
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
