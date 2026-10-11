@@ -56,7 +56,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.tp_q_head_num_ = self.num_heads // self.tp_world_size_
         self.flashmla_q_head_num_ = self.tp_q_head_num_
         self.tp_groups = self.o_groups // self.tp_world_size_
-        self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        start_args = get_env_start_args()
+        self.enable_ep_moe = start_args.enable_ep_moe
+        self._dsv4_decode_role = start_args.run_mode == "decode"
         self.compressor = CompressorInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
@@ -577,6 +579,37 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         )
         return out
 
+    def _ffn_prefill_shared_overlap(self, x, weights, indices, infer_state, layer_weight):
+        from deep_ep import ElasticBuffer
+
+        experts = layer_weight.experts_
+        if not infer_state.is_prefill or torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("DeepSeek-V4 shared overlap requires non-captured prefill")
+        if getattr(getattr(experts, "expert_parallel_state", None), "eplb", None) is not None:
+            raise RuntimeError("DeepSeek-V4 shared overlap does not support EPLB")
+        indices = indices.to(torch.long)
+        qinput = experts.quantize_dispatch_input(x)
+        ready = ElasticBuffer.capture()
+        shared = self._ffn_tp(x, infer_state, layer_weight)
+        recv_x, recv_indices, recv_weights, recv_count, handle, dispatch_hook = experts.dispatch(
+            qinput, indices, weights, overlap_event=ready
+        )
+        dispatch_hook()
+        routed_temp = experts.prefilled_group_gemm(
+            recv_count,
+            handle.num_unaligned_recv_tokens_per_expert,
+            handle.recv_src_metadata,
+            recv_x,
+            recv_indices,
+            recv_weights,
+            hidden_dtype=x.dtype,
+            microbatch_index=infer_state.microbatch_index,
+            clamp_limit=self.swiglu_limit,
+        )
+        routed, combine_hook = experts.combine(routed_temp, handle)
+        combine_hook()
+        return routed + shared
+
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
@@ -586,13 +619,14 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         weights, indices, logical_topk_ids = self._select_experts(
             logits, infer_state, layer_weight, return_logical_ids=need_logical_ids
         )
-        # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
-        # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
-        # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
-        # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
-        shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
-        routed = self._routed_experts(x, weights, indices, logical_topk_ids, infer_state, layer_weight)
-        out = routed + shared
+        if infer_state.is_prefill and not self._dsv4_decode_role:
+            if need_logical_ids:
+                raise RuntimeError("DeepSeek-V4 shared overlap does not support logical route IDs")
+            out = self._ffn_prefill_shared_overlap(x, weights, indices, infer_state, layer_weight)
+        else:
+            shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
+            routed = self._routed_experts(x, weights, indices, logical_topk_ids, infer_state, layer_weight)
+            out = routed + shared
         return out if self.enable_ep_moe else self._tpsp_reduce(input=out, infer_state=infer_state)
 
     def _select_experts(

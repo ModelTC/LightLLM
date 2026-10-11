@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+
 import torch
 
 
@@ -34,3 +36,57 @@ class TestSharedFp8AndOverlap(unittest.TestCase):
         self.assertTrue(torch.equal(q, expected_q))
         self.assertTrue(torch.equal(scale, expected_scale))
         self.assertEqual(scale.stride(), (1, 4))
+
+    def test_shared_overlap_captures_before_shared_then_dispatches(self):
+        from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+        import sys
+        import types
+
+        events = []
+
+        class ElasticBuffer:
+            @staticmethod
+            def capture():
+                events.append("capture")
+                return "ready"
+
+        old = sys.modules.get("deep_ep")
+        sys.modules["deep_ep"] = types.SimpleNamespace(ElasticBuffer=ElasticBuffer)
+        try:
+            experts = SimpleNamespace(
+                expert_parallel_state=SimpleNamespace(eplb=None),
+                quantize_dispatch_input=lambda x: events.append("quantize") or "q",
+                dispatch=lambda q, i, w, overlap_event: (
+                    events.append(("dispatch", overlap_event))
+                    or (
+                        "rx",
+                        "ri",
+                        "rw",
+                        "rc",
+                        SimpleNamespace(num_unaligned_recv_tokens_per_expert="n", recv_src_metadata="m"),
+                        lambda: events.append("dispatch_hook"),
+                    )
+                ),
+                prefilled_group_gemm=lambda *a, **k: events.append("gemm") or "rtemp",
+                combine=lambda r, h: (events.append("combine") or (7, lambda: events.append("combine_hook"))),
+            )
+            obj = object.__new__(DeepseekV4TransformerLayerInfer)
+            obj.layer_num_ = 0
+            obj.swiglu_limit = 10.0
+            obj._ffn_tp = lambda *a: events.append("shared") or 3
+            out = obj._ffn_prefill_shared_overlap(
+                torch.tensor([1]),
+                torch.tensor([1.0]),
+                torch.tensor([1]),
+                SimpleNamespace(is_prefill=True, microbatch_index=0),
+                SimpleNamespace(experts_=experts),
+            )
+            self.assertEqual(out, 10)
+            self.assertEqual(events[:4], ["quantize", "capture", "shared", ("dispatch", "ready")])
+            self.assertLess(events.index("dispatch_hook"), events.index("gemm"))
+            self.assertLess(events.index("combine"), events.index("combine_hook"))
+        finally:
+            if old is None:
+                del sys.modules["deep_ep"]
+            else:
+                sys.modules["deep_ep"] = old
