@@ -481,6 +481,20 @@ class TpPartBaseModel:
         new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
         new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
+        if new_model_input.b_req_idx_cpu is not None:
+            new_model_input.b_req_idx_cpu = F.pad(
+                new_model_input.b_req_idx_cpu, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
+            )
+        if new_model_input.b_mtp_index_cpu is not None:
+            new_model_input.b_mtp_index_cpu = F.pad(new_model_input.b_mtp_index_cpu, (0, 1), mode="constant", value=0)
+        if new_model_input.b_seq_len_cpu is not None:
+            new_model_input.b_seq_len_cpu = F.pad(
+                new_model_input.b_seq_len_cpu, (0, 1), mode="constant", value=padded_token_num
+            )
+        if new_model_input.b_ready_cache_len_cpu is not None:
+            new_model_input.b_ready_cache_len_cpu = F.pad(
+                new_model_input.b_ready_cache_len_cpu, (0, 1), mode="constant", value=0
+            )
         new_model_input.b_is_decode_req = F.pad(new_model_input.b_is_decode_req, (0, 1), mode="constant", value=False)
         b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len

@@ -750,8 +750,9 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.index_n_heads = network_config["index_n_heads"]
         self.tp_world_size_ = tp_world_size
-        self.indexer_score_scale = self.index_head_dim ** -0.5
-        self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
+        self._dsv4_prefill_role = get_env_start_args().run_mode == "prefill"
+        self.indexer_score_scale = self.index_head_dim**-0.5
+        self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads**-0.5
         # c4 layers own a second compressor (is_in_indexer) that writes the Lightning-Indexer key
         # pool every step; _c4_indices gathers it back + scores via deep_gemm.fp8_mqa_logits.
         self.indexer_compressor = (
@@ -792,7 +793,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
 
         if use_custom_tensor_manager:
             hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)
-        scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5, out=hadamard_out)
+        scratch = hadamard_transform(scratch, scale=self.index_head_dim**-0.5, out=hadamard_out)
         mem_manager = infer_state.mem_manager
         mem_manager.pack_indexer_k_to_cache(
             self.layer_idx_,
@@ -956,44 +957,16 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 torch.clamp(valid_len, min=1, out=ctx_lens[:, 0])
                 torch.clamp(valid_len, min=1, max=index_topk, out=topk_lengths)
             rows_per_chunk = None
-            chunk_metadata = None
             if infer_state.is_prefill:
                 if c4_aux_workspace is None:
                     aligned_c4_cap = ((c4_cap + C4_LOGITS_ALIGNMENT - 1) // C4_LOGITS_ALIGNMENT) * C4_LOGITS_ALIGNMENT
                     rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_c4_cap * 4))
                 else:
                     rows_per_chunk = c4_aux_workspace.rows_per_logits_chunk(c4_cap)
-                if positions.numel() > rows_per_chunk:
-                    chunk_metadata = tuple(
-                        deep_gemm.get_paged_mqa_logits_metadata(
-                            ctx_lens[start : start + rows_per_chunk],
-                            page_size,
-                            deep_gemm.get_num_sms(),
-                        )
-                        for start in range(0, positions.numel(), rows_per_chunk)
-                    )
-
-            metadata = (
-                deep_gemm.get_paged_mqa_logits_metadata(
-                    ctx_lens,
-                    page_size,
-                    deep_gemm.get_num_sms(),
-                )
-                if chunk_metadata is None
-                else None
-            )
-            cached = (
-                row_page_table,
-                valid_len,
-                ctx_lens,
-                metadata,
-                topk_lengths,
-                rows_per_chunk,
-                chunk_metadata,
-            )
+            cached = (row_page_table, valid_len, ctx_lens, topk_lengths, rows_per_chunk)
             infer_state._c4_paged_meta = cached
 
-        row_page_table, valid_len, ctx_lens, metadata, topk_lengths, rows_per_chunk, chunk_metadata = cached
+        row_page_table, valid_len, ctx_lens, topk_lengths, rows_per_chunk = cached
         indexer_k_cache = mem_manager.c4_indexer_pool.get_layer_buffer(
             mem_manager.layer_to_c4_idx[self.layer_idx_]
         ).view(
@@ -1003,11 +976,110 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             self.index_head_dim + 4,
         )
         top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
+        ragged_plan = getattr(infer_state, "dsv4_c4_ragged_pair_plan", None)
+        pair_kind = getattr(ragged_plan, "kind", None) if (infer_state.is_prefill and self._dsv4_prefill_role) else None
+        if infer_state.is_prefill and self._dsv4_prefill_role:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("DeepSeek-V4 P prefill C4 pair scoring does not support CUDA graph capture")
+            if pair_kind not in ("all_even", "ragged"):
+                raise RuntimeError("DeepSeek-V4 P prefill C4 pair plan is required")
+        if pair_kind == "ragged":
+            self._c4_score_topk_ragged_pair(
+                infer_state,
+                ragged_plan,
+                idx_q_fp8,
+                weights,
+                indexer_k_cache,
+                valid_len,
+                row_page_table,
+                top_slots,
+                c4_cap,
+                page_size,
+                rows_per_chunk,
+                c4_aux_workspace,
+            )
+            return top_slots.unsqueeze(1), topk_lengths
+        if pair_kind == "all_even":
+            pair_cached = getattr(infer_state, "_c4_paged_pair_meta", None)
+            if pair_cached is None:
+                pair_rows = max(2, (rows_per_chunk or idx_q_fp8.shape[0]) // 2 * 2)
+                pair_ctx = ctx_lens.reshape(-1, 2)
+                pair_pages = row_page_table[::2].contiguous()
+                if idx_q_fp8.shape[0] > pair_rows:
+                    pair_meta = tuple(
+                        deep_gemm.get_paged_mqa_logits_metadata(
+                            pair_ctx[i : i + pair_rows // 2], page_size, deep_gemm.get_num_sms()
+                        )
+                        for i in range(0, pair_ctx.shape[0], pair_rows // 2)
+                    )
+                else:
+                    pair_meta = deep_gemm.get_paged_mqa_logits_metadata(pair_ctx, page_size, deep_gemm.get_num_sms())
+                pair_cached = (pair_rows, pair_ctx, pair_pages, pair_meta)
+                infer_state._c4_paged_pair_meta = pair_cached
+            pair_rows, pair_ctx, pair_pages, pair_meta = pair_cached
+            if isinstance(pair_meta, tuple):
+                for chunk_idx, start in enumerate(range(0, idx_q_fp8.shape[0], pair_rows)):
+                    end = min(start + pair_rows, idx_q_fp8.shape[0])
+                    self._c4_score_topk(
+                        idx_q_fp8[start:end].reshape(-1, 2, self.index_n_heads, self.index_head_dim),
+                        indexer_k_cache,
+                        weights[start:end],
+                        pair_ctx[start // 2 : end // 2],
+                        pair_pages[start // 2 : end // 2],
+                        pair_meta[chunk_idx],
+                        c4_cap,
+                        valid_len[start:end],
+                        row_page_table[start:end],
+                        top_slots[start:end],
+                        page_size,
+                        logits_out=(
+                            c4_aux_workspace.logits(end - start, c4_cap) if c4_aux_workspace is not None else None
+                        ),
+                    )
+            else:
+                self._c4_score_topk(
+                    idx_q_fp8.reshape(-1, 2, self.index_n_heads, self.index_head_dim),
+                    indexer_k_cache,
+                    weights,
+                    pair_ctx,
+                    pair_pages,
+                    pair_meta,
+                    c4_cap,
+                    valid_len,
+                    row_page_table,
+                    top_slots,
+                    page_size,
+                    logits_out=(
+                        c4_aux_workspace.logits(idx_q_fp8.shape[0], c4_cap) if c4_aux_workspace is not None else None
+                    ),
+                )
+            return top_slots.unsqueeze(1), topk_lengths
+        # N=1 metadata is used by decode and draft-prefill modes.
+        n1_cached = getattr(infer_state, "_c4_paged_n1_meta", None)
+        if n1_cached is None:
+            if rows_per_chunk is not None and idx_q_fp8.shape[0] > rows_per_chunk:
+                n1_cached = (
+                    None,
+                    tuple(
+                        deep_gemm.get_paged_mqa_logits_metadata(
+                            ctx_lens[start : start + rows_per_chunk], page_size, deep_gemm.get_num_sms()
+                        )
+                        for start in range(0, idx_q_fp8.shape[0], rows_per_chunk)
+                    ),
+                )
+            else:
+                n1_cached = (
+                    deep_gemm.get_paged_mqa_logits_metadata(ctx_lens, page_size, deep_gemm.get_num_sms()),
+                    None,
+                )
+            infer_state._c4_paged_n1_meta = n1_cached
+        metadata, chunk_metadata = n1_cached
+
         if chunk_metadata is not None:
             for chunk_idx, start in enumerate(range(0, idx_q_fp8.shape[0], rows_per_chunk)):
                 end = min(start + rows_per_chunk, idx_q_fp8.shape[0])
                 self._c4_score_topk(
-                    idx_q_fp8[start:end],
+                    idx_q_fp8[start:end].unsqueeze(1),
                     indexer_k_cache,
                     weights[start:end],
                     ctx_lens[start:end],
@@ -1015,6 +1087,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                     chunk_metadata[chunk_idx],
                     c4_cap,
                     valid_len[start:end],
+                    row_page_table[start:end],
                     top_slots[start:end],
                     page_size,
                     logits_out=(c4_aux_workspace.logits(end - start, c4_cap) if c4_aux_workspace is not None else None),
@@ -1022,35 +1095,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             return top_slots.unsqueeze(1), topk_lengths
 
         self._c4_score_topk(
-            idx_q_fp8,
-            indexer_k_cache,
-            weights,
-            ctx_lens,
-            row_page_table,
-            metadata,
-            c4_cap,
-            valid_len,
-            top_slots,
-            page_size,
-            logits_out=(c4_aux_workspace.logits(idx_q_fp8.shape[0], c4_cap) if c4_aux_workspace is not None else None),
-        )
-        return top_slots.unsqueeze(1), topk_lengths
-
-    @staticmethod
-    def _c4_score_topk(
-        idx_q_fp8,
-        indexer_k_cache,
-        weights,
-        ctx_lens,
-        row_page_table,
-        metadata,
-        c4_cap,
-        valid_len,
-        top_slots,
-        page_size,
-        logits_out=None,
-    ):
-        args = (
             idx_q_fp8.unsqueeze(1),
             indexer_k_cache,
             weights,
@@ -1058,17 +1102,113 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             row_page_table,
             metadata,
             c4_cap,
-            False,
-        )
-        logits = (
-            deep_gemm.fp8_paged_mqa_logits(*args)
-            if logits_out is None
-            else deep_gemm.fp8_paged_mqa_logits(*args, out=logits_out)
-        )
-        topk_transform_512(
-            logits,
             valid_len,
             row_page_table,
             top_slots,
             page_size,
+            logits_out=(c4_aux_workspace.logits(idx_q_fp8.shape[0], c4_cap) if c4_aux_workspace is not None else None),
         )
+        return top_slots.unsqueeze(1), topk_lengths
+
+    def _c4_score_topk_ragged_pair(
+        self,
+        infer_state,
+        plan,
+        idx_q_fp8,
+        weights,
+        indexer_k_cache,
+        valid_len,
+        row_page_table,
+        top_slots,
+        c4_cap,
+        page_size,
+        rows_per_chunk,
+        c4_aux_workspace=None,
+    ):
+        """Run C4 scoring in request-local N=2 packed order and scatter real rows."""
+        from lightllm.models.deepseek_v4.c4_ragged_pair import materialize_ragged_gpu_plan
+
+        cached = getattr(infer_state, "_c4_ragged_pair_gpu", None)
+        if cached is None:
+            cached = materialize_ragged_gpu_plan(plan, idx_q_fp8.device)
+            infer_state._c4_ragged_pair_gpu = cached
+        packed_to_original = cached["packed_to_original"]
+        original_to_packed = cached["original_to_packed"]
+        packed_rows = packed_to_original.numel()
+        if packed_rows <= idx_q_fp8.shape[0] or packed_rows % 2:
+            raise RuntimeError("invalid C4 ragged packed plan")
+        packed_q = torch.index_select(idx_q_fp8, 0, packed_to_original)
+        packed_weights = torch.index_select(weights, 0, packed_to_original)
+        num_sms = deep_gemm.get_num_sms()
+        budget_rows = max(2, (rows_per_chunk or packed_rows) // 2 * 2)
+        signature = (packed_rows, c4_cap, page_size, budget_rows, num_sms)
+        metadata = getattr(infer_state, "_c4_ragged_pair_metadata", None)
+        if metadata is None or metadata["signature"] != signature:
+            packed_valid = torch.index_select(valid_len, 0, packed_to_original)
+            packed_pages = torch.index_select(row_page_table, 0, packed_to_original)
+            pair_ctx = torch.clamp(packed_valid, min=1).reshape(-1, 2)
+            pair_pages = packed_pages[::2].contiguous()
+            chunk_meta = tuple(
+                deep_gemm.get_paged_mqa_logits_metadata(
+                    pair_ctx[start // 2 : min(start + budget_rows, packed_rows) // 2], page_size, num_sms
+                )
+                for start in range(0, packed_rows, budget_rows)
+            )
+            metadata = {
+                "signature": signature,
+                "packed_valid": packed_valid,
+                "packed_pages": packed_pages,
+                "pair_ctx": pair_ctx,
+                "pair_pages": pair_pages,
+                "chunk_meta": chunk_meta,
+            }
+            infer_state._c4_ragged_pair_metadata = metadata
+        workspace = getattr(infer_state, "_c4_ragged_pair_workspace", None)
+        if workspace is None or workspace.shape != (packed_rows, self.index_topk) or workspace.dtype != top_slots.dtype:
+            workspace = self.alloc_tensor((packed_rows, self.index_topk), top_slots.dtype, device=top_slots.device)
+            infer_state._c4_ragged_pair_workspace = workspace
+        for chunk_idx, start in enumerate(range(0, packed_rows, budget_rows)):
+            end = min(start + budget_rows, packed_rows)
+            self._c4_score_topk(
+                packed_q[start:end].reshape(-1, 2, self.index_n_heads, self.index_head_dim),
+                indexer_k_cache,
+                packed_weights[start:end],
+                metadata["pair_ctx"][start // 2 : end // 2],
+                metadata["pair_pages"][start // 2 : end // 2],
+                metadata["chunk_meta"][chunk_idx],
+                c4_cap,
+                metadata["packed_valid"][start:end],
+                metadata["packed_pages"][start:end],
+                workspace[start:end],
+                page_size,
+                logits_out=(c4_aux_workspace.logits(end - start, c4_cap) if c4_aux_workspace is not None else None),
+            )
+        torch.index_select(workspace, 0, original_to_packed, out=top_slots)
+
+    @staticmethod
+    def _c4_score_topk(
+        normalized_q,
+        indexer_k_cache,
+        weights,
+        score_ctx_lens,
+        score_page_table,
+        metadata,
+        c4_cap,
+        topk_valid_len,
+        topk_row_page_table,
+        top_slots,
+        page_size,
+        logits_out=None,
+    ):
+        logits = deep_gemm.fp8_paged_mqa_logits(
+            normalized_q,
+            indexer_k_cache,
+            weights,
+            score_ctx_lens,
+            score_page_table,
+            metadata,
+            c4_cap,
+            False,
+            **({"out": logits_out} if logits_out is not None else {}),
+        )
+        topk_transform_512(logits, topk_valid_len, topk_row_page_table, top_slots, page_size)

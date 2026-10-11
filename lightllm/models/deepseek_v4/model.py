@@ -309,6 +309,46 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
         return streams.mean(dim=1)
 
+    @staticmethod
+    def _c4_pair_prefill_plan(model_input: ModelInput):
+        """Build the CPU-only C4 pair plan without a D2H transfer or graph path."""
+        if not bool(model_input.is_prefill):
+            return None
+        if bool(getattr(model_input, "is_cuda_graph", False)):
+            raise RuntimeError("DeepSeek-V4 prefill C4 pair scoring does not support CUDA graph capture")
+        seq = getattr(model_input, "b_seq_len_cpu", None)
+        ready = getattr(model_input, "b_ready_cache_len_cpu", None)
+        if seq is None or ready is None or not isinstance(seq, torch.Tensor) or not isinstance(ready, torch.Tensor):
+            # Synthetic single-request prefill warmup has no CPU mirrors but its CPU scalars are known.
+            if (
+                model_input.batch_size == 1
+                and int(model_input.max_cache_len) == 0
+                and int(model_input.max_q_seq_len) == int(model_input.input_ids.shape[0])
+                and int(model_input.max_kv_seq_len) == int(model_input.input_ids.shape[0])
+            ):
+                seq = torch.tensor([int(model_input.input_ids.shape[0])], dtype=torch.int64)
+                ready = torch.tensor([0], dtype=torch.int64)
+            else:
+                raise RuntimeError("DeepSeek-V4 prefill C4 pair plan requires CPU sequence and ready-cache mirrors")
+        if seq.device.type != "cpu" or ready.device.type != "cpu" or seq.ndim != 1 or ready.ndim != 1:
+            raise RuntimeError("DeepSeek-V4 prefill C4 pair plan requires one-dimensional CPU mirrors")
+        if (
+            seq.dtype.is_floating_point
+            or ready.dtype.is_floating_point
+            or seq.dtype == torch.bool
+            or ready.dtype == torch.bool
+        ):
+            raise RuntimeError("DeepSeek-V4 prefill C4 pair plan requires integral CPU mirrors")
+        from lightllm.models.deepseek_v4.c4_ragged_pair import build_c4_ragged_pair_plan
+
+        return build_c4_ragged_pair_plan(seq.tolist(), ready.tolist(), int(model_input.input_ids.shape[0]))
+
+    def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
+        infer_state = super()._create_inferstate(model_input=model_input, microbatch_index=microbatch_index)
+        plan = self._c4_pair_prefill_plan(model_input) if self.run_mode == "prefill" else None
+        infer_state.dsv4_c4_ragged_pair_plan = plan
+        return infer_state
+
     def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
         if model_input.batch_size == 0 or (model_input.is_prefill and self.is_mtp_draft_model):
             return
@@ -325,6 +365,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             if ready_lens is None:
                 ready_lens = model_input.b_ready_cache_len.cpu()
             self.req_manager.prepare_prefill(req_ids, ready_lens, seq_lens)
+            model_input.b_seq_len_cpu = seq_lens
+            model_input.b_ready_cache_len_cpu = ready_lens
         else:
             mtp_indices = model_input.b_mtp_index_cpu
             if mtp_indices is None:
@@ -359,7 +401,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         orig_max = rs.get("original_max_position_embeddings", 0)
 
         def build_inv_freq(base):
-            freqs = 1.0 / (base ** freq_exponents)
+            freqs = 1.0 / (base**freq_exponents)
             if rope_type == "yarn" and orig_max > 0:
                 beta_fast = rs.get("beta_fast", 32)
                 beta_slow = rs.get("beta_slow", 1)
