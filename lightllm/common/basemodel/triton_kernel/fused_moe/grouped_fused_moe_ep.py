@@ -5,15 +5,16 @@ import triton
 import triton.language as tl
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
-from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
     silu_and_mul_masked_post_quant_fwd,
 )
-from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
-    lightllm_per_token_group_quant_fp8,
-    per_token_group_quant_fp8,
+from lightllm.common.basemodel.triton_kernel.fused_moe.routed_silu_mul_quant_fp8 import (
+    alloc_routed_silu_mul_quant_fp8,
 )
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import lightllm_per_token_group_quant_fp8
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
     ep_build_m_indices,
     ep_compact_metadata,
@@ -27,7 +28,6 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.device_utils import is_sm100_gpu
-from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
 logger = init_logger(__name__)
@@ -477,7 +477,6 @@ def _get_max_chunk_rows(
         hidden_dtype,
         quant_dtype,
         expert_alignment,
-        HAS_SGL_KERNEL,
     )
     if cache_key in max_chunk_rows_cache:
         return max_chunk_rows_cache[cache_key]
@@ -496,11 +495,7 @@ def _get_max_chunk_rows(
             # 量化阶段复用 W1 输出空间，并继续保留 SwiGLU 输出。
             probe_manager.alloc((chunk_rows, intermediate_size), quant_dtype)
             aligned_chunk_rows = (chunk_rows + 3) // 4 * 4
-            if HAS_SGL_KERNEL:
-                probe_manager.alloc((scale_cols, aligned_chunk_rows), torch.float32)
-            else:
-                # LightLLM fallback 通过 alloc_func 申请 row-major scale；后续 TMA 转置不占用 workspace。
-                probe_manager.alloc((chunk_rows, scale_cols), torch.float32)
+            probe_manager.alloc((scale_cols, aligned_chunk_rows), torch.float32)
             probe_manager.free(silu_out)
 
             # W2 阶段释放 SwiGLU 输出后申请最终 GEMM 输出。
@@ -589,6 +584,16 @@ def chunked_expanded_moe_forward(
             f"chunk_rows={alignment}"
         )
     max_chunk_rows = min(all_tokens, max_chunk_rows)
+    if not (
+        hidden_dtype == torch.bfloat16
+        and hidden_size == 4096
+        and intermediate_size == 2048
+        and intermediate_twice == 4096
+        and w2.dtype == torch.float8_e4m3fn
+        and block_size_k == 128
+        and clamp_limit == 10.0
+    ):
+        raise RuntimeError("DeepSeek-V4 routed FP8 requires the DS4 BF16/4096/2048/FP8-b128 configuration")
 
     workspace_manager = TensorBufferManager(workspace)
     gather_out = workspace_manager.alloc((gather_rows, hidden_size), hidden_dtype)
@@ -606,7 +611,6 @@ def chunked_expanded_moe_forward(
 
             chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
             chunk_rows = chunk_end - chunk_start
-            silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
             gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
             deepgemm_grouped_fp8_nt_contiguous(
                 (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
@@ -614,10 +618,6 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out, limit=clamp_limit)
-            workspace_manager.free(gemm_out_a)
-            del gemm_out_a
-
             quant_buffers = []
 
             def workspace_quant_alloc(shape, dtype, device):
@@ -627,16 +627,13 @@ def chunked_expanded_moe_forward(
                 quant_buffers.append(quant_buffer)
                 return quant_buffer
 
-            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-                silu_out,
-                block_size_k,
-                dtype=w2.dtype,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                alloc_func=workspace_quant_alloc,
+            qsilu_out, qsilu_out_scale = alloc_routed_silu_mul_quant_fp8(
+                gemm_out_a,
+                workspace_quant_alloc,
+                limit=clamp_limit,
             )
-            workspace_manager.free(silu_out)
-            del silu_out
+            workspace_manager.free(gemm_out_a)
+            del gemm_out_a
 
             gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
             deepgemm_grouped_fp8_nt_contiguous(
