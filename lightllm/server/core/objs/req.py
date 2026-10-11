@@ -116,7 +116,12 @@ class Req(ctypes.Structure):
         ("disk_prompt_cache_len", ctypes.c_int),  # 用于记录从磁盘命中的长度
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
-        # 由 HTTP 写入，其他进程读取；用于断网取消或命中 stop 后停止该子请求。
+        # 请求停止信号，主要由 HTTP 写入，Router 读取后通知推理进程执行 abort 并回收资源。
+        # 来源包括客户端断开、主动取消，以及 HTTP 匹配到 stop 后停止当前候选的生成。
+        # 该字段属于单个 Req：HTTP stop 匹配只设置命中的子请求，整组取消则逐个设置所有子请求。
+        # 多机 TP 时，Router 会把主节点的 abort 信号同步到其他节点的同一请求。
+        # True 只表示已发出停止信号，不表示推理已经退出，也不直接决定 API 的 finish_reason。
+        # HTTP 因 stop 发起 abort 时，输出缓冲记录的结束原因仍为 stop；后续 abort marker 只用于收尾。
         ("is_aborted", ctypes.c_bool),
         # 当FinishStatus 是正常结束状态时，finish_token_index 用于标识结束的
         # token 的index位置
@@ -138,9 +143,20 @@ class Req(ctypes.Structure):
         ("mtp_verify_step_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
-        # 后端 stop 匹配模式使用：detokenization 写入，Router 通知推理进程停止。
+        # 后端字符串 stop 的匹配结果，初始化为 False。
+        # enable_stop_match_in_backend=True 时，detokenization 检查已解码的字符串尾部，
+        # 命中后先写 stop_str_matched_token_index，再将本字段设为 True，并停止处理后续生成 token。
+        # Router 读取此标志后向推理进程发送 stop 命令；HTTP 据此确定对外返回 stop 的 token 位置。
+        # 推理层按 token ID 命中 stop 时直接写 finish_status，不通过本标志报告匹配结果。
+        # enable_stop_match_in_backend=False 时由 HTTP 按 reasoning / content 阶段匹配，
+        # 命中后使用 is_aborted 停止当前子请求，不写本字段；API 的 stop 原因由 HTTP 输出缓冲维护。
+        # True 表示 detokenization 已确认匹配，不代表推理已结束或请求资源已可回收。
         ("stop_str_matched", ctypes.c_bool),
-        # 命中 stop 的 token 索引，HTTP 据此返回 stop 结束原因。
+        # 由 detokenization 写入，只有 stop_str_matched=True 时才表示有效的后端 stop 位置；初始为 -1。
+        # 这是 shm_prompt_ids / shm_logprobs 中包含 prompt 的绝对索引，不是生成 token 的计数。
+        # 第 N 个生成 token 的索引为 input_len + N - 1；跨 token 的 stop 指向使匹配成立的最后一个 token。
+        # HTTP 在这个 token 上报告 finish_reason=stop，即使推理端仍有在途 token 或稍后才写 finish_token_index。
+        # 该索引只定位结束 token；stop 字符串及同一 token 内后续文本的截断，由 HTTP 的文本缓冲完成。
         ("stop_str_matched_token_index", ctypes.c_int),
         # hybrid 模型按 checkpoint 粒度提前计算输入 hash，供大小页 radix 匹配。
         ("hybrid_token_hash_list", TokenHashList),
@@ -423,7 +439,10 @@ class Req(ctypes.Structure):
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        # Infer put_back 前会写好 finish_status；ref_count_ok 保证 Infer 已退出。
+        # 回收请求需同时确认：推理端已写入结束状态，detokenization 已完成并设置 can_released_mark，
+        # 其他进程已归还 Req 引用（只剩主管理进程的一个引用），且 HTTP 已取走共享输出队列中的所有 token。
+        # Infer 在归还引用前写好 finish_status；因此 ref_count_ok 与结束状态共同确认推理端已退出。
+        # stop_str_matched 只是异步停止通知，后端仍可能在处理停止命令，不能单凭它提前回收共享内存。
         if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
             return True
 
@@ -481,8 +500,10 @@ class ChunkedPrefillReq(Req):
         # 2. page_size：KV cache 按页分配，预留一页以覆盖逻辑 token 长度与实际分配容量之间的对齐开销。
         # 3. 2 * (mtp_step + 1)：按每轮最多推进 mtp_step + 1 个 token，预留两轮推理的容量，
         #    为 MTP 和 overlap 执行留出空间；mtp_step 为 0 时仍保留两个普通 decode token 的余量。
-        # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。例如 stop_str 需要先由 HTTP
-        #    层匹配，再由 router 通知推理端停止请求；在状态传播、停止处理及 KV 释放完成之前，
+        # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。字符串 stop 有两种通知路径：
+        #    后端匹配由 detokenization 写 stop_str_matched，再由 Router 下发 stop 命令；
+        #    HTTP 匹配由 HTTP 写 is_aborted，再由 Router 下发 abort 命令。
+        #    两种路径都需要跨进程传播；在推理端完成停止处理及 KV 释放之前，
         #    请求仍可能继续推进推理或占用 KV。这 16 个 token 是吸收此类延迟的保守余量，
         #    避免调度时过早将这部分容量分配给其他请求；它不表示固定的等待时间或异步延迟上限。
         b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
