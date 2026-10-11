@@ -448,6 +448,108 @@ def test_application_stop_cancels_pd_without_waiting_for_final_metadata(monkeypa
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
+@pytest.mark.parametrize(
+    "exit_mode, token_count", [("finish", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)]
+)
+def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, token_count):
+    import math
+    import time
+    from unittest.mock import MagicMock
+
+    manager = _make_manager(monkeypatch)
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.metric_client = MagicMock()
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4, group_request_id=80)
+    request = SimpleNamespace(headers={"X-Request-Id": "summary-test"}, is_disconnected=lambda: asyncio.sleep(0, False))
+    caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+
+    async def raw_stream(*_args):
+        if exit_mode == "empty":
+            return
+        metadata = {
+            "prompt_tokens": 0 if exit_mode == "empty_prompt" else 10,
+            "prompt_cache_len": 0 if exit_mode == "empty_prompt" else 3,
+        }
+        yield 80, "first", dict(metadata), FinishStatus()
+        if exit_mode == "error":
+            raise RuntimeError("decode failed")
+        yield 80, "last", dict(metadata), FinishStatus(FinishStatus.FINISHED_LENGTH)
+
+    manager.fetch_pd_stream = raw_stream
+
+    async def run():
+        generator = manager._wait_to_token_package(None, None, time.time(), "prompt", params, None, request)
+        if exit_mode == "close":
+            await generator.__anext__()
+            await generator.aclose()
+        elif exit_mode == "error":
+            with pytest.raises(RuntimeError, match="decode failed"):
+                async for _ in generator:
+                    pass
+        else:
+            assert len([result async for result in generator]) == token_count
+
+    asyncio.run(run())
+    summaries = [record.getMessage() for record in caplog.records if "out_token_counter:" in record.getMessage()]
+    if token_count:
+        assert len(summaries) == 1
+        assert "X-Request-Id:summary-test" in summaries[0]
+        assert f"out_token_counter:{token_count}" in summaries[0]
+        manager.first_time_costs.add.assert_called_once()
+        manager.per_token_costs.add.assert_called_once()
+        assert math.isfinite(manager.per_token_costs.add.call_args.args[0])
+        generated = [
+            args
+            for args, _ in manager.metric_client.histogram_observe.call_args_list
+            if args[0] == "lightllm_request_generated_tokens"
+        ]
+        assert generated == [("lightllm_request_generated_tokens", token_count)]
+    else:
+        assert not summaries
+        manager.per_token_costs.add.assert_not_called()
+        manager.metric_client.histogram_observe.assert_not_called()
+
+
+@pytest.mark.parametrize("late_status", [FinishStatus.NO_FINISH, FinishStatus.FINISHED_PD_DECODE_CAPACITY])
+def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_status):
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+
+    manager = _make_manager(monkeypatch)
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.metric_client = MagicMock()
+    manager.abort = AsyncMock()
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
+    request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
+    caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+
+    async def raw_stream(_p_node, _d_node, _prompt, sampling_params, *_args):
+        metadata = {"prompt_tokens": 10, "prompt_cache_len": 3}
+        yield sampling_params.group_request_id, "first", dict(metadata), FinishStatus()
+        yield sampling_params.group_request_id, "late", dict(metadata), FinishStatus(late_status)
+
+    manager.fetch_pd_stream = raw_stream
+
+    async def run():
+        generator = manager._generate_one("prompt", params, None, request, time.time(), 80, 10)
+        assert (await generator.__anext__())[1] == "first"
+        await manager.stop_request(80)
+        with pytest.raises(StopAsyncIteration):
+            await generator.__anext__()
+        assert not manager.active_req_ids
+        manager.abort.assert_awaited_once()
+        summaries = [record.getMessage() for record in caplog.records if "out_token_counter:" in record.getMessage()]
+        assert len(summaries) == 1
+        assert "lightllm_req_id:1" in summaries[0]
+        manager.metric_client.histogram_observe.assert_any_call("lightllm_request_generated_tokens", 2)
+
+    asyncio.run(run())
+
+
 def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
     from unittest.mock import AsyncMock
 

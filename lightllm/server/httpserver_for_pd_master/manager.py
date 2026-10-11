@@ -377,6 +377,8 @@ class HttpServerManagerForPDMaster:
                     # 外层 finally 负责清理请求记录和节点负载，不影响其他子请求。
                     if origin_request_id not in self.active_req_ids:
                         await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
+                        # 关闭分段生成器，执行其 finally 中的总结日志和指标记录。
+                        await results_generator.aclose()
                         return
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
@@ -673,60 +675,67 @@ class HttpServerManagerForPDMaster:
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
-        async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
-            p_node, d_node, prompt, sampling_params, multimodal_params, request
-        ):
-            if await request.is_disconnected():
-                raise ClientDisconnected(
-                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+        try:
+            async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
+                p_node, d_node, prompt, sampling_params, multimodal_params, request
+            ):
+                if await request.is_disconnected():
+                    raise ClientDisconnected(
+                        group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                    )
+
+                prompt_tokens = metadata["prompt_tokens"]
+                out_token_counter += 1
+                prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))
+                sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+                sub_req_id_to_mtp_verify_step_num[sub_req_id] = metadata.get("mtp_verify_step_num", 0)
+                if is_first_token:
+                    first_token_cost_ms = (time.time() - start_time) * 1000
+                    is_first_token = False
+                    self.first_time_costs.add(first_token_cost_ms)
+
+                self.latest_success_infer_time = time.time()
+                yield sub_req_id, out_str, metadata, finish_status
+                if finish_status.is_finished():
+                    unfinished_count -= 1
+                if unfinished_count == 0:
+                    break
+
+        finally:
+            # 分段可能因 stop、容量切换或取消而提前关闭，已有输出也需要记录总结。
+            if out_token_counter:
+                total_cost_time_ms = (time.time() - start_time) * 1000
+                mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
+                self.per_token_costs.add(mean_per_token_cost_time_ms)
+                headers = request.headers if request is not None else {}
+                x_request_id = headers.get("X-Request-Id", "")
+                x_session_id = headers.get("X-Session-Id", "")
+                prompt_cache_ratio = prompt_cache_len / max(prompt_tokens, 1)
+                mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
+                if mtp_total_verify_steps <= 0:
+                    mtp_total_verify_steps = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+                mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
+                format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
+                logger.info(
+                    f"X-Request-Id:{x_request_id} "
+                    f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
+                    f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
+                    f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
+                    f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
+                    f"prompt_token_num:{prompt_tokens} "
+                    f"prompt_cache_len:{prompt_cache_len} "
+                    f"prompt_cache_ratio:{prompt_cache_ratio} "
+                    f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                 )
-
-            prompt_tokens = metadata["prompt_tokens"]
-            out_token_counter += 1
-            prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))
-            sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
-            sub_req_id_to_mtp_verify_step_num[sub_req_id] = metadata.get("mtp_verify_step_num", 0)
-            if is_first_token:
-                first_token_cost_ms = (time.time() - start_time) * 1000
-                is_first_token = False
-                self.first_time_costs.add(first_token_cost_ms)
-
-            self.latest_success_infer_time = time.time()
-            yield sub_req_id, out_str, metadata, finish_status
-            if finish_status.is_finished():
-                unfinished_count -= 1
-            if unfinished_count == 0:
-                break
-
-        total_cost_time_ms = (time.time() - start_time) * 1000
-        mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
-        self.per_token_costs.add(mean_per_token_cost_time_ms)
-        x_request_id = request.headers.get("X-Request-Id", "")
-        x_session_id = request.headers.get("X-Session-Id", "")
-        prompt_cache_ratio = prompt_cache_len / prompt_tokens
-        mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
-        if mtp_total_verify_steps <= 0:
-            mtp_total_verify_steps = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
-        mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
-        format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
-            f"X-Request-Id:{x_request_id} "
-            f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
-            f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
-            f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
-            f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
-            f"prompt_token_num:{prompt_tokens} "
-            f"prompt_cache_len:{prompt_cache_len} "
-            f"prompt_cache_ratio:{prompt_cache_ratio} "
-            f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
-        )
-        self.metric_client.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms / 1000.0)
-        self.metric_client.histogram_observe(
-            "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
-        )
-        self.metric_client.histogram_observe("lightllm_request_first_token_duration", first_token_cost_ms / 1000.0)
-        self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
-        self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
+                self.metric_client.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms / 1000.0)
+                self.metric_client.histogram_observe(
+                    "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
+                )
+                self.metric_client.histogram_observe(
+                    "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
+                )
+                self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
+                self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
         return
 
     async def stop_request(self, request_id: int):
