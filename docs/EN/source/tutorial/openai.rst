@@ -41,7 +41,7 @@ With the OpenAI Python client, pass the option through ``extra_body``:
 For example, generated text ``helloEND`` is returned as ``hello`` by default,
 or ``helloEND`` with this option enabled.
 
-When a reasoning parser is configured (automatically or via ``--reasoning_parser``),
+For ``/v1/chat/completions`` with a reasoning parser configured (automatically or via ``--reasoning_parser``),
 user stop sequences apply only to final answer ``content`` by default. A matching
 string inside reasoning does not end generation. This also applies when
 ``separate_reasoning=False`` combines reasoning and content in the response.
@@ -55,9 +55,10 @@ before starting the service:
     export LIGHTLLM_STOP_IN_REASONING=1
 
 The default is ``0``; ``1``, ``true``, and ``ON`` enable the option. Restart the
-service after changing it. For PD deployments, set the same value on the master
-and all prefill/decode nodes. Without a reasoning parser, stop sequences continue
-to apply to all generated text.
+service after changing it. For PD deployments, set it on the master that accepts
+OpenAI requests; the stop scope is passed to prefill/decode nodes in sampling parameters.
+``/v1/completions`` matches stops against all generated text. Chat requests without
+a reasoning parser use the same behavior.
 
 Basic Conversation Examples
 ---------------------------

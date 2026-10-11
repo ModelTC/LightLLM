@@ -13,7 +13,7 @@ class StopSequenceBuffer:
     def __init__(self, sampling_params, tokenizer, prompt_ids, reasoning_parser=None):
         self.stop_strings = sampling_params.stop_sequences.to_strings()
         self.include_stop = sampling_params.include_stop_str_in_output
-        self.match_token_stops = not sampling_params.enable_stop_match_in_backend
+        self.match_token_stops = not sampling_params.stop_match_mode.is_backend_all()
         self.stop_prefixes = {stop[:length] for stop in self.stop_strings for length in range(1, len(stop))}
         self.max_prefix_length = max((len(prefix) for prefix in self.stop_prefixes), default=0)
         self.stop_token_sequences = sampling_params.stop_sequences.to_list(include_strings=False)

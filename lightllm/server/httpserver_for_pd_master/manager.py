@@ -25,7 +25,6 @@ from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.server.httpserver.stop_sequence import StopSequenceBuffer
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
-    get_stop_in_reasoning,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
@@ -152,8 +151,6 @@ class HttpServerManagerForPDMaster:
         request: Request,
     ):
         await self._wait_for_pd_master_request_slot()
-        if self.args.reasoning_parser and not get_stop_in_reasoning():
-            sampling_params.enable_stop_match_in_backend = False
 
         was_idle = self.running_request_count == 0
         self.running_request_count += 1
@@ -334,7 +331,9 @@ class HttpServerManagerForPDMaster:
                     origin_sampling_params,
                     self.tokenizer,
                     self.tokenizer.encode(prompt, add_special_tokens=False),
-                    self.args.reasoning_parser if not get_stop_in_reasoning() else None,
+                    self.args.reasoning_parser
+                    if origin_sampling_params.stop_match_mode.is_output_content_only()
+                    else None,
                 )
             history_gen_token_strs = []
             origin_prompt_cache_len = None

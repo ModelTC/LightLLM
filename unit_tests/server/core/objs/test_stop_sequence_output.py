@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 import numpy as np
 
-from lightllm.server.core.objs import FinishStatus, SamplingParams, Req
+from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParams, Req
 from lightllm.server.core.objs.out_token_circlequeue import CircularQueue
 from lightllm.server.detokenization.decode_req import DecodeReq
 from lightllm.server.detokenization.manager import DeTokenizationManager
@@ -26,7 +26,7 @@ def _params(stop="END", include=False, force=0):
         stop_sequences=stop,
         _initial_reasoning_state=force,
         include_stop_str_in_output=include,
-        enable_stop_match_in_backend=False,
+        stop_match_mode=StopMatchMode.OUTPUT_ALL,
     )
     return params
 
@@ -127,7 +127,7 @@ def test_no_string_stops_emit_immediately():
 
 def test_token_stops_can_be_delegated_without_reasoning_parser():
     params = _params([[10, 11]])
-    params.enable_stop_match_in_backend = False
+    params.stop_match_mode.set_mode(StopMatchMode.OUTPUT_ALL)
     buffer = StopSequenceBuffer(params, _ReasoningTokenizer(), [])
     assert not buffer.append(10, "first", 1)
     assert buffer.append(11, "second", 2)
@@ -206,7 +206,7 @@ def test_pd_capacity_marker_preserves_reasoning_state():
 def test_detokenization_forwards_raw_tokens_before_release(monkeypatch, finish, backend):
     tokens = list(range(10, 30))
     params = _params()
-    params.enable_stop_match_in_backend = backend
+    params.stop_match_mode.set_mode(StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL)
     decode = DecodeReq(_req(tokens, finish, params))
     simulated = finish in (
         FinishStatus.FINISHED_ERROR,
@@ -244,7 +244,7 @@ def test_detokenization_forwards_raw_tokens_before_release(monkeypatch, finish, 
 def test_stop_mode_preserves_backend_match_and_forwards_raw_tokens(monkeypatch, backend):
     tokens = list(range(10, 20))
     params = _params()
-    params.enable_stop_match_in_backend = backend
+    params.stop_match_mode.set_mode(StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL)
     req = _req(tokens, FinishStatus.FINISHED_LENGTH, params)
     decode = DecodeReq(req)
     chunks = {tokens[0]: "helloE", tokens[-2]: "NDextra"}
@@ -278,7 +278,7 @@ def test_backend_stop_match_is_buffered_and_trimmed_by_http(monkeypatch, include
     async def run():
         tokens = list(range(10, 13 + empty_tokens))
         params = _params(include=include)
-        params.enable_stop_match_in_backend = True
+        params.stop_match_mode.set_mode(StopMatchMode.BACKEND_ALL)
         req = _req(tokens, params=params)
         decode = DecodeReq(req)
         chunks = {tokens[0]: "helloE", tokens[-2]: "NDextra"}
@@ -328,7 +328,7 @@ def test_http_uses_legacy_stop_token_index_only_in_backend_mode(backend):
     async def run():
         manager = _http_manager()
         params = _params()
-        params.enable_stop_match_in_backend = backend
+        params.stop_match_mode.set_mode(StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL)
         req = _req([10, 11, 12], FinishStatus.FINISHED_ABORTED, params)
         req.stop_str_matched = True
         req.stop_str_matched_token_index = 3
@@ -482,7 +482,13 @@ def test_inference_stop_gate_uses_sampling_params(match_in_inference):
     req.stop_sequences = [[10]]
     req.shm_req = SimpleNamespace(input_len=1, shm_prompt_ids=SimpleNamespace(arr=np.array([1, 10])))
     req.sampling_param = SimpleNamespace(
-        shm_param=SimpleNamespace(ignore_eos=False, max_new_tokens=100, enable_stop_match_in_backend=match_in_inference)
+        shm_param=SimpleNamespace(
+            ignore_eos=False,
+            max_new_tokens=100,
+            stop_match_mode=StopMatchMode(
+                StopMatchMode.BACKEND_ALL if match_in_inference else StopMatchMode.OUTPUT_ALL
+            ),
+        )
     )
     req.finish_status = FinishStatus()
     req.update_finish_status([], output_len=1)

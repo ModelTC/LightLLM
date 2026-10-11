@@ -10,7 +10,7 @@ from lightllm.server.api_openai import (
     _build_completion_response,
     _collect_generation_results,
 )
-from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs import StopMatchMode, FinishStatus
 from lightllm.server.httpserver.stop_sequence import StopSequenceBuffer
 
 
@@ -199,12 +199,20 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
 
 
 @pytest.mark.parametrize("thinking", [False, True])
-def test_stop_scope_receives_request_thinking_mode(monkeypatch, thinking):
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("api", ["chat", "completion"])
+def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, api):
     from lightllm.server.api_http import g_objs
     from lightllm.server import reasoning_parser
 
     def generate(prompt, sampling_params, multimodal_params, request):
-        assert sampling_params._initial_reasoning_state == int(thinking)
+        assert sampling_params._initial_reasoning_state == (int(thinking) if api == "chat" else -1)
+        skip_reasoning = api == "chat" and not enabled
+        assert sampling_params.stop_match_mode.get_mode() == (
+            StopMatchMode.OUTPUT_CONTENT_ONLY if skip_reasoning else StopMatchMode.BACKEND_ALL
+        )
+        assert sampling_params.stop_match_mode.is_backend_all() is (not skip_reasoning)
 
         async def results():
             yield 80, "hello", {"prompt_tokens": 4, "id": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
@@ -214,6 +222,7 @@ def test_stop_scope_receives_request_thinking_mode(monkeypatch, thinking):
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
     monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))
+    monkeypatch.setattr(api_openai, "get_stop_in_reasoning", lambda: enabled)
     monkeypatch.setattr(api_openai, "_is_force_thinking_mode", lambda request: thinking)
     monkeypatch.setattr(reasoning_parser, "get_token_id", lambda token: 1001)
 
@@ -221,9 +230,17 @@ def test_stop_scope_receives_request_thinking_mode(monkeypatch, thinking):
         return "Prompt"
 
     monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
-    request = ChatCompletionRequest(
-        messages=[{"role": "user", "content": "Hello"}],
-        stop=["END"],
-        max_completion_tokens=10,
-    )
-    asyncio.run(api_openai.chat_completions_impl(request, SimpleNamespace()))
+
+    async def run():
+        kwargs = dict(model="test-model", stop=["END"], max_completion_tokens=10, stream=stream)
+        if api == "chat":
+            request = ChatCompletionRequest(messages=[{"role": "user", "content": "Hello"}], **kwargs)
+            response = await api_openai.chat_completions_impl(request, SimpleNamespace())
+        else:
+            request = CompletionRequest(prompt="Prompt", **kwargs)
+            response = await api_openai.completions_impl(request, SimpleNamespace())
+        if stream:
+            body = [chunk async for chunk in response.body_iterator]
+            assert body
+
+    asyncio.run(run())

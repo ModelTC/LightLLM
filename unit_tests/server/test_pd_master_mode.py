@@ -7,7 +7,7 @@ from easydict import EasyDict
 
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.server.core.objs import FinishStatus, SamplingParams
+from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 
 
@@ -309,12 +309,12 @@ def test_pd_master_restores_request_count_when_preload_fails():
     "parser,enabled,backend,match_in_inference",
     [
         (None, False, None, True),
-        ("qwen3", False, None, False),
+        ("qwen3", False, None, True),
         ("qwen3", True, None, True),
         (None, False, False, False),
         (None, False, True, True),
         ("qwen3", False, False, False),
-        ("qwen3", False, True, False),
+        ("qwen3", False, True, True),
         ("qwen3", True, False, False),
         ("qwen3", True, True, True),
     ],
@@ -322,7 +322,7 @@ def test_pd_master_restores_request_count_when_preload_fails():
 def test_pd_master_request_count_covers_async_generator_lifecycle(
     monkeypatch, parser, enabled, backend, match_in_inference
 ):
-    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.get_stop_in_reasoning", lambda: enabled)
+    monkeypatch.setenv("LIGHTLLM_STOP_IN_REASONING", "1" if enabled else "0")
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.args = SimpleNamespace(reasoning_parser=None)
     manager.running_request_count = 0
@@ -333,7 +333,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
         nonlocal inner_generator_closed
         try:
             assert manager.running_request_count == 1
-            assert sampling_params.enable_stop_match_in_backend is match_in_inference
+            assert sampling_params.stop_match_mode.is_backend_all() is match_in_inference
             yield "result"
         finally:
             inner_generator_closed = True
@@ -344,7 +344,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
         params = SamplingParams()
         params.init(None)
         if backend is not None:
-            params.enable_stop_match_in_backend = backend
+            params.stop_match_mode.set_mode(StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL)
         results_generator = manager.generate(None, params, None, None)
         assert await results_generator.__anext__() == "result"
         assert manager.running_request_count == 1

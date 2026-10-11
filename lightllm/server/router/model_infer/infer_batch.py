@@ -929,7 +929,7 @@ class InferReq:
             return False
         # HTTP 匹配模式关闭原有后端 stop 路径；EOS 和输出上限不受此开关影响。
         # 推理层无法区分 reasoning 和回答阶段，需要按阶段匹配时也由 HTTP 处理。
-        if not self.sampling_param.shm_param.enable_stop_match_in_backend:
+        if not self.sampling_param.shm_param.stop_match_mode.is_backend_all():
             return False
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)

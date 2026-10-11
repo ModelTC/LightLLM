@@ -23,6 +23,40 @@ MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 MAX_SEED = (1 << 63) - 1
 
 
+class StopMatchMode(ctypes.Structure):
+    """请求级 stop 匹配策略。共享内存仅保存模式值，接口和 PD 传输也使用该整数。"""
+
+    _pack_ = 4
+    _fields_ = [("mode", ctypes.c_int)]
+
+    # 原推理 / detokenization 路径匹配全部生成内容；HTTP 缓冲负责输出文本的截断。
+    BACKEND_ALL = 0
+    # 由输出层（HTTP manager / PD Master）匹配全部内容并 abort，包括 reasoning 和回答。
+    OUTPUT_ALL = 1
+    # 由输出层跳过 reasoning，仅匹配 content 并 abort；后端无法区分阶段，必须关闭匹配。
+    OUTPUT_CONTENT_ONLY = 2
+
+    def __init__(self, mode: int = BACKEND_ALL):
+        self.set_mode(mode)
+
+    def set_mode(self, mode: int):
+        if mode not in (self.BACKEND_ALL, self.OUTPUT_ALL, self.OUTPUT_CONTENT_ONLY):
+            raise ValueError(f"Invalid stop_match_mode: {mode!r}")
+        self.mode = mode
+
+    def get_mode(self) -> int:
+        return self.mode
+
+    def is_backend_all(self) -> bool:
+        return self.mode == self.BACKEND_ALL
+
+    def is_output_all(self) -> bool:
+        return self.mode == self.OUTPUT_ALL
+
+    def is_output_content_only(self) -> bool:
+        return self.mode == self.OUTPUT_CONTENT_ONLY
+
+
 class StopSequence(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -284,9 +318,9 @@ class SamplingParams(ctypes.Structure):
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
-        # True 使用原有推理 / detokenization stop 路径；False 由 HTTP 缓冲、匹配并 abort。
-        # 默认启用后端匹配；需要跳过 reasoning 时由 HTTP 关闭此开关，避免提前结束请求。
-        ("enable_stop_match_in_backend", ctypes.c_bool),
+        # stop 匹配策略，取值见 StopMatchMode；由接口入口设置，随请求传递到各进程和 P/D 节点。
+        # 默认 BACKEND_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
+        ("stop_match_mode", StopMatchMode),
         # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
         # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
         ("include_stop_str_in_output", ctypes.c_bool),
@@ -389,7 +423,7 @@ class SamplingParams(ctypes.Structure):
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences, tokenizer)
-        self.enable_stop_match_in_backend = kwargs.get("enable_stop_match_in_backend", True)
+        self.stop_match_mode.set_mode(kwargs.get("stop_match_mode", StopMatchMode.BACKEND_ALL))
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
         # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
@@ -513,7 +547,7 @@ class SamplingParams(ctypes.Structure):
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
-            "enable_stop_match_in_backend": self.enable_stop_match_in_backend,
+            "stop_match_mode": self.stop_match_mode.get_mode(),
             "include_stop_str_in_output": self.include_stop_str_in_output,
             "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,

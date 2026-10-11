@@ -37,7 +37,6 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_stop_in_reasoning
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import (
     ClientDisconnected,
@@ -331,8 +330,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
-        if self.pd_mode.is_normal() and self.args.reasoning_parser and not get_stop_in_reasoning():
-            sampling_params.enable_stop_match_in_backend = False
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
@@ -472,7 +469,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         sampling_params,
                         self.tokenizer,
                         prompt_ids,
-                        self.args.reasoning_parser if not get_stop_in_reasoning() else None,
+                        self.args.reasoning_parser
+                        if sampling_params.stop_match_mode.is_output_content_only()
+                        else None,
                     )
                     for req in req_objs
                 }
@@ -1036,7 +1035,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if self.args.use_reward_model:
                 metadata["score"] = float(req.reward_score)
 
-            backend_stop = req.sample_params.enable_stop_match_in_backend and req.stop_str_matched
+            backend_stop = req.sample_params.stop_match_mode.is_backend_all() and req.stop_str_matched
             finish_index = req.stop_str_matched_token_index if backend_stop else req.finish_token_index
             finish_status = FinishStatus(
                 (FinishStatus.FINISHED_STOP if backend_stop else req.finish_status.status)

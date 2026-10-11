@@ -111,11 +111,10 @@ across tokens from leaking into output.
 An unmatched tail is returned when generation finishes. Token IDs, logprobs,
 output token counts, and the finish reason retain their original meanings.
 
-With a configured reasoning parser, both string and token-ID stop sequences
-ignore reasoning and apply only to answer content by default. Set
-``LIGHTLLM_STOP_IN_REASONING=1`` before service startup to enable them in both
-phases. EOS and the output token limit remain active in both phases. See the
-:ref:`OpenAI API examples <openai_api>` for deployment details.
+``/generate`` and ``/generate_stream`` match stops against all generated text,
+including reasoning text, even when a reasoning parser is configured.
+For reasoning / content stop scope in OpenAI ``/v1/chat/completions``, see the
+:ref:`OpenAI API examples <openai_api>`.
 
 :code:`POST /get_score`
 ~~~~~~~~~~~~~~~~~~~~~~~

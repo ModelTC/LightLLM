@@ -39,7 +39,7 @@ token 内 stop 之后的文本。流式、非流式以及 PD 部署遵循相同�
 
 例如生成 ``helloEND`` 时，默认返回 ``hello``，开启后返回 ``helloEND``。
 
-配置了 reasoning parser（自动识别或使用 ``--reasoning_parser``）时，用户设置的
+使用 ``/v1/chat/completions`` 且配置了 reasoning parser（自动识别或使用 ``--reasoning_parser``）时，用户设置的
 stop 默认只作用于最终回答的 ``content``，reasoning 中出现相同字符串不会结束生成。
 即使设置 ``separate_reasoning=False`` 合并返回两个部分，停止范围也遵循这个规则。
 EOS 和输出 token 长度上限仍可在任意阶段结束生成。
@@ -50,8 +50,9 @@ EOS 和输出 token 长度上限仍可在任意阶段结束生成。
 
     export LIGHTLLM_STOP_IN_REASONING=1
 
-默认为 ``0``，``1``、``true``、``ON`` 均可开启。修改后需要重启服务；PD 部署需要
-在 master 和全部 P/D 节点设置相同值。未配置 reasoning parser 时，stop 继续作用于全部生成文本。
+默认为 ``0``，``1``、``true``、``ON`` 均可开启。修改后需要重启服务；PD 部署在接收
+OpenAI 请求的 master 上设置，停止范围通过请求采样参数传递给 P/D 节点。
+``/v1/completions`` 对全部生成文本匹配 stop；Chat 接口未配置 reasoning parser 时也采用此行为。
 
 基础对话示例
 ------------

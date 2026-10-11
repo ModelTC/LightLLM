@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lightllm.server.core.objs import FinishStatus, SamplingParams
+from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 
@@ -159,25 +159,67 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     assert mgr.inserted_prompt_caches == []
 
 
+@pytest.mark.parametrize("backend", [False, True])
+def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backend):
+    manager = _make_manager(monkeypatch)
+    manager.args.reasoning_parser = "qwen3"
+    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    params = SamplingParams()
+    params.init(
+        manager.tokenizer,
+        stop_sequences="END",
+        max_new_tokens=10,
+        stop_match_mode=StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL,
+        _initial_reasoning_state=1,
+    )
+
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        assert sp.stop_match_mode.is_backend_all() is backend
+        assert sp.stop_match_mode.get_mode() == (StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL)
+        metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
+        yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
+
+    monkeypatch.setattr(manager, "_wait_to_token_package", fake_wait)
+
+    async def run():
+        return [
+            result
+            async for result in manager.generate(
+                "prompt",
+                params,
+                SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
+                None,
+            )
+        ]
+
+    results = asyncio.run(run())
+    assert "".join(result[1] for result in results) == "reason"
+    assert results[-1][3].is_stopped()
 
 
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
 def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
 
-    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.get_stop_in_reasoning", lambda: False)
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(
         encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
     )
     params = SamplingParams()
-    params.init(manager.tokenizer, stop_sequences="END", max_new_tokens=3, _initial_reasoning_state=1)
+    params.init(
+        manager.tokenizer,
+        stop_sequences="END",
+        max_new_tokens=3,
+        _initial_reasoning_state=1,
+        stop_match_mode=StopMatchMode.OUTPUT_CONTENT_ONLY,
+    )
     segment_modes = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segment_modes.append(sp._initial_reasoning_state)
-        assert sp.enable_stop_match_in_backend is False
+        assert sp.stop_match_mode.get_mode() == StopMatchMode.OUTPUT_CONTENT_ONLY
+        assert sp.stop_match_mode.is_backend_all() is False
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segment_modes) == 1:
             yield sp.group_request_id, "reason", {**metadata, "id": 10}, FinishStatus()
@@ -263,7 +305,6 @@ def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch
 def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, continuation, node_finish):
     from unittest.mock import AsyncMock
 
-    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.get_stop_in_reasoning", lambda: False)
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = parser
     manager.tokenizer = SimpleNamespace(
@@ -276,13 +317,14 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
         stop_sequences="END",
         include_stop_str_in_output=include,
         _initial_reasoning_state=int(parser is not None),
+        stop_match_mode=StopMatchMode.BACKEND_ALL if parser is None else StopMatchMode.OUTPUT_CONTENT_ONLY,
         max_new_tokens=10,
     )
     segments = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segments.append(prompt)
-        assert sp.enable_stop_match_in_backend is (parser is None)
+        assert sp.stop_match_mode.is_backend_all() is (parser is None)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
             if parser:

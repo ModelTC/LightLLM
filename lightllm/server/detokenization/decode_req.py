@@ -30,8 +30,8 @@ class DecodeReq:
         self.stop_str_max_len = len(self.stop_strs[0]) if self.stop_strs else 0
 
     def stop_sequences_str_match(self) -> bool:
-        # 需要跳过 reasoning 时由 HTTP 匹配，后端不写入 stop_str_matched。
-        if not self.req.sample_params.enable_stop_match_in_backend:
+        # 接口指定由 HTTP 匹配时，后端不写入 stop_str_matched。
+        if not self.req.sample_params.stop_match_mode.is_backend_all():
             return False
         stop_strs = self.stop_strs
         if not stop_strs or self.stop_str_max_len == 0:

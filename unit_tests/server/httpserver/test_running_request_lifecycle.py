@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lightllm.server.core.objs import FinishStatus, SamplingParams
+from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
@@ -65,11 +65,11 @@ def _multimodal_params():
 
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D, NodeRole.P])
 @pytest.mark.parametrize("include", [False, True])
-@pytest.mark.parametrize("parser,enabled", [(None, False), ("qwen3", False), ("qwen3", True)])
-@pytest.mark.parametrize("backend", [None, False, True])
-def test_http_forwards_packaged_tokens_and_preserves_stop_policy(monkeypatch, mode, include, parser, enabled, backend):
-    monkeypatch.setattr("lightllm.server.httpserver.manager.get_stop_in_reasoning", lambda: enabled)
-
+@pytest.mark.parametrize("parser", [None, "qwen3"])
+@pytest.mark.parametrize(
+    "stop_mode", [None, StopMatchMode.BACKEND_ALL, StopMatchMode.OUTPUT_ALL, StopMatchMode.OUTPUT_CONTENT_ONLY]
+)
+def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, parser, stop_mode):
     async def run():
         manager = _make_manager(mode)
         manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
@@ -95,8 +95,8 @@ def test_http_forwards_packaged_tokens_and_preserves_stop_policy(monkeypatch, mo
             pd_node_resource_wait_timeout_seconds=20,
         )
         # P/D nodes keep the matching policy supplied by Master.
-        if backend is not None:
-            params.enable_stop_match_in_backend = backend
+        if stop_mode is not None:
+            params.stop_match_mode.set_mode(stop_mode)
         websocket = AsyncMock() if mode == NodeRole.P else None
         pd_event = None
         if mode == NodeRole.P:
@@ -108,11 +108,13 @@ def test_http_forwards_packaged_tokens_and_preserves_stop_policy(monkeypatch, mo
             result
             async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
         ]
-        expected_backend = backend is not False
-        if mode == NodeRole.NORMAL and parser and not enabled:
-            expected_backend = False
-        assert params.enable_stop_match_in_backend is expected_backend
+        expected_mode = StopMatchMode.BACKEND_ALL if stop_mode is None else stop_mode
+        assert params.stop_match_mode.get_mode() == expected_mode
+        assert params.stop_match_mode.is_backend_all() is (expected_mode == StopMatchMode.BACKEND_ALL)
+        skip_reasoning = expected_mode == StopMatchMode.OUTPUT_CONTENT_ONLY
         assert bool(manager.req_id_to_out_inf[123].stop_buffers) is (mode == NodeRole.NORMAL)
+        for buffer in manager.req_id_to_out_inf[123].stop_buffers.values():
+            assert (buffer.reasoning_state is not None) is (parser is not None and skip_reasoning)
         expected = "helloEND" if include else "hello"
         assert "".join(result[1] for result in results) == expected
         assert [result[2]["id"] for result in results] == [1, 2]
