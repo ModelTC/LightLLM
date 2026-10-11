@@ -9,7 +9,7 @@ from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParam
 from lightllm.server.core.objs.out_token_circlequeue import CircularQueue
 from lightllm.server.detokenization.decode_req import DecodeReq
 from lightllm.server.detokenization.manager import DeTokenizationManager
-from lightllm.server.httpserver.stop_sequence import StopSequenceBuffer
+from lightllm.server.httpserver.stop_seq_match import StopSequenceBuffer
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.router.model_infer import infer_batch
 

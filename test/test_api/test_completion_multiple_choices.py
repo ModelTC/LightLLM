@@ -11,7 +11,7 @@ from lightllm.server.api_openai import (
     _collect_generation_results,
 )
 from lightllm.server.core.objs import StopMatchMode, FinishStatus
-from lightllm.server.httpserver.stop_sequence import StopSequenceBuffer
+from lightllm.server.httpserver.stop_seq_match import StopSequenceBuffer
 
 
 class _FinishStatus:
@@ -222,7 +222,7 @@ def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, a
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
     monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))
-    monkeypatch.setattr(api_openai, "get_stop_in_reasoning", lambda: enabled)
+    monkeypatch.setattr(api_openai, "is_stop_matching_in_reasoning_enabled", lambda: enabled)
     monkeypatch.setattr(api_openai, "_is_force_thinking_mode", lambda request: thinking)
     monkeypatch.setattr(reasoning_parser, "get_token_id", lambda token: 1001)
 

@@ -79,7 +79,8 @@ def enable_env_vars(args):
 
 
 @lru_cache(maxsize=None)
-def get_stop_in_reasoning() -> bool:
+def is_stop_matching_in_reasoning_enabled() -> bool:
+    """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""
     return os.getenv("LIGHTLLM_STOP_IN_REASONING", "False").upper() in ["ON", "TRUE", "1"]
 
 

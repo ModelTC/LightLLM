@@ -29,7 +29,11 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
-from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size, get_stop_in_reasoning
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_lightllm_websocket_max_message_size,
+    is_stop_matching_in_reasoning_enabled,
+)
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
@@ -359,7 +363,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
             # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
             sampling_params_dict["stop_match_mode"] = (
-                StopMatchMode.BACKEND_ALL if get_stop_in_reasoning() else StopMatchMode.OUTPUT_CONTENT_ONLY
+                StopMatchMode.BACKEND_ALL
+                if is_stop_matching_in_reasoning_enabled()
+                else StopMatchMode.OUTPUT_CONTENT_ONLY
             )
 
     # Structured output handling
