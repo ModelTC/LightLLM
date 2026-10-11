@@ -26,6 +26,8 @@ Stop Strings
 from returned text. Set ``include_stop_str_in_output`` to ``true`` to include it.
 Text after the stop string in the same token is excluded in either case. This
 applies to streaming and non-streaming requests, including PD deployments.
+String stops retain their original text; they are not encoded into token ID
+sequences or matched as token IDs in the inference layer.
 
 With the OpenAI Python client, pass the option through ``extra_body``:
 
@@ -42,12 +44,12 @@ For example, generated text ``helloEND`` is returned as ``hello`` by default,
 or ``helloEND`` with this option enabled.
 
 For ``/v1/chat/completions`` with a reasoning parser configured (automatically or via ``--reasoning_parser``),
-user stop sequences apply only to final answer ``content`` by default. A matching
+user string stops apply only to final answer ``content`` by default. A matching
 string inside reasoning does not end generation. This also applies when
 ``separate_reasoning=False`` combines reasoning and content in the response.
 EOS and the output token limit still end generation in either phase.
 
-To enable stop sequences in reasoning as well, set this environment variable
+To enable string stops in reasoning as well, set this environment variable
 before starting the service:
 
 .. code-block:: bash
@@ -60,8 +62,13 @@ OpenAI requests; the stop scope is passed to prefill/decode nodes in sampling pa
 ``/v1/completions`` matches stops against all generated text. Chat requests without
 a reasoning parser use the same behavior.
 
+This phase scope applies only to string stops. Explicit token ID sequences in
+the native API's ``parameters.stop_sequences`` always match in the inference
+layer and can end generation during reasoning or answer content, regardless of
+this environment variable or ``include_stop_str_in_output``.
+
 When ``--enable_rl`` or ``--enable_return_routed_experts`` is enabled, or the request
-asks for ``prompt_logprobs``, only ``BACKEND_ALL`` is supported. These requests return
+asks for ``prompt_logprobs``, only ``DETOKEN_ALL`` is supported. These requests return
 raw backend output and final metadata without application-side text trimming.
 For Chat requests with a reasoning parser and stop sequences, set
 ``LIGHTLLM_STOP_IN_REASONING=1``; application-side stop modes fail an assertion.

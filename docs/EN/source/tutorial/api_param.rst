@@ -95,14 +95,42 @@ Stream return text completion results
 
     data:{"token": {"id": 279, "text": " the", "logprob": -1.5594439506530762, "special": false, "count_output_tokens": 3, "prompt_tokens": 4}, "generated_text": null, "finished": true, "finish_reason": "length", "details": null}
 
-Stop strings
-~~~~~~~~~~~~
+Stop conditions
+~~~~~~~~~~~~~~~
 
 For ``/generate`` and ``/generate_stream``, set ``parameters.stop_sequences`` to a
 string or a list of strings. ``parameters.include_stop_str_in_output`` defaults to
 ``false``: the matched stop string and any following text in the same token are
 removed. Set it to ``true`` to retain the stop string. This option applies to
-string stops; token-ID stop sequences keep their existing behavior.
+string stops only.
+
+Strings retain their original text and are never encoded into token ID sequences.
+``DETOKEN_ALL`` matches decoded text during detokenization, with the HTTP output
+layer handling buffering and trimming. ``OUTPUT_ALL`` and ``OUTPUT_CONTENT_ONLY``
+match strings in the HTTP output layer.
+
+Explicit token ID sequences are also supported, for example
+``"stop_sequences": [[100, 101]]``; replace these IDs with the values used by your
+model. These stops always match in the inference layer, including reasoning,
+regardless of ``str_stop_match_mode`` or ``LIGHTLLM_STOP_IN_REASONING``.
+``include_stop_str_in_output`` does not change token ID stop output behavior.
+Strings and token ID sequences may be mixed, for example ``["END", [100, 101]]``.
+
+.. list-table:: Stop matching scope
+   :header-rows: 1
+
+   * - ``str_stop_match_mode``
+     - String stops
+     - Explicit token ID stops
+   * - ``0`` / ``DETOKEN_ALL`` (default)
+     - All generated text
+     - All generated tokens
+   * - ``1`` / ``OUTPUT_ALL``
+     - All generated text
+     - All generated tokens
+   * - ``2`` / ``OUTPUT_CONTENT_ONLY``
+     - Answer content only, excluding reasoning
+     - All generated tokens
 
 Both streaming and non-streaming output follow this setting. When the output
 ends with a prefix of any stop string, streaming holds the complete tokens
@@ -111,7 +139,7 @@ across tokens from leaking into output.
 An unmatched tail is returned when generation finishes. Token IDs, logprobs,
 output token counts, and the finish reason retain their original meanings.
 
-``/generate`` and ``/generate_stream`` match stops against all generated text,
+``/generate`` and ``/generate_stream`` match string stops against all generated text by default,
 including reasoning text, even when a reasoning parser is configured.
 For reasoning / content stop scope in OpenAI ``/v1/chat/completions``, see the
 :ref:`OpenAI API examples <openai_api>`.

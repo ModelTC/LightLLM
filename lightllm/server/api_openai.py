@@ -24,8 +24,7 @@ from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse
-from lightllm.server.core.objs.sampling_params import SamplingParams, StopMatchMode
-from .generation import generate_with_stop
+from lightllm.server.core.objs.sampling_params import SamplingParams, StrStopMatchMode
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -363,10 +362,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # The prompt may already open reasoning; generated tokens may omit the opening marker.
             sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
             # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
-            sampling_params_dict["stop_match_mode"] = (
-                StopMatchMode.BACKEND_ALL
+            sampling_params_dict["str_stop_match_mode"] = (
+                StrStopMatchMode.DETOKEN_ALL
                 if is_stop_matching_in_reasoning_enabled()
-                else StopMatchMode.OUTPUT_CONTENT_ONLY
+                else StrStopMatchMode.OUTPUT_CONTENT_ONLY
             )
 
     # Structured output handling
@@ -383,8 +382,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
     sampling_params.verify()
-    results_generator = generate_with_stop(
-        g_objs.httpserver_manager, prompt, sampling_params, multimodal_params, request=raw_request
+    results_generator = g_objs.httpserver_manager.generate(
+        prompt, sampling_params, multimodal_params, request=raw_request
     )
 
     # Non-streaming case
@@ -944,8 +943,8 @@ async def _process_prompts_completion(
         if isinstance(prompt, list):
             prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
 
-        generator = generate_with_stop(
-            g_objs.httpserver_manager, prompt, individual_sampling_params, multimodal_params, request=raw_request
+        generator = g_objs.httpserver_manager.generate(
+            prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
         return await _collect_generation_results(generator, request, prompt_str)
@@ -966,8 +965,8 @@ async def _handle_streaming_completion(
 ) -> Response:
     from .api_http import g_objs
 
-    results_generator = generate_with_stop(
-        g_objs.httpserver_manager, prompt, sampling_params, multimodal_params, request=raw_request
+    results_generator = g_objs.httpserver_manager.generate(
+        prompt, sampling_params, multimodal_params, request=raw_request
     )
 
     async def stream_results() -> AsyncGenerator[bytes, None]:

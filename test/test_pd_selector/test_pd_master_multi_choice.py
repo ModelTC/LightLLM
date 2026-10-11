@@ -81,7 +81,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
 
         with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
             results = []
-            async for result in manager._generate("prompt", sampling_params, multimodal_params, request):
+            async for result in manager._generate_choices("prompt", sampling_params, multimodal_params, request):
                 results.append(result)
 
         assert [result[0] for result in results].count(800) == 2
@@ -146,7 +146,7 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
 
         with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
             results = []
-            async for result in manager._generate("prompt", sampling_params, multimodal_params, request):
+            async for result in manager._generate_choices("prompt", sampling_params, multimodal_params, request):
                 results.append(result)
 
         assert [result[0] for result in results] == [800]
@@ -184,7 +184,7 @@ def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_fi
 
         with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
             results = []
-            async for result in manager._generate("prompt", sampling_params, multimodal_params, request):
+            async for result in manager._generate_choices("prompt", sampling_params, multimodal_params, request):
                 results.append(result)
 
         assert len(results) == 1

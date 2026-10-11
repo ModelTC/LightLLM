@@ -23,6 +23,7 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
+from .stop_seq_match import wrap_stop_sequence_stream
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -316,7 +317,22 @@ class HttpServerManager(HttpRlManagerHelper, object):
             assert False, "dead code path"
         return group_request_id
 
-    async def generate(
+    def generate(
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        pd_upload_websocket: ClientConnection = None,
+        pd_event: asyncio.Event = None,
+    ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+        """客户端输出统一包裹 stop；P/D 节点和 TP slave 转发原始流。"""
+        generator = self._generate(prompt, sampling_params, multimodal_params, request, pd_upload_websocket, pd_event)
+        if self.pd_mode.is_normal() and not self.is_multinode_tp_slave:
+            return wrap_stop_sequence_stream(self, generator, sampling_params, prompt)
+        return generator
+
+    async def _generate(
         self,
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,

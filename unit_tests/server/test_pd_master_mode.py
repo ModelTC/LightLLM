@@ -7,7 +7,7 @@ from easydict import EasyDict
 
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParams
+from lightllm.server.core.objs import StrStopMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 
 
@@ -292,7 +292,7 @@ def test_pd_master_restores_request_count_when_preload_fails():
             raise RuntimeError("preload failed")
 
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(reasoning_parser=None)
+    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
     manager.running_request_count = 0
 
     async def consume_generate():
@@ -324,7 +324,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
 ):
     monkeypatch.setenv("LIGHTLLM_STOP_IN_REASONING", "1" if enabled else "0")
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(reasoning_parser=None)
+    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
     manager.running_request_count = 0
     manager.args.reasoning_parser = parser
     inner_generator_closed = False
@@ -333,18 +333,20 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
         nonlocal inner_generator_closed
         try:
             assert manager.running_request_count == 1
-            assert sampling_params.stop_match_mode.is_backend_all() is match_in_inference
+            assert sampling_params.str_stop_match_mode.is_detoken_all() is match_in_inference
             yield "result"
         finally:
             inner_generator_closed = True
 
-    manager._generate = fake_generate
+    manager._generate_choices = fake_generate
 
     async def consume_one_result_and_close():
         params = SamplingParams()
         params.init(None)
         if backend is not None:
-            params.stop_match_mode.set_mode(StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL)
+            params.str_stop_match_mode.set_mode(
+                StrStopMatchMode.DETOKEN_ALL if backend else StrStopMatchMode.OUTPUT_ALL
+            )
         results_generator = manager.generate(None, params, None, None)
         assert await results_generator.__anext__() == "result"
         assert manager.running_request_count == 1
@@ -358,13 +360,11 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
 @pytest.mark.parametrize("include", [False, True])
 def test_pd_master_forwards_filtered_choices(include):
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(reasoning_parser=None)
+    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
     manager.running_request_count = 0
+    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
     params = SamplingParams()
-    params.stop_sequences.initialize([[1, 2]], None)
-    params.stop_sequences.groups[0].sequence_str = b"END"
-    params.stop_sequences.groups[0].sequence_str_len = 3
-    params.include_stop_str_in_output = include
+    params.init(manager.tokenizer, stop_sequences="END", n=2, best_of=2, include_stop_str_in_output=include)
 
     async def fake_generate(*args):
         # Prefill's first token and subsequent decode tokens arrive in one stream.
@@ -373,7 +373,7 @@ def test_pd_master_forwards_filtered_choices(include):
         yield 80, "END" if include else "", {"id": 3}, FinishStatus(FinishStatus.FINISHED_STOP)
         yield 81, "EN", {"id": 4}, FinishStatus(FinishStatus.FINISHED_LENGTH)
 
-    manager._generate = fake_generate
+    manager._generate_choices = fake_generate
 
     async def collect():
         return [result async for result in manager.generate("prompt", params, None, None)]

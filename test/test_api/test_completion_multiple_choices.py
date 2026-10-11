@@ -11,7 +11,22 @@ from lightllm.server.api_openai import (
     _build_completion_response,
     _collect_generation_results,
 )
-from lightllm.server.core.objs import StopMatchMode, FinishStatus
+from lightllm.server.core.objs import StrStopMatchMode, FinishStatus
+from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.pd_io_struct import NodeRole
+
+
+def _manager(tokenizer, generate, args):
+    manager = HttpServerManager.__new__(HttpServerManager)
+    manager.tokenizer = tokenizer
+    manager._generate = lambda prompt, params, multimodal, request, *_args: generate(
+        prompt, params, multimodal, request
+    )
+    manager.args = args
+    manager.pd_mode = NodeRole.NORMAL
+    manager.is_multinode_tp_slave = False
+    manager.stop_request = AsyncMock()
+    return manager
 
 
 class _FinishStatus:
@@ -143,7 +158,7 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
 
     def generate(prompt, sampling_params, multimodal_params, request):
         assert sampling_params.include_stop_str_in_output is (include is True)
-        assert sampling_params.stop_sequences.to_strings() == ["END"]
+        assert sampling_params.stop_sequences.to_stop_str_list() == ["END"]
 
         async def results():
             metadata = {"prompt_tokens": 4, "prompt_cache_len": 0, "logprobs": {}}
@@ -157,11 +172,10 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
     monkeypatch.setattr(
         g_objs,
         "httpserver_manager",
-        SimpleNamespace(
-            tokenizer=tokenizer,
-            generate=generate,
-            args=SimpleNamespace(reasoning_parser=None),
-            stop_request=AsyncMock(),
+        _manager(
+            tokenizer,
+            generate,
+            SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False),
         ),
     )
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
@@ -213,10 +227,10 @@ def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, a
     def generate(prompt, sampling_params, multimodal_params, request):
         assert sampling_params._initial_reasoning_state == (int(thinking) if api == "chat" else -1)
         skip_reasoning = api == "chat" and not enabled
-        assert sampling_params.stop_match_mode.get_mode() == (
-            StopMatchMode.OUTPUT_CONTENT_ONLY if skip_reasoning else StopMatchMode.BACKEND_ALL
+        assert sampling_params.str_stop_match_mode.get_mode() == (
+            StrStopMatchMode.OUTPUT_CONTENT_ONLY if skip_reasoning else StrStopMatchMode.DETOKEN_ALL
         )
-        assert sampling_params.stop_match_mode.is_backend_all() is (not skip_reasoning)
+        assert sampling_params.str_stop_match_mode.is_detoken_all() is (not skip_reasoning)
 
         async def results():
             yield 80, "hello", {"prompt_tokens": 4, "id": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
@@ -227,11 +241,10 @@ def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, a
     monkeypatch.setattr(
         g_objs,
         "httpserver_manager",
-        SimpleNamespace(
-            tokenizer=tokenizer,
-            generate=generate,
-            args=SimpleNamespace(reasoning_parser="qwen3"),
-            stop_request=AsyncMock(),
+        _manager(
+            tokenizer,
+            generate,
+            SimpleNamespace(reasoning_parser="qwen3", enable_rl=False, enable_return_routed_experts=False),
         ),
     )
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))

@@ -144,12 +144,13 @@ class Req(ctypes.Structure):
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
         # 后端字符串 stop 的匹配结果，初始化为 False。
-        # stop_match_mode=BACKEND_ALL 时，detokenization 检查已解码的字符串尾部，
+        # str_stop_match_mode=DETOKEN_ALL 时，detokenization 检查已解码的字符串尾部，
         # 命中后先写 stop_str_matched_token_index，再将本字段设为 True，并停止处理后续生成 token。
         # Router 读取此标志后向推理进程发送 stop 命令；HTTP 据此确定对外返回 stop 的 token 位置。
         # 推理层按 token ID 命中 stop 时直接写 finish_status，不通过本标志报告匹配结果。
-        # stop_match_mode=OUTPUT_ALL / OUTPUT_CONTENT_ONLY 时由 HTTP 匹配，后端不判断字符串或 token ID stop。
-        # OUTPUT_ALL 匹配全部生成内容，OUTPUT_CONTENT_ONLY 跳过 reasoning、仅匹配回答；通用 generate 默认 BACKEND_ALL。
+        # str_stop_match_mode=OUTPUT_ALL / OUTPUT_CONTENT_ONLY 时字符串由 HTTP 匹配，detokenization 不判断字符串。
+        # 显式 token ID stop 在所有模式、reasoning 和回答阶段都由推理层匹配。
+        # OUTPUT_ALL 匹配全部生成内容，OUTPUT_CONTENT_ONLY 跳过 reasoning、仅匹配回答；通用 generate 默认 DETOKEN_ALL。
         # 命中后使用 is_aborted 停止当前子请求，不写本字段；API 的 stop 原因由 HTTP 输出缓冲维护。
         # True 表示 detokenization 已确认匹配，不代表推理已结束或请求资源已可回收。
         ("stop_str_matched", ctypes.c_bool),

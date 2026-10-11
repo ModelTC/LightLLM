@@ -23,32 +23,32 @@ MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 MAX_SEED = (1 << 63) - 1
 
 
-class StopMatchMode(ctypes.Structure):
-    """请求级 stop 匹配策略。共享内存仅保存模式值，接口和 PD 传输也使用该整数。"""
+class StrStopMatchMode(ctypes.Structure):
+    """请求级字符串 stop 匹配策略；显式 token ID 序列始终由推理层匹配，不受本模式影响。"""
 
     _pack_ = 4
     _fields_ = [("mode", ctypes.c_int)]
 
-    # 原推理 / detokenization 路径匹配全部生成内容；普通接口由应用侧缓冲截断文本。
-    BACKEND_ALL = 0
-    # 由应用侧输出层匹配全部内容并停止对应请求，包括 reasoning 和回答。
+    # detokenization 匹配全部生成文本；HTTP 输出层负责缓冲和截断字符串 stop。
+    DETOKEN_ALL = 0
+    # HTTP 输出层对全部生成文本匹配字符串 stop，包括 reasoning 和回答。
     OUTPUT_ALL = 1
-    # 由输出层跳过 reasoning，仅匹配 content 并 abort；后端无法区分阶段，必须关闭匹配。
+    # HTTP 输出层跳过 reasoning，仅匹配 content；关闭 detokenization 的字符串匹配。
     OUTPUT_CONTENT_ONLY = 2
 
-    def __init__(self, mode: int = BACKEND_ALL):
+    def __init__(self, mode: int = DETOKEN_ALL):
         self.set_mode(mode)
 
     def set_mode(self, mode: int):
-        if mode not in (self.BACKEND_ALL, self.OUTPUT_ALL, self.OUTPUT_CONTENT_ONLY):
-            raise ValueError(f"Invalid stop_match_mode: {mode!r}")
+        if mode not in (self.DETOKEN_ALL, self.OUTPUT_ALL, self.OUTPUT_CONTENT_ONLY):
+            raise ValueError(f"Invalid str_stop_match_mode: {mode!r}")
         self.mode = mode
 
     def get_mode(self) -> int:
         return self.mode
 
-    def is_backend_all(self) -> bool:
-        return self.mode == self.BACKEND_ALL
+    def is_detoken_all(self) -> bool:
+        return self.mode == self.DETOKEN_ALL
 
     def is_output_all(self) -> bool:
         return self.mode == self.OUTPUT_ALL
@@ -58,6 +58,8 @@ class StopMatchMode(ctypes.Structure):
 
 
 class StopSequence(ctypes.Structure):
+    """保存一种 stop：字符串仅写 sequence_str，显式 token ID 序列仅写 sequence。"""
+
     _pack_ = 4
     _fields_ = [
         ("sequence", ctypes.c_int * STOP_SEQUENCE_MAX_LENGTH),
@@ -85,51 +87,44 @@ class StopSequence(ctypes.Structure):
 
 
 class StopSequenceGroups(ctypes.Structure):
+    """分别保存字符串和显式 token ID 序列，字符串不经过 tokenizer 编码。"""
+
     _pack_ = 4
     _fields_ = [
         ("groups", StopSequence * MAX_STOP_SEQUENCES),
         ("size", ctypes.c_int),
     ]
 
-    def initialize(self, stop_sequences: Union[str, List[Union[List[int], str]]], tokenizer):
+    def initialize(self, stop_sequences: Union[str, List[Union[List[int], str]]]):
         if stop_sequences is None:
             stop_sequences = []
         elif isinstance(stop_sequences, str):
             stop_sequences = [stop_sequences]
 
-        groups: List[List[int]] = self.stop_sentences_to_token_ids(stop_sequences, tokenizer)
-        self.size = len(groups)
+        stop_sequences = [stop for stop in stop_sequences if stop]
+        self.size = len(stop_sequences)
         assert self.size <= MAX_STOP_SEQUENCES, "Too many stop sequence groups."
 
         for group_idx in range(self.size):
             if isinstance(stop_sequences[group_idx], str):
-                self.groups[group_idx].initialize(groups[group_idx], sequence_str=stop_sequences[group_idx])
+                self.groups[group_idx].initialize([], sequence_str=stop_sequences[group_idx])
             else:
-                self.groups[group_idx].initialize(groups[group_idx])
+                assert isinstance(stop_sequences[group_idx], list), "stop sequence must be str or List[int]"
+                self.groups[group_idx].initialize(stop_sequences[group_idx])
 
-    def stop_sentences_to_token_ids(self, stop_sequences: List[Union[List[int], str]], tokenizer) -> List[List[int]]:
-        new_stop_sequences = []
-        for stop_info in stop_sequences:
-            if isinstance(stop_info, str):
-                stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
-                if stop_str_ids is not None and len(stop_str_ids) > 0:
-                    new_stop_sequences.append(stop_str_ids)
-            if isinstance(stop_info, list):
-                if all(isinstance(x, int) for x in stop_info):
-                    if len(stop_info) > 0:
-                        new_stop_sequences.append(stop_info)
-                else:
-                    assert False, "stop_sequences item must be type List[int] when it is a list."
-        return new_stop_sequences
+    def to_token_ids_list(self) -> List[List[int]]:
+        """只返回显式 token ID 序列，供推理层在所有阶段匹配。"""
+        return [group.to_list() for group in self.groups[: self.size] if group.size > 0]
 
-    def _stop_str_to_token_ids(self, stop_str: str, tokenizer) -> List[int]:
-        stop_str_ids = tokenizer.encode(stop_str, add_special_tokens=False)
-        return stop_str_ids
+    def to_origin_list(self) -> List[Union[str, List[int]]]:
+        """序列化时保留各 stop 的原始类型和顺序，避免重建请求时丢失字符串。"""
+        return [group.to_string() if group.sequence_str_len else group.to_list() for group in self.groups[: self.size]]
 
-    def to_list(self, include_strings: bool = True) -> List[List[int]]:
-        return [group.to_list() for group in self.groups[: self.size] if include_strings or group.sequence_str_len == 0]
+    def has_stop_strs(self) -> bool:
+        """只检查字符串是否存在，避免仅判断匹配入口时解码和排序。"""
+        return any(group.sequence_str_len > 0 for group in self.groups[: self.size])
 
-    def to_strings(self) -> List[str]:
+    def to_stop_str_list(self) -> List[str]:
         # 降序匹配，在出现"\n\n"和"\n"情况时，优先匹配“\n\n”
         return sorted(
             [self.groups[i].to_string() for i in range(self.size) if self.groups[i].sequence_str_len > 0],
@@ -318,9 +313,9 @@ class SamplingParams(ctypes.Structure):
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
-        # stop 匹配策略，取值见 StopMatchMode；由接口入口设置，随请求传递到各进程和 P/D 节点。
-        # 默认 BACKEND_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
-        ("stop_match_mode", StopMatchMode),
+        # 字符串 stop 匹配策略，取值见 StrStopMatchMode；显式 token ID 序列不受本策略影响。
+        # 默认 DETOKEN_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
+        ("str_stop_match_mode", StrStopMatchMode),
         # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
         # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
         ("include_stop_str_in_output", ctypes.c_bool),
@@ -422,8 +417,8 @@ class SamplingParams(ctypes.Structure):
         # Initialize stop_sequence_groups
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
-        self.stop_sequences.initialize(stop_sequences, tokenizer)
-        self.stop_match_mode.set_mode(kwargs.get("stop_match_mode", StopMatchMode.BACKEND_ALL))
+        self.stop_sequences.initialize(stop_sequences)
+        self.str_stop_match_mode.set_mode(kwargs.get("str_stop_match_mode", StrStopMatchMode.DETOKEN_ALL))
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
         # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
@@ -546,8 +541,8 @@ class SamplingParams(ctypes.Structure):
             "max_new_tokens": self.max_new_tokens,
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
-            "stop_sequences": self.stop_sequences.to_list(),
-            "stop_match_mode": self.stop_match_mode.get_mode(),
+            "stop_sequences": self.stop_sequences.to_origin_list(),
+            "str_stop_match_mode": self.str_stop_match_mode.get_mode(),
             "include_stop_str_in_output": self.include_stop_str_in_output,
             "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,

@@ -25,13 +25,13 @@ class DecodeReq:
 
         self.req = req
         self.input_len = self.req.input_len
-        self.stop_strs: List[str] = self.req.sample_params.stop_sequences.to_strings()
-        # to_strings()已经做了倒序排列，第一个元素就是最长字符串
+        self.stop_strs: List[str] = self.req.sample_params.stop_sequences.to_stop_str_list()
+        # to_stop_str_list()已经做了倒序排列，第一个元素就是最长字符串
         self.stop_str_max_len = len(self.stop_strs[0]) if self.stop_strs else 0
 
     def stop_sequences_str_match(self) -> bool:
-        # 接口指定由 HTTP 匹配时，后端不写入 stop_str_matched。
-        if not self.req.sample_params.stop_match_mode.is_backend_all():
+        # 此处仅处理字符串；HTTP 匹配模式下不写 stop_str_matched，显式 token ID stop 仍由推理层处理。
+        if not self.req.sample_params.str_stop_match_mode.is_detoken_all():
             return False
         stop_strs = self.stop_strs
         if not stop_strs or self.stop_str_max_len == 0:

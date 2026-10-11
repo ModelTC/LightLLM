@@ -4,8 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lightllm.server.generation import generate_with_stop
-from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParams
+from lightllm.server.core.objs import StrStopMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 
@@ -18,7 +17,12 @@ def _make_manager(monkeypatch):
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
     mgr.active_req_ids = set()
-    mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True, reasoning_parser=None)
+    mgr.args = SimpleNamespace(
+        disable_pd_master_decode_capacity_limit=True,
+        reasoning_parser=None,
+        enable_rl=False,
+        enable_return_routed_experts=False,
+    )
     mgr.enable_pd_node_self_request_limit = True
     mgr.pd_node_resource_wait_timeout_seconds = -1
     mgr.pd_node_continuation_resource_wait_timeout_seconds = 60
@@ -176,13 +180,15 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backe
         manager.tokenizer,
         stop_sequences="END",
         max_new_tokens=10,
-        stop_match_mode=StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL,
+        str_stop_match_mode=StrStopMatchMode.DETOKEN_ALL if backend else StrStopMatchMode.OUTPUT_ALL,
         _initial_reasoning_state=1,
     )
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
-        assert sp.stop_match_mode.is_backend_all() is backend
-        assert sp.stop_match_mode.get_mode() == (StopMatchMode.BACKEND_ALL if backend else StopMatchMode.OUTPUT_ALL)
+        assert sp.str_stop_match_mode.is_detoken_all() is backend
+        assert sp.str_stop_match_mode.get_mode() == (
+            StrStopMatchMode.DETOKEN_ALL if backend else StrStopMatchMode.OUTPUT_ALL
+        )
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
         yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
 
@@ -191,8 +197,7 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backe
     async def run():
         return [
             result
-            async for result in generate_with_stop(
-                manager,
+            async for result in manager.generate(
                 "prompt",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
@@ -219,14 +224,14 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
         stop_sequences="END",
         max_new_tokens=3,
         _initial_reasoning_state=1,
-        stop_match_mode=StopMatchMode.OUTPUT_CONTENT_ONLY,
+        str_stop_match_mode=StrStopMatchMode.OUTPUT_CONTENT_ONLY,
     )
     segment_modes = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segment_modes.append(sp._initial_reasoning_state)
-        assert sp.stop_match_mode.get_mode() == StopMatchMode.OUTPUT_CONTENT_ONLY
-        assert sp.stop_match_mode.is_backend_all() is False
+        assert sp.str_stop_match_mode.get_mode() == StrStopMatchMode.OUTPUT_CONTENT_ONLY
+        assert sp.str_stop_match_mode.is_detoken_all() is False
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segment_modes) == 1:
             yield sp.group_request_id, "reason", {**metadata, "id": 10}, FinishStatus()
@@ -247,8 +252,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
     async def run():
         return [
             result
-            async for result in generate_with_stop(
-                manager,
+            async for result in manager.generate(
                 "hello",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
@@ -327,14 +331,14 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
         stop_sequences="END",
         include_stop_str_in_output=include,
         _initial_reasoning_state=int(parser is not None),
-        stop_match_mode=StopMatchMode.BACKEND_ALL if parser is None else StopMatchMode.OUTPUT_CONTENT_ONLY,
+        str_stop_match_mode=StrStopMatchMode.DETOKEN_ALL if parser is None else StrStopMatchMode.OUTPUT_CONTENT_ONLY,
         max_new_tokens=10,
     )
     segments = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segments.append(prompt)
-        assert sp.stop_match_mode.is_backend_all() is (parser is None)
+        assert sp.str_stop_match_mode.is_detoken_all() is (parser is None)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
             if parser:
@@ -352,8 +356,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     async def run():
         return [
             result
-            async for result in generate_with_stop(
-                manager,
+            async for result in manager.generate(
                 "prompt",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
@@ -404,7 +407,7 @@ def test_pd_abort_removes_output_channel_by_default(monkeypatch):
         node.websocket.send_bytes.assert_awaited_once()
 
 
-def test_application_stop_cancels_pd_without_waiting_for_final_metadata(monkeypatch):
+def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch):
     from unittest.mock import AsyncMock
 
     manager = _make_manager(monkeypatch)
@@ -415,22 +418,30 @@ def test_application_stop_cancels_pd_without_waiting_for_final_metadata(monkeypa
     async def run():
         segments = []
         closed = asyncio.Event()
+        stopped = asyncio.Event()
         manager.abort = AsyncMock()
+        stop_request = manager.stop_request
+
+        async def stop_and_notify(request_id):
+            await stop_request(request_id)
+            stopped.set()
+
+        manager.stop_request = stop_and_notify
 
         async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
             segments.append(prompt)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
             try:
                 yield sp.group_request_id, "helloENDextra", metadata, FinishStatus()
-                await asyncio.Event().wait()
+                await stopped.wait()
+                yield sp.group_request_id, "late", {**metadata, "id": 11}, FinishStatus()
             finally:
                 closed.set()
 
         manager._wait_to_token_package = raw_segment
         results = [
             result
-            async for result in generate_with_stop(
-                manager,
+            async for result in manager.generate(
                 "prompt",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
@@ -590,8 +601,7 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
         manager._wait_to_token_package = raw_segment
         results = [
             result
-            async for result in generate_with_stop(
-                manager,
+            async for result in manager.generate(
                 "prompt",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),

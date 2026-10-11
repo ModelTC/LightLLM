@@ -22,6 +22,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.server.httpserver.stop_seq_match import wrap_stop_sequence_stream
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -145,7 +146,18 @@ class HttpServerManagerForPDMaster:
         """PD Master 请求准入的预留接口，当前不执行限流。"""
         return
 
-    async def generate(
+    def generate(
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+    ):
+        """统一包裹各 choice 的 stop 匹配，状态覆盖所有 P/D 分段。"""
+        generator = self._generate(prompt, sampling_params, multimodal_params, request)
+        return wrap_stop_sequence_stream(self, generator, sampling_params, prompt)
+
+    async def _generate(
         self,
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
@@ -159,13 +171,14 @@ class HttpServerManagerForPDMaster:
         if was_idle:
             self.latest_success_infer_time = time.time()
         try:
-            async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
+            generator = self._generate_choices(prompt, sampling_params, multimodal_params, request)
+            async with aclosing(generator):
                 async for result in generator:
                     yield result
         finally:
             self.running_request_count -= 1
 
-    async def _generate(
+    async def _generate_choices(
         self,
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,

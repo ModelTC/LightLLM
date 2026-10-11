@@ -105,19 +105,45 @@
     data:{"token": {"id": 279, "text": " the", "logprob": -1.5594439506530762, "special": false, "count_output_tokens": 3, "prompt_tokens": 4}, "generated_text": null, "finished": true, "finish_reason": "length", "details": null}
 
 
-停止字符串
+停止条件
 ~~~~~~~~~~~~
 
 ``/generate`` 和 ``/generate_stream`` 使用 ``parameters.stop_sequences`` 设置
 停止字符串，可以传入字符串或字符串列表。``parameters.include_stop_str_in_output``
 默认为 ``false``，返回文本会移除匹配到的 stop 字符串及同一 token 中其后的文本；
-设为 ``true`` 则保留 stop 字符串。此参数只影响字符串 stop，token ID 序列的行为保持不变。
+设为 ``true`` 则保留 stop 字符串。此参数只影响字符串 stop。
+
+字符串保留原文，不再编码成 token ID 序列。``DETOKEN_ALL`` 在 detokenization
+阶段匹配已解码文本，HTTP 输出层负责缓冲和截断；``OUTPUT_ALL`` 和
+``OUTPUT_CONTENT_ONLY`` 由 HTTP 输出层匹配字符串。
+
+也可以显式传入 token ID 序列，例如 ``"stop_sequences": [[100, 101]]``，其中
+ID 应替换为模型实际使用的值。此类 stop 始终由推理层匹配，包括 reasoning 阶段，
+不受 ``str_stop_match_mode`` 或 ``LIGHTLLM_STOP_IN_REASONING`` 影响。
+``include_stop_str_in_output`` 不改变 token ID stop 的输出行为。
+字符串和 token ID 序列可以混合配置，例如 ``["END", [100, 101]]``。
+
+.. list-table:: stop 匹配范围
+   :header-rows: 1
+
+   * - ``str_stop_match_mode``
+     - 字符串 stop
+     - 显式 token ID stop
+   * - ``0`` / ``DETOKEN_ALL``（默认）
+     - 全部生成文本
+     - 全部生成 token
+   * - ``1`` / ``OUTPUT_ALL``
+     - 全部生成文本
+     - 全部生成 token
+   * - ``2`` / ``OUTPUT_CONTENT_ONLY``
+     - 仅回答，跳过 reasoning
+     - 全部生成 token
 
 流式和非流式遵循相同设置。输出尾部匹配任意 stop 字符串的前缀时，流式输出会暂存
 覆盖该前缀的完整 token，直到能够确认是否命中 stop，防止跨 token 的 stop 片段提前发出。
 请求结束时会返回未匹配的尾部。token ID、logprob、输出 token 计数和结束原因的含义保持不变。
 
-``/generate`` 和 ``/generate_stream`` 对全部生成文本匹配 stop，包含 reasoning 文本，
+``/generate`` 和 ``/generate_stream`` 默认对全部生成文本匹配字符串 stop，包含 reasoning 文本，
 不因服务配置了 reasoning parser 而自动区分阶段。OpenAI ``/v1/chat/completions``
 的 reasoning / content 停止范围设置见 :ref:`OpenAI 接口示例 <openai_api>`。
 
