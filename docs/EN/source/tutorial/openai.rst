@@ -60,6 +60,12 @@ OpenAI requests; the stop scope is passed to prefill/decode nodes in sampling pa
 ``/v1/completions`` matches stops against all generated text. Chat requests without
 a reasoning parser use the same behavior.
 
+When ``--enable_rl`` or ``--enable_return_routed_experts`` is enabled, or the request
+asks for ``prompt_logprobs``, only ``BACKEND_ALL`` is supported. These requests return
+raw backend output and final metadata without application-side text trimming.
+For Chat requests with a reasoning parser and stop sequences, set
+``LIGHTLLM_STOP_IN_REASONING=1``; application-side stop modes fail an assertion.
+
 Basic Conversation Examples
 ---------------------------
 

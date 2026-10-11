@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,7 +12,6 @@ from lightllm.server.api_openai import (
     _collect_generation_results,
 )
 from lightllm.server.core.objs import StopMatchMode, FinishStatus
-from lightllm.server.httpserver.stop_seq_match import StopSequenceBuffer
 
 
 class _FinishStatus:
@@ -100,7 +100,7 @@ def test_non_streaming_chat_usage_sums_all_choices(monkeypatch):
 
     class _SamplingParams:
         def init(self, **_kwargs):
-            pass
+            self.stop_sequences = SimpleNamespace(size=0)
 
         def verify(self):
             pass
@@ -108,7 +108,9 @@ def test_non_streaming_chat_usage_sums_all_choices(monkeypatch):
     async def build_prompt(_request, _tools):
         return "Prompt"
 
-    manager = SimpleNamespace(tokenizer=None, generate=lambda *_args, **_kwargs: generate_results())
+    manager = SimpleNamespace(
+        tokenizer=None, args=SimpleNamespace(enable_rl=False), generate=lambda *_args, **_kwargs: generate_results()
+    )
     monkeypatch.setattr(api_openai, "SamplingParams", _SamplingParams)
     monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
@@ -144,22 +146,24 @@ def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
         assert sampling_params.stop_sequences.to_strings() == ["END"]
 
         async def results():
-            output = StopSequenceBuffer(sampling_params, tokenizer, [])
             metadata = {"prompt_tokens": 4, "prompt_cache_len": 0, "logprobs": {}}
             for index, text in enumerate(["helloE", "NDextra"], 1):
                 finish = FinishStatus(FinishStatus.FINISHED_STOP if index == 2 else FinishStatus.NO_FINISH)
-                token_metadata = {**metadata, "id": index, "logprob": -index}
-                output.append(index, text, (token_metadata, finish))
-                if finish.is_finished():
-                    output.flush()
-                while output.ready_tokens:
-                    visible_text, (metadata, status) = output.ready_tokens.popleft()
-                    yield 80, visible_text, metadata, status
+                yield 80, text, {**metadata, "id": index, "logprob": -index}, finish
 
         return results()
 
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
-    monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
+    monkeypatch.setattr(
+        g_objs,
+        "httpserver_manager",
+        SimpleNamespace(
+            tokenizer=tokenizer,
+            generate=generate,
+            args=SimpleNamespace(reasoning_parser=None),
+            stop_request=AsyncMock(),
+        ),
+    )
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
 
     async def build_prompt(*args):
@@ -220,7 +224,16 @@ def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, a
         return results()
 
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
-    monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=tokenizer, generate=generate))
+    monkeypatch.setattr(
+        g_objs,
+        "httpserver_manager",
+        SimpleNamespace(
+            tokenizer=tokenizer,
+            generate=generate,
+            args=SimpleNamespace(reasoning_parser="qwen3"),
+            stop_request=AsyncMock(),
+        ),
+    )
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))
     monkeypatch.setattr(api_openai, "is_stop_matching_in_reasoning_enabled", lambda: enabled)
     monkeypatch.setattr(api_openai, "_is_force_thinking_mode", lambda request: thinking)

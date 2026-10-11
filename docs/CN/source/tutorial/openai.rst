@@ -54,6 +54,11 @@ EOS 和输出 token 长度上限仍可在任意阶段结束生成。
 OpenAI 请求的 master 上设置，停止范围通过请求采样参数传递给 P/D 节点。
 ``/v1/completions`` 对全部生成文本匹配 stop；Chat 接口未配置 reasoning parser 时也采用此行为。
 
+启用 ``--enable_rl``、``--enable_return_routed_experts`` 或请求 ``prompt_logprobs`` 时，
+仅支持 ``BACKEND_ALL``，直接返回后端原始输出及最终 metadata，不进行应用侧文本截断。
+这些场景下若使用配置了 reasoning parser 的 Chat 接口并设置 stop，需开启
+``LIGHTLLM_STOP_IN_REASONING=1``；使用应用侧 stop 匹配模式会触发断言。
+
 基础对话示例
 ------------
 

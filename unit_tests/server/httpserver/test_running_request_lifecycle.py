@@ -111,10 +111,6 @@ def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, 
         expected_mode = StopMatchMode.BACKEND_ALL if stop_mode is None else stop_mode
         assert params.stop_match_mode.get_mode() == expected_mode
         assert params.stop_match_mode.is_backend_all() is (expected_mode == StopMatchMode.BACKEND_ALL)
-        skip_reasoning = expected_mode == StopMatchMode.OUTPUT_CONTENT_ONLY
-        assert bool(manager.req_id_to_out_inf[123].stop_buffers) is (mode == NodeRole.NORMAL)
-        for buffer in manager.req_id_to_out_inf[123].stop_buffers.values():
-            assert (buffer.reasoning_state is not None) is (parser is not None and skip_reasoning)
         expected = "helloEND" if include else "hello"
         assert "".join(result[1] for result in results) == expected
         assert [result[2]["id"] for result in results] == [1, 2]

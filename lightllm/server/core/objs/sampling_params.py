@@ -29,9 +29,9 @@ class StopMatchMode(ctypes.Structure):
     _pack_ = 4
     _fields_ = [("mode", ctypes.c_int)]
 
-    # 原推理 / detokenization 路径匹配全部生成内容；HTTP 缓冲负责输出文本的截断。
+    # 原推理 / detokenization 路径匹配全部生成内容；普通接口由应用侧缓冲截断文本。
     BACKEND_ALL = 0
-    # 由输出层（HTTP manager / PD Master）匹配全部内容并 abort，包括 reasoning 和回答。
+    # 由应用侧输出层匹配全部内容并停止对应请求，包括 reasoning 和回答。
     OUTPUT_ALL = 1
     # 由输出层跳过 reasoning，仅匹配 content 并 abort；后端无法区分阶段，必须关闭匹配。
     OUTPUT_CONTENT_ONLY = 2

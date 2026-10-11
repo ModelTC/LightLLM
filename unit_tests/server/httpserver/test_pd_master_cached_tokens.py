@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lightllm.server.generation import generate_with_stop
 from lightllm.server.core.objs import StopMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
@@ -16,6 +17,7 @@ def _make_manager(monkeypatch):
     )
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
+    mgr.active_req_ids = set()
     mgr.args = SimpleNamespace(disable_pd_master_decode_capacity_limit=True, reasoning_parser=None)
     mgr.enable_pd_node_self_request_limit = True
     mgr.pd_node_resource_wait_timeout_seconds = -1
@@ -43,8 +45,13 @@ def _make_manager(monkeypatch):
             insert_prompt_cache=lambda prompt, p_node: mgr.inserted_prompt_caches.append((prompt, p_node)),
         )
     )
-    p_node = SimpleNamespace(dispatched_prompt_chars=0, dispatched_req_num=0)
-    mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, 1, PDSelectionExtraInfo()))
+    from unittest.mock import AsyncMock
+
+    p_node = SimpleNamespace(
+        dispatched_prompt_chars=0, dispatched_req_num=0, websocket=SimpleNamespace(send_bytes=AsyncMock())
+    )
+    d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+    mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, d_node, PDSelectionExtraInfo()))
     mgr.remove_req = lambda *a, **k: asyncio.sleep(0)
     return mgr
 
@@ -184,7 +191,8 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backe
     async def run():
         return [
             result
-            async for result in manager.generate(
+            async for result in generate_with_stop(
+                manager,
                 "prompt",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
@@ -195,7 +203,6 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backe
     results = asyncio.run(run())
     assert "".join(result[1] for result in results) == "reason"
     assert results[-1][3].is_stopped()
-
 
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
@@ -240,7 +247,8 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
     async def run():
         return [
             result
-            async for result in manager.generate(
+            async for result in generate_with_stop(
+                manager,
                 "hello",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
@@ -249,7 +257,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
         ]
 
     results = asyncio.run(run())
-    assert segment_modes == [1, int(in_reasoning)]
+    assert segment_modes == [1, 1]  # reasoning 状态只保存在应用侧，不再回写节点参数。
     assert "".join(result[1] for result in results) == "reason" + ("END" if in_reasoning else "")
 
 
@@ -311,6 +319,8 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
         encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
     )
     manager.abort = AsyncMock()
+    stop_request = manager.stop_request
+    manager.stop_request = AsyncMock(side_effect=stop_request)
     params = SamplingParams()
     params.init(
         manager.tokenizer,
@@ -335,14 +345,15 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
         else:
             yield sp.group_request_id, continuation, {**metadata, "id": 12}, FinishStatus(node_finish)
             if continuation == "NDextra" and node_finish == FinishStatus.NO_FINISH:
-                pytest.fail("Master must stop the active segment as soon as the cross-segment stop matches")
+                yield sp.group_request_id, "", {**metadata, "id": None}, FinishStatus(FinishStatus.FINISHED_ABORTED)
 
     monkeypatch.setattr(manager, "_wait_to_token_package", fake_wait)
 
     async def run():
         return [
             result
-            async for result in manager.generate(
+            async for result in generate_with_stop(
+                manager,
                 "prompt",
                 params,
                 SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
@@ -359,7 +370,141 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     assert results[-1][3].get_finish_reason() == ("stop" if continuation == "NDextra" else "length")
     assert all(not result[3].is_finished() for result in results[:-1])
     if continuation == "NDextra" and node_finish == FinishStatus.NO_FINISH:
-        manager.abort.assert_awaited_once()
+        manager.stop_request.assert_awaited_once()
     else:
-        manager.abort.assert_not_awaited()
+        manager.stop_request.assert_not_awaited()
 
+
+def test_pd_stop_request_marks_only_matching_choice(monkeypatch):
+    manager = _make_manager(monkeypatch)
+    manager.active_req_ids.update((80, 81))
+
+    async def run():
+        await manager.stop_request(80)
+        assert manager.active_req_ids == {81}
+        await manager.stop_request(80)
+        await manager.stop_request(999)
+        assert manager.active_req_ids == {81}
+
+    asyncio.run(run())
+
+
+def test_pd_abort_removes_output_channel_by_default(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    manager = _make_manager(monkeypatch)
+    p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+    d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+    manager.req_id_to_out_inf = {88: SimpleNamespace(p_node=p_node, d_node=d_node), 96: object()}
+
+    asyncio.run(manager.abort(88))
+
+    assert set(manager.req_id_to_out_inf) == {96}
+    for node in (p_node, d_node):
+        node.websocket.send_bytes.assert_awaited_once()
+
+
+def test_application_stop_cancels_pd_without_waiting_for_final_metadata(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    manager = _make_manager(monkeypatch)
+    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    params = SamplingParams()
+    params.init(manager.tokenizer, stop_sequences="END", max_new_tokens=10)
+
+    async def run():
+        segments = []
+        closed = asyncio.Event()
+        manager.abort = AsyncMock()
+
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+            segments.append(prompt)
+            metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
+            try:
+                yield sp.group_request_id, "helloENDextra", metadata, FinishStatus()
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        manager._wait_to_token_package = raw_segment
+        results = [
+            result
+            async for result in generate_with_stop(
+                manager,
+                "prompt",
+                params,
+                SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
+                None,
+            )
+        ]
+        assert segments == ["prompt"]
+        assert results[-1][1] == "hello"
+        assert results[-1][3].is_stopped()
+        assert not manager.active_req_ids
+        await asyncio.wait_for(closed.wait(), timeout=1)
+        assert closed.is_set()
+        manager.abort.assert_awaited_once()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    manager = _make_manager(monkeypatch)
+    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    params = SamplingParams()
+    params.init(manager.tokenizer, stop_sequences="END", n=2, best_of=2, max_new_tokens=10)
+
+    async def run():
+        stopped = asyncio.Event()
+        cleaned = asyncio.Event()
+        segments = []
+        manager.abort = AsyncMock(side_effect=lambda *args, **kwargs: stopped.set())
+        original_remove_req = manager.remove_req
+
+        async def remove_req(*args, **kwargs):
+            await original_remove_req(*args, **kwargs)
+            if not manager.active_req_ids:
+                cleaned.set()
+
+        manager.remove_req = remove_req
+
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+            index = len(segments)
+            segments.append(sp.group_request_id)
+            metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
+            if index == 0:
+                yield sp.group_request_id, "helloENDextra", dict(metadata), FinishStatus()
+                await asyncio.sleep(0.01)
+                yield sp.group_request_id, "late", dict(metadata), FinishStatus()
+            else:
+                yield sp.group_request_id, "otherE", dict(metadata), FinishStatus()
+                await stopped.wait()
+                # 保持 sibling 未结束，验证另一个 choice 停止后仍能继续生成。
+                await asyncio.sleep(0.01)
+                yield sp.group_request_id, "X", {**metadata, "id": 11}, FinishStatus(FinishStatus.FINISHED_LENGTH)
+
+        manager._wait_to_token_package = raw_segment
+        results = [
+            result
+            async for result in generate_with_stop(
+                manager,
+                "prompt",
+                params,
+                SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
+                None,
+            )
+        ]
+        ids = sorted({result[0] for result in results})
+        assert len(ids) == 2
+        assert "".join(result[1] for result in results if result[0] == ids[0]) == "hello"
+        assert "".join(result[1] for result in results if result[0] == ids[1]) == "otherEX"
+        assert {result[0]: result[3].get_finish_reason() for result in results if result[3].is_finished()} == {
+            ids[0]: "stop",
+            ids[1]: "length",
+        }
+        await asyncio.wait_for(cleaned.wait(), timeout=1)
+        assert not manager.active_req_ids
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))

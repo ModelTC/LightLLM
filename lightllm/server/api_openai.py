@@ -25,6 +25,7 @@ from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams, StopMatchMode
+from .generation import generate_with_stop
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -382,8 +383,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
     sampling_params.verify()
-    results_generator = g_objs.httpserver_manager.generate(
-        prompt, sampling_params, multimodal_params, request=raw_request
+    results_generator = generate_with_stop(
+        g_objs.httpserver_manager, prompt, sampling_params, multimodal_params, request=raw_request
     )
 
     # Non-streaming case
@@ -943,8 +944,8 @@ async def _process_prompts_completion(
         if isinstance(prompt, list):
             prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
 
-        generator = g_objs.httpserver_manager.generate(
-            prompt, individual_sampling_params, multimodal_params, request=raw_request
+        generator = generate_with_stop(
+            g_objs.httpserver_manager, prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
         return await _collect_generation_results(generator, request, prompt_str)
@@ -965,8 +966,8 @@ async def _handle_streaming_completion(
 ) -> Response:
     from .api_http import g_objs
 
-    results_generator = g_objs.httpserver_manager.generate(
-        prompt, sampling_params, multimodal_params, request=raw_request
+    results_generator = generate_with_stop(
+        g_objs.httpserver_manager, prompt, sampling_params, multimodal_params, request=raw_request
     )
 
     async def stream_results() -> AsyncGenerator[bytes, None]:

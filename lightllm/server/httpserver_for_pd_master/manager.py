@@ -22,7 +22,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
-from lightllm.server.httpserver.stop_seq_match import StopSequenceBuffer
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -51,6 +50,9 @@ class HttpServerManagerForPDMaster:
         self.pd_manager = PDManager(args)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
+        # 活跃子请求的对外 ID 集合，跨 P/D 分段保持不变。
+        # 定点停止时移除 ID，生成循环恢复后据此停止输出并清理当前分段，不影响其他子请求。
+        self.active_req_ids: set[int] = set()
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
         self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
         self.latest_success_infer_time = time.time()
@@ -295,6 +297,7 @@ class HttpServerManagerForPDMaster:
         p_node = None
         d_node = None
         pending_prefill_load_chars = None
+        self.active_req_ids.add(origin_request_id)
 
         try:
             p_node, d_node, selection_extra_info = await self.select_p_d_node(
@@ -323,18 +326,6 @@ class HttpServerManagerForPDMaster:
                 and input_token_num >= self.pd_cache_high_priority_min_prompt_tokens
             )
 
-            # P/D nodes forward raw text. Keep one buffer for the whole choice,
-            # so stop prefixes and reasoning boundaries survive capacity splits.
-            stop_buffer = None
-            if origin_sampling_params.stop_sequences.size:
-                stop_buffer = StopSequenceBuffer(
-                    origin_sampling_params,
-                    self.tokenizer,
-                    self.tokenizer.encode(prompt, add_special_tokens=False),
-                    self.args.reasoning_parser
-                    if origin_sampling_params.stop_match_mode.is_output_content_only()
-                    else None,
-                )
             history_gen_token_strs = []
             origin_prompt_cache_len = None
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
@@ -381,6 +372,12 @@ class HttpServerManagerForPDMaster:
                 )
                 raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
+                    # 应用侧匹配到 stop 后，stop_request 会移除该子请求 ID。
+                    # 恢复生成时丢弃后续输出，abort 当前 P/D 分段并结束该子请求，避免容量不足时继续续跑；
+                    # 外层 finally 负责清理请求记录和节点负载，不影响其他子请求。
+                    if origin_request_id not in self.active_req_ids:
+                        await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
+                        return
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
                     assert sub_req_id == block_group_request_id
 
@@ -395,10 +392,6 @@ class HttpServerManagerForPDMaster:
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
-                        if stop_buffer is not None and stop_buffer.reasoning_state is not None:
-                            origin_sampling_params._initial_reasoning_state = int(
-                                stop_buffer.reasoning_state.in_reasoning
-                            )
                         break
 
                     # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
@@ -418,29 +411,8 @@ class HttpServerManagerForPDMaster:
                             # Decode，不能仅根据 node_mode 判断 P 是否完成推理。
                             self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
-                    if stop_buffer is None:
-                        yield origin_request_id, request_output, metadata, raw_finish_status
-                    else:
-                        matched = stop_buffer.append(
-                            metadata.get("id"),
-                            request_output,
-                            (origin_request_id, metadata, raw_finish_status),
-                            simulated=raw_finish_status.is_error_finished() or metadata.get("id") is None,
-                        )
-                        stop_before_node_finish = matched and not raw_finish_status.is_finished()
-                        if matched:
-                            if stop_before_node_finish:
-                                await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
-                            raw_finish_status.status = FinishStatus.FINISHED_STOP
-                        if raw_finish_status.is_finished():
-                            stop_buffer.flush()
-                        while stop_buffer.ready_tokens:
-                            text, (req_id, token_metadata, token_finish) = stop_buffer.ready_tokens.popleft()
-                            yield req_id, text, token_metadata, token_finish
-                        if stop_before_node_finish:
-                            break
+                    yield origin_request_id, request_output, metadata, raw_finish_status
 
-                await results_generator.aclose()
                 await self.remove_req(group_request_id=block_group_request_id)
                 segment_index += 1
                 # 只有 PD Decode 容量不足产生的内部分段需要续跑；其他状态都结束整个请求。
@@ -460,6 +432,7 @@ class HttpServerManagerForPDMaster:
             raise e
 
         finally:
+            self.active_req_ids.discard(origin_request_id)
             if p_node is not None and pending_prefill_load_chars is not None:
                 p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - pending_prefill_load_chars)
                 p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
@@ -755,6 +728,10 @@ class HttpServerManagerForPDMaster:
         self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
         self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
         return
+
+    async def stop_request(self, request_id: int):
+        """标记指定子请求停止，由生成循环 abort 当前分段并清理资源。"""
+        self.active_req_ids.discard(request_id)
 
     async def abort(
         self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None

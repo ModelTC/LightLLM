@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import aclosing
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -15,6 +16,7 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 
 def _manager() -> HttpServerManagerForPDMaster:
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.active_req_ids = set()
     manager.pd_manager = MagicMock()
     manager.id_gen = MagicMock()
     manager.id_gen.generate_id.return_value = 800
@@ -310,6 +312,41 @@ def test_pd_master_multi_choice_cancellation_is_not_treated_as_success():
         with pytest.raises(asyncio.CancelledError, match="choice cancelled"):
             async for _ in manager._merge_choice_generators([cancelled()]):
                 pass
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@pytest.mark.parametrize("late_status", [FinishStatus.NO_FINISH, FinishStatus.FINISHED_PD_DECODE_CAPACITY])
+def test_pd_master_stopped_choice_does_not_forward_late_output(late_status):
+    async def run():
+        manager = _manager()
+        p_node = MagicMock(dispatched_prompt_chars=0, dispatched_req_num=0)
+        d_node = MagicMock()
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
+        manager.remove_req = AsyncMock()
+        manager.abort = AsyncMock()
+        sampling_params = SamplingParams()
+        sampling_params.max_new_tokens = 4
+
+        async def wait_to_token_package(p_node, d_node, start_time, prompt, params, multimodal_params, request):
+            metadata = {"prompt_tokens": 2}
+            yield params.group_request_id, "first", dict(metadata), FinishStatus()
+            await asyncio.sleep(0.01)
+            yield params.group_request_id, "late", dict(metadata), FinishStatus(late_status)
+
+        manager._wait_to_token_package = wait_to_token_package
+        choice = manager._generate_one("prompt", sampling_params, MagicMock(), MagicMock(), 0, 800, 2)
+
+        async def sibling():
+            yield "other"
+
+        merged = manager._merge_choice_generators([choice, sibling()])
+        async with aclosing(merged):
+            assert (await merged.__anext__())[1] == "first"
+            await manager.stop_request(800)
+            assert [result async for result in merged] == ["other"]
+        assert not manager.active_req_ids
+        manager.abort.assert_awaited_once_with(800, p_node=p_node, d_node=d_node)
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 

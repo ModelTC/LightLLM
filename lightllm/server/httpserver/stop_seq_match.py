@@ -1,4 +1,7 @@
 from collections import deque
+from contextlib import aclosing
+
+from lightllm.server.core.objs import FinishStatus
 
 from lightllm.server.reasoning_parser import ReasoningStopState
 
@@ -6,7 +9,7 @@ from lightllm.server.reasoning_parser import ReasoningStopState
 class StopSequenceBuffer:
     """Match stops and hold complete tokens until their text is safe to emit.
 
-    普通 HTTP server 和 PD Master 共用；PD Master 跨分段保留缓冲。
+    应用侧共用；缓冲覆盖 PD Master 的所有生成分段。
     文本截断为空的 token 仍携带原始 payload，以保留 token ID、logprob 和计数。
     """
 
@@ -97,3 +100,50 @@ class StopSequenceBuffer:
             self.ready_tokens.append((text[: max(0, visible_length)], payload))
             visible_length -= len(text)
         self.pending_text = ""
+
+
+async def match_stop_sequence_stream(
+    generator, sampling_params, tokenizer, prompt, reasoning_parser=None, *, on_stop=None
+):
+    """应用侧按请求 ID 匹配 stop，独立保留各 choice 的前缀和 reasoning 状态。
+
+    命中后停止对应请求，立即返回 stop 结束结果，忽略后续输出。
+    缓冲覆盖整个输出流，不受 PD 内部容量分段影响。
+    """
+    async with aclosing(generator):
+        if not sampling_params.stop_sequences.size:
+            async for result in generator:
+                yield result
+            return
+
+        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False) if isinstance(prompt, str) else prompt
+        parser = reasoning_parser if sampling_params.stop_match_mode.is_output_content_only() else None
+        buffers = {}
+        finished_ids = set()
+        async for req_id, text, metadata, raw_finish in generator:
+            if req_id in finished_ids:
+                continue
+            if req_id not in buffers:
+                buffers[req_id] = StopSequenceBuffer(sampling_params, tokenizer, prompt_ids, parser)
+            buffer = buffers[req_id]
+            finish = FinishStatus(raw_finish.status)
+            matched = buffer.append(
+                metadata.get("id"),
+                text,
+                (req_id, metadata, finish),
+                simulated=finish.is_error_finished() or metadata.get("id") is None,
+            )
+            if matched:
+                finish.status = FinishStatus.FINISHED_STOP
+                if not raw_finish.is_finished() and on_stop is not None:
+                    await on_stop(req_id)
+            if finish.is_finished():
+                buffer.flush()
+                finished_ids.add(req_id)
+            while buffer.ready_tokens:
+                output_text, (output_id, output_metadata, output_finish) = buffer.ready_tokens.popleft()
+                yield output_id, output_text, output_metadata, output_finish
+            if req_id in finished_ids:
+                del buffers[req_id]
+                if len(finished_ids) == sampling_params.n:
+                    break

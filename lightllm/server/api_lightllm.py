@@ -3,6 +3,7 @@ from typing import AsyncGenerator
 from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response
 from lightllm.server.core.objs.sampling_params import SamplingParams
+from .generation import generate_with_stop
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .api_stream_obj import CustomStreamingResponse
@@ -18,7 +19,7 @@ async def lightllm_get_score(request: Request, httpserver_manager: HttpServerMan
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
-    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
+    results_generator = generate_with_stop(httpserver_manager, prompt, sampling_params, multimodal_params, request)
 
     ret = {}
     # n === 1
@@ -45,7 +46,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
 
-    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
+    results_generator = generate_with_stop(httpserver_manager, prompt, sampling_params, multimodal_params, request)
 
     # Non-streaming case
     final_output_dict = collections.defaultdict(list)
@@ -130,7 +131,7 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
 
     multimodal_params_dict = request_dict.get("multimodal_params", {})
     multimodal_params = MultimodalParams(**multimodal_params_dict)
-    results_generator = httpserver_manager.generate(prompt, sampling_params, multimodal_params, request=request)
+    results_generator = generate_with_stop(httpserver_manager, prompt, sampling_params, multimodal_params, request)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
