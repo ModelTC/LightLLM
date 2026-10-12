@@ -378,9 +378,7 @@ class SamplingParams(ctypes.Structure):
         self.guided_grammar.initialize(guided_grammar, tokenizer)
 
         # Initialize guided_json
-        guided_json = kwargs.get("guided_json")
-        if guided_json is None:
-            guided_json = ""
+        guided_json = kwargs.get("guided_json", "")
         self.guided_json = GuidedJsonSchema()
         self.guided_json.initialize(guided_json, tokenizer)
 
