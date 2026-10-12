@@ -137,3 +137,54 @@ LightLLM 使用三项优化后的 `1527fd44`；vLLM 使用此前 0.31.0 的 `hot
 128 并发 TPOT 已接近 vLLM，单轮略低不足以证明稳定领先；512 并发仍有约 14.4% 的 TPOT 差距。LightLLM 整轮 output TPS 较高，同时 TTFT 较低；吞吐包含 P 供给、准入/排队和尾部耗时，不能据此断言纯 decode GPU 更快。两边 cache 预热历史和粒度不同：usage 报告的平均 cached tokens 为 vLLM 两档均 16383，LightLLM 分别为 16128、15981；没有把整个运行窗口或缓存状态视为完全一致。优化后尚未复测 64K，因此本表只列本次有实际结果的 16K 两档。
 
 可复核原始数据：`/mnt/vqa/wanzihao/bench-logs/pd-tpot-comparison-20261010/vllm/controlled/hot-16k-c{128,512}-1011/{case,summary,requests}.json` 与本轮 `controlled/after-16k-c{128,512}-stage1/`；派生对比保存于 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/current-vs-vllm-results.json`。
+
+## 512 并发补采：实际 batch 与剩余差距
+
+应用户要求在现有优化后服务补采，没有重启、修改启动参数或开启 microbatch。沿用 vLLM 归档的 512 条 16K token IDs，每请求输出 4096；先用 8-token 回放预热，再等待至少 504 请求收到首个输出，确认全部 8 rank 的 backend profiler 开始，发出停止命令并保存全部 8 rank trace。采集请求 512/512 成功。
+
+此前提到的平均约 410/274，是按时间加权的客户端“收到首个输出、尚未完成”请求数，不是 GPU batch，不能直接作为 TPOT 差距的归因。现在的 trace 证据如下：
+
+| 实际执行指标 | vLLM 归档窗口 | 当前 LightLLM 稳定窗口 |
+|---|---:|---:|
+| 总请求 batch | 504 | 512 |
+| 每 rank 请求 batch | 60–64 | 全部 64 |
+| 每 rank 平均序列长（8-rank 均值） | 17541.6 | 17293.2 |
+| 分析的内部周期数 / rank | 53 | 38 |
+
+batch 只差 1.59%，LightLLM 序列还短 1.42%；这些是接近的执行窗口，并非精确同 batch/同输出序列的 A/B。它们不支持此前用 410/274 解释“大幅 batch 差异”。
+
+LightLLM 的 all-thread trace 还覆盖了 profiler 初始化期间的推理，因此额外按 `baseTimeNanoseconds` 对齐 epoch 时间，仅保留全 rank backend 开始确认后 150 ms 至 stop ACK 前 150 ms，再去除首尾各 5 个周期。确认窗口为 `[1791784872.492364, 1791784874.925029]`；8 rank 均保留 38 个内部周期。完整跨度的原分析单独保存在 `trace-analysis-full-span.json` 与 `*-full-span.json`，不替代下表。vLLM 使用原已归档的内部稳定周期分析。
+
+以下为 8-rank 均值，单位 ms/周期；GPU 项使用区间并集。不同分类有重叠，不能直接相加为壁钟时间；CPU execute 起点间隔也不是纯 CPU 计算时间。
+
+| 指标 | vLLM | 当前 LightLLM | LightLLM − vLLM |
+|---|---:|---:|---:|
+| target verification GPU | 36.5560 | 40.4074 | +3.8515 |
+| draft/DSpark GPU | 2.7851 | 3.2518 | +0.4667 |
+| GPU busy 区间并集 | 40.2090 | 44.3043 | +4.0953 |
+| CPU execute 起点间隔 | 43.4372 | 49.4596 | +6.0225 |
+| 辅助 kernel：量化/索引/mHC/采样等 | 6.2204 | 9.1198 | +2.8994 |
+| expert 通信与 collectives | 9.3058 | 10.1811 | +0.8753 |
+| dense/indexer 等其他 GEMM | 8.5908 | 9.1380 | +0.5472 |
+| DeepGEMM grouped masked expert GEMM | 13.0378 | 12.3863 | -0.6515 |
+| attention | 3.6059 | 3.4066 | -0.1993 |
+
+target GPU 高 10.54%，周期起点间隔高 13.86%；GPU 空闲占比为 7.43%→10.42%。剩余差距确实包含执行与同步/调度等待，不能都归给转发，也不能仅根据 GPU 空闲推断具体 CPU 函数耗时。最大的已测 GPU 分类差额在辅助 kernel，expert GEMM 和 attention 本身并未更慢。
+
+进一步从原始 trace 提取完整 kernel 家族，仍使用相同内部窗口。下表是 kernel duration 的和 / 周期，不是壁钟区间并集；独立 kernel 分类不包括融合到其他 kernel 中的同类工作。
+
+| 独立 kernel 家族 | vLLM 调用数/周期 | LightLLM 调用数/周期 | vLLM (ms/周期) | LightLLM (ms/周期) |
+|---|---:|---:|---:|---:|
+| PyTorch `direct_copy_kernel_cuda` | 9.00 | 105.00 | 0.0211 | 1.6312 |
+| per-token FP8 quant | 253.12 | 253.03 | 0.8720 | 1.3809 |
+| PyTorch reduction | 6.00 | 7.00 | 0.1421 | 0.4277 |
+| mHC pre | 91.04 | 92.00 | 0.5673 | 0.5523 |
+| mHC post | 94.04 | 94.00 | 0.5995 | 0.5939 |
+
+独立 GPU copy 多出约 1.61 ms/周期，独立量化多约 0.51 ms；mHC 本身相近。下一步应追踪这些 copy 的生产者/消费者和目标 buffer，确认哪些可以直接写入或融合，并比较量化 kernel；不能仅凭 kernel 名称就直接删除拷贝。通信、draft 和同步等待仍有差额，本次尚未对这些剩余项实施新优化。
+
+采集期间客户端 TPOT 16.1448 ms 含 profiler/export 开销，排除出正常测速。采集后的额外 unprofiled 回放也为 512/512 成功，TPOT 11.7391 ms、整轮 output TPS 33452.9，作为另一窗口参考；保留前述主表 11.2567 ms，不择优替换，也不把单轮差异当统计置信区间。
+
+全部 profiler 已停止，D running=0；1P1D 健康，外部文本/真实 image_url 请求仍为 HTTP 200、`2`/`Red`。P/master 44 个、D 27 个长驻进程 nofile 均为 1048576，采样最大 FD 370/433；无新增 HTTP 500、CUDA/NCCL/WRITE-task 错误，cgroup OOM 为 0。
+
+原始日志与结果均在 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/`：`profile512-supplement1.log`、`controlled/profile-16k-c512-after1-1012-supplement1/`（原始 trace inventory、capture events、稳定与完整跨度分析）、`paired-512-supplement1.json`、`profile512-kernel-families.json`、`controlled/hot-16k-c512-after1-1012-supplement1/`、`profile512-final-{p,d}-validation.json` 与 `profile512-final-smoke.json`。
