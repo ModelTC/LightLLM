@@ -26,7 +26,7 @@ class LayerCache:
         self.device = device
         if shm_name is not None:
             assert device == "cpu" and size_first
-            self.share_memory(shm_name, size, shm_create)
+            self.init_share_memory(shm_name, size, shm_create)
         elif not self.size_first:
             if device == "cpu":
                 self.buffer = torch.zeros((self.layer_num, size, *shape), dtype=dtype, device="cpu", pin_memory=True)
@@ -41,7 +41,7 @@ class LayerCache:
     def get_cell_size(self):
         return np.prod(self.shape) * self.layer_num * torch._utils._element_size(self.dtype)
 
-    def share_memory(self, name: str, size: int, create: bool):
+    def init_share_memory(self, name: str, size: int, create: bool):
         """Service-owned, CUDA-mapped CPU storage, attached separately in each DP process."""
         import ctypes
         from lightllm.utils.shm_utils import create_or_link_shm
