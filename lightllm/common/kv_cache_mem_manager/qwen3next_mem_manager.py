@@ -1,8 +1,10 @@
 import torch
+import torch.distributed as dist
 import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.dist_utils import create_new_group_for_current_node, get_dp_rank_in_node, get_current_rank_in_dp
 from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManager
 from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
@@ -45,20 +47,55 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def _init_linear_att_buffers(self):
-        big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
+        args = get_env_start_args()
+        big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         # 申请大页可能需要对应的资源, 多申请了两个linear att的状态，理论上这个状态
         # 永远不会被 alloc 申请到，只会在 cpu cache中，用于过渡和存储碎页情况下的
         # cpu cache 的页面拷贝。
-        self.big_page_buffers = LinearAttCacheManager(
-            size=triton.cdiv(self.size, big_page_token_num) + 2,
-            linear_config=self.linear_config,
-            keep_num=2,
-        )
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        per_dp_keep_num = 2
+        size = (triton.cdiv(self.size, big_page_token_num) + per_dp_keep_num) * dp_size_in_node
+        keep_num = per_dp_keep_num * dp_size_in_node
+        dp_rank_in_node = 0
+        if dp_size_in_node == 1:
+            self.big_page_buffers = LinearAttCacheManager(
+                size=size,
+                linear_config=self.linear_config,
+                keep_num=keep_num,
+            )
+        else:
+            dp_rank_in_node = get_dp_rank_in_node()
+            shm_name = f"dp_big_checkpoints_tp_{get_current_rank_in_dp()}"
+            group = create_new_group_for_current_node("gloo")
 
-        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
-        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
+            # DP0 创建并初始化每个 TP shard 的共享池。
+            if dp_rank_in_node == 0:
+                self.big_page_buffers = LinearAttCacheManager(
+                    size=size,
+                    linear_config=self.linear_config,
+                    keep_num=keep_num,
+                    shm_name=shm_name,
+                    shm_create=True,
+                )
+
+            # 所有 DP 等共享池创建完成，再连接。
+            dist.barrier(group=group)
+
+            # 其余 DP 连接已创建的共享池；构造返回时本进程已可使用。
+            if dp_rank_in_node != 0:
+                self.big_page_buffers = LinearAttCacheManager(
+                    size=size,
+                    linear_config=self.linear_config,
+                    keep_num=keep_num,
+                    shm_name=shm_name,
+                    shm_create=False,
+                )
+
+            # 所有 DP 连接完共享锁后，才允许使用 checkpoint 池。
+            dist.barrier(group=group)
+
+        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = size - keep_num + dp_rank_in_node * per_dp_keep_num
+        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID + 1
         return
 
     def _free_buffers(self):
