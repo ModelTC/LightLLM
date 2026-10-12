@@ -1210,7 +1210,7 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
 
 
 def _convert_openai_finish_status(finish_status, sub_req_id):
-    if finish_status.get_finish_reason() == "abort":
+    if finish_status.status == FinishStatus.FINISHED_ABORTED:
         # TODO: OpenAI 响应模型暂不接受 abort，先映射为 stop；后续统一取消与应用侧 stop 的对外语义。
         logger.info(f"OpenAI maps finish_reason=abort to stop for compatibility, sub_req_id={sub_req_id}")
         return FinishStatus(FinishStatus.FINISHED_STOP)

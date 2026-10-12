@@ -33,6 +33,7 @@ class _FinishStatus:
     def __init__(self, finished=False, reason=None):
         self.finished = finished
         self.reason = reason
+        self.status = FinishStatus.FINISHED_LENGTH if finished else FinishStatus.NO_FINISH
 
     def is_finished(self):
         return self.finished
