@@ -1006,39 +1006,75 @@ async def _handle_streaming_completion(
         completion_tokens = 0
         cached_tokens = 0
 
-        async for sub_req_id, request_output, metadata, finish_status in results_generator:
-            group_request_id = convert_sub_id_to_group_id(sub_req_id)
-            choice_index = sub_req_id - group_request_id
-            prompt_tokens = metadata["prompt_tokens"]
-            cached_tokens = metadata.get("prompt_cache_len", 0)
-            completion_tokens += 1
-            current_finish_reason = None
-            if finish_status.is_finished():
-                current_finish_reason = finish_status.get_finish_reason()
+        pending_choices = {}
+        pending_tokens = 0
+        pending_chars = 0
+        emitted_choices = set()
 
-            output_text = request_output
-            if request.echo and metadata.get("is_first_token", False):
-                prompt_str = prompt
-                if isinstance(prompt, list):
-                    prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
-                output_text = prompt_str + output_text
-
+        def pop_pending_chunk():
+            nonlocal pending_tokens, pending_chars
             stream_resp = {
                 "id": str(group_request_id),
                 "object": "text_completion",
                 "created": created_time,
                 "model": request.model,
-                "choices": [
-                    {
+                "choices": list(pending_choices.values()),
+                "usage": None,
+            }
+            pending_choices.clear()
+            pending_tokens = 0
+            pending_chars = 0
+            return f"data: {json.dumps(stream_resp, ensure_ascii=False)}\n\n"
+
+        try:
+            async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                group_request_id = convert_sub_id_to_group_id(sub_req_id)
+                choice_index = sub_req_id - group_request_id
+                prompt_tokens = metadata["prompt_tokens"]
+                cached_tokens = metadata.get("prompt_cache_len", 0)
+                completion_tokens += 1
+                current_finish_reason = None
+                if finish_status.is_finished():
+                    current_finish_reason = finish_status.get_finish_reason()
+
+                output_text = request_output
+                if request.echo and metadata.get("is_first_token", False):
+                    prompt_str = prompt
+                    if isinstance(prompt, list):
+                        prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
+                    output_text = prompt_str + output_text
+
+                if choice_index not in pending_choices:
+                    pending_choices[choice_index] = {
                         "text": output_text,
                         "index": int(choice_index),
                         "logprobs": None if request.logprobs is None else {},
                         "finish_reason": current_finish_reason,
                     }
-                ],
-                "usage": None,
-            }
-            yield f"data: {json.dumps(stream_resp, ensure_ascii=False)}\n\n"
+                else:
+                    choice = pending_choices[choice_index]
+                    choice["text"] += output_text
+                    choice["finish_reason"] = current_finish_reason
+                pending_tokens += 1
+                pending_chars += len(output_text)
+                is_first_chunk = choice_index not in emitted_choices
+                emitted_choices.add(choice_index)
+                if (
+                    is_first_chunk
+                    or metadata.pop("_pd_stream_batch_end", True)
+                    or current_finish_reason is not None
+                    or pending_tokens >= 32
+                    or pending_chars >= 64 * 1024
+                ):
+                    yield pop_pending_chunk()
+
+        except Exception:
+            if pending_choices:
+                yield pop_pending_chunk()
+            raise
+
+        if pending_choices:
+            yield pop_pending_chunk()
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
