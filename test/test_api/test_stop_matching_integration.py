@@ -165,8 +165,8 @@ def test_prompt_marker_pretransition_only_applies_to_content(server_url, force, 
     prompt = "<|im_start|>user\nWhat is 2 + 3? Think briefly.<|im_end|>\n<|im_start|>assistant\n" + marker
     params = {"max_new_tokens": 80, "skip_special_tokens": False, "_initial_reasoning_state": force}
     baseline = _native(server_url, params, prompt)
-    stop_text = "".join(token["text"] for token in baseline["tokens"][:3])
-    assert stop_text and "</think>" not in stop_text
+    # 模型可能立刻结束思考；只取首个非空 token，验证它是否受初始阶段保护。
+    stop_text = next(token["text"] for token in baseline["tokens"] if token["text"])
     result = _native(server_url, {**params, "str_stop_match_mode": 2, "stop_sequences": stop_text}, prompt)
     if in_reasoning:
         assert result["generated_text"][0].startswith(stop_text)
