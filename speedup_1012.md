@@ -122,3 +122,18 @@ kernel 分类中的非 GEMM/attention 部分为 6.8851→5.3146 ms，通信为 6
 | 16K / 512 | 15.4485 | 13.0199 | 12.4207 | 11.2567 | 27.13% | 26,730.2 → 34,971.9 | 30.83% |
 
 每阶段正式测速共 640/640 请求成功，profiler 关闭，decode microbatch 始终关闭。上述吞吐是整轮均值，与原始 LLM Bench 的不同输出长度、采样、视觉输入和 Peak TPS 口径不能直接等同；本次没有重新运行平台任务。
+
+## 当前 LightLLM 与 vLLM 对比
+
+LightLLM 使用三项优化后的 `1527fd44`；vLLM 使用此前 0.31.0 的 `hot-16k-c{128,512}-1011` 归档，本次未切换服务重测 vLLM。两边是同一套自定义检查点、同一组原始 token IDs（已核对解压后的 prompts 文件 SHA256 相同），16K 输入、每请求固定 4096 输出、temperature=0、ignore_eos=true，profiler 均关闭；使用同两台 8×H100 的 1P1D 服务。以下为预热前缀后的受控文本回放，前后各一轮。
+
+| 输入/并发 | vLLM TPOT (ms) | 当前 LightLLM TPOT (ms) | LightLLM TPOT 相对差异 | vLLM output TPS | 当前 LightLLM output TPS | LightLLM TPS 相对差异 |
+|---|---:|---:|---:|---:|---:|---:|
+| 16K / 128 | 7.2066 | 7.0181 | -2.62% | 12,264.4 | 16,295.3 | +32.87% |
+| 16K / 512 | 9.8407 | 11.2567 | +14.39% | 26,675.9 | 34,971.9 | +31.10% |
+
+相对差异为 `(LightLLM / vLLM − 1) × 100%`；TPOT 越低越好，TPS 越高越好。两边均 128/128、512/512 成功。TTFT 均值（vLLM→当前 LightLLM）为 4215.5→2536.6 ms、17737.0→10114.2 ms。
+
+128 并发 TPOT 已接近 vLLM，单轮略低不足以证明稳定领先；512 并发仍有约 14.4% 的 TPOT 差距。LightLLM 整轮 output TPS 较高，同时 TTFT 较低；吞吐包含 P 供给、准入/排队和尾部耗时，不能据此断言纯 decode GPU 更快。两边 cache 预热历史和粒度不同：usage 报告的平均 cached tokens 为 vLLM 两档均 16383，LightLLM 分别为 16128、15981；没有把整个运行窗口或缓存状态视为完全一致。优化后尚未复测 64K，因此本表只列本次有实际结果的 16K 两档。
+
+可复核原始数据：`/mnt/vqa/wanzihao/bench-logs/pd-tpot-comparison-20261010/vllm/controlled/hot-16k-c{128,512}-1011/{case,summary,requests}.json` 与本轮 `controlled/after-16k-c{128,512}-stage1/`；派生对比保存于 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/current-vs-vllm-results.json`。
