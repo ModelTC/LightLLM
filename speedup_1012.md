@@ -258,3 +258,57 @@ TTFT 均值为 2471.7→2875.2 ms、10422.5→10455.5 ms。采集后的额外 un
 profile 512/512 成功、8 trace 保存、16 个线程 profiler 开始/停止事件匹配；客户端 profile 延迟不进入主表。部署后的内部与外部文本/真实 image_url 请求均 HTTP 200、`2`/`Red`；1P1D 健康，D 27 个长驻进程 nofile 均 1048576，启动后采样最大 FD 417，无新 CUDA/NCCL/OOM/HTTP 500/WRITE-task 错误。
 
 数据：`o-proj-normal-results.json`、`o-proj-gpu-summary.json`、`controlled/{baseline,after}-16k-c{128,512}-o-proj-validate1/`、`controlled/profile-16k-c512-o-proj-validate1/`、`o-proj-unit-tests.log`、`o-proj-final-validation.json`、`o-proj-final-smoke.json`，均在本轮日志目录。本项单独提交后，再验证量化粒度。
+
+## 普通 UE8M0 量化 CTA 粒度：服务验证
+
+在输出投影提交 `51fc373f` 上单独实施第二项。复用原量化 kernel：仅在 `COPY_TOPK=False`、UE8M0 scale、group_size=128、总组数 M≥2048 时选 8 groups/CTA 和 4 warps；小输入、非 UE8M0 与 Mega 分支保持原选择。没有切换 SGL backend、scale 格式、eps、dtype 或量化 rounding。
+
+新增 GPU 回归覆盖 1/63/64/129/256/8192 行的 4096 维输入，以及 171×1536、173×3840 的非整 CTA 尾组；包括零值和 1e-7 输入。逐字节比对原 1-group kernel 的 FP8 与 FP32 scale，并验证输出 sentinel 未被覆盖。首次连同现有回归共 58 项通过；补充尾组后量化 8 项全部通过，合计覆盖 60 个不同用例；black/flake8 通过。
+
+完整停止旧 D 的 PGID 82025、确认 GPU context 清空后，原 launcher/config 启动新 D PGID 98542，runtime 为 `runtime-quant-validate1`。P/master 保持运行。权重、MTP、cache、batch、graph、Microbatch、GPU clock 与上一项相同，未更换镜像或依赖。
+
+主表使用上一项的正式 after 作为量化 before，保留量化部署后的第一轮正式 after；相同归档 token IDs，16K 输入、预热前缀、每请求 4096 输出，profiler 关闭，640/640 全部成功：
+
+| 输入/并发 | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---:|---:|---:|---:|
+| 16K / 128 | 6.9691 → 6.7898 | 2.57% | 15,982.5 → 16,791.3 | 5.06% |
+| 16K / 512 | 11.1036 → 11.4263 | -2.91% | 34,560.2 → 31,965.8 | -7.51% |
+
+TTFT 均值为 2875.2→2509.4 ms、10455.5→9946.2 ms。512 第一轮较慢，不能列为端到端加速。采集后的额外回放与再次独立回放如下，均 512/512 成功、profiler 关闭；不择优替换主表：
+
+| 512 回放窗口 | TPOT (ms) | output TPS | TTFT (ms) |
+|---|---:|---:|---:|
+| 量化前，O-proj 后额外回放 | 11.1649 | 34,412.9 | 10864.6 |
+| 量化后，采集后额外回放 | 11.2787 | 33,995.6 | 11497.6 |
+| 量化后，再次回放 | 11.2167 | 34,399.9 | 11144.7 |
+
+512 改后两次额外窗口与改前相近，但尚无稳定端到端收益证据；正式第一轮的退化也保留。MTP 指标的逐请求平均 tokens/step 为主表 3.9862→3.9821，额外窗口约 3.9874–3.9895，不能用明显不同的 MTP 接收解释这项变化；这不是按总验证次数加权的精确接收率。
+
+512 profile 两边实际 batch 均为 512、每 rank 64；平均序列长 17331.8→17505.1，差 1.00%，8 rank 各取 36→35 个内部稳定周期。按全 backend 启动确认后 150 ms、stop ACK 前 150 ms 裁剪，并去掉首尾 5 周期。下表为 8-rank 均值，GPU 项为区间并集；独立量化项是 kernel duration 和，不能直接等同壁钟节省：
+
+| 指标 (ms/周期) | 量化前 | 量化后 |
+|---|---:|---:|
+| 独立 FP8 quant kernel duration 和 | 1.3855 | 0.5993 |
+| target verification GPU | 38.5766 | 37.9091 |
+| draft/DSpark GPU | 3.1861 | 3.1432 |
+| GPU busy 区间并集 | 42.4078 | 41.6817 |
+| 辅助 kernel 区间并集 | 7.9316 | 7.1409 |
+| CPU execute 起点间隔 | 46.7683 | 46.7401 |
+| 全部 rank 同时空闲时间 / 等效周期 | 1.8344 | 2.3678 |
+
+量化调用数仍约 253 次/周期，实际量化 kernel 时长减少 **56.75% / 0.7862 ms**，GPU busy 少约 0.7261 ms，但执行周期几乎不变；共同窗口的全 rank 同时空闲占比 3.92%→5.07%。这是该短窗口中 GPU 节省未转化为周期收益的直接证据，尚不能定位到某个 CPU 函数或调度策略，也不能证明新增空闲由量化改动引起。保留此项为数值一致、实际 kernel 更快的优化；**不计为 512 并发端到端加速**。
+
+profile 512/512 成功，保存 8 rank trace，16 个线程 profiler start/stop 匹配。采集时出现 8 条 Kineto `External init callback must run in same thread as registerClient` 诊断，单独保存在资源检查记录，不把它们当正常测速；profile 客户端延迟仍排除。最终外部文本/真实 image_url 请求均 HTTP 200、`2`/`Red`，注册 1P/1D；P/master 44 个、D 27 个长驻进程 nofile 均 1048576，最终采样最大 FD 370/433，cgroup OOM 为 0。量化 D 启动后无运行错误；master 在停止旧 D 时的 WebSocketDisconnect 保留在历史日志，不混入新服务测速窗口。
+
+新增证据均在本轮日志目录：`quant-normal-results.json`、`quant-gpu-summary.json`、`quant-comparison-global-idle.json`、`quant-validation.log`、`quant-repeat512.log`、`quant-unit-tests.log`、`quant-edge-unit-tests.log`、`quant-decode-launch.json`、`quant-final-{p,d}-validation.json`、`quant-final-smoke.json`，以及 `controlled/{after,profile,hot,repeat}-16k-c*-quant-validate1/` 对应目录。
+
+## 本次验证后与 vLLM 的对比
+
+LightLLM 为三项原优化 + O-projection + 量化 CTA 改动后的当前服务；vLLM 仍使用前述 0.31.0 的归档 hot 回放，没有切换机器重测。以下保留本次量化正式第一轮，指标定义、模型、16K token IDs、4096 输出、warm-prefix 与前述对比一致；不同引擎 cache 粒度和供给时序仍有差异。128/512 两档均全部成功。
+
+| 输入/并发 | vLLM TPOT (ms) | 当前 LightLLM TPOT (ms) | LightLLM TPOT 相对差异 | vLLM output TPS | 当前 LightLLM output TPS | LightLLM TPS 相对差异 |
+|---|---:|---:|---:|---:|---:|---:|
+| 16K / 128 | 7.2066 | 6.7898 | -5.78% | 12,264.4 | 16,791.3 | +36.91% |
+| 16K / 512 | 9.8407 | 11.4263 | +16.11% | 26,675.9 | 31,965.8 | +19.83% |
+
+当前 512 的其他无 profiler 窗口为 11.2787/11.2167 ms，相对归档 vLLM 仍约高 14%；不能认为差距已消除。O-projection 的 92 次布局 copy 已验证消失，量化 kernel 也已加速；剩余周期差距需继续追踪等待、通信和其他执行路径。整轮 output TPS 包含 P 供给与尾部，仍不代表纯 decode GPU 比 vLLM 更快。

@@ -140,6 +140,8 @@ def lightllm_per_token_group_quant_fp8(
         num_topk = topk_row_stride = topk_out_row_stride = 0
     # Large Mega inputs otherwise launch one CTA per 128-element group.
     groups_per_cta = 16 if copy_topk and M >= 4096 else 1
+    if not copy_topk and use_ue8m0_scales and group_size == 128 and M >= 2048:
+        groups_per_cta = 8
     if groups_per_cta > 1:
         num_warps = 4
     _per_token_group_quant_fp8[(triton.cdiv(M, groups_per_cta),)](
