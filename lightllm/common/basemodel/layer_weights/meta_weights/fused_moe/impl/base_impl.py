@@ -8,6 +8,8 @@ from lightllm.common.quantization.quantize_method import (
 
 
 class FuseMoeBaseImpl(ABC):
+    supports_decode_shared_expert_overlap = False
+
     def __init__(
         self,
         n_routed_experts: int,

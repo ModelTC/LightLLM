@@ -210,10 +210,14 @@ class FusedMoeWeight(BaseWeightTpl):
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
         logical_topk_ids: Optional[torch.Tensor] = None,
+        shared_expert_func=None,
     ) -> torch.Tensor:
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
             moe_capture_callback(logical_topk_ids if logical_topk_ids is not None else topk_ids)
+        kwargs = {}
+        if shared_expert_func is not None:
+            kwargs["shared_expert_func"] = shared_expert_func
         return self.fuse_moe_impl._fused_experts(
             input_tensor=input_tensor,
             w13=self.w13,
@@ -223,6 +227,7 @@ class FusedMoeWeight(BaseWeightTpl):
             is_prefill=is_prefill,
             clamp_limit=clamp_limit,
             alloc_tensor_func=alloc_tensor_func,
+            **kwargs,
         )
 
     def low_latency_dispatch(

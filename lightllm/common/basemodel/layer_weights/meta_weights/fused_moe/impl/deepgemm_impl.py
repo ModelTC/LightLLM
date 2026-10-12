@@ -1,5 +1,6 @@
 import torch
-from typing import Optional, Tuple, Any
+import triton
+from typing import Optional, Tuple, Any, Callable
 from .base_impl import FuseMoeBaseImpl
 from ..expert_parallel_state import ExpertParallelState
 from lightllm.distributed import dist_group_manager
@@ -14,6 +15,8 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     masked_group_gemm,
     chunked_expanded_moe_forward,
     quantize_fused_experts_input,
+    use_mega_moe,
+    check_ep_expert_dtype,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
@@ -26,6 +29,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.eplb = expert_parallel_state.eplb
         self.ep_balance_counters = None
         self._primary_weight_pack_cache = {}
+        self.supports_decode_shared_expert_overlap = not use_mega_moe(self.quant_method)
 
     def low_latency_dispatch(
         self,
@@ -165,6 +169,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         dtype: torch.dtype,
         expected_m: int,
         clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
         w13_weight, w13_scale = w13.weight, w13.weight_scale
@@ -179,6 +184,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             w2_scale,
             expected_m=expected_m,
             clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
         )
 
     def prefilled_group_gemm(
@@ -339,7 +345,36 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
     ):
+        if shared_expert_func is not None:
+            assert is_prefill is False and self.supports_decode_shared_expert_overlap
+            check_ep_expert_dtype(self.quant_method)
+            recv_x, masked_m, topk_ids, topk_weights, handle, dispatch_hook = self.low_latency_dispatch_with_topk(
+                input_tensor, topk_ids, topk_weights
+            )
+            dispatch_hook()
+            expected_m = triton.cdiv(
+                input_tensor.shape[0] * dist_group_manager.ep_low_latency_buffer.group_size * topk_ids.shape[1],
+                self.n_routed_experts,
+            )
+            gemm_out = self.masked_group_gemm(
+                recv_x,
+                w13,
+                w2,
+                masked_m,
+                input_tensor.dtype,
+                expected_m,
+                clamp_limit=clamp_limit,
+                alloc_tensor_func=alloc_tensor_func,
+            )
+            routed, combine_hook = self.low_latency_combine(gemm_out, topk_ids, topk_weights, handle)
+            # This backend preserves input_tensor; shared compute can run while
+            # the combine send is in flight, before enqueuing its receive hook.
+            shared = shared_expert_func()
+            combine_hook()
+            return routed + shared
+
         if is_prefill is False:
             w13 = self._primary_weight_pack(w13)
             w2 = self._primary_weight_pack(w2)

@@ -543,6 +543,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         logical_topk_ids,
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
+        shared_expert_func=None,
     ):
         return layer_weight.experts_.experts_with_topk(
             input_tensor=x,
@@ -553,6 +554,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             infer_state=infer_state,
             clamp_limit=float(self.swiglu_limit),
             alloc_tensor_func=self.alloc_tensor,
+            shared_expert_func=shared_expert_func,
         )
 
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
@@ -575,6 +577,16 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         weights, indices, logical_topk_ids = self._select_experts(
             logits, infer_state, layer_weight, return_logical_ids=need_logical_ids
         )
+        if not infer_state.is_prefill and layer_weight.experts_.fuse_moe_impl.supports_decode_shared_expert_overlap:
+            return self._routed_experts(
+                x,
+                weights,
+                indices,
+                logical_topk_ids,
+                infer_state,
+                layer_weight,
+                shared_expert_func=lambda: self._ffn_tp(x, infer_state, layer_weight),
+            )
         # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
         # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
         # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's

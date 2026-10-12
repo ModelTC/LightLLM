@@ -29,3 +29,35 @@
 TTFT 均值分别为 3028.2→2663.4 ms、11314.1→10532.4 ms，包含 P 供给和排队。前后均为各一轮；128 档变化很小，不能据此断言稳定提速。512 档文本 SSE 数量明显下降，高并发客户端 TPOT 与整轮吞吐改善。合并的是已经到达的输出，未增加等待凑批的定时器。
 
 测试后 master 健康并注册 1P/1D；P/master 44 个、D 27 个进程的 soft nofile 均为 1048576，采样最大 FD 370/643，cgroup OOM 为 0。CPU 采样辅助脚本因转义错误未运行，本项不提供 CPU 降幅结论。原始摘要：`stage3-results.json`；逐请求 usage、SSE、TTFT/TPOT：`controlled/{baseline-16k-c{128,512}-stage0,after-16k-c{128,512}-stage3}/`。
+
+本项提交：`da96b61a`。
+
+## ② 普通 decode 的 DeepEP/shared expert 重叠
+
+复用选中的 DeepGEMM 后端现有 low-latency dispatch、masked GEMM、combine 接口。普通 DS4 decode 顺序变为 `dispatch → dispatch recv hook → expert GEMM → combine send → shared expert → combine recv hook → routed+shared`。没有开启 microbatch，也没有新增 CUDA stream。对应 vLLM 的 `MK_INTERNAL_OVERLAPPED` 路径，其 shared expert 同样在当前 stream 执行；这项主要减少接收阶段的等待，不以不同 GPU kernel 并行执行为前提。
+
+支持能力由现有后端声明，MegaMoE 与会覆盖输入的 Triton 后端沿用原顺序；prefill 沿用原路径。expert ID 采集仍由 FusedMoeWeight 负责；保留 quant selector、EPLB primary weights、clamp 和调用方 tensor allocator。
+
+回归：新增 4 项验证 hook/读取顺序、后端选择、逻辑路由 ID 和 inplace 输入保护；与流式回归合计 10 项通过。实际 DeepEP API 为 `/opt/conda/lib/python3.10/site-packages/deep_ep/buffers/legacy.py`，dispatch/combine 均支持 `return_recv_hook`。停止完整 D 进程树后 GPU 进程列表为空，再按原 launcher 启动；8 rank CUDA Graph warmup 完成。外部文本/视觉 smoke 为 `2`、`Red`，HTTP 200；D 27 个进程 nofile 均为 1048576，启动后最大 FD 417，OOM 为 0。
+
+以下“前”是已包含③的版本，“后”是③+②。正式测速均在本轮 GPU profile 之前，profiler 关闭，前后各一轮。
+
+| 输入/并发 | 成功（前→后） | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---|---:|---:|---:|---:|
+| 16K / 128 | 128/128 → 128/128 | 8.1817 → 7.6108 | 6.98% | 13,900.8 → 15,342.5 | 10.37% |
+| 16K / 512 | 512/512 → 512/512 | 13.0199 → 12.4207 | 4.60% | 30,066.7 → 32,115.6 | 6.81% |
+
+128 并发的额外、同样关闭 profiler 的 post-profile 回放为 9.0468→8.1931 ms。它不替代主表，表明不同运行窗口有波动，不能把单轮差异当作统计置信区间。
+
+GPU profile 等待全部 8 个 backend 真正开始，截取内部稳定周期。前后实际请求均为 128（每 rank 16），平均序列长 17003.6→17202.8，相差 1.17%；以下时间为单 rank 区间并集的 8-rank 平均，不能把不同类别相加当作壁钟时间。
+
+| GPU 指标 | 前 (ms/周期) | 后 (ms/周期) | 降幅 |
+|---|---:|---:|---:|
+| target verification | 30.0472 | 28.8086 | 4.12% |
+| draft/DSpark | 2.1129 | 2.0724 | 1.92% |
+| expert 通信及 collectives | 7.5498 | 6.6296 | 12.19% |
+| GPU busy | 32.4570 | 31.1786 | 3.94% |
+
+跨类别 GPU kernel 重叠为 0.0665→0.0236 ms，没有显示更多 GPU kernel 并行；当前数据支持通信等待减少和 target 时间改善。profile 本身会增加开销，其客户端延迟不进入速度主表。
+
+原始数据：`stage2-normal-results.json`、`before2-gpu-summary.json`、`after2-gpu-summary.json`；`controlled/after-16k-c{128,512}-stage2/`；`controlled/profile-16k-c128-{before2,after2}/` 保存全部 8 rank trace 的 inventory/分析。启动与 smoke：`stage2-decode-launch.json`、`stage2-smoke.json`。
