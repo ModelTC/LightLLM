@@ -14,8 +14,8 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
         k, v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
-        k = self._reshape_storage_side_for_attention(k)
-        v = self._reshape_storage_side_for_attention(v)
+        k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
+        v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         use_sliding_window = self.sliding_window_ > 0
         # DFlash2 attention is non-causal, so its local window must retain both
@@ -33,26 +33,9 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         )
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
-    def _reshape_storage_side_for_attention(self, cache):
-        draft_width = self.tp_k_head_num_ * self.head_dim_
-        storage_width = cache.shape[1] * cache.shape[2]
-        assert draft_width == storage_width, (
-            "DFlash2 draft and target KV must have equal flat widths: "
-            f"draft=({self.tp_k_head_num_}, {self.head_dim_}), "
-            f"storage=({cache.shape[1]}, {cache.shape[2]})"
-        )
-        return cache.view(cache.shape[0], self.tp_k_head_num_, self.head_dim_)
-
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
         storage_head_num = infer_state.mem_manager.head_num
         storage_head_dim = infer_state.mem_manager.head_dim
-        draft_width = self.tp_k_head_num_ * self.head_dim_
-        storage_width = storage_head_num * storage_head_dim
-        assert draft_width == storage_width, (
-            "DFlash2 draft and target KV must have equal flat widths: "
-            f"draft=({self.tp_k_head_num_}, {self.head_dim_}), "
-            f"storage=({storage_head_num}, {storage_head_dim})"
-        )
         storage_kv = cache_kv.view(cache_kv.shape[0], 2 * storage_head_num, storage_head_dim)
         return super()._post_cache_kv(storage_kv, infer_state, layer_weight)
 

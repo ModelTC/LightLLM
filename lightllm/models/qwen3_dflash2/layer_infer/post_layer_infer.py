@@ -91,7 +91,7 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
         assert hidden.shape[:2] == (req_num, draft_width)
         assert unary.shape == candidate_ids.shape
 
-        candidate_hidden = hidden.reshape(req_num * draft_width, -1)
+        candidate_hidden = hidden.view(req_num * draft_width, -1)
         gate = layer_weight.selector_hidden_projection_weight_.mm(candidate_hidden)
         gate = gate.view(req_num, draft_width, -1)
 
