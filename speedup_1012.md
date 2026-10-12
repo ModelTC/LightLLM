@@ -61,3 +61,64 @@ GPU profile 等待全部 8 个 backend 真正开始，截取内部稳定周期�
 跨类别 GPU kernel 重叠为 0.0665→0.0236 ms，没有显示更多 GPU kernel 并行；当前数据支持通信等待减少和 target 时间改善。profile 本身会增加开销，其客户端延迟不进入速度主表。
 
 原始数据：`stage2-normal-results.json`、`before2-gpu-summary.json`、`after2-gpu-summary.json`；`controlled/after-16k-c{128,512}-stage2/`；`controlled/profile-16k-c128-{before2,after2}/` 保存全部 8 rank trace 的 inventory/分析。启动与 smoke：`stage2-decode-launch.json`、`stage2-smoke.json`。
+
+本项提交：`c261c747`。
+
+## ① C128 compressor：64 维分块与两阶段执行
+
+复用同一个 Triton compressor：C128 第一阶段以 64 维 tile、8 warps 计算 window softmax/weighted sum，写 FP32 scratch；第二阶段以完整 head、4 warps 完成原有 RMSNorm/RoPE/FP8 pack。C4/indexer 仍是原单阶段。scratch 由 DeepseekV4Workspace 按 microbatch slot 持有，infer_state 已有的 workspace 引用直接借用；没有新 backend、状态格式转换或每请求 scratch 分配。仍先完成压缩，再保存 partial state，保留环形 cache 的历史/当前输入与 MTP 语义。
+
+独立脚本：`test/benchmark/kernel/benchmark_dsv4_compressor.py`。根据实际 serving TTIR 使用 FP32 KV/score/state、BF16 norm、int32 positions/slots，模拟每 rank 16/24/32/64 请求 × 4 个验证 token，覆盖全部/单个/无 C128 边界、padding、C4 latent/indexer、129/512/8192 行 prefill。对照 `c261c747` 中的 compressor；每场景 3 轮 CUDA Graph + CUDA event 计时，包含 slot 计算、所有压缩阶段及 partial-state 保存，没有 Torch profiler。
+
+完整 21 场景通过。与 PyTorch FP32 softmax/weighted-sum oracle 的最大绝对误差 `2.98e-7`；partial-state 保存完全相同；C4/indexer 输出逐字节相同。C128 的 64 请求场景有 1 个、8192 行 prefill 有 4 个输出字节处于 FP8/BF16 舍入边界，scale 字节不变，解包值差异在 1 ULP 内；其余场景字节相同。这项保持 FP32 中间精度，但不能声称全部输出 bit-exact。
+
+| 场景 | 行数 | 完整 compressor 前 (µs) | 后 (µs) | 倍率 |
+|---|---:|---:|---:|---:|
+| 16 请求，全部跨 C128 边界 | 64 | 295.77 | 18.99 | 15.57× |
+| 16 请求，仅一个边界 | 64 | 228.16 | 16.90 | 13.50× |
+| 64 请求，全部跨 C128 边界 | 256 | 495.43 | 31.44 | 15.76× |
+| 64 请求，仅一个边界 | 256 | 229.11 | 19.05 | 12.03× |
+| 64 请求，没有边界 | 256 | 11.61 | 14.96 | 0.78× |
+| prefill | 512 | 312.06 | 23.04 | 13.55× |
+| prefill | 8192 | 720.11 | 113.87 | 6.32× |
+| C4 latent | 64 | 13.54 | 13.50 | 1.00× |
+| C4 indexer | 64 | 13.04 | 13.02 | 1.00× |
+
+无边界场景多一次 kernel launch，增加约 1.6–3.4 µs，不能将有边界的倍率外推为整模型速度。没有使用 GPU→CPU `.item()` 同步来判断运行时边界。
+
+实际 cubin 资源：原 C128 两类 `REG=32, STACK=18008/18192 bytes`；新第一阶段 `REG=88/86, STACK=0`，第二阶段 `REG=29, STACK=0`。旧 kernel 的寄存器 spill 已在对应 int32 特化中消除。
+
+原始数据：`kernel-c128-i32-clean/results.json`、`compiler-resources.json`、cubin/resource txt；模拟输入构造和源文件 SHA 随数据记录。初次以 int64 positions/slots 测试的旧特化只有约 10 KB 栈，保留为先行诊断，不替代上表。随后 int32 旧 kernel 与常驻 D 共用 GPU 时测试进程 OOM，该失败尝试排除；停止 D 并确认 GPU 清空后完成上表测试。
+
+本项部署同时重启 P/D。旧 P 停止后的 GPU/pinned memory 释放有延迟，等待全部旧 PID/GPU 资源消失；旧服务清理器自动移除已识别的 SysV shmid 1（4 GiB，creator 3300）和 2（约 1 TiB，creator 6978），没有手动删除未知或附着 segment。身份、进程、日志 key/shmid 和清理后证据保存于 `stage1-p-*`。
+
+正式服务测速均在本轮 GPU profile 之前完成；“前”为③+②，“后”为③+②+①。两档均每请求输出 4096 tokens，HTTP/usage 合约全部通过。
+
+| 输入/并发 | 成功（前→后） | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---|---:|---:|---:|---:|
+| 16K / 128 | 128/128 → 128/128 | 7.6108 → 7.0181 | 7.79% | 15,342.5 → 16,295.3 | 6.21% |
+| 16K / 512 | 512/512 → 512/512 | 12.4207 → 11.2567 | 9.37% | 32,115.6 → 34,971.9 | 8.89% |
+
+TTFT 均值为 2548.1→2536.6 ms、10592.8→10114.2 ms。P CPU cache 经重启重新建立，先完成各档相同前缀预热，再采集正式测量。原始数据：`stage1-normal-results.json`、`controlled/after-16k-c{128,512}-stage1/`。前后各一轮，不把变化解释为统计置信区间。
+
+8 rank profile 的实际请求均为 128（每 rank 16），平均序列长 17202.8→17200.1，相差 0.016%。以下是内部稳定周期的 8-rank 均值，profile 客户端延迟不进入上述正式速度表。
+
+| GPU 指标 | 前 (ms/周期) | 后 (ms/周期) | 降幅 |
+|---|---:|---:|---:|
+| target verification | 28.8086 | 25.9914 | 9.78% |
+| draft/DSpark | 2.0724 | 2.0737 | -0.06% |
+| GPU busy 区间并集 | 31.1786 | 28.3628 | 9.03% |
+| CPU execute 起点间隔 | 35.3032 | 32.3505 | 8.36% |
+
+kernel 分类中的非 GEMM/attention 部分为 6.8851→5.3146 ms，通信为 6.6296→5.3763 ms；通信数字包含跨 rank 等待，不把这次变化解释为又改了通信后端。profile 完成后额外 unprofiled 128 回放为 8.1931→7.4613 ms，同样只作另一运行窗口的参考。原始数据：`after2-gpu-summary.json`、`after1-gpu-summary.json`、`controlled/profile-16k-c128-after1/`，包含全部 rank 的 trace inventory、实际 batch/序列长度、分析与 profiler 开始/停止证据。
+
+最终服务仍为健康的 1P1D，所有 profiler 已停止。通过外部 `10.210.6.10:10418` 的文本/真实 image_url 请求分别返回 `2`、`Red`，HTTP 200；P/master 44 个、D 27 个进程 nofile 均为 1048576，采样最大 FD 370/433，cgroup OOM 为 0。P/D 日志无 CUDA/NCCL/HTTP 500/WRITE-task 错误；master 的两条历史 traceback 是 D 重启时 KV 状态 WebSocket 断开，均早于本项正式测速。证据：`final-smoke.json`、`final-{p,d}-validation.json`。服务使用 `runtime-stage1` P/D overlay 和 `runtime-stage3` master overlay，保留原 token-ID/profiler 兼容补丁，正式仓库只提交性能改动和独立测试脚本。
+
+## 三项累计服务结果
+
+| 输入/并发 | 起点 TPOT (ms) | ③后 | ③+②后 | ③+②+①后 | 累计 TPOT 降幅 | 起点→最终 output TPS | 累计 TPS 增幅 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 16K / 128 | 8.2967 | 8.1817 | 7.6108 | 7.0181 | 15.41% | 13,632.7 → 16,295.3 | 19.53% |
+| 16K / 512 | 15.4485 | 13.0199 | 12.4207 | 11.2567 | 27.13% | 26,730.2 → 34,971.9 | 30.83% |
+
+每阶段正式测速共 640/640 请求成功，profiler 关闭，decode microbatch 始终关闭。上述吞吐是整轮均值，与原始 LLM Bench 的不同输出长度、采样、视觉输入和 Peak TPS 口径不能直接等同；本次没有重新运行平台任务。

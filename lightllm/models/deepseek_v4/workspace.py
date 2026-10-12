@@ -142,6 +142,11 @@ class DeepseekV4Workspace:
         self.c4_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
         self.c128_indices = self._alloc(self.c128_cap)
         self.c128_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
+        self.c128_compress_scratch = torch.empty(
+            (self.microbatch_count, self.token_capacity, int(model.config["head_dim"])),
+            dtype=torch.float32,
+            device="cuda",
+        )
         self.flashmla_prefill_q = None
         self.flashmla_prefill_full_out = None
         self.flashmla_prefill_o_accum = None

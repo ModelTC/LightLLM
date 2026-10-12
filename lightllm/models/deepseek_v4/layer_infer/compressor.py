@@ -111,6 +111,7 @@ def _fused_compress_norm_rope_insert_kernel(
     sin_stride0,
     sin_stride1,
     out_buffer,
+    compress_scratch,
     HEAD_DIM: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
     STATE_LAST_DIM: tl.constexpr,
@@ -130,6 +131,8 @@ def _fused_compress_norm_rope_insert_kernel(
     BYTES_PER_PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
     IS_IN_INDEXER: tl.constexpr,
+    STORE_COMPRESSED: tl.constexpr,
+    LOAD_COMPRESSED: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     out_slot = tl.load(out_slots + token_idx).to(tl.int64)
@@ -140,82 +143,92 @@ def _fused_compress_norm_rope_insert_kernel(
     if (position + 1) % COMPRESS_RATIO != 0:
         return
 
-    batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
-    req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-    seq_len = tl.load(b_seq_len + batch_idx)
-    if IS_PREFILL:
-        ready_len = tl.load(b_ready_cache_len + batch_idx)
-        q_start = tl.load(b_q_start_loc + batch_idx)
-    else:
-        mtp_index = tl.load(b_mtp_index + batch_idx)
-        ready_len = position - mtp_index
-        q_start = token_idx - mtp_index
-
-    token_offsets = tl.arange(0, WINDOW_SIZE)
-    # position 11, start 4
-    start = position - WINDOW_SIZE + 1
-    # 最近的window个索引 [4, 5, 6, 7, 8, 9, 10, 11]
-    gather_pos = start + token_offsets
-    # 都在[0, 12)之间，valid [1, 1, 1, 1, 1, 1, 1, 1]
-    valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
-    # 新计算的mask ready_len=8 [0, 0, 0, 0, 1, 1, 1, 1]
-    use_current = (gather_pos >= ready_len) & valid_pos
-    # 现在的kvscore的索引 [-4, -3, -2, -1, 0, 1, 2, 3]
-    current_idx = q_start + (gather_pos - ready_len)
-    # cache的mask [1, 1, 1, 1, 0, 0, 0, 0]
-    valid_pos = valid_pos & (~use_current)
-    cache_pos = valid_pos
-
-    if IS_C4:
-        swa_page = tl.load(
-            req_to_swa_pages + req_idx * req_to_swa_stride0 + gather_pos // SWA_PAGE_SIZE,
-            mask=cache_pos,
-            other=-1,
-        ).to(tl.int64)
-        swa_slot = swa_page * SWA_PAGE_SIZE + gather_pos % SWA_PAGE_SIZE
-        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
-        state_valid = cache_pos & (swa_slot >= 0)
-        head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
-    else:
-        state_row = req_idx * STATE_RING + gather_pos % STATE_RING
-        state_valid = cache_pos
-        head_offset = token_offsets * 0
-
     offs = tl.arange(0, BLOCK)
+    if STORE_COMPRESSED:
+        offs += tl.program_id(1) * BLOCK
     dim_mask = offs < HEAD_DIM
-    current_mask = use_current[:, None] & dim_mask[None, :]
-    state_mask = state_valid[:, None] & dim_mask[None, :]
+    if LOAD_COMPRESSED:
+        compressed_kv = tl.load(compress_scratch + token_idx * HEAD_DIM + offs, mask=dim_mask, other=0.0)
+    else:
+        batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
+        req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
+        seq_len = tl.load(b_seq_len + batch_idx)
+        if IS_PREFILL:
+            ready_len = tl.load(b_ready_cache_len + batch_idx)
+            q_start = tl.load(b_q_start_loc + batch_idx)
+        else:
+            mtp_index = tl.load(b_mtp_index + batch_idx)
+            ready_len = position - mtp_index
+            q_start = token_idx - mtp_index
 
-    cur_ptrs = (
-        kv_score + current_idx[:, None] * kv_score_stride0 + (head_offset[:, None] + offs[None, :]) * kv_score_stride1
-    )
-    cur_kv = tl.load(
-        cur_ptrs,
-        mask=current_mask,
-        other=0.0,
-    )
-    cur_score = tl.load(
-        cur_ptrs + STATE_WIDTH * kv_score_stride1,
-        mask=current_mask,
-        other=float("-inf"),
-    )
+        token_offsets = tl.arange(0, WINDOW_SIZE)
+        # position 11, start 4
+        start = position - WINDOW_SIZE + 1
+        # 最近的window个索引 [4, 5, 6, 7, 8, 9, 10, 11]
+        gather_pos = start + token_offsets
+        # 都在[0, 12)之间，valid [1, 1, 1, 1, 1, 1, 1, 1]
+        valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
+        # 新计算的mask ready_len=8 [0, 0, 0, 0, 1, 1, 1, 1]
+        use_current = (gather_pos >= ready_len) & valid_pos
+        # 现在的kvscore的索引 [-4, -3, -2, -1, 0, 1, 2, 3]
+        current_idx = q_start + (gather_pos - ready_len)
+        # cache的mask [1, 1, 1, 1, 0, 0, 0, 0]
+        valid_pos = valid_pos & (~use_current)
+        cache_pos = valid_pos
 
-    state_ptrs = state_buffer + state_row[:, None] * STATE_LAST_DIM + head_offset[:, None] + offs[None, :]
-    state_kv = tl.load(
-        state_ptrs,
-        mask=state_mask,
-        other=0.0,
-    )
-    state_score = tl.load(
-        state_ptrs + STATE_WIDTH,
-        mask=state_mask,
-        other=float("-inf"),
-    )
+        if IS_C4:
+            swa_page = tl.load(
+                req_to_swa_pages + req_idx * req_to_swa_stride0 + gather_pos // SWA_PAGE_SIZE,
+                mask=cache_pos,
+                other=-1,
+            ).to(tl.int64)
+            swa_slot = swa_page * SWA_PAGE_SIZE + gather_pos % SWA_PAGE_SIZE
+            state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
+            state_valid = cache_pos & (swa_slot >= 0)
+            head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
+        else:
+            state_row = req_idx * STATE_RING + gather_pos % STATE_RING
+            state_valid = cache_pos
+            head_offset = token_offsets * 0
 
-    kv = tl.where(current_mask, cur_kv, state_kv)
-    score = tl.where(current_mask, cur_score, state_score)
-    score = tl.softmax(score, dim=0)
-    compressed_kv = tl.sum(kv * score, axis=0)
+        current_mask = use_current[:, None] & dim_mask[None, :]
+        state_mask = state_valid[:, None] & dim_mask[None, :]
+
+        cur_ptrs = (
+            kv_score
+            + current_idx[:, None] * kv_score_stride0
+            + (head_offset[:, None] + offs[None, :]) * kv_score_stride1
+        )
+        cur_kv = tl.load(
+            cur_ptrs,
+            mask=current_mask,
+            other=0.0,
+        )
+        cur_score = tl.load(
+            cur_ptrs + STATE_WIDTH * kv_score_stride1,
+            mask=current_mask,
+            other=float("-inf"),
+        )
+
+        state_ptrs = state_buffer + state_row[:, None] * STATE_LAST_DIM + head_offset[:, None] + offs[None, :]
+        state_kv = tl.load(
+            state_ptrs,
+            mask=state_mask,
+            other=0.0,
+        )
+        state_score = tl.load(
+            state_ptrs + STATE_WIDTH,
+            mask=state_mask,
+            other=float("-inf"),
+        )
+
+        kv = tl.where(current_mask, cur_kv, state_kv)
+        score = tl.where(current_mask, cur_score, state_score)
+        score = tl.softmax(score, dim=0)
+        compressed_kv = tl.sum(kv * score, axis=0)
+    if STORE_COMPRESSED:
+        tl.store(compress_scratch + token_idx * HEAD_DIM + offs, compressed_kv, mask=dim_mask)
+        return
     # 以上得到compressed_kv
 
     # rms_norm
@@ -361,51 +374,60 @@ def fused_compress(
     q_start_loc = infer_state.b_q_start_loc if infer_state.b_q_start_loc is not None else infer_state.b_seq_len
     req_to_swa_pages = infer_state.req_manager.req_to_swa_pages
 
-    _fused_compress_norm_rope_insert_kernel[(kv_score.shape[0],)](
-        kv_score,
-        kv_score.stride(0),
-        kv_score.stride(1),
-        state_buffer,
-        infer_state.position_ids,
-        token_to_batch_idx,
-        infer_state.b_req_idx,
-        infer_state.b_mtp_index,
-        infer_state.b_seq_len,
-        ready_cache_len,
-        q_start_loc,
-        req_to_swa_pages,
-        req_to_swa_pages.stride(0),
-        out_slots,
-        norm_weight,
-        eps,
-        cos_table,
-        cos_table.stride(0),
-        cos_table.stride(1),
-        sin_table,
-        sin_table.stride(0),
-        sin_table.stride(1),
-        out_buffer,
-        HEAD_DIM=head_dim,
-        STATE_WIDTH=state_width,
-        STATE_LAST_DIM=state_last_dim,
-        COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=compress_ratio * (2 if is_c4 else 1),
-        IS_C4=is_c4,
-        IS_PREFILL=infer_state.is_prefill,
-        SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
-        STATE_RING=state_ring,
-        ROPE_HEAD_DIM=qk_rope_head_dim,
-        FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
-        AMAX_MIN=1e-4,
-        NOPE_DIM=head_dim - qk_rope_head_dim,
-        QUANT_BLOCK=64,
-        SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
-        PAGE_SIZE=out_page_size,
-        BYTES_PER_PAGE=out_buffer.shape[-1],
-        BLOCK=block_head,
-        IS_IN_INDEXER=is_in_indexer,
-        num_warps=4,
-    )
+    compress_scratch = None
+    stages = ((block_head, 4, False, False),)
+    if compress_ratio == 128:
+        compress_scratch = infer_state.dsv4_workspace.c128_compress_scratch[infer_state.microbatch_index]
+        stages = ((64, 8, True, False), (block_head, 4, False, True))
+    for block, num_warps, store_compressed, load_compressed in stages:
+        _fused_compress_norm_rope_insert_kernel[(kv_score.shape[0], head_dim // block if store_compressed else 1)](
+            kv_score,
+            kv_score.stride(0),
+            kv_score.stride(1),
+            state_buffer,
+            infer_state.position_ids,
+            token_to_batch_idx,
+            infer_state.b_req_idx,
+            infer_state.b_mtp_index,
+            infer_state.b_seq_len,
+            ready_cache_len,
+            q_start_loc,
+            req_to_swa_pages,
+            req_to_swa_pages.stride(0),
+            out_slots,
+            norm_weight,
+            eps,
+            cos_table,
+            cos_table.stride(0),
+            cos_table.stride(1),
+            sin_table,
+            sin_table.stride(0),
+            sin_table.stride(1),
+            out_buffer,
+            compress_scratch,
+            HEAD_DIM=head_dim,
+            STATE_WIDTH=state_width,
+            STATE_LAST_DIM=state_last_dim,
+            COMPRESS_RATIO=compress_ratio,
+            WINDOW_SIZE=compress_ratio * (2 if is_c4 else 1),
+            IS_C4=is_c4,
+            IS_PREFILL=infer_state.is_prefill,
+            SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
+            STATE_RING=state_ring,
+            ROPE_HEAD_DIM=qk_rope_head_dim,
+            FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
+            AMAX_MIN=1e-4,
+            NOPE_DIM=head_dim - qk_rope_head_dim,
+            QUANT_BLOCK=64,
+            SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
+            PAGE_SIZE=out_page_size,
+            BYTES_PER_PAGE=out_buffer.shape[-1],
+            BLOCK=block,
+            IS_IN_INDEXER=is_in_indexer,
+            STORE_COMPRESSED=store_compressed,
+            LOAD_COMPRESSED=load_compressed,
+            num_warps=num_warps,
+        )
 
     _save_partial_states_kernel[(kv_score.shape[0],)](
         kv_score,
