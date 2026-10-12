@@ -106,11 +106,3 @@ class StateCacheManager(ABC):
     def get_used_cache_num(self):
         # Preserve the existing accounting: reserved slots count as used.
         return self.size - self.get_free_cache_num()
-
-    def clear_to_init_state(self):
-        """重置空闲槽位；子类同时清零自身的 checkpoint buffer。"""
-        capacity = self.size - self.keep_num
-        self.metadata[0] = capacity
-        self.metadata[1] = 0
-        self.free_ids[:] = np.arange(capacity)
-        self.refs.fill(0)

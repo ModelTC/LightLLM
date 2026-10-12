@@ -166,10 +166,6 @@ class LinearAttCacheManager(StateCacheManager):
     ):
         super().__init__(size, keep_num, shm_name, shm_create)
         self.linear_config = linear_config
-        self._init_buffers(shm_name, shm_create)
-        return
-
-    def _init_buffers(self, shm_name: str = None, create: bool = False):
         # init the layer cache
         self.conv_state_cache = LayerCache(
             size=self.size,
@@ -179,7 +175,7 @@ class LinearAttCacheManager(StateCacheManager):
             device="cpu",
             size_first=True,
             shm_name=None if shm_name is None else shm_name + "_conv",
-            shm_create=create,
+            shm_create=shm_create,
         )
         self.ssm_state_cache = LayerCache(
             size=self.size,
@@ -189,16 +185,9 @@ class LinearAttCacheManager(StateCacheManager):
             device="cpu",
             size_first=True,
             shm_name=None if shm_name is None else shm_name + "_ssm",
-            shm_create=create,
+            shm_create=shm_create,
         )
         return
 
     def get_state_cache(self, buffer_idx: int):
         return self.conv_state_cache.buffer[buffer_idx, ...], self.ssm_state_cache.buffer[buffer_idx, ...]
-
-    def clear_to_init_state(self):
-        # Check before zeroing buffers: another DP may still own these checkpoints.
-        super().clear_to_init_state()
-        self.conv_state_cache.buffer.zero_()
-        self.ssm_state_cache.buffer.zero_()
-        return
