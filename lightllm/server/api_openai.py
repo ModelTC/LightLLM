@@ -24,7 +24,7 @@ from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse
-from lightllm.server.core.objs.sampling_params import SamplingParams, StrStopMatchMode
+from lightllm.server.core.objs.sampling_params import SamplingParams, StopStrMatchMode
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -362,10 +362,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # The prompt may already open reasoning; generated tokens may omit the opening marker.
             sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
             # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
-            sampling_params_dict["str_stop_match_mode"] = (
-                StrStopMatchMode.DETOKEN_ALL
+            sampling_params_dict["stop_str_match_mode"] = (
+                StopStrMatchMode.DETOKEN_ALL
                 if is_stop_matching_in_reasoning_enabled()
-                else StrStopMatchMode.OUTPUT_CONTENT_ONLY
+                else StopStrMatchMode.OUTPUT_CONTENT_ONLY
             )
 
     # Structured output handling

@@ -112,7 +112,7 @@ match strings in the HTTP output layer.
 Explicit token ID sequences are also supported, for example
 ``"stop_sequences": [[100, 101]]``; replace these IDs with the values used by your
 model. These stops match independently in inference and HTTP output, including reasoning,
-regardless of ``str_stop_match_mode`` or ``LIGHTLLM_STOP_IN_REASONING``.
+regardless of ``stop_str_match_mode`` or ``LIGHTLLM_STOP_IN_REASONING``.
 HTTP output matches token ID stops before string stops. Each choice retains a bounded
 tail of actual generated IDs across P/D capacity segments, including special tokens
 whose decoded text is empty. A match preserves token text and metadata and changes
@@ -126,7 +126,7 @@ for these requests.
 .. list-table:: Stop matching scope
    :header-rows: 1
 
-   * - ``str_stop_match_mode``
+   * - ``stop_str_match_mode``
      - String stops
      - Explicit token ID stops
    * - ``0`` / ``DETOKEN_ALL`` (default)

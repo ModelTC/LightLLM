@@ -7,7 +7,7 @@ import pytest
 
 from lightllm.server.api_lightllm import lightllm_generate, lightllm_generate_stream
 from lightllm.server.api_tgi import tgi_generate_impl, tgi_generate_stream_impl
-from lightllm.server.core.objs import FinishStatus, SamplingParams, StrStopMatchMode
+from lightllm.server.core.objs import FinishStatus, SamplingParams, StopStrMatchMode
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.pd_io_struct import NodeRole
 
@@ -142,7 +142,7 @@ def test_http_generate_only_wraps_client_output(mode, slave):
 
 
 @pytest.mark.parametrize(
-    "mode", [StrStopMatchMode.DETOKEN_ALL, StrStopMatchMode.OUTPUT_ALL, StrStopMatchMode.OUTPUT_CONTENT_ONLY]
+    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
 )
 @pytest.mark.parametrize("feature", ["enable_rl", "enable_return_routed_experts", "prompt_logprobs"])
 @pytest.mark.parametrize("stop", [None, "END", [[10]], ["END", [10]]])
@@ -150,7 +150,7 @@ def test_rl_and_final_metadata_skip_both_stop_wrappers(mode, feature, stop):
     async def run():
         tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
         params = SamplingParams()
-        params.init(tokenizer, stop_sequences=stop, str_stop_match_mode=mode)
+        params.init(tokenizer, stop_sequences=stop, stop_str_match_mode=mode)
         if feature == "prompt_logprobs":
             params.prompt_logprobs = 0
         metadata = {"id": 11, "prompt_token_ids": [1, 2], "prompt_logprobs": [None, {}], "routed_experts": [[2]]}
@@ -169,7 +169,7 @@ def test_rl_and_final_metadata_skip_both_stop_wrappers(mode, feature, stop):
             ),
             raw_results,
         )
-        if mode != StrStopMatchMode.DETOKEN_ALL:
+        if mode != StopStrMatchMode.DETOKEN_ALL:
             with pytest.raises(AssertionError, match="DETOKEN_ALL"):
                 manager.generate("prompt", params, None, None)
             return

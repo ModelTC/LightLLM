@@ -925,7 +925,7 @@ class InferReq:
         return
 
     def _stop_sequences_matched(self, output_len: int):
-        # 显式 token ID stop 始终生效，包括 reasoning 阶段；str_stop_match_mode 只控制字符串。
+        # 显式 token ID stop 始终生效，包括 reasoning 阶段；stop_str_match_mode 只控制字符串。
         if not self.stop_sequences:
             return False
         for stop_token_ids in self.stop_sequences:

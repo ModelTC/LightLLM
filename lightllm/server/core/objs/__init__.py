@@ -1,4 +1,4 @@
-from .sampling_params import SamplingParams, StrStopMatchMode
+from .sampling_params import SamplingParams, StopStrMatchMode
 from .req import Req, FinishStatus
 from .shm_req_manager import ShmReqManager
 from .start_args_type import StartArgs

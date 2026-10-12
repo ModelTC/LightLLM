@@ -214,7 +214,7 @@ class StopStrMatchBuffer:
         self._max_prefix_length = max((len(stop) - 1 for stop in self._stop_strings), default=0)
         self._reasoning_state = None
         reasoning_parser = httpserver_manager.args.reasoning_parser
-        if sampling_params.str_stop_match_mode.is_output_content_only() and reasoning_parser:
+        if sampling_params.stop_str_match_mode.is_output_content_only() and reasoning_parser:
             self._reasoning_state = ReasoningStateMachine(
                 reasoning_parser,
                 httpserver_manager.tokenizer,
@@ -407,8 +407,8 @@ def wrap_stop_match_stream(
     )
     if needs_final_metadata:
         assert (
-            sampling_params.str_stop_match_mode.is_detoken_all()
-        ), "RL and final token metadata require str_stop_match_mode=DETOKEN_ALL"
+            sampling_params.stop_str_match_mode.is_detoken_all()
+        ), "RL and final token metadata require stop_str_match_mode=DETOKEN_ALL"
         return generator
     # 先匹配真实 token IDs，再由外层处理字符串，避免文本截断影响 token ID 匹配。
     if sampling_params.stop_sequences.to_token_ids_list():

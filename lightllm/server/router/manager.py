@@ -385,7 +385,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             return ans
         for req in self.running_batch.reqs:
             if (
-                req.sample_params.str_stop_match_mode.is_detoken_all()
+                req.sample_params.stop_str_match_mode.is_detoken_all()
                 and req.stop_str_matched
                 and req._router_stop_str_matched is False
             ):

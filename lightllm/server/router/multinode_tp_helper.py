@@ -133,7 +133,7 @@ class RouterMultiNodeTpHelper:
         local_matched_req_ids = [
             req_id
             for req_id, req in id_to_req.items()
-            if req.sample_params.str_stop_match_mode.is_detoken_all()
+            if req.sample_params.stop_str_match_mode.is_detoken_all()
             and req.stop_str_matched
             and not req._router_stop_str_matched
         ]

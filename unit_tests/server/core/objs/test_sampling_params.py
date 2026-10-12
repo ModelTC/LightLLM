@@ -2,7 +2,7 @@ import pytest
 import pickle
 from unittest.mock import Mock
 from lightllm.server.core.objs.sampling_params import (
-    StrStopMatchMode,
+    StopStrMatchMode,
     StopSequence,
     StopSequenceGroups,
     RegularConstraint,
@@ -82,14 +82,14 @@ def test_stop_sequence_groups_initialization(stop_sequences, expected_ids, expec
 
 
 @pytest.mark.parametrize(
-    "mode", [StrStopMatchMode.DETOKEN_ALL, StrStopMatchMode.OUTPUT_ALL, StrStopMatchMode.OUTPUT_CONTENT_ONLY]
+    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
 )
 def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
     tokenizer = Mock()
     tokenizer.encode.side_effect = AssertionError("String stops must not be tokenized")
     stops = ["END", [10, 11], "结束"]
     params = SamplingParams()
-    params.init(tokenizer, stop_sequences=stops, str_stop_match_mode=mode)
+    params.init(tokenizer, stop_sequences=stops, stop_str_match_mode=mode)
     serialized = params.to_dict()
     assert serialized["stop_sequences"] == stops
     restored = SamplingParams()
@@ -97,9 +97,9 @@ def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
     for candidate in (params, restored, SamplingParams.from_buffer_copy(params), pickle.loads(pickle.dumps(params))):
         assert candidate.stop_sequences.to_token_ids_list() == [[10, 11]]
         assert candidate.stop_sequences.to_stop_str_list() == ["END", "结束"]
-        assert candidate.str_stop_match_mode.get_mode() == mode
+        assert candidate.stop_str_match_mode.get_mode() == mode
         assert candidate.to_origin_dict()["stop_sequences"] == stops
-    py_params = PySamplingParams(stop_sequences=serialized["stop_sequences"], str_stop_match_mode=mode)
+    py_params = PySamplingParams(stop_sequences=serialized["stop_sequences"], stop_str_match_mode=mode)
     py_params.verify()
     assert py_params.to_dict()["stop_sequences"] == stops
     tokenizer.encode.assert_not_called()
@@ -228,59 +228,59 @@ def test_include_stop_str_in_output_round_trip(kwargs, expected):
 @pytest.mark.parametrize(
     "kwargs,expected",
     [
-        ({}, StrStopMatchMode.DETOKEN_ALL),
-        ({"str_stop_match_mode": StrStopMatchMode.DETOKEN_ALL}, StrStopMatchMode.DETOKEN_ALL),
-        ({"str_stop_match_mode": StrStopMatchMode.OUTPUT_ALL}, StrStopMatchMode.OUTPUT_ALL),
-        ({"str_stop_match_mode": StrStopMatchMode.OUTPUT_CONTENT_ONLY}, StrStopMatchMode.OUTPUT_CONTENT_ONLY),
+        ({}, StopStrMatchMode.DETOKEN_ALL),
+        ({"stop_str_match_mode": StopStrMatchMode.DETOKEN_ALL}, StopStrMatchMode.DETOKEN_ALL),
+        ({"stop_str_match_mode": StopStrMatchMode.OUTPUT_ALL}, StopStrMatchMode.OUTPUT_ALL),
+        ({"stop_str_match_mode": StopStrMatchMode.OUTPUT_CONTENT_ONLY}, StopStrMatchMode.OUTPUT_CONTENT_ONLY),
     ],
 )
 def test_stop_matching_policy_round_trip(kwargs, expected):
     params = SamplingParams()
     params.init(None, **kwargs)
     serialized = params.to_dict()
-    assert serialized["str_stop_match_mode"] == expected
-    assert type(serialized["str_stop_match_mode"]) is int
+    assert serialized["stop_str_match_mode"] == expected
+    assert type(serialized["stop_str_match_mode"]) is int
     assert "enable_stop_match_in_backend" not in serialized
     assert "_skip_stop_in_reasoning" not in serialized
     restored = SamplingParams()
     restored.init(None, **serialized)
     py_params = PySamplingParams(**kwargs)
     for candidate in (params, SamplingParams.from_buffer_copy(params), restored, py_params):
-        assert candidate.str_stop_match_mode.get_mode() == expected
-        assert candidate.str_stop_match_mode.is_detoken_all() is (expected == StrStopMatchMode.DETOKEN_ALL)
-        assert candidate.str_stop_match_mode.is_output_all() is (expected == StrStopMatchMode.OUTPUT_ALL)
-        assert candidate.str_stop_match_mode.is_output_content_only() is (
-            expected == StrStopMatchMode.OUTPUT_CONTENT_ONLY
+        assert candidate.stop_str_match_mode.get_mode() == expected
+        assert candidate.stop_str_match_mode.is_detoken_all() is (expected == StopStrMatchMode.DETOKEN_ALL)
+        assert candidate.stop_str_match_mode.is_output_all() is (expected == StopStrMatchMode.OUTPUT_ALL)
+        assert candidate.stop_str_match_mode.is_output_content_only() is (
+            expected == StopStrMatchMode.OUTPUT_CONTENT_ONLY
         )
-        assert candidate.to_dict()["str_stop_match_mode"] == expected
+        assert candidate.to_dict()["stop_str_match_mode"] == expected
     py_restored = PySamplingParams(**py_params.to_dict())
-    assert py_restored.str_stop_match_mode.get_mode() == expected
+    assert py_restored.stop_str_match_mode.get_mode() == expected
 
 
 @pytest.mark.parametrize("mode", [-1, 3, 2 ** 32, "OUTPUT_CONTENT_ONLY", None, 0.0])
-def test_invalid_str_stop_match_mode(mode):
+def test_invalid_stop_str_match_mode(mode):
     params = SamplingParams()
     with pytest.raises((ValueError, TypeError)):
-        params.init(None, str_stop_match_mode=mode)
+        params.init(None, stop_str_match_mode=mode)
     with pytest.raises((ValueError, TypeError)):
-        PySamplingParams(str_stop_match_mode=mode)
+        PySamplingParams(stop_str_match_mode=mode)
 
 
-def test_str_stop_match_mode_updates_shared_buffer():
+def test_stop_str_match_mode_updates_shared_buffer():
     params = SamplingParams()
     params.init(None, include_stop_str_in_output=True, _initial_reasoning_state=1)
     storage = bytearray(bytes(params))
     writer = SamplingParams.from_buffer(storage)
     reader = SamplingParams.from_buffer(storage)
-    writer.str_stop_match_mode.set_mode(StrStopMatchMode.OUTPUT_CONTENT_ONLY)
-    assert reader.str_stop_match_mode.is_output_content_only()
-    assert reader.to_dict()["str_stop_match_mode"] == StrStopMatchMode.OUTPUT_CONTENT_ONLY
+    writer.stop_str_match_mode.set_mode(StopStrMatchMode.OUTPUT_CONTENT_ONLY)
+    assert reader.stop_str_match_mode.is_output_content_only()
+    assert reader.to_dict()["stop_str_match_mode"] == StopStrMatchMode.OUTPUT_CONTENT_ONLY
     assert reader.include_stop_str_in_output is True
     assert reader._initial_reasoning_state == 1
-    assert params.str_stop_match_mode.is_detoken_all()
+    assert params.stop_str_match_mode.is_detoken_all()
     with pytest.raises(ValueError):
-        writer.str_stop_match_mode.set_mode(3)
-    assert reader.str_stop_match_mode.is_output_content_only()
+        writer.stop_str_match_mode.set_mode(3)
+    assert reader.stop_str_match_mode.is_output_content_only()
 
 
 # Mock tokenizer for testing

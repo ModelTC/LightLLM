@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import numpy as np
 
-from lightllm.server.core.objs import StrStopMatchMode, FinishStatus, SamplingParams
+from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
@@ -123,7 +123,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         manager = _make_manager(monkeypatch)
         params = SamplingParams()
         stop_ids = list(range(10, 10 + len(token_chunks)))
-        params.init(None, stop_sequences=[stop_ids], str_stop_match_mode=mode, max_new_tokens=6)
+        params.init(None, stop_sequences=[stop_ids], stop_str_match_mode=mode, max_new_tokens=6)
         segments = []
 
         async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request):
@@ -226,14 +226,14 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backe
         manager.tokenizer,
         stop_sequences="END",
         max_new_tokens=10,
-        str_stop_match_mode=StrStopMatchMode.DETOKEN_ALL if backend else StrStopMatchMode.OUTPUT_ALL,
+        stop_str_match_mode=StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL,
         _initial_reasoning_state=1,
     )
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
-        assert sp.str_stop_match_mode.is_detoken_all() is backend
-        assert sp.str_stop_match_mode.get_mode() == (
-            StrStopMatchMode.DETOKEN_ALL if backend else StrStopMatchMode.OUTPUT_ALL
+        assert sp.stop_str_match_mode.is_detoken_all() is backend
+        assert sp.stop_str_match_mode.get_mode() == (
+            StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL
         )
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
         yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
@@ -270,14 +270,14 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
         stop_sequences="END",
         max_new_tokens=3,
         _initial_reasoning_state=1,
-        str_stop_match_mode=StrStopMatchMode.OUTPUT_CONTENT_ONLY,
+        stop_str_match_mode=StopStrMatchMode.OUTPUT_CONTENT_ONLY,
     )
     segment_modes = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segment_modes.append(sp._initial_reasoning_state)
-        assert sp.str_stop_match_mode.get_mode() == StrStopMatchMode.OUTPUT_CONTENT_ONLY
-        assert sp.str_stop_match_mode.is_detoken_all() is False
+        assert sp.stop_str_match_mode.get_mode() == StopStrMatchMode.OUTPUT_CONTENT_ONLY
+        assert sp.stop_str_match_mode.is_detoken_all() is False
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segment_modes) == 1:
             yield sp.group_request_id, "reason", {**metadata, "id": 10}, FinishStatus()
@@ -377,14 +377,14 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
         stop_sequences="END",
         include_stop_str_in_output=include,
         _initial_reasoning_state=int(parser is not None),
-        str_stop_match_mode=StrStopMatchMode.DETOKEN_ALL if parser is None else StrStopMatchMode.OUTPUT_CONTENT_ONLY,
+        stop_str_match_mode=StopStrMatchMode.DETOKEN_ALL if parser is None else StopStrMatchMode.OUTPUT_CONTENT_ONLY,
         max_new_tokens=10,
     )
     segments = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segments.append(prompt)
-        assert sp.str_stop_match_mode.is_detoken_all() is (parser is None)
+        assert sp.stop_str_match_mode.is_detoken_all() is (parser is None)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
             if parser:

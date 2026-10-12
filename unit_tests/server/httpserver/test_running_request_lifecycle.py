@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lightllm.server.core.objs import StrStopMatchMode, FinishStatus, SamplingParams
+from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
@@ -69,7 +69,7 @@ def _multimodal_params():
 @pytest.mark.parametrize("include", [False, True])
 @pytest.mark.parametrize("parser", [None, "qwen3"])
 @pytest.mark.parametrize(
-    "stop_mode", [None, StrStopMatchMode.DETOKEN_ALL, StrStopMatchMode.OUTPUT_ALL, StrStopMatchMode.OUTPUT_CONTENT_ONLY]
+    "stop_mode", [None, StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
 )
 def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, parser, stop_mode):
     async def run():
@@ -98,7 +98,7 @@ def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, 
         )
         # P/D nodes keep the matching policy supplied by Master.
         if stop_mode is not None:
-            params.str_stop_match_mode.set_mode(stop_mode)
+            params.stop_str_match_mode.set_mode(stop_mode)
         websocket = AsyncMock() if mode == NodeRole.P else None
         pd_event = None
         if mode == NodeRole.P:
@@ -110,9 +110,9 @@ def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, 
             result
             async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
         ]
-        expected_mode = StrStopMatchMode.DETOKEN_ALL if stop_mode is None else stop_mode
-        assert params.str_stop_match_mode.get_mode() == expected_mode
-        assert params.str_stop_match_mode.is_detoken_all() is (expected_mode == StrStopMatchMode.DETOKEN_ALL)
+        expected_mode = StopStrMatchMode.DETOKEN_ALL if stop_mode is None else stop_mode
+        assert params.stop_str_match_mode.get_mode() == expected_mode
+        assert params.stop_str_match_mode.is_detoken_all() is (expected_mode == StopStrMatchMode.DETOKEN_ALL)
         expected = "helloEND" if include else "hello"
         assert "".join(result[1] for result in results) == expected
         assert [result[2]["id"] for result in results] == [1, 2]

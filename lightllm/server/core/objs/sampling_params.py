@@ -23,7 +23,7 @@ MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 MAX_SEED = (1 << 63) - 1
 
 
-class StrStopMatchMode(ctypes.Structure):
+class StopStrMatchMode(ctypes.Structure):
     """请求级字符串 stop 匹配策略；显式 token ID 序列始终由推理层匹配，不受本模式影响。"""
 
     _pack_ = 4
@@ -41,7 +41,7 @@ class StrStopMatchMode(ctypes.Structure):
 
     def set_mode(self, mode: int):
         if mode not in (self.DETOKEN_ALL, self.OUTPUT_ALL, self.OUTPUT_CONTENT_ONLY):
-            raise ValueError(f"Invalid str_stop_match_mode: {mode!r}")
+            raise ValueError(f"Invalid stop_str_match_mode: {mode!r}")
         self.mode = mode
 
     def get_mode(self) -> int:
@@ -314,9 +314,9 @@ class SamplingParams(ctypes.Structure):
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
-        # 字符串 stop 匹配策略，取值见 StrStopMatchMode；显式 token ID 序列不受本策略影响。
+        # 字符串 stop 匹配策略，取值见 StopStrMatchMode；显式 token ID 序列不受本策略影响。
         # 默认 DETOKEN_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
-        ("str_stop_match_mode", StrStopMatchMode),
+        ("stop_str_match_mode", StopStrMatchMode),
         # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
         # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
         ("include_stop_str_in_output", ctypes.c_bool),
@@ -419,7 +419,7 @@ class SamplingParams(ctypes.Structure):
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences)
-        self.str_stop_match_mode.set_mode(kwargs.get("str_stop_match_mode", StrStopMatchMode.DETOKEN_ALL))
+        self.stop_str_match_mode.set_mode(kwargs.get("stop_str_match_mode", StopStrMatchMode.DETOKEN_ALL))
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
         # 运行时状态由 StopStrMatchBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
@@ -543,7 +543,7 @@ class SamplingParams(ctypes.Structure):
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_origin_list(),
-            "str_stop_match_mode": self.str_stop_match_mode.get_mode(),
+            "stop_str_match_mode": self.stop_str_match_mode.get_mode(),
             "include_stop_str_in_output": self.include_stop_str_in_output,
             "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,

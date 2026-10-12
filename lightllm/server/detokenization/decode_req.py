@@ -31,7 +31,7 @@ class DecodeReq:
 
     def stop_sequences_str_match(self) -> bool:
         # 此处仅处理字符串；HTTP 匹配模式下不写 stop_str_matched，显式 token ID stop 仍由推理层处理。
-        if not self.req.sample_params.str_stop_match_mode.is_detoken_all():
+        if not self.req.sample_params.stop_str_match_mode.is_detoken_all():
             return False
         stop_strs = self.stop_strs
         if not stop_strs or self.stop_str_max_len == 0:

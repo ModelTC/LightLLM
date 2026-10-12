@@ -7,7 +7,7 @@ from easydict import EasyDict
 
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.server.core.objs import StrStopMatchMode, FinishStatus, SamplingParams
+from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 
 
@@ -333,7 +333,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
         nonlocal inner_generator_closed
         try:
             assert manager.running_request_count == 1
-            assert sampling_params.str_stop_match_mode.is_detoken_all() is match_in_inference
+            assert sampling_params.stop_str_match_mode.is_detoken_all() is match_in_inference
             yield "result"
         finally:
             inner_generator_closed = True
@@ -344,8 +344,8 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
         params = SamplingParams()
         params.init(None)
         if backend is not None:
-            params.str_stop_match_mode.set_mode(
-                StrStopMatchMode.DETOKEN_ALL if backend else StrStopMatchMode.OUTPUT_ALL
+            params.stop_str_match_mode.set_mode(
+                StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL
             )
         results_generator = manager.generate(None, params, None, None)
         assert await results_generator.__anext__() == "result"

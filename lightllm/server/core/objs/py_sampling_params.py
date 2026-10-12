@@ -6,7 +6,7 @@ import os
 from typing import List, Optional, Union, Tuple
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
-from .sampling_params import MAX_SEED, StrStopMatchMode
+from .sampling_params import MAX_SEED, StopStrMatchMode
 
 
 _SAMPLING_EPS = 1e-5
@@ -69,9 +69,9 @@ class SamplingParams:
         # stop 检测的初始推理状态提示：-1 使用 parser 默认值，0 为回答，1 为思考。
         # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopStrMatchBuffer 维护。
         _initial_reasoning_state: int = -1,
-        # stop 匹配策略，取值见 StrStopMatchMode；由接口入口设置，随请求传递到各进程和 P/D 节点。
+        # stop 匹配策略，取值见 StopStrMatchMode；由接口入口设置，随请求传递到各进程和 P/D 节点。
         # 默认 DETOKEN_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
-        str_stop_match_mode: int = StrStopMatchMode.DETOKEN_ALL,
+        stop_str_match_mode: int = StopStrMatchMode.DETOKEN_ALL,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -92,7 +92,7 @@ class SamplingParams:
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
-        self.str_stop_match_mode = StrStopMatchMode(str_stop_match_mode)
+        self.stop_str_match_mode = StopStrMatchMode(stop_str_match_mode)
         self.include_stop_str_in_output = include_stop_str_in_output
         # 运行时状态由 StopStrMatchBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = _initial_reasoning_state
@@ -262,7 +262,7 @@ class SamplingParams:
         ret["ignore_eos"] = self.ignore_eos
         ret["max_new_tokens"] = self.max_new_tokens
         ret["stop_sequences"] = self.stop_sequences
-        ret["str_stop_match_mode"] = self.str_stop_match_mode.get_mode()
+        ret["stop_str_match_mode"] = self.stop_str_match_mode.get_mode()
         ret["include_stop_str_in_output"] = self.include_stop_str_in_output
         ret["_initial_reasoning_state"] = self._initial_reasoning_state
         ret["best_of"] = self.best_of

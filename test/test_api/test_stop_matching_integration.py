@@ -68,7 +68,7 @@ def test_native_stop_scope_and_token_boundaries(server_url, baseline, mode, incl
         expected = "".join(token["text"] for token in tokens[:6])
     result = _native(
         server_url,
-        {"stop_sequences": stop, "str_stop_match_mode": mode, "include_stop_str_in_output": include},
+        {"stop_sequences": stop, "stop_str_match_mode": mode, "include_stop_str_in_output": include},
         stream=stream,
     )
     assert result["generated_text"] == [expected]
@@ -80,7 +80,7 @@ def test_native_stop_scope_and_token_boundaries(server_url, baseline, mode, incl
 @pytest.mark.parametrize("stream", [False, True])
 def test_id_stop_on_prefill_first_token(server_url, baseline, mode, stream):
     first = baseline["tokens"][0]
-    result = _native(server_url, {"stop_sequences": [[first["id"]]], "str_stop_match_mode": mode}, stream=stream)
+    result = _native(server_url, {"stop_sequences": [[first["id"]]], "stop_str_match_mode": mode}, stream=stream)
     assert [token["id"] for token in result["tokens"]] == [first["id"]]
     assert result["generated_text"] == [first["text"]]
     assert result["finish_reason"] == "stop"
@@ -167,7 +167,7 @@ def test_prompt_marker_pretransition_only_applies_to_content(server_url, force, 
     baseline = _native(server_url, params, prompt)
     # 模型可能立刻结束思考；只取首个非空 token，验证它是否受初始阶段保护。
     stop_text = next(token["text"] for token in baseline["tokens"] if token["text"])
-    result = _native(server_url, {**params, "str_stop_match_mode": 2, "stop_sequences": stop_text}, prompt)
+    result = _native(server_url, {**params, "stop_str_match_mode": 2, "stop_sequences": stop_text}, prompt)
     if in_reasoning:
         assert result["generated_text"][0].startswith(stop_text)
     else:
@@ -188,11 +188,11 @@ def test_ids_stop_inside_reasoning_while_strings_skip_it(server_url, stream):
     assert all("</think>" not in token["text"] for token in tokens[:3])
     stop_ids = [token["id"] for token in tokens[:3]]
     stop_text = "".join(token["text"] for token in tokens[:3])
-    result = _native(server_url, {**parameters, "str_stop_match_mode": 2, "stop_sequences": [stop_ids]}, prompt, stream)
+    result = _native(server_url, {**parameters, "stop_str_match_mode": 2, "stop_sequences": [stop_ids]}, prompt, stream)
     assert [token["id"] for token in result["tokens"]] == stop_ids
     assert result["finish_reason"] == "stop"
     result = _native(
-        server_url, {**parameters, "str_stop_match_mode": 2, "stop_sequences": [stop_text]}, prompt, stream
+        server_url, {**parameters, "stop_str_match_mode": 2, "stop_sequences": [stop_text]}, prompt, stream
     )
     assert result["generated_text"][0].startswith(stop_text)
     assert "</think>" in result["generated_text"][0]
