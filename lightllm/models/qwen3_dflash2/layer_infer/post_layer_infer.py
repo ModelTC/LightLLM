@@ -37,15 +37,13 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
         token_num = hidden.shape[0]
         lm_head = layer_weight.lm_head_weight_
         local_vocab_size = lm_head.weight.shape[0]
-        if local_vocab_size < self.selector_top_k_:
-            raise ValueError(
-                "DFlash2 selector_top_k exceeds the TP-local vocabulary size: "
-                f"top_k={self.selector_top_k_}, local_vocab_size={local_vocab_size}"
-            )
-
-        local_logits = lm_head.project_token_logits(hidden=hidden, alloc_func=self.alloc_tensor)
+        local_logits = self.alloc_tensor(
+            (token_num, local_vocab_size), dtype=hidden.dtype, device=hidden.device,
+        )
+        # Write through a [vocab, token] view, keeping [token, vocab] contiguous for top-k.
+        lm_head(input=hidden.t(), out=local_logits.t())
         local_values, local_ids = torch.topk(local_logits, k=self.selector_top_k_, dim=-1)
-        global_ids = local_ids.long().add_(lm_head.tp_vocab_start_id)
+        global_ids = local_ids.add_(lm_head.tp_vocab_start_id)
 
         if self.tp_world_size_ == 1:
             return global_ids, self._transform_unary_logits(local_values)
@@ -85,14 +83,9 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
         candidate_ids = torch.gather(gathered_ids, dim=-1, index=top_indexes)
         return candidate_ids, self._transform_unary_logits(top_values)
 
-    def _select_path(self, hidden, candidate_ids, unary, anchor_token_ids, infer_state, layer_weight):
+    def _select_path(self, hidden, candidate_ids, unary, anchor_token_ids, layer_weight):
         req_num, draft_width, _ = candidate_ids.shape
-        assert draft_width > 0
-        assert hidden.shape[:2] == (req_num, draft_width)
-        assert unary.shape == candidate_ids.shape
-
-        candidate_hidden = hidden.view(req_num * draft_width, -1)
-        gate = layer_weight.selector_hidden_projection_weight_.mm(candidate_hidden)
+        gate = layer_weight.selector_hidden_projection_weight_.mm(hidden)
         gate = gate.view(req_num, draft_width, -1)
 
         predecessor_codebook = layer_weight.selector_predecessor_codebook_weight_.weight
@@ -105,15 +98,12 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
             dim=-1,
         )
 
-        pair_scores = None
+        score_lattice = first_scores[:, None, None, :].expand(-1, 1, self.selector_top_k_, -1)
         if draft_width > 1:
             predecessor = F.embedding(candidate_ids[:, :-1, :], predecessor_codebook)
             conditioned_predecessor = predecessor * gate[:, 1:, None, :]
             transitions = torch.matmul(conditioned_predecessor, successor[:, 1:, :, :].transpose(-1, -2))
             pair_scores = transitions + unary[:, 1:, None, :]
-
-        score_lattice = first_scores[:, None, None, :].expand(-1, 1, self.selector_top_k_, -1)
-        if pair_scores is not None:
             score_lattice = torch.cat((score_lattice, pair_scores), dim=1)
 
         confidence_logits = (
@@ -135,23 +125,23 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
         assert token_num % self.block_size_ == 0
         req_num = token_num // self.block_size_
+        draft_width = self.block_size_ - 1
         normed_hidden = self._norm(last_input, infer_state, layer_weight)
         block_hidden = normed_hidden.view(req_num, self.block_size_, -1)
-        candidate_hidden = block_hidden[:, 1:, :].reshape(req_num * (self.block_size_ - 1), -1)
+        candidate_hidden = block_hidden[:, 1:, :].reshape(req_num * draft_width, -1)
         candidate_ids, unary = self._compute_candidates(
             hidden=candidate_hidden,
             infer_state=infer_state,
             layer_weight=layer_weight,
         )
-        candidate_ids = candidate_ids.view(req_num, self.block_size_ - 1, self.selector_top_k_)
-        unary = unary.view(req_num, self.block_size_ - 1, self.selector_top_k_)
+        candidate_ids = candidate_ids.view(req_num, draft_width, self.selector_top_k_)
+        unary = unary.view(req_num, draft_width, self.selector_top_k_)
         anchor_token_ids = infer_state.input_ids.view(req_num, self.block_size_)[:, 0]
         draft_token_ids, confidence_logits = self._select_path(
-            hidden=candidate_hidden.view(req_num, self.block_size_ - 1, -1),
+            hidden=candidate_hidden,
             candidate_ids=candidate_ids,
             unary=unary,
             anchor_token_ids=anchor_token_ids,
-            infer_state=infer_state,
             layer_weight=layer_weight,
         )
         infer_state.hidden_collector.add_mtp_outputs(
