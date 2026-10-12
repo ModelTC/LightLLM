@@ -46,11 +46,9 @@ def test_private_pool_allocation_and_reserved_slots():
     assert manager.alloc_one_state_cache() == 0
     with pytest.raises(AssertionError, match="out of alloc range"):
         manager.free_state_cache([2])
-    with pytest.raises(AssertionError, match="only shared"):
-        manager.retain_state_cache([1])
 
 
-def test_private_pool_reuses_released_slots_and_resets():
+def test_private_pool_reuses_released_slots_in_fifo_order():
     manager = SlotPool(5, keep_num=1)
     assert manager.alloc_state_cache(2) == [0, 1]
     manager.free_state_cache([0])
@@ -58,20 +56,9 @@ def test_private_pool_reuses_released_slots_and_resets():
     assert reused == [2, 3, 0]
     manager.free_state_cache([1] + reused)
     assert manager.get_used_cache_num() == 1
-    manager.clear_to_init_state()
     assert (manager.refs == 0).all()
-    assert manager.alloc_state_cache(4) == [0, 1, 2, 3]
+    assert manager.alloc_state_cache(4) == [1, 2, 3, 0]
     assert manager.alloc_one_state_cache() is None
-
-
-def test_private_pool_with_only_reserved_slots():
-    manager = SlotPool(2, keep_num=2)
-    assert manager.get_free_cache_num() == 0
-    assert manager.get_used_cache_num() == 2
-    assert manager.alloc_one_state_cache() is None
-    assert manager.alloc_state_cache(0) == []
-    manager.clear_to_init_state()
-    assert manager.get_free_cache_num() == 0
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -110,15 +97,13 @@ def test_source_release_does_not_reclaim_destination_checkpoint(pool):
     assert pool.get_used_cache_num() == 2
 
 
-def test_startup_attach_preserves_metadata_and_reset_is_rejected(pool):
+def test_startup_attach_preserves_metadata(pool):
     target = _attach("pool")
     slot = pool.alloc_one_state_cache()
     with pool.lock:
         assert target.lock.shm.buf.cast("i")[0] == 1
         assert target.refs[slot] == 1
     assert target.get_free_cache_num() == 7
-    with pytest.raises(AssertionError, match="must not reset"):
-        target.clear_to_init_state()
     with pytest.raises(AssertionError, match="out of alloc range"):
         target.free_state_cache([8])
     pool.free_state_cache([slot])

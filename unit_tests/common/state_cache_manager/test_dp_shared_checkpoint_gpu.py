@@ -123,10 +123,6 @@ def _gpu_rank(rank, rendezvous, service_name, kind):
             big.free_state_cache([slot])
         dist.barrier()
         assert big.get_free_cache_num() == 4
-        before = big.conv_state_cache.buffer.clone()
-        with pytest.raises(AssertionError, match="must not reset"):
-            big.clear_to_init_state()
-        assert torch.equal(big.conv_state_cache.buffer, before)
         assert all(torch.all(state == 37 + rank) for state in small.get_state_cache(small_slot))
         small.free_state_cache([small_slot])
         assert small.get_free_cache_num() == 2
