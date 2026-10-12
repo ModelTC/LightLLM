@@ -3,13 +3,13 @@ import time
 from typing import List
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
 )
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
@@ -266,6 +266,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 req_num=req_num,
                 plan=spec_plan,
             )
+
             model_output = self.model.forward(model_input)
             # 动态 MTP verify 可能只从原始物理 batch 中选择部分行参与 target forward。
             # 等待异步回传的行选择掩码后，按相同掩码过滤 run_reqs，使请求列表的
@@ -343,8 +344,10 @@ class ChunkedPrefillBackend(ModeBackend):
             sync_event = torch.cuda.Event()
             sync_event.record()
 
-        # 上一轮未生成 draft 时，每个请求只有一个必然接受的 target token，
-        # 可直接使用 run_reqs，无需等待 verify_event。
+        # 当 pre_draft_step == 0 时，上一轮没有生成 draft token，本轮每个请求
+        # 只有一个由 target model 产生且必然提交的 token，不存在需要根据
+        # accepted_index_cpu 剔除的 draft 行。因此这里可以直接使用 run_reqs，
+        # 无需等待 verify_event，避免一次不必要的 GPU/CPU 同步。
         if spec_plan.skip_verify_sync:
             verify_ok_reqs = run_reqs
         else:

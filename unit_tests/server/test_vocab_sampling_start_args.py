@@ -12,15 +12,17 @@ from lightllm.server.core.objs.start_args_type import StartArgs
         {"output_constraint_mode": "xgrammar"},
     ],
 )
-def test_target_candidates_reject_constraints_before_model_configuration(monkeypatch, run_mode, constraint_args):
+def test_target_candidates_reject_constraints_before_model_loading(monkeypatch, run_mode, constraint_args):
     monkeypatch.setattr("lightllm.server.api_start._set_envs_and_config", lambda args: None)
 
-    def unexpected_initialization(args):
-        pytest.fail("incompatible options must be rejected before initialization")
+    def unexpected_model_loading(args):
+        pytest.fail("Incompatible candidate sampling must be rejected before loading model configuration")
 
-    monkeypatch.setattr("lightllm.server.api_start.auto_set_max_req_total_len", unexpected_initialization)
-    with pytest.raises(AssertionError, match="--target_vocab_topk_sampling"):
-        _launch_subprocesses(StartArgs(run_mode=run_mode, target_vocab_topk_sampling=2, **constraint_args))
+    monkeypatch.setattr("lightllm.server.api_start.auto_set_max_req_total_len", unexpected_model_loading)
+    args = StartArgs(run_mode=run_mode, target_vocab_topk_sampling=2, **constraint_args)
+
+    with pytest.raises(AssertionError, match="Disable --target_vocab_topk_sampling when using output constraints"):
+        _launch_subprocesses(args)
 
 
 @pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode", "pd_master"])

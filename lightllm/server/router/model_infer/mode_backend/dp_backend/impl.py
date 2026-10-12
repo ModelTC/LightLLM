@@ -3,9 +3,9 @@ import time
 from typing import List, Tuple
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,

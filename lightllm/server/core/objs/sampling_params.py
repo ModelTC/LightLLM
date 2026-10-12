@@ -368,12 +368,12 @@ class SamplingParams(ctypes.Structure):
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
         # Initialize regular_constraint
-        regular_constraint = kwargs.get("regular_constraint") or ""
+        regular_constraint = kwargs.get("regular_constraint", "")
         self.regular_constraint = RegularConstraint()
         self.regular_constraint.initialize(regular_constraint)
 
         # Initialize guided_grammar
-        guided_grammar = kwargs.get("guided_grammar") or ""
+        guided_grammar = kwargs.get("guided_grammar", "")
         self.guided_grammar = GuidedGrammar()
         self.guided_grammar.initialize(guided_grammar, tokenizer)
 
@@ -383,7 +383,7 @@ class SamplingParams(ctypes.Structure):
         self.guided_json.initialize(guided_json, tokenizer)
 
         self.guided_reasoning_end = StopSequence()
-        self.guided_reasoning_end.initialize(kwargs.get("guided_reasoning_end") or [])
+        self.guided_reasoning_end.initialize(kwargs.get("guided_reasoning_end", []))
 
         # Initialize stop_sequence_groups
         stop_sequences = kwargs.get("stop_sequences", [])
