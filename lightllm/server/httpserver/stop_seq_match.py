@@ -1,3 +1,4 @@
+import regex
 from collections import deque
 from contextlib import aclosing
 from enum import Enum, auto
@@ -244,10 +245,12 @@ class StopStrMatchBuffer:
         self._httpserver_manager = httpserver_manager
         self._needs_final_metadata = StopTokenIdsMatchBuffer.needs_final_metadata(httpserver_manager, sampling_params)
         self.state = self.State.SCANNING
-        self._stop_strings = sampling_params.stop_sequences.to_stop_str_list()
+        stop_strings = sampling_params.stop_sequences.to_stop_str_list()
+        # 长度降序的字面量分支：同一位置优先最长 stop，partial=True 同时识别待补全的尾部。
+        self._stop_pattern = (
+            regex.compile("|".join(regex.escape(stop) for stop in stop_strings)) if stop_strings else None
+        )
         self._include_stop = sampling_params.include_stop_str_in_output
-        self._stop_prefixes = {stop[:length] for stop in self._stop_strings for length in range(1, len(stop))}
-        self._max_prefix_length = max((len(stop) - 1 for stop in self._stop_strings), default=0)
         self._reasoning_state = None
         reasoning_parser = httpserver_manager.args.reasoning_parser
         if sampling_params.stop_str_match_mode.is_content_only() and reasoning_parser:
@@ -344,34 +347,26 @@ class StopStrMatchBuffer:
             self._release_pending_tokens()
             return False
 
-        visible_length = self._match_stop()
-        if visible_length is not None:
-            self._release_pending_tokens(visible_length)
-            return True
-        self._release_safe_tokens()
-        return False
+        matched = self._match_stop()
+        if matched is None:
+            # 未匹配：没有完整 stop 或待补全的尾部前缀，原样释放全部缓冲。
+            self._release_pending_tokens()
+            return False
+        if matched.partial:
+            # 部分匹配：只释放前缀之前的完整 token，保留可能组成 stop 的尾部等待后续输入。
+            self._release_safe_tokens(matched.start())
+            return False
+        # 完整命中：按 include_stop 决定是否保留 stop 文本，截断释放并返回命中结果。
+        visible_length = matched.end() if self._include_stop else matched.start()
+        self._release_pending_tokens(visible_length)
+        return True
 
     def _match_stop(self):
-        """返回匹配后的可见字符数；None 表示未匹配，0 表示全部截断。"""
-        stop_index = len(self._pending_text)
-        matched_stop = None
-        # stop 字符串已按长度降序排列；同一位置同时命中时优先最长的 stop。
-        for stop in self._stop_strings:
-            index = self._pending_text.find(stop)
-            if index != -1 and index < stop_index:
-                stop_index, matched_stop = index, stop
-        if matched_stop is not None:
-            return stop_index + (len(matched_stop) if self._include_stop else 0)
+        """一次搜索优先返回完整 stop；没有完整命中时返回尾部最长的未完成前缀。"""
+        return self._stop_pattern.search(self._pending_text, partial=True) if self._stop_pattern is not None else None
 
-        return None
-
-    def _release_safe_tokens(self):
-        """暂存可能组成 stop 的尾部，按完整 token 释放其余输出。"""
-        safe_length = len(self._pending_text)
-        for length in range(min(safe_length, self._max_prefix_length), 0, -1):
-            if self._pending_text[-length:] in self._stop_prefixes:
-                safe_length -= length
-                break
+    def _release_safe_tokens(self, safe_length):
+        """按正则匹配确定的安全边界释放完整 token，暂存可能组成 stop 的尾部。"""
         if safe_length == len(self._pending_text):
             self._release_pending_tokens()
             return

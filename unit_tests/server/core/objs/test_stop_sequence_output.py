@@ -143,6 +143,21 @@ def _match_http_stream(manager, generator, params, prompt_ids, reqs):
         (["LATER", "END"], ["helloENDLATER"], "hello", "END"),
         (["\n", "\n\n"], ["hello\n\nextra"], "hello", "\n\n"),
         (["结束"], ["你好结", "束后缀"], "你好", "结束"),
+        (["abcde", "c"], ["ab", "c"], "ab", "c"),
+        (["ab", "abcd"], ["ab"], "", "ab"),
+        (["ab", "abcd"], ["abcdextra"], "", "abcd"),
+        (["b", "abcd"], ["abcdextra"], "", "abcd"),
+        ([".*"], ["hello.", "*extra"], "hello", ".*"),
+        (["[END]"], ["hello[EN", "D]extra"], "hello", "[END]"),
+        (["\\end"], ["hello\\", "endextra"], "hello", "\\end"),
+        (["🙂结束"], ["你好🙂结", "束后缀"], "你好", "🙂结束"),
+        (["a" * 254 + "b"], ["hello" + "a" * 253, "a", "", "bextra"], "hello", "a" * 254 + "b"),
+        (["结" * 84 + "END"], ["你好" + "结" * 83, "结E", "ND后缀"], "你好", "结" * 84 + "END"),
+        (["🙂" * 63 + "END"], ["hello" + "🙂" * 62, "🙂E", "NDextra"], "hello", "🙂" * 63 + "END"),
+        (["aaaab", "aaac"], ["aaa", "a", "c"], "a", "aaac"),
+        (["\r\n"], ["hello\r", "\nextra"], "hello", "\r\n"),
+        (["e\u0301END"], ["helloe", "\u0301EN", "Dextra"], "hello", "e\u0301END"),
+        (["(?i)[]+*.^$|{}\\"], ["hello(?i)[]+", "*.^$|{}\\extra"], "hello", "(?i)[]+*.^$|{}\\"),
     ],
 )
 def test_stop_buffer_trims_text_and_preserves_token_payloads(include, stops, chunks, prefix, matched_stop):
@@ -230,6 +245,47 @@ def test_releasing_one_token_preserves_next_token_before_stop(include):
     assert released_tokens == [("aE", "first")]
 
 
+@pytest.mark.parametrize("include", [False, True])
+def test_regex_partial_match_keeps_longest_tail_and_releases_safe_tokens(include):
+    manager = _http_manager()
+    manager.stop_request = AsyncMock()
+    buffer = StopStrMatchBuffer(manager, _params(["abcd", "bcx"], include), [])
+    _handle_output(buffer, *_output(1, "safe", "first"))
+    assert _drain_ready_tokens(buffer) == [("safe", "first")]
+    _handle_output(buffer, *_output(2, "a", "second"))
+    assert not buffer.ready_token_list
+    _handle_output(buffer, *_output(3, "bc", "third"))
+    assert not buffer.ready_token_list
+    assert buffer._pending_text == "abc"
+    assert buffer.state is buffer.State.WAITING
+    _handle_output(buffer, *_output(4, "xab", "fourth"))
+    # 后一个 stop 已完整命中，即使文本尾部仍是前一个 stop 的前缀，也应立即结束。
+    assert _drain_ready_tokens(buffer) == [
+        ("a", "second"),
+        ("bc" if include else "", "third"),
+        ("x" if include else "", "fourth"),
+    ]
+    assert buffer.state is buffer.State.STOPPED
+    manager.stop_request.assert_awaited_once_with(80)
+
+
+@pytest.mark.parametrize("include", [False, True])
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
+def test_unicode_stop_matching_does_not_normalize_text(include, mode):
+    params = _params("é", include)
+    params.stop_str_match_mode.set_mode(mode)
+    manager = _http_manager()
+    manager.stop_request = AsyncMock()
+    buffer = StopStrMatchBuffer(manager, params, [])
+    _handle_output(buffer, *_output(1, "e", "first"))
+    assert _drain_ready_tokens(buffer) == [("e", "first")]
+    _handle_output(buffer, *_output(2, "\u0301", "last", finish=FinishStatus.FINISHED_LENGTH))
+    assert buffer.ready_token_list[-1][3].is_finished_length()
+    assert _drain_ready_tokens(buffer) == [("\u0301", "last")]
+    assert buffer.state is buffer.State.STOPPED
+    manager.stop_request.assert_not_awaited()
+
+
 def test_none_token_resets_text_matching_without_simulated_flag():
     buffer = StopStrMatchBuffer(_http_manager(), _params(), [])
     _handle_output(buffer, *_output(10, "helloE", "first"))
@@ -285,12 +341,13 @@ def test_no_string_stops_emit_immediately():
 
 
 @pytest.mark.parametrize("include", [False, True])
-def test_string_stop_matches_reference_for_random_token_boundaries(include):
+@pytest.mark.parametrize("alphabet", ["ab结束", "ab结束🙂.*[]\\\n"])
+def test_string_stop_matches_reference_for_random_token_boundaries(include, alphabet):
     async def run():
         rng = random.Random(20261011)
         for _ in range(300):
-            stops = ["".join(rng.choices("ab结束", k=rng.randint(1, 5))) for _ in range(rng.randint(1, 4))]
-            chunks = ["".join(rng.choices("ab结束", k=rng.randint(0, 4))) for _ in range(20)]
+            stops = ["".join(rng.choices(alphabet, k=rng.randint(1, 5))) for _ in range(rng.randint(1, 4))]
+            chunks = ["".join(rng.choices(alphabet, k=rng.randint(0, 4))) for _ in range(20)]
             manager = _http_manager()
             manager.stop_request = AsyncMock()
             buffer = StopStrMatchBuffer(manager, _params(stops, include), [])
