@@ -188,3 +188,52 @@ target GPU 高 10.54%，周期起点间隔高 13.86%；GPU 空闲占比为 7.43%
 全部 profiler 已停止，D running=0；1P1D 健康，外部文本/真实 image_url 请求仍为 HTTP 200、`2`/`Red`。P/master 44 个、D 27 个长驻进程 nofile 均为 1048576，采样最大 FD 370/433；无新增 HTTP 500、CUDA/NCCL/WRITE-task 错误，cgroup OOM 为 0。
 
 原始日志与结果均在 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/`：`profile512-supplement1.log`、`controlled/profile-16k-c512-after1-1012-supplement1/`（原始 trace inventory、capture events、稳定与完整跨度分析）、`paired-512-supplement1.json`、`profile512-kernel-families.json`、`controlled/hot-16k-c512-after1-1012-supplement1/`、`profile512-final-{p,d}-validation.json` 与 `profile512-final-smoke.json`。
+
+## 剩余热点排查：copy 的来源、量化粒度与等待
+
+本次按用户要求排查，未修改服务代码、启动参数、镜像或依赖，未重启。独立脚本在空闲服务旁的 D 节点 GPU0 执行，诊断进程已结束；它们的局部倍率不是新的服务 TPOT/TPS 结果。证据目录为上述日志目录中的 `remaining-gap-investigation/`。
+
+### attention 输出投影的两次布局搬运
+
+确定的调用链是 `DeepseekV4TransformerLayerInfer._get_o → ROWBMMWeight/BMMWeightTpl.bmm → wo_b.mm`。H100 上当前走 BF16 grouped BMM 分支：输入 `[T, G, 4096]` 的 `transpose(0,1).contiguous()` 搬运到 group-major；BMM 输出 `[G,T,1024]` 再经 `transpose(0,1).reshape(T,-1)` 搬回 token-major。第二个 reshape 在 `G>1,T>1` 时不能只改 view。
+
+512 档 rank0 的 38 个稳定周期中，grid `[16384,1,1]` 与 `[4096,1,1]` 的 BF16 copy 各为 43 次/周期，对应 target 的 `T=256,G=8` 输入/输出布局；draft 的 `T=192` 对应 `[12288,1,1]` 与 `[3072,1,1]`，各 3 次/周期。合计 92 次布局 copy，约 1.20 ms/周期。另有 4 次完整词表 logits 转 FP32：target 的 `_lm_head_and_gather` 明确写入 FP32 `ans_logics`，3 次 DSpark Markov 的 `local_base_logits.float()`；其 grid 与 `256×129280`、`64×129280` 元素匹配，约 0.40 ms/周期。剩余 9 次小 copy 约 0.03 ms，尚未逐一归因。上述详细 grid 归因是 rank0，不能冒充全部 rank 的逐项平均。
+
+归档 vLLM BF16 `deep_gemm_fp8_o_proj` 直接使用 strided input 和 `out=z.transpose(0,1)`，最后 `z.flatten(1)` 为 view。当前 LightLLM 的 BMMWeight 已有 `out` 参数，因此不需要新 backend：可以让它直接写入 token-major 目标 buffer 的转置 view，并保留现有 weight 布局与 allocator。
+
+独立复现使用 BF16、`K=4096,R=1024`，测试 G=1/8、T=16/64/128/192/256 共 10 个场景，每项 3 轮 CUDA Graph/event 计时。所有场景输出逐元素相同；G=1 的性能基本不变。G=8 的完整布局转换+BMM 如下：
+
+| query 行数 T | 现有路径 (µs) | 输入/输出均用 stride (µs) |
+|---|---:|---:|
+| 64 | 36.97 | 26.32 |
+| 128 | 45.44 | 28.41 |
+| 192 | 54.75 | 30.29 |
+| 256 | 63.72 | 33.99 |
+
+单次 Torch GPU trace 确认原路径为 BMM+2 个 copy，strided 路径仅 BMM、0 个 copy；两个原 copy 的 grid 与服务 trace 一致。源代码、数值、计时和 trace：`benchmark_o_proj_layout.py`、`o-proj-layout-benchmark.json`、`o-proj-{original,both_strided}.trace.json`、`copy-grid-rank0.json`；vLLM 实际源码来自原 runtime tar，保存为 `vllm_o_proj.py`。
+
+### FP8 activation quant 的 CTA 粒度
+
+实际调用 `DeepGEMMFP8w8a8B128QuantizationMethod.apply → per_token_group_quant_fp8 → lightllm_per_token_group_quant_fp8`。普通 UE8M0 路径 `COPY_TOPK=False`，当前固定每 CTA 处理 1 个 128 元素组、1 warp；`256×4096` 会启动 8192 个小 CTA。当前同一个 Triton kernel 已支持 `GROUPS_PER_CTA` 和尾组 mask，16 组配置目前只用于大 Mega/COPY_TOPK 输入；普通路径没有用到分组能力。
+
+独立实验复用该 kernel，以每 CTA 8 组、4 warps 代替 1 组、1 warp；FP8 字节、FP32 scale、UE8M0 rounding 和输出布局保持相同。
+
+| 输入形状 | 当前 (µs) | 8 组/CTA (µs) |
+|---|---:|---:|
+| 64×4096 | 2.39 | 1.93 |
+| 192×4096 | 4.85 | 2.20 |
+| 256×1536 | 2.99 | 1.91 |
+| 256×4096 | 6.07 | 2.40 |
+| 256×8192 | 10.99 | 3.15 |
+
+5 个计时场景的 FP8/scale 全部 bit-exact；另加 1×1536、17×3840、65×4096、127×8192、129×4096 的小 batch/尾组检查，字节、scale 与输出 sentinel 均通过。这里只验证普通 `COPY_TOPK=False` 分组路径，不扩展结论到 Mega 或其他量化 dtype。实施时仍需按实际形状选择粒度，并验证更小输入是否值得分组。
+
+核实了运行环境的 SGL 接口后，最初“UE8 分支判断过时”的猜测没有成立：已安装的 `sgl_kernel.gemm.sgl_per_token_group_quant_8bit` 的 `scale_ue8m0=True` 写 packed exponent（4 字节/int32），与当前 H100 DeepGEMM 的 FP32 scale 格式不同。它还固定接受 eps=1e-10；零值/1e-7 输入的解包 scale 分别为 `2.27e-13/2.33e-10`，当前 Triton 都为 `2.38e-7`。普通值解包后相同，小值量化字节不同，因此不能直接移除 guard 切换 SGL，也不引入格式转换来掩盖差异。原错误格式尝试和 eps=1e-4 被拒绝的诊断单独保留，排除出同合约性能结论。
+
+证据：`benchmark_quant_backends.py`、`quant-backend-benchmark.json`、`quant-edge-parity.json`、`sgl-packed-ue8-contract.json`；实际量化 import 为 `runtime-stage1/lightllm/common/basemodel/triton_kernel/quantization/fp8act_quant_kernel.py`，SGL callable 位于 `/opt/conda/lib/python3.10/site-packages/sgl_kernel/gemm.py`。没有安装或更换包。
+
+### 不能把单 rank 空闲全归为 CPU 同步
+
+继续把同一 D 节点 8 rank 的 kernel/memcpy/memset 时间转换到共同 epoch，裁剪到各 rank 内部窗口的交集，再计算“所有 GPU 都空闲”的区间。vLLM 全 rank 同时空闲约 1.566 ms/周期，LightLLM 约 1.625 ms/周期，仅差约 0.059 ms；占共同窗口的 3.60%/3.29%。这不支持用“CPU 把整个 D 卡住”解释主要差距。此前较高的单 rank 平均空闲还包含不同 GPU/stream 的工作错位、收发和负载等待，不能直接当成 CPU 时间。此项是短 profile 窗口证据，未定量证明具体路由负载不均。
+
+证据：`analyze_global_gpu_idle.py`、`global-gpu-idle-analysis.json`。优先改动应是输出投影布局与普通量化 CTA 粒度；完整 logits FP32 搬运需结合采样/logprob/Markov 的精度合约另行设计，不能直接删 cast。上述排查尚未覆盖全部 512 TPOT 差额，也未实施服务优化。
