@@ -384,8 +384,10 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             # one group per rank -> a single fp8 GEMM (deepgemm .mm quantizes o to fp8 internally)
             o = layer_weight.wo_a_.mm(o.reshape(T, -1))  # [T, o_lora]
         else:
-            o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
-            o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
+            grouped_o = o.reshape(T, self.tp_groups, -1).transpose(0, 1)
+            o = self.alloc_tensor((T, self.tp_groups, layer_weight.wo_a_.dim2), dtype=o.dtype, device=o.device)
+            layer_weight.wo_a_.bmm(grouped_o, out=o.transpose(0, 1))
+            o = o.view(T, -1)  # [T, groups*o_lora]
         o = layer_weight.wo_b_.mm(o)
         return self._tpsp_reduce(input=o, infer_state=infer_state)
 

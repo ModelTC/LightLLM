@@ -237,3 +237,24 @@ target GPU 高 10.54%，周期起点间隔高 13.86%；GPU 空闲占比为 7.43%
 继续把同一 D 节点 8 rank 的 kernel/memcpy/memset 时间转换到共同 epoch，裁剪到各 rank 内部窗口的交集，再计算“所有 GPU 都空闲”的区间。vLLM 全 rank 同时空闲约 1.566 ms/周期，LightLLM 约 1.625 ms/周期，仅差约 0.059 ms；占共同窗口的 3.60%/3.29%。这不支持用“CPU 把整个 D 卡住”解释主要差距。此前较高的单 rank 平均空闲还包含不同 GPU/stream 的工作错位、收发和负载等待，不能直接当成 CPU 时间。此项是短 profile 窗口证据，未定量证明具体路由负载不均。
 
 证据：`analyze_global_gpu_idle.py`、`global-gpu-idle-analysis.json`。优先改动应是输出投影布局与普通量化 CTA 粒度；完整 logits FP32 搬运需结合采样/logprob/Markov 的精度合约另行设计，不能直接删 cast。上述排查尚未覆盖全部 512 TPOT 差额，也未实施服务优化。
+
+## 输出投影布局：服务验证
+
+按用户要求实施并部署第一项。`_get_o` 复用 `BMMWeightTpl.bmm(..., out=...)`：输入只转置为 view；输出通过现有 tensor allocator 分配为 `[T,G,wo_a.dim2]`，BMM 直接写入其转置 view；交给 wo_b 的 `[T,G*R]` 为连续 view。维度取自 weight owner；保留选中的 BF16/FP8 分支、权重布局和 allocator，不新建 backend。
+
+新增 10 项验证 G=1/2/8、T=1/16/256 的结果、输入/输出 storage 共享关系、wo_b 连续布局与 FP8 线性分支；连同 MoE/转发共 20 项通过，black/flake8 通过。部署前重跑当前服务的 128/512 正式基线，随后停止旧 D 的完整 PGID 63684，确认进程组和 GPU context 清空、checkpoint 全部 shard 可读，再使用原 launcher/config 启动 PGID 82025。P/master 保持原 overlay 与进程；D 使用 `runtime-o-proj-validate1`。主/draft 模型、镜像、cache、batch、graph 和 Microbatch 参数不变，8 GPU SM clock 均 1980 MHz。启动和资源证据保存于 `o-proj-*-launch/stop/resource-validation` 对应文件。
+
+前后均 profiler 关闭，预热相同前缀后固定输出 4096 tokens，每档各一轮，640/640 全部成功：
+
+| 输入/并发 | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---:|---:|---:|---:|
+| 16K / 128 | 7.4930 → 6.9691 | 6.99% | 14,755.8 → 15,982.5 | 8.31% |
+| 16K / 512 | 11.6108 → 11.1036 | 4.37% | 31,778.9 → 34,560.2 | 8.75% |
+
+TTFT 均值为 2471.7→2875.2 ms、10422.5→10455.5 ms。采集后的额外 unprofiled 512 回放为 11.1649 ms，512/512 成功。前后时段存在波动，不把单轮差异当统计置信区间，也不拿更早的最好一轮替换本次基线。
+
+512 profile 与前述补采的稳定窗口比较，实际 batch 均为 512/每 rank 64，平均序列长 17293.2→17331.8，仅差 0.22%。8-rank 均值：target GPU 40.4074→38.5766 ms/周期；GPU busy 44.3043→42.4078；周期起点间隔 49.4596→46.7683。独立 copy 从 **105→13 次/周期、1.6312→0.4311 ms/周期**，全部 rank 都减少 92 次，确认目标布局 copy 在实际服务中消失。辅助 kernel 区间并集 9.1198→7.9316 ms；通信区间也变化，包含跨 rank 等待，不解释为修改了通信 backend。
+
+profile 512/512 成功、8 trace 保存、16 个线程 profiler 开始/停止事件匹配；客户端 profile 延迟不进入主表。部署后的内部与外部文本/真实 image_url 请求均 HTTP 200、`2`/`Red`；1P1D 健康，D 27 个长驻进程 nofile 均 1048576，启动后采样最大 FD 417，无新 CUDA/NCCL/OOM/HTTP 500/WRITE-task 错误。
+
+数据：`o-proj-normal-results.json`、`o-proj-gpu-summary.json`、`controlled/{baseline,after}-16k-c{128,512}-o-proj-validate1/`、`controlled/profile-16k-c512-o-proj-validate1/`、`o-proj-unit-tests.log`、`o-proj-final-validation.json`、`o-proj-final-smoke.json`，均在本轮日志目录。本项单独提交后，再验证量化粒度。
