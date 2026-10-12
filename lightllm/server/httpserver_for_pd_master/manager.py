@@ -22,7 +22,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
-from lightllm.server.httpserver.stop_seq_match import wrap_stop_sequence_stream
+from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
@@ -155,7 +155,7 @@ class HttpServerManagerForPDMaster:
     ):
         """统一包裹各 choice 的 stop 匹配，状态覆盖所有 P/D 分段。"""
         generator = self._generate(prompt, sampling_params, multimodal_params, request)
-        return wrap_stop_sequence_stream(self, generator, sampling_params, prompt)
+        return wrap_stop_match_stream(self, generator, sampling_params, prompt)
 
     async def _generate(
         self,
@@ -227,11 +227,12 @@ class HttpServerManagerForPDMaster:
             )
 
         request_finished_successfully = True
-        async for result in self._merge_choice_generators(generators):
-            finish_status = result[3]
-            if finish_status.is_error_finished():
-                request_finished_successfully = False
-            yield result
+        async with aclosing(self._merge_choice_generators(generators)) as generator:
+            async for result in generator:
+                finish_status = result[3]
+                if finish_status.is_error_finished():
+                    request_finished_successfully = False
+                yield result
         if request_finished_successfully:
             self.metric_client.counter_inc("lightllm_request_success")
         return
@@ -752,7 +753,7 @@ class HttpServerManagerForPDMaster:
         return
 
     async def stop_request(self, request_id: int):
-        """标记指定子请求停止，由生成循环 abort 当前分段并清理资源。"""
+        """标记指定子请求停止，由生成循环恢复后 abort 当前分段并清理资源。"""
         self.active_req_ids.discard(request_id)
 
     async def abort(

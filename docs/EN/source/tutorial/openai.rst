@@ -63,13 +63,14 @@ OpenAI requests; the stop scope is passed to prefill/decode nodes in sampling pa
 a reasoning parser use the same behavior.
 
 This phase scope applies only to string stops. Explicit token ID sequences in
-the native API's ``parameters.stop_sequences`` always match in the inference
-layer and can end generation during reasoning or answer content, regardless of
+the native API's ``parameters.stop_sequences`` match independently in inference
+and HTTP output and can end generation during reasoning or answer content, regardless of
 this environment variable or ``include_stop_str_in_output``.
 
 When ``--enable_rl`` or ``--enable_return_routed_experts`` is enabled, or the request
-asks for ``prompt_logprobs``, only ``DETOKEN_ALL`` is supported. These requests return
-raw backend output and final metadata without application-side text trimming.
+asks for ``prompt_logprobs``, only ``DETOKEN_ALL`` is supported. These requests bypass
+both string and token ID stop wrappers and return raw backend output and final metadata.
+Stop matching is handled by the backend.
 For Chat requests with a reasoning parser and stop sequences, set
 ``LIGHTLLM_STOP_IN_REASONING=1``; application-side stop modes fail an assertion.
 

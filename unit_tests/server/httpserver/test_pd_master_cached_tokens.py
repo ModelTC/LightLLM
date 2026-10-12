@@ -3,8 +3,10 @@ import copy
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 
 from lightllm.server.core.objs import StrStopMatchMode, FinishStatus, SamplingParams
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 
@@ -17,6 +19,7 @@ def _make_manager(monkeypatch):
     monkeypatch.setattr(SamplingParams, "from_buffer_copy", classmethod(lambda cls, other: copy.copy(other)))
     mgr = object.__new__(HttpServerManagerForPDMaster)
     mgr.active_req_ids = set()
+    mgr.req_id_to_out_inf = {}
     mgr.args = SimpleNamespace(
         disable_pd_master_decode_capacity_limit=True,
         reasoning_parser=None,
@@ -110,6 +113,49 @@ def test_single_block_prefill_hit_persists_past_decode_zeros(monkeypatch):
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.3)]
     assert len(mgr.inserted_prompt_caches) == 1
     assert mgr.inserted_prompt_caches[0][0] == "hello"
+
+
+@pytest.mark.parametrize("mode", list(range(3)))
+@pytest.mark.parametrize("hidden_prefix", [False, True])
+@pytest.mark.parametrize("token_chunks", [[[10], [11, 12]], [[10], [11], [12, 13]]])
+def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hidden_prefix, token_chunks):
+    async def run():
+        manager = _make_manager(monkeypatch)
+        params = SamplingParams()
+        stop_ids = list(range(10, 10 + len(token_chunks)))
+        params.init(None, stop_sequences=[stop_ids], str_stop_match_mode=mode, max_new_tokens=6)
+        segments = []
+
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request):
+            index = len(segments)
+            segments.append(sp.group_request_id)
+            req = InferReq.__new__(InferReq)
+            req.stop_sequences = sp.stop_sequences.to_token_ids_list()
+            req.sampling_param = SimpleNamespace(shm_param=sp)
+            tokens = token_chunks[index]
+            req.shm_req = SimpleNamespace(input_len=1, shm_prompt_ids=SimpleNamespace(arr=np.array([1, *tokens])))
+            for output_len, token_id in enumerate(tokens, 1):
+                req.finish_status = FinishStatus()
+                req.update_finish_status([], output_len)
+                if index == len(token_chunks) - 1 and output_len == len(tokens) and not req.finish_status.is_finished():
+                    req.finish_status = FinishStatus(FinishStatus.FINISHED_LENGTH)
+                text = "" if token_id == 10 and hidden_prefix else str(token_id)
+                yield sp.group_request_id, text, {"id": token_id, "prompt_tokens": 2}, req.finish_status
+                if req.finish_status.is_finished():
+                    return
+            yield sp.group_request_id, "", {"id": None}, FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY)
+
+        manager._wait_to_token_package = raw_segment
+        # 分段内仍由真实 InferReq 判断；跨分段匹配由对外生成流的包装层完成。
+        from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
+
+        raw_generator = manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)
+        results = [result async for result in wrap_stop_match_stream(manager, raw_generator, params, "prompt")]
+        assert [result[2]["id"] for result in results] == stop_ids
+        assert results[-1][3].is_stopped()
+        assert len(segments) == len(token_chunks)
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
 def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
@@ -549,6 +595,8 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
         generator = manager._generate_one("prompt", params, None, request, time.time(), 80, 10)
         assert (await generator.__anext__())[1] == "first"
         await manager.stop_request(80)
+        # stop_request 只做标记，恢复生成时才停止当前 P/D 分段。
+        manager.abort.assert_not_awaited()
         with pytest.raises(StopAsyncIteration):
             await generator.__anext__()
         assert not manager.active_req_ids

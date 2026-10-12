@@ -17,6 +17,7 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 def _manager() -> HttpServerManagerForPDMaster:
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.active_req_ids = set()
+    manager.req_id_to_out_inf = {}
     manager.pd_manager = MagicMock()
     manager.id_gen = MagicMock()
     manager.id_gen.generate_id.return_value = 800
@@ -31,6 +32,40 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.pd_cache_high_priority_min_prompt_tokens = 4096
     manager.disable_pd_cache_high_priority = False
     return manager
+
+
+@pytest.mark.parametrize("choice_count", [1, 3])
+def test_closing_pd_choice_stream_closes_all_forwarders(choice_count):
+    async def run():
+        manager = _manager()
+        params = SamplingParams()
+        params.n = params.best_of = choice_count
+        params.max_new_tokens = 4
+        multimodal = MagicMock(verify_and_preload=AsyncMock())
+        started = set()
+        closed = set()
+        all_started = asyncio.Event()
+
+        async def generate_one(prompt, params, multimodal, request, start_time, req_id, input_token_num):
+            try:
+                started.add(req_id)
+                if len(started) == choice_count:
+                    all_started.set()
+                await all_started.wait()
+                yield req_id, "first", {"id": 10}, FinishStatus()
+                await asyncio.Event().wait()
+            finally:
+                closed.add(req_id)
+
+        manager._generate_one = generate_one
+        with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
+            generator = manager._generate_choices("prompt", params, multimodal, None)
+            await generator.__anext__()
+            await generator.aclose()
+            assert closed == started
+            assert len(closed) == choice_count
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
 def test_pd_master_expands_n_into_concurrent_single_choice_requests():

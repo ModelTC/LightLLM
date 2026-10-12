@@ -67,7 +67,7 @@ class SamplingParams:
         # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
         include_stop_str_in_output: bool = False,
         # stop 检测的初始推理状态提示：-1 使用 parser 默认值，0 为回答，1 为思考。
-        # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopSequenceBuffer 维护。
+        # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopStrMatchBuffer 维护。
         _initial_reasoning_state: int = -1,
         # stop 匹配策略，取值见 StrStopMatchMode；由接口入口设置，随请求传递到各进程和 P/D 节点。
         # 默认 DETOKEN_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
@@ -94,7 +94,7 @@ class SamplingParams:
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
         self.str_stop_match_mode = StrStopMatchMode(str_stop_match_mode)
         self.include_stop_str_in_output = include_stop_str_in_output
-        # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
+        # 运行时状态由 StopStrMatchBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = _initial_reasoning_state
         self.skip_special_tokens = skip_special_tokens
         self.add_special_tokens = add_special_tokens

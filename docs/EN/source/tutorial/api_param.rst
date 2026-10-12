@@ -111,10 +111,17 @@ match strings in the HTTP output layer.
 
 Explicit token ID sequences are also supported, for example
 ``"stop_sequences": [[100, 101]]``; replace these IDs with the values used by your
-model. These stops always match in the inference layer, including reasoning,
+model. These stops match independently in inference and HTTP output, including reasoning,
 regardless of ``str_stop_match_mode`` or ``LIGHTLLM_STOP_IN_REASONING``.
+HTTP output matches token ID stops before string stops. Each choice retains a bounded
+tail of actual generated IDs across P/D capacity segments, including special tokens
+whose decoded text is empty. A match preserves token text and metadata and changes
+only the finish status to stop. IDs from the user prompt do not participate in matching.
 ``include_stop_str_in_output`` does not change token ID stop output behavior.
 Strings and token ID sequences may be mixed, for example ``["END", [100, 101]]``.
+RL, routed-expert output, and prompt-logprob requests bypass both HTTP stop wrappers
+and rely on backend matching. HTTP token ID matching across P/D segments is disabled
+for these requests.
 
 .. list-table:: Stop matching scope
    :header-rows: 1

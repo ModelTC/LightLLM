@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 
 from lightllm.server.reasoning_parser import ReasoningParser
-from lightllm.server.httpserver.stop_seq_match import ReasoningStopState
+from lightllm.server.httpserver.stop_seq_match import ReasoningStateMachine
 
 
 def _create_parser(model_type: str, force_reasoning: bool) -> ReasoningParser:
@@ -67,7 +67,7 @@ class _StopTokenizer:
 
 
 def test_stop_state_tracks_multi_token_delimiters():
-    state = ReasoningStopState("qwen3", _StopTokenizer(), 0, [])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), 0, [])
     tokens = [1, 90, 91, 2, 92, 93, 3]
     assert [state.handle(token) for token in tokens] == [True, True, False, False, False, False, True]
 
@@ -77,14 +77,38 @@ def test_stop_state_tracks_multi_token_delimiters():
     [([90, 91], True), ([1, 90, 91], True), ([90, 91, 1], False), ([90], False), ([], False)],
 )
 def test_prompt_complete_start_initializes_reasoning(tail_prompt_ids, in_reasoning):
-    state = ReasoningStopState("qwen3", _StopTokenizer(), 0, tail_prompt_ids)
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), 0, tail_prompt_ids)
     assert state.in_reasoning is in_reasoning
     assert state.handle(2) is (not in_reasoning)
 
 
+@pytest.mark.parametrize("model,force", [("qwen3", 1), ("deepseek-r1", -1)])
+def test_prompt_end_marker_preserves_initial_reasoning_hint(model, force):
+    state = ReasoningStateMachine(model, _StopTokenizer(), force, [90, 91, 1, 92, 93])
+    assert state.state is state.State.REASONING
+    assert state.handle(2) is False
+
+
+@pytest.mark.parametrize(
+    "force,tail_prompt_ids,in_reasoning",
+    [(0, [90, 91, 1, 2], False), (1, [92, 93, 1, 2], True), (0, [90, 91, 92, 93, 1, 2], False)],
+)
+def test_prompt_marker_before_trailing_whitespace_does_not_pretransition(force, tail_prompt_ids, in_reasoning):
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), force, tail_prompt_ids)
+    assert state.in_reasoning is in_reasoning
+    assert state.handle(3) is (not in_reasoning)
+
+
+@pytest.mark.parametrize("force,marker_ids", [(0, [90, 91]), (1, [92, 93])])
+def test_prompt_phase_hint_is_preserved_when_marker_is_outside_tail(force, marker_ids):
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), force, marker_ids + [1] * 20)
+    assert state.in_reasoning is bool(force)
+    assert state.handle(2) is (not bool(force))
+
+
 def test_short_prompt_retains_complete_tail_for_long_delimiters():
     tokenizer = _StopTokenizer(end_ids=[94, 95, 96, 97], start_ids=[90, 91, 92])
-    state = ReasoningStopState("qwen3", tokenizer, 0, [90, 91])
+    state = ReasoningStateMachine("qwen3", tokenizer, 0, [90, 91])
     assert not state.in_reasoning
     assert state.handle(92) is False
     assert state.in_reasoning
@@ -95,7 +119,7 @@ def test_short_prompt_retains_complete_tail_for_long_delimiters():
 
 @pytest.mark.parametrize("model,force", [("qwen3", 1), ("deepseek-r1", -1)])
 def test_stop_state_starts_in_forced_reasoning(model, force):
-    state = ReasoningStopState(model, _StopTokenizer(), force, [])
+    state = ReasoningStateMachine(model, _StopTokenizer(), force, [])
     assert state.state is state.State.REASONING
     assert state.handle(1) is False
     assert state.handle(92) is False
@@ -106,7 +130,7 @@ def test_stop_state_starts_in_forced_reasoning(model, force):
 
 
 def test_stop_state_carries_a_partial_delimiter_from_pd_prompt():
-    state = ReasoningStopState("qwen3", _StopTokenizer(), 1, [1, 92])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), 1, [1, 92])
     assert state.state is state.State.REASONING
     assert state.in_reasoning
     assert state.handle(93) is False
@@ -115,7 +139,7 @@ def test_stop_state_carries_a_partial_delimiter_from_pd_prompt():
 
 
 def test_stop_state_can_reenter_reasoning_after_answer_content():
-    state = ReasoningStopState("qwen3", _StopTokenizer(), 0, [])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), 0, [])
     assert state.state is state.State.CONTENT
     assert state.handle(90) is True
     assert state.state is state.State.CONTENT
@@ -139,7 +163,7 @@ def test_stop_state_can_reenter_reasoning_after_answer_content():
     [(91, False, "REASONING"), (90, True, "CONTENT"), (1, True, "CONTENT")],
 )
 def test_stop_state_requires_complete_start_from_prompt(token, can_match, next_state):
-    state = ReasoningStopState("qwen3", _StopTokenizer(), 0, [1, 90])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), 0, [1, 90])
     assert state.state is state.State.CONTENT
     assert not state.in_reasoning
     assert state.handle(token) is can_match
@@ -148,7 +172,7 @@ def test_stop_state_requires_complete_start_from_prompt(token, can_match, next_s
 
 @pytest.mark.parametrize("end_ids,can_match,next_state", [([90, 92], True, "CONTENT"), ([90, 91], False, "REASONING")])
 def test_start_matching_only_recognizes_start_marker(end_ids, can_match, next_state):
-    state = ReasoningStopState("qwen3", _StopTokenizer(end_ids), 0, [])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(end_ids), 0, [])
     assert state.handle(90) is True
     assert state.state is state.State.CONTENT
     assert state.handle(end_ids[-1]) is can_match
@@ -156,7 +180,7 @@ def test_start_matching_only_recognizes_start_marker(end_ids, can_match, next_st
 
 
 def test_end_marker_outside_reasoning_is_content():
-    state = ReasoningStopState("qwen3", _StopTokenizer(), 0, [])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), 0, [])
     assert state.handle(92) is True
     assert state.handle(93) is True
     assert state.state is state.State.CONTENT
@@ -164,7 +188,7 @@ def test_end_marker_outside_reasoning_is_content():
 
 @pytest.mark.parametrize("token,next_state", [(93, "CONTENT"), (92, "REASONING"), (1, "REASONING")])
 def test_stop_state_requires_complete_end_from_prompt(token, next_state):
-    state = ReasoningStopState("qwen3", _StopTokenizer(), 1, [1, 92])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(), 1, [1, 92])
     assert state.state is state.State.REASONING
     assert state.handle(token) is False
     assert state.state is state.State[next_state]
@@ -173,7 +197,7 @@ def test_stop_state_requires_complete_end_from_prompt(token, next_state):
 
 
 def test_start_marker_inside_reasoning_is_reasoning_content():
-    state = ReasoningStopState("qwen3", _StopTokenizer([90, 92]), 1, [])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer([90, 92]), 1, [])
     assert state.handle(90) is False
     assert state.state is state.State.REASONING
     assert state.handle(91) is False
@@ -190,7 +214,7 @@ def test_start_marker_inside_reasoning_is_reasoning_content():
     ],
 )
 def test_reasoning_matches_end_even_when_it_overlaps_start(end_ids, tokens, states):
-    state = ReasoningStopState("qwen3", _StopTokenizer(end_ids), 1, [])
+    state = ReasoningStateMachine("qwen3", _StopTokenizer(end_ids), 1, [])
     for token, expected_state in zip(tokens, states):
         assert state.handle(token) is False
         assert state.state is state.State[expected_state]

@@ -1,4 +1,5 @@
 import pytest
+import pickle
 from unittest.mock import Mock
 from lightllm.server.core.objs.sampling_params import (
     StrStopMatchMode,
@@ -93,7 +94,7 @@ def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
     assert serialized["stop_sequences"] == stops
     restored = SamplingParams()
     restored.init(tokenizer, **serialized)
-    for candidate in (params, restored, SamplingParams.from_buffer_copy(params)):
+    for candidate in (params, restored, SamplingParams.from_buffer_copy(params), pickle.loads(pickle.dumps(params))):
         assert candidate.stop_sequences.to_token_ids_list() == [[10, 11]]
         assert candidate.stop_sequences.to_stop_str_list() == ["END", "结束"]
         assert candidate.str_stop_match_mode.get_mode() == mode

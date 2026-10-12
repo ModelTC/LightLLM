@@ -83,6 +83,7 @@ class StopSequence(ctypes.Structure):
         return list(self.sequence[0 : self.size])
 
     def to_string(self) -> str:
+        # 字符串 stop 不支持内嵌 NUL（\x00）；c_char 数组属性读取会在 NUL 处截断。
         return bytes(self.sequence_str[0 : self.sequence_str_len]).decode("utf-8")
 
 
@@ -320,7 +321,7 @@ class SamplingParams(ctypes.Structure):
         # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
         ("include_stop_str_in_output", ctypes.c_bool),
         # stop 检测的初始推理状态提示：-1 使用 parser 默认值，0 为回答，1 为思考。
-        # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopSequenceBuffer 维护。
+        # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopStrMatchBuffer 维护。
         ("_initial_reasoning_state", ctypes.c_int),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
@@ -420,7 +421,7 @@ class SamplingParams(ctypes.Structure):
         self.stop_sequences.initialize(stop_sequences)
         self.str_stop_match_mode.set_mode(kwargs.get("str_stop_match_mode", StrStopMatchMode.DETOKEN_ALL))
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
-        # 运行时状态由 StopSequenceBuffer 维护，此参数仅用于初始化。
+        # 运行时状态由 StopStrMatchBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)
 
         # Initialize allowed_token_ids
