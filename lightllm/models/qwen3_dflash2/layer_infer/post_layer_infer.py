@@ -38,7 +38,9 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
         lm_head = layer_weight.lm_head_weight_
         local_vocab_size = lm_head.weight.shape[0]
         local_logits = self.alloc_tensor(
-            (token_num, local_vocab_size), dtype=hidden.dtype, device=hidden.device,
+            (token_num, local_vocab_size),
+            dtype=hidden.dtype,
+            device=hidden.device,
         )
         # Write through a [vocab, token] view, keeping [token, vocab] contiguous for top-k.
         lm_head(input=hidden.t(), out=local_logits.t())
