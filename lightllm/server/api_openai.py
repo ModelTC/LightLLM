@@ -24,6 +24,7 @@ from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse
+from lightllm.server.core.objs import FinishStatus
 from lightllm.server.core.objs.sampling_params import SamplingParams, StopStrMatchMode
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
@@ -363,9 +364,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
             # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
             sampling_params_dict["stop_str_match_mode"] = (
-                StopStrMatchMode.DETOKEN_ALL
-                if is_stop_matching_in_reasoning_enabled()
-                else StopStrMatchMode.OUTPUT_CONTENT_ONLY
+                StopStrMatchMode.ALL_TEXT if is_stop_matching_in_reasoning_enabled() else StopStrMatchMode.CONTENT_ONLY
             )
 
     # Structured output handling
@@ -398,6 +397,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         completion_tokens = 0
         reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
             from .req_id_generator import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -529,6 +529,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         completion_tokens = 0
         cached_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
             prompt_tokens = metadata["prompt_tokens"]
             cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
@@ -977,6 +978,7 @@ async def _handle_streaming_completion(
         cached_tokens = 0
 
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
             prompt_tokens = metadata["prompt_tokens"]
@@ -1041,6 +1043,7 @@ async def _collect_generation_results(generator, request: CompletionRequest, pro
     prompt_token_ids = {}
 
     async for sub_req_id, request_output, metadata, finish_status in generator:
+        finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
         if sub_req_id not in prompt_token_ids:
             prompt_logprobs[sub_req_id] = metadata.get("prompt_logprobs")
             prompt_token_ids[sub_req_id] = metadata.get("prompt_token_ids")
@@ -1204,3 +1207,11 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
         "top_logprobs": top_logprobs_list,
         "text_offset": all_text_offsets,
     }
+
+
+def _convert_openai_finish_status(finish_status, sub_req_id):
+    if finish_status.get_finish_reason() == "abort":
+        # TODO: OpenAI 响应模型暂不接受 abort，先映射为 stop；后续统一取消与应用侧 stop 的对外语义。
+        logger.info(f"OpenAI maps finish_reason=abort to stop for compatibility, sub_req_id={sub_req_id}")
+        return FinishStatus(FinishStatus.FINISHED_STOP)
+    return finish_status

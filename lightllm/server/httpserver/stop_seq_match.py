@@ -81,27 +81,33 @@ class ReasoningStateMachine:
 
 
 class StopTokenIdsMatchBuffer:
-    """匹配真实输出的 token ID 序列，命中时只修正当前输出的 finish_status。
+    """匹配真实输出的 token ID 序列，命中后根据是否需要最终 metadata 决定结束状态。
 
     每个子请求独立保留有限的 ID 尾部，覆盖所有 P/D 容量分段，不读取用户 prompt。
     所有 token 立即输出，包括文本为空的特殊 token；不处理 reasoning 或 include_stop_str_in_output。
     推理层仍负责分段内的 token ID stop，本状态机补充跨分段匹配，并吞掉结束后的迟到输出。
-    handle() 只分派状态；MATCHING 按匹配结果和后端结束状态处理输出，STOPPED 忽略后续输入。
+    handle() 只分派状态；MATCHING 匹配 stop，STOPPED 忽略后续输入，WAIT_LAST_PACK 等待后端结束包。
 
-    当前状态 | 输入条件                  | 下一状态 | 输出处理
-    ---------|---------------------------|----------|----------------------------
-    MATCHING | 错误结束                  | STOPPED  | 原样输出，保留错误状态
-    MATCHING | 完整命中 token ID stop    | STOPPED  | 原样输出 token，结束状态改为 stop
-    MATCHING | 未命中，后端已结束        | STOPPED  | 原样输出并保留后端结束状态
-    MATCHING | 未命中，后端未结束        | MATCHING | 原样输出，保留 ID 尾部
-    STOPPED  | 任意输入                  | STOPPED  | 忽略迟到输出
+    当前状态       | 输入条件               | _needs_final_metadata | 下一状态       | 输出处理
+    ---------------|------------------------|-----------------------|----------------|--------------------------------------
+    MATCHING       | 错误结束               | 任意                  | STOPPED        | 原样输出，保留错误状态
+    MATCHING       | 完整命中 token ID stop | False                 | STOPPED        | 原样输出 token，结束状态改为 stop
+    MATCHING       | 命中，后端未结束       | True                  | WAIT_LAST_PACK | 原样输出，保持未结束
+    MATCHING       | 命中，后端已结束       | True                  | STOPPED        | 原样输出，保留后端结束状态和 metadata
+    MATCHING       | 未命中，后端已结束     | 任意                  | STOPPED        | 原样输出并保留后端结束状态
+    MATCHING       | 未命中，后端未结束     | 任意                  | MATCHING       | 原样输出，保留 ID 尾部
+    STOPPED        | 任意输入               | 任意                  | STOPPED        | 忽略迟到输出
+    WAIT_LAST_PACK | 后端未结束             | True                  | WAIT_LAST_PACK | 原样输出，不再匹配 stop
+    WAIT_LAST_PACK | 后端已结束             | True                  | STOPPED        | 原样输出后端结束状态和最终 metadata
 
     错误或没有 token ID 的输出不更新匹配历史；正常结束 token 先匹配再结束，错误状态优先保留。
+    需要最终 metadata 时，命中 stop 保留后端结束状态；后端未结束才进入 WAIT_LAST_PACK。
     """
 
     class State(Enum):
         MATCHING = auto()
         STOPPED = auto()
+        WAIT_LAST_PACK = auto()
 
     def __init__(
         self,
@@ -109,6 +115,7 @@ class StopTokenIdsMatchBuffer:
         sampling_params: SamplingParams,
     ):
         self._httpserver_manager = httpserver_manager
+        self._needs_final_metadata = StopTokenIdsMatchBuffer.needs_final_metadata(httpserver_manager, sampling_params)
         self.state = self.State.MATCHING
         self._stop_token_ids_list = sampling_params.stop_sequences.to_token_ids_list()
         self._tail_stop_token_ids: set[int] = {ids[-1] for ids in self._stop_token_ids_list}
@@ -124,6 +131,8 @@ class StopTokenIdsMatchBuffer:
                 await self._handle_matching(sub_req_id, request_output, metadata, finish_status)
             case self.State.STOPPED:
                 await self._handle_stopped(sub_req_id, request_output, metadata, finish_status)
+            case self.State.WAIT_LAST_PACK:
+                await self._handle_wait_last_pack(sub_req_id, request_output, metadata, finish_status)
 
     async def _handle_matching(self, sub_req_id, request_output, metadata, finish_status) -> None:
         """按“命中 stop、后端已结束、继续生成”三种情况处理。"""
@@ -135,10 +144,13 @@ class StopTokenIdsMatchBuffer:
 
         match matched, finish_status.is_finished():
             case True, backend_finished:
-                self.state = self.State.STOPPED
-                self.ready_token_list.append(
-                    (sub_req_id, request_output, metadata, FinishStatus(FinishStatus.FINISHED_STOP))
-                )
+                if self._needs_final_metadata:
+                    output_finish = finish_status
+                    self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
+                else:
+                    output_finish = FinishStatus(FinishStatus.FINISHED_STOP)
+                    self.state = self.State.STOPPED
+                self.ready_token_list.append((sub_req_id, request_output, metadata, output_finish))
                 if not backend_finished:
                     await self._httpserver_manager.stop_request(sub_req_id)
             case False, True:
@@ -150,6 +162,12 @@ class StopTokenIdsMatchBuffer:
     async def _handle_stopped(self, sub_req_id, request_output, metadata, finish_status) -> None:
         """请求已结束，忽略迟到输出。"""
         return
+
+    async def _handle_wait_last_pack(self, sub_req_id, request_output, metadata, finish_status):
+        """命中 stop 后原样放行后续包，直到后端结束并携带最终 metadata。"""
+        self.ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
+        if finish_status.is_finished():
+            self.state = self.State.STOPPED
 
     def _matches_stop(self) -> bool:
         """先检查结束 ID 集合，再逐个检查长度、末尾 ID 和完整尾部序列。"""
@@ -165,6 +183,14 @@ class StopTokenIdsMatchBuffer:
                 return True
         return False
 
+    @staticmethod
+    def needs_final_metadata(httpserver_manager, sampling_params):
+        return (
+            httpserver_manager.args.enable_rl
+            or httpserver_manager.args.enable_return_routed_experts
+            or sampling_params.prompt_logprobs >= 0
+        )
+
 
 class StopStrMatchBuffer:
     """通过 handle() 匹配字符串 stop，将确定可输出的 token 放入 ready_token_list。
@@ -173,32 +199,41 @@ class StopStrMatchBuffer:
     SCANNING：没有待确认的 stop 前缀，从当前 token 开始匹配。
     WAITING：尾部可能组成 stop，需要后续 token 确认，失败后也可能留下新的前缀。
     STOPPED：已命中 stop 或后端已结束，忽略后续 token。
+    WAIT_LAST_PACK：需要最终 metadata，命中 stop 后放行后续包直到后端结束。
     每个状态对应一个 _handle_* 函数，负责状态跳转和结束处理；handle() 只按当前状态分派。
 
-    当前状态 | 输入条件                         | 下一状态 | 输出处理
-    ---------|----------------------------------|----------|----------------------------
-    SCANNING | 完整命中 stop                    | STOPPED  | 按 include_stop 截断并释放
-    SCANNING | 未结束，尾部命中 stop 前缀        | WAITING  | 保留可能组成 stop 的文本
-    SCANNING | 未结束，尾部无 stop 前缀          | SCANNING | 原样释放
-    WAITING  | 完整命中 stop                    | STOPPED  | 按 include_stop 截断并释放
-    WAITING  | 未结束，尾部仍有 stop 前缀        | WAITING  | 释放安全 token，继续等待
-    WAITING  | 未结束，尾部不再有 stop 前缀      | SCANNING | 原样释放全部缓冲
-    SCANNING | 未结束，reasoning 或模拟边界      | SCANNING | 清空匹配历史，原样释放
-    WAITING  | 未结束，reasoning 或模拟边界      | SCANNING | 清空匹配历史，原样释放
-    SCANNING | 未命中 stop，后端已结束          | STOPPED  | 释放全部尾部 token
-    WAITING  | 未命中 stop，后端已结束          | STOPPED  | 释放全部尾部 token
-    STOPPED  | 任意输入                         | STOPPED  | 不添加输出
+    当前状态       | 输入条件                     | _needs_final_metadata | 下一状态       | 输出处理
+    ---------------|------------------------------|-----------------------|----------------|----------------------------------------
+    SCANNING       | 完整命中 stop                | False                 | STOPPED        | 按 include_stop 截断并释放，标记 stop
+    SCANNING       | 命中，后端未结束             | True                  | WAIT_LAST_PACK | 按 include_stop 截断并释放，保持未结束
+    SCANNING       | 命中，后端已结束             | True                  | STOPPED        | 截断并释放，保留后端结束状态和 metadata
+    SCANNING       | 未结束，尾部命中 stop 前缀   | 任意                  | WAITING        | 保留可能组成 stop 的文本
+    SCANNING       | 未结束，尾部无 stop 前缀     | 任意                  | SCANNING       | 原样释放
+    SCANNING       | 未结束，reasoning 或模拟边界 | 任意                  | SCANNING       | 清空匹配历史，原样释放
+    SCANNING       | 未命中 stop，后端已结束      | 任意                  | STOPPED        | 释放尾部 token，保留后端结束状态
+    WAITING        | 完整命中 stop                | False                 | STOPPED        | 按 include_stop 截断并释放，标记 stop
+    WAITING        | 命中，后端未结束             | True                  | WAIT_LAST_PACK | 按 include_stop 截断并释放，保持未结束
+    WAITING        | 命中，后端已结束             | True                  | STOPPED        | 截断并释放，保留后端结束状态和 metadata
+    WAITING        | 未结束，尾部仍有 stop 前缀   | 任意                  | WAITING        | 释放安全 token，继续等待
+    WAITING        | 未结束，尾部不再有 stop 前缀 | 任意                  | SCANNING       | 原样释放全部缓冲
+    WAITING        | 未结束，reasoning 或模拟边界 | 任意                  | SCANNING       | 清空匹配历史，原样释放
+    WAITING        | 未命中 stop，后端已结束      | 任意                  | STOPPED        | 释放尾部 token，保留后端结束状态
+    STOPPED        | 任意输入                     | 任意                  | STOPPED        | 不添加输出
+    WAIT_LAST_PACK | 后端未结束                   | True                  | WAIT_LAST_PACK | 原样输出，不再匹配 stop
+    WAIT_LAST_PACK | 后端已结束                   | True                  | STOPPED        | 原样输出后端结束状态和最终 metadata
 
     先匹配当前 token，再处理后端结束状态；最后一个 token 也可能命中 stop。
     未结束时，只暂存可能组成 stop 的尾部；遇到思维链或模拟 token 时释放缓冲并重置匹配历史。
     本缓冲只处理字符串；token ID stop 在内层 StopTokenIdsMatchBuffer 和推理层中独立匹配。
     输入和 ready_token_list 均使用生成器的四元组结构，文本截断为空时也保留原始 metadata。
+    需要最终 metadata 时，命中包只截断文本，保留后端结束状态；后端未结束才进入 WAIT_LAST_PACK。
     """
 
     class State(Enum):
         SCANNING = auto()
         WAITING = auto()
         STOPPED = auto()
+        WAIT_LAST_PACK = auto()
 
     def __init__(
         self,
@@ -207,6 +242,7 @@ class StopStrMatchBuffer:
         tail_prompt_ids: list[int],
     ):
         self._httpserver_manager = httpserver_manager
+        self._needs_final_metadata = StopTokenIdsMatchBuffer.needs_final_metadata(httpserver_manager, sampling_params)
         self.state = self.State.SCANNING
         self._stop_strings = sampling_params.stop_sequences.to_stop_str_list()
         self._include_stop = sampling_params.include_stop_str_in_output
@@ -214,7 +250,7 @@ class StopStrMatchBuffer:
         self._max_prefix_length = max((len(stop) - 1 for stop in self._stop_strings), default=0)
         self._reasoning_state = None
         reasoning_parser = httpserver_manager.args.reasoning_parser
-        if sampling_params.stop_str_match_mode.is_output_content_only() and reasoning_parser:
+        if sampling_params.stop_str_match_mode.is_content_only() and reasoning_parser:
             self._reasoning_state = ReasoningStateMachine(
                 reasoning_parser,
                 httpserver_manager.tokenizer,
@@ -231,7 +267,7 @@ class StopStrMatchBuffer:
 
         错误结束或 metadata 中没有 token ID 的输出不匹配 stop，也不推进 reasoning 状态。
         确定可输出的 token 追加到 ready_token_list，调用方用 popleft() 消费。
-        命中 stop 且后端未结束时，进入 STOPPED 后通知 manager 停止该子请求。
+        命中 stop 且后端未结束时，通知 manager 停止该子请求；需要最终 metadata 时进入 WAIT_LAST_PACK。
         """
         match self.state:
             case self.State.SCANNING:
@@ -240,45 +276,61 @@ class StopStrMatchBuffer:
                 await self._handle_waiting(sub_req_id, request_output, metadata, finish_status)
             case self.State.STOPPED:
                 await self._handle_stopped(sub_req_id, request_output, metadata, finish_status)
+            case self.State.WAIT_LAST_PACK:
+                await self._handle_wait_last_pack(sub_req_id, request_output, metadata, finish_status)
 
     async def _handle_scanning(self, sub_req_id, request_output, metadata, finish_status):
         """没有可延续的前缀，从当前 token 开始匹配。"""
         self._pending_text = request_output
         # 只修改输出的结束状态，保留后端传入的原始状态。
         output_finish = FinishStatus(finish_status.status)
-        if self._match_and_release_token(sub_req_id, request_output, metadata, output_finish):
-            output_finish.status = FinishStatus.FINISHED_STOP
-            self.state = self.State.STOPPED
-            if not finish_status.is_finished():
-                await self._httpserver_manager.stop_request(sub_req_id)
-            return
-        if finish_status.is_finished():
-            self._release_pending_tokens()
-            self.state = self.State.STOPPED
-        elif self._pending_tokens:
-            self.state = self.State.WAITING
+        matched = self._match_and_release_token(sub_req_id, request_output, metadata, output_finish)
+        match matched, finish_status.is_finished():
+            case True, backend_finished:
+                if self._needs_final_metadata:
+                    self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
+                else:
+                    output_finish.status = FinishStatus.FINISHED_STOP
+                    self.state = self.State.STOPPED
+                if not backend_finished:
+                    await self._httpserver_manager.stop_request(sub_req_id)
+            case False, True:
+                self._release_pending_tokens()
+                self.state = self.State.STOPPED
+            case False, False:
+                self.state = self.State.WAITING if self._pending_tokens else self.State.SCANNING
         return
 
     async def _handle_waiting(self, sub_req_id, request_output, metadata, finish_status):
         """接续待确认的文本，尝试补全字符串 stop。"""
         self._pending_text += request_output
         output_finish = FinishStatus(finish_status.status)
-        if self._match_and_release_token(sub_req_id, request_output, metadata, output_finish):
-            output_finish.status = FinishStatus.FINISHED_STOP
-            self.state = self.State.STOPPED
-            if not finish_status.is_finished():
-                await self._httpserver_manager.stop_request(sub_req_id)
-            return
-        if finish_status.is_finished():
-            self._release_pending_tokens()
-            self.state = self.State.STOPPED
-        elif not self._pending_tokens:
-            self.state = self.State.SCANNING
+        matched = self._match_and_release_token(sub_req_id, request_output, metadata, output_finish)
+        match matched, finish_status.is_finished():
+            case True, backend_finished:
+                if self._needs_final_metadata:
+                    self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
+                else:
+                    output_finish.status = FinishStatus.FINISHED_STOP
+                    self.state = self.State.STOPPED
+                if not backend_finished:
+                    await self._httpserver_manager.stop_request(sub_req_id)
+            case False, True:
+                self._release_pending_tokens()
+                self.state = self.State.STOPPED
+            case False, False:
+                self.state = self.State.WAITING if self._pending_tokens else self.State.SCANNING
         return
 
     async def _handle_stopped(self, sub_req_id, request_output, metadata, finish_status):
         """请求已结束，忽略所有迟到输出。"""
         return
+
+    async def _handle_wait_last_pack(self, sub_req_id, request_output, metadata, finish_status):
+        """命中 stop 后原样放行后续包，直到后端结束并携带最终 metadata。"""
+        self.ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
+        if finish_status.is_finished():
+            self.state = self.State.STOPPED
 
     def _match_and_release_token(self, sub_req_id, request_output, metadata, finish_status):
         """匹配并释放 token，返回是否命中 stop；状态跳转由调用方处理。"""
@@ -399,17 +451,6 @@ def wrap_stop_match_stream(
     prompt: str | list[int],
 ) -> AsyncGenerator[tuple[int, str, dict, FinishStatus], None]:
     """公开 generate 的统一入口：原始流 -> token ID stop -> 字符串 stop。"""
-    # 最终 metadata 由后端结束输出携带，RL 等路径跳过两种应用侧 stop 包装。
-    needs_final_metadata = (
-        httpserver_manager.args.enable_rl
-        or httpserver_manager.args.enable_return_routed_experts
-        or sampling_params.prompt_logprobs >= 0
-    )
-    if needs_final_metadata:
-        assert (
-            sampling_params.stop_str_match_mode.is_detoken_all()
-        ), "RL and final token metadata require stop_str_match_mode=DETOKEN_ALL"
-        return generator
     # 先匹配真实 token IDs，再由外层处理字符串，避免文本截断影响 token ID 匹配。
     if sampling_params.stop_sequences.to_token_ids_list():
         generator = match_stop_token_ids_stream(httpserver_manager, generator, sampling_params)

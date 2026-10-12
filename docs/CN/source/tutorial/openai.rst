@@ -59,11 +59,10 @@ OpenAI 请求的 master 上设置，停止范围通过请求采样参数传递�
 token ID 序列由推理层和 HTTP 输出层独立匹配，可在 reasoning 和回答阶段结束生成；
 不受此环境变量和 ``include_stop_str_in_output`` 影响。
 
-启用 ``--enable_rl``、``--enable_return_routed_experts`` 或请求 ``prompt_logprobs`` 时，
-仅支持 ``DETOKEN_ALL``，跳过字符串和 token ID 的应用侧 stop 包装，
-直接返回后端原始输出及最终 metadata，stop 由后端匹配。
-这些场景下若使用配置了 reasoning parser 的 Chat 接口并设置 stop，需开启
-``LIGHTLLM_STOP_IN_REASONING=1``；使用应用侧 stop 匹配模式会触发断言。
+RL、返回 routed experts 和 prompt logprobs 仅支持普通模式。此类请求命中 stop 时仍通知后端停止，
+字符串命中包按 ``include_stop_str_in_output`` 截断文本，但保留后端结束状态；后续包原样放行，
+直到后端结束包返回最终 metadata。因此命中后仍可能返回在途 token，最终结束原因由后端决定。
+PD 分离模式启动时拒绝这些功能开关；请求参数不能启用对应的服务端功能。
 
 基础对话示例
 ------------

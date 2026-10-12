@@ -1072,17 +1072,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
 
-                                finished_token_index = (
-                                    req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
-                                )
-
-                                if finished_token_index != src_index:
+                                if req.finish_token_index != src_index:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
-                                    if req.stop_str_matched:
-                                        finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
-                                    else:
-                                        finish_status = FinishStatus(req.finish_status.status)
+                                    finish_status = FinishStatus(req.finish_status.status)
 
                                     await req.merge_final_token_metadata(
                                         metadata,

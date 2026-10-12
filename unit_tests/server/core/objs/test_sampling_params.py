@@ -81,9 +81,7 @@ def test_stop_sequence_groups_initialization(stop_sequences, expected_ids, expec
     assert groups.to_origin_list() == expected_original
 
 
-@pytest.mark.parametrize(
-    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
-)
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
     tokenizer = Mock()
     tokenizer.encode.side_effect = AssertionError("String stops must not be tokenized")
@@ -228,10 +226,9 @@ def test_include_stop_str_in_output_round_trip(kwargs, expected):
 @pytest.mark.parametrize(
     "kwargs,expected",
     [
-        ({}, StopStrMatchMode.DETOKEN_ALL),
-        ({"stop_str_match_mode": StopStrMatchMode.DETOKEN_ALL}, StopStrMatchMode.DETOKEN_ALL),
-        ({"stop_str_match_mode": StopStrMatchMode.OUTPUT_ALL}, StopStrMatchMode.OUTPUT_ALL),
-        ({"stop_str_match_mode": StopStrMatchMode.OUTPUT_CONTENT_ONLY}, StopStrMatchMode.OUTPUT_CONTENT_ONLY),
+        ({}, StopStrMatchMode.ALL_TEXT),
+        ({"stop_str_match_mode": StopStrMatchMode.ALL_TEXT}, StopStrMatchMode.ALL_TEXT),
+        ({"stop_str_match_mode": StopStrMatchMode.CONTENT_ONLY}, StopStrMatchMode.CONTENT_ONLY),
     ],
 )
 def test_stop_matching_policy_round_trip(kwargs, expected):
@@ -247,17 +244,14 @@ def test_stop_matching_policy_round_trip(kwargs, expected):
     py_params = PySamplingParams(**kwargs)
     for candidate in (params, SamplingParams.from_buffer_copy(params), restored, py_params):
         assert candidate.stop_str_match_mode.get_mode() == expected
-        assert candidate.stop_str_match_mode.is_detoken_all() is (expected == StopStrMatchMode.DETOKEN_ALL)
-        assert candidate.stop_str_match_mode.is_output_all() is (expected == StopStrMatchMode.OUTPUT_ALL)
-        assert candidate.stop_str_match_mode.is_output_content_only() is (
-            expected == StopStrMatchMode.OUTPUT_CONTENT_ONLY
-        )
+        assert candidate.stop_str_match_mode.is_all_text() is (expected == StopStrMatchMode.ALL_TEXT)
+        assert candidate.stop_str_match_mode.is_content_only() is (expected == StopStrMatchMode.CONTENT_ONLY)
         assert candidate.to_dict()["stop_str_match_mode"] == expected
     py_restored = PySamplingParams(**py_params.to_dict())
     assert py_restored.stop_str_match_mode.get_mode() == expected
 
 
-@pytest.mark.parametrize("mode", [-1, 3, 2 ** 32, "OUTPUT_CONTENT_ONLY", None, 0.0])
+@pytest.mark.parametrize("mode", [-1, 0, 3, 2 ** 32, "CONTENT_ONLY", None, 0.0])
 def test_invalid_stop_str_match_mode(mode):
     params = SamplingParams()
     with pytest.raises((ValueError, TypeError)):
@@ -272,15 +266,15 @@ def test_stop_str_match_mode_updates_shared_buffer():
     storage = bytearray(bytes(params))
     writer = SamplingParams.from_buffer(storage)
     reader = SamplingParams.from_buffer(storage)
-    writer.stop_str_match_mode.set_mode(StopStrMatchMode.OUTPUT_CONTENT_ONLY)
-    assert reader.stop_str_match_mode.is_output_content_only()
-    assert reader.to_dict()["stop_str_match_mode"] == StopStrMatchMode.OUTPUT_CONTENT_ONLY
+    writer.stop_str_match_mode.set_mode(StopStrMatchMode.CONTENT_ONLY)
+    assert reader.stop_str_match_mode.is_content_only()
+    assert reader.to_dict()["stop_str_match_mode"] == StopStrMatchMode.CONTENT_ONLY
     assert reader.include_stop_str_in_output is True
     assert reader._initial_reasoning_state == 1
-    assert params.stop_str_match_mode.is_detoken_all()
+    assert params.stop_str_match_mode.is_all_text()
     with pytest.raises(ValueError):
         writer.stop_str_match_mode.set_mode(3)
-    assert reader.stop_str_match_mode.is_output_content_only()
+    assert reader.stop_str_match_mode.is_content_only()
 
 
 # Mock tokenizer for testing

@@ -35,7 +35,7 @@ def _params(stop="END", include=False, force=0):
         stop_sequences=stop,
         _initial_reasoning_state=force,
         include_stop_str_in_output=include,
-        stop_str_match_mode=StopStrMatchMode.OUTPUT_ALL,
+        stop_str_match_mode=StopStrMatchMode.ALL_TEXT,
     )
     return params
 
@@ -43,7 +43,7 @@ def _params(stop="END", include=False, force=0):
 def _stop_buffer(stop_in_reasoning=False, stop="END", force=1, parser="qwen3", include=False):
     params = _params(stop, include, force)
     if not stop_in_reasoning:
-        params.stop_str_match_mode.set_mode(StopStrMatchMode.OUTPUT_CONTENT_ONLY)
+        params.stop_str_match_mode.set_mode(StopStrMatchMode.CONTENT_ONLY)
     manager = _http_manager()
     manager.args.reasoning_parser = parser
     return StopStrMatchBuffer(manager, params, [1, 2])
@@ -77,8 +77,6 @@ def _req(tokens, finish=FinishStatus.NO_FINISH, params=None, request_id=80):
         finish_token_index=1 + len(tokens) if finish != FinishStatus.NO_FINISH else -1,
         finish_status=FinishStatus(finish),
         is_aborted=False,
-        stop_str_matched=False,
-        stop_str_matched_token_index=-1,
         candetoken_out_len=len(tokens),
         out_tokens_queue=CircularQueue(),
         can_released_mark=False,
@@ -319,9 +317,7 @@ def test_string_stop_matches_reference_for_random_token_boundaries(include):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
-)
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 def test_token_id_stop_is_wrapped_without_text_buffering_even_in_reasoning(mode):
     params = _params([[10, 11]])
     params.stop_str_match_mode.set_mode(mode)
@@ -371,9 +367,7 @@ def test_waiting_tracks_overlapping_stop_prefixes(stop, chunks, expected_text):
     assert [payload for _, payload in outputs] == list(range(len(chunks)))
 
 
-@pytest.mark.parametrize(
-    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
-)
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 def test_token_id_stop_does_not_enter_text_waiting(mode):
     params = _params([[10, 11]])
     params.stop_str_match_mode.set_mode(mode)
@@ -472,7 +466,7 @@ def test_prompt_start_marker_prevents_stop_inside_reasoning():
     manager = _http_manager()
     manager.args.reasoning_parser = "qwen3"
     params = _params(force=0)
-    params.stop_str_match_mode.set_mode(StopStrMatchMode.OUTPUT_CONTENT_ONLY)
+    params.stop_str_match_mode.set_mode(StopStrMatchMode.CONTENT_ONLY)
     buffer = StopStrMatchBuffer(manager, params, [1, 1000])
     _handle_output(buffer, *_output(10, "END", "thought"))
     thought_tokens = _drain_ready_tokens(buffer)
@@ -514,11 +508,10 @@ def test_pd_capacity_marker_preserves_reasoning_state():
         FinishStatus.FINISHED_PD_DECODE_CAPACITY,
     ],
 )
-@pytest.mark.parametrize("backend", [False, True])
-def test_detokenization_forwards_raw_tokens_before_release(monkeypatch, finish, backend):
+def test_detokenization_forwards_raw_tokens_before_release(monkeypatch, finish):
     tokens = list(range(10, 30))
     params = _params()
-    params.stop_str_match_mode.set_mode(StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL)
+    params.stop_str_match_mode.set_mode(StopStrMatchMode.ALL_TEXT)
     decode = DecodeReq(_req(tokens, finish, params))
     simulated = finish in (
         FinishStatus.FINISHED_ERROR,
@@ -547,50 +540,17 @@ def test_detokenization_forwards_raw_tokens_before_release(monkeypatch, finish, 
         if decode.req.can_released_mark:
             break
     assert decode.req.can_released_mark
-    assert decode.req.stop_str_matched is (backend and finish == FinishStatus.FINISHED_LENGTH)
     assert "".join(text for text, *_ in results) == ("helloE" if simulated else "helloENDextra")
     assert [count for *_, count in results] == list(range(1, len(tokens) + 1))
 
 
-@pytest.mark.parametrize("backend", [False, True])
-def test_stop_mode_preserves_backend_match_and_forwards_raw_tokens(monkeypatch, backend):
-    tokens = list(range(10, 20))
-    params = _params()
-    params.stop_str_match_mode.set_mode(StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL)
-    req = _req(tokens, FinishStatus.FINISHED_LENGTH, params)
-    decode = DecodeReq(req)
-    chunks = {tokens[0]: "helloE", tokens[-2]: "NDextra"}
-    monkeypatch.setattr(
-        "lightllm.server.detokenization.manager.decode_token",
-        lambda tokenizer, req, token_id, eos: chunks.get(token_id, ""),
-    )
-    manager = DeTokenizationManager.__new__(DeTokenizationManager)
-    manager.req_id_to_out = {80: decode}
-    manager.tokenizer = _ReasoningTokenizer()
-    manager.eos_id = []
-    manager.all_special_ids = set()
-    manager.pub_to_httpserver = SimpleNamespace(send_pyobj=lambda *a, **kw: None)
-    manager.shm_req_manager = SimpleNamespace(put_back_req_obj=lambda req: None)
-    results = []
-    for _ in range(100):
-        manager.gen_token_out()
-        while not req.out_tokens_queue.is_empty():
-            results.append(req.out_tokens_queue.pop())
-        if req.can_released_mark:
-            break
-    assert req.can_released_mark
-    assert "".join(text for text, *_ in results) == "helloENDextra"
-    assert [count for *_, count in results] == list(range(1, len(tokens) + 1 - int(backend)))
-    assert req.stop_str_matched_token_index == (2 + len(tokens) - 2 if backend else -1)
-
-
 @pytest.mark.parametrize("include", [False, True])
 @pytest.mark.parametrize("empty_tokens", [2, 35])
-def test_backend_stop_match_is_buffered_and_trimmed_by_http(monkeypatch, include, empty_tokens):
+def test_http_stop_drains_detokenization_before_release(monkeypatch, include, empty_tokens):
     async def run():
         tokens = list(range(10, 13 + empty_tokens))
         params = _params(include=include)
-        params.stop_str_match_mode.set_mode(StopStrMatchMode.DETOKEN_ALL)
+        params.stop_str_match_mode.set_mode(StopStrMatchMode.ALL_TEXT)
         req = _req(tokens, params=params)
         decode = DecodeReq(req)
         chunks = {tokens[0]: "helloE", tokens[-2]: "NDextra"}
@@ -619,10 +579,8 @@ def test_backend_stop_match_is_buffered_and_trimmed_by_http(monkeypatch, include
                     break
 
         results = [result async for result in _match_http_stream(http_manager, raw_results(), params, [1, 2], [req])]
-        backend_matched = empty_tokens == 2
         assert req.can_released_mark
-        assert req.stop_str_matched is backend_matched
-        assert req.is_aborted is (not backend_matched)
+        assert req.is_aborted
         assert "".join(text for _, text, _, _ in results) == "hello" + ("END" if include else "")
         assert [metadata["id"] for _, _, metadata, _ in results] == tokens[:-1]
         assert all(not status.is_finished() for _, _, _, status in results[:-1])
@@ -632,24 +590,19 @@ def test_backend_stop_match_is_buffered_and_trimmed_by_http(monkeypatch, include
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("backend", [False, True])
-def test_http_uses_backend_stop_index_or_request_finish_index(backend):
+def test_http_uses_request_finish_index():
     async def run():
         manager = _http_manager()
         manager.pd_mode = SimpleNamespace(is_normal=lambda: False)
-        params = _params()
-        params.stop_str_match_mode.set_mode(StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL)
-        req = _req([10, 11, 12], FinishStatus.FINISHED_ABORTED, params)
-        req.stop_str_matched = backend
-        req.stop_str_matched_token_index = 3 if backend else -1
+        req = _req([10, 11, 12], FinishStatus.FINISHED_ABORTED)
         req.out_tokens_queue.push("hello", 2, False, 1)
         first = await _read_http_tokens(manager, req)
-        req.out_tokens_queue.push("", 3 if backend else 4, False, 2 if backend else 3)
+        req.out_tokens_queue.push("", 4, False, 3)
         last = await _read_http_tokens(manager, req)
         assert first[0][1] == "hello"
         assert not first[0][3].is_finished()
-        assert last[0][2]["id"] == (11 if backend else None)
-        assert last[0][3].is_stopped() is backend
+        assert last[0][2]["id"] is None
+        assert last[0][3].status == FinishStatus.FINISHED_ABORTED
         req.merge_final_token_metadata.assert_awaited_once()
 
     asyncio.run(run())
@@ -743,7 +696,7 @@ def test_http_scopes_stop_matching_and_preserves_hidden_reasoning_marker(stop_in
         manager.args.reasoning_parser = "qwen3"
         params = _params([[10, 11]] if token_stop else "END", force=1)
         params.stop_str_match_mode.set_mode(
-            StopStrMatchMode.OUTPUT_ALL if stop_in_reasoning else StopStrMatchMode.OUTPUT_CONTENT_ONLY
+            StopStrMatchMode.ALL_TEXT if stop_in_reasoning else StopStrMatchMode.CONTENT_ONLY
         )
         tokens = [10, 11, 1001, 10, 11]
         req = _req(tokens, params=params)
@@ -780,9 +733,7 @@ def test_stop_groups_can_separate_explicit_token_ids_from_strings():
     assert params.to_dict()["stop_sequences"] == ["END", [10, 11]]
 
 
-@pytest.mark.parametrize(
-    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
-)
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 def test_string_stop_is_matched_only_after_detokenization(mode):
     params = _params()
     params.stop_str_match_mode.set_mode(mode)
@@ -797,13 +748,11 @@ def test_string_stop_is_matched_only_after_detokenization(mode):
     assert not req.finish_status.is_finished()
 
     decode = DecodeReq(shm_req)
-    decode.output_strs = ["E", "N", "D"]
-    assert decode.stop_sequences_str_match() is (mode == StopStrMatchMode.DETOKEN_ALL)
+    assert decode.need_detoken()
+    assert not decode.can_set_release_mark()
 
 
-@pytest.mark.parametrize(
-    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
-)
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 @pytest.mark.parametrize("reasoning", [False, True])
 @pytest.mark.parametrize(
     "stop_ids, output_ids, matched",
@@ -1043,7 +992,7 @@ def test_http_stream_discards_late_tokens_in_same_full_queue_batch(include):
 def test_stop_stream_uses_prompt_tail_for_all_choices_and_ignores_metadata():
     params = _params(force=0)
     params.n = params.best_of = 2
-    params.stop_str_match_mode.set_mode(StopStrMatchMode.OUTPUT_CONTENT_ONLY)
+    params.stop_str_match_mode.set_mode(StopStrMatchMode.CONTENT_ONLY)
     manager = _http_manager()
     manager.args.reasoning_parser = "qwen3"
     manager.stop_request = AsyncMock()
@@ -1072,9 +1021,9 @@ def test_stop_stream_uses_prompt_tail_for_all_choices_and_ignores_metadata():
 @pytest.mark.parametrize(
     "mode, parser",
     [
-        (StopStrMatchMode.OUTPUT_ALL, "qwen3"),
-        (StopStrMatchMode.OUTPUT_CONTENT_ONLY, None),
-        (StopStrMatchMode.OUTPUT_CONTENT_ONLY, "qwen3"),
+        (StopStrMatchMode.ALL_TEXT, "qwen3"),
+        (StopStrMatchMode.CONTENT_ONLY, None),
+        (StopStrMatchMode.CONTENT_ONLY, "qwen3"),
     ],
 )
 def test_stop_stream_encodes_prompt_tail_independent_of_mode_and_metadata(prompt, prompt_metadata, mode, parser):
@@ -1106,7 +1055,7 @@ def test_stop_stream_encodes_prompt_tail_independent_of_mode_and_metadata(prompt
 def test_stop_stream_keeps_reasoning_state_independent_for_interleaved_choices():
     params = _params(force=0)
     params.n = params.best_of = 2
-    params.stop_str_match_mode.set_mode(StopStrMatchMode.OUTPUT_CONTENT_ONLY)
+    params.stop_str_match_mode.set_mode(StopStrMatchMode.CONTENT_ONLY)
     manager = _http_manager()
     manager.args.reasoning_parser = "qwen3"
     manager.stop_request = AsyncMock()

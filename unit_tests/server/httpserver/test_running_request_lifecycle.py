@@ -68,9 +68,7 @@ def _multimodal_params():
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D, NodeRole.P])
 @pytest.mark.parametrize("include", [False, True])
 @pytest.mark.parametrize("parser", [None, "qwen3"])
-@pytest.mark.parametrize(
-    "stop_mode", [None, StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
-)
+@pytest.mark.parametrize("stop_mode", [None, StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, parser, stop_mode):
     async def run():
         manager = _make_manager(mode)
@@ -110,9 +108,8 @@ def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, 
             result
             async for result in manager.generate("prompt", params, _multimodal_params(), None, websocket, pd_event)
         ]
-        expected_mode = StopStrMatchMode.DETOKEN_ALL if stop_mode is None else stop_mode
+        expected_mode = StopStrMatchMode.ALL_TEXT if stop_mode is None else stop_mode
         assert params.stop_str_match_mode.get_mode() == expected_mode
-        assert params.stop_str_match_mode.is_detoken_all() is (expected_mode == StopStrMatchMode.DETOKEN_ALL)
         expected = "helloEND" if include else "hello"
         assert "".join(result[1] for result in results) == expected
         assert [result[2]["id"] for result in results] == [1, 2]

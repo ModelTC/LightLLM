@@ -113,9 +113,8 @@
 默认为 ``false``，返回文本会移除匹配到的 stop 字符串及同一 token 中其后的文本；
 设为 ``true`` 则保留 stop 字符串。此参数只影响字符串 stop。
 
-字符串保留原文，不再编码成 token ID 序列。``DETOKEN_ALL`` 在 detokenization
-阶段匹配已解码文本，HTTP 输出层负责缓冲和截断；``OUTPUT_ALL`` 和
-``OUTPUT_CONTENT_ONLY`` 由 HTTP 输出层匹配字符串。
+字符串保留原文，不再编码成 token ID 序列。字符串 stop 统一由 HTTP 输出层匹配和截断；
+``ALL_TEXT`` 匹配全部生成文本，``CONTENT_ONLY`` 跳过 reasoning、仅匹配回答。
 
 也可以显式传入 token ID 序列，例如 ``"stop_sequences": [[100, 101]]``，其中
 ID 应替换为模型实际使用的值。此类 stop 在推理层和 HTTP 输出层独立匹配，包括 reasoning 阶段，
@@ -125,8 +124,10 @@ HTTP 输出层先匹配 token ID stop，再匹配字符串 stop；各子请求�
 命中时保留完整 token 文本和 metadata，只将结束状态改为 stop；用户 prompt 的 IDs 不参与匹配。
 ``include_stop_str_in_output`` 不改变 token ID stop 的输出行为。
 字符串和 token ID 序列可以混合配置，例如 ``["END", [100, 101]]``。
-启用 RL、返回 routed experts 或请求 prompt logprobs 时，两种 HTTP stop 包装均跳过，
-依赖后端匹配，不提供 HTTP 层的跨 P/D 分段 token ID 匹配。
+RL、返回 routed experts 和 prompt logprobs 仅支持普通模式。此类请求命中 stop 时仍通知后端停止，
+字符串命中包按 ``include_stop_str_in_output`` 截断文本，但保留后端结束状态；后续包原样放行，
+直到后端结束包返回最终 metadata。因此命中后仍可能返回在途 token，最终结束原因由后端决定。
+PD 分离模式启动时拒绝这些功能开关；请求参数不能启用对应的服务端功能。
 
 .. list-table:: stop 匹配范围
    :header-rows: 1
@@ -134,13 +135,10 @@ HTTP 输出层先匹配 token ID stop，再匹配字符串 stop；各子请求�
    * - ``stop_str_match_mode``
      - 字符串 stop
      - 显式 token ID stop
-   * - ``0`` / ``DETOKEN_ALL``（默认）
+   * - ``1`` / ``ALL_TEXT``（默认）
      - 全部生成文本
      - 全部生成 token
-   * - ``1`` / ``OUTPUT_ALL``
-     - 全部生成文本
-     - 全部生成 token
-   * - ``2`` / ``OUTPUT_CONTENT_ONLY``
+   * - ``2`` / ``CONTENT_ONLY``
      - 仅回答，跳过 reasoning
      - 全部生成 token
 

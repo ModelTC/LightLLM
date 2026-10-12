@@ -51,7 +51,7 @@ def baseline(server_url):
     return result
 
 
-@pytest.mark.parametrize("mode", [0, 1, 2])
+@pytest.mark.parametrize("mode", [1, 2])
 @pytest.mark.parametrize("include", [False, True])
 @pytest.mark.parametrize("kind", ["string", "ids", "mixed"])
 @pytest.mark.parametrize("stream", [False, True])
@@ -76,7 +76,7 @@ def test_native_stop_scope_and_token_boundaries(server_url, baseline, mode, incl
     assert [token["id"] for token in result["tokens"]] == [token["id"] for token in tokens[:6]]
 
 
-@pytest.mark.parametrize("mode", [0, 1, 2])
+@pytest.mark.parametrize("mode", [1, 2])
 @pytest.mark.parametrize("stream", [False, True])
 def test_id_stop_on_prefill_first_token(server_url, baseline, mode, stream):
     first = baseline["tokens"][0]

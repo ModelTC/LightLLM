@@ -70,8 +70,8 @@ class SamplingParams:
         # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopStrMatchBuffer 维护。
         _initial_reasoning_state: int = -1,
         # stop 匹配策略，取值见 StopStrMatchMode；由接口入口设置，随请求传递到各进程和 P/D 节点。
-        # 默认 DETOKEN_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
-        stop_str_match_mode: int = StopStrMatchMode.DETOKEN_ALL,
+        # 默认 ALL_TEXT；Chat 接口需要跳过 reasoning 时使用 CONTENT_ONLY。
+        stop_str_match_mode: int = StopStrMatchMode.ALL_TEXT,
     ) -> None:
         self.best_of = best_of
         self.n = n

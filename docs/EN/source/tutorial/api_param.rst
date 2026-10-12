@@ -105,9 +105,8 @@ removed. Set it to ``true`` to retain the stop string. This option applies to
 string stops only.
 
 Strings retain their original text and are never encoded into token ID sequences.
-``DETOKEN_ALL`` matches decoded text during detokenization, with the HTTP output
-layer handling buffering and trimming. ``OUTPUT_ALL`` and ``OUTPUT_CONTENT_ONLY``
-match strings in the HTTP output layer.
+String stops are matched and trimmed in HTTP output. ``ALL_TEXT`` matches all
+generated text; ``CONTENT_ONLY`` skips reasoning and matches answer content.
 
 Explicit token ID sequences are also supported, for example
 ``"stop_sequences": [[100, 101]]``; replace these IDs with the values used by your
@@ -119,9 +118,12 @@ whose decoded text is empty. A match preserves token text and metadata and chang
 only the finish status to stop. IDs from the user prompt do not participate in matching.
 ``include_stop_str_in_output`` does not change token ID stop output behavior.
 Strings and token ID sequences may be mixed, for example ``["END", [100, 101]]``.
-RL, routed-expert output, and prompt-logprob requests bypass both HTTP stop wrappers
-and rely on backend matching. HTTP token ID matching across P/D segments is disabled
-for these requests.
+RL, routed-expert output, and prompt-logprob requests are supported only in normal
+mode. A stop match still requests backend shutdown. The matched string packet is trimmed
+according to ``include_stop_str_in_output`` but retains the backend finish status.
+Subsequent packets pass through unchanged until the backend finishes with final metadata.
+In-flight tokens may therefore appear after the match, and the backend determines the final finish reason.
+PD mode rejects the corresponding startup flags; request parameters cannot enable these server features.
 
 .. list-table:: Stop matching scope
    :header-rows: 1
@@ -129,13 +131,10 @@ for these requests.
    * - ``stop_str_match_mode``
      - String stops
      - Explicit token ID stops
-   * - ``0`` / ``DETOKEN_ALL`` (default)
+   * - ``1`` / ``ALL_TEXT`` (default)
      - All generated text
      - All generated tokens
-   * - ``1`` / ``OUTPUT_ALL``
-     - All generated text
-     - All generated tokens
-   * - ``2`` / ``OUTPUT_CONTENT_ONLY``
+   * - ``2`` / ``CONTENT_ONLY``
      - Answer content only, excluding reasoning
      - All generated tokens
 

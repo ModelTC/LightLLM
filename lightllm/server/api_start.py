@@ -35,6 +35,7 @@ def _set_envs_and_config(args: StartArgs):
 
 
 def _launch_subprocesses(args: StartArgs):
+    _validate_pd_features(args)
     _set_envs_and_config(args)
 
     if args.target_vocab_topk_sampling is not None:
@@ -489,6 +490,7 @@ def normal_or_p_d_start(args: StartArgs):
 
 
 def pd_master_start(args: StartArgs):
+    _validate_pd_features(args)
     _set_envs_and_config(args)
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
@@ -629,3 +631,10 @@ def config_server_start(args):
     http_server_process = subprocess.Popen(command)
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
+
+
+def _validate_pd_features(args: StartArgs):
+    if args.run_mode in ("pd_master", "prefill", "decode") and (
+        args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
+    ):
+        raise ValueError("PD mode does not support RL, routed experts or prompt logprobs")

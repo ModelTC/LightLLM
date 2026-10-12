@@ -104,6 +104,7 @@ def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefi
 def test_single_block_prefill_hit_persists_past_decode_zeros(monkeypatch):
     mgr = _make_manager(monkeypatch)
     sp = SamplingParams()
+    sp.init(None)
     sp.n = 1
     sp.max_new_tokens = 3
     sp.best_of = 1
@@ -115,7 +116,7 @@ def test_single_block_prefill_hit_persists_past_decode_zeros(monkeypatch):
     assert mgr.inserted_prompt_caches[0][0] == "hello"
 
 
-@pytest.mark.parametrize("mode", list(range(3)))
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 @pytest.mark.parametrize("hidden_prefix", [False, True])
 @pytest.mark.parametrize("token_chunks", [[[10], [11, 12]], [[10], [11], [12, 13]]])
 def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hidden_prefix, token_chunks):
@@ -161,6 +162,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
 def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
     mgr = _make_manager(monkeypatch)
     sp = SamplingParams()
+    sp.init(None)
     sp.n = 1
     sp.max_new_tokens = 5
     sp.best_of = 1
@@ -183,6 +185,7 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
 def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch):
     mgr = _make_manager(monkeypatch)
     sampling_params = SamplingParams()
+    sampling_params.init(None)
     sampling_params.n = 1
     sampling_params.best_of = 1
     sampling_params.max_new_tokens = 1
@@ -216,8 +219,7 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     assert mgr.inserted_prompt_caches == []
 
 
-@pytest.mark.parametrize("backend", [False, True])
-def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backend):
+def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
@@ -226,15 +228,12 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch, backe
         manager.tokenizer,
         stop_sequences="END",
         max_new_tokens=10,
-        stop_str_match_mode=StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL,
+        stop_str_match_mode=StopStrMatchMode.ALL_TEXT,
         _initial_reasoning_state=1,
     )
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
-        assert sp.stop_str_match_mode.is_detoken_all() is backend
-        assert sp.stop_str_match_mode.get_mode() == (
-            StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL
-        )
+        assert sp.stop_str_match_mode.get_mode() == (StopStrMatchMode.ALL_TEXT)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
         yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
 
@@ -270,14 +269,13 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
         stop_sequences="END",
         max_new_tokens=3,
         _initial_reasoning_state=1,
-        stop_str_match_mode=StopStrMatchMode.OUTPUT_CONTENT_ONLY,
+        stop_str_match_mode=StopStrMatchMode.CONTENT_ONLY,
     )
     segment_modes = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segment_modes.append(sp._initial_reasoning_state)
-        assert sp.stop_str_match_mode.get_mode() == StopStrMatchMode.OUTPUT_CONTENT_ONLY
-        assert sp.stop_str_match_mode.is_detoken_all() is False
+        assert sp.stop_str_match_mode.get_mode() == StopStrMatchMode.CONTENT_ONLY
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segment_modes) == 1:
             yield sp.group_request_id, "reason", {**metadata, "id": 10}, FinishStatus()
@@ -315,6 +313,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
 def test_skipped_prefill_does_not_insert_prompt_cache(monkeypatch, node_mode):
     mgr = _make_manager(monkeypatch)
     sampling_params = SamplingParams()
+    sampling_params.init(None)
     sampling_params.n = sampling_params.best_of = 1
     sampling_params.max_new_tokens = 3
     cached = _collect(
@@ -334,6 +333,7 @@ def test_skipped_prefill_does_not_insert_prompt_cache(monkeypatch, node_mode):
 def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch, needs_prefill_first_token):
     mgr = _make_manager(monkeypatch)
     sampling_params = SamplingParams()
+    sampling_params.init(None)
     sampling_params.n = sampling_params.best_of = 1
     sampling_params.max_new_tokens = 3
     cached = _collect(
@@ -377,14 +377,13 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
         stop_sequences="END",
         include_stop_str_in_output=include,
         _initial_reasoning_state=int(parser is not None),
-        stop_str_match_mode=StopStrMatchMode.DETOKEN_ALL if parser is None else StopStrMatchMode.OUTPUT_CONTENT_ONLY,
+        stop_str_match_mode=StopStrMatchMode.ALL_TEXT if parser is None else StopStrMatchMode.CONTENT_ONLY,
         max_new_tokens=10,
     )
     segments = []
 
     async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
         segments.append(prompt)
-        assert sp.stop_str_match_mode.is_detoken_all() is (parser is None)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
             if parser:

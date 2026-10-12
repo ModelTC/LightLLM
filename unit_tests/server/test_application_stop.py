@@ -141,24 +141,26 @@ def test_http_generate_only_wraps_client_output(mode, slave):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    "mode", [StopStrMatchMode.DETOKEN_ALL, StopStrMatchMode.OUTPUT_ALL, StopStrMatchMode.OUTPUT_CONTENT_ONLY]
-)
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 @pytest.mark.parametrize("feature", ["enable_rl", "enable_return_routed_experts", "prompt_logprobs"])
-@pytest.mark.parametrize("stop", [None, "END", [[10]], ["END", [10]]])
-def test_rl_and_final_metadata_skip_both_stop_wrappers(mode, feature, stop):
+@pytest.mark.parametrize("stop", [None, [], "END", [[10, 11]], ["END", [10, 11]]])
+@pytest.mark.parametrize("include", [False, True])
+@pytest.mark.parametrize("split", [False, True])
+def test_final_metadata_stop_forwards_late_tokens_and_backend_finish(mode, feature, stop, include, split):
     async def run():
         tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
         params = SamplingParams()
-        params.init(tokenizer, stop_sequences=stop, stop_str_match_mode=mode)
+        params.init(tokenizer, stop_sequences=stop, stop_str_match_mode=mode, include_stop_str_in_output=include)
         if feature == "prompt_logprobs":
             params.prompt_logprobs = 0
-        metadata = {"id": 11, "prompt_token_ids": [1, 2], "prompt_logprobs": [None, {}], "routed_experts": [[2]]}
+        metadata = {"id": 13, "prompt_token_ids": [1, 2], "prompt_logprobs": [None, {}], "routed_experts": [[2]]}
 
         async def raw_results(*args, **kwargs):
-            # 第一条输出就命中 stop；最终 metadata 只在后端结束输出中出现。
-            yield 80, "helloEND", {"id": 10}, FinishStatus()
-            yield 80, "tail", metadata, FinishStatus(FinishStatus.FINISHED_STOP)
+            yield 80, "helloE" if split else "hello", {"id": 10}, FinishStatus()
+            yield 80, "NDextra" if split else "ENDextra", {"id": 11}, FinishStatus()
+            yield 80, "lateEND", {"id": 12}, FinishStatus()
+            yield 80, "tail", metadata, FinishStatus(FinishStatus.FINISHED_ABORTED)
+            yield 80, "after finish", {"id": 14}, FinishStatus()
 
         manager = _manager(
             tokenizer,
@@ -169,17 +171,29 @@ def test_rl_and_final_metadata_skip_both_stop_wrappers(mode, feature, stop):
             ),
             raw_results,
         )
-        if mode != StopStrMatchMode.DETOKEN_ALL:
-            with pytest.raises(AssertionError, match="DETOKEN_ALL"):
-                manager.generate("prompt", params, None, None)
-            return
         results = [result async for result in manager.generate("prompt", params, None, None)]
-        assert len(results) == 2
-        assert results[0][1] == "helloEND"
-        assert not results[0][3].is_finished()
-        assert results[1][1] == "tail"
-        assert results[1][2] is metadata
-        assert results[1][3].is_stopped()
-        manager.stop_request.assert_not_awaited()
+        first_text = "helloE" if split else "hello"
+        hit_text = "NDextra" if split else "ENDextra"
+        if stop:
+            if params.stop_sequences.has_stop_strs():
+                first_text = first_text if include else "hello"
+                hit_text = ("ND" if split else "END") if include else ""
+            assert [result[1] for result in results] == [
+                first_text,
+                hit_text,
+                "lateEND",
+                "tail",
+            ]
+            assert [result[2]["id"] for result in results] == [10, 11, 12, 13]
+            expected_stops = (
+                2 if params.stop_sequences.has_stop_strs() and params.stop_sequences.to_token_ids_list() else 1
+            )
+            assert [call.args for call in manager.stop_request.await_args_list] == [(80,)] * expected_stops
+        else:
+            assert [result[1] for result in results] == [first_text, hit_text, "lateEND", "tail", "after finish"]
+            manager.stop_request.assert_not_awaited()
+        assert all(not result[3].is_finished() for result in results[:3])
+        assert results[3][2] is metadata
+        assert results[3][3].status == FinishStatus.FINISHED_ABORTED
 
     asyncio.run(run())

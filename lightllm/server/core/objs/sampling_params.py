@@ -29,32 +29,27 @@ class StopStrMatchMode(ctypes.Structure):
     _pack_ = 4
     _fields_ = [("mode", ctypes.c_int)]
 
-    # detokenization 匹配全部生成文本；HTTP 输出层负责缓冲和截断字符串 stop。
-    DETOKEN_ALL = 0
     # HTTP 输出层对全部生成文本匹配字符串 stop，包括 reasoning 和回答。
-    OUTPUT_ALL = 1
-    # HTTP 输出层跳过 reasoning，仅匹配 content；关闭 detokenization 的字符串匹配。
-    OUTPUT_CONTENT_ONLY = 2
+    ALL_TEXT = 1
+    # HTTP 输出层跳过 reasoning，仅匹配 content。
+    CONTENT_ONLY = 2
 
-    def __init__(self, mode: int = DETOKEN_ALL):
+    def __init__(self, mode: int = ALL_TEXT):
         self.set_mode(mode)
 
     def set_mode(self, mode: int):
-        if mode not in (self.DETOKEN_ALL, self.OUTPUT_ALL, self.OUTPUT_CONTENT_ONLY):
+        if mode not in (self.ALL_TEXT, self.CONTENT_ONLY):
             raise ValueError(f"Invalid stop_str_match_mode: {mode!r}")
         self.mode = mode
 
     def get_mode(self) -> int:
         return self.mode
 
-    def is_detoken_all(self) -> bool:
-        return self.mode == self.DETOKEN_ALL
+    def is_all_text(self) -> bool:
+        return self.mode == self.ALL_TEXT
 
-    def is_output_all(self) -> bool:
-        return self.mode == self.OUTPUT_ALL
-
-    def is_output_content_only(self) -> bool:
-        return self.mode == self.OUTPUT_CONTENT_ONLY
+    def is_content_only(self) -> bool:
+        return self.mode == self.CONTENT_ONLY
 
 
 class StopSequence(ctypes.Structure):
@@ -315,7 +310,7 @@ class SamplingParams(ctypes.Structure):
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
         # 字符串 stop 匹配策略，取值见 StopStrMatchMode；显式 token ID 序列不受本策略影响。
-        # 默认 DETOKEN_ALL；Chat 接口需要跳过 reasoning 时使用 OUTPUT_CONTENT_ONLY。
+        # 默认 ALL_TEXT；Chat 接口需要跳过 reasoning 时使用 CONTENT_ONLY。
         ("stop_str_match_mode", StopStrMatchMode),
         # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
         # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
@@ -419,7 +414,7 @@ class SamplingParams(ctypes.Structure):
         stop_sequences = kwargs.get("stop_sequences", [])
         self.stop_sequences = StopSequenceGroups()
         self.stop_sequences.initialize(stop_sequences)
-        self.stop_str_match_mode.set_mode(kwargs.get("stop_str_match_mode", StopStrMatchMode.DETOKEN_ALL))
+        self.stop_str_match_mode.set_mode(kwargs.get("stop_str_match_mode", StopStrMatchMode.ALL_TEXT))
         self.include_stop_str_in_output = kwargs.get("include_stop_str_in_output", False)
         # 运行时状态由 StopStrMatchBuffer 维护，此参数仅用于初始化。
         self._initial_reasoning_state = kwargs.get("_initial_reasoning_state", -1)

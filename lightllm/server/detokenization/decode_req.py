@@ -1,9 +1,5 @@
 import os
-from typing import List
 from lightllm.server.core.objs import Req
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 LIGHTLLM_DECODE_PREFIX_LENGTH = int(os.getenv("LIGHTLLM_DECODE_PREFIX_LENGTH", 5))
@@ -18,42 +14,15 @@ class DecodeReq:
         self.group_req_id = req.group_req_id
         self.prompt_ids = req.shm_prompt_ids.arr[0 : req.input_len].tolist()
         self.output_ids = []
-        self.output_strs = []
         self.prefix_offset = max(len(self.prompt_ids) - LIGHTLLM_DECODE_PREFIX_LENGTH, 0)
 
         self.read_offset = len(self.prompt_ids)
 
         self.req = req
         self.input_len = self.req.input_len
-        self.stop_strs: List[str] = self.req.sample_params.stop_sequences.to_stop_str_list()
-        # to_stop_str_list()已经做了倒序排列，第一个元素就是最长字符串
-        self.stop_str_max_len = len(self.stop_strs[0]) if self.stop_strs else 0
-
-    def stop_sequences_str_match(self) -> bool:
-        # 此处仅处理字符串；HTTP 匹配模式下不写 stop_str_matched，显式 token ID stop 仍由推理层处理。
-        if not self.req.sample_params.stop_str_match_mode.is_detoken_all():
-            return False
-        stop_strs = self.stop_strs
-        if not stop_strs or self.stop_str_max_len == 0:
-            return False
-
-        tail_token_len = self.stop_str_max_len + 10  # 10 for safety
-        tail_token_strs = self.output_strs[-tail_token_len:]
-        tail_str = "".join(tail_token_strs)
-
-        for stop_str in stop_strs:
-            if stop_str in tail_str:
-                logger.debug(
-                    f"req_id {self.request_id} Found stop sequence in tail: stop_str='{stop_str}', "
-                    f"tail_str='{tail_str}'"
-                )
-                return True
-        return False
 
     def need_detoken(self):
-        if (not self.req.stop_str_matched) and len(self.output_ids) < self.req.candetoken_out_len:
-            return True
-        return False
+        return len(self.output_ids) < self.req.candetoken_out_len
 
     def out_queue_is_full(self):
         return self.req.out_tokens_queue.is_full()
@@ -68,12 +37,8 @@ class DecodeReq:
         return prefix_tokens, read_tokens
 
     def can_set_release_mark(self):
-        if self.req.stop_str_matched:
-            return True
-        if (
+        return (
             self.req.finish_status.is_finished()
             and self.req.candetoken_out_len == len(self.output_ids)
             and self.req.finish_token_index == self.input_len + len(self.output_ids) - 1
-        ):
-            return True
-        return False
+        )

@@ -67,12 +67,12 @@ the native API's ``parameters.stop_sequences`` match independently in inference
 and HTTP output and can end generation during reasoning or answer content, regardless of
 this environment variable or ``include_stop_str_in_output``.
 
-When ``--enable_rl`` or ``--enable_return_routed_experts`` is enabled, or the request
-asks for ``prompt_logprobs``, only ``DETOKEN_ALL`` is supported. These requests bypass
-both string and token ID stop wrappers and return raw backend output and final metadata.
-Stop matching is handled by the backend.
-For Chat requests with a reasoning parser and stop sequences, set
-``LIGHTLLM_STOP_IN_REASONING=1``; application-side stop modes fail an assertion.
+RL, routed-expert output, and prompt-logprob requests are supported only in normal
+mode. A stop match still requests backend shutdown. The matched string packet is trimmed
+according to ``include_stop_str_in_output`` but retains the backend finish status.
+Subsequent packets pass through unchanged until the backend finishes with final metadata.
+In-flight tokens may therefore appear after the match, and the backend determines the final finish reason.
+PD mode rejects the corresponding startup flags; request parameters cannot enable these server features.
 
 Basic Conversation Examples
 ---------------------------

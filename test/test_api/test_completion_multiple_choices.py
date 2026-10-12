@@ -1,7 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -228,9 +228,8 @@ def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, a
         assert sampling_params._initial_reasoning_state == (int(thinking) if api == "chat" else -1)
         skip_reasoning = api == "chat" and not enabled
         assert sampling_params.stop_str_match_mode.get_mode() == (
-            StopStrMatchMode.OUTPUT_CONTENT_ONLY if skip_reasoning else StopStrMatchMode.DETOKEN_ALL
+            StopStrMatchMode.CONTENT_ONLY if skip_reasoning else StopStrMatchMode.ALL_TEXT
         )
-        assert sampling_params.stop_str_match_mode.is_detoken_all() is (not skip_reasoning)
 
         async def results():
             yield 80, "hello", {"prompt_tokens": 4, "id": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
@@ -268,5 +267,71 @@ def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, a
         if stream:
             body = [chunk async for chunk in response.body_iterator]
             assert body
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("api", ["chat", "completion"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_openai_maps_backend_abort_to_stop(monkeypatch, api, stream):
+    from lightllm.server.api_http import g_objs
+
+    backend_finish = FinishStatus(FinishStatus.FINISHED_ABORTED)
+
+    async def generate(prompt, sampling_params, multimodal_params, request):
+        metadata = {"prompt_tokens": 4, "prompt_cache_len": 1, "logprobs": {}, "logprob": -0.1}
+        yield 80, "helloENDextra", {**metadata, "id": 0}, FinishStatus()
+        yield 80, "late", {**metadata, "id": 11}, FinishStatus()
+        yield 80, "", {**metadata, "id": None, "logprob": None}, backend_finish
+
+    monkeypatch.setattr(
+        g_objs,
+        "httpserver_manager",
+        _manager(
+            SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text]),
+            generate,
+            SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=True),
+        ),
+    )
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
+    log = Mock()
+    monkeypatch.setattr(api_openai.logger, "info", log)
+
+    async def build_prompt(*args):
+        return "Prompt"
+
+    monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
+
+    async def run():
+        kwargs = dict(model="test-model", stop="END", stream=stream)
+        if api == "chat":
+            request = ChatCompletionRequest(messages=[{"role": "user", "content": "Hello"}], **kwargs)
+            response = await api_openai.chat_completions_impl(request, SimpleNamespace())
+        else:
+            request = CompletionRequest(prompt="Prompt", **kwargs)
+            response = await api_openai.completions_impl(request, SimpleNamespace())
+        if stream:
+            body = "".join(
+                [chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator]
+            )
+            events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: {")]
+            assert not any("error" in event for event in events)
+            choices = [choice for event in events for choice in event["choices"]]
+            text = (
+                "".join(choice["delta"].get("content") or "" for choice in choices)
+                if api == "chat"
+                else "".join(choice.get("text", "") for choice in choices)
+            )
+            assert choices[-1]["finish_reason"] == "stop"
+            assert events[-1]["usage"]["completion_tokens"] == 3
+        else:
+            text = response.choices[0].message.content if api == "chat" else response.choices[0].text
+            assert response.choices[0].finish_reason == "stop"
+            assert response.usage.completion_tokens == 3
+        assert text == "hellolate"
+        assert backend_finish.status == FinishStatus.FINISHED_ABORTED
+        log.assert_called_once()
+        assert "abort to stop" in log.call_args.args[0]
+        assert "sub_req_id=80" in log.call_args.args[0]
 
     asyncio.run(run())

@@ -295,8 +295,11 @@ def test_pd_master_restores_request_count_when_preload_fails():
     manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
     manager.running_request_count = 0
 
+    params = SamplingParams()
+    params.init(None)
+
     async def consume_generate():
-        async for _ in manager.generate("prompt", SamplingParams(), FailingMultimodalParams(), None):
+        async for _ in manager.generate("prompt", params, FailingMultimodalParams(), None):
             pass
 
     with pytest.raises(RuntimeError, match="preload failed"):
@@ -305,23 +308,9 @@ def test_pd_master_restores_request_count_when_preload_fails():
     assert manager.running_request_count == 0
 
 
-@pytest.mark.parametrize(
-    "parser,enabled,backend,match_in_inference",
-    [
-        (None, False, None, True),
-        ("qwen3", False, None, True),
-        ("qwen3", True, None, True),
-        (None, False, False, False),
-        (None, False, True, True),
-        ("qwen3", False, False, False),
-        ("qwen3", False, True, True),
-        ("qwen3", True, False, False),
-        ("qwen3", True, True, True),
-    ],
-)
-def test_pd_master_request_count_covers_async_generator_lifecycle(
-    monkeypatch, parser, enabled, backend, match_in_inference
-):
+@pytest.mark.parametrize("parser", [None, "qwen3"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, parser, enabled):
     monkeypatch.setenv("LIGHTLLM_STOP_IN_REASONING", "1" if enabled else "0")
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
     manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
@@ -333,7 +322,6 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
         nonlocal inner_generator_closed
         try:
             assert manager.running_request_count == 1
-            assert sampling_params.stop_str_match_mode.is_detoken_all() is match_in_inference
             yield "result"
         finally:
             inner_generator_closed = True
@@ -343,10 +331,6 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(
     async def consume_one_result_and_close():
         params = SamplingParams()
         params.init(None)
-        if backend is not None:
-            params.stop_str_match_mode.set_mode(
-                StopStrMatchMode.DETOKEN_ALL if backend else StopStrMatchMode.OUTPUT_ALL
-            )
         results_generator = manager.generate(None, params, None, None)
         assert await results_generator.__anext__() == "result"
         assert manager.running_request_count == 1
@@ -457,3 +441,17 @@ def test_elastic_pd_master_health_does_not_check_individual_pd_nodes(monkeypatch
     assert response.status_code == 200
     assert response_body["message"] == "Ok"
     assert "pd_nodes_healthy" not in response_body
+
+
+@pytest.mark.parametrize("run_mode", ["pd_master", "prefill", "decode"])
+@pytest.mark.parametrize("feature", ["enable_rl", "enable_return_routed_experts", "enable_prompt_logprobs"])
+def test_pd_rejects_final_metadata_features_before_startup(monkeypatch, run_mode, feature):
+    from lightllm.server import api_start
+
+    def unexpected_startup(*args, **kwargs):
+        pytest.fail("Unsupported PD features must be rejected before process setup")
+
+    monkeypatch.setattr(api_start.mp, "set_start_method", unexpected_startup)
+    start = api_start.pd_master_start if run_mode == "pd_master" else api_start._launch_subprocesses
+    with pytest.raises(ValueError, match="PD mode does not support"):
+        start(StartArgs(run_mode=run_mode, **{feature: True}))
