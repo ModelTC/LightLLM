@@ -48,6 +48,7 @@ def test_invalid_draft_is_rejected_without_failing_the_request(compiler, draft):
     assert not mask[mismatch, ord("!")]
     assert mask[mismatch + 1 :].all()  # Unreachable suffix rows remain harmless.
     assert req.output_constraint.error is None
+    assert not req.output_constraint.is_terminated()
     assert allowed([req])[0, ord("a")]
 
 
@@ -83,6 +84,48 @@ def test_stop_token_in_draft_does_not_terminate_the_real_matcher(compiler, reaso
     for token in reasoning_end:
         assert not commit_token(req, token)
     assert allowed([req])[0, ord("a")]
+
+
+def test_completed_grammar_does_not_enable_mask(compiler):
+    req = make_req(regular_constraint="a")
+    init_request(compiler, req)
+    state = req.output_constraint
+    state.commit(ord("a"))
+    state.commit(256)
+    assert state.is_terminated()
+
+    bitmask = torch.zeros((1, 9), dtype=torch.int32)
+    assert not state.fill_masks(bitmask, [])
+    assert (bitmask == -1).all()
+    assert state.is_terminated() and state.error is None
+
+
+def test_long_reasoning_tail_restored_after_repeated_speculation(compiler):
+    req = make_req(regular_constraint="ab", guided_reasoning_end=tuple(b"]>"))
+    init_request(compiler, req)
+    state = req.output_constraint
+    # 长思考内容只保留结束标记长度的后缀，标记仍能跨已提交和 draft token 匹配。
+    assert verify_mask(compiler, [req] * 4, [0, *b"xxx"]).all()
+    for token in b"x" * 100 + b"]":
+        commit_token(req, token)
+    assert state.reasoning_tail == tuple(b"x]")
+    saved_tail = state.reasoning_tail
+
+    for _ in range(3):
+        mask = verify_mask(compiler, [req] * 4, [0, *b">ab"])
+        assert mask[0].all()
+        assert [row.nonzero().flatten().tolist() for row in mask[1:]] == [[ord("a")], [ord("b")], [256]]
+        assert state.in_reasoning and state.reasoning_tail[-1] == ord("]")
+        # 快照恢复被临时推进替换的后缀，多轮验证始终观察同一已提交状态。
+        assert state.reasoning_tail == saved_tail
+        assert state.error is None
+
+    for token in b">ab":
+        commit_token(req, token)
+    # 思考结束标记保留在 tail 中，grammar token 的提交进度由 matcher 持有。
+    assert state.reasoning_tail == tuple(b"]>")
+    assert not state.in_reasoning
+    assert allowed([req])[0].nonzero().flatten().tolist() == [256]
 
 
 def test_reasoning_boundary_inside_verify_is_temporary_until_commit(compiler):
@@ -149,7 +192,8 @@ def test_verify_locates_answer_without_mutating_reasoning_progress(compiler, mar
 
 
 @pytest.mark.parametrize("failure", ["fill_next_token_bitmask", "rollback"])
-def test_mask_failure_after_speculative_reasoning_end_disables_request_mask(compiler, monkeypatch, failure):
+@pytest.mark.parametrize("exception_type", [RuntimeError, BaseException])
+def test_failure_after_speculative_reasoning_end_records_terminal_error(compiler, monkeypatch, failure, exception_type):
     import xgrammar as xgr
 
     req = make_req(regular_constraint="ab", guided_reasoning_end=(ord("]"),))
@@ -158,18 +202,47 @@ def test_mask_failure_after_speculative_reasoning_end_disables_request_mask(comp
 
     def fail_speculative_mask(matcher, *args):
         if failure == "rollback" or args[1] == 2:
-            raise RuntimeError("injected speculative mask failure")
+            raise exception_type("injected speculative mask failure")
         return original(matcher, *args)
 
     with monkeypatch.context() as patcher:
         patcher.setattr(xgr.GrammarMatcher, failure, fail_speculative_mask)
-        assert build_mask([req] * 5, draft_input_ids=[0, *b"]ab", 256]) is None
+        masks = build_mask([req] * 5, draft_input_ids=[0, *b"]ab", 256])
+        if failure == "rollback":
+            # 回滚失败不影响此前已完整生成的掩码，本轮仍可使用。
+            assert masks is not None
+        else:
+            assert masks is None
 
     state = req.output_constraint
     assert state.in_reasoning and state.reasoning_tail == ()
     assert state.error == "injected speculative mask failure"
-    # An overlapping batch must not reuse partially written masks or retry the matcher.
+    assert state.is_terminated()
+    # 后续批次不再使用错误请求的 matcher。
     assert build_mask([req] * 4, draft_input_ids=[0, *b"]ab"]) is None
+
+
+@pytest.mark.parametrize("exception_type", [RuntimeError, BaseException])
+def test_temporary_state_marks_rollback_failure_as_terminal(compiler, monkeypatch, exception_type):
+    import xgrammar as xgr
+
+    req = make_req(regular_constraint="ab", guided_reasoning_end=tuple(b"]>"))
+    init_request(compiler, req)
+    commit_token(req, ord("]"))
+    state = req.output_constraint
+
+    def fail_rollback(matcher, token_count):
+        raise exception_type("injected rollback failure")
+
+    monkeypatch.setattr(xgr.GrammarMatcher, "rollback", fail_rollback)
+    # 直接使用临时状态接口，验证错误标记不依赖 fill_masks 的外层捕获。
+    with state._temporary_state():
+        assert state._accept_token(ord(">"))
+        assert state._accept_token(ord("a"))
+
+    assert state.error == "injected rollback failure"
+    assert state.is_terminated()
+    assert state.in_reasoning and state.reasoning_tail == (ord("]"),)
 
 
 def test_thinking_verify_does_not_enable_mask_or_advance_matcher(compiler):
@@ -200,7 +273,10 @@ def test_speculative_mask_failure_isolated_and_draft_tokens_rolled_back(compiler
         patcher.setattr(xgr.GrammarMatcher, failure, fail_for_bad_request)
         mask = verify_mask(compiler, [bad, bad, good], [0, ord("a"), 0])
 
-    assert mask[:2].all()
+    if failure == "rollback":
+        assert [row.nonzero().flatten().tolist() for row in mask[:2]] == [[ord("a")], [ord("b")]]
+    else:
+        assert mask[:2].all()
     assert mask[2].nonzero().flatten().tolist() == [ord("c")]
     assert bad.output_constraint.error == "injected grammar failure"
     assert good.output_constraint.error is None

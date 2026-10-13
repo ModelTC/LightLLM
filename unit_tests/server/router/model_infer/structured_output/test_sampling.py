@@ -144,7 +144,7 @@ def test_sample_does_not_activate_constraints_for_partial_prefill(compiler, samp
 
 
 @pytest.mark.parametrize("failure", ["fill_next_token_bitmask", "rollback"])
-def test_sample_ignores_failed_masks_and_preserves_other_requests(compiler, sampling_manager, monkeypatch, failure):
+def test_sample_preserves_valid_masks_and_isolates_failed_requests(compiler, sampling_manager, monkeypatch, failure):
     import xgrammar as xgr
 
     bad = sampling_req(compiler, sampling_manager, req_idx=0)
@@ -173,9 +173,10 @@ def test_sample_ignores_failed_masks_and_preserves_other_requests(compiler, samp
         b_mtp_index=torch.tensor([0, 1, 0], dtype=torch.int32, device="cuda"),
     )
 
-    assert tokens.tolist() == list(b"!!c")
+    expected_tokens = b"abc" if failure == "rollback" else b"!!c"
+    assert tokens.tolist() == list(expected_tokens)
     assert torch.isfinite(logprobs).all()
-    assert not sampling_manager.req_to_bitmask_enabled[bad.req_idx]
+    assert bool(sampling_manager.req_to_bitmask_enabled[bad.req_idx]) == (failure == "rollback")
     assert sampling_manager.req_to_bitmask_enabled[good.req_idx]
     assert bad.output_constraint.error == "injected grammar failure"
     assert good.output_constraint.error is None

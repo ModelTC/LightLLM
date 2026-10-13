@@ -76,9 +76,10 @@ def test_pd_history_outside_prompt_returns_constraint_error(compiler, previous_o
     init_request(compiler, req)
     assert "pd_previous_output_len" in req.output_constraint.error
     assert req.output_constraint.matcher is None
+    assert req.output_constraint.is_terminated()
 
 
-def test_thinking_does_not_advance_matcher_or_fill_mask(compiler):
+def test_thinking_does_not_advance_matcher_or_enable_mask(compiler):
     req = make_req(regular_constraint="ab", guided_reasoning_end=(ord("]"),))
     init_request(compiler, req)
     # The state owns its marker snapshot even if the shared parameters change.
@@ -86,7 +87,8 @@ def test_thinking_does_not_advance_matcher_or_fill_mask(compiler):
     manager = make_mask_buffers([req])
     manager.req_to_bitmask.fill_(42)
     assert not prepare_sampling_tensors([req], manager)[-1]
-    assert (manager.req_to_bitmask == 42).all()
+    assert (manager.req_to_bitmask[req.req_idx] == -1).all()
+    assert not manager.req_to_bitmask_enabled[req.req_idx]
     assert not commit_token(req, ord("?"))
     assert req.output_constraint.error is None
     assert not commit_token(req, ord("]"))
