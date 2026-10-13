@@ -580,7 +580,7 @@ class StaticBenchmarkExecutor:
             req = SimpleNamespace(req_idx=req_id, hold_kv_len=old_hold_kv_len)
             allocations.append((req, new_hold_kv_len - old_hold_kv_len))
         if allocations:
-            req_manager.alloc_req_pages(allocations)
+            req_manager.alloc_req_token_indexes(allocations)
             for req, _ in allocations:
                 self._hold_kv_len_by_req[req.req_idx] = req.hold_kv_len
 

@@ -102,8 +102,10 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 # 逻辑长度，hold_kv_len 还包含最后一个页面中尚未使用的预留槽位。
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
                 if req_obj.hold_kv_len > old_prefix_len:
-                    self.model.req_manager.free_pages(
-                        self.model.req_manager.get_cpu_page_bases(req_obj.req_idx, old_prefix_len, req_obj.hold_kv_len)
+                    self.model.req_manager.free_token_index_blocks(
+                        self.model.req_manager.get_cpu_token_index_blocks(
+                            req_obj.req_idx, old_prefix_len, req_obj.hold_kv_len
+                        )
                     )
                     req_obj.cur_kv_len = old_prefix_len
                     req_obj.hold_kv_len = old_prefix_len

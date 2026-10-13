@@ -43,16 +43,16 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     context = InferenceContext()
     context.is_hybrid_att_model = False
     context.req_manager = SimpleNamespace(
-        get_cpu_page_bases=lambda row, start, end: torch.arange(10 + start, 10 + end).numpy()
+        get_cpu_token_index_blocks=lambda row, start, end: torch.arange(10 + start, 10 + end).numpy()
     )
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
     req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
-    free_page_indexes = []
+    free_token_index_blocks = []
 
-    context._free_req_mem_without_radix_insert(free_page_indexes, req)
+    context._free_req_mem_without_radix_insert(free_token_index_blocks, req)
 
-    assert free_page_indexes[0].tolist() == [12, 13, 14, 15, 16]
+    assert free_token_index_blocks[0].tolist() == [12, 13, 14, 15, 16]
     assert released_refs == [shared_node]
     assert req.shared_kv_node is None
 
@@ -62,7 +62,7 @@ def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
     context.radix_cache = object()
     context.is_hybrid_att_model = False
     inserted_reqs = []
-    context._full_att_free_req = lambda free_page_index, req: inserted_reqs.append(req)
+    context._full_att_free_req = lambda free_token_index_blocks, req: inserted_reqs.append(req)
     req = SimpleNamespace(
         cache_tiers=(CacheTier.GPU, CacheTier.CPU, CacheTier.DISK),
         cur_kv_len=3,
@@ -139,7 +139,7 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     context = InferenceContext()
     context.is_hybrid_att_model = True
     context.req_manager = SimpleNamespace(
-        get_cpu_page_bases=lambda row, start, end: torch.arange(10 + start, 10 + end).numpy()
+        get_cpu_token_index_blocks=lambda row, start, end: torch.arange(10 + start, 10 + end).numpy()
     )
     context.radix_cache = SimpleNamespace(
         small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
@@ -153,11 +153,11 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
         tail_small_page_buffer_id=7,
         hybrid_len_to_big_page_id={128: 8, 256: 9},
     )
-    free_page_indexes = []
+    free_token_index_blocks = []
 
-    context._free_req_mem_without_radix_insert(free_page_indexes, req)
+    context._free_req_mem_without_radix_insert(free_token_index_blocks, req)
 
-    assert free_page_indexes[0].tolist() == [10, 11, 12]
+    assert free_token_index_blocks[0].tolist() == [10, 11, 12]
     assert freed_small_pages == [7]
     assert freed_big_pages == [8, 9]
     assert req.tail_small_page_buffer_id is None

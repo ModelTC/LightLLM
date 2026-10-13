@@ -127,25 +127,27 @@ class InferenceContext:
 
         return req_objs
 
-    def free_a_req_mem(self, free_page_index: List, req: "InferReq"):
+    def free_a_req_mem(self, free_token_index_blocks: List, req: "InferReq"):
         if self.radix_cache is None:
-            free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, 0, req.hold_kv_len))
+            free_token_index_blocks.append(self.req_manager.get_cpu_token_index_blocks(req.req_idx, 0, req.hold_kv_len))
         elif CacheTier.GPU not in req.cache_tiers:
-            self._free_req_mem_without_radix_insert(free_page_index=free_page_index, req=req)
+            self._free_req_mem_without_radix_insert(free_token_index_blocks=free_token_index_blocks, req=req)
         else:
             if not self.is_hybrid_att_model:
-                self._full_att_free_req(free_page_index=free_page_index, req=req)
+                self._full_att_free_req(free_token_index_blocks=free_token_index_blocks, req=req)
             else:
-                self._hybrid_att_free_req(free_page_index=free_page_index, req=req)
+                self._hybrid_att_free_req(free_token_index_blocks=free_token_index_blocks, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
         req.cur_kv_len = 0
         req.hold_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
-    def _free_req_mem_without_radix_insert(self, free_page_index: List, req: "InferReq"):
+    def _free_req_mem_without_radix_insert(self, free_token_index_blocks: List, req: "InferReq"):
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, shared_kv_len, req.hold_kv_len))
+        free_token_index_blocks.append(
+            self.req_manager.get_cpu_token_index_blocks(req.req_idx, shared_kv_len, req.hold_kv_len)
+        )
 
         if self.is_hybrid_att_model:
             # 释放请求尾部尚未移交给 radix cache 的 hybrid attention 小页状态。
@@ -163,27 +165,31 @@ class InferenceContext:
             req.shared_kv_node = None
         return
 
-    def _full_att_free_req(self, free_page_index: List, req: "InferReq"):
+    def _full_att_free_req(self, free_token_index_blocks: List, req: "InferReq"):
         page_size = self.args.page_size
         cache_kv_len = req.cur_kv_len // page_size * page_size
-        self._cache_req_prefix(free_page_index, req, cache_kv_len)
+        self._cache_req_prefix(free_token_index_blocks, req, cache_kv_len)
 
-    def _cache_req_prefix(self, free_page_index: List, req: "InferReq", cache_kv_len: int, **cache_metadata):
+    def _cache_req_prefix(self, free_token_index_blocks: List, req: "InferReq", cache_kv_len: int, **cache_metadata):
         """Cache complete KV pages and release the tail, duplicate pages and shared reference."""
         indexes = self.req_manager.get_cpu_token_indexes(req.req_idx, 0, cache_kv_len)
-        free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, cache_kv_len, req.hold_kv_len))
+        free_token_index_blocks.append(
+            self.req_manager.get_cpu_token_index_blocks(req.req_idx, cache_kv_len, req.hold_kv_len)
+        )
         key = torch.tensor(req.get_input_token_ids()[:cache_kv_len], dtype=torch.int64, device="cpu")
         # The request row may be reused while the cached prefix is still alive.
         prefix_len, _ = self.radix_cache.insert(key, indexes, **cache_metadata)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_page_index.append(self.req_manager.get_cpu_page_bases(req.req_idx, old_prefix_len, prefix_len))
+        free_token_index_blocks.append(
+            self.req_manager.get_cpu_token_index_blocks(req.req_idx, old_prefix_len, prefix_len)
+        )
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
         return
 
-    def _hybrid_att_free_req(self, free_page_index: List, req: "InferReq"):
+    def _hybrid_att_free_req(self, free_token_index_blocks: List, req: "InferReq"):
         assert g_infer_context.is_hybrid_att_model is True
         args = get_env_start_args()
         hash_page_size = args.linear_att_hash_page_size
@@ -211,7 +217,7 @@ class InferenceContext:
         elif shared_kv_len <= req.cur_kv_len:
             assert req.tail_small_page_buffer_id is None
             req.cur_kv_len = shared_kv_len
-            self._free_req_mem_without_radix_insert(free_page_index, req)
+            self._free_req_mem_without_radix_insert(free_token_index_blocks, req)
             return
         else:
             assert False, f"error state: cur_kv_len: {req.cur_kv_len}"
@@ -222,7 +228,7 @@ class InferenceContext:
         state_idxs[-1] = req.tail_small_page_buffer_id
         req.tail_small_page_buffer_id = None
         self._cache_req_prefix(
-            free_page_index,
+            free_token_index_blocks,
             req,
             cache_kv_len,
             block_hashs=req.shm_req.hybrid_token_hash_list.get_all()[:page_num],
@@ -252,7 +258,7 @@ class InferenceContext:
         should_modify_shm = modify_shm_finish_state and self.backend.is_master_in_dp
 
         free_req_index = []
-        free_page_index = []
+        free_token_index_blocks = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
@@ -261,7 +267,7 @@ class InferenceContext:
             if should_modify_shm:
                 req.final_token_metadata.dump()
 
-            self.free_a_req_mem(free_page_index, req)
+            self.free_a_req_mem(free_token_index_blocks, req)
 
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
@@ -271,9 +277,9 @@ class InferenceContext:
                 req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
-        if free_page_index:
-            free_page_index = np.concatenate(free_page_index)
-        self.req_manager.free(free_req_index, free_page_index)
+        if free_token_index_blocks:
+            free_token_index_blocks = np.concatenate(free_token_index_blocks)
+        self.req_manager.free(free_req_index, free_token_index_blocks)
 
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
@@ -297,12 +303,12 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-            free_page_index = []
+            free_token_index_blocks = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self.free_a_req_mem(free_page_index, req)
+                self.free_a_req_mem(free_token_index_blocks, req)
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True
@@ -310,9 +316,9 @@ class InferenceContext:
                     req.shm_req.is_paused = True
                     logger.debug(f"infer paused req id {req.req_id}")
 
-            if len(free_page_index) != 0:
-                free_page_index = np.concatenate(free_page_index)
-                self.req_manager.free_pages(free_page_index)
+            if len(free_token_index_blocks) != 0:
+                free_token_index_blocks = np.concatenate(free_token_index_blocks)
+                self.req_manager.free_token_index_blocks(free_token_index_blocks)
         return self
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
