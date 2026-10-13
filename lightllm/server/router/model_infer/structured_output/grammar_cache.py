@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 class OutputGrammarCache:
     """Load HTTP-compiled artifacts; each request owns its independent matcher."""
 
-    def __init__(self, tokenizer, vocab_size: int, eos_ids: Sequence[int], cache_size: int = 200):
+    def __init__(self, tokenizer, vocab_size: int, eos_ids: Sequence[int], cache_size: int = 512):
         self.tokenizer_info = create_tokenizer_info(tokenizer, vocab_size, list(eos_ids))
         self.get_grammar = lru_cache(maxsize=cache_size)(self._deserialize)
 

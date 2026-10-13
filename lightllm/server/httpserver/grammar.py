@@ -25,7 +25,7 @@ class OutputGrammarCompiler:
     """Compile and serialize grammars before requests enter the inference pipeline."""
 
     def __init__(
-        self, tokenizer, vocab_size: int, eos_ids: Sequence[int], timeout: float = 30.0, cache_size: int = 200
+        self, tokenizer, vocab_size: int, eos_ids: Sequence[int], timeout: float = 30.0, cache_size: int = 512
     ):
         import xgrammar as xgr
 
