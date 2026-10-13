@@ -364,3 +364,26 @@ copy 的具体来源延续前述 grid 归因：target 的 `llama/layer_infer/pos
 量化既有 32 项 GPU 回归通过，black/flake8 通过；内、外部文本与真实 image_url 请求均 HTTP 200、`2`/`Red`，注册与健康均为 1P/1D。P/master 44 个进程及 2 个 detached SHM helper、D 27 个进程及 1 个 helper 的 nofile 均 1048576；最终资源采样最大 FD 370/417，cgroup OOM 为 0，8 GPU 时钟均 1980/2619 MHz。新 D 启动后无 HTTP 500、CUDA/NCCL/WRITE-task 错误；旧 D 停止时 master 的 WebSocketDisconnect 保留在启动前历史日志。
 
 日志与证据均在既有 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/`，前缀 `quant-rollback-20261013-`：`launch.json`、`stop.json`、`decode.log`、`validation.log`、`repeat1.log`、`unit-tests.log`、`{p,d}-checkpoint-preflight.json`、`{p,d}-resource-validation.json`、`final-smoke.json`；有效逐请求记录位于 `controlled/rollback-16k-c512-quant-1013-repeat1/`，首轮失败证据位于 `controlled/rollback-16k-c512-quant-1013/`。
+
+## 第二轮优化 ①：draft 词表 bias＋max 融合
+
+按用户确认的顺序，先在既有 `local_vocab_topk.py` 中增加两阶段词表归约，在通用 DSpark `_sample_markov` 接入；DeepSeek-V4 复用该路径。直接读取 `[B,V]` 的 strided BF16 logits view 与 bias，在寄存器中转 FP32、相加、取最大值，只写分块最大值与最终 token ID，省去完整 `.float()`/scores 张量。每个 Markov 步仍顺序执行；同分优先最小 local token ID，TP 后续 winner gather 保持原路径。未更改 head 精度、模型权重或 MTP 配置。
+
+GPU 回归 10 项通过：BF16/FP32 bias、小 batch/尾词表/真实 V=129280、三个 step 的 strided 输入、同分 ID、CUDA Graph 新输入 replay，以及依赖上一步 token 的完整三步 Markov。最大值与 ID 均与原 FP32 add＋torch.max 精确相同。H100 Graph 下测试 7 种 tile，选 BLOCK_V=256、BLOCK_B=8、4 warps；B16 原 44.65→12.26 µs，B64 原 197.19→40.89 µs，均含两阶段归约和输出分配。
+
+部署前重新采集当前 `313dc8eb` 服务基线；仅停止 D PGID 115392、确认 GPU 清空，再用原 launcher/config 启动 PGID 132765，runtime `runtime-draft-vocab-1013`。P/master 未重启，原 nofile、模型/cache/batch/graph/时钟/Microbatch 设置保持一致。主表采用第一轮正式 before/after，profiler 关闭，每请求输出 4096 tokens，640/640 全部成功：
+
+| 输入/并发 | 成功（前→后） | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---:|---:|---:|---:|---:|
+| 16K / 128 | 128→128 | 6.9130 → 6.9247 | -0.17% | 16,629.1 → 16,184.3 | -2.68% |
+| 16K / 512 | 512→512 | 11.1632 → 11.1830 | -0.18% | 33,981.9 → 35,038.7 | +3.11% |
+
+TTFT 为 2800.6→2589.5 ms、10192.2→10205.7 ms。采集后额外 unprofiled 512 回放 512/512 成功，TPOT 11.2531 ms、整轮 75.4568 s，不替换主表。上述 TPOT 接近，**尚未证明端到端 TPOT 收益**，整轮 TPS 也受供给/尾部波动影响；本项保留的是数值已验证、实际 GPU 工作量减少的融合路径，不把局部倍率宣称为服务加速。
+
+512 profile 保存 8 rank trace；实际 batch=512、每 rank=64。与现有 O-projection 后、同量化代码的 profile 比较，序列长 17331.8→17367.0，差 0.20%。8-rank 均值：draft GPU 区间并集 3.1861→2.7237 ms/周期，GPU busy 42.4078→41.7245，CPU execute 起点间隔 46.7683→46.3431。copy 从 13→10 次、0.4311→0.3203 ms；PyTorch reduction 从 7→4 次、0.4275→0.0884 ms。新增 partial/finish 各 3 次/周期，kernel duration 和 0.1228/0.0061 ms；确认三次 draft cast/max 消失。kernel 和、GPU 并集与起点间隔不可直接相加，profile 客户端延迟不进入主表。
+
+主表 MTP 平均 tokens/step 为 128 档 3.9901→3.9904、512 档 3.9849→3.9868。逐请求前 256 字符的全模型输出不完全一致；相同原代码、同 D 进程的两次基线也仅 369/512 相同，融合前后为 351/512，融合后两次为 347/512。因此本次不声称全模型输出 bit-exact；数值精确一致的结论限于上述 kernel 与三步 Markov 回归。
+
+内/外部文本和真实 image_url 请求均 HTTP 200、`2`/`Red`，1P/1D 健康；D 27 个进程及 SHM helper 的 nofile 为 1048576，采样最大 FD 433，OOM=0，GPU 时钟 1980/2619 MHz。无运行期 HTTP 500/CUDA/NCCL/WRITE-task 错误；Kineto 的既知 profiler callback 诊断单独记录。
+
+证据位于既有日志目录：`draft-vocab-1013-{baseline,after,benchmark}.log`、`draft-vocab-1013-benchmark.json`、`draft-vocab-1013-unit-tests-final.log`、`draft-vocab-1013-profile-summary.json`、`draft-vocab-1013-{launch,stop,deployment-plan}.json`、`draft-vocab-1013-final-smoke.json`、`controlled/{baseline,after,profile,hot}-16k-c*-draft-vocab-1013/`。本项记录并单独提交后，再做主模型 greedy 采样融合。

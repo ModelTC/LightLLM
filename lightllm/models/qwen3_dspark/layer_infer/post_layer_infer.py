@@ -3,6 +3,7 @@ from typing import Optional
 import torch
 
 from lightllm.common.basemodel.batch_objs import PostLayerOutput
+from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_bias_max
 
 from lightllm.distributed.communication_op import all_gather_into_tensor
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
@@ -111,9 +112,10 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
             )
             markov_w2 = layer_weight.markov_w2_weight_.weight
             local_markov_bias = torch.mm(markov_latent.to(dtype=markov_w2.dtype), markov_w2.t())
-            local_base_logits = local_logits[:, step_idx :: self.block_size_].permute(1, 0).float()
-            local_scores = local_base_logits + local_markov_bias
-            local_max_values, local_max_indexes = torch.max(local_scores, dim=-1)
+            local_base_logits = local_logits[:, step_idx :: self.block_size_].permute(1, 0)
+            local_max_values, local_max_indexes = local_vocab_bias_max(
+                local_base_logits, local_markov_bias, alloc_func=self.alloc_tensor
+            )
             local_token_ids = local_max_indexes + local_start
 
             if self.tp_world_size_ == 1:
