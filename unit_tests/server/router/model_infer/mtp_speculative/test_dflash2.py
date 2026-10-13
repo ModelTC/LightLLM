@@ -9,35 +9,51 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash2 import
 
 
 @pytest.mark.parametrize("dynamic_verify", [False, True])
-def test_dflash2_proposal_returns_greedy_tokens(dynamic_verify):
+@pytest.mark.parametrize("draft_step", [1, 3])
+def test_dflash2_proposal_returns_greedy_tokens(dynamic_verify, draft_step):
     tokens = torch.arange(6).view(2, 3)
+    physical_tokens = torch.tensor([100, 0, 1, 2, 200, 3, 4, 5])
     proposer = DFlash2Proposer(backend=SimpleNamespace(), enable_dynmaic_mtp=dynamic_verify)
     confidence = torch.tensor([[0.0, 1.0, -1.0], [float("inf"), -100.0, 2.0]])
     output = SimpleNamespace(
-        mtp_collector=ModelMtpOutputCollector(draft_token_ids=tokens, confidence_logits=confidence)
+        mtp_collector=ModelMtpOutputCollector(draft_token_ids=physical_tokens, confidence_logits=confidence)
     )
-    proposal = proposer._build_proposal(output, 2, 4, 3)
+    proposal = proposer._build_proposal(output, 2, 4, draft_step)
     assert type(proposal) is DFlashSpecProposal
-    torch.testing.assert_close(proposal.token_ids, tokens)
+    torch.testing.assert_close(proposal.token_ids, tokens[:, :draft_step])
     if dynamic_verify:
-        torch.testing.assert_close(proposal.schedule_scores, confidence.sigmoid().clamp(0.01, 0.99))
+        torch.testing.assert_close(proposal.schedule_scores, confidence[:, :draft_step].sigmoid().clamp(0.01, 0.99))
     else:
         assert proposal.schedule_scores is None
 
 
-def test_dflash2_collector_unpads_logical_request_rows():
+@pytest.mark.parametrize("dynamic_verify", [False, True])
+@pytest.mark.parametrize("req_num", [0, 1, 2])
+def test_dflash2_collector_unpads_physical_token_rows(dynamic_verify, req_num):
     tokens = torch.arange(6).view(2, 3)
-    collector = ModelMtpOutputCollector(draft_token_ids=tokens, confidence_logits=tokens.float())
-    unpadded = collector.unpad_decode(padded_batch_size=8, origin_batch_size=4)
-    torch.testing.assert_close(unpadded.draft_token_ids, tokens[:1])
-    torch.testing.assert_close(unpadded.confidence_logits, tokens[:1].float())
-    assert collector.draft_token_ids.shape[0] == collector.confidence_logits.shape[0] == 2
+    physical_tokens = torch.tensor([100, 0, 1, 2, 200, 3, 4, 5])
+    confidence = tokens.float() if dynamic_verify else None
+    collector = ModelMtpOutputCollector(draft_token_ids=physical_tokens, confidence_logits=confidence)
+    unpadded = collector.unpad_decode(padded_batch_size=8, origin_batch_size=req_num * 4)
+    torch.testing.assert_close(unpadded.draft_token_ids, physical_tokens[: req_num * 4])
+    if dynamic_verify:
+        torch.testing.assert_close(unpadded.confidence_logits, confidence[:req_num])
+    else:
+        assert unpadded.confidence_logits is None
+    assert collector.draft_token_ids.shape == (8,)
+
+    proposer = DFlash2Proposer(backend=SimpleNamespace(), enable_dynmaic_mtp=dynamic_verify)
+    proposal = proposer._build_proposal(SimpleNamespace(mtp_collector=unpadded), req_num, 4, 3)
+    torch.testing.assert_close(proposal.token_ids, tokens[:req_num])
+    if dynamic_verify:
+        torch.testing.assert_close(proposal.schedule_scores, confidence[:req_num].sigmoid().clamp(0.01, 0.99))
 
 
 def test_dflash2_dynamic_verification_requires_confidence():
     proposer = DFlash2Proposer(backend=SimpleNamespace(), enable_dynmaic_mtp=True)
     output = ModelOutput(
-        logits=torch.empty(4, 1), mtp_collector=ModelMtpOutputCollector(draft_token_ids=torch.ones(1, 3))
+        logits=torch.empty(4, 1),
+        mtp_collector=ModelMtpOutputCollector(draft_token_ids=torch.ones(4, dtype=torch.int64)),
     )
     with pytest.raises(RuntimeError, match="selector confidence"):
         proposer._build_proposal(output, 1, 4, 3)
@@ -90,12 +106,12 @@ def test_dflash2_post_layer_satisfies_base_model_output_contract(is_prefill):
     collected = {}
     state = SimpleNamespace(
         is_prefill=is_prefill,
-        input_ids=torch.arange(4),
+        input_ids=torch.tensor([99, 0, 0, 0]),
         hidden_collector=SimpleNamespace(add_mtp_outputs=lambda **kwargs: collected.update(kwargs)),
     )
     output = layer.token_forward(hidden, state, None)
     assert isinstance(output, PostLayerOutput)
     assert output.logits.shape == ((0,) if is_prefill else (4, 1))
     if not is_prefill:
-        torch.testing.assert_close(collected["draft_token_ids"], selected)
+        torch.testing.assert_close(collected["draft_token_ids"], torch.tensor([99, 0, 2, 4]))
         torch.testing.assert_close(collected["confidence_logits"], confidence)

@@ -17,8 +17,9 @@ class DFlash2Proposer(DFlashProposer):
         draft_step: int,
     ) -> DFlashSpecProposal:
         mtp_collector = draft_output.mtp_collector
-        selected_token_ids = mtp_collector.draft_token_ids
-        assert selected_token_ids.shape == (req_num, block_size - 1)
+        flat_token_ids = mtp_collector.draft_token_ids
+        assert flat_token_ids.ndim == 1 and flat_token_ids.numel() == req_num * block_size
+        selected_token_ids = flat_token_ids.view(req_num, block_size)[:, 1:]
         assert 0 < draft_step <= block_size - 1
 
         schedule_scores = None

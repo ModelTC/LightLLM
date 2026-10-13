@@ -146,6 +146,9 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
             anchor_token_ids=anchor_token_ids,
             layer_weight=layer_weight,
         )
+        # Keep token IDs aligned with physical decode rows for common unpadding.
+        # The proposer skips the anchor at the start of each request's block.
+        draft_token_ids = torch.cat((anchor_token_ids[:, None], draft_token_ids), dim=1).reshape(-1)
         infer_state.hidden_collector.add_mtp_outputs(
             draft_token_ids=draft_token_ids,
             confidence_logits=confidence_logits,
