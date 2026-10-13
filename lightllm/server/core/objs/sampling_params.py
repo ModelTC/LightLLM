@@ -193,6 +193,43 @@ class GuidedJsonSchema(ctypes.Structure):
         return bytes(self.constraint[0 : self.length]).decode("utf-8").rstrip("\x00")
 
 
+class ConstraintOutParams(ctypes.Structure):
+    """Static parameters for output constraints and PD continuation."""
+
+    _pack_ = 4
+    _fields_ = [
+        # 正则表达式约束，限制模型生成的输出文本格式。
+        ("regular_constraint", RegularConstraint),
+        # EBNF 语法约束；特殊值 "json" 表示输出一个 JSON 对象。
+        ("guided_grammar", GuidedGrammar),
+        # JSON Schema 约束，限制输出 JSON 的类型、字段及取值。
+        ("guided_json", GuidedJsonSchema),
+        # 思考结束标记的 token ID 序列；完整匹配后，从下一个 token 开始启用输出约束。
+        # 标记本身不参与语法匹配，也不会触发请求停止；为空时立即启用输出约束。
+        ("guided_reasoning_end", StopSequence),
+        # PD Master 设置的历史已生成 token 数，首段为 0；这些 token 被追加到续跑 prompt 尾部。
+        # 推理侧重放该后缀，恢复思考阶段和语法匹配进度；支持从序列化参数恢复该值。
+        ("pd_previous_output_len", ctypes.c_int),
+    ]
+
+    def initialize(
+        self,
+        tokenizer,
+        regular_constraint: str,
+        guided_grammar: str,
+        guided_json: Union[str, dict],
+        guided_reasoning_end: List[int],
+        pd_previous_output_len: int = 0,
+    ):
+        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2 ** 31 - 1:
+            raise ValueError("pd_previous_output_len must be an integer in [0, 2147483647]")
+        self.regular_constraint.initialize(regular_constraint)
+        self.guided_grammar.initialize(guided_grammar, tokenizer)
+        self.guided_json.initialize(guided_json, tokenizer)
+        self.guided_reasoning_end.initialize(guided_reasoning_end)
+        self.pd_previous_output_len = pd_previous_output_len
+
+
 class InvalidTokenIds(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -264,11 +301,7 @@ class SamplingParams(ctypes.Structure):
         ("min_new_tokens", ctypes.c_int),
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
         ("input_penalty", ctypes.c_bool),
-        ("regular_constraint", RegularConstraint),
-        ("guided_grammar", GuidedGrammar),
-        ("guided_json", GuidedJsonSchema),
-        # Generated marker after which grammar constraints start; not a stop condition.
-        ("guided_reasoning_end", StopSequence),
+        ("constraint_out_params", ConstraintOutParams),
         # if provided, the invalid token ids will be ignored during generation
         ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
@@ -286,9 +319,6 @@ class SamplingParams(ctypes.Structure):
         # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
         # 以高优先级插入 Router 调度队列。
         ("pd_high_priority_request", ctypes.c_bool),
-        # Committed output appended to a PD continuation's prompt. Inference
-        # replays this suffix once when restoring the request's grammar state.
-        ("pd_previous_output_len", ctypes.c_int),
         # P/D 节点的资源等待超时，由 PD Master 下发。非负值用于控制 shm_req 申请和
         # Router 等待进入推理系统的时限；负数表示永久等待。
         ("pd_node_resource_wait_timeout_seconds", ctypes.c_int),
@@ -342,9 +372,8 @@ class SamplingParams(ctypes.Structure):
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
-        # PD Master 的内部续跑和调度信息，不能由外部请求参数开启或修改。
+        # PD Master 的内部调度信息，不能由外部请求参数开启或修改。
         self.pd_high_priority_request = False
-        self.pd_previous_output_len = 0
         self.pd_node_resource_wait_timeout_seconds = -1
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
@@ -367,23 +396,15 @@ class SamplingParams(ctypes.Structure):
         self.pd_master_node_id = NodeUUId()
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
-        # Initialize regular_constraint
-        regular_constraint = kwargs.get("regular_constraint", "")
-        self.regular_constraint = RegularConstraint()
-        self.regular_constraint.initialize(regular_constraint)
-
-        # Initialize guided_grammar
-        guided_grammar = kwargs.get("guided_grammar", "")
-        self.guided_grammar = GuidedGrammar()
-        self.guided_grammar.initialize(guided_grammar, tokenizer)
-
-        # Initialize guided_json
-        guided_json = kwargs.get("guided_json", "")
-        self.guided_json = GuidedJsonSchema()
-        self.guided_json.initialize(guided_json, tokenizer)
-
-        self.guided_reasoning_end = StopSequence()
-        self.guided_reasoning_end.initialize(kwargs.get("guided_reasoning_end", []))
+        self.constraint_out_params = ConstraintOutParams()
+        self.constraint_out_params.initialize(
+            tokenizer=tokenizer,
+            regular_constraint=kwargs.get("regular_constraint", ""),
+            guided_grammar=kwargs.get("guided_grammar", ""),
+            guided_json=kwargs.get("guided_json", ""),
+            guided_reasoning_end=kwargs.get("guided_reasoning_end", []),
+            pd_previous_output_len=kwargs.get("pd_previous_output_len", 0),
+        )
 
         # Initialize stop_sequence_groups
         stop_sequences = kwargs.get("stop_sequences", [])
@@ -473,10 +494,10 @@ class SamplingParams(ctypes.Structure):
         return seed
 
     def _verify_grammar_constraint(self):
-        if self.guided_grammar.length != 0:
-            if self.regular_constraint.length != 0:
+        if self.constraint_out_params.guided_grammar.length != 0:
+            if self.constraint_out_params.regular_constraint.length != 0:
                 raise ValueError("guided_grammar and regular_constraint can not be used in same time")
-            if self.guided_json.length != 0:
+            if self.constraint_out_params.guided_json.length != 0:
                 raise ValueError("guided_grammar and guided_json can not be used in same time")
         return
 
@@ -491,9 +512,9 @@ class SamplingParams(ctypes.Structure):
     async def verify_output_constraint(self, compiler) -> None:
         """Validate and compile output constraints before admission or HTTP streaming."""
         for kind, constraint in (
-            ("grammar", self.guided_grammar),
-            ("regex", self.regular_constraint),
-            ("json", self.guided_json),
+            ("grammar", self.constraint_out_params.guided_grammar),
+            ("regex", self.constraint_out_params.regular_constraint),
+            ("json", self.constraint_out_params.guided_json),
         ):
             if constraint.length:
                 if compiler is None:
@@ -529,10 +550,11 @@ class SamplingParams(ctypes.Structure):
             "_initial_reasoning_state": self._initial_reasoning_state,
             "best_of": self.best_of,
             "input_penalty": self.input_penalty,
-            "regular_constraint": self.regular_constraint.to_str(),
-            "guided_grammar": self.guided_grammar.to_str(),
-            "guided_json": self.guided_json.to_str(),
-            "guided_reasoning_end": self.guided_reasoning_end.to_list(),
+            "regular_constraint": self.constraint_out_params.regular_constraint.to_str(),
+            "guided_grammar": self.constraint_out_params.guided_grammar.to_str(),
+            "guided_json": self.constraint_out_params.guided_json.to_str(),
+            "guided_reasoning_end": self.constraint_out_params.guided_reasoning_end.to_list(),
+            "pd_previous_output_len": self.constraint_out_params.pd_previous_output_len,
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
             "pd_high_priority_request": self.pd_high_priority_request,

@@ -69,9 +69,20 @@ def test_context_initializes_artifact_cache_with_resolved_eos_at_startup(monkeyp
         assert req.output_constraint.is_terminated()
 
 
+@pytest.mark.parametrize("previous_output_len", [-1, 2])
+def test_pd_history_outside_prompt_returns_constraint_error(compiler, previous_output_len):
+    req = make_req(regular_constraint="ab")
+    req.sampling_param.shm_param.constraint_out_params.pd_previous_output_len = previous_output_len
+    init_request(compiler, req)
+    assert "pd_previous_output_len" in req.output_constraint.error
+    assert req.output_constraint.matcher is None
+
+
 def test_thinking_does_not_advance_matcher_or_fill_mask(compiler):
     req = make_req(regular_constraint="ab", guided_reasoning_end=(ord("]"),))
     init_request(compiler, req)
+    # The state owns its marker snapshot even if the shared parameters change.
+    req.sampling_param.shm_param.constraint_out_params.guided_reasoning_end.initialize([ord("?")])
     manager = make_mask_buffers([req])
     manager.req_to_bitmask.fill_(42)
     assert not prepare_sampling_tensors([req], manager)[-1]
@@ -245,7 +256,7 @@ def test_pd_first_token_updates_constraint_before_sampling(
     req = make_req(regular_constraint="ab", guided_reasoning_end=tuple(reasoning_end))
     req.shm_req.shm_prompt_ids.arr.extend(history)
     req.shm_req.input_len += len(history)
-    req.sampling_param.shm_param.pd_previous_output_len = len(history)
+    req.sampling_param.shm_param.constraint_out_params.pd_previous_output_len = len(history)
     good = make_req(regular_constraint="cd")
     for request in (req, good):
         init_request(compiler, request)

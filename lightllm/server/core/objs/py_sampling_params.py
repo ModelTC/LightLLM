@@ -70,6 +70,7 @@ class SamplingParams:
         # 默认 ALL_TEXT；Chat 接口需要跳过 reasoning 时使用 CONTENT_ONLY。
         stop_str_match_mode: int = StopStrMatchMode.ALL_TEXT,
         guided_reasoning_end: Optional[List[int]] = None,
+        pd_previous_output_len: int = 0,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -102,6 +103,7 @@ class SamplingParams:
         self.guided_grammar = guided_grammar
         self.guided_json = guided_json
         self.guided_reasoning_end = guided_reasoning_end
+        self.pd_previous_output_len = pd_previous_output_len
         self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.suggested_dp_index = suggested_dp_index
@@ -255,6 +257,7 @@ class SamplingParams:
         ret["guided_grammar"] = self.guided_grammar
         ret["guided_json"] = self.guided_json
         ret["guided_reasoning_end"] = self.guided_reasoning_end
+        ret["pd_previous_output_len"] = self.pd_previous_output_len
         ret["invalid_token_ids"] = self.invalid_token_ids
         ret["seed"] = self.seed
         return ret

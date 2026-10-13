@@ -69,7 +69,9 @@ def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefi
     segment_iter = iter(segments)
 
     async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request):
-        mgr.segment_inputs.append(pickle.loads(pickle.dumps((prompt_ids, sp.pd_previous_output_len))))
+        mgr.segment_inputs.append(
+            pickle.loads(pickle.dumps((prompt_ids, sp.constraint_out_params.pd_previous_output_len)))
+        )
         sub_req_id = sp.group_request_id
         token_count, final_status = next(segment_iter)
         hit = sampling_params.max_new_tokens * 10

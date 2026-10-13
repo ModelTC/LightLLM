@@ -485,9 +485,6 @@ class InferSamplingParams:
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
-        # Grammar compilation is complete; inference only needs its activation marker.
-        self.guided_reasoning_end = tuple(self.shm_param.guided_reasoning_end.to_list())
-
         # if provided, invalid_token_ids are masked to -inf during sampling (see generic_post_process.sample)
         self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
 

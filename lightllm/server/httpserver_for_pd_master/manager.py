@@ -377,7 +377,7 @@ class HttpServerManagerForPDMaster:
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
-                sampling_params.pd_previous_output_len = len(history_output_token_ids)
+                sampling_params.constraint_out_params.pd_previous_output_len = len(history_output_token_ids)
                 # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
                 # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧
                 # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源

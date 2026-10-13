@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from lightllm.server.core.objs import FinishStatus, StartArgs
+from lightllm.server.core.objs import ConstraintOutParams, FinishStatus, StartArgs
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import (
     _get_post_sample_tensors,
     g_pin_mem_manager,
@@ -37,15 +37,19 @@ class SamplingRequest(SimpleNamespace):
         return self.shm_req.input_len + self.cur_output_len
 
 
-def make_req(**constraints):
+def make_req(guided_reasoning_end=(), **constraints):
+    constraint_out_params = ConstraintOutParams()
+    constraint_out_params.initialize(
+        tokenizer=None,
+        regular_constraint=constraints.pop("regular_constraint", None) or "",
+        guided_grammar=constraints.pop("guided_grammar", None) or "",
+        guided_json=constraints.pop("guided_json", None) or "",
+        guided_reasoning_end=list(guided_reasoning_end),
+    )
     params = dict(
-        guided_json=None,
-        guided_grammar=None,
-        regular_constraint=None,
-        guided_reasoning_end=(),
         invalid_token_ids=[],
         shm_param=SimpleNamespace(
-            pd_previous_output_len=0,
+            constraint_out_params=constraint_out_params,
             exponential_decay_length_penalty=SimpleNamespace(to_tuple=lambda: (0, 1.0)),
             min_new_tokens=0,
             temperature=1.0,
@@ -69,13 +73,14 @@ def make_req(**constraints):
 
 
 def init_request(compiler, req):
+    params = req.sampling_param.shm_param.constraint_out_params
     for kind, value in (
-        ("grammar", req.sampling_param.guided_grammar),
-        ("regex", req.sampling_param.regular_constraint),
-        ("json", req.sampling_param.guided_json),
+        ("grammar", params.guided_grammar),
+        ("regex", params.regular_constraint),
+        ("json", params.guided_json),
     ):
-        if value:
-            payload = asyncio.run(compiler.compile(kind, value))
+        if value.length:
+            payload = asyncio.run(compiler.compile(kind, value.to_str()))
             req.shm_req.get_compiled_grammar = lambda: payload
             req.output_constraint = compiler.grammar_cache.create_state(req.shm_req, req.sampling_param)
             return

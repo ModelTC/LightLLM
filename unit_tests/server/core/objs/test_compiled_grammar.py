@@ -52,6 +52,54 @@ def test_request_initialization_publishes_compiled_payload(compiler, grammar_req
     assert shared_req.sample_params.compiled_grammar == b""
 
 
+@pytest.mark.parametrize("previous_output_len", [-1, 2 ** 31, 2 ** 32, "1", 1.5, None])
+def test_invalid_pd_previous_output_len_is_rejected_before_ctypes_conversion(previous_output_len):
+    params = SamplingParams()
+    with pytest.raises(ValueError, match="pd_previous_output_len"):
+        params.init(None, pd_previous_output_len=previous_output_len)
+
+
+@pytest.mark.parametrize("transport", ["copy", "buffer", "pickle", "dict", "origin_dict"])
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        {"regular_constraint": "ab"},
+        {"guided_grammar": 'root ::= "ab"'},
+        {"guided_json": {"const": "ab"}},
+    ],
+)
+def test_constraint_params_survive_transport_with_independent_storage(transport, constraint):
+    params = SamplingParams()
+    params.init(None, guided_reasoning_end=[7, 8], **constraint)
+    params.constraint_out_params.pd_previous_output_len = 3
+    original_values = params.to_dict()
+
+    if transport == "copy":
+        copied = params.copy()
+    elif transport == "buffer":
+        copied = SamplingParams.from_buffer_copy(params)
+    elif transport == "pickle":
+        copied = pickle.loads(pickle.dumps(params))
+    else:
+        serialized = params.to_dict() if transport == "dict" else params.to_origin_dict()
+        copied = SamplingParams()
+        copied.init(None, **serialized)
+
+    assert copied.constraint_out_params.guided_reasoning_end.to_list() == [7, 8]
+    assert copied.constraint_out_params.pd_previous_output_len == 3
+    for name in ("regular_constraint", "guided_grammar", "guided_json"):
+        assert getattr(copied.constraint_out_params, name).to_str() == original_values[name]
+    for name in constraint:
+        getattr(copied.constraint_out_params, name).length = 0
+        assert getattr(copied.constraint_out_params, name).to_str() == ""
+    copied.constraint_out_params.guided_reasoning_end.sequence[0] = 9
+    copied.constraint_out_params.pd_previous_output_len = 4
+    assert params.constraint_out_params.guided_reasoning_end.to_list() == [7, 8]
+    assert params.constraint_out_params.pd_previous_output_len == 3
+    assert params.to_dict() == original_values
+    assert "constraint_out_params" not in params.to_dict()
+
+
 @pytest.mark.parametrize(
     "reasoning_end,history,next_output,in_reasoning",
     [
@@ -63,16 +111,27 @@ def test_request_initialization_publishes_compiled_payload(compiler, grammar_req
         (b"</think>", b"thought</think>a", b"", False),
     ],
 )
+@pytest.mark.parametrize("transport", ["pickle", "dict"])
 def test_pd_continuation_restores_state_from_shared_prompt(
-    compiler, grammar_req, reasoning_end, history, next_output, in_reasoning
+    compiler, grammar_req, reasoning_end, history, next_output, in_reasoning, transport
 ):
     from lightllm.server.router.model_infer.infer_batch import InferSamplingParams
 
     params = SamplingParams()
-    params.init(None, regular_constraint="ab", guided_reasoning_end=list(reasoning_end))
+    params.init(
+        None,
+        regular_constraint="ab",
+        guided_reasoning_end=list(reasoning_end),
+        pd_previous_output_len=len(history),
+    )
     asyncio.run(params.verify_cpu_async(compiler))
-    params.pd_previous_output_len = len(history)
-    params = pickle.loads(pickle.dumps(params.copy()))
+    if transport == "pickle":
+        params = pickle.loads(pickle.dumps(params.copy()))
+    else:
+        serialized = params.to_dict()
+        params = SamplingParams()
+        params.init(None, **serialized)
+        asyncio.run(params.verify_cpu_async(compiler))
     # Delimiters and other text in the original prompt must never be replayed.
     prompt_ids = list(b"original </think> prompt") + list(history)
     grammar_req.init(1, prompt_ids, params, None)
@@ -82,7 +141,7 @@ def test_pd_continuation_restores_state_from_shared_prompt(
         infer_params = InferSamplingParams(shared_req, vocab_size=257)
         state = compiler.grammar_cache.create_state(shared_req, infer_params)
         assert state.error is None and state.in_reasoning == in_reasoning
-        assert shared_req.sample_params.pd_previous_output_len == len(history)
+        assert shared_req.sample_params.constraint_out_params.pd_previous_output_len == len(history)
         for token_id in next_output:
             state.commit(token_id)
         assert state.error is None and not state.in_reasoning
@@ -93,7 +152,9 @@ def test_pd_continuation_restores_state_from_shared_prompt(
     finally:
         shared_req.shm_prompt_ids.detach_shm()
     params.init(None, pd_previous_output_len=99)
-    assert params.pd_previous_output_len == 0
+    assert params.constraint_out_params.pd_previous_output_len == 99
+    params.init(None)
+    assert params.constraint_out_params.pd_previous_output_len == 0
 
 
 def test_compiled_grammar_is_readable_in_another_process(compiler, grammar_req):

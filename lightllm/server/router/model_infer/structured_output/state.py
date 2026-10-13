@@ -8,7 +8,7 @@ from lightllm.utils.log_utils import init_logger
 if TYPE_CHECKING:
     from xgrammar import CompiledGrammar, GrammarMatcher
 
-    from lightllm.server.router.model_infer.infer_batch import InferSamplingParams
+    from lightllm.server.core.objs.sampling_params import ConstraintOutParams
 
 
 logger = init_logger(__name__)
@@ -22,17 +22,19 @@ class ConstraintState:
     matcher: Optional["GrammarMatcher"]
     in_reasoning: bool
     error: Optional[str] = None
+    # 思考结束标记及其匹配进度与 XGrammar matcher 一起由当前请求独立持有。
     reasoning_end_token_ids: Tuple[int, ...] = ()
     reasoning_tail: Tuple[int, ...] = ()
 
     @classmethod
-    def from_grammar(cls, grammar: "CompiledGrammar", params: "InferSamplingParams") -> "ConstraintState":
+    def from_grammar(cls, grammar: "CompiledGrammar", params: "ConstraintOutParams") -> "ConstraintState":
         import xgrammar as xgr
 
+        reasoning_end_token_ids = tuple(params.guided_reasoning_end.to_list())
         return cls(
             matcher=xgr.GrammarMatcher(grammar),
-            in_reasoning=bool(params.guided_reasoning_end),
-            reasoning_end_token_ids=tuple(params.guided_reasoning_end),
+            in_reasoning=bool(reasoning_end_token_ids),
+            reasoning_end_token_ids=reasoning_end_token_ids,
         )
 
     def _get_grammar_start_after_reasoning(self, draft_tokens: Sequence[int]) -> int:

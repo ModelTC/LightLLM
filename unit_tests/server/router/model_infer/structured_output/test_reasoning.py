@@ -70,9 +70,16 @@ def test_chat_passes_reasoning_marker_through_shared_sampling_params(monkeypatch
         pass
 
     def generate(prompt, params, *args, **kwargs):
-        # Exercise the real API-to-shared-memory and inference parameter boundary.
+        # Exercise the real API-to-shared-memory and grammar-state boundary.
         copy = SamplingParams.from_buffer_copy(bytes(params))
-        captured.append(InferSamplingParams(SimpleNamespace(sample_params=copy), vocab_size=257))
+        shared_req = SimpleNamespace(
+            sample_params=copy,
+            get_compiled_grammar=lambda: params.compiled_grammar,
+            input_len=1,
+            shm_prompt_ids=SimpleNamespace(arr=[ord("P")]),
+        )
+        infer_params = InferSamplingParams(shared_req, vocab_size=257)
+        captured.append(compiler.grammar_cache.create_state(shared_req, infer_params))
         raise RequestCaptured
 
     tokenizer = SimpleNamespace(encode=lambda *args, **kwargs: [7, 8])
@@ -90,7 +97,13 @@ def test_chat_passes_reasoning_marker_through_shared_sampling_params(monkeypatch
     with pytest.raises(RequestCaptured):
         asyncio.run(api_openai.chat_completions_impl(request, None))
     expected = (7, 8) if thinking and response_type != "text" else ()
-    assert captured[0].guided_reasoning_end == expected
+    state = captured[0]
+    if response_type == "text":
+        assert state is None
+    else:
+        assert state.error is None
+        assert state.reasoning_end_token_ids == expected
+        assert state.in_reasoning == bool(expected)
 
 
 def test_reasoning_marker_survives_serialization_and_parameter_reuse():
@@ -99,9 +112,9 @@ def test_reasoning_marker_survives_serialization_and_parameter_reuse():
     copy = SamplingParams.from_buffer_copy(ctypes.string_at(ctypes.addressof(params), ctypes.sizeof(params)))
     round_trip = SamplingParams()
     round_trip.init(None, **copy.to_origin_dict())
-    assert round_trip.guided_reasoning_end.to_list() == [11, 12]
+    assert round_trip.constraint_out_params.guided_reasoning_end.to_list() == [11, 12]
     round_trip.init(None)
-    assert round_trip.guided_reasoning_end.to_list() == []
+    assert round_trip.constraint_out_params.guided_reasoning_end.to_list() == []
 
 
 @pytest.mark.parametrize(
@@ -136,8 +149,9 @@ def test_deepseek_r1_json_answer_stays_in_content(monkeypatch, compiler, stream,
     answer = '{"ok":true}'
 
     async def generate(prompt, params, *args, **kwargs):
-        infer_params = InferSamplingParams(SimpleNamespace(sample_params=params), vocab_size=257)
-        state = ConstraintState.from_grammar(compiler.grammar_cache.get_grammar(params.compiled_grammar), infer_params)
+        state = ConstraintState.from_grammar(
+            compiler.grammar_cache.get_grammar(params.compiled_grammar), params.constraint_out_params
+        )
         bitmask = torch.empty((1, 9), dtype=torch.int32)
         for index, token_id in enumerate([*tokenizer.encode(prefix + answer), 256]):
             # The real matcher must allow thinking and its delimiter before constraining JSON.

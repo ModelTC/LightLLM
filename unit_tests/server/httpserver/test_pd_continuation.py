@@ -40,7 +40,7 @@ def test_master_encodes_once_and_prefill_preserves_output_ids(multimodal, add_sp
     manager._alloc_multimodal_resources = AsyncMock()
     # P expands media placeholders in the supplied IDs without text tokenization.
     manager.tokenizer = SimpleNamespace(encode=Mock(side_effect=lambda ids, *_args, **_kwargs: [2 ** 32] + ids))
-    params.pd_previous_output_len = 1
+    params.constraint_out_params.pd_previous_output_len = 1
     continuation_ids = pickle.loads(pickle.dumps(prompt_ids + [1]))
     result = asyncio.run(manager._encode(continuation_ids, resources, params))
 
@@ -80,7 +80,7 @@ def test_multimodal_continuation_expands_images_without_retokenizing(tokenizer_c
     manager.args = master.args
     manager._alloc_multimodal_resources = AsyncMock()
     history = [2, 3]
-    params.pd_previous_output_len = len(history)
+    params.constraint_out_params.pd_previous_output_len = len(history)
     encoded = asyncio.run(manager._encode(prompt_ids + history, resources, params))
     assert encoded == [10, 1000, 1001, 11] * image_count + [1] + history
     assert token_count + len(history) == len(encoded)

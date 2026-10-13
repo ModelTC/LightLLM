@@ -262,7 +262,7 @@ def test_pd_master_compiler_resolves_eos_before_model_loading(monkeypatch, tmp_p
 def test_dictionary_schema_is_serialized_during_initialization():
     params = SamplingParams()
     params.init(None, guided_json={"type": "object"})
-    assert json.loads(params.guided_json.to_str()) == {"type": "object"}
+    assert json.loads(params.constraint_out_params.guided_json.to_str()) == {"type": "object"}
 
 
 @pytest.mark.parametrize(
