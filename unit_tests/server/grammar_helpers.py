@@ -67,7 +67,7 @@ def make_req(guided_reasoning_end=(), **constraints):
         finish_status=FinishStatus(),
         cur_output_len=0,
         shm_req=SimpleNamespace(
-            input_len=1, shm_prompt_ids=SimpleNamespace(arr=[ord("P")]), get_compiled_grammar=lambda: b""
+            input_len=1, shm_prompt_ids=SimpleNamespace(arr=[ord("P")]), get_compiled_grammar=lambda: None
         ),
     )
 

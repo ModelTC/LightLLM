@@ -229,6 +229,9 @@ class ConstraintOutParams(ctypes.Structure):
         self.guided_reasoning_end.initialize(guided_reasoning_end)
         self.pd_previous_output_len = pd_previous_output_len
 
+    def has_constraint(self):
+        return bool(self.regular_constraint.length or self.guided_grammar.length or self.guided_json.length)
+
 
 class InvalidTokenIds(ctypes.Structure):
     _pack_ = 4
@@ -347,14 +350,10 @@ class SamplingParams(ctypes.Structure):
     _temperature: float = 1.0
     _top_p: float = 1.0
     _top_k: int = -1  # -1 is for all
-    # Internal HTTP/PD transport data, excluded from the fixed-size SHM struct
-    # and public request JSON. Req.init writes it to the request's SHM slot.
-    compiled_grammar: bytes = b""
 
     def init(self, tokenizer, **kwargs):
         """Initialize and validate sampling parameters synchronously."""
         super().__init__()
-        self.compiled_grammar = b""
         self.best_of = kwargs.get("best_of", 1)
         self.n = kwargs.get("n", self.best_of)
         self.do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
@@ -510,7 +509,11 @@ class SamplingParams(ctypes.Structure):
         await self.verify_output_constraint(compiler)
 
     async def verify_output_constraint(self, compiler) -> None:
-        """Validate and compile output constraints before admission or HTTP streaming."""
+        """在请求准入或发送流式响应头前完成编译校验；结果由编译器缓存，不保存在采样参数对象上。"""
+        await self.get_compiled_grammar(compiler)
+
+    async def get_compiled_grammar(self, compiler) -> Optional[bytes]:
+        """获取编译器缓存中的结果，未命中时执行异步编译；无输出约束时返回 None。"""
         for kind, constraint in (
             ("grammar", self.constraint_out_params.guided_grammar),
             ("regex", self.constraint_out_params.regular_constraint),
@@ -519,14 +522,8 @@ class SamplingParams(ctypes.Structure):
             if constraint.length:
                 if compiler is None:
                     raise ValueError("Output constraints require --output_constraint_mode xgrammar")
-                self.compiled_grammar = await compiler.compile(kind, constraint.to_str())
-                return
-
-    def copy(self) -> "SamplingParams":
-        """Copy scalar parameters and retain the immutable artifact across PD segments/choices."""
-        result = SamplingParams.from_buffer_copy(self)
-        result.compiled_grammar = self.compiled_grammar
-        return result
+                return await compiler.compile(kind, constraint.to_str())
+        return None
 
     def to_dict(self):
         return {

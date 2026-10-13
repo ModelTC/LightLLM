@@ -346,6 +346,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
+        # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
+        compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
@@ -464,6 +466,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     self.tokenizer,
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
+                # None 表示没有输出约束；有约束时需在转发 Router 前发布编译结果，供推理进程加载。
+                if compiled_grammar is not None:
+                    req_obj.set_compiled_grammar(compiled_grammar)
                 req_objs.append(req_obj)
             self._log_stage_timing(
                 group_request_id,

@@ -953,7 +953,7 @@ async def _process_prompts_completion(
         # SamplingParams 是 ctypes.Structure，包含嵌套结构和数组；这里通过 from_buffer_copy
         # 深拷贝整个结构体缓冲区，确保每个 prompt 的参数（含嵌套字段）拥有独立内存，
         # 避免仅复制引用或创建共享缓冲区视图时，原地修改仍影响其他请求。
-        individual_sampling_params = sampling_params.copy()
+        individual_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
 
         # Convert token array to string for _collect_generation_results
         prompt_str = prompt

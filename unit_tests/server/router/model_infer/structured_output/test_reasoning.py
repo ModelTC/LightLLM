@@ -69,18 +69,20 @@ def test_chat_passes_reasoning_marker_through_shared_sampling_params(monkeypatch
     class RequestCaptured(Exception):
         pass
 
-    def generate(prompt, params, *args, **kwargs):
+    async def generate(prompt, params, *args, **kwargs):
         # Exercise the real API-to-shared-memory and grammar-state boundary.
         copy = SamplingParams.from_buffer_copy(bytes(params))
+        payload = await copy.get_compiled_grammar(compiler)
         shared_req = SimpleNamespace(
             sample_params=copy,
-            get_compiled_grammar=lambda: params.compiled_grammar,
+            get_compiled_grammar=lambda: payload,
             input_len=1,
             shm_prompt_ids=SimpleNamespace(arr=[ord("P")]),
         )
         infer_params = InferSamplingParams(shared_req, vocab_size=257)
         captured.append(compiler.grammar_cache.create_state(shared_req, infer_params))
         raise RequestCaptured
+        yield
 
     tokenizer = SimpleNamespace(encode=lambda *args, **kwargs: [7, 8])
     manager = SimpleNamespace(tokenizer=tokenizer, generate=generate, output_grammar_compiler=compiler)
@@ -149,9 +151,8 @@ def test_deepseek_r1_json_answer_stays_in_content(monkeypatch, compiler, stream,
     answer = '{"ok":true}'
 
     async def generate(prompt, params, *args, **kwargs):
-        state = ConstraintState.from_grammar(
-            compiler.grammar_cache.get_grammar(params.compiled_grammar), params.constraint_out_params
-        )
+        payload = await params.get_compiled_grammar(compiler)
+        state = ConstraintState.from_grammar(compiler.grammar_cache.get_grammar(payload), params.constraint_out_params)
         bitmask = torch.empty((1, 9), dtype=torch.int32)
         for index, token_id in enumerate([*tokenizer.encode(prefix + answer), 256]):
             # The real matcher must allow thinking and its delimiter before constraining JSON.

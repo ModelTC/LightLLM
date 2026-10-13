@@ -110,19 +110,22 @@ def test_openai_grammar_failures_return_400(compiler, http_client, monkeypatch, 
         ({"guided_json": {"const": "ok"}}, b'"ok"'),
     ],
 )
-def test_artifact_survives_pd_copy_and_pickle_without_recompilation(compiler, monkeypatch, constraint, text):
+def test_copied_and_pickled_params_get_artifact_from_compiler_cache(compiler, monkeypatch, constraint, text):
     sampling_params = params(compiler=compiler, **constraint)
-    # Choices and PD continuation each copy the scalar struct. Both that copy
-    # and the existing network pickle must preserve the serialized artifact.
-    copied = pickle.loads(pickle.dumps(sampling_params.copy().copy()))
-    assert copied.compiled_grammar == sampling_params.compiled_grammar
+    # Choices and PD continuation transport scalar parameters, then get the
+    # immutable artifact from the compiler's completed-result cache.
+    copied = pickle.loads(pickle.dumps(SamplingParams.from_buffer_copy(sampling_params)))
     with monkeypatch.context() as patcher:
+        patcher.setattr(compiler._executor, "submit", MagicMock(side_effect=AssertionError("Cache miss")))
         patcher.setattr(xgr, "GrammarCompiler", MagicMock(side_effect=AssertionError("Backend recompiled")))
-        grammar = compiler.grammar_cache.get_grammar(copied.compiled_grammar)
+        payload = asyncio.run(copied.get_compiled_grammar(compiler))
+        assert payload is asyncio.run(sampling_params.get_compiled_grammar(compiler))
+        grammar = compiler.grammar_cache.get_grammar(payload)
         matcher = xgr.GrammarMatcher(grammar)
         assert all(matcher.accept_token(token) for token in text)
         assert matcher.accept_token(256) and matcher.is_terminated()
     assert "compiled_grammar" not in sampling_params.to_dict()
+    assert not hasattr(copied, "compiled_grammar")
     copied.max_new_tokens = 2
     assert sampling_params.max_new_tokens != copied.max_new_tokens
 
@@ -174,15 +177,17 @@ def test_no_grammar_does_not_use_compiler_and_none_mode_rejects_constraints():
         params(regular_constraint="ab")
 
 
-def test_reinitialization_clears_compiled_grammar(compiler):
+def test_getter_uses_current_constraints_after_reinitialization(compiler):
     sampling_params = SamplingParams()
 
     async def run():
         sampling_params.init(None, regular_constraint="ab")
         await sampling_params.verify_cpu_async(compiler)
-        assert sampling_params.compiled_grammar
+        first = await sampling_params.get_compiled_grammar(compiler)
+        sampling_params.init(None, regular_constraint="cd")
+        assert await sampling_params.get_compiled_grammar(compiler) != first
         sampling_params.init(None)
-        assert not sampling_params.compiled_grammar
+        assert await sampling_params.get_compiled_grammar(None) is None
 
     asyncio.run(run())
 
@@ -275,7 +280,7 @@ def test_parameter_validation_precedes_grammar_compilation(invalid_params):
         params.init(None, regular_constraint="ab", **invalid_params)
         asyncio.run(params.verify_cpu_async(compiler))
     compiler.compile.assert_not_called()
-    assert not params.compiled_grammar
+    assert not hasattr(params, "compiled_grammar")
 
 
 @pytest.mark.parametrize(
@@ -286,7 +291,7 @@ def test_invalid_grammar_is_rejected_by_output_constraint_validation(compiler, c
     params.init(None, **constraint)
     with pytest.raises(ValueError):
         asyncio.run(params.verify_cpu_async(compiler))
-    assert not params.compiled_grammar
+    assert not hasattr(params, "compiled_grammar")
 
 
 @pytest.mark.parametrize("status", [FinishStatus.FINISHED_ERROR, FinishStatus.FINISHED_STOP])

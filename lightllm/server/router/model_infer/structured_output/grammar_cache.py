@@ -28,7 +28,8 @@ class OutputGrammarCache:
     def create_state(self, shm_req: "Req", sampling_params: "InferSamplingParams") -> Optional[ConstraintState]:
         try:
             payload = shm_req.get_compiled_grammar()
-            if not payload:
+            # None 表示当前请求没有输出约束，无需创建语法状态机。
+            if payload is None:
                 return None
             constraint_params = sampling_params.shm_param.constraint_out_params
             previous_output_len = constraint_params.pd_previous_output_len

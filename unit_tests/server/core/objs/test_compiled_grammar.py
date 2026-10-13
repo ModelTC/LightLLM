@@ -41,15 +41,19 @@ def grammar_req(monkeypatch):
     get_unique_server_name.cache_clear()
 
 
-def test_request_initialization_publishes_compiled_payload(compiler, grammar_req):
+def test_compiled_payload_is_published_explicitly_after_request_initialization(compiler, grammar_req):
     sampling_params = SamplingParams()
     sampling_params.init(None, regular_constraint="ab")
     asyncio.run(sampling_params.verify_cpu_async(compiler))
     grammar_req.init(1, [0], sampling_params, None)
+    with pytest.raises(FileNotFoundError):
+        grammar_req.get_compiled_grammar()
+    payload = asyncio.run(sampling_params.get_compiled_grammar(compiler))
+    grammar_req.set_compiled_grammar(payload)
     shared_req = Req.from_buffer_copy(grammar_req)
-    assert shared_req.get_compiled_grammar() == sampling_params.compiled_grammar
-    # The fixed-size ctypes sampling struct deliberately does not carry bytes.
-    assert shared_req.sample_params.compiled_grammar == b""
+    assert shared_req.get_compiled_grammar() == payload
+    assert not hasattr(sampling_params, "compiled_grammar")
+    assert not hasattr(shared_req, "compiled_grammar_size")
 
 
 @pytest.mark.parametrize("previous_output_len", [-1, 2 ** 31, 2 ** 32, "1", 1.5, None])
@@ -59,7 +63,7 @@ def test_invalid_pd_previous_output_len_is_rejected_before_ctypes_conversion(pre
         params.init(None, pd_previous_output_len=previous_output_len)
 
 
-@pytest.mark.parametrize("transport", ["copy", "buffer", "pickle", "dict", "origin_dict"])
+@pytest.mark.parametrize("transport", ["buffer", "pickle", "dict", "origin_dict"])
 @pytest.mark.parametrize(
     "constraint",
     [
@@ -74,9 +78,7 @@ def test_constraint_params_survive_transport_with_independent_storage(transport,
     params.constraint_out_params.pd_previous_output_len = 3
     original_values = params.to_dict()
 
-    if transport == "copy":
-        copied = params.copy()
-    elif transport == "buffer":
+    if transport == "buffer":
         copied = SamplingParams.from_buffer_copy(params)
     elif transport == "pickle":
         copied = pickle.loads(pickle.dumps(params))
@@ -126,7 +128,7 @@ def test_pd_continuation_restores_state_from_shared_prompt(
     )
     asyncio.run(params.verify_cpu_async(compiler))
     if transport == "pickle":
-        params = pickle.loads(pickle.dumps(params.copy()))
+        params = pickle.loads(pickle.dumps(SamplingParams.from_buffer_copy(params)))
     else:
         serialized = params.to_dict()
         params = SamplingParams()
@@ -135,6 +137,7 @@ def test_pd_continuation_restores_state_from_shared_prompt(
     # Delimiters and other text in the original prompt must never be replayed.
     prompt_ids = list(b"original </think> prompt") + list(history)
     grammar_req.init(1, prompt_ids, params, None)
+    grammar_req.set_compiled_grammar(asyncio.run(params.get_compiled_grammar(compiler)))
     shared_req = Req.from_buffer_copy(grammar_req)
     shared_req.link_prompt_ids_shm_array()
     try:
@@ -159,6 +162,7 @@ def test_pd_continuation_restores_state_from_shared_prompt(
 
 def test_compiled_grammar_is_readable_in_another_process(compiler, grammar_req):
     payload = asyncio.run(compiler.compile("regex", "ab"))
+    grammar_req.sample_params.init(None, regular_constraint="ab")
     grammar_req.set_compiled_grammar(payload)
     # Only the fixed request struct crosses the process boundary. The compiled
     # artifact itself must be loaded from the HTTP-written shared memory.
@@ -179,12 +183,19 @@ assert matcher.accept_token(256) and matcher.is_terminated()
 
 
 def test_reused_request_slot_does_not_expose_previous_grammar(compiler, grammar_req):
-    first = asyncio.run(compiler.compile("regex", "ab"))
-    second = asyncio.run(compiler.compile("json", '{"const":{"ok":true}}'))
-    for payload in (first, b"", second, b"", first):
-        grammar_req.set_compiled_grammar(payload)
+    for constraint in (
+        {"regular_constraint": "ab"},
+        {},
+        {"guided_json": {"const": {"ok": True}}},
+        {},
+        {"regular_constraint": "ab"},
+    ):
+        grammar_req.sample_params.init(None, **constraint)
+        payload = asyncio.run(grammar_req.sample_params.get_compiled_grammar(compiler))
+        # Unconstrained requests must ignore old slot storage even without a write.
+        if payload is not None:
+            grammar_req.set_compiled_grammar(payload)
         req = Req.from_buffer_copy(grammar_req)
-        assert req.compiled_grammar_size == len(payload)
         assert req.get_compiled_grammar() == payload
 
 

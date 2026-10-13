@@ -12,7 +12,7 @@ from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_utils import create_or_link_shm
 from .logprob_utils import logprob_info
@@ -129,7 +129,6 @@ class Req(ctypes.Structure):
         ("finish_token_index", ctypes.c_int),
         ("out_tokens_queue", CircularQueue),
         ("sample_params", SamplingParams),
-        ("compiled_grammar_size", ctypes.c_int64),
         ("chunked_prefill_size", ctypes.c_int),  # 只有chunked prefill模式才使用的参数
         # can_released_mark的作用是：
         # 只有整个流程中的最后一个处理模块，一般是 detokenization 进程，标记这个参数为True后，主管理进程才能真
@@ -199,7 +198,6 @@ class Req(ctypes.Structure):
         else:
             self.sample_params = SamplingParams()
             self.sample_params.init(tokenizer=tokenizer, **sample_param)
-        self.set_compiled_grammar(sample_param.compiled_grammar if isinstance(sample_param, SamplingParams) else b"")
         self.out_tokens_queue = CircularQueue()
         self.input_len = len(prompt_ids)
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
@@ -279,24 +277,25 @@ class Req(ctypes.Structure):
         return
 
     def set_compiled_grammar(self, payload: bytes) -> None:
-        """Publish the HTTP-compiled artifact before this request is sent to router."""
-        self.compiled_grammar_size = len(payload)
+        """在请求转发 Router 前，将 HTTP 侧编译好的语法写入当前请求槽的共享内存。"""
         if not payload:
             return
-        # Like prompt/logprob arrays, storage belongs to a request slot and is
-        # reused only after the normal request lifecycle releases that slot.
-        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", len(payload))
+        # 共享内存按请求槽复用，只在旧请求释放该槽后重建。
+        # 按编译结果的实际长度创建内存块，读取侧直接使用块长度，无需在 Req 中另存长度字段。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", len(payload), force_mode="create")
         try:
             shm.buf[: len(payload)] = payload
         finally:
             shm.close()
 
-    def get_compiled_grammar(self) -> bytes:
-        if not self.compiled_grammar_size:
-            return b""
-        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", self.compiled_grammar_size, force_mode="link")
+    def get_compiled_grammar(self) -> Optional[bytes]:
+        # 无约束请求跳过读取，避免请求槽复用时误读旧请求留下的语法。
+        if not self.sample_params.constraint_out_params.has_constraint():
+            return None
+        # 只连接写入侧已发布的内存块，读取整个块即可取得完整编译结果。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", -1, force_mode="link")
         try:
-            return bytes(shm.buf[: self.compiled_grammar_size])
+            return bytes(shm.buf)
         finally:
             shm.close()
 

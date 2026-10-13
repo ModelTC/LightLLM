@@ -213,7 +213,7 @@ class HttpServerManagerForPDMaster:
             self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
         )
 
-        origin_sampling_params = sampling_params.copy()
+        origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
         origin_group_request_id = self.id_gen.generate_id()
 
         # Record one user request even when it is expanded into multiple independent
@@ -226,7 +226,7 @@ class HttpServerManagerForPDMaster:
         choice_count = origin_sampling_params.n
         generators = []
         for choice_index in range(choice_count):
-            choice_sampling_params = origin_sampling_params.copy()
+            choice_sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
             choice_sampling_params.n = 1
             choice_sampling_params.best_of = 1
             generators.append(
@@ -372,7 +372,7 @@ class HttpServerManagerForPDMaster:
             # Decode 节点容量不足时会用专用状态结束当前分段。
             # PD Master 吞掉该内部分段 marker，并用剩余 token 限额在同一组 P/D 节点上继续。
             while remaining_max_new_tokens > 0:
-                sampling_params = origin_sampling_params.copy()
+                sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
                 logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")

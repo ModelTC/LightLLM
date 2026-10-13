@@ -167,7 +167,7 @@ def test_request_admission_loads_shared_artifacts_without_compilation(compiler, 
     assert mask[1, ord("b")] and not mask[1, ord("a")]
 
 
-@pytest.mark.parametrize("failure", ["read", "deserialize", "matcher"])
+@pytest.mark.parametrize("failure", ["read", "deserialize", "empty", "matcher"])
 def test_artifact_load_failure_finishes_only_its_request(compiler, monkeypatch, failure):
     bad = make_req(regular_constraint="ab")
     good = make_req(regular_constraint="cd")
@@ -177,6 +177,8 @@ def test_artifact_load_failure_finishes_only_its_request(compiler, monkeypatch, 
     def read_artifact():
         if failure == "read":
             raise FileNotFoundError("missing compiled artifact")
+        if failure == "empty":
+            return b""
         return b"invalid artifact" if failure == "deserialize" else payload
 
     def fail_to_create_matcher(*args):
