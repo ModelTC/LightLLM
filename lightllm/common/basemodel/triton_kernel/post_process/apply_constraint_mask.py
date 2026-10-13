@@ -29,8 +29,7 @@ def _apply_constraint_mask(
         mtp_index = tl.load(b_mtp_index + prediction) if HAS_MTP_INDEX else 0
         mask_ptr = req_to_bitmask + req_idx * mask_req_stride + mtp_index * mask_mtp_stride
         word_ids = tl.program_id(1) * (BLOCK_SIZE // 32) + tl.arange(0, BLOCK_SIZE // 32)
-        # Read each packed word once from host memory, then expand its 32 bits
-        # in registers. Per-token loads waste mapped-memory transactions.
+        # 每个压缩 word 只从 GPU 读取一次，再在寄存器中展开 32 位，减少重复访存。
         mask_words = tl.load(mask_ptr + word_ids, mask=word_ids < tl.cdiv(VOCAB_SIZE, 32), other=0)
         allowed = ((mask_words[:, None] >> tl.arange(0, 32)[None, :]) & 1).reshape(BLOCK_SIZE)
         # Only forbidden logits need a write; allowed scores stay untouched.
@@ -51,14 +50,15 @@ def apply_constraint_mask(
     vocab_size: int,
     b_mtp_index: Optional[torch.Tensor] = None,
 ) -> None:
-    """Apply request-owned masks, reading the CPU-filled pinned buffers directly.
+    """Apply request-owned masks from CUDA buffers.
 
     b_mtp_index is the existing compacted verify position; ordinary decode and
     prefill use position zero. Call after penalties on the sampling stream.
-    The existing post_handle completion event protects buffer reuse next step.
+    CPU-filled masks are copied to CUDA on this stream before the call.
+    The existing post_handle completion event protects pinned source reuse next step.
     """
     assert logits.is_cuda and logits.stride(1) == 1
-    assert req_to_bitmask.is_pinned() and req_to_bitmask_enabled.is_pinned()
+    assert req_to_bitmask.is_cuda and req_to_bitmask_enabled.is_cuda
     if logits.shape[0] == 0:
         return
     block_size = 4096

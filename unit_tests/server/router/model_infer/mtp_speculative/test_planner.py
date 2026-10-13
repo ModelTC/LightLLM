@@ -210,6 +210,7 @@ def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
                 req_sampling_params_manager=SimpleNamespace(
+                    req_to_bitmask_enabled=None,
                     req_to_next_token_ids=req_to_next_token_ids,
                     req_to_next_token_scores=req_to_next_token_scores,
                 )
@@ -249,6 +250,7 @@ def test_scatter_mtp_next_tokens_ignores_empty_schedule_scores(monkeypatch):
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
                 req_sampling_params_manager=SimpleNamespace(
+                    req_to_bitmask_enabled=None,
                     req_to_next_token_ids=torch.empty((4, 2), dtype=torch.int64),
                     req_to_next_token_scores=torch.empty((4, 2), dtype=torch.float32),
                 )

@@ -11,8 +11,9 @@ from unit_tests.server.grammar_helpers import (
     init_request,
 )
 from lightllm.common.req_manager import req_sampling_params
-from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids, mtp_verify
+from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.server.router.model_infer.mode_backend import generic_post_process as sampling
+from lightllm.server.router.model_infer.mtp_speculative.utils import scatter_mtp_next_tokens
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Sampling integration requires CUDA")
@@ -30,7 +31,8 @@ def sampling_manager(request, monkeypatch):
     monkeypatch.setattr(req_sampling_params, "get_env_start_args", lambda: args)
     monkeypatch.setattr(req_sampling_params, "get_vocab_size", lambda model_dir: 257)
     result = req_sampling_params.ReqSamplingParamsManager(8)
-    assert result.req_to_next_token_ids.device.type == "cpu" and result.req_to_next_token_ids.is_pinned()
+    assert result.req_to_next_token_ids.is_cuda
+    assert result.req_to_next_token_ids_cpu.device.type == "cpu" and result.req_to_next_token_ids_cpu.is_pinned()
     assert result.req_to_next_token_scores.is_cuda
     monkeypatch.setattr(sampling.g_infer_context, "req_manager", SimpleNamespace(req_sampling_params_manager=result))
     yield result
@@ -81,22 +83,25 @@ def test_sample_disables_stale_constraint_mask_for_ordinary_requests(compiler, s
 def test_sample_reads_scattered_prefix_after_existing_handoff(compiler, sampling_manager, monkeypatch):
     req = sampling_req(compiler, sampling_manager)
     table = sampling_manager.req_to_next_token_ids
-    mtp_scatter_next_token_ids(
-        req_to_next_token_ids=table,
-        b_req_mtp_start_loc=torch.tensor([0], dtype=torch.int32, device="cuda"),
-        target_next_token_ids=torch.tensor([ord("a")], device="cuda"),
-        draft_token_ids=torch.tensor([[ord("b"), ord("!")]], device="cuda"),
-        b_req_idx=torch.tensor([req.req_idx], dtype=torch.int32, device="cuda"),
-        mtp_accept_len=torch.tensor([1], dtype=torch.int32, device="cuda"),
-    )
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     # This is the existing previous-step completion event, before post_handle.
     previous_done = torch.cuda.Event()
-    previous_done.record()
+    with torch.cuda.stream(stream):
+        scatter_mtp_next_tokens(
+            backend=SimpleNamespace(model=SimpleNamespace(req_manager=sampling.g_infer_context.req_manager)),
+            proposal=SimpleNamespace(token_ids=torch.tensor([[ord("b"), ord("!")]], device="cuda")),
+            b_req_mtp_start_loc=torch.tensor([0], dtype=torch.int32, device="cuda"),
+            target_next_token_ids=torch.tensor([ord("a")], device="cuda"),
+            b_req_idx=torch.tensor([req.req_idx], dtype=torch.int32, device="cuda"),
+            mtp_accept_len=torch.tensor([1], dtype=torch.int32, device="cuda"),
+        )
+        previous_done.record()
     previous_done.synchronize()
     commit_token(req, ord("a"))
 
     def unexpected_copy(*args, **kwargs):
-        pytest.fail("Sampling must read the ready pinned table without a prefix D2H")
+        pytest.fail("Sampling must read the ready CPU snapshot without starting another D2H")
 
     monkeypatch.setattr(sampling.g_pin_mem_manager, "async_copy_from_gpu_tensor", unexpected_copy)
     monkeypatch.setattr(sampling.g_pin_mem_manager, "async_copy_from_gpu_tensor_with_event", unexpected_copy)
@@ -162,6 +167,7 @@ def test_sample_preserves_valid_masks_and_isolates_failed_requests(compiler, sam
     monkeypatch.setattr(xgr.GrammarMatcher, failure, fail_for_bad_request)
 
     sampling_manager.req_to_next_token_ids[bad.req_idx] = torch.tensor([0, *b"ab!"])
+    copy_snapshot_and_wait(sampling_manager)
     sampling_manager.req_to_bitmask_enabled[bad.req_idx] = True
     sampling_manager.req_to_bitmask[bad.req_idx].zero_()
     logits = torch.zeros(3, 257, device="cuda")
@@ -192,6 +198,7 @@ def test_sample_groups_mixed_verify_rows_and_preserves_speculative_reasoning(com
     table = sampling_manager.req_to_next_token_ids
     table[active.req_idx] = torch.tensor(list(b"ab!!"))
     table[thinking.req_idx] = torch.tensor(list(b"]>a!"))
+    copy_snapshot_and_wait(sampling_manager)
 
     partial.output_constraint.fill_masks = MagicMock(side_effect=AssertionError("Partial prefill must not fill masks"))
     # Dynamic verification can keep a different prefix length per request.
@@ -221,6 +228,7 @@ def test_reused_mask_slots_clear_an_unreachable_draft_suffix(compiler, sampling_
     req = sampling_req(compiler, sampling_manager)
     positions = torch.arange(4, dtype=torch.int32, device="cuda")
     sampling_manager.req_to_next_token_ids[req.req_idx] = torch.tensor([0, *b"abc"])
+    copy_snapshot_and_wait(sampling_manager)
     logits = torch.zeros(4, 257, device="cuda")
     logits[:, ord("!")] = 10
     tokens, _ = sampling.sample(logits, [req] * 4, [256], b_mtp_index=positions)
@@ -232,6 +240,7 @@ def test_reused_mask_slots_clear_an_unreachable_draft_suffix(compiler, sampling_
     # The second prefix rejects its draft at '!', so masks from the previous
     # iteration must not constrain that unreachable suffix.
     sampling_manager.req_to_next_token_ids[req.req_idx] = torch.tensor([0, *b"a!c"])
+    copy_snapshot_and_wait(sampling_manager)
     logits.zero_()
     logits[:, ord("!")] = 10
     tokens, _ = sampling.sample(logits, [req] * 4, [256], b_mtp_index=positions)
@@ -265,3 +274,47 @@ def test_reused_request_slot_disables_stale_mask(compiler, sampling_manager, rep
     assert tokens.tolist() == list(b"!x")
     assert not sampling_manager.req_to_bitmask_enabled[0]
     assert sampling_manager.req_to_bitmask_enabled[1]
+
+
+@pytest.mark.parametrize("constraints_enabled,draft_step", [(True, 2), (False, 2), (True, 0)])
+def test_mtp_scatter_reuses_snapshot_and_only_copies_when_needed(sampling_manager, constraints_enabled, draft_step):
+    table = sampling_manager.req_to_next_token_ids
+    snapshot = sampling_manager.req_to_next_token_ids_cpu
+    snapshot.fill_(-42)
+    snapshot_ptr = snapshot.data_ptr()
+    if not constraints_enabled:
+        sampling_manager.req_to_bitmask_enabled = None
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    backend = SimpleNamespace(model=SimpleNamespace(req_manager=sampling.g_infer_context.req_manager))
+    for first_draft in [10, 20]:
+        with torch.cuda.stream(stream):
+            drafts = torch.arange(first_draft, first_draft + draft_step, device="cuda").reshape(1, draft_step)
+            scatter_mtp_next_tokens(
+                backend=backend,
+                proposal=SimpleNamespace(token_ids=drafts),
+                target_next_token_ids=torch.tensor([7], device="cuda"),
+                b_req_mtp_start_loc=torch.tensor([0], dtype=torch.int32, device="cuda"),
+                b_req_idx=torch.tensor([0], dtype=torch.int32, device="cuda"),
+                mtp_accept_len=torch.tensor([1], dtype=torch.int32, device="cuda"),
+            )
+            completed = torch.cuda.Event()
+            completed.record()
+        completed.synchronize()
+        assert snapshot.data_ptr() == snapshot_ptr
+        if constraints_enabled:
+            expected = [7, first_draft, first_draft + 1, 1] if draft_step else [7, 1, 1, 1]
+            assert snapshot[0].tolist() == expected
+            # CPU snapshot is independent of subsequent writes to the GPU table.
+            table[0].fill_(99)
+            torch.cuda.current_stream().synchronize()
+            assert snapshot[0].tolist() == expected
+        else:
+            assert snapshot.eq(-42).all()
+
+
+def copy_snapshot_and_wait(manager):
+    manager.req_to_next_token_ids_cpu.copy_(manager.req_to_next_token_ids, non_blocking=True)
+    completed = torch.cuda.Event()
+    completed.record()
+    completed.synchronize()

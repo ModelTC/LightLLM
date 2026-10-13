@@ -399,7 +399,7 @@ def test_mtp_decode_handoff_compaction_and_accepted_commits(compiler, monkeypatc
         assert len(reqs) == 3
         assert req.out_token_id_count == {ord("a"): 1}, "MTP read stale CPU counters"
         manager = make_mask_buffers(reqs, 4)
-        manager.req_to_next_token_ids = ReadyTokenTable()
+        manager.req_to_next_token_ids_cpu = ReadyTokenTable()
         assert prepare_sampling_tensors(reqs, manager)[-1]
         assert b_mtp_index.tolist() == [0, 1, 2]
         apply_masks(reqs, logits, manager, b_mtp_index)

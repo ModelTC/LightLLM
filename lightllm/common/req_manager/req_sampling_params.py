@@ -31,10 +31,14 @@ class ReqSamplingParamsManager:
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
-        # GPU scatter/gather access the mapped host buffer directly. CPU sampling
-        # preparation reads it only after the previous post_handle handoff, whose
-        # CUDA event already covers the scatter; no separate prefix copy is needed.
+        # GPU 主表供 scatter、gather 和 MTP verify 使用。
         self.req_to_next_token_ids = torch.zeros(
+            (max_request_num + 1, self.mtp_verify_width),
+            dtype=torch.int64,
+            device="cuda",
+        )
+        # 常驻 CPU 快照，由 MTP scatter 后的异步拷贝更新；读取前复用已有 CUDA event 等待完成。
+        self.req_to_next_token_ids_cpu = torch.zeros(
             (max_request_num + 1, self.mtp_verify_width),
             dtype=torch.int64,
             device="cpu",
@@ -49,9 +53,8 @@ class ReqSamplingParamsManager:
         self.req_to_bitmask: Optional[torch.Tensor] = None
         self.req_to_bitmask_enabled: Optional[torch.Tensor] = None
         if get_env_start_args().output_constraint_mode == "xgrammar":
-            # One mask per request and verify prefix. CPU matchers fill these
-            # fixed slots after the previous post_handle; sampling reads mapped
-            # host memory directly, without assembling or copying a batch mask.
+            # 每个请求和验证位置对应一个固定掩码槽；CPU matcher 在上一轮 post_handle 后填充，
+            # 采样时在同一流上异步传到 GPU；已有完成事件保护下一轮 pinned 源缓冲区的复用。
             self.req_to_bitmask = torch.empty(
                 (max_request_num + 1, self.mtp_verify_width, (self.vocab_size + 31) // 32),
                 dtype=torch.int32,

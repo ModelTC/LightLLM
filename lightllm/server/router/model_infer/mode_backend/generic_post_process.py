@@ -86,13 +86,14 @@ def sample(
     # Apply hard constraints after all penalties. In particular, the EOS length
     # penalty must not turn a masked -inf into NaN or re-enable a forbidden EOS.
     if has_output_constraints:
+        # 在当前采样流上异步传输掩码，后续 kernel 按流顺序读取 GPU 数据。
         apply_constraint_mask(
-            logits,
-            b_req_idx,
-            sampling_params_manager.req_to_bitmask,
-            sampling_params_manager.req_to_bitmask_enabled,
-            sampling_params_manager.vocab_size,
-            b_mtp_index,
+            logits=logits,
+            b_req_idx=b_req_idx,
+            req_to_bitmask=sampling_params_manager.req_to_bitmask.cuda(non_blocking=True),
+            req_to_bitmask_enabled=sampling_params_manager.req_to_bitmask_enabled.cuda(non_blocking=True),
+            vocab_size=sampling_params_manager.vocab_size,
+            b_mtp_index=b_mtp_index,
         )
     probs = torch.softmax(logits, dim=-1)
 
@@ -285,10 +286,10 @@ def _prepare_output_constraint_mask(request_group, sampling_params_manager) -> b
     enabled = False
     state = req_obj.output_constraint
     if state is not None and not req_obj.finish_status.is_finished() and has_output:
-        # The previous post_handle handoff covers GPU scatter into this pinned table.
-        # Column zero is committed; only consume draft tokens for the later columns.
+        # 上一轮 post_handle 的 CUDA event 已等待 GPU 主表到 CPU 快照的拷贝完成。
+        # 第 0 列是已提交 token，后续列才是需要临时推进状态机的 draft。
         draft_tokens = (
-            sampling_params_manager.req_to_next_token_ids[req_obj.req_idx, 1:group_size].tolist()
+            sampling_params_manager.req_to_next_token_ids_cpu[req_obj.req_idx, 1:group_size].tolist()
             if group_size > 1
             else []
         )

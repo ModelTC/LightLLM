@@ -93,6 +93,7 @@ def make_mask_buffers(reqs, verify_width=1):
     return SimpleNamespace(
         vocab_size=257,
         req_to_next_token_ids=torch.zeros((capacity, verify_width), dtype=torch.int64),
+        req_to_next_token_ids_cpu=torch.zeros((capacity, verify_width), dtype=torch.int64),
         req_to_bitmask=torch.empty((capacity, verify_width, 9), dtype=torch.int32),
         req_to_bitmask_enabled=torch.zeros(capacity, dtype=torch.bool),
     )
@@ -115,7 +116,7 @@ def build_mask(reqs, has_output=None, draft_input_ids=None):
         for index, req in enumerate(reqs):
             if index == 0 or reqs[index - 1] is not req:
                 request_start = index
-            manager.req_to_next_token_ids[req.req_idx, index - request_start] = draft_input_ids[index]
+            manager.req_to_next_token_ids_cpu[req.req_idx, index - request_start] = draft_input_ids[index]
     return manager if prepare_sampling_tensors(reqs, manager, has_output)[-1] else None
 
 

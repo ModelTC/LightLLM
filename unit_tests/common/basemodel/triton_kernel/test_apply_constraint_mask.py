@@ -38,12 +38,12 @@ def test_request_indexed_mask_matches_reference(dtype, vocab_size, padding, mtp)
     untouched_padding = storage[:, width:].clone()
 
     apply_constraint_mask(
-        logits,
-        req_ids.cuda(),
-        masks,
-        enabled,
-        vocab_size,
-        positions.cuda() if mtp else None,
+        logits=logits,
+        b_req_idx=req_ids.cuda(),
+        req_to_bitmask=masks.cuda(non_blocking=True),
+        req_to_bitmask_enabled=enabled.cuda(non_blocking=True),
+        vocab_size=vocab_size,
+        b_mtp_index=positions.cuda() if mtp else None,
     )
 
     torch.testing.assert_close(logits.cpu(), expected, rtol=0, atol=0)
@@ -58,10 +58,20 @@ def test_pinned_masks_can_be_reused_after_sampling_completion():
     req_ids = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
     positions = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
     logits = torch.zeros(2, 33, device="cuda")
-    apply_constraint_mask(logits, req_ids, masks, enabled, 33, positions)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     # This represents the existing sampling/post_handle completion boundary.
     done = torch.cuda.Event()
-    done.record()
+    with torch.cuda.stream(stream):
+        apply_constraint_mask(
+            logits=logits,
+            b_req_idx=req_ids,
+            req_to_bitmask=masks.cuda(non_blocking=True),
+            req_to_bitmask_enabled=enabled.cuda(non_blocking=True),
+            vocab_size=33,
+            b_mtp_index=positions,
+        )
+        done.record()
     done.synchronize()
     assert torch.isfinite(logits[0]).nonzero().flatten().tolist() == [32]
     assert torch.isfinite(logits[1]).nonzero().flatten().tolist() == [31]
@@ -69,16 +79,26 @@ def test_pinned_masks_can_be_reused_after_sampling_completion():
     # Reuse one slot for an ordinary request, and update the other's prefix.
     enabled[1] = False
     masks[0].fill_(-1)
-    logits.fill_(1.25)
-    apply_constraint_mask(logits, req_ids, masks, enabled, 33, positions)
+    with torch.cuda.stream(stream):
+        logits.fill_(1.25)
+        apply_constraint_mask(
+            logits=logits,
+            b_req_idx=req_ids,
+            req_to_bitmask=masks.cuda(non_blocking=True),
+            req_to_bitmask_enabled=enabled.cuda(non_blocking=True),
+            vocab_size=33,
+            b_mtp_index=positions,
+        )
+        done.record()
+    done.synchronize()
     torch.testing.assert_close(logits, torch.full_like(logits, 1.25), rtol=0, atol=0)
 
 
 def test_empty_batch_needs_no_kernel_launch():
     apply_constraint_mask(
-        torch.empty(0, 33, device="cuda"),
-        torch.empty(0, dtype=torch.int32, device="cuda"),
-        torch.empty(1, 1, 2, dtype=torch.int32, pin_memory=True),
-        torch.zeros(1, dtype=torch.bool, pin_memory=True),
-        33,
+        logits=torch.empty(0, 33, device="cuda"),
+        b_req_idx=torch.empty(0, dtype=torch.int32, device="cuda"),
+        req_to_bitmask=torch.empty(1, 1, 2, dtype=torch.int32, device="cuda"),
+        req_to_bitmask_enabled=torch.zeros(1, dtype=torch.bool, device="cuda"),
+        vocab_size=33,
     )
