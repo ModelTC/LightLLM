@@ -177,7 +177,7 @@ class GuidedJsonSchema(ctypes.Structure):
         ("length", ctypes.c_int),
     ]
 
-    def initialize(self, constraint: str, tokenizer):
+    def initialize(self, constraint: Union[str, dict], tokenizer):
         if isinstance(constraint, dict):
             constraint = json.dumps(constraint, ensure_ascii=False, separators=(",", ":"))
         constraint_bytes = constraint.encode("utf-8")
