@@ -556,3 +556,18 @@ LightLLM 额外 512 为 11.3715 ms、34,463.4 TPS，TPOT 相对归档 vLLM 高15
 LightLLM 维持接近满负载的时间更长，vLLM 首字到达更分散，这支持“整个生命周期的负载过程不同”这一观察，与整轮 TPS 高而平均 TPOT 仍慢的现象相符，仍是待验证的解释；不能据此证明具体调度策略贡献了多少。由请求 decode 时长之和/整轮 wall 算出的均值与 TPOT×TPS 存在代数关系，只作一致性校验，不重复当作独立因果证据。上述可复查数据保存为 `silu-quant-1013-vllm-final-comparison.json`。
 
 下一步若要判断小优化的端到端收益，应交错多轮 A/B，以完整回放为实验单位并比较整轮分布；同一归档 prompt 的预热/命中状态须匹配，冷缓存另做独立实验。固定 rank 映射会改变调度且无法固定所有工作量，不作为单独的精确归因办法。本轮没有恢复旧量化、改变 rank 映射、开启 Microbatch 或改动 P/master 服务。
+
+### 补充：vLLM 服务端的整轮负载与 TPOT 分组
+
+继续读取原已归档 `occupancy.json` 与 Prometheus 定义，未修改服务或重跑。vLLM D 的 `vllm:num_requests_running` 帮助文本为“Number of requests in model execution batches”；8 engine 求和的时间加权条件均值为288.56（排除零 running 的采样区间），与独立客户端计数接近。采样约9.8 s时各 rank8–12、19.7 s时27–32、30.7 s时63–64，证明“客户端并发512”并不意味着整轮 D 一直满 batch。此项仍是 scheduler 采样状态，不是每个 GPU step 的实际输入/graph padding；不与 LightLLM router admission gauge 直接当同口径相减。
+
+逐请求按 TTFT 从小到大排序，每组128个、全部16K输入/4096输出；以下是同轮内的描述性分组，不是128个独立性能实验或同 batch 的严格对照：
+
+| TTFT 排序四分组 | vLLM 平均 TTFT (ms) | vLLM 平均 TPOT (ms) | LightLLM 平均 TTFT (ms) | LightLLM 平均 TPOT (ms) |
+|---|---:|---:|---:|---:|
+| 1 | 7911.4 | 9.1682 | 8998.0 | 11.3299 |
+| 2 | 15262.6 | 9.8757 | 9836.9 | 11.4518 |
+| 3 | 23505.3 | 10.1589 | 11048.5 | 11.4180 |
+| 4 | 24268.8 | 10.1601 | 12277.3 | 11.2861 |
+
+vLLM 的9.8407 ms包含最小TTFT组的9.1682 ms，其余三组约9.8757–10.1601 ms；LightLLM各组约11.2861–11.4518 ms。结合服务端running曲线，更支持负载/到达时序是候选原因之一；分组仍受请求组成、rank映射、序列状态影响，不能把组间差直接归因给batch，或声称它解释了全部约14%的差距。逐step按相近batch/序列长/每周期产出对齐的证据仍缺失。原始派生数据为`silu-quant-1013-vllm-scheduler-running.json`、`silu-quant-1013-ttft-tpot-cohorts.json`。
