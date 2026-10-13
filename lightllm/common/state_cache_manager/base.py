@@ -24,6 +24,39 @@ class StateCacheManager(ABC):
     ]
     """
 
+    @classmethod
+    def create_dp_shared(cls, name: str, size: int, keep_num: int = 0, **kwargs):
+        """Group node-local DP owners by TP shard before exposing their shared pool."""
+        import torch.distributed as dist
+        from lightllm.utils.envs_utils import get_env_start_args
+        from lightllm.utils.dist_utils import (
+            create_new_group_for_current_node,
+            get_dp_rank_in_node,
+            get_current_rank_in_dp,
+        )
+
+        args = get_env_start_args()
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        if dp_size_in_node == 1:
+            return cls(size=size, keep_num=keep_num, **kwargs)
+
+        dp_rank = get_dp_rank_in_node()
+        group = create_new_group_for_current_node("gloo")
+        pool_args = dict(
+            size=size * dp_size_in_node,
+            keep_num=keep_num * dp_size_in_node,
+            shm_name=f"{name}_tp_{get_current_rank_in_dp()}",
+            **kwargs,
+        )
+        if dp_rank == 0:
+            pool = cls(**pool_args, shm_create=True)
+        dist.barrier(group=group)
+        if dp_rank != 0:
+            pool = cls(**pool_args, shm_create=False)
+        # AtomicShmLock initializes its shared word on attach; all owners attach before use.
+        dist.barrier(group=group)
+        return pool
+
     def __init__(self, size: int, keep_num: int = 0, shm_name: Optional[str] = None, shm_create: bool = False):
         self.size = size
         self.keep_num = keep_num

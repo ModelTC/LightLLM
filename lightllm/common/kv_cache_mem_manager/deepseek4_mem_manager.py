@@ -618,7 +618,8 @@ class DeepseekV4MemoryManager(MemoryManager):
 
         args = get_env_start_args()
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        self.big_page_buffers = DeepseekV4StateCacheManager(
+        self.big_page_buffers = DeepseekV4StateCacheManager.create_dp_shared(
+            name="dp_big_checkpoints",
             size=_ceil_div(size, big_page_tokens),
             layout=layout,
         )
@@ -739,7 +740,7 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        # Pinned CPU checkpoints are process-local; IPC readers need only GPU storage.
+        # Checkpoint pools attach by service/TP shard; IPC readers need only GPU storage.
         state["big_page_buffers"] = None
         return state
 
@@ -778,7 +779,6 @@ class DeepseekV4MemoryManager(MemoryManager):
     def free_all(self):
         super().free_all()
         self.swa_page_allocator.free_all()
-        self.big_page_buffers.clear_to_init_state()
 
     # ------------------------------------------------------------------ packed codecs (torch reference)
     # 与 sglang/vllm 的 fp8_ds_mla 字节布局逐位对齐(ue8m0 幂次 scale)。这些 torch 实现是该 ABI 的

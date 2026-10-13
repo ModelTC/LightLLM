@@ -101,7 +101,9 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
             self.prepare_swa(req_idx, start, end)
 
     def create_small_page_cache_manager(self, size):
-        self.small_page_buffers = DeepseekV4StateCacheManager(size, self.mem_manager.cpu_cache_layout)
+        self.small_page_buffers = DeepseekV4StateCacheManager.create_dp_shared(
+            name="dp_small_checkpoints", size=size, layout=self.mem_manager.cpu_cache_layout
+        )
         return self.small_page_buffers
 
     def init_hybrid_attention_state(self, req):

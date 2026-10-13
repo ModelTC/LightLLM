@@ -532,6 +532,12 @@ B256 每次 CPU 提交减少约 28.20 µs，是约 44 ms 周期的 0.064%，不�
 
 所有原始日志在 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/`，本项前缀 `silu-quant-1013-`：`normal-results.json`、`profile-summary.json`、`{prototype,full-w2}-benchmark.json`、`unit-tests.log`、`o-proj-tests.log`、`{after,repeat1,formal-continuation}.log`、`{launch,stop,deployment-plan,import-contract,warm-coverage}.json`、`{p,d}-resource-validation.json`、`d-resource-during-hot.json`、`final-smoke.json`；case 在 `controlled/{after,profile,hot}-16k-c*-silu-quant-1013/`，失败预热单独留存。
 
+## PR 1623：DSv4 跨 DP checkpoint 共享（2026-10-13）
+
+取 PR 的三个功能提交（原始 `71c8ee01`、`4511fdb2`、`216c7427`），未引入其上游基线中的 GLM5.3 或依赖变更。沿用已有 StateCacheManager/LayerCache，在同节点的对应 TP shard 之间共享 DSv4 大、小 continuation checkpoint 及引用计数；目标 DP 接收 checkpoint ID 并保留引用，不再重复分配或通过 Gloo 传输 checkpoint 字节。GPU compressed history 的复制、源 radix pin、恢复完成后的同步和临时小页释放顺序保持原合同。模型 warmup 的 free_all 不重置其他 DP 持有的 checkpoint。
+
+五组回归合计 **40 passed**，包括双 GPU 的生产 `_transfer_dsv4_source_data`、实际 save/restore，以及源 DP 释放后的目标引用存活检查。2304 token 用例的 Gloo 数据为 **18432 字节 token-slot 索引 + 16 字节 checkpoint ID**；checkpoint 本体留在共享 pinned CPU 内存。该字节数是回归用例，不代表服务端 TTFT/TPOT 收益。日志：`/mnt/vqa/wanzihao/bench-logs/pr1623-dsv4-dp-fetch-20261013/candidate-tests-r4.log`。服务重启和同 seed 的 LLM Bench 结果待记录；下方既有 vLLM 对照均早于此改动。
+
 ## 五项完成后的 vLLM 对照（2026-10-13）
 
 当前 LightLLM 为全部五项叠加，普通量化仍为用户要求回退后的原路径。vLLM 0.31.0 取归档 `hot-16k-c{128,512}-1011`；同一两台 H100、同自定义主/draft 检查点、MTP3，不能同时启动两套服务，因此不是同期随机化 A/B。这里比较的是相同归档 token IDs、warm-prefix、greedy、4096 输出的 text decode 诊断，不是原 vision LLM Bench 任务、冷缓存或不同随机 seed 的端到端测试。当前数据不足以证明约 1% 的单项服务收益。

@@ -196,18 +196,8 @@ class DPKVSharedMoudle:
         # ---------------------------------------------------------------------
         by_id = {req.req_id: req for req in local_reqs}
         req_manager = self.backend.model.req_manager
-        big_tokens = self.backend.args.linear_att_hash_page_size * self.backend.args.linear_att_page_block_num
-        big_enabled = big_tokens <= self.backend.args.max_req_total_len
-        big_buffers = self.backend.model.mem_manager.big_page_buffers
-        small_buffers = self.backend.small_page_buffers
         swa_capacity = g_infer_context.get_can_alloc_dsv4_swa_page_num()
         token_capacity = g_infer_context.get_can_alloc_token_num()
-        big_capacity = big_buffers.get_free_cache_num()
-        small_capacity = (
-            self.backend.radix_cache.get_available_small_page_buffer_num()
-            if self.backend.radix_cache is not None
-            else 0
-        )
         need_swa_pages = req_manager.get_prompt_cache_page_size() // self.backend.model.mem_manager.swa_pool.page_size
         local_plans = {}
         for index, (req_id, _, _, owner_dp) in enumerate(reqs):
@@ -224,17 +214,8 @@ class DPKVSharedMoudle:
             if trans_size <= 0:
                 continue
             alloc_tokens = req._kv_cache_alloc_need(end)
-            big_lengths = (
-                list(range((req.cur_kv_len // big_tokens + 1) * big_tokens, end + 1, big_tokens)) if big_enabled else []
-            )
-            needs_small = end % big_tokens != 0 or not big_enabled
             needs_new_swa = req.cur_kv_len == 0
-            if (
-                (needs_new_swa and swa_capacity < need_swa_pages)
-                or alloc_tokens > token_capacity
-                or len(big_lengths) > big_capacity
-                or (needs_small and small_capacity == 0)
-            ):
+            if (needs_new_swa and swa_capacity < need_swa_pages) or alloc_tokens > token_capacity:
                 continue
 
             # 此处只预占容量计数；所有 TP rank 达成一致前不实际分配资源。
@@ -242,8 +223,6 @@ class DPKVSharedMoudle:
             if needs_new_swa:
                 swa_capacity -= need_swa_pages
             token_capacity -= alloc_tokens
-            big_capacity -= len(big_lengths)
-            small_capacity -= int(needs_small)
 
         # ---------------------------------------------------------------------
         # 阶段 2：收集节点内所有 rank 的候选计划，供同一 DP 的 TP ranks 达成一致。
@@ -256,65 +235,39 @@ class DPKVSharedMoudle:
         # 阶段 3：构造逐 rank 的收发计划，并在请求所属 DP 上实际分配目标资源。
         # ---------------------------------------------------------------------
         tasks = []
-        temporary_small_ids = []
         transfer_plan = [[] for _ in all_rank_plans]
-        try:
-            for index, (req_id, _, _, owner_dp) in enumerate(reqs):
-                owner_ranks = range(owner_dp * self.backend.dp_world_size, (owner_dp + 1) * self.backend.dp_world_size)
-                plans = [all_rank_plans[rank].get(index) for rank in owner_ranks]
-                if plans[0] is None or any(plan != plans[0] for plan in plans):
-                    continue
-                source_dp, start, end = plans[0]
+        for index, (req_id, _, _, owner_dp) in enumerate(reqs):
+            owner_ranks = range(owner_dp * self.backend.dp_world_size, (owner_dp + 1) * self.backend.dp_world_size)
+            plans = [all_rank_plans[rank].get(index) for rank in owner_ranks]
+            if plans[0] is None or any(plan != plans[0] for plan in plans):
+                continue
+            source_dp, start, end = plans[0]
 
-                # 源、目标使用相同的 rank_in_dp，使每个 TP shard 与对应 shard 配对。
-                for destination in owner_ranks:
-                    source = source_dp * self.backend.dp_world_size + destination % self.backend.dp_world_size
-                    transfer_plan[destination].append((source, req_id, start, end))
+            # 源、目标使用相同的 rank_in_dp，使每个 TP shard 与对应 shard 配对。
+            for destination in owner_ranks:
+                source = source_dp * self.backend.dp_world_size + destination % self.backend.dp_world_size
+                transfer_plan[destination].append((source, req_id, start, end))
 
-                # 所有 rank 都构造相同的 transfer_plan；只有 owner DP 分配本地接收资源。
-                if owner_dp != self.dp_rank_in_node:
-                    continue
-                req = by_id[req_id]
-                big_lengths = (
-                    list(range((start // big_tokens + 1) * big_tokens, end + 1, big_tokens)) if big_enabled else []
+            # 所有 rank 都构造相同的 transfer_plan；只有 owner DP 分配本地接收资源。
+            if owner_dp != self.dp_rank_in_node:
+                continue
+            req = by_id[req_id]
+            assert req.hold_kv_len == req.cur_kv_len
+            mem_indexes = self.backend._alloc_req_kv_mem(req, req._kv_cache_alloc_need(end))
+            assert mem_indexes is not None
+            tasks.append(
+                TransTask(
+                    req=req,
+                    mem_indexes=mem_indexes[: end - start],
+                    max_kv_len_dp_rank=source_dp,
+                    max_kv_len_mem_manager_index=source_dp * self.backend.dp_world_size + self.backend.rank_in_dp,
                 )
-                small_id = None
-                if end % big_tokens != 0 or not big_enabled:
-                    self.backend.radix_cache.free_one_small_page_buffer()
-                    small_id = small_buffers.alloc_one_state_cache()
-                    assert small_id is not None
-                    if end == req.hybrid_cache_len:
-                        req.tail_small_page_buffer_id = small_id
-                    else:
-                        # 非请求尾部的 checkpoint 只服务本次传输，完成后由调用方释放。
-                        temporary_small_ids.append(small_id)
-
-                for length in big_lengths:
-                    checkpoint_id = big_buffers.alloc_one_state_cache()
-                    assert checkpoint_id is not None
-                    req.hybrid_len_to_big_page_id[length] = checkpoint_id
-
-                assert req.hold_kv_len == req.cur_kv_len
-                mem_indexes = self.backend._alloc_req_kv_mem(req, req._kv_cache_alloc_need(end))
-                assert mem_indexes is not None
-                tasks.append(
-                    TransTask(
-                        req=req,
-                        mem_indexes=mem_indexes[: end - start],
-                        max_kv_len_dp_rank=source_dp,
-                        max_kv_len_mem_manager_index=source_dp * self.backend.dp_world_size + self.backend.rank_in_dp,
-                        terminal_small_page_buffer_id=small_id,
-                    )
-                )
-        except BaseException:
-            if temporary_small_ids:
-                small_buffers.free_state_cache(temporary_small_ids)
-            raise
+            )
 
         return tasks, transfer_plan
 
     def _transfer_dsv4_source_data(self, trans_tasks, matches, transfer_plan):
-        """Move selected slot indexes and continuation checkpoints over Gloo."""
+        """Exchange slot indexes and shared checkpoint IDs; checkpoint bytes stay node-local."""
         args = self.backend.args
         big_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
         big_enabled = big_tokens <= args.max_req_total_len
@@ -331,30 +284,38 @@ class DPKVSharedMoudle:
                 big_lengths = (
                     list(range((start // big_tokens + 1) * big_tokens, end + 1, big_tokens)) if big_enabled else []
                 )
+                needs_small = end % big_tokens != 0 or not big_enabled
                 if rank == source:
                     match = matches[req_id]
                     assert match.matched_len == end
                     indexes = (
                         cache.get_mem_index_value_by_node(match.node, start, end).to(dtype=torch.int64).contiguous()
                     )
+                    big_ids = cache.get_big_page_ids_by_node(match.node)
+                    ids = [big_ids[length // big_tokens - 1] for length in big_lengths]
+                    if needs_small:
+                        assert match.node.small_page_buffer_idx is not None
+                        ids.append(match.node.small_page_buffer_idx)
                     peer = dist.get_global_rank(group, destination)
                     dist.send(indexes, dst=peer, group=group)
-                    big_ids = cache.get_big_page_ids_by_node(match.node)
-                    for length in big_lengths:
-                        dist.send(big_buffers.buffer[big_ids[length // big_tokens - 1]], dst=peer, group=group)
-                    if end % big_tokens != 0 or not big_enabled:
-                        assert match.node.small_page_buffer_idx is not None
-                        dist.send(small_buffers.buffer[match.node.small_page_buffer_idx], dst=peer, group=group)
+                    dist.send(torch.tensor(ids, dtype=torch.int64), dst=peer, group=group)
                 else:
                     task = local_by_id[req_id]
                     peer = dist.get_global_rank(group, source)
                     indexes = torch.empty(end - start, dtype=torch.int64)
+                    ids = torch.empty(len(big_lengths) + int(needs_small), dtype=torch.int64)
                     dist.recv(indexes, src=peer, group=group)
+                    dist.recv(ids, src=peer, group=group)
                     task.max_kv_len_mem_indexes = indexes.to(device="cuda", dtype=torch.int32)
-                    for length in big_lengths:
-                        dist.recv(big_buffers.buffer[task.req.hybrid_len_to_big_page_id[length]], src=peer, group=group)
-                    if end % big_tokens != 0 or not big_enabled:
-                        dist.recv(small_buffers.buffer[task.terminal_small_page_buffer_id], src=peer, group=group)
+                    big_ids = ids[: len(big_lengths)].tolist()
+                    big_buffers.retain_state_cache(big_ids)
+                    task.req.hybrid_len_to_big_page_id.update(zip(big_lengths, big_ids))
+                    if needs_small:
+                        small_id = int(ids[-1])
+                        small_buffers.retain_state_cache([small_id])
+                        task.terminal_small_page_buffer_id = small_id
+                        if end == task.req.hybrid_cache_len:
+                            task.req.tail_small_page_buffer_id = small_id
 
     def kv_trans_dsv4(self, trans_tasks: List["TransTask"], matches: Dict[int, PrefixCacheMatch], transfer_plan):
         self._transfer_dsv4_source_data(trans_tasks, matches, transfer_plan)
@@ -414,7 +375,7 @@ class DPKVSharedMoudle:
                     req.shm_req.prompt_cache_len = end
             self.backend.logger.info(
                 f"dp_i {self.dp_rank_in_node} transfer kv tokens num: "
-                f"{sum(len(task.mem_indexes) for task in trans_tasks)}"
+                f"{sum(len(task.mem_indexes) for task in trans_tasks)} using shared checkpoint IDs"
             )
         # Destination kernels must finish reading source GPU pools before source radix refs are released.
         torch.cuda.current_stream().synchronize()
