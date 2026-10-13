@@ -387,3 +387,26 @@ TTFT 为 2800.6→2589.5 ms、10192.2→10205.7 ms。采集后额外 unprofiled 
 内/外部文本和真实 image_url 请求均 HTTP 200、`2`/`Red`，1P/1D 健康；D 27 个进程及 SHM helper 的 nofile 为 1048576，采样最大 FD 433，OOM=0，GPU 时钟 1980/2619 MHz。无运行期 HTTP 500/CUDA/NCCL/WRITE-task 错误；Kineto 的既知 profiler callback 诊断单独记录。
 
 证据位于既有日志目录：`draft-vocab-1013-{baseline,after,benchmark}.log`、`draft-vocab-1013-benchmark.json`、`draft-vocab-1013-unit-tests-final.log`、`draft-vocab-1013-profile-summary.json`、`draft-vocab-1013-{launch,stop,deployment-plan}.json`、`draft-vocab-1013-final-smoke.json`、`controlled/{baseline,after,profile,hot}-16k-c*-draft-vocab-1013/`。本项记录并单独提交后，再做主模型 greedy 采样融合。
+
+## 第二轮优化 ②：主模型 greedy token＋logprob 融合
+
+在既有 `local_vocab_topk.py` 增加两阶段 argmax＋logsumexp，greedy 路径不再生成完整 softmax 概率矩阵，但仍返回选中 token 的 logprob；惩罚、invalid token 与 temperature 的顺序保持原样。随机采样继续原路径。相等 logits 选择最小 token ID，logprob 用最大值平移后的 −log(sum(exp(logit−max)))，避免巨大共同 offset 引起抵消。
+
+新增 11 项 GPU 回归，连同上一项共 21 项通过；覆盖真实词表 B64/B256、小词表/尾块、温度与惩罚顺序、同分/1e30 offset、CUDA Graph replay。ID 精确一致，logprob 最大误差 9.5367e-7。3 次 Graph 计时中位数：B64 原 94.45→9.58 µs，B256 原 240.02→46.62 µs；eager 为 121.95→24.06、258.90→60.73 µs。局部结果不能直接当服务加速。
+
+仅重启 D，正式 PGID 151375，runtime `runtime-greedy-fuse-1013`，原 launcher/config/env、模型/cache/batch/graph/MTP/Microbatch 保持原设置。首次启动因 8121 暂时无法 bind 退出，保存独立失败日志；确认无进程/GPU context、端口可 bind 后同脚本重试。后续 restart helper 加入端口可绑定检查。P/master 未重启，两节点主/草稿索引的 115/285 个 shard 均可读。
+
+本项第一轮 before/after 原始结果全部保留。相同归档 16K token IDs、warm-prefix、4096 输出，profiler 关闭，640/640 全部成功：
+
+| 输入/并发 | 成功（前→后） | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---:|---:|---:|---:|---:|
+| 16K / 128 | 128→128 | 7.4829 → 6.8475 | 8.49% | 15,136.6 → 16,847.1 | +11.30% |
+| 16K / 512 | 512→512 | 12.0921 → 11.4567 | 5.25% | 33,041.5 → 34,304.6 | +3.82% |
+
+**该表的 8.49%/5.25% TPOT 差异不能归为本项因果收益。** 未改代码、未换 D 进程的 before 已比上一项采集前 6.9247/11.1830 ms 慢约 8%；额外重复 128 基线仍为 7.3643 ms。已检查时钟/资源与 profiler start/stop，未找到明确原因，不能断言是 profiler 残留。相对上一项采集前结果，本项 128 好 1.12%，512 **慢 2.45%**；正式退化窗口不隐藏。采集后额外 512 为 11.2826 ms，与上一项额外 11.2531 ms 仅差 0.26%，尚不能证明稳定 TPOT 收益。
+
+512 profile：batch=512、每 rank=64，平均序列长 17367.0→17440.2（+0.42%）；8-rank 平均周期 46.3431→45.7510 ms。graph 外 sampling/copy GPU 并集 0.6477→0.4542 ms，完整 SoftMaxForward 从 1 次→0 次，greedy partial/finish 各 1 次，合计 0.05279 ms/周期。target 38.3555→38.6256 ms、draft 2.7237→2.7044、GPU busy 41.7245→41.7827；总 GPU busy 没有减少，通信波动抵消了采样节省。保留数值与真实采样工作量已验证的融合，不将其列为已证实的 512 端到端加速。
+
+profile 512/512 成功，8 trace 留存，profile 客户端延迟排除。外部文本/真实图片均 HTTP 200、`2`/`Red`；P/master 46、D 28 个进程（含 SHM helper）nofile 均 1048576，最终最大 FD 370/433，压测中 D 曾达 2178/1048576，未触及限制。cgroup OOM=0，时钟 1980/2619 MHz，无新运行期 HTTP 500、CUDA/NCCL、WRITE-task 错误。
+
+证据均在既有日志目录，前缀 `greedy-fuse-1013-`：`normal-results.json`、`profile-summary.json`、`unit-tests.log`、`benchmark.{log,json}`、`{baseline,after,baseline-repeat128}.log`、`{launch,stop,deployment-plan}.json`、`{p,d}-resource-validation.json`、`final-smoke.json`、`failed-startup-port-busy.log`，以及 `controlled/{baseline,after,profile,hot}-16k-c*-greedy-fuse-1013/`。后续各项使用上一项采集前正式 after 作为 before，保留额外窗口，避免再把异常偏慢基线算为优化收益。本项单独提交后继续 dense GEMM。

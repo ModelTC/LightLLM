@@ -3,6 +3,7 @@ from typing import List, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
+from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_greedy_logprob
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
@@ -76,14 +77,13 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         )
 
     logits.div_(b_temperatures.view((-1, 1)))
-    probs = torch.softmax(logits, dim=-1)
 
     if is_all_greedy:
-        batch_next_token_ids = torch.argmax(logits, -1)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+        return local_vocab_greedy_logprob(logits)
 
-    elif skip_top_k and skip_top_p:
+    probs = torch.softmax(logits, dim=-1)
+
+    if skip_top_k and skip_top_p:
         # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
         batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
         batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))

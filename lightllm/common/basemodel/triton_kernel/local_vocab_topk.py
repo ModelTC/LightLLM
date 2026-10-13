@@ -86,6 +86,78 @@ def local_vocab_bias_max(base_logits: torch.Tensor, bias: torch.Tensor, alloc_fu
 
 
 @triton.jit
+def _greedy_vocab_partial(
+    logits,
+    maxima,
+    sums,
+    indexes,
+    vocab: tl.constexpr,
+    stride_b: tl.constexpr,
+    chunks: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    b = tl.program_id(0)
+    v = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    scores = tl.load(logits + b * stride_b + v, v < vocab, -float("inf"))
+    maximum = tl.max(scores, axis=0)
+    total = tl.sum(tl.exp(scores - maximum), axis=0)
+    winner = tl.min(tl.where(scores == maximum, v, 2147483647), axis=0)
+    offset = b * chunks + tl.program_id(1)
+    tl.store(maxima + offset, maximum)
+    tl.store(sums + offset, total)
+    tl.store(indexes + offset, winner)
+
+
+@triton.jit
+def _greedy_vocab_finish(maxima, sums, indexes, token_ids, logprobs, chunks: tl.constexpr, BLOCK: tl.constexpr):
+    b = tl.program_id(0)
+    c = tl.arange(0, BLOCK)
+    maximums = tl.load(maxima + b * chunks + c, c < chunks, -float("inf"))
+    partial_sums = tl.load(sums + b * chunks + c, c < chunks, 0)
+    ids = tl.load(indexes + b * chunks + c, c < chunks, 2147483647)
+    maximum = tl.max(maximums, axis=0)
+    total = tl.sum(partial_sums * tl.exp(maximums - maximum), axis=0)
+    winner = tl.min(tl.where(maximums == maximum, ids, 2147483647), axis=0)
+    tl.store(token_ids + b, winner.to(tl.int64))
+    tl.store(logprobs + b, -tl.log(total))
+
+
+def local_vocab_greedy_logprob(logits: torch.Tensor, alloc_func=torch.empty, run_config=None):
+    """Return greedy IDs and their normalized logprobs without a full probability matrix."""
+    assert logits.ndim == 2 and logits.dtype == torch.float32 and logits.stride(1) == 1
+    batch, vocab = logits.shape
+    if run_config is None:
+        run_config = {"BLOCK": 2048, "num_warps": 4}
+    chunks = triton.cdiv(vocab, run_config["BLOCK"])
+    maxima = alloc_func((batch, chunks), dtype=torch.float32, device=logits.device)
+    sums = alloc_func((batch, chunks), dtype=torch.float32, device=logits.device)
+    indexes = alloc_func((batch, chunks), dtype=torch.int32, device=logits.device)
+    token_ids = alloc_func((batch,), dtype=torch.int64, device=logits.device)
+    logprobs = alloc_func((batch,), dtype=torch.float32, device=logits.device)
+    _greedy_vocab_partial[(batch, chunks)](
+        logits,
+        maxima,
+        sums,
+        indexes,
+        vocab,
+        logits.stride(0),
+        chunks,
+        **run_config,
+    )
+    _greedy_vocab_finish[(batch,)](
+        maxima,
+        sums,
+        indexes,
+        token_ids,
+        logprobs,
+        chunks,
+        triton.next_power_of_2(chunks),
+        num_warps=4,
+    )
+    return token_ids, logprobs
+
+
+@triton.jit
 def _transpose_vocab_logits_kernel(
     logits,
     transposed_logits,
