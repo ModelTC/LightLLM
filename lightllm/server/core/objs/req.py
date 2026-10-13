@@ -199,7 +199,6 @@ class Req(ctypes.Structure):
         else:
             self.sample_params = SamplingParams()
             self.sample_params.init(tokenizer=tokenizer, **sample_param)
-            self.sample_params.verify()
         self.set_compiled_grammar(sample_param.compiled_grammar if isinstance(sample_param, SamplingParams) else b"")
         self.out_tokens_queue = CircularQueue()
         self.input_len = len(prompt_ids)

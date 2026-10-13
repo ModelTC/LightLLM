@@ -206,7 +206,13 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
         yield (
             sp.group_request_id,
             "",
-            {"id": None, "prompt_tokens": 100, "prompt_cache_len": 20, "count_output_tokens": 0, "needs_prefill_first_token": True},
+            {
+                "id": None,
+                "prompt_tokens": 100,
+                "prompt_cache_len": 20,
+                "count_output_tokens": 0,
+                "needs_prefill_first_token": True,
+            },
             FinishStatus(FinishStatus.FINISHED_ERROR),
         )
 
@@ -423,7 +429,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
 
     results = asyncio.run(run())
     assert len(segments) == 2
-    assert segments[1] == "prompt" + ("END" if parser else "") + "helloE"
+    assert segments == [[1, 2], [1, 2] + ([10, 1001] if parser else []) + [11]]
     expected = "hello" + ("END" if include else "") if continuation == "NDextra" else "helloE" + continuation
     assert "".join(result[1] for result in results) == ("END" if parser else "") + expected
     assert [result[2]["id"] for result in results] == ([10, 1001] if parser else []) + [11, 12]
@@ -505,7 +511,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
                 None,
             )
         ]
-        assert segments == ["prompt"]
+        assert segments == [[1, 2]]
         assert results[-1][1] == "hello"
         assert results[-1][3].is_stopped()
         assert not manager.active_req_ids

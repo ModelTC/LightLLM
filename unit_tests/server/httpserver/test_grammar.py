@@ -9,6 +9,7 @@ import httpx
 import pytest
 import xgrammar as xgr
 
+from lightllm.server.core.objs import FinishStatus
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from unit_tests.server.grammar_helpers import configure, reset_args_cache
 
@@ -18,9 +19,10 @@ def start_args(monkeypatch):
     configure(monkeypatch)
 
 
-def params(**kwargs):
+def params(compiler=None, **kwargs):
     result = SamplingParams()
     result.init(None, **kwargs)
+    asyncio.run(result.verify_cpu_async(compiler))
     return result
 
 
@@ -59,7 +61,9 @@ def assert_bad_request(client, path, body):
 
 
 @pytest.mark.parametrize("failure", ["syntax", "exception", "timeout"])
-def test_compilation_failure_returns_400_before_generation(compiler, http_client, monkeypatch, failure):
+@pytest.mark.parametrize("early_headers", [False, True])
+def test_compilation_failure_returns_400_before_generation(compiler, http_client, monkeypatch, failure, early_headers):
+    configure(monkeypatch, disable_delay_response_start=early_headers)
     if failure == "exception":
         monkeypatch.setattr(compiler, "_compile", MagicMock(side_effect=RuntimeError("injected compiler error")))
     elif failure == "timeout":
@@ -81,7 +85,9 @@ def test_invalid_sampling_params_return_400(http_client, monkeypatch, path, earl
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("failure", ["syntax", "exception", "timeout"])
-def test_openai_grammar_failures_return_400(compiler, http_client, monkeypatch, path, stream, failure):
+@pytest.mark.parametrize("early_headers", [False, True])
+def test_openai_grammar_failures_return_400(compiler, http_client, monkeypatch, path, stream, failure, early_headers):
+    configure(monkeypatch, disable_delay_response_start=early_headers)
     if failure == "exception":
         monkeypatch.setattr(compiler, "_compile", MagicMock(side_effect=RuntimeError("injected compiler error")))
     elif failure == "timeout":
@@ -105,8 +111,7 @@ def test_openai_grammar_failures_return_400(compiler, http_client, monkeypatch, 
     ],
 )
 def test_artifact_survives_pd_copy_and_pickle_without_recompilation(compiler, monkeypatch, constraint, text):
-    sampling_params = params(**constraint)
-    asyncio.run(sampling_params.verify_async(compiler))
+    sampling_params = params(compiler=compiler, **constraint)
     # Choices and PD continuation each copy the scalar struct. Both that copy
     # and the existing network pickle must preserve the serialized artifact.
     copied = pickle.loads(pickle.dumps(sampling_params.copy().copy()))
@@ -163,10 +168,23 @@ def test_failed_compilation_is_retried_before_caching_success(compiler, monkeypa
 
 def test_no_grammar_does_not_use_compiler_and_none_mode_rejects_constraints():
     compiler = MagicMock(side_effect=AssertionError("Ordinary request compiled"))
-    asyncio.run(params().verify_async(compiler))
+    params(compiler=compiler)
     compiler.compile.assert_not_called()
     with pytest.raises(ValueError, match="output_constraint_mode xgrammar"):
-        asyncio.run(params(regular_constraint="ab").verify_async(None))
+        params(regular_constraint="ab")
+
+
+def test_reinitialization_clears_compiled_grammar(compiler):
+    sampling_params = SamplingParams()
+
+    async def run():
+        sampling_params.init(None, regular_constraint="ab")
+        await sampling_params.verify_cpu_async(compiler)
+        assert sampling_params.compiled_grammar
+        sampling_params.init(None)
+        assert not sampling_params.compiled_grammar
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("stop_waiter", ["cancel", "timeout"])
@@ -252,10 +270,10 @@ def test_dictionary_schema_is_serialized_during_initialization():
 )
 def test_parameter_validation_precedes_grammar_compilation(invalid_params):
     params = SamplingParams()
-    params.init(None, regular_constraint="ab", **invalid_params)
     compiler = SimpleNamespace(compile=AsyncMock())
     with pytest.raises(ValueError):
-        asyncio.run(params.verify_async(compiler))
+        params.init(None, regular_constraint="ab", **invalid_params)
+        asyncio.run(params.verify_cpu_async(compiler))
     compiler.compile.assert_not_called()
     assert not params.compiled_grammar
 
@@ -263,16 +281,16 @@ def test_parameter_validation_precedes_grammar_compilation(invalid_params):
 @pytest.mark.parametrize(
     "constraint", [{"guided_grammar": "bad grammar"}, {"guided_json": "not json"}, {"regular_constraint": "["}]
 )
-def test_invalid_grammar_is_rejected_by_async_validation(compiler, constraint):
+def test_invalid_grammar_is_rejected_by_output_constraint_validation(compiler, constraint):
     params = SamplingParams()
     params.init(None, **constraint)
     with pytest.raises(ValueError):
-        asyncio.run(params.verify_async(compiler))
+        asyncio.run(params.verify_cpu_async(compiler))
     assert not params.compiled_grammar
 
 
-@pytest.mark.parametrize("stop_match", [False, True])
-def test_http_preserves_error_status_and_inflight_token(stop_match):
+@pytest.mark.parametrize("status", [FinishStatus.FINISHED_ERROR, FinishStatus.FINISHED_STOP])
+def test_http_preserves_finish_status_and_inflight_token(status):
     import numpy as np
 
     from lightllm.server.core.objs import FinishStatus, Req
@@ -284,9 +302,8 @@ def test_http_preserves_error_status_and_inflight_token(stop_match):
     req.input_len = 1
     req.shm_prompt_ids = SimpleNamespace(arr=np.array([ord("P"), ord("!")]))
     req.shm_logprobs = SimpleNamespace(arr=np.array([(0.0,), (-0.2,)], dtype=[("logprob", np.float32)]))
-    req.finish_status.set_status(FinishStatus.FINISHED_ERROR)
-    req.finish_token_index = req.stop_str_matched_token_index = 1
-    req.stop_str_matched = stop_match
+    req.finish_status.set_status(status)
+    req.finish_token_index = 1
     req.out_tokens_queue.push("!", 1, False, 1)
     req.get_output_logprobs_metadata = MagicMock(return_value={"token": "!"})
     req.merge_final_token_metadata = AsyncMock()
@@ -312,7 +329,7 @@ def test_http_preserves_error_status_and_inflight_token(stop_match):
             await asyncio.gather(task, return_exceptions=True)
 
     _, text, metadata, finish = asyncio.run(collect())
-    assert text == "!" and finish.is_finished_error()
+    assert text == "!" and finish.status == status
     assert metadata["id"] == ord("!") and metadata["logprob"] == pytest.approx(-0.2)
     assert metadata["logprobs"] == {"token": "!"}
     req.merge_final_token_metadata.assert_awaited_once()

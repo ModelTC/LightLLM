@@ -395,8 +395,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
-    await sampling_params.verify_async(g_objs.httpserver_manager.output_grammar_compiler)
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
@@ -914,7 +914,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-    await sampling_params.verify_async(g_objs.httpserver_manager.output_grammar_compiler)
+    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
     # v1/completions does not support multimodal inputs, so we use an empty MultimodalParams
     multimodal_params = MultimodalParams()

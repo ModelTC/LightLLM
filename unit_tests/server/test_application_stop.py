@@ -14,6 +14,7 @@ from lightllm.server.pd_io_struct import NodeRole
 
 def _manager(tokenizer, args, raw_results):
     manager = HttpServerManager.__new__(HttpServerManager)
+    manager.output_grammar_compiler = None
     manager.tokenizer = tokenizer
     manager.args = args
     manager.pd_mode = NodeRole.NORMAL

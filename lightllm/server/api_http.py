@@ -500,7 +500,6 @@ async def tokens(request: Request):
 
         sampling_params = SamplingParams()
         sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sample_params_dict)
-        sampling_params.verify()
 
         multimodal_params_dict = request_dict.get("multimodal_params", {})
         multimodal_params = MultimodalParams(**multimodal_params_dict)

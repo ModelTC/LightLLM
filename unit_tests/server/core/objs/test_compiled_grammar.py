@@ -44,7 +44,7 @@ def grammar_req(monkeypatch):
 def test_request_initialization_publishes_compiled_payload(compiler, grammar_req):
     sampling_params = SamplingParams()
     sampling_params.init(None, regular_constraint="ab")
-    asyncio.run(sampling_params.verify_async(compiler))
+    asyncio.run(sampling_params.verify_cpu_async(compiler))
     grammar_req.init(1, [0], sampling_params, None)
     shared_req = Req.from_buffer_copy(grammar_req)
     assert shared_req.get_compiled_grammar() == sampling_params.compiled_grammar
@@ -70,7 +70,7 @@ def test_pd_continuation_restores_state_from_shared_prompt(
 
     params = SamplingParams()
     params.init(None, regular_constraint="ab", guided_reasoning_end=list(reasoning_end))
-    asyncio.run(params.verify_async(compiler))
+    asyncio.run(params.verify_cpu_async(compiler))
     params.pd_previous_output_len = len(history)
     params = pickle.loads(pickle.dumps(params.copy()))
     # Delimiters and other text in the original prompt must never be replayed.

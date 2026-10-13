@@ -18,6 +18,7 @@ from lightllm.server.pd_io_struct import NodeRole
 
 def _manager(tokenizer, generate, args):
     manager = HttpServerManager.__new__(HttpServerManager)
+    manager.output_grammar_compiler = None
     manager.tokenizer = tokenizer
     manager._generate = lambda prompt, params, multimodal, request, *_args: generate(
         prompt, params, multimodal, request
@@ -121,11 +122,17 @@ def test_non_streaming_chat_usage_sums_all_choices(monkeypatch):
         def verify(self):
             pass
 
+        async def verify_cpu_async(self, compiler):
+            assert compiler is None
+
     async def build_prompt(_request, _tools):
         return "Prompt"
 
     manager = SimpleNamespace(
-        tokenizer=None, args=SimpleNamespace(enable_rl=False), generate=lambda *_args, **_kwargs: generate_results()
+        tokenizer=None,
+        output_grammar_compiler=None,
+        args=SimpleNamespace(enable_rl=False),
+        generate=lambda *_args, **_kwargs: generate_results(),
     )
     monkeypatch.setattr(api_openai, "SamplingParams", _SamplingParams)
     monkeypatch.setattr(api_openai, "build_prompt", build_prompt)

@@ -322,7 +322,7 @@ class SamplingParams(ctypes.Structure):
     compiled_grammar: bytes = b""
 
     def init(self, tokenizer, **kwargs):
-        """Populate fields; callers run verify() or await verify_async() before admission."""
+        """Initialize and validate sampling parameters synchronously."""
         super().__init__()
         self.compiled_grammar = b""
         self.best_of = kwargs.get("best_of", 1)
@@ -409,6 +409,8 @@ class SamplingParams(ctypes.Structure):
             self.temperature = 1.0
             self.top_k = 1
 
+        self.verify()
+
     @classmethod
     def load_generation_cfg(cls, weight_dir):
         try:
@@ -478,9 +480,16 @@ class SamplingParams(ctypes.Structure):
                 raise ValueError("guided_grammar and guided_json can not be used in same time")
         return
 
-    async def verify_async(self, compiler) -> None:
-        """Validate parameters and compile grammar before request admission or HTTP streaming."""
-        self.verify()
+    async def verify_cpu_async(self, compiler) -> None:
+        """Run CPU-heavy validation before admission or HTTP streaming.
+
+        Each validator must offload expensive work to keep the event loop responsive.
+        Ordinary sampling parameters are already validated synchronously by init().
+        """
+        await self.verify_output_constraint(compiler)
+
+    async def verify_output_constraint(self, compiler) -> None:
+        """Validate and compile output constraints before admission or HTTP streaming."""
         for kind, constraint in (
             ("grammar", self.guided_grammar),
             ("regex", self.regular_constraint),

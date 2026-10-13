@@ -46,7 +46,7 @@ def test_closing_pd_choice_stream_closes_all_forwarders(choice_count):
         closed = set()
         all_started = asyncio.Event()
 
-        async def generate_one(prompt, params, multimodal, request, start_time, req_id, input_token_num):
+        async def generate_one(prompt, prompt_ids, params, multimodal, request, start_time, req_id, input_token_num):
             try:
                 started.add(req_id)
                 if len(started) == choice_count:
@@ -366,13 +366,13 @@ def test_pd_master_stopped_choice_does_not_forward_late_output(late_status):
         sampling_params.max_new_tokens = 4
 
         async def wait_to_token_package(p_node, d_node, start_time, prompt, params, multimodal_params, request):
-            metadata = {"prompt_tokens": 2}
+            metadata = {"id": 10, "prompt_tokens": 2}
             yield params.group_request_id, "first", dict(metadata), FinishStatus()
             await asyncio.sleep(0.01)
             yield params.group_request_id, "late", dict(metadata), FinishStatus(late_status)
 
         manager._wait_to_token_package = wait_to_token_package
-        choice = manager._generate_one("prompt", sampling_params, MagicMock(), MagicMock(), 0, 800, 2)
+        choice = manager._generate_one("prompt", [1, 2], sampling_params, MagicMock(), MagicMock(), 0, 800, 2)
 
         async def sibling():
             yield "other"
