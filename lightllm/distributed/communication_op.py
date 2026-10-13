@@ -455,6 +455,10 @@ class DistributeGroupManager:
                 # its SM reservation based on decode's logical expert count.
                 deep_ep.Buffer.set_num_sms(low_latency_sms - low_latency_sms % 2)
             deep_gemm_sms = max(device_sms - deepep_sms, 2)
+            if self.ep_low_latency_buffer is not None and get_env_start_args().run_mode == "decode":
+                # Pure Decode uses the separate low-latency communication pool,
+                # rather than Prefill's persistent dispatch/compute partition.
+                deep_gemm_sms = device_sms
             if self.ep_mega_moe_mma_type == "fp8xfp8":
                 deep_gemm_sms -= deep_gemm_sms % 2
             set_num_sms(deep_gemm_sms)

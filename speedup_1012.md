@@ -410,3 +410,50 @@ TTFT 为 2800.6→2589.5 ms、10192.2→10205.7 ms。采集后额外 unprofiled 
 profile 512/512 成功，8 trace 留存，profile 客户端延迟排除。外部文本/真实图片均 HTTP 200、`2`/`Red`；P/master 46、D 28 个进程（含 SHM helper）nofile 均 1048576，最终最大 FD 370/433，压测中 D 曾达 2178/1048576，未触及限制。cgroup OOM=0，时钟 1980/2619 MHz，无新运行期 HTTP 500、CUDA/NCCL、WRITE-task 错误。
 
 证据均在既有日志目录，前缀 `greedy-fuse-1013-`：`normal-results.json`、`profile-summary.json`、`unit-tests.log`、`benchmark.{log,json}`、`{baseline,after,baseline-repeat128}.log`、`{launch,stop,deployment-plan}.json`、`{p,d}-resource-validation.json`、`final-smoke.json`、`failed-startup-port-busy.log`，以及 `controlled/{baseline,after,profile,hot}-16k-c*-greedy-fuse-1013/`。后续各项使用上一项采集前正式 after 作为 before，保留额外窗口，避免再把异常偏慢基线算为优化收益。本项单独提交后继续 dense GEMM。
+
+## 第二轮优化 ③：纯 Decode DeepGEMM 使用完整 SM 池
+
+先使用当前安装的 DeepGEMM 实际 API（`fp8_gemm_nt(...,compiled_dims='nk')`），按相同 UE8M0/F8 block128 格式测试 N=4096、K=8192/4096/2048、M=16/64/256。118/132 SM 与 nk/mnk 共 36 个组合的 BF16 GEMM 输出精确一致；每组 100 次 Graph 调用、7 轮计时中位数，原始数据保留。正式只改 SM 选择，compiled_dims 继续 nk。
+
+| GEMM（N=4096） | M64：118→132 SM (µs) | M256：118→132 SM (µs) | M256 降幅 |
+|---|---:|---:|---:|
+| wo_b, K=8192 | 12.010 → 10.769 | 25.738 → 18.076 | 29.77% |
+| shared w13, K=4096 | 6.873 → 6.418 | 13.987 → 9.994 | 28.55% |
+| shared w2, K=2048 | 4.470 → 4.315 | 8.585 → 6.314 | 26.45% |
+
+在资源 owner `DistributeGroupManager._set_num_sms_for_deep_gemm` 增加纯 Decode + low-latency buffer 的分支，DeepGEMM pool 取设备实际 SM 数。`ep_num_sms` 与 `Buffer.set_num_sms` 的 14 SM 通信预算保留；普通混合模式、Prefill 继续原预留逻辑，不在热调用切换全局 setter。4 项 selector 回归通过。此设置会影响 D 的所有 DeepGEMM，包括 expert GEMM 和相关 metadata，不把全部收益只归到三个 dense GEMM。
+
+仅停止原 D PGID 151375，确认 GPU 清空后原 launcher/config 启动 PGID 168678，runtime `runtime-dense-sms-1013`。P/master、权重、镜像、cache、batch/MTP/graph/Microbatch、1980/2619 MHz 时钟不变。部署清单首次缺少文件列表时在停服务前失败，已补齐并将旧 snapshot 单独归档；正式启动前检查文件列表/SHA 合约。
+
+第一轮 512 有 17 个 pre-HTTP `ReadError(BrokenResourceError())`，495/512 成功；原始 case 留存并标记 invalid，不把 12.1216 ms 当性能数据。P/master/D 无 GPU、OOM、FD 或 HTTP 500 错误；监听 backlog=100，发现累计 ListenDrops，但没有该失败窗口的增量证据，不能认定具体根因。相同代码、进程、payload 重复 512 后全部成功。下表 before 为第二项采集前正式 after，after 为本项第一个全成功窗口（128 首轮、512 repeat1）：
+
+| 输入/并发 | 成功（前→后） | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---:|---:|---:|---:|---:|
+| 16K / 128 | 128→128 | 6.8475 → 6.4999 | 5.08% | 16,847.1 → 17,231.7 | +2.28% |
+| 16K / 512 | 512→512 | 11.4567 → 11.2330 | 1.95% | 34,304.6 → 34,990.2 | +2.00% |
+
+本项采集后额外 512 为 11.4313 ms、33,636.0 TPS、TTFT 10703.2 ms，第二项额外为 11.2826 ms；额外窗口没有重复主表的收益。保留所有窗口，**尚不能将 512 的约 2% 改善视为稳定因果收益**，不择优替换主表。
+
+512 profile 两项均 512/512 成功、8 trace、实际 batch=512/每 rank64；序列长 17440.2→17423.6（−0.10%）。8-rank GPU 并集：
+
+| 指标 (ms/周期) | 第二项后 | 第三项后 |
+|---|---:|---:|
+| 周期起点间隔 | 45.7510 | 44.3624 |
+| GPU busy | 41.7827 | 40.1761 |
+| target verification | 38.6256 | 37.0830 |
+| draft | 2.7044 | 2.6519 |
+| 其他 dense/indexer GEMM | 9.1481 | 8.3469 |
+| expert masked GEMM | 12.3402 | 11.8173 |
+| 通信/collectives | 9.5982 | 9.3223 |
+
+三个 dense 家族的独立 kernel duration 和（不能与并集直接相加）：
+
+| 家族 | 118 SM (ms/周期) | 132 SM (ms/周期) |
+|---|---:|---:|
+| wo_b | 1.2551 | 0.9013 |
+| shared w13 | 0.7204 | 0.5278 |
+| shared w2 | 0.4682 | 0.3654 |
+
+每家族约 46 次/周期，所有 rank 的模板均确认从 118→132 SM；三家族合计节省约 0.65 ms，实际其他 GEMM 并集少 0.80 ms、expert GEMM 少 0.52 ms、GPU busy 少 1.61 ms、周期少 1.39 ms。通信并集没有增长；短窗口不能推广成全部负载都不会抢占通信。当前稳态 GPU busy 40.1761 ms 已接近归档 vLLM 40.2090 ms，但正常整请求 TPOT 仍有差距，二者不是同一个测量窗口，不能据此宣称 TPOT 已追平。
+
+最终外部文本/真实图片 HTTP 200、`2`/`Red`，1P1D 健康；P/master 46、D 28 个进程含 helper，nofile 均 1048576、最大 FD 370/433，cgroup OOM=0，无新 HTTP 500/CUDA/NCCL/WRITE-task 错误。证据位于既有日志目录，`dense-sms-1013-{benchmark,normal-results,profile-summary}.json`、`unit-tests.log`、`{after,repeat1}.log`、`{launch,stop,deployment-plan,valid-case-map}.json`、`{p,d}-resource-validation.json`、`final-smoke.json`、`controlled/{after,after-repeat1,profile,hot}-16k-c*-dense-sms-1013/`。本项单独提交后，继续 CPU 采样参数准备。
