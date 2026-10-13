@@ -145,3 +145,29 @@ def test_dsv4_fetch_uses_shared_ids_and_restores_after_source_eviction():
         sock.bind(("127.0.0.1", 0))
         rendezvous = f"tcp://127.0.0.1:{sock.getsockname()[1]}"
     mp.spawn(_rank, args=(rendezvous, f"test_dsv4_shared_{uuid.uuid4().hex}"), nprocs=2, join=True)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 1, reason="requires a CUDA device")
+def test_shared_checkpoint_copy_across_default_registration_boundary(monkeypatch):
+    from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4CpuCacheLayout
+    from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheManager
+    from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
+
+    service_name = f"test_dsv4_registration_{uuid.uuid4().hex}"
+    monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", service_name)
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    torch.cuda.set_device(0)
+    layout = DeepseekV4CpuCacheLayout.from_compress_rates([0] * 5 + [4] * 21 + [128] * 20)
+    state_bytes = layout.page_nbytes - layout.swa_offset
+    crossing_index = (128 * 1024 * 1024) // state_bytes
+    assert crossing_index * state_bytes < 128 * 1024 * 1024 < (crossing_index + 1) * state_bytes
+    try:
+        pool = DeepseekV4StateCacheManager(crossing_index + 2, layout, shm_name="checkpoints", shm_create=True)
+        source = torch.full((state_bytes,), 173, dtype=torch.uint8, device="cuda")
+        pool.buffer[crossing_index].copy_(source, non_blocking=True)
+        torch.cuda.synchronize()
+        restored = pool.buffer[crossing_index].cuda(non_blocking=True)
+        torch.cuda.synchronize()
+        assert torch.equal(restored, source)
+    finally:
+        ServiceShmCleanup(service_name).cleanup_service_resources()

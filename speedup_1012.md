@@ -538,6 +538,8 @@ B256 每次 CPU 提交减少约 28.20 µs，是约 44 ms 周期的 0.064%，不�
 
 五组回归合计 **40 passed**，包括双 GPU 的生产 `_transfer_dsv4_source_data`、实际 save/restore，以及源 DP 释放后的目标引用存活检查。2304 token 用例的 Gloo 数据为 **18432 字节 token-slot 索引 + 16 字节 checkpoint ID**；checkpoint 本体留在共享 pinned CPU 内存。该字节数是回归用例，不代表服务端 TTFT/TPOT 收益。日志：`/mnt/vqa/wanzihao/bench-logs/pr1623-dsv4-dp-fetch-20261013/candidate-tests-r4.log`。服务重启和同 seed 的 LLM Bench 结果待记录；下方既有 vLLM 对照均早于此改动。
 
+首次端到端检查发现 pinned 共享池的注册边界故障：原 helper 每 128 MiB 独立 `cudaHostRegister`，DSv4 checkpoint 的 7749120 字节步长使索引 17 的槽位跨注册段，GPU→CPU `copy_` 抛出 `CUDA invalid argument`，P supervisor 随后退出。这轮服务/性能数据不能作为优化收益。新增 GPU 回归已在修复前复现同一异常；共享 LayerCache 现在向原 helper 提供完整 cache cell 的字节对齐，helper 取其与系统页大小的最小公倍数并在约 128 MiB 的粒度内分段，确保每个 checkpoint 的所有子视图落在单个注册段中。没有填充、改变 checkpoint ABI 或修改 CPU 大缓存的默认注册粒度。修复后上述五组回归共 **41 passed**，包括该槽位的 GPU→CPU→GPU 完整字节往返。前后日志分别为 `registration-boundary-before.log`、`registration-fix-tests.log`，均在同一 PR 日志目录。
+
 ## 五项完成后的 vLLM 对照（2026-10-13）
 
 当前 LightLLM 为全部五项叠加，普通量化仍为用户要求回退后的原路径。vLLM 0.31.0 取归档 `hot-16k-c{128,512}-1011`；同一两台 H100、同自定义主/draft 检查点、MTP3，不能同时启动两套服务，因此不是同期随机化 A/B。这里比较的是相同归档 token IDs、warm-prefix、greedy、4096 输出的 text decode 诊断，不是原 vision LLM Bench 任务、冷缓存或不同随机 seed 的端到端测试。当前数据不足以证明约 1% 的单项服务收益。
