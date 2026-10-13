@@ -370,6 +370,7 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
+
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
