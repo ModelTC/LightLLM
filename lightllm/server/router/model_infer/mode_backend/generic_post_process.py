@@ -199,14 +199,22 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
             has_invalid_token_ids = True
             invalid_token_ids.extend(req_obj.sampling_param.invalid_token_ids)
 
-    req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
-    temperatures_cpu = g_pin_mem_manager.gen_from_list(key="temperatures", data=temperatures, dtype=torch.float32)
-    top_ps_cpu = g_pin_mem_manager.gen_from_list(key="top_ps", data=top_ps, dtype=torch.float32)
-    top_ks_cpu = g_pin_mem_manager.gen_from_list(key="top_ks", data=top_ks, dtype=torch.int32)
-    length_penalty_param_cpu = g_pin_mem_manager.gen_from_list(
-        key="length_penalty_param", data=length_penalty_param, dtype=torch.int32
+    batch = len(reqs)
+    # Five 32-bit fields followed by one dense bool field, all read dynamically.
+    sampling_cpu = g_pin_mem_manager.alloc_pin_tensor("post_sample_fields", 21 * batch, torch.uint8)
+    sampling_array = sampling_cpu.numpy()
+    fields = (
+        (req_idxes, "int32"),
+        (temperatures, "float32"),
+        (top_ps, "float32"),
+        (top_ks, "int32"),
+        (length_penalty_param, "int32"),
     )
-    mask_eos_reqs_cpu = g_pin_mem_manager.gen_from_list(key="mask_eos_reqs", data=mask_eos_reqs, dtype=torch.bool)
+    for index, (values, dtype) in enumerate(fields):
+        sampling_array[4 * batch * index : 4 * batch * (index + 1)].view(dtype)[:] = values
+    sampling_array[20 * batch :].view("bool")[:] = mask_eos_reqs
+    sampling_gpu = sampling_cpu.cuda(non_blocking=True)
+    sampling_fields = sampling_gpu[: 20 * batch].view(torch.int32).view(5, batch)
 
     if has_invalid_token_ids:
         invalid_token_ids_cpu = g_pin_mem_manager.gen_from_list(
@@ -217,12 +225,12 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         )
 
     return (
-        req_idxes_cpu.cuda(non_blocking=True),
-        temperatures_cpu.cuda(non_blocking=True),
-        top_ps_cpu.cuda(non_blocking=True),
-        top_ks_cpu.cuda(non_blocking=True),
-        length_penalty_param_cpu.cuda(non_blocking=True),
-        mask_eos_reqs_cpu.cuda(non_blocking=True),
+        sampling_fields[0],
+        sampling_fields[1].view(torch.float32),
+        sampling_fields[2].view(torch.float32),
+        sampling_fields[3],
+        sampling_fields[4],
+        sampling_gpu[20 * batch :].view(torch.bool),
         invalid_token_ids_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
         cu_invalid_token_num_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
         is_all_greedy,

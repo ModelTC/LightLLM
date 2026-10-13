@@ -351,6 +351,8 @@ copy 的具体来源延续前述 grid 归因：target 的 `llama/layer_infer/pos
 
 用户决定回退 `5ab53973` 的普通 UE8M0 8-groups/CTA 选择。仅删除该选择的 2 行与本项新增测试文件；量化源码逐字节恢复到 `51fc373f`，此前 Mega 的 16-groups/CTA 路径保持原状。保留 O-projection 布局优化与最初三项优化，保留本文件中的历史实验数据。
 
+**因果解释补充：** 回退不等于证明此项无效或必然使服务变慢。同输入数值回归、量化 kernel 1.3855→0.5993 ms 与 GPU busy 42.4078→41.6817 ms 支持明确的局部收益；不同请求组成窗口中周期仅 46.7683→46.7401 ms，不能精确归因到 CPU overlap/等待，也不能凭一轮 +2.91% TPOT 认定是此 kernel 导致退化。保守回退的依据是当时未可靠证明 512 端到端收益，而不是否认 GPU 加速。
+
 停止 D 的完整 PGID 98542，确认进程组与 GPU context 清空、旧 SHM 清理 helper 退出后，用原 launcher/config 启动新 D PGID 115392，runtime `runtime-quant-rollback-20261013`。主/草稿 checkpoint 的 115/285 个索引 shard 在 P、D 分别通过 O_RDONLY 检查；运行代码的量化 SHA256 为 `529c0070af31a918224025113161205ca0f5919576c6b9cb353d41a534d9c907`，O-projection 为 `974ef4dc67245cada95ac00fddb06156a6b4f0cbd893bbd20cadfe442eaa41ea`。P/master 未重启，模型、启动参数、镜像、依赖与持久 cache 不变。
 
 首次正式回放有 5 个请求在收到 HTTP 状态前失败，日志保留为空的异常字符串，507/512 成功；该轮排除出性能对比，原始摘要保存在 `summary-original.json`。脚本仅补充异常类型/cause 记录，保持 payload、timeout、并发与采样不变后再次回放，512/512 全部成功，无 profiler。沿用同一组预热后的归档 16K token IDs，每请求 4096 输出；这仍是受控 decode 回放，不是新的冷缓存平台压测。
@@ -381,6 +383,8 @@ GPU 回归 10 项通过：BF16/FP32 bias、小 batch/尾词表/真实 V=129280�
 TTFT 为 2800.6→2589.5 ms、10192.2→10205.7 ms。采集后额外 unprofiled 512 回放 512/512 成功，TPOT 11.2531 ms、整轮 75.4568 s，不替换主表。上述 TPOT 接近，**尚未证明端到端 TPOT 收益**，整轮 TPS 也受供给/尾部波动影响；本项保留的是数值已验证、实际 GPU 工作量减少的融合路径，不把局部倍率宣称为服务加速。
 
 512 profile 保存 8 rank trace；实际 batch=512、每 rank=64。与现有 O-projection 后、同量化代码的 profile 比较，序列长 17331.8→17367.0，差 0.20%。8-rank 均值：draft GPU 区间并集 3.1861→2.7237 ms/周期，GPU busy 42.4078→41.7245，CPU execute 起点间隔 46.7683→46.3431。copy 从 13→10 次、0.4311→0.3203 ms；PyTorch reduction 从 7→4 次、0.4275→0.0884 ms。新增 partial/finish 各 3 次/周期，kernel duration 和 0.1228/0.0061 ms；确认三次 draft cast/max 消失。kernel 和、GPU 并集与起点间隔不可直接相加，profile 客户端延迟不进入主表。
+
+**因果解释补充：** 上述 draft 与周期同时缩短只是不同请求组成窗口之间的观察，与收益传递相符，不能认定周期减少的 0.4252 ms 全由本项带来。同输入微基准与 cast/max 调用消失证明局部工作减少；正常服务约 1% 的收益尚未被可靠证明。D 的默认 `bs_balancer` 在等负载 rank 间 `random.choice`，固定 prompt seed 不固定 rank 分配；固定映射本身也会改变调度，而且不能固定 KV 到达、MTP 接受长度或 MoE 路由。不能只靠固定 rank 映射做精确归因。服务性能应以多轮完整回放为统计单位，不能把同一轮的 512 个共享 GPU 请求当成 512 个独立实验。
 
 主表 MTP 平均 tokens/step 为 128 档 3.9901→3.9904、512 档 3.9849→3.9868。逐请求前 256 字符的全模型输出不完全一致；相同原代码、同 D 进程的两次基线也仅 369/512 相同，融合前后为 351/512，融合后两次为 347/512。因此本次不声称全模型输出 bit-exact；数值精确一致的结论限于上述 kernel 与三步 Markov 回归。
 
@@ -457,3 +461,30 @@ profile 512/512 成功，8 trace 留存，profile 客户端延迟排除。外部
 每家族约 46 次/周期，所有 rank 的模板均确认从 118→132 SM；三家族合计节省约 0.65 ms，实际其他 GEMM 并集少 0.80 ms、expert GEMM 少 0.52 ms、GPU busy 少 1.61 ms、周期少 1.39 ms。通信并集没有增长；短窗口不能推广成全部负载都不会抢占通信。当前稳态 GPU busy 40.1761 ms 已接近归档 vLLM 40.2090 ms，但正常整请求 TPOT 仍有差距，二者不是同一个测量窗口，不能据此宣称 TPOT 已追平。
 
 最终外部文本/真实图片 HTTP 200、`2`/`Red`，1P1D 健康；P/master 46、D 28 个进程含 helper，nofile 均 1048576、最大 FD 370/433，cgroup OOM=0，无新 HTTP 500/CUDA/NCCL/WRITE-task 错误。证据位于既有日志目录，`dense-sms-1013-{benchmark,normal-results,profile-summary}.json`、`unit-tests.log`、`{after,repeat1}.log`、`{launch,stop,deployment-plan,valid-case-map}.json`、`{p,d}-resource-validation.json`、`final-smoke.json`、`controlled/{after,after-repeat1,profile,hot}-16k-c*-dense-sms-1013/`。本项单独提交后，继续 CPU 采样参数准备。
+
+## 第二轮优化 ④：CPU 采样参数单次打包传输
+
+在原 `_get_post_sample_tensors` 中读取同一批动态字段，将五个 32-bit 字段与一个 dense bool 字段放进 21×B bytes pinned buffer：req_idx、temperature、top_p、top_k、length penalty、EOS mask。复用原 `PinMemTensorManager` 四缓冲轮换，一次 H2D 后以 dtype view 取各字段，保留顺序、连续性和 lifetime；invalid token 与 EOS ID 路径保持原样。不缓存可变采样参数，不删除 verify/sync event，不改调度策略或 Microbatch。
+
+2 项新增 GPU 回归验证混合 dtype/布局/单 storage、invalid prefix、重复行、运行时更新与旧结果存活，连同 greedy 回归共 13 项通过。独立相同字段传输测试，每次调用后 synchronize，300 轮 CPU 提交/完成中位数，数据逐值一致：
+
+| B | CPU 提交：六次→打包 (µs) | 完成：六次→打包 (µs) |
+|---|---:|---:|
+| 16 | 57.86 → 29.55 | 64.55 → 36.31 |
+| 64 | 63.18 → 34.84 | 69.81 → 41.30 |
+| 256 | 85.13 → 56.93 | 91.42 → 63.17 |
+
+B256 每次 CPU 提交减少约 28.20 µs，是约 44 ms 周期的 0.064%，不能以整轮百分比波动替代这个局部结论。仅重启 D，PGID 190582、runtime `runtime-sampling-pack-1013`，原 launcher/config/env、权重/cache、batch/MTP/graph/Microbatch、SM132 与时钟不变，P/master 未重启。
+
+512 第一轮有 1 个 pre-HTTP ReadError，511/512；原始 case 标为 invalid，11.2332 ms 不纳入性能比较。同代码/进程/载荷 repeat1 全部成功。before 为第三项采集前正式有效 after，after 为本项第一个完整成功窗口，profiler 关闭、相同归档 16K/4096 tokens：
+
+| 输入/并发 | 成功（前→后） | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---:|---:|---:|---:|---:|
+| 16K / 128 | 128→128 | 6.4999 → 6.7123 | -3.27% | 17,231.7 → 16,699.2 | -3.09% |
+| 16K / 512 | 512→512 | 11.2330 → 11.1434 | 0.80% | 34,990.2 → 33,344.3 | -4.70% |
+
+128 的正式窗口变慢约 3.27%，512 低约 0.80%；采集后额外 512 为 11.3569 ms，第三项额外为 11.4313 ms。**不认定上述整轮差异是本项带来的收益或退化**，也不能证明 CPU overlap 的因果份额。本项确认局部 CPU 提交开销下降，尚未确认服务 TPOT 加速；保留减少 pinned/API 工作、数值已验证的实现，性能总结不将其计为端到端加速。历史量化回退仍遵从用户先前指令，其局部收益与不确定性已在对应节补充说明。
+
+512 profile 512/512 成功、8 trace、实际 batch512/每 rank64；序列长 17423.6→17341.3（−0.47%）。8-rank 平均 GPU busy 40.1761→40.2436 ms，周期 44.3624→44.7220 ms，graph 外 sampling/copy 并集 0.4425→0.4411 ms。不能以此声称周期改善。捕获窗口中的 cudaMemcpyAsync CPU API 次数/周期 62.31→59.38，CPU duration 和 0.3538→0.3350 ms；aten::to duration 和 0.5145→0.4092 ms。这些包含其他复制、CPU profiler 开销与不同请求组成，不能直接等于本项六次→一次的五次差额或壁钟节省。
+
+内/外部文本和真实图片 HTTP 200、`2`/`Red`，1P1D 健康；P/master46、D28 进程含 helper 的 nofile 均 1048576，最终最大 FD370/433，OOM=0、时钟1980/2619 MHz，无新 HTTP 500/CUDA/NCCL/WRITE-task 错误。证据在既有日志目录，`sampling-pack-1013-{benchmark,normal-results,profile-summary}.json`、`unit-tests.log`、`{after,repeat1}.log`、`{launch,stop,deployment-plan,valid-case-map}.json`、`{p,d}-resource-validation.json`、`final-smoke.json`，以及 `controlled/{after,after-repeat1,profile,hot}-16k-c*-sampling-pack-1013/`。本项记录并单独提交后，继续 shared expert activation＋量化融合。
