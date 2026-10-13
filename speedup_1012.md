@@ -312,3 +312,55 @@ LightLLM 为三项原优化 + O-projection + 量化 CTA 改动后的当前服务
 | 16K / 512 | 9.8407 | 11.4263 | +16.11% | 26,675.9 | 31,965.8 | +19.83% |
 
 当前 512 的其他无 profiler 窗口为 11.2787/11.2167 ms，相对归档 vLLM 仍约高 14%；不能认为差距已消除。O-projection 的 92 次布局 copy 已验证消失，量化 kernel 也已加速；剩余周期差距需继续追踪等待、通信和其他执行路径。整轮 output TPS 包含 P 供给与尾部，仍不代表纯 decode GPU 比 vLLM 更快。
+
+## 2026-10-13：从现有 profile 定位剩余 TPOT 差额
+
+继续分析已经保存的 `profile-16k-c512-o-proj-validate1` 与 vLLM `profile-16k-c512-1011`，没有新增 profiler 或为排查修改服务参数。本节使用减少拷贝后的量化原始路径，对应下述回退后的代码。实际 batch 为 LightLLM 512、vLLM 504，平均序列长 17331.8/17541.6；因此是接近负载的 profile 对照，不是完全同形状的严格 A/B。正常无 profiler 主表 TPOT 为 11.1036/9.8407 ms，差约 12.83%。
+
+8-rank 均值的 GPU busy 区间并集为 LightLLM 42.4078、vLLM 40.2090 ms/MTP 周期，差 2.1988 ms；CPU execute 起点间隔为 46.7683/43.4372 ms，差 3.3311 ms。两项来自带 profiler 的短窗口，不能直接作为正常 TPOT 的精确分解，也不能把起点间隔当纯 CPU 耗时。
+
+辅助 kernel 区间并集仍多 1.7112 ms/周期，dense/indexer GEMM 多 0.5296 ms，通信/collectives 多 0.2168 ms；expert GEMM 少 0.6449 ms、attention 少 0.2094 ms。剩余最大差额在辅助计算与部分 dense GEMM，不支持把 attention 或 expert GEMM 本身视为主要慢点。下表进一步定位具体 kernel 家族；数字是独立 kernel duration 和 / 周期，与前述区间并集不能相加：
+
+| kernel 家族 (ms/MTP 周期，8-rank 均值) | vLLM | LightLLM | LightLLM − vLLM |
+|---|---:|---:|---:|
+| per-token FP8 quant | 0.8720 | 1.3855 | +0.5135 |
+| 剩余 PyTorch direct copy | 0.0211 | 0.4311 | +0.4100 |
+| PyTorch reduction | 0.1421 | 0.4275 | +0.2854 |
+| wo_b FP8 GEMM：N=4096,K=8192 | 0.9007 | 1.2501 | +0.3494 |
+| shared w13 FP8 GEMM：N=4096,K=4096 | 0.5349 | 0.7155 | +0.1805 |
+| shared w2 FP8 GEMM：N=4096,K=2048 | 0.3711 | 0.4634 | +0.0923 |
+
+三个 dense 家族合计差约 0.6222 ms，target+draft 每家族均约 46 次/周期，调用次数基本相同。其他 GEMM 有反向差额，因此不能把 0.6222 直接替代整个 dense 分类的 0.5296。实际 kernel 模板全部显示 LightLLM 118 SM、vLLM 132 SM，且 BLOCK_N 等参数不同。当前运行的 `communication_op.py:_set_num_sms_for_deep_gemm` 全局执行 `set_num_sms(device_sms - deepep_sms)`；这确立了资源/分块配置差异，但还没有单独修改 SM 数做 A/B，不能断言这三个 GEMM 的全部差额由预留 SM 引起，也不能据此调整 expert GEMM。
+
+copy 的具体来源延续前述 grid 归因：target 的 `llama/layer_infer/post_layer_infer.py:_lm_head_and_gather` 第 121–122 行分配 FP32 全词表并复制转置后的 lm_head 输出；draft 复用 `qwen3_dspark/layer_infer/post_layer_infer.py:_sample_markov` 第 114–116 行，3 个 Markov 步分别 `.float()`、相加并 `torch.max`。3 次 full-vocab max 是 reduction 热点；剩余 logits copy 约 4 次大搬运/周期。它们不是已经移除的 92 次 O-projection 布局 copy。两边配置均 BF16，vLLM 没有显式设置 FP32 head；改变这些计算需保留相加、rounding、tie-breaking 与 logprob 合约，不能直接删除 `.float()`。
+
+另一个明确工作量差异是 `generic_post_process.py:78–84`：LightLLM 在判断 `is_all_greedy` 前仍除 temperature 并执行全词表 softmax，用于返回选中 token 的 logprob；当前 trace 为 1 次/周期、0.1785 ms。vLLM 的 greedy 且未请求 logprobs 路径允许直接取 argmax；其现有 trace 没有对应的 PyTorch 全词表 SoftMaxForward。这个差异适用于本次 greedy 受控回放，不能推广到所有随机采样请求。
+
+进一步按 CUPTI correlation 聚合每次 CUDA Graph 的实际 GPU 起止时间，匹配完整 target/draft graph，相邻图之间的平均间隔为：
+
+| 图间间隔 (ms，8-rank 均值) | vLLM | LightLLM |
+|---|---:|---:|
+| target 结束 → draft 开始 | 0.6682 | 0.7902 |
+| draft 结束 → 下一轮 target 开始 | 3.0004 | 3.5328 |
+
+额外图间间隔主要出现在 draft 后进入下一轮 target 的边界，约多 0.5324 ms。间隔包含采样、更新、其他非 graph kernel，以及其他 rank 的执行错位，不能全部归为纯 CPU 空闲或某一个调度函数。现有 profile 已直接定位慢的 kernel 和阶段边界；仍未完成对全部正常 TPOT 差额的精确因果分解。
+
+新增证据位于 `remaining-gap-investigation/after-o-proj-kernel-families.json`、`dense-gemm-matched-shapes.json`、`graph-transition-gaps.json`；vLLM 对照源码直接读取原 snapshot 的 `vllm-runtime-source.tar.gz`，选中源码保存为同目录 `vllm-vllm__*.py`，不使用当前网上版本代替实际运行代码。
+
+## 2026-10-13：按用户要求回退量化 CTA 改动
+
+用户决定回退 `5ab53973` 的普通 UE8M0 8-groups/CTA 选择。仅删除该选择的 2 行与本项新增测试文件；量化源码逐字节恢复到 `51fc373f`，此前 Mega 的 16-groups/CTA 路径保持原状。保留 O-projection 布局优化与最初三项优化，保留本文件中的历史实验数据。
+
+停止 D 的完整 PGID 98542，确认进程组与 GPU context 清空、旧 SHM 清理 helper 退出后，用原 launcher/config 启动新 D PGID 115392，runtime `runtime-quant-rollback-20261013`。主/草稿 checkpoint 的 115/285 个索引 shard 在 P、D 分别通过 O_RDONLY 检查；运行代码的量化 SHA256 为 `529c0070af31a918224025113161205ca0f5919576c6b9cb353d41a534d9c907`，O-projection 为 `974ef4dc67245cada95ac00fddb06156a6b4f0cbd893bbd20cadfe442eaa41ea`。P/master 未重启，模型、启动参数、镜像、依赖与持久 cache 不变。
+
+首次正式回放有 5 个请求在收到 HTTP 状态前失败，日志保留为空的异常字符串，507/512 成功；该轮排除出性能对比，原始摘要保存在 `summary-original.json`。脚本仅补充异常类型/cause 记录，保持 payload、timeout、并发与采样不变后再次回放，512/512 全部成功，无 profiler。沿用同一组预热后的归档 16K token IDs，每请求 4096 输出；这仍是受控 decode 回放，不是新的冷缓存平台压测。
+
+| 输入/并发 | 成功 | 当前 TPOT (ms) | 当前 TTFT (ms) | 当前 output TPS | 整轮耗时 (s) |
+|---|---:|---:|---:|---:|---:|
+| 16K / 512 | 512/512 | 11.3009 | 10801.1 | 30,912.7 | 67.8412 |
+
+该结果没有证明回退使整体速度显著提升；恢复此前已确认有效的 O-projection 路径，是对未证明 512 收益的量化候选做保守回退。当前 TPOT 相对归档 vLLM 9.8407 ms 仍高 14.84%，整轮 output TPS 相对 26,675.9 高 15.88%；整轮吞吐较高不等于逐 token 输出更快。前述 profile 差额排查仍适用，不能把回退当作解决剩余 TPOT 差距。
+
+量化既有 32 项 GPU 回归通过，black/flake8 通过；内、外部文本与真实 image_url 请求均 HTTP 200、`2`/`Red`，注册与健康均为 1P/1D。P/master 44 个进程及 2 个 detached SHM helper、D 27 个进程及 1 个 helper 的 nofile 均 1048576；最终资源采样最大 FD 370/417，cgroup OOM 为 0，8 GPU 时钟均 1980/2619 MHz。新 D 启动后无 HTTP 500、CUDA/NCCL/WRITE-task 错误；旧 D 停止时 master 的 WebSocketDisconnect 保留在启动前历史日志。
+
+日志与证据均在既有 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/`，前缀 `quant-rollback-20261013-`：`launch.json`、`stop.json`、`decode.log`、`validation.log`、`repeat1.log`、`unit-tests.log`、`{p,d}-checkpoint-preflight.json`、`{p,d}-resource-validation.json`、`final-smoke.json`；有效逐请求记录位于 `controlled/rollback-16k-c512-quant-1013-repeat1/`，首轮失败证据位于 `controlled/rollback-16k-c512-quant-1013/`。
