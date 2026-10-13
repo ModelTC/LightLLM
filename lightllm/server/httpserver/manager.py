@@ -596,7 +596,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 logger.warning(
                     f"{self.args.run_mode} node shm_req allocation timed out after "
                     f"{alloc_timeout_seconds} seconds"
-                )
+                )  # fmt: skip
                 raise ServerBusyError(
                     f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
                     f"within {alloc_timeout_seconds} seconds"
