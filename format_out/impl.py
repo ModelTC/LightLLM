@@ -48,7 +48,11 @@ class ChatSession:
             sampling_param.guided_grammar = str(grammar) if grammar is not None else None
         sampling_param.verify()
 
-        data = {"inputs": self.chat_his, "parameters": sampling_param.to_dict()}
+        # 客户端以 None 表示未设置的可选参数，省略这些字段，让服务端使用对应默认值。
+        data = {
+            "inputs": self.chat_his,
+            "parameters": {key: value for key, value in sampling_param.to_dict().items() if value is not None},
+        }
 
         for _ in range(retry_count):
             try:
