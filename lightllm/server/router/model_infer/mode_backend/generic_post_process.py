@@ -185,6 +185,14 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
     skip_top_p = True
     exist_req_use_random_seed = False
     has_output_constraints = False
+    # 仅在服务启用 XGrammar 输出约束时，按请求分组并为 MTP 验证位置准备语法掩码。
+    if sampling_params_manager.req_to_bitmask_enabled is not None:
+        request_groups = _group_contiguous_requests(reqs, has_output)
+        for request_group in request_groups:
+            has_output_constraints |= _prepare_output_constraint_mask(
+                request_group=request_group,
+                sampling_params_manager=sampling_params_manager,
+            )
 
     # invalid token ids
     invalid_token_ids: List[int] = []
@@ -219,29 +227,6 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
             has_invalid_token_ids = True
             invalid_token_ids.extend(req_obj.sampling_param.invalid_token_ids)
 
-        # Each request's verify rows are contiguous; prepare its masks on the first row.
-        if sampling_params_manager.req_to_bitmask_enabled is None or (i > 0 and reqs[i - 1] is req_obj):
-            continue
-        enabled = False
-        state = req_obj.output_constraint
-        if state is not None and not req_obj.finish_status.is_finished() and (has_output is None or has_output[i]):
-            mtp_verify_len = 1
-            while i + mtp_verify_len < len(reqs) and reqs[i + mtp_verify_len] is req_obj:
-                mtp_verify_len += 1
-            # The previous post_handle handoff already covers GPU scatter into
-            # this pinned table. Column zero is committed; only consume drafts.
-            draft_tokens = (
-                sampling_params_manager.req_to_next_token_ids[req_obj.req_idx, 1:mtp_verify_len].tolist()
-                if mtp_verify_len > 1
-                else []
-            )
-            enabled = state.fill_masks(
-                sampling_params_manager.req_to_bitmask[req_obj.req_idx, :mtp_verify_len], draft_tokens
-            )
-        # Also clear ordinary/partial requests' reused slots.
-        sampling_params_manager.req_to_bitmask_enabled[req_obj.req_idx] = enabled
-        has_output_constraints |= enabled
-
     req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
     temperatures_cpu = g_pin_mem_manager.gen_from_list(key="temperatures", data=temperatures, dtype=torch.float32)
     top_ps_cpu = g_pin_mem_manager.gen_from_list(key="top_ps", data=top_ps, dtype=torch.float32)
@@ -275,3 +260,40 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
         exist_req_use_random_seed,
         has_output_constraints,
     )
+
+
+def _group_contiguous_requests(reqs: List[InferReq], has_output=None) -> List[List[Tuple[InferReq, bool]]]:
+    """Group contiguous rows as (request, has_output) pairs."""
+    groups = []
+    for index, req_obj in enumerate(reqs):
+        row_has_output = True if has_output is None else bool(has_output[index])
+        row = (req_obj, row_has_output)
+        if groups and groups[-1][0][0] is req_obj:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    return groups
+
+
+def _prepare_output_constraint_mask(request_group, sampling_params_manager) -> bool:
+    """Prepare one request group's verify masks and report whether masking is active."""
+    if sampling_params_manager.req_to_bitmask_enabled is None:
+        return False
+
+    req_obj, has_output = request_group[0]
+    group_size = len(request_group)
+    enabled = False
+    state = req_obj.output_constraint
+    if state is not None and not req_obj.finish_status.is_finished() and has_output:
+        # The previous post_handle handoff covers GPU scatter into this pinned table.
+        # Column zero is committed; only consume draft tokens for the later columns.
+        draft_tokens = (
+            sampling_params_manager.req_to_next_token_ids[req_obj.req_idx, 1:group_size].tolist()
+            if group_size > 1
+            else []
+        )
+        enabled = state.fill_masks(sampling_params_manager.req_to_bitmask[req_obj.req_idx, :group_size], draft_tokens)
+
+    # Clear slots reused by ordinary or partial requests as well.
+    sampling_params_manager.req_to_bitmask_enabled[req_obj.req_idx] = enabled
+    return enabled
