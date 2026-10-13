@@ -381,6 +381,13 @@ class HttpServerManagerForPDMaster:
                         self.tokens, block_prompt, multimodal_params, sampling_params
                     )
                     # 原始输入长度已在准入时计算；长度差作为重新编码后的历史输出长度。
+                    # TODO: 暂不处理 PD 分段续跑时的跨边界分词合并；该问题主要出现在 /generate
+                    # 原始字符串 prompt 的极少数边界，例如末尾空格与历史 JSON 开头 {" 合并。
+                    # 长度差可能漏掉历史前缀或包含 prompt 内容，导致语法恢复失败或输出不符合约束；
+                    # 仅影响当前请求，matcher 拒绝 token 会记录错误并结束请求，不会导致服务崩溃。
+                    # OpenAI Chat 的标准模板通常通过独立角色/思考分隔 token 和稳定换行保护边界，
+                    # 当前已验证模板下基本不会出现；使用原始 prompt 的 /v1/completions 仍有同类风险。
+                    # 后续需要严格支持时，应按真实输出 token 或完整历史文本恢复状态。
                     # 分词边界合并可能使差值为负，按 0 处理，避免非法的重放长度。
                     sampling_params.constraint_out_params.pd_previous_output_len = max(
                         0, block_token_num - input_token_num
