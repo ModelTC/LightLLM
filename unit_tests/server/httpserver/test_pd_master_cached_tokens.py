@@ -43,7 +43,8 @@ def _make_manager(monkeypatch):
 
     mgr.id_gen = SimpleNamespace(generate_id=gen_id)
     mgr.metric_client = SimpleNamespace(counter_inc=lambda *a, **k: None, histogram_observe=lambda *a, **k: None)
-    mgr._encode_prompt = lambda *a, **k: ([1, 2], 10)
+    mgr.tokens = lambda prompt, *a, **k: 10 + len(prompt) - len("hello")
+    mgr.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [1, 2])
     mgr._log_req_header = lambda *a, **k: asyncio.sleep(0)
     mgr.recorded_cache_hit_rates = []
     mgr.inserted_prompt_caches = []
@@ -65,7 +66,16 @@ def _make_manager(monkeypatch):
     return mgr
 
 
-def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefill", needs_prefill_first_token=True):
+def _collect(
+    mgr,
+    sampling_params,
+    monkeypatch,
+    segments,
+    first_node_mode="prefill",
+    needs_prefill_first_token=True,
+    first_token_text="",
+    prompt="hello",
+):
     segment_iter = iter(segments)
 
     async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request):
@@ -88,14 +98,14 @@ def _collect(mgr, sampling_params, monkeypatch, segments, first_node_mode="prefi
             }
             if token_index == 1 and needs_prefill_first_token is not None:
                 metadata["needs_prefill_first_token"] = needs_prefill_first_token
-            yield sub_req_id, "" if token_index == 1 else "x", metadata, finish_status
+            yield sub_req_id, first_token_text if token_index == 1 else "x", metadata, finish_status
 
     monkeypatch.setattr(mgr, "_wait_to_token_package", fake_wait)
 
     async def run():
         out = []
         async for sub_id, out_str, metadata, finish in mgr.generate(
-            prompt="hello",
+            prompt=prompt,
             sampling_params=sampling_params,
             multimodal_params=SimpleNamespace(images=[], audios=[], verify_and_preload=lambda req: asyncio.sleep(0)),
             request=None,
@@ -156,7 +166,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         # 分段内仍由真实 InferReq 判断；跨分段匹配由对外生成流的包装层完成。
         from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 
-        raw_generator = manager._generate_one_attempt("prompt", [1, 2], params, None, None, 0, 80, 2)
+        raw_generator = manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)
         results = [result async for result in wrap_stop_match_stream(manager, raw_generator, params, "prompt")]
         assert [result[2]["id"] for result in results] == stop_ids
         assert results[-1][3].is_stopped()
@@ -187,12 +197,58 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.5)]
     assert len(mgr.inserted_prompt_caches) == 1
     assert mgr.inserted_prompt_caches[0][0] == "hello"
-    # Empty detokenized text still represents a committed token. Capacity
-    # markers are excluded, and every continuation carries the full history.
+    # 无约束请求不需要计算语法状态重放长度。
     assert mgr.segment_inputs == [
-        ([1, 2], 0),
-        ([1, 2] + [ord("x")] * 2, 2),
-        ([1, 2] + [ord("x")] * 3, 3),
+        ("hello", 0),
+        ("hellox", 0),
+        ("hellox", 0),
+    ]
+
+
+@pytest.mark.parametrize("add_special_tokens", [False, True])
+@pytest.mark.parametrize("prompt,expected_lengths", [("P", (0, 1)), ("PP", (0, 0))])
+@pytest.mark.parametrize("constraint_enabled", [False, True])
+def test_continuation_uses_reencoded_length_difference(
+    monkeypatch, add_special_tokens, prompt, expected_lengths, constraint_enabled
+):
+    from tokenizers import Tokenizer, models, processors
+    from unittest.mock import Mock, call
+
+    tokenizer = Tokenizer(models.BPE({"P": 0, "x": 1, "Px": 2, "<bos>": 3, "PPx": 4}, [("P", "x"), ("P", "Px")]))
+    tokenizer.post_processor = processors.TemplateProcessing(single="<bos> $A", special_tokens=[("<bos>", 3)])
+    manager = _make_manager(monkeypatch)
+    del manager.tokens
+    manager.tokenizer = SimpleNamespace(
+        encode=Mock(side_effect=lambda text, _multimodal=None, **kwargs: tokenizer.encode(text, **kwargs).ids)
+    )
+    params = SamplingParams()
+    params.init(
+        None,
+        max_new_tokens=4,
+        add_special_tokens=add_special_tokens,
+        regular_constraint=".*" if constraint_enabled else "",
+    )
+    _collect(
+        manager,
+        params,
+        monkeypatch,
+        segments=[
+            (2, FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+            (2, FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+            (2, FinishStatus.FINISHED_STOP),
+        ],
+        first_token_text="x",
+        prompt=prompt,
+    )
+    # 约束输出按拼接文本的编码长度差重放；普通请求跳过后续编码。
+    assert manager.segment_inputs == [
+        (prompt, 0),
+        (prompt + "x", expected_lengths[0] if constraint_enabled else 0),
+        (prompt + "xx", expected_lengths[1] if constraint_enabled else 0),
+    ]
+    expected_encoded_prompts = (prompt, prompt + "x", prompt + "xx") if constraint_enabled else (prompt,)
+    assert manager.tokenizer.encode.call_args_list == [
+        call(text, None, add_special_tokens=add_special_tokens) for text in expected_encoded_prompts
     ]
 
 
@@ -242,7 +298,7 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
 def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
-    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    manager.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [ord(c) for c in text])
     params = SamplingParams()
     params.init(
         manager.tokenizer,
@@ -277,11 +333,12 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
 def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
-
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(
-        encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
+        encode=lambda text, _multimodal=None, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(
+            text, [ord(c) for c in text]
+        )
     )
     params = SamplingParams()
     params.init(
@@ -386,7 +443,9 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = parser
     manager.tokenizer = SimpleNamespace(
-        encode=lambda text, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(text, [ord(c) for c in text])
+        encode=lambda text, _multimodal=None, **kwargs: {"<think>": [1000], "</think>": [1001]}.get(
+            text, [ord(c) for c in text]
+        )
     )
     manager.abort = AsyncMock()
     stop_request = manager.stop_request
@@ -431,7 +490,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
 
     results = asyncio.run(run())
     assert len(segments) == 2
-    assert segments == [[1, 2], [1, 2] + ([10, 1001] if parser else []) + [11]]
+    assert segments == ["prompt", "prompt" + ("END" if parser else "") + "helloE"]
     expected = "hello" + ("END" if include else "") if continuation == "NDextra" else "helloE" + continuation
     assert "".join(result[1] for result in results) == ("END" if parser else "") + expected
     assert [result[2]["id"] for result in results] == ([10, 1001] if parser else []) + [11, 12]
@@ -476,7 +535,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
     from unittest.mock import AsyncMock
 
     manager = _make_manager(monkeypatch)
-    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    manager.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [ord(c) for c in text])
     params = SamplingParams()
     params.init(manager.tokenizer, stop_sequences="END", max_new_tokens=10)
 
@@ -513,7 +572,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
                 None,
             )
         ]
-        assert segments == [[1, 2]]
+        assert segments == ["prompt"]
         assert results[-1][1] == "hello"
         assert results[-1][3].is_stopped()
         assert not manager.active_req_ids
@@ -611,7 +670,7 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
     manager.fetch_pd_stream = raw_stream
 
     async def run():
-        generator = manager._generate_one("prompt", [1, 2], params, None, request, time.time(), 80, 10)
+        generator = manager._generate_one("prompt", params, None, request, time.time(), 80, 10)
         assert (await generator.__anext__())[1] == "first"
         await manager.stop_request(80)
         # stop_request 只做标记，恢复生成时才停止当前 P/D 分段。
@@ -632,7 +691,7 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
     from unittest.mock import AsyncMock
 
     manager = _make_manager(monkeypatch)
-    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    manager.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [ord(c) for c in text])
     params = SamplingParams()
     params.init(manager.tokenizer, stop_sequences="END", n=2, best_of=2, max_new_tokens=10)
 

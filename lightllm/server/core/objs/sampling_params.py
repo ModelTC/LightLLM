@@ -207,8 +207,9 @@ class ConstraintOutParams(ctypes.Structure):
         # 思考结束标记的 token ID 序列；完整匹配后，从下一个 token 开始启用输出约束。
         # 标记本身不参与语法匹配，也不会触发请求停止；为空时立即启用输出约束。
         ("guided_reasoning_end", StopSequence),
-        # PD Master 设置的历史已生成 token 数，首段为 0；这些 token 被追加到续跑 prompt 尾部。
-        # 推理侧重放该后缀，恢复思考阶段和语法匹配进度；支持从序列化参数恢复该值。
+        # PD 续跑输入末尾需要重放的 token 数，首段为 0。
+        # PD Master 按拼接文本与原始 prompt 的编码长度差设置，推理侧重放该后缀恢复思考和语法进度。
+        # 支持从序列化参数恢复该值。
         ("pd_previous_output_len", ctypes.c_int),
     ]
 

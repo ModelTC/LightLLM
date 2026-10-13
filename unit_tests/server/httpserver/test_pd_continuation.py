@@ -16,7 +16,7 @@ from lightllm.server.pd_io_struct import NodeRole
 
 @pytest.mark.parametrize("multimodal", [False, True])
 @pytest.mark.parametrize("add_special_tokens", [False, True])
-def test_master_encodes_once_and_prefill_preserves_output_ids(multimodal, add_special_tokens):
+def test_master_counts_prompt_tokens_and_prefill_preserves_output_ids(multimodal, add_special_tokens):
     tokenizer = Tokenizer(models.BPE({"P": 0, "a": 1, "Pa": 2, "<bos>": 3}, [("P", "a")]))
     tokenizer.post_processor = processors.TemplateProcessing(single="<bos> $A", special_tokens=[("<bos>", 3)])
     master = object.__new__(HttpServerManagerForPDMaster)
@@ -26,10 +26,8 @@ def test_master_encodes_once_and_prefill_preserves_output_ids(multimodal, add_sp
     params = SamplingParams()
     params.init(None, add_special_tokens=add_special_tokens)
     resources = SimpleNamespace(images=[], audios=[], verify_resource_limits=lambda: None)
-    prompt_ids, token_count = master._encode_prompt(
-        "P", resources, params, {"add_special_tokens": params.add_special_tokens}
-    )
-    assert prompt_ids == ([3] if add_special_tokens else []) + [0]
+    token_count = master.tokens("P", resources, params)
+    prompt_ids = ([3] if add_special_tokens else []) + [0]
     assert token_count == len(prompt_ids)
     master.tokenizer.encode.assert_called_once_with("P", None, add_special_tokens=add_special_tokens)
 
@@ -70,8 +68,8 @@ def test_multimodal_continuation_expands_images_without_retokenizing(tokenizer_c
     master = object.__new__(HttpServerManagerForPDMaster)
     master.tokenizer = tokenizer
     master.args = SimpleNamespace(max_image_token_count=16)
-    prompt_ids, token_count = master._encode_prompt("prompt", resources, params)
-    assert prompt_ids == [10, 11] * image_count + [1]
+    token_count = master.tokens("prompt", resources, params)
+    prompt_ids = [10, 11] * image_count + [1]
 
     manager = object.__new__(HttpServerManager)
     manager.enable_multimodal = True
@@ -89,7 +87,7 @@ def test_multimodal_continuation_expands_images_without_retokenizing(tokenizer_c
     # D receives P's expanded IDs and must preserve them, including the history suffix.
     manager.pd_mode = NodeRole.D
     assert asyncio.run(manager._encode(encoded, resources, params)) == encoded
-    tokenizer.tokenizer.encode.assert_called_once_with("prompt")
+    tokenizer.tokenizer.encode.assert_called_once_with("prompt", add_special_tokens=params.add_special_tokens)
     manager._alloc_multimodal_resources.assert_awaited_once_with(resources, params)
     assert master.tokens("prompt", resources, params) == token_count
     assert manager.tokens("prompt", resources, params) == token_count
