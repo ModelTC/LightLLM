@@ -49,7 +49,9 @@ def _make_manager(mode: NodeRole):
     manager.metric_client = MagicMock()
     manager._run_reqs_count_lock = asyncio.Lock()
     manager.run_reqs_count_mark = _ValueMark()
-    manager.shm_req_manager = SimpleNamespace(async_alloc_req_index=AsyncMock(side_effect=RuntimeError("alloc failed")))
+    manager.shm_req_manager = SimpleNamespace(
+        async_alloc_req_indexes=AsyncMock(side_effect=RuntimeError("alloc failed"))
+    )
     return manager
 
 
@@ -340,7 +342,7 @@ def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
     async def run():
         manager = _make_manager(mode)
         manager.shm_req_manager = SimpleNamespace(
-            async_alloc_req_index=AsyncMock(return_value=None),
+            async_alloc_req_indexes=AsyncMock(return_value=None),
             async_release_req_index=AsyncMock(),
         )
 
@@ -361,7 +363,7 @@ def test_pd_node_returns_busy_when_shm_req_allocation_times_out(mode):
                     pd_event,
                 )
 
-        manager.shm_req_manager.async_alloc_req_index.assert_awaited_once()
+        manager.shm_req_manager.async_alloc_req_indexes.assert_awaited_once_with(1)
         manager.shm_req_manager.async_release_req_index.assert_not_awaited()
         manager._register_running_request.assert_awaited_once()
         manager._unregister_running_request.assert_awaited_once()
@@ -456,11 +458,11 @@ def test_httpserver_keeps_started_requests_and_requests_with_remaining_master_ti
         assert req_status.has_timed_out_waiting_for_inference() is False
 
 
-def test_pd_node_self_request_limit_releases_partially_allocated_shm_reqs():
+def test_pd_node_allocation_failure_does_not_hold_partial_slots():
     async def run():
         manager = _make_manager(NodeRole.D)
         manager.shm_req_manager = SimpleNamespace(
-            async_alloc_req_index=AsyncMock(side_effect=[7, RuntimeError("alloc failed")]),
+            async_alloc_req_indexes=AsyncMock(side_effect=RuntimeError("alloc failed")),
             async_release_req_index=AsyncMock(),
         )
         sampling_params = _sampling_params()
@@ -469,7 +471,63 @@ def test_pd_node_self_request_limit_releases_partially_allocated_shm_reqs():
         with pytest.raises(RuntimeError, match="alloc failed"):
             await _drain_generate(manager, sampling_params, _multimodal_params())
 
-        manager.shm_req_manager.async_release_req_index.assert_awaited_once_with(7)
+        manager.shm_req_manager.async_alloc_req_indexes.assert_awaited_once_with(2)
+        manager.shm_req_manager.async_release_req_index.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("high_priority", [False, True])
+def test_batch_allocation_retries_with_priority_backoff(high_priority):
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=[None, None, [0, 1]])
+        with patch("lightllm.server.httpserver.manager.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            assert await manager._alloc_shm_req_indexes(2, pd_high_priority_request=high_priority) == [0, 1]
+        factor = 0.2 if high_priority else 1
+        assert [call.args[0] for call in sleep.await_args_list] == pytest.approx([0.1 * factor, 0.11 * factor])
+        assert [call.args for call in manager.shm_req_manager.async_alloc_req_indexes.await_args_list] == [(2,)] * 3
+
+    asyncio.run(run())
+
+
+def test_batch_allocation_rejects_requests_larger_than_capacity():
+    async def run():
+        manager = _make_manager(NodeRole.NORMAL)
+        with pytest.raises(ValueError, match="must not exceed running_max_req_size"):
+            await manager._alloc_shm_req_indexes(3)
+        manager.shm_req_manager.async_alloc_req_indexes.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_multinode_tp_slave_does_not_apply_allocation_wait_timeout():
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.is_multinode_tp_slave = True
+        manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=[None, [0, 1]])
+        with patch("lightllm.server.httpserver.manager.asyncio.sleep", new_callable=AsyncMock):
+            with patch("lightllm.server.httpserver.manager.time.monotonic") as monotonic:
+                assert await manager._alloc_shm_req_indexes(2, pd_node_resource_wait_timeout_seconds=0) == [0, 1]
+                monotonic.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_cancelled_batch_allocation_does_not_hold_slots():
+    async def run():
+        manager = _make_manager(NodeRole.NORMAL)
+        manager.shm_req_manager = SimpleNamespace(
+            async_alloc_req_indexes=AsyncMock(return_value=None),
+            async_release_req_index=AsyncMock(),
+        )
+        task = asyncio.create_task(manager._alloc_shm_req_indexes(2))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        manager.shm_req_manager.async_alloc_req_indexes.assert_awaited_once_with(2)
+        manager.shm_req_manager.async_release_req_index.assert_not_awaited()
 
     asyncio.run(run())
 

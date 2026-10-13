@@ -570,12 +570,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
         pd_high_priority_request: bool = False,
         pd_node_resource_wait_timeout_seconds: int = -1,
     ) -> List[int]:
-        """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
+        """为一个请求一次性申请全部 shm_req 索引，等待时不占用部分槽。
 
         PD Master 下发非负值时启用资源等待超时，负数表示无限等待。多机 TP slave
         不独立限流，由 master 节点统一判断。请求优先级只影响重试间隔，不影响超时值。
         """
-        alloced_req_indexes = []
+        if req_num > self.args.running_max_req_size:
+            raise ValueError(
+                f"req_num ({req_num}) must not exceed running_max_req_size ({self.args.running_max_req_size})"
+            )
         alloc_timeout_seconds = None
         # 多机 TP 各 rank 必须保持请求执行一致；slave 若按本地计时独立超时退出，可能导致
         # master/其他 rank 继续进入 collective 而发生状态不一致或阻塞，因此超时由 master 统一决策。
@@ -583,32 +586,25 @@ class HttpServerManager(HttpRlManagerHelper, object):
             alloc_timeout_seconds = pd_node_resource_wait_timeout_seconds
         alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
 
-        try:
-            while len(alloced_req_indexes) < req_num:
-                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
-                sleep_time_factor = 0.2 if pd_high_priority_request else 1
-                sleep_time = 0.1
-                while alloc_req_index is None:
-                    if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
-                        logger.warning(
-                            f"{self.args.run_mode} node shm_req allocation timed out after "
-                            f"{alloc_timeout_seconds} seconds"
-                        )
-                        raise ServerBusyError(
-                            f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
-                            f"within {alloc_timeout_seconds} seconds"
-                        )
-                    await asyncio.sleep(sleep_time * sleep_time_factor)
-                    sleep_time = min(1, sleep_time * 1.1)
-                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                alloced_req_indexes.append(alloc_req_index)
-            return alloced_req_indexes
-        except BaseException:
-            # 批量申请中途失败时，释放已申请的索引，避免 shm_req 资源泄漏。
-            for req_index in alloced_req_indexes:
-                await self.shm_req_manager.async_release_req_index(req_index)
-            raise
+        # 空闲槽不足时整组重试，避免多个 n > 1 的请求各占部分槽后互相等待。
+        alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
+        sleep_time_factor = 0.2 if pd_high_priority_request else 1
+        sleep_time = 0.1
+        while alloced_req_indexes is None:
+            if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
+                logger.warning(
+                    f"{self.args.run_mode} node shm_req allocation timed out after "
+                    f"{alloc_timeout_seconds} seconds"
+                )
+                raise ServerBusyError(
+                    f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
+                    f"within {alloc_timeout_seconds} seconds"
+                )
+            await asyncio.sleep(sleep_time * sleep_time_factor)
+            sleep_time = min(1, sleep_time * 1.1)
+            alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        return alloced_req_indexes
 
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")
