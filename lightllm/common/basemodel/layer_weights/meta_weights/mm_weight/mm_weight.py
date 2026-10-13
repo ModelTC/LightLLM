@@ -75,6 +75,16 @@ class MMWeightTpl(BaseWeightTpl):
             input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=self.bias
         )
 
+    def mm_swiglu(self, input_tensor, limit=None, out=None, use_custom_tensor_mananger=True):
+        return self.quant_method.apply_swiglu(
+            input_tensor,
+            self.mm_param,
+            limit=limit,
+            out=out,
+            use_custom_tensor_mananger=use_custom_tensor_mananger,
+            bias=self.bias,
+        )
+
     def gen_weight_quant_param_names(self):
         self.quanted_weight_names = [None] * len(self.weight_names)
         self.weight_zero_point_names = [None] * len(self.weight_names)

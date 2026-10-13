@@ -4,7 +4,6 @@ from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_mega_moe
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.triton_ep_impl import FuseMoeTritonEP
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
@@ -562,13 +561,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
-        shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(gate_up, shared, limit=self.swiglu_limit)
-        input = None
-        gate_up = None
-        out = layer_weight.down_proj.mm(shared)
-        shared = None
-        return out
+        return layer_weight.down_proj.mm_swiglu(gate_up, limit=self.swiglu_limit)
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)

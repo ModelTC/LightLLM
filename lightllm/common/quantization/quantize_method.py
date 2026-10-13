@@ -64,6 +64,19 @@ class QuantizationMethod(ABC):
     def method_name(self):
         pass
 
+    def apply_swiglu(self, input_tensor, weight_pack, limit=None, out=None, use_custom_tensor_mananger=True, bias=None):
+        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+        from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+
+        alloc_func = g_cache_manager.empty if use_custom_tensor_mananger else torch.empty
+        activation = alloc_func(
+            (input_tensor.shape[0], input_tensor.shape[1] // 2), dtype=input_tensor.dtype, device=input_tensor.device
+        )
+        silu_and_mul_fwd(input_tensor, activation, limit=limit)
+        return self.apply(
+            activation, weight_pack, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=bias
+        )
+
     def create_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int
     ) -> Tuple[WeightPack, List[WeightPack]]:

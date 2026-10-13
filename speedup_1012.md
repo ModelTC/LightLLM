@@ -488,3 +488,71 @@ B256 每次 CPU 提交减少约 28.20 µs，是约 44 ms 周期的 0.064%，不�
 512 profile 512/512 成功、8 trace、实际 batch512/每 rank64；序列长 17423.6→17341.3（−0.47%）。8-rank 平均 GPU busy 40.1761→40.2436 ms，周期 44.3624→44.7220 ms，graph 外 sampling/copy 并集 0.4425→0.4411 ms。不能以此声称周期改善。捕获窗口中的 cudaMemcpyAsync CPU API 次数/周期 62.31→59.38，CPU duration 和 0.3538→0.3350 ms；aten::to duration 和 0.5145→0.4092 ms。这些包含其他复制、CPU profiler 开销与不同请求组成，不能直接等于本项六次→一次的五次差额或壁钟节省。
 
 内/外部文本和真实图片 HTTP 200、`2`/`Red`，1P1D 健康；P/master46、D28 进程含 helper 的 nofile 均 1048576，最终最大 FD370/433，OOM=0、时钟1980/2619 MHz，无新 HTTP 500/CUDA/NCCL/WRITE-task 错误。证据在既有日志目录，`sampling-pack-1013-{benchmark,normal-results,profile-summary}.json`、`unit-tests.log`、`{after,repeat1}.log`、`{launch,stop,deployment-plan,valid-case-map}.json`、`{p,d}-resource-validation.json`、`final-smoke.json`，以及 `controlled/{after,after-repeat1,profile,hot}-16k-c*-sampling-pack-1013/`。本项记录并单独提交后，继续 shared expert activation＋量化融合。
+
+## 第二轮优化 ⑤：shared expert 激活＋FP8 量化融合
+
+沿既有 MMWeight → config 选择的 QuantizationMethod 调用链增加 `mm_swiglu/apply_swiglu`。普通 backend 保持原 SiLU＋mm；DeepGEMM FP8 block128 在已有通用 `moe_silu_and_mul.py` 融合激活与 UE8M0 量化，直接送入原 GEMM。保留 clamp、既有 GELU 选择、两处 BF16 rounding、eps=1e-4、FP8 dtype 和列主序 TMA-aligned FP32 scale，不硬编码模型的 backend。默认 fused kernel 为 4 groups/CTA、4 warps；它不恢复已经回退的普通量化 8-groups/CTA。
+
+21 项新增 GPU 回归覆盖 M1/7/64/256、clamp、GELU、零/微小值、FP8 字节和 scale、CUDA Graph replay、真实 shared-w2 和带 bias 的 NoQuant backend。量化字节/scale 与 BF16 GEMM 输出精确一致；连同 11 项 greedy、2 项参数打包为 34 项通过，O-projection 10 项也通过，black/flake8 通过。完整 owner 路径 Graph 计时的三轮中位数：
+
+| shared w2（N=4096,K=2048） | 原激活＋量化＋GEMM (µs) | 融合后 (µs) | 降幅 |
+|---|---:|---:|---:|
+| M16 | 7.801 | 6.090 | 21.93% |
+| M64 | 7.787 | 6.195 | 20.44% |
+| M256 | 12.327 | 8.568 | 30.49% |
+
+仅重启 D，停止 PGID 190582、确认 GPU context 清空后，原 launcher/config 启动 PGID 208695，runtime `runtime-silu-quant-1013`；P/master、模型/cache/MTP/batch/graph/Microbatch/时钟不变。首次 preflight 的直接 quant 包导入命中既有循环依赖，同样导入在上一项 runtime 也失败；停旧服务前已改为验证实际模型 caller，没有改包初始化或依赖。实际 caller、MMWeight、量化 backend、kernel 的导入路径与方法签名均已留存。
+
+512 预热首轮 504/512、repeat1 496/512；均为 pre-HTTP ReadError，失败 ID 分别 242–249、163–178。两轮成功集合覆盖全部 512 个 archived prompt，逐请求核实至少预热成功一次后开始正式回放；两份失败预热记录均保留，不计入性能对比，也不伪称单轮预热全成功。服务无 HTTP 500/CUDA/OOM/FD 错误，连接断开的具体根因未确定。没有修改 HTTP 传输、payload、并发或启动参数来隐藏失败。
+
+正式 128/512、带 profiler 的 512 与采集后额外 512 全部成功，每请求输出 4096 tokens。before 为第四项正式有效 after；主表使用本项第一轮正式结果：
+
+| 输入/并发 | 成功（前→后） | TPOT 前→后 (ms) | TPOT 降幅 | output TPS 前→后 | TPS 增幅 |
+|---|---:|---:|---:|---:|---:|
+| 16K / 128 | 128→128 | 6.7123 → 6.5685 | 2.14% | 16,699.2 → 17,392.4 | +4.15% |
+| 16K / 512 | 512→512 | 11.1434 → 11.1926 | -0.44% | 33,344.3 → 35,146.2 | +5.40% |
+
+128 TPOT 低约 2.14%，512 高约 0.44%；额外 512 为 11.3715 ms，第四项额外为 11.3569 ms。没有证明本项稳定改善整轮 TPOT，128 的单轮改善也不作为因果倍率。正式 TTFT 为 2548.3/9921.4 ms。
+
+512 profile：8 rank、实际 batch512/每 rank64，平均序列长 17341.3→17279.8（−0.35%）。独立 SiLU 约 46 次/周期全部消失，普通量化从 253.04→207.02 次，新融合约 46.02 次，确认实际路径替换成功：
+
+| 指标 (ms/周期，8-rank 均值) | 第四项后 | 第五项后 |
+|---|---:|---:|
+| 周期起点间隔 | 44.7220 | 44.9392 |
+| GPU busy 并集 | 40.2436 | 39.8426 |
+| target verification | 37.1415 | 36.7657 |
+| draft | 2.6637 | 2.6397 |
+| 普通 FP8 quant kernel duration 和 | 1.3864 | 1.2237 |
+| 独立 SiLU kernel duration 和 | 0.1085 | 0.0000 |
+| 融合 SiLU＋quant kernel duration 和 | 0.0000 | 0.1055 |
+
+量化＋激活的 kernel duration 和共少约 0.166 ms/周期；GPU busy 少 0.401 ms，但通信并集也少约 0.287 ms，不能把全部 busy 变化归到融合。周期反而多 0.217 ms；这与之前回退量化的结论采用同一标准：局部 GPU 工作减少已有证据，整轮收益与抵消原因仍未精确归因。kernel duration 和、区间并集、周期不相加。
+
+最终 1P1D 健康，外部 10.210.6.10:10418 文本/真实 image_url 均 HTTP 200、回答 `2`/`Red`。P/master46、D28 进程含 helper 的 nofile 全为1048576，最终最大 FD370/433，额外回放中 D 达2179，OOM=0，时钟1980/2619 MHz，未出现新的 HTTP 500/CUDA/NCCL/WRITE-task 错误。
+
+所有原始日志在 `/mnt/vqa/wanzihao/bench-logs/speedup-1012-20261012/`，本项前缀 `silu-quant-1013-`：`normal-results.json`、`profile-summary.json`、`{prototype,full-w2}-benchmark.json`、`unit-tests.log`、`o-proj-tests.log`、`{after,repeat1,formal-continuation}.log`、`{launch,stop,deployment-plan,import-contract,warm-coverage}.json`、`{p,d}-resource-validation.json`、`d-resource-during-hot.json`、`final-smoke.json`；case 在 `controlled/{after,profile,hot}-16k-c*-silu-quant-1013/`，失败预热单独留存。
+
+## 五项完成后的 vLLM 对照（2026-10-13）
+
+当前 LightLLM 为全部五项叠加，普通量化仍为用户要求回退后的原路径。vLLM 0.31.0 取归档 `hot-16k-c{128,512}-1011`；同一两台 H100、同自定义主/draft 检查点、MTP3，不能同时启动两套服务，因此不是同期随机化 A/B。这里比较的是相同归档 token IDs、warm-prefix、greedy、4096 输出的 text decode 诊断，不是原 vision LLM Bench 任务、冷缓存或不同随机 seed 的端到端测试。当前数据不足以证明约 1% 的单项服务收益。
+
+| 输入/并发 | vLLM TPOT (ms) | LightLLM TPOT (ms) | TPOT 差异 | vLLM output TPS | LightLLM output TPS | TPS 差异 |
+|---|---:|---:|---:|---:|---:|---:|
+| 16K / 128 | 7.2066 | 6.5685 | -8.85% | 12,264.4 | 17,392.4 | +41.81% |
+| 16K / 512 | 9.8407 | 11.1926 | +13.74% | 26,675.9 | 35,146.2 | +31.75% |
+
+LightLLM 额外 512 为 11.3715 ms、34,463.4 TPS，TPOT 相对归档 vLLM 高15.55%；保留额外窗口，不以最快一轮代替主表。当前 512 正式 TTFT 9921.4 ms，归档 vLLM 17737.0 ms。
+
+短 profile 的 GPU busy 为当前 LightLLM39.8426、vLLM40.2090 ms，周期44.9392/43.4372 ms；实际 batch512/504、平均序列长17279.8/17541.6。GPU busy 接近不能证明整请求 TPOT 接近，也不能把带 profiler 的忙碌时间直接除 tokens 解释正常请求。尚未确认剩余差距全部来自 CPU、接收率或某个调度策略。
+
+独立采样的客户端供给曲线有明显差异。下表均以“已收到首字、尚未完成”计数，条件均值只统计至少一个 active 请求的采样区间；它不是 GPU batch，且不能给出各因素的因果份额：
+
+| 512 窗口 | 首字最早→最晚 (ms) | 客户端 active 条件均值 | active≥480 的时间 (s) |
+|---|---:|---:|---:|
+| 归档 vLLM | 3808.3 → 39543.6 | 288.4 | 16.39 |
+| 当前 LightLLM 正式 | 8078.0 → 13070.2 | 471.5 | 40.70 |
+| 当前 LightLLM 额外 | 8310.4 → 12984.2 | 473.4 | 40.61 |
+
+LightLLM 维持接近满负载的时间更长，vLLM 首字到达更分散，这支持“整个生命周期的负载过程不同”这一观察，与整轮 TPS 高而平均 TPOT 仍慢的现象相符，仍是待验证的解释；不能据此证明具体调度策略贡献了多少。由请求 decode 时长之和/整轮 wall 算出的均值与 TPOT×TPS 存在代数关系，只作一致性校验，不重复当作独立因果证据。上述可复查数据保存为 `silu-quant-1013-vllm-final-comparison.json`。
+
+下一步若要判断小优化的端到端收益，应交错多轮 A/B，以完整回放为实验单位并比较整轮分布；同一归档 prompt 的预热/命中状态须匹配，冷缓存另做独立实验。固定 rank 映射会改变调度且无法固定所有工作量，不作为单独的精确归因办法。本轮没有恢复旧量化、改变 rank 映射、开启 Microbatch 或改动 P/master 服务。

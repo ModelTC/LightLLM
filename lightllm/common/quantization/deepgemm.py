@@ -106,6 +106,22 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
         return out
 
+    def apply_swiglu(self, input_tensor, weight_pack, limit=None, out=None, use_custom_tensor_mananger=True, bias=None):
+        from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_quant_fp8
+
+        alloc_func = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
+        quant, scale = silu_and_mul_quant_fp8(
+            input_tensor, self.block_size, weight_pack.weight.dtype, limit=limit, alloc_func=alloc_func
+        )
+        if out is None:
+            out = alloc_func(
+                (input_tensor.shape[0], weight_pack.weight.shape[0]),
+                dtype=input_tensor.dtype,
+                device=input_tensor.device,
+            )
+        _deepgemm_fp8_nt((quant, scale), (weight_pack.weight, weight_pack.weight_scale), out)
+        return out
+
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> Tuple[WeightPack, List[WeightPack]]:
