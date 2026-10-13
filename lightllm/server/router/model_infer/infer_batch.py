@@ -29,7 +29,7 @@ from lightllm.server.router.model_infer.structured_output.state import Constrain
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-    from lightllm.server.router.model_infer.structured_output.grammar_cache import OutputGrammarCache
+    from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
 
 logger = init_logger(__name__)
 
@@ -44,7 +44,7 @@ class InferenceContext:
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
     cache_placement_controller: Optional[CachePlacementController] = None
-    output_grammar_cache: Optional["OutputGrammarCache"] = None
+    output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -73,14 +73,14 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_hybrid_att_model = isinstance(self.req_manager, HybridAttentionReqManager)
-        self.output_grammar_cache = self._init_output_grammar_cache()
+        self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
 
-    def _init_output_grammar_cache(self) -> Optional["OutputGrammarCache"]:
+    def _init_output_constraint_state_factory(self) -> Optional["OutputConstraintStateFactory"]:
         if self.args.output_constraint_mode != "xgrammar":
             return None
-        from lightllm.server.router.model_infer.structured_output.grammar_cache import OutputGrammarCache
+        from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
         from lightllm.server.tokenizer import get_tokenizer
 
         # HTTP workers already compiled the grammar. Inference needs only the
@@ -88,7 +88,7 @@ class InferenceContext:
         tokenizer = get_tokenizer(
             self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
         )
-        return OutputGrammarCache(
+        return OutputConstraintStateFactory(
             tokenizer=tokenizer,
             vocab_size=self.vocab_size,
             eos_ids=self.args.eos_id,
@@ -118,14 +118,11 @@ class InferenceContext:
                 req_id=r_id,
                 req_idx=self.req_manager.alloc(),
                 shm_index=r_index,
+                dp_rank_in_node=dp_rank_in_node,
                 multimodal_params=multimodal_params,
                 vocab_size=self.vocab_size,
                 init_prefix_cache=init_prefix_cache,
             )
-            # Other DP ranks' requests are temporary KV cache donors. Only
-            # requests generating tokens on this rank need grammar state.
-            if dp_rank_in_node == self.backend.dp_rank_in_node and self.output_grammar_cache is not None:
-                r_obj.output_constraint = self.output_grammar_cache.create_state(r_obj.shm_req, r_obj.sampling_param)
             self.requests_mapping[r_id] = r_obj
             request_ids.append(r_id)
             req_objs.append(r_obj)
@@ -524,6 +521,7 @@ class InferReq:
         req_id: int,
         req_idx: int,
         shm_index: int,
+        dp_rank_in_node: int,
         multimodal_params: MultimodalParams,
         vocab_size: int = -1,
         init_prefix_cache: bool = True,
@@ -532,6 +530,9 @@ class InferReq:
         self.req_id = req_id
         self.req_idx = req_idx
         self.shm_index = shm_index
+        # 请求归属的节点内 DP 组编号，用于区分本组生成请求与跨 DP 缓存共享的临时请求。
+        # 其他 DP 组的临时请求只参与 KV cache 复用，无需初始化输出约束状态机。
+        self.dp_rank_in_node = dp_rank_in_node
         self.multimodal_params = multimodal_params
         self.vocab_size = vocab_size
         # cur_kv_len is the logical length already written; hold_kv_len is the
@@ -607,6 +608,10 @@ class InferReq:
         self.shm_req.link_logprobs_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
         self.output_constraint: Optional[ConstraintState] = None
+        state_factory = g_infer_context.output_constraint_state_factory
+        # 只为归属当前 DP 组的生成请求创建约束状态；跨 DP 缓存共享的临时请求保持 None。
+        if state_factory is not None and self.dp_rank_in_node == g_infer_context.backend.dp_rank_in_node:
+            self.output_constraint = state_factory.create_state(self.shm_req, self.sampling_param)
 
         # 更新 pd 分离模式下， prefill 节点需要开始传输的起始位置
         if self.sampling_param.pd_decode_node is not None:

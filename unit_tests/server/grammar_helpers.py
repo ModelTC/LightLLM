@@ -82,7 +82,9 @@ def init_request(compiler, req):
         if value.length:
             payload = asyncio.run(compiler.compile(kind, value.to_str()))
             req.shm_req.get_compiled_grammar = lambda: payload
-            req.output_constraint = compiler.grammar_cache.create_state(req.shm_req, req.sampling_param)
+            req.output_constraint = compiler.output_constraint_state_factory.create_state(
+                req.shm_req, req.sampling_param
+            )
             return
 
 

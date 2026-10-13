@@ -120,7 +120,7 @@ def test_copied_and_pickled_params_get_artifact_from_compiler_cache(compiler, mo
         patcher.setattr(xgr, "GrammarCompiler", MagicMock(side_effect=AssertionError("Backend recompiled")))
         payload = asyncio.run(copied.get_compiled_grammar(compiler))
         assert payload is asyncio.run(sampling_params.get_compiled_grammar(compiler))
-        grammar = compiler.grammar_cache.get_grammar(payload)
+        grammar = compiler.output_constraint_state_factory.get_grammar(payload)
         matcher = xgr.GrammarMatcher(grammar)
         assert all(matcher.accept_token(token) for token in text)
         assert matcher.accept_token(256) and matcher.is_terminated()

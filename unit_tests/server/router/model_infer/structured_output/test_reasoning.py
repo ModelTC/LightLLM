@@ -80,7 +80,7 @@ def test_chat_passes_reasoning_marker_through_shared_sampling_params(monkeypatch
             shm_prompt_ids=SimpleNamespace(arr=[ord("P")]),
         )
         infer_params = InferSamplingParams(shared_req, vocab_size=257)
-        captured.append(compiler.grammar_cache.create_state(shared_req, infer_params))
+        captured.append(compiler.output_constraint_state_factory.create_state(shared_req, infer_params))
         raise RequestCaptured
         yield
 
@@ -152,7 +152,9 @@ def test_deepseek_r1_json_answer_stays_in_content(monkeypatch, compiler, stream,
 
     async def generate(prompt, params, *args, **kwargs):
         payload = await params.get_compiled_grammar(compiler)
-        state = ConstraintState.from_grammar(compiler.grammar_cache.get_grammar(payload), params.constraint_out_params)
+        state = ConstraintState.from_grammar(
+            compiler.output_constraint_state_factory.get_grammar(payload), params.constraint_out_params
+        )
         bitmask = torch.empty((1, 9), dtype=torch.int32)
         for index, token_id in enumerate([*tokenizer.encode(prefix + answer), 256]):
             # The real matcher must allow thinking and its delimiter before constraining JSON.

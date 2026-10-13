@@ -142,7 +142,7 @@ def test_pd_continuation_restores_state_from_shared_prompt(
     shared_req.link_prompt_ids_shm_array()
     try:
         infer_params = InferSamplingParams(shared_req, vocab_size=257)
-        state = compiler.grammar_cache.create_state(shared_req, infer_params)
+        state = compiler.output_constraint_state_factory.create_state(shared_req, infer_params)
         assert state.error is None and state.in_reasoning == in_reasoning
         assert shared_req.sample_params.constraint_out_params.pd_previous_output_len == len(history)
         for token_id in next_output:
@@ -201,12 +201,12 @@ def test_reused_request_slot_does_not_expose_previous_grammar(compiler, grammar_
 
 def test_backend_rejects_incompatible_tokenizer_metadata(compiler):
     import xgrammar as xgr
-    from lightllm.server.router.model_infer.structured_output.grammar_cache import OutputGrammarCache
+    from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
     from unittest.mock import patch
 
     payload = asyncio.run(compiler.compile("regex", "ab"))
     other_info = xgr.TokenizerInfo([bytes([i]) for i in range(256)] + [b"<eos>"], stop_token_ids=[255])
     with patch.object(xgr.TokenizerInfo, "from_huggingface", return_value=other_info):
-        cache = OutputGrammarCache(object(), 257, [255])
+        factory = OutputConstraintStateFactory(object(), 257, [255])
     with pytest.raises(Exception, match="[Mm]etadata"):
-        cache.get_grammar(payload)
+        factory.get_grammar(payload)

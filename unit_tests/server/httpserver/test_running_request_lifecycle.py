@@ -88,7 +88,7 @@ def test_http_publishes_grammar_for_all_choices_before_forwarding(compiler, mode
                 req.set_compiled_grammar.assert_called_once()
                 payload = req.set_compiled_grammar.call_args.args[0]
                 payloads.append(payload)
-                grammar = compiler.grammar_cache.get_grammar(payload)
+                grammar = compiler.output_constraint_state_factory.get_grammar(payload)
                 matcher = xgr.GrammarMatcher(grammar)
                 assert matcher.accept_token(ord("a")) and matcher.accept_token(ord("b"))
                 assert matcher.accept_token(256) and matcher.is_terminated()

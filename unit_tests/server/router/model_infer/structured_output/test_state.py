@@ -8,7 +8,7 @@ import pytest
 import torch
 import xgrammar as xgr
 
-from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.grammar import OutputGrammarCompiler
 from unit_tests.server.grammar_helpers import (
     make_req,
@@ -33,7 +33,7 @@ def test_sampling_preparation_without_constraint_buffers():
 
 
 @pytest.mark.parametrize("mode", ["none", "xgrammar"])
-def test_context_initializes_artifact_cache_with_resolved_eos_at_startup(monkeypatch, mode):
+def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypatch, mode):
     args = SimpleNamespace(
         output_constraint_mode=mode, model_dir="unused", tokenizer_mode="auto", trust_remote_code=False, eos_id=[255]
     )
@@ -55,7 +55,7 @@ def test_context_initializes_artifact_cache_with_resolved_eos_at_startup(monkeyp
             vocab_size=257,
         )
         if mode == "none":
-            assert context.output_grammar_cache is None
+            assert context.output_constraint_state_factory is None
             load_tokenizer.assert_not_called()
             build_tokenizer_info.assert_not_called()
             return
@@ -63,7 +63,7 @@ def test_context_initializes_artifact_cache_with_resolved_eos_at_startup(monkeyp
         build_tokenizer_info.assert_called_once_with(tokenizer, vocab_size=257, stop_token_ids=[255])
         req = make_req(regular_constraint="a")
         req.shm_req.get_compiled_grammar = lambda: payload
-        req.output_constraint = context.output_grammar_cache.create_state(req.shm_req, req.sampling_param)
+        req.output_constraint = context.output_constraint_state_factory.create_state(req.shm_req, req.sampling_param)
         commit_token(req, ord("a"))
         assert req.output_constraint.matcher.accept_token(255)
         assert req.output_constraint.is_terminated()
@@ -100,7 +100,7 @@ def test_reasoning_boundary_mixed_batch_and_shared_schema(compiler, marker):
     direct = make_req(guided_json='{"const":{"ok":true}}')
     for req in (thinking, direct):
         init_request(compiler, req)
-    assert compiler.grammar_cache.get_grammar.cache_info().currsize == 1
+    assert compiler.output_constraint_state_factory.get_grammar.cache_info().currsize == 1
     mask = allowed([thinking, direct])
     assert mask[0].all() and not mask[1, ord("?")]
     assert thinking.output_constraint.matcher is not direct.output_constraint.matcher
@@ -133,31 +133,62 @@ def test_unconstrained_batch_does_not_compile_or_allocate_mask(compiler):
     assert not compiler._cache
 
 
-def test_request_admission_loads_shared_artifacts_without_compilation(compiler, monkeypatch):
+@pytest.mark.parametrize("current_dp_rank", [0, 1])
+@pytest.mark.parametrize("constraints_enabled", [False, True])
+def test_request_admission_loads_shared_artifacts_without_compilation(
+    compiler, monkeypatch, current_dp_rank, constraints_enabled
+):
     payload = asyncio.run(compiler.compile("regex", "ab"))
-    reqs = {
-        1: make_req(regular_constraint="ab"),
-        2: make_req(regular_constraint="ab"),
-        3: make_req(),
-        4: make_req(regular_constraint="ab"),
-    }
-    for index in (1, 2, 4):
-        reqs[index].shm_req.get_compiled_grammar = lambda: payload
+    shared_reqs = {}
+    requests = []
+    for index, req_id in enumerate((1, 2, 3, 4)):
+        owner_dp_rank = 1 - current_dp_rank if req_id == 4 else current_dp_rank
+        params = SamplingParams()
+        params.init(None, regular_constraint="" if req_id == 3 else "ab")
+
+        def read_artifact(req_id=req_id, owner_dp_rank=owner_dp_rank):
+            # Disabled constraints and KV-only donor requests must not load grammar artifacts.
+            assert constraints_enabled and owner_dp_rank == current_dp_rank
+            return None if req_id == 3 else payload
+
+        shared_reqs[index] = SimpleNamespace(
+            sample_params=params,
+            input_len=1,
+            shm_prompt_ids=SimpleNamespace(arr=[ord("P")]),
+            link_prompt_ids_shm_array=lambda: None,
+            link_logprobs_shm_array=lambda: None,
+            get_compiled_grammar=read_artifact,
+        )
+        requests.append((req_id, index, SimpleNamespace(to_dict=lambda: {}), owner_dp_rank))
     monkeypatch.setattr(compiler, "_compile", lambda *args: pytest.fail("Inference must not compile"))
-    monkeypatch.setattr(infer_batch, "InferReq", lambda req_id, **kwargs: reqs[req_id])
-    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False))
+    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False, mtp_step=0))
     context = infer_batch.InferenceContext(
-        req_manager=SimpleNamespace(alloc=count().__next__),
+        req_manager=SimpleNamespace(
+            alloc=count().__next__,
+            req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None),
+        ),
+        shm_req_manager=SimpleNamespace(get_req_obj_by_index=lambda index: shared_reqs[index]),
         requests_mapping={},
-        output_grammar_cache=compiler.grammar_cache,
+        output_constraint_state_factory=compiler.output_constraint_state_factory if constraints_enabled else None,
     )
-    context.backend = SimpleNamespace(dp_rank_in_node=0)
+    context.backend = SimpleNamespace(dp_rank_in_node=current_dp_rank)
     context.infer_req_ids = []
     context.vocab_size = compiler.vocab_size
-    # Another DP rank's request is a temporary KV donor and needs no matcher.
-    context.add_reqs([(1, 0, None, 0), (2, 1, None, 0), (3, 2, None, 0), (4, 3, None, 1)])
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    # Exercise the real InferReq constructor, including its internal grammar initialization.
+    context.add_reqs(requests)
+    reqs = context.requests_mapping
+    assert [reqs[req_id].dp_rank_in_node for req_id in (1, 2, 3, 4)] == [
+        current_dp_rank,
+        current_dp_rank,
+        current_dp_rank,
+        1 - current_dp_rank,
+    ]
+    if not constraints_enabled:
+        assert all(req.output_constraint is None for req in reqs.values())
+        return
     assert reqs[3].output_constraint is None and reqs[4].output_constraint is None
-    assert compiler.grammar_cache.get_grammar.cache_info().misses == 1
+    assert compiler.output_constraint_state_factory.get_grammar.cache_info().misses == 1
     assert reqs[1].output_constraint.matcher is not reqs[2].output_constraint.matcher
     mask = allowed([reqs[1], reqs[2], reqs[3]])
     assert mask[:2, ord("a")].all() and mask[2].all()
@@ -188,7 +219,7 @@ def test_artifact_load_failure_finishes_only_its_request(compiler, monkeypatch, 
     with monkeypatch.context() as patcher:
         if failure == "matcher":
             patcher.setattr(xgr, "GrammarMatcher", fail_to_create_matcher)
-        bad.output_constraint = compiler.grammar_cache.create_state(bad.shm_req, bad.sampling_param)
+        bad.output_constraint = compiler.output_constraint_state_factory.create_state(bad.shm_req, bad.sampling_param)
     assert bad.output_constraint.error is not None
     assert build_mask([bad]) is None
     bad.set_next_gen_token_id = lambda *args, **kwargs: None
@@ -205,7 +236,7 @@ def test_constraint_state_lifetime_follows_request_cleanup(compiler):
     allowed([req])
     state_ref = ref(req.output_constraint)
     payload = req.shm_req.get_compiled_grammar()
-    grammar = compiler.grammar_cache.get_grammar(payload)
+    grammar = compiler.output_constraint_state_factory.get_grammar(payload)
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(free=lambda *args: None),
         requests_mapping={1: req},
@@ -220,7 +251,7 @@ def test_constraint_state_lifetime_follows_request_cleanup(compiler):
     assert context.requests_mapping == {} and context.infer_req_ids == []
     del req
     assert state_ref() is None
-    assert compiler.grammar_cache.get_grammar(payload) is grammar
+    assert compiler.output_constraint_state_factory.get_grammar(payload) is grammar
 
 
 def test_mixed_batch_partial_prefill_and_finished_requests(compiler):

@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class OutputGrammarCache:
-    """Load HTTP-compiled artifacts; each request owns its independent matcher."""
+class OutputConstraintStateFactory:
+    """缓存已加载的语法，并为每个请求创建独立的输出约束状态机。"""
 
     def __init__(self, tokenizer, vocab_size: int, eos_ids: Sequence[int], cache_size: int = 512):
         self.tokenizer_info = create_tokenizer_info(tokenizer, vocab_size, list(eos_ids))
