@@ -43,7 +43,6 @@ def make_executor(monkeypatch, page_size: int = 4):
         req_to_token_indexs_cpu=torch.full((4, 32), -1, dtype=torch.int32),
         req_to_token_indexs=torch.full((4, 32), -1, dtype=torch.int32),
     )
-
     model = SimpleNamespace(mem_manager=mem_manager, req_manager=req_manager)
     args = SimpleNamespace(mtp_mode=None, mtp_step=0)
     executor = StaticBenchmarkExecutor(args=args, model=model, draft_models=[], token_source=None)

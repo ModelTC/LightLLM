@@ -225,6 +225,7 @@ class MultiLevelKvCacheModule(object):
             assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
+
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 

@@ -29,6 +29,7 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
+
     operator_class = NormalMemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
