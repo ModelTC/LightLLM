@@ -557,8 +557,8 @@ class ModeBackend:
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
                                 )
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                # TODO: 分析 PD 首 token 写入后同步当前流的必要性，以及对后续推理的阻塞影响。
-                                torch.cuda.current_stream().synchronize()
+                                # handle 只更新 CPU 状态；推理入口通过 overlap_stream.wait_stream(current_stream)
+                                # 保证读取首 token 前写入已完成，无需在此阻塞 CPU。修改写入或推理流时须保留此依赖。
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
