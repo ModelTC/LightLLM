@@ -82,6 +82,12 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
 
     monkeypatch.setattr(ModelInput, "to_cuda", record_to_cuda)
 
+    def fake_gather(**kwargs):
+        events.append("gather")
+        kwargs["input_ids"][-1] = 90 + events.count("gather")
+
+    monkeypatch.setattr(basemodel, "gather_token_prefill_decode_mixed", fake_gather)
+
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = SimpleNamespace(enable_prefill_decode_mixed=True, page_size=1)
     model.req_manager = SimpleNamespace(
@@ -101,14 +107,14 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
 
     outputs = model.microbatch_overlap_prefill(model_input0, model_input1)
 
-    assert events == ["to_cuda", "to_cuda", "forward"]
+    assert events == ["to_cuda", "gather", "to_cuda", "gather", "forward"]
     assert captured_inputs == [model_input0, model_input1]
-    assert captured_inputs[0].input_ids.tolist() == [10, 11]
-    assert captured_inputs[1].input_ids.tolist() == [12]
+    assert captured_inputs[0].input_ids.tolist() == [10, 91]
+    assert captured_inputs[1].input_ids.tolist() == [92]
     assert len(outputs) == 2
 
 
-def test_base_model_decode_defers_gather_until_padded_forward(monkeypatch):
+def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch):
     model_input0 = _make_decode_input()
     model_input0.input_ids = None
     model_input1 = _make_empty_decode_input()
@@ -121,6 +127,12 @@ def test_base_model_decode_defers_gather_until_padded_forward(monkeypatch):
         original_to_cuda(self)
 
     monkeypatch.setattr(ModelInput, "to_cuda", record_to_cuda)
+
+    def fake_gather(**kwargs):
+        events.append("gather")
+        return torch.arange(40, 46, dtype=torch.int64, device="cuda")
+
+    monkeypatch.setattr(basemodel, "gather_token", fake_gather)
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = SimpleNamespace(page_size=1)
@@ -141,9 +153,10 @@ def test_base_model_decode_defers_gather_until_padded_forward(monkeypatch):
 
     model.microbatch_overlap_decode(model_input0, model_input1)
 
-    assert events == ["to_cuda", "to_cuda", "forward"]
+    assert events == ["to_cuda", "gather", "to_cuda", "forward"]
     assert captured_inputs == [model_input0, model_input1]
-    assert all(model_input.input_ids is None for model_input in captured_inputs)
+    assert captured_inputs[0].input_ids.tolist() == [40, 41, 42, 43, 44, 45]
+    assert captured_inputs[1].input_ids.numel() == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

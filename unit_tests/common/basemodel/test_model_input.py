@@ -104,6 +104,7 @@ def test_prefill_rejects_position_delta():
         model_input.check_input()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_padded_prefill_adds_non_decode_request_marker():
     model_input = ModelInput(
         batch_size=1,
@@ -127,6 +128,7 @@ def test_padded_prefill_adds_non_decode_request_marker():
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
 
+    model_input.to_cuda()
     padded_input = TpPartBaseModel._create_padded_prefill_model_input(
         model,
         model_input=model_input,
@@ -137,6 +139,7 @@ def test_padded_prefill_adds_non_decode_request_marker():
     assert padded_input.b_is_decode_req.tolist() == [True, False]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_padded_prefill_builds_internal_request_for_empty_input():
     model_input = ModelInput(
         batch_size=0,
@@ -161,6 +164,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
     )
 
+    model_input.to_cuda()
     padded_input = TpPartBaseModel._create_padded_prefill_model_input(
         model,
         model_input=model_input,
@@ -176,6 +180,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
     assert torch.equal(padded_input.mtp_draft_input_hiddens, torch.zeros((1, 4)))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_padded_decode_builds_internal_request_from_empty_token_tensor():
     model_input = ModelInput(
         batch_size=0,
@@ -197,6 +202,7 @@ def test_padded_decode_builds_internal_request_from_empty_token_tensor():
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=88),
     )
 
+    model_input.to_cuda()
     padded_input = TpPartBaseModel._create_padded_decode_model_input(
         model,
         model_input=model_input,

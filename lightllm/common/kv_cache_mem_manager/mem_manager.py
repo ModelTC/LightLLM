@@ -1,4 +1,7 @@
 import math
+import os
+import re
+import weakref
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -26,7 +29,6 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-
     operator_class = NormalMemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
@@ -45,7 +47,7 @@ class MemoryManager:
         self.page_size = get_env_start_args().page_size
         self.size = self.size // self.page_size * self.page_size
 
-        self.allocator = KvCacheAllocator(self.size, self.page_size)
+        self.allocator = KvCacheAllocator(self.size)
 
         self._init_buffers(
             self.size,
@@ -192,6 +194,9 @@ class MemoryManager:
         # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
 
+    def _free_buffers(self):
+        self.kv_buffer = None
+
     def alloc(self, need_size) -> torch.Tensor:
         assert (
             need_size % self.page_size == 0
@@ -203,6 +208,23 @@ class MemoryManager:
 
     def free_all(self):
         self.allocator.free_all()
+
+    def resize_mem(self, new_size):
+        """
+        just for test code
+        """
+        size = new_size // self.page_size * self.page_size
+        dtype = self.dtype
+        head_num = self.head_num
+        head_dim = self.head_dim
+        layer_num = self.layer_num
+
+        self.size = size
+        self.allocator.resize(size)
+        self._free_buffers()
+        self._init_buffers(size, dtype, head_num, head_dim, layer_num)
+        self.HOLD_TOKEN_MEMINDEXES = tuple(range(self.size, self.size + self.page_size))
+        return
 
     def get_index_kv_buffer(self, index):
         return {"kv_buffer": self.kv_buffer[:, index]}
@@ -226,6 +248,16 @@ class MemoryManager:
         # 这个地方是一个不太优雅的设计，但是暂时这么做，可以让dp shared kv swap模块直接访问 req_manager 中的 req_to_token_indexs
         # 避免过多无用的数据复制和传输开销。
         self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
+        # DP transfers need allocation metadata even before the next model forward publishes it.
+        self.req_to_token_indexs_cpu: torch.Tensor = req_manager.req_to_token_indexs_cpu.share_memory_()
+        # share_memory_ 会更换存储并丢失 pinned 属性，注册共享存储以继续直接异步上传。
+        if not self.req_to_token_indexs_cpu.is_pinned():
+            runtime = torch.cuda.cudart()
+            cpu_table = self.req_to_token_indexs_cpu
+            error = runtime.cudaHostRegister(cpu_table.data_ptr(), cpu_table.numel() * cpu_table.element_size(), 0)
+            if error != runtime.cudaError.success:
+                raise RuntimeError(f"cudaHostRegister failed for shared request indexes: {error}")
+            weakref.finalize(cpu_table, runtime.cudaHostUnregister, cpu_table.data_ptr())
 
         lock = FileLock(f"/tmp/{get_service_shm_name('mem_manager_lock')}")
         with lock:

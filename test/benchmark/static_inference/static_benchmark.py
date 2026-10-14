@@ -568,21 +568,22 @@ class StaticBenchmarkExecutor:
             req_id = int(req_id)
             max_target_len_by_req[req_id] = max(max_target_len_by_req.get(req_id, 0), int(target_len))
 
-        req_manager = self.model.req_manager
-        page_size = req_manager.mem_manager.page_size
-        allocations = []
+        mem_manager = self.model.req_manager.mem_manager
+        page_size = mem_manager.page_size
+        cpu_table = self.model.req_manager.req_to_token_indexs_cpu
+        gpu_table = self.model.req_manager.req_to_token_indexs
         for req_id, target_len in max_target_len_by_req.items():
             new_hold_kv_len = align_up(target_len, page_size)
             old_hold_kv_len = self._hold_kv_len_by_req.get(req_id, 0)
             if new_hold_kv_len <= old_hold_kv_len:
                 continue
 
-            req = SimpleNamespace(req_idx=req_id, hold_kv_len=old_hold_kv_len)
-            allocations.append((req, new_hold_kv_len - old_hold_kv_len))
-        if allocations:
-            req_manager.alloc_req_token_indexes(allocations)
-            for req, _ in allocations:
-                self._hold_kv_len_by_req[req.req_idx] = req.hold_kv_len
+            alloc_token_num = new_hold_kv_len - old_hold_kv_len
+            mem_indexes = mem_manager.alloc(alloc_token_num)
+            cpu_indexes = cpu_table[req_id, old_hold_kv_len:new_hold_kv_len]
+            cpu_indexes.copy_(mem_indexes)
+            gpu_table[req_id, old_hold_kv_len:new_hold_kv_len].copy_(cpu_indexes, non_blocking=True)
+            self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
         if allow_overlap and self.args.enable_prefill_microbatch_overlap and model_input.batch_size > 1:
@@ -705,6 +706,11 @@ class StaticBenchmarkExecutor:
                     output0.mtp_collector.confidence_logits,
                     output1.mtp_collector.confidence_logits,
                 ),
+            ),
+            prefill_mem_indexes_ready_event=(
+                output0.prefill_mem_indexes_ready_event
+                if output0.prefill_mem_indexes_ready_event is not None
+                else output1.prefill_mem_indexes_ready_event
             ),
             prompt_logics=concat_optional(output0.prompt_logics, output1.prompt_logics),
         )

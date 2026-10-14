@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import torch
 import pytest
 
+from lightllm.common.basemodel import basemodel
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 
@@ -76,7 +77,7 @@ def test_prefill_unpad_restores_empty_output():
 
 
 def _create_empty_decode_input():
-    return ModelInput(
+    model_input = ModelInput(
         batch_size=0,
         total_token_num=0,
         max_q_seq_len=1,
@@ -91,9 +92,12 @@ def _create_empty_decode_input():
         is_prefill=False,
         multimodal_params=[],
     )
+    model_input.to_cuda()
+    return model_input
 
 
 @torch.no_grad()
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
     execution_configs = (
         # eager 普通模式：空 batch 只补一个 dummy request。
@@ -130,7 +134,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
         graph_flags_at_att_init = []
 
-        def create_infer_state(model_input, microbatch_index=0):
+        def create_infer_state(model_input):
             infer_state = SimpleNamespace(
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,
@@ -163,6 +167,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         assert output.logits.shape == (0, 4)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("graph_mode", ["eager", "capture", "replay"])
@@ -217,6 +222,7 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
         model_input.b_req_idx = torch.tensor([req for req, _ in request_rows], dtype=torch.int32)
         model_input.b_mtp_index = torch.tensor([step for _, step in request_rows], dtype=torch.int32)
         model_input.b_seq_len = 10 + model_input.b_mtp_index
+    model_input.to_cuda()
     expected = torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1)
     if overlap:
         output, empty_output = model._microbatch_overlap_decode_cuda(model_input, _create_empty_decode_input())

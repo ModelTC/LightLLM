@@ -1,3 +1,4 @@
+import threading
 import torch.distributed as dist
 import torch
 import dataclasses
@@ -7,9 +8,11 @@ from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
+from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
 
@@ -92,6 +95,7 @@ class MultiLevelKvCacheModule(object):
             if need_token_num >= 128 and req.shm_req.input_len >= 256:
                 assert req.cur_kv_len % self.args.page_size == 0
                 assert match_tokens % self.args.page_size == 0
+                assert need_token_num % self.args.page_size == 0
                 assert req.hold_kv_len == req.cur_kv_len
                 if need_token_num <= idle_token_num:
                     # 计算需要加载的页面（只加载未匹配的部分）
@@ -99,9 +103,7 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= len(page_list)
                     need_pages = page_list[ready_page_num:]  # 只取需要的页面
 
-                    mem_indexes = g_infer_context.req_manager.alloc_token_indexes(
-                        req, match_tokens, g_infer_context.radix_cache
-                    )
+                    self.backend._alloc_req_kv_mem(req, need_token_num)
 
                     if self.need_sync_compute_stream():
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
@@ -111,7 +113,6 @@ class MultiLevelKvCacheModule(object):
                     mem_manager = self.backend.model.mem_manager
                     req_manager = self.backend.model.req_manager
 
-                    mem_indexes_cuda = mem_indexes.pin_memory().cuda(non_blocking=True)
                     page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu", pin_memory=True).cuda(
                         non_blocking=True
                     )
@@ -119,10 +120,11 @@ class MultiLevelKvCacheModule(object):
                     # 这里需要进行pad操作，使操作的页面是完整的。
                     _start = page_len_start_list[ready_page_num]
 
-                    _end = req.cur_kv_len
-                    assert 0 <= _start <= _end, f"invalid pad range [{_start}, {_end}]"
-                    mem_indexes_cuda = torch.cat(
-                        [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
+                    _end = req.hold_kv_len
+                    assert 0 <= _start <= req.cur_kv_len <= _end, f"invalid pad range [{_start}, {_end}]"
+                    # 旧前缀和新分配的索引已连续写入 pinned CPU 镜像，一次上传即可。
+                    mem_indexes_cuda = req_manager.req_to_token_indexs_cpu[req.req_idx, _start:_end].cuda(
+                        non_blocking=True
                     )
 
                     assert (
@@ -223,7 +225,6 @@ class MultiLevelKvCacheModule(object):
             assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
@@ -275,8 +276,9 @@ class MultiLevelKvCacheModule(object):
 
             move_token_num = page_len_list[item_size - 1]
             assert req.cur_kv_len >= move_token_num
-            self.backend.model.req_manager.wait_token_indexes()
-            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
+            token_indexes = self.backend.model.req_manager.req_to_token_indexs_cpu[req.req_idx, :move_token_num].cuda(
+                non_blocking=True
+            )
 
             mem_manager = self.backend.model.mem_manager
 

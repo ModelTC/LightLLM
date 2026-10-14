@@ -152,7 +152,7 @@ class FinalTokenMetadataExt:
         # 延迟导入，避免与 infer_batch 形成模块级循环依赖。
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        return g_infer_context.req_manager.req_to_token_indexs[self._req.req_idx]
+        return g_infer_context.req_manager.req_to_token_indexs_cpu[self._req.req_idx]
 
     def collect_prompt_logprobs(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """从 PromptLogprobsCaptureManager 提取 ``prompt_logprobs>0`` 的 top-k。

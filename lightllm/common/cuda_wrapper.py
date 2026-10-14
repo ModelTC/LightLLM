@@ -38,6 +38,48 @@ logger = init_logger(__name__)
 
 cudaError_t = ctypes.c_int
 cudaMemcpyKind = ctypes.c_int
+_cuda_memcpy_batch_available = True
+
+
+def cuda_memcpy_pinned_h2d_batch_async(dst_gpu_tensors: List[torch.Tensor], src_pinned_tensors: List[torch.Tensor]):
+    """在当前非默认流上，将 pinned CPU Tensor 批量异步拷贝到 GPU Tensor，仅支持 H2D。
+
+    使用 Stream 模式；调用方保证源为 pinned 内存、目标在当前 CUDA 设备上，
+    各对 Tensor 连续且形状和 dtype 一致，并保持源数据有效且不变直到传输完成。
+    """
+    global _cuda_memcpy_batch_available
+
+    if not dst_gpu_tensors:
+        return
+    stream = torch.cuda.current_stream()
+    # CUDA 批量拷贝接口明确禁止使用 legacy 默认流（句柄为 0）。
+    # 在异常回退前检查，避免默认流调用错误被吞掉并关闭全局 batch 开关。
+    assert stream.cuda_stream != 0, "cuda_memcpy_pinned_h2d_batch_async 必须在非默认 CUDA 流上调用"
+
+    if _cuda_memcpy_batch_available:
+        try:
+            from cuda.bindings import runtime as cuda_runtime
+
+            attrs = cuda_runtime.cudaMemcpyAttributes()
+            # 使用 Stream 模式，让源数据读取遵循当前流顺序。
+            # 调用方需保持源数据有效且不变，直到传输完成。
+            attrs.srcAccessOrder = cuda_runtime.cudaMemcpySrcAccessOrder.cudaMemcpySrcAccessOrderStream
+            dst_ptrs = [tensor.data_ptr() for tensor in dst_gpu_tensors]
+            src_ptrs = [tensor.data_ptr() for tensor in src_pinned_tensors]
+            byte_sizes = [tensor.numel() * tensor.element_size() for tensor in src_pinned_tensors]
+            (error,) = cuda_runtime.cudaMemcpyBatchAsync(
+                dst_ptrs, src_ptrs, byte_sizes, len(byte_sizes), [attrs], [0], 1, stream.cuda_stream
+            )
+            if error != cuda_runtime.cudaError_t.cudaSuccess:
+                raise RuntimeError(f"cudaMemcpyBatchAsync failed: {error.name}")
+        except Exception as error:
+            _cuda_memcpy_batch_available = False
+            logger.warning(f"Disabling CUDA batch copies; falling back to individual copies: {error}")
+        else:
+            return
+
+    for dst, src in zip(dst_gpu_tensors, src_pinned_tensors):
+        dst.copy_(src, non_blocking=True)
 
 
 class cudaIpcMemHandle_t(ctypes.Structure):
