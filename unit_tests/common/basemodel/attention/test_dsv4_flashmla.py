@@ -180,33 +180,11 @@ def test_prefill_out_supports_strided_scratch_buffer():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_native_keeps_legacy_positional_call():
-    backend, state_info, q, pool, decoded, _, params = _case(64, 0)
-    from flash_mla import cuda
-
-    actual, _, _, _ = cuda.sparse_decode_fwd(
-        q.unsqueeze(1),
-        attention._view_cache(pool, 128),
-        params["swa_indices"],
-        params["swa_lengths"],
-        params["attn_sink"],
-        None,
-        None,
-        None,
-        None,
-        None,
-        512,
-        params["softmax_scale"],
-    )
-    torch.testing.assert_close(actual[:, 0], _reference(q, decoded, None, params, 64), rtol=0.02, atol=5e-4)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("invalid", ["shape", "dtype", "device", "stride"])
 def test_native_out_validation(invalid):
     backend, state_info, q, pool, _, _, params = _case(64, 0)
     if not backend.supports_out:
-        pytest.skip("standalone FlashMLA build has no out extension")
+        pytest.skip("FlashMLA package has no out argument")
     if invalid == "shape":
         out = torch.empty((q.shape[0], 1, 63, 512), dtype=q.dtype, device=q.device)
     elif invalid == "dtype":

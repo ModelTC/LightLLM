@@ -34,7 +34,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         self.real_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
         self.padded_q_head_num = get_dsv4_flashmla_padded_q_heads(self.real_q_head_num)
         self.compress_ratios = tuple(dict.fromkeys(model.config["compress_ratios"]))
-        # Our standalone build accepts out; upstream builds still work through a copy.
+        # Use the package's optional out interface; older upstream builds use a copy.
         self.supports_out = "out" in inspect.signature(flashmla.flash_mla_with_kvcache).parameters
 
     def _flashmla_att(

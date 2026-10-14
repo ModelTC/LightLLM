@@ -5,7 +5,9 @@ ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
 ARG VLLM_VERSION=0.21.0
 ARG NIXL_REF=v1.2.0
-ARG FLASH_MLA_REF=47c35a7
+# The independently buildable vLLM fork retains Hopper/DSV4 and supports out buffers.
+ARG FLASH_MLA_REPO=https://github.com/vllm-project/FlashMLA.git
+ARG FLASH_MLA_REF=5dceadbd9eabc9acfc547ef18ec8f7b14b980682
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
 ARG DEEPEP_REF=60d44037a702f651a6e18bd4aea65ed8409051c2
 ARG DEEPEP_NCCL_VERSION=2.30.4
@@ -59,14 +61,10 @@ RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
     -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130
 RUN PIP_NO_INDEX=0 pip install --no-cache-dir "flash-qla==${FLASHQLA_VERSION}" -i https://pypi.org/simple
-COPY ./docker/patches/flashmla_sparse_out.patch /tmp/flashmla_sparse_out.patch
-# Reuse caller-owned sparse attention output buffers in the standalone FlashMLA build.
-# Refresh this patch together with the pinned FLASH_MLA_REF.
 RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cuda/targets/x86_64-linux/include${CPATH:+:${CPATH}} && \
-    git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
+    git clone ${FLASH_MLA_REPO} /root/FlashMLA && \
     cd /root/FlashMLA && \
     git checkout ${FLASH_MLA_REF} && \
-    git apply /tmp/flashmla_sparse_out.patch && \
     git submodule update --init --recursive && \
     FLASH_MLA_DISABLE_SM100="$(if [ "${ENABLE_SM100}" = "1" ]; then echo 0; else echo 1; fi)" \
     pip install --no-cache-dir --no-build-isolation --no-deps .
