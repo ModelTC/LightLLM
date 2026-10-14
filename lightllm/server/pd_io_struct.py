@@ -3,7 +3,6 @@ import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
 from lightllm.utils.log_utils import init_logger
@@ -104,7 +103,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)
@@ -145,7 +143,7 @@ class PDAgentMetadata:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: Optional[bytes] = None
-    page_xfer_handles: Optional[int] = None
+    page_xfer_handles: Optional[Dict[int, object]] = None
 
 
 @dataclass
@@ -153,6 +151,7 @@ class PDChunckedTransTask:
     request_id: int
     start_kv_index: int
     end_kv_index: int
+    request_kv_len: int
     time_out_secs: int
 
     pd_master_node_id: int
@@ -181,6 +180,7 @@ class PDChunckedTransTask:
     # transfer params
     src_page_index: Optional[int] = None
     dst_page_index: Optional[int] = None
+    transfer_nbytes: Optional[int] = None
 
     # xfer_handle
     xfer_handle: Optional[int] = None

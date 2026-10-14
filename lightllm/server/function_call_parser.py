@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import partial_json_parser
 from partial_json_parser.core.exceptions import MalformedJSON
 from partial_json_parser.core.options import Allow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from .api_models import Tool
 
@@ -40,6 +40,7 @@ TOOLS_TAG_LIST = [
     "[TOOL_CALLS]",
     "<｜tool▁calls▁begin｜>",
     "<｜DSML｜function_calls>",
+    "<｜DSML｜tool_calls>",
 ]
 
 
@@ -788,7 +789,6 @@ class KimiK2Detector(BaseFormatDetector):
                     parsed_args_diff = argument_diff.split("<|tool_call_end|>", 1)[0]
 
                     if parsed_args_diff:
-
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,
@@ -1934,6 +1934,15 @@ class Qwen3CoderDetector(BaseFormatDetector):
             self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 
+class DeepSeekV4Detector(DeepSeekV32Detector):
+    """DeepSeek-V4 uses the V3.2 DSML payload with a tool_calls wrapper."""
+
+    def __init__(self):
+        super().__init__()
+        self.bot_token = f"<{self.dsml_token}tool_calls>"
+        self.eot_token = f"</{self.dsml_token}tool_calls>"
+
+
 class FunctionCallParser:
     """
     Parser for function/tool calls in model outputs.
@@ -1947,6 +1956,7 @@ class FunctionCallParser:
         "deepseekv3": DeepSeekV3Detector,
         "deepseekv31": DeepSeekV31Detector,
         "deepseekv32": DeepSeekV32Detector,
+        "deepseekv4": DeepSeekV4Detector,
         "glm47": Glm47Detector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,

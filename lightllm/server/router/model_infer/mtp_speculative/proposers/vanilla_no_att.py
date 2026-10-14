@@ -27,6 +27,7 @@ class VanillaNoAttProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
+        accept_len_cpu=None,  # Optional asynchronous CPU acceptance lengths.
     ) -> VanillaSpecProposal:
         req_num = int(b_req_mtp_start_loc.shape[0])
         proposal_token_ids_by_step = []

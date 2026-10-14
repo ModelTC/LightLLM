@@ -43,3 +43,37 @@ diverse mode 仍只支持 `page_size=1`，启动阶段会对其他取值明确�
   `[HOLD, HOLD+1, ..., HOLD+page_size-1]` 循环填充，而不是重复同一个 token 索引。
 - Radix 子节点用“首个完整 token 页”作为键，避免不同序列仅首 token 相同造成页级分支冲突。
 - 非法的 `page_size < 1` 以及尚未支持的功能组合在模型加载前失败。
+
+## DeepSeek-V4
+
+V4 的分配页 `--page_size` 支持 256 的正整数倍，例如 256、512、768、1024。
+沿用默认值 `1` 时自动选择 256；显式配置的合法页大小会保留。
+小页缓存边界 `--linear_att_hash_page_size` 必须是分配页大小的整数倍，例如：
+
+```bash
+--page_size 256 --linear_att_hash_page_size 256
+# 或
+--page_size 768 --linear_att_hash_page_size 768
+```
+
+大页 checkpoint 间隔是小页大小乘以 `--linear_att_page_block_num`。
+例如 256-token 小页配合 `--linear_att_page_block_num 8`，每 2048 token 保存一次 checkpoint。
+省略该参数时沿用主线默认值，关闭大页 checkpoint。PD Decode 节点仍按主线规则关闭大页。
+启用大页和 CPU cache 时，`--cpu_cache_token_page_size` 必须等于大页间隔；未指定时自动设置。
+PD 传输页 `--pd_kv_page_size` 和 CPU cache 页也必须是分配页大小的整数倍。
+例如 768-token 分配页可以配合 `--pd_kv_page_size 1536`。
+
+- 分配页按 256-token packed block 持有压缩历史。闭合分组的 C4/C128 槽分别由组末 full slot 除以 4/128 得到；
+  不再维护独立压缩槽映射或 allocator。预留容量不改变 attention 的逻辑可见长度。
+- packed 格式保持独立：SWA 每页 128 槽，C4 每页 64 槽，C128 每页 2 槽。
+  这些物理块大小来自算子布局，与分配页大小独立。历史复制遍历分配页内的所有 packed block；
+  HOLD 请求也预留整个分配页对应的压缩容量。
+- SWA 页和 compressor 运行态归请求所有，保留完整 prefill chunk 所需的数据。
+  两个请求命中同一前缀时，共享压缩历史，分别恢复自己的 SWA 和 compressor 状态。
+- 大小页 CPU checkpoint 只保存末尾 256 token 的 SWA、C4 和 indexer continuation，
+  不重复保存压缩历史。256 边界已闭合 C128 分组，下一组覆盖状态后再读取。
+- PD 支持任意传输终点，额外保存未闭合分组以及最后可缓存边界的 continuation。
+  PD continuation 布局有变化，P/D 节点需要使用相同代码版本。
+
+验证覆盖分页边界、packed history 复制、大小页命中和分叉、推测拒绝后重试、CUDA Graph 索引、
+CPU/PD pack-unpack、跨进程 NCCL checkpoint 传输及资源回收。完整模型精度和性能仍需另行实测。

@@ -1,14 +1,11 @@
 import torch
-import triton
 import collections
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
-from typing import Tuple, Any, Optional, List
+from typing import Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
-from .triton_kernel.multimodal_emb import mark_multimodal_obj
-from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
@@ -94,6 +91,7 @@ class InferStateInfo:
         # 在开启 mtp_mode 时，mtp draft model
         # 的输入会用到，其他模型和场景都不会用到
         self.mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+        self.mtp_draft_swa_pages: Optional[torch.Tensor] = None
 
         # 在单节点多dp的运行模式下，在进行prefill的阶段，如果出现了dp之间数据不平衡的现象，
         # 可以将推理的数据，进行重新分配到各个dp，在做 att 之前，重新 all to all 到各自的

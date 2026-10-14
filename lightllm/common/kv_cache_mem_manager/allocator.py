@@ -2,13 +2,13 @@ import torch
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.log_utils import init_logger
-from typing import Union, List
+from typing import Union, List, Optional
 
 logger = init_logger(__name__)
 
 
 class KvCacheAllocator:
-    def __init__(self, size: int) -> None:
+    def __init__(self, size: int, shared_name: Optional[str] = None) -> None:
         self.size = size
         self.mem_state = torch.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
@@ -24,8 +24,10 @@ class KvCacheAllocator:
         self.can_use_mem_size = self.size
 
         rank_in_node = get_current_rank_in_node()
-        # 用共享内存进行共享，router 模块读取进行精确的调度估计；基础层会统一添加服务前缀以防止实例冲突。
-        self.shared_can_use_token_num = SharedInt(f"mem_manger_can_use_token_num_{rank_in_node}")
+        # SharedInt adds the service prefix; subpools retain separate counters.
+        if shared_name is None:
+            shared_name = f"mem_manger_can_use_token_num_{rank_in_node}"
+        self.shared_can_use_token_num = SharedInt(shared_name)
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return
 

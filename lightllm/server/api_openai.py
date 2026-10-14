@@ -2,45 +2,27 @@ import asyncio
 import collections
 import time
 import uvloop
-import requests
 import base64
-import os
-from io import BytesIO
-import pickle
 import uuid
 
 from lightllm.server.reasoning_parser import ReasoningParser
 
 from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser, ToolCallItem
-from .build_prompt import build_prompt, init_tokenizer
+from .build_prompt import build_prompt
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import ujson as json
 from http import HTTPStatus
-from PIL import Image
-import multiprocessing as mp
 from typing import Any, AsyncGenerator, Optional, Union, List, Dict, Tuple
-from typing import Callable
-from lightllm.server import TokenLoad
-from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response, JSONResponse
+from fastapi import BackgroundTasks, Request
+from fastapi.responses import Response
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.core.objs.sampling_params import SamplingParams, StopStrMatchMode
 from .multimodal_params import MultimodalParams
-from .httpserver.manager import HttpServerManager
-from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
-from .api_lightllm import lightllm_get_score
-from lightllm.utils.envs_utils import (
-    get_env_start_args,
-    get_lightllm_websocket_max_message_size,
-    is_stop_matching_in_reasoning_enabled,
-)
+from lightllm.utils.envs_utils import get_env_start_args, is_stop_matching_in_reasoning_enabled
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.metrics.manager import MetricClient
-from lightllm.utils.envs_utils import get_unique_server_name
-from dataclasses import dataclass
 
 from .api_errors import create_error_response
 from .api_stream_obj import CustomStreamingResponse
@@ -180,6 +162,13 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
         return False
     if reasoning_parser in ["deepseek-v3"]:
         return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
+    if reasoning_parser in ["deepseek-v4"]:
+        chat_template_kwargs = request.chat_template_kwargs or {}
+        if "thinking" in chat_template_kwargs:
+            return chat_template_kwargs["thinking"] is True
+        if request.reasoning_effort is not None:
+            return request.reasoning_effort != "none"
+        return True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
         # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
         return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True

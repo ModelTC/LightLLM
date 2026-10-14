@@ -1,6 +1,5 @@
 import torch
 import triton
-from typing import List
 from typing import TYPE_CHECKING
 from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
@@ -94,6 +93,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         g_infer_context.req_manager.restore_big_page_state(
             big_page_buffer_idx=big_page_buffer_ids_cpu[-1],
             req=req,
+            checkpoint_len=req.cur_kv_len,
         )
 
         return

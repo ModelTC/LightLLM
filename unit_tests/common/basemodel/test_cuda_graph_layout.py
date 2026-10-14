@@ -2,12 +2,14 @@ import math
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import lightllm.common.basemodel.basemodel as basemodel_module
 import lightllm.common.basemodel.cuda_graph as cuda_graph_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.mtp_manager import MtpManager
 
 
@@ -81,6 +83,46 @@ def test_batch_step_size_after_split_controls_capture_range(_graph_args):
         42,
         56,
     ]
+
+
+def test_token_forward_keeps_mtp_hidden_capture_buffer_for_replay():
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.layers_num = 0
+    model.layers_infer = []
+    model.trans_layers_weight = []
+    model.pre_post_weight = None
+    model.pre_infer = SimpleNamespace(
+        token_forward=lambda input_ids, infer_state, layer_weight: infer_state.mtp_draft_input_hiddens,
+        _tpsp_sp_split=lambda input, infer_state: input,
+    )
+    model.post_infer = SimpleNamespace(
+        _tpsp_allgather=lambda input, infer_state: input,
+        token_forward=lambda input, infer_state, layer_weight: object(),
+    )
+    output = SimpleNamespace(to_no_ref_tensor=lambda: None)
+    model._create_model_output = lambda post_output, infer_state: output
+
+    def make_state(hidden, is_cuda_graph):
+        state = InferStateInfo()
+        state.input_ids = torch.zeros(hidden.shape[0], dtype=torch.int64)
+        state.mtp_draft_input_hiddens = hidden
+        state.is_cuda_graph = is_cuda_graph
+        state.hidden_collector = SimpleNamespace(add_final_hidden=lambda value: None)
+        state.decode_att_state = SimpleNamespace(copy_for_decode_cuda_graph=lambda value: None)
+        return state
+
+    capture_hidden = torch.zeros((2, 4))
+    graph_state = make_state(capture_hidden, is_cuda_graph=True)
+    model._token_forward(graph_state)
+
+    assert graph_state.mtp_draft_input_hiddens is capture_hidden
+    replay_state = make_state(torch.ones((2, 4)), is_cuda_graph=False)
+    graph_state.copy_for_cuda_graph(replay_state)
+    assert graph_state.mtp_draft_input_hiddens.sum().item() == 8
+
+    eager_state = make_state(torch.ones((2, 4)), is_cuda_graph=False)
+    model._token_forward(eager_state)
+    assert eager_state.mtp_draft_input_hiddens is None
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])

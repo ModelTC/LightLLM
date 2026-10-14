@@ -2,20 +2,20 @@ import os
 import rpyc
 import torch
 import socket
-import torch.multiprocessing as mp
 import queue
 import threading
 import time
 import torch.distributed as dist
-from typing import Dict, List, Tuple, Deque, Optional
+from typing import List
 from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
+from lightllm.models.deepseek_v4.deepseek_v4_visual import DeepseekV4VisionModel
 from lightllm.models.vit.model import VisionTransformer
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
@@ -95,6 +95,8 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = (
                     Qwen3VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
+            elif self.model_type == "deepseek_v4" and model_cfg.get("vision_n_layers", 0) > 0:
+                self.model = DeepseekV4VisionModel(kvargs, **model_cfg).eval()
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
             elif self.model_type == "llava":

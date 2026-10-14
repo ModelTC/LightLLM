@@ -342,7 +342,6 @@ class HybridAttPagedRadixCache:
         block_hashs: Optional[List[int]] = None,
         update_refs: bool = False,
     ):
-        assert update_refs is True, "update_refs must be True"
         assert key is not None, "key must not be None"
         if block_hashs is None:
             block_hashs = []
@@ -366,7 +365,7 @@ class HybridAttPagedRadixCache:
             return None, 0, None
 
         # 判定真正可以用的匹配节点。
-        ans_node_list = self._trim_unusable_match_tail(ans_node_list)
+        ans_node_list = self._trim_unusable_match_tail(ans_node_list, update_refs=update_refs)
         if len(ans_node_list) == 0:
             return None, 0, None
 
@@ -431,7 +430,9 @@ class HybridAttPagedRadixCache:
         finally:
             self._add_node(node)
 
-    def _trim_unusable_match_tail(self, nodes: List[HybridAttPagedTreeNode]) -> List[HybridAttPagedTreeNode]:
+    def _trim_unusable_match_tail(
+        self, nodes: List[HybridAttPagedTreeNode], update_refs: bool
+    ) -> List[HybridAttPagedTreeNode]:
         removed_list = []
         for node in reversed(nodes):
             if node.is_big_page_node():
@@ -442,14 +443,15 @@ class HybridAttPagedRadixCache:
             else:
                 removed_list.append(node)
 
-        for node in removed_list:
-            self._discard_node(node)
-            # dec ref
-            node.ref_counter -= 1
-            if node.ref_counter == 0:
-                self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
+        if update_refs:
+            for node in removed_list:
+                self._discard_node(node)
+                # dec ref
+                node.ref_counter -= 1
+                if node.ref_counter == 0:
+                    self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
 
-            self._add_node(node)
+                self._add_node(node)
 
         if len(removed_list) == 0:
             return nodes

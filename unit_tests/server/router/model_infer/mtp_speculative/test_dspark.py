@@ -2,8 +2,9 @@ from types import SimpleNamespace
 
 import torch
 
+from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
 
 
 def test_dspark_prefill_uses_a_shallow_copy_for_target_hidden():
@@ -28,6 +29,36 @@ def test_dspark_prefill_uses_a_shallow_copy_for_target_hidden():
             mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
         ),
         target_next_token_ids=torch.tensor([11, 13], dtype=torch.int64),
+    )
+
+    assert len(forwarded_inputs) == 1
+    assert forwarded_inputs[0] is not model_input
+    assert forwarded_inputs[0].mtp_draft_input_hiddens is target_hidden
+    assert model_input.mtp_draft_input_hiddens is None
+
+
+def test_dspark_empty_prefill_still_forwards_for_dp_collectives():
+    forwarded_inputs = []
+    draft_model = SimpleNamespace(forward=forwarded_inputs.append)
+    proposer = DSparkProposer(
+        backend=SimpleNamespace(draft_models=[draft_model]),
+        enable_dynmaic_mtp=False,
+    )
+    model_input = SimpleNamespace(
+        is_prefill=True,
+        b_position_delta=None,
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        mtp_draft_input_hiddens=None,
+    )
+    target_hidden = torch.empty((0, 8))
+
+    proposer.fill_draft_model_kv_state(
+        target_model_input=model_input,
+        target_model_output=SimpleNamespace(
+            mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
+        ),
+        target_next_token_ids=torch.empty((0,), dtype=torch.int64),
     )
 
     assert len(forwarded_inputs) == 1
@@ -96,7 +127,10 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         mtp_draft_input_hiddens=None,
     )
 
-    proposal = proposer.propose_next(
+    engine = SpecEngine.__new__(SpecEngine)
+    engine.backend = SimpleNamespace(is_deepseek_v4=True)
+    engine.proposer = proposer
+    proposal = engine.propose_next(
         target_model_input=model_input,
         target_model_output=SimpleNamespace(
             mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
@@ -105,6 +139,7 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         b_req_mtp_start_loc=torch.tensor([0, 3], dtype=torch.int32),
         draft_step=2,
         accept_len=torch.tensor([2, 2], dtype=torch.int32),
+        accept_len_cpu=AsyncPinnedCpuTensor(torch.tensor([2, 2]), None),
     )
 
     assert len(forwarded_inputs) == 2

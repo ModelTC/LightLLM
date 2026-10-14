@@ -1,23 +1,20 @@
 import enum
 import torch
 import torch.distributed as dist
-import numpy as np
 import collections
 import pickle
 
 from sortedcontainers import SortedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
-from lightllm.common.req_manager import ReqManager, HybridAttentionReqManager
-from lightllm.utils.infer_utils import mark_start, mark_end
-from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
+from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManager, HybridAttentionReqManager
+from lightllm.server.core.objs import Req, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
@@ -49,6 +46,7 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
+    is_deepseek_v4: bool = False
 
     def register(
         self,
@@ -73,6 +71,7 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_hybrid_att_model = isinstance(self.req_manager, HybridAttentionReqManager)
+        self.is_deepseek_v4 = isinstance(self.req_manager, DeepseekV4ReqManager)
         self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
@@ -160,6 +159,8 @@ class InferenceContext:
             else:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
+        if self.is_deepseek_v4:
+            self.req_manager.clear_runtime_state(req.req_idx)
         req.cur_kv_len = 0
         req.hold_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -370,7 +371,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -393,12 +393,16 @@ class InferenceContext:
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
             can_alloc_token_num = self.get_can_alloc_token_num()
+            resource_budget = self.req_manager.get_request_resource_budget()
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
                 # 才允许执行 radix cache 匹配，避免在容量不足时提前改变引用或重建 hybrid cache 状态。
                 alloc_token_num = req._kv_cache_alloc_need(req.get_cur_total_len())
                 if alloc_token_num > can_alloc_token_num:
+                    break
+
+                if not resource_budget.reserve(self.req_manager.get_request_resource_need(req, "recover")):
                     break
 
                 if g_infer_context.is_hybrid_att_model:
@@ -424,37 +428,43 @@ class InferenceContext:
 
     def save_hybrid_state_to_cache(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
-        if not self.is_hybrid_att_model:
+        if not self.is_hybrid_att_model or self.radix_cache is None:
             return
 
         # Request-state snapshot at a big-page boundary.
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_buffer_ids = []
-        for req in reqs:
-            cur_input_len = req.get_chuncked_input_token_len()
-            if cur_input_len % big_page_token_num == 0 and cur_input_len <= req.hybrid_cache_len:
+        checkpoint_lens = []
+        req_rows = []
+        for row, req in enumerate(reqs):
+            chunk_end = req.get_chuncked_input_token_len()
+            first_boundary = (req.cur_kv_len // big_page_token_num + 1) * big_page_token_num
+            for length in range(first_boundary, min(chunk_end, req.hybrid_cache_len) + 1, big_page_token_num):
                 big_page_id = self.radix_cache.big_page_buffers.alloc_one_state_cache()
                 assert big_page_id is not None
+                assert length not in req.hybrid_len_to_big_page_id
+                req.hybrid_len_to_big_page_id[length] = big_page_id
                 big_page_buffer_ids.append(big_page_id)
-                assert cur_input_len not in req.hybrid_len_to_big_page_id
-                req.hybrid_len_to_big_page_id[cur_input_len] = big_page_id
-            else:
-                big_page_buffer_ids.append(-1)
+                checkpoint_lens.append(length)
+                req_rows.append(row)
 
-        assert len(b_req_idx) == len(big_page_buffer_ids)
-        if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
+        if big_page_buffer_ids:
+            selected_rows = torch.tensor(req_rows, dtype=torch.int64, device=b_req_idx.device)
             self.req_manager.save_big_page_states(
-                b_req_idx=b_req_idx,
-                req_indexes=[req.req_idx for req in reqs],
+                b_req_idx=b_req_idx[selected_rows],
+                req_indexes=[reqs[row].req_idx for row in req_rows],
                 buffer_indexes=big_page_buffer_ids,
+                checkpoint_lens=checkpoint_lens,
             )
 
-        assert not self.args.disable_chunked_prefill, "chunked prefill must be enabled for hybrid attention models"
+        assert (
+            self.is_deepseek_v4 or not self.args.disable_chunked_prefill
+        ), "chunked prefill must be enabled for linear attention models"
 
         # Request-state snapshot at the final small-page boundary.
         for req in reqs:
             # 判断本次prefill 完以后 kv 的长度是否到达 hybrid checkpoint 的存储边界。
-            if req.get_chuncked_input_token_len() == req.hybrid_cache_len:
+            if req.cur_kv_len < req.hybrid_cache_len <= req.get_chuncked_input_token_len():
                 assert req.tail_small_page_buffer_id is None
                 if req.hybrid_cache_len % big_page_token_num != 0:
                     self.radix_cache.free_one_small_page_buffer()
@@ -465,6 +475,7 @@ class InferenceContext:
                             req_idx=req.req_idx,
                             buffer_idx=dst_buffer_idx,
                             state_cache_manager=self.radix_cache.small_page_buffers,
+                            checkpoint_len=req.hybrid_cache_len,
                         )
         return
 
@@ -628,6 +639,11 @@ class InferReq:
         # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
+        self.image_block_spans = [
+            (image["block_start_idx"], image["block_end_idx"])
+            for image in self.multimodal_params.get("images", [])
+            if image.get("block_start_idx") is not None
+        ]
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
@@ -636,6 +652,11 @@ class InferReq:
         if g_infer_context.is_hybrid_att_model:
             block_num = self.shm_req.hybrid_token_hash_list.size
             self.hybrid_cache_len = block_num * self.args.linear_att_hash_page_size
+            for image_start, image_end in reversed(self.image_block_spans):
+                if image_start < self.hybrid_cache_len < image_end:
+                    self.hybrid_cache_len = (
+                        image_start // self.args.linear_att_hash_page_size * self.args.linear_att_hash_page_size
+                    )
             self.hybrid_len_to_big_page_id = SortedDict()
 
         return
@@ -668,6 +689,11 @@ class InferReq:
             g_infer_context.is_hybrid_att_model is True
         ), "current _hybrid_match_radix_cache only supports hybrid attention models, to do..."
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
+        if enable_prompt_cache:
+            req_manager = g_infer_context.req_manager
+            enable_prompt_cache = req_manager.get_request_resource_budget().reserve(
+                req_manager.get_request_resource_need(self, "restore")
+            )
         block_hashs = self.shm_req.hybrid_token_hash_list.get_all()
         hash_page_size = self.args.linear_att_hash_page_size
         match_tokens = min(len(block_hashs) * hash_page_size, self.get_cur_total_len() - 1)
@@ -682,6 +708,18 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(block_hashs) * hash_page_size
+            if self.image_block_spans:
+                while True:
+                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(
+                        key, block_hashs=block_hashs, update_refs=False
+                    )
+                    for image_start, image_end in self.image_block_spans:
+                        if image_start < matched_len < image_end:
+                            limit = image_start // hash_page_size * hash_page_size
+                            key, block_hashs = key[:limit], block_hashs[: limit // hash_page_size]
+                            break
+                    else:
+                        break
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
                 key, block_hashs=block_hashs, update_refs=True
             )
@@ -698,7 +736,7 @@ class InferReq:
                     assert self.tail_small_page_buffer_id is None
                     # 恢复 hybrid checkpoint
                     g_infer_context.req_manager.restore_big_page_state(
-                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
+                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self, checkpoint_len=ready_cache_len
                     )
                 else:
                     # 小页匹配
@@ -714,6 +752,7 @@ class InferReq:
                         # 恢复 hybrid checkpoint
                         g_infer_context.req_manager.restore_small_page_state(
                             req=self,
+                            checkpoint_len=ready_cache_len,
                         )
                     else:
                         # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
@@ -736,7 +775,8 @@ class InferReq:
 
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
-                                value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
+                                value_tensor[cur_big_page_tokens:shared_kv_len],
+                                tail_mems,
                             )
                             # 尾部 KV 换到新 mem 后，同步拷贝已捕获的 top-k prompt logprobs。
                             self.prompt_selected_logprobs.copy_capture_slots_if_needed(
@@ -747,6 +787,7 @@ class InferReq:
                             self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
                             g_infer_context.req_manager.restore_small_page_state(
                                 req=self,
+                                checkpoint_len=shared_kv_len,
                             )
                             self.shared_kv_node = None
 
@@ -771,7 +812,9 @@ class InferReq:
                                 assert self.tail_small_page_buffer_id is None
                                 # 恢复 hybrid checkpoint
                                 g_infer_context.req_manager.restore_big_page_state(
-                                    big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
+                                    big_page_buffer_idx=share_node.big_page_buffer_idx,
+                                    req=self,
+                                    checkpoint_len=ready_cache_len,
                                 )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
@@ -830,40 +873,39 @@ class InferReq:
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
-    def get_chuncked_input_token_ids(self):
+    def _get_chunked_input_end(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
-
-    def get_chuncked_input_token_ids_for_hybrid_att(self):
-        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
-
-        chunked_start = self.cur_kv_len
-        chunked_end = chunked_start + self.args.chunked_prefill_size
-        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
-        total_end = self.get_cur_total_len()
-        end = min(total_end, chunked_end, big_page_end)
-
-        if chunked_start < self.hybrid_cache_len < end:
-            # hybrid checkpoint 对应需要存储的部分。
-            end = self.hybrid_cache_len
-
-        return self.shm_req.shm_prompt_ids.arr[0:end]
-
-    def get_chuncked_input_token_len(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
+        for image_start, image_end in self.image_block_spans:
+            if image_start < chunked_end < image_end:
+                chunked_end = image_start if chunked_start < image_start else image_end
+                break
         return chunked_end
 
+    def get_chuncked_input_token_ids(self):
+        return self.shm_req.shm_prompt_ids.arr[0 : self._get_chunked_input_end()]
+
+    def get_chuncked_input_token_ids_for_hybrid_att(self):
+        return self.shm_req.shm_prompt_ids.arr[0 : self.get_chuncked_input_token_len_for_hybrid_att()]
+
+    def get_chuncked_input_token_len(self):
+        return self._get_chunked_input_end()
+
     def get_chuncked_input_token_len_for_hybrid_att(self):
+        end = self._get_chunked_input_end()
+        if g_infer_context.is_deepseek_v4 and self.args.disable_chunked_prefill:
+            return end
+        if g_infer_context.radix_cache is None:
+            return end
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
-        chunked_start = self.cur_kv_len
-        chunked_end = chunked_start + self.args.chunked_prefill_size
-        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
-        total_end = self.get_cur_total_len()
-        end = min(total_end, chunked_end, big_page_end)
-        if chunked_start < self.hybrid_cache_len < end:
+        big_page_end = (self.cur_kv_len // big_page_token_num + 1) * big_page_token_num
+        end = min(end, big_page_end)
+        if self.cur_kv_len < self.hybrid_cache_len < end:
             end = self.hybrid_cache_len
+        for image_start, image_end in self.image_block_spans:
+            if image_start < end < image_end:
+                end = image_start if self.cur_kv_len < image_start else image_end
+                break
         return end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank: int = -1):

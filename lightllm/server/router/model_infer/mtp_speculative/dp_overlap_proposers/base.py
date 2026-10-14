@@ -10,6 +10,7 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor
 
 
 class BaseDpOverlapProposer(ABC):
@@ -45,6 +46,7 @@ class BaseDpOverlapProposer(ABC):
         target_next_token_ids1: torch.Tensor,  # [padded_verify_batch_size1]
         accept_len1: torch.Tensor,  # [real_req_num1]
         draft_step: int,
+        accept_len_cpu: "AsyncPinnedCpuTensor | None" = None,
     ) -> SpecProposal:
         """Generate one proposal from two DP-overlapped decode microbatches."""
 
