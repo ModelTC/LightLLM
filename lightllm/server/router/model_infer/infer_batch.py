@@ -459,7 +459,8 @@ class InferSamplingParams:
         vocab_size: int,
     ) -> None:
         self.shm_param = shm_req.sample_params
-        self.disable_prompt_cache = self.shm_param.disable_prompt_cache
+        # Cached KV skips prompt logits, so logprobs requests must recompute the full prompt.
+        self.disable_prompt_cache = self.shm_param.disable_prompt_cache or self.shm_param.prompt_logprobs >= 0
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
