@@ -107,6 +107,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="KV transfer backend for PD disaggregation; default: nccl",
     )
     parser.add_argument(
+        "--use_dp_split_mode_connect_pd_master",
+        action="store_true",
+        help="Prefill only: register a separate PD master connection for each local DP rank",
+    )
+    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
         default="cache_aware",
@@ -386,7 +391,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         choices=vocab_topk_choices,
         default=None,
-        help="Top-k communication width per TP rank for target-model logits; disabled by default.",
+        help="Top-k communication width per TP rank for target-model logits; disabled by default. "
+        "Requires --output_constraint_mode none.",
     )
     parser.add_argument(
         "--draft_vocab_topk_sampling",
@@ -399,15 +405,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--output_constraint_mode",
         type=str,
-        choices=["outlines", "xgrammar", "none"],
-        default="none",
-        help="set the output constraint backend, none means no output constraint",
+        choices=["xgrammar", "none"],
+        default="xgrammar",
+        help="Output constraint backend used on demand in the regular inference pipeline; none rejects constraints.",
     )
     parser.add_argument(
-        "--first_token_constraint_mode",
-        action="store_true",
-        help="""constraint the first token allowed range,
-                        use env FIRST_ALLOWED_TOKENS to set the range, like FIRST_ALLOWED_TOKENS=1,2 ..""",
+        "--grammar_compile_timeout",
+        type=float,
+        default=30.0,
+        help="HTTP grammar compilation timeout in seconds; failures and timeouts return HTTP 400 before inference.",
     )
     parser.add_argument(
         "--disable_vision",
@@ -801,12 +807,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle3",
             "dspark",
             "dflash",
+            "dflash2",
             None,
         ],
         default=None,
         help="""Speculative decoding mode.
         *_with_att and *_no_att select attention or non-attention draft models;
         eagle3 uses autoregressive EAGLE-3 drafting; dflash uses block-diffusion drafting;
+        dflash2 uses block-diffusion drafting with local convolutions and candidate reranking;
         dspark uses semi-autoregressive parallel drafting.""",
     )
     parser.add_argument(

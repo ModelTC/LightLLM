@@ -135,6 +135,7 @@ class CompletionRequest(BaseModel):
     logprobs: Optional[int] = None
     echo: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
+    include_stop_str_in_output: bool = False
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     best_of: Optional[int] = 1
@@ -199,6 +200,7 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
+    include_stop_str_in_output: bool = False
     max_tokens: Optional[int] = Field(
         default=65536, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
     )

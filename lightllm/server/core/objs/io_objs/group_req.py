@@ -31,8 +31,3 @@ class GroupReqObjs:
 @dataclass
 class AbortedReqCmd:
     req_id: int
-
-
-@dataclass
-class StopStrMatchedReqCmd:
-    req_id: int

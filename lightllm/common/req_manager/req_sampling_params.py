@@ -20,6 +20,7 @@ class ReqSamplingParamsManager:
     利用 triton kernel 进行处理，对于那些比较动态(部分处理模式下会动态的修改某些后处理参数)，或者存在特殊处理的后处理参数，
     则保留从 InferSamplingParams 中进行动态读取和动态组batch， 具体使用可以参考
     lightllm/server/router/model_infer/mode_backend/generic_post_process.py 文件中的使用方式。
+    输出约束使用固定的 pinned bitmask buffer，由通用采样准备阶段按 req_idx / mtp_index 填充。
     """
 
     def __init__(self, max_request_num):
@@ -30,16 +31,39 @@ class ReqSamplingParamsManager:
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
+        # GPU 主表供 scatter、gather 和 MTP verify 使用。
         self.req_to_next_token_ids = torch.zeros(
             (max_request_num + 1, self.mtp_verify_width),
             dtype=torch.int64,
             device="cuda",
         )
+        # 常驻 CPU 快照，由 MTP scatter 后的异步拷贝更新；读取前复用已有 CUDA event 等待完成。
+        self.req_to_next_token_ids_cpu = torch.zeros(
+            (max_request_num + 1, self.mtp_verify_width),
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
         self.req_to_next_token_scores = (
-            torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32)
+            torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32, device="cuda")
             if get_env_start_args().mtp_dynamic_verify
             else None
         )
+
+        self.req_to_bitmask: Optional[torch.Tensor] = None
+        self.req_to_bitmask_enabled: Optional[torch.Tensor] = None
+        if get_env_start_args().output_constraint_mode == "xgrammar":
+            # 每个请求和验证位置对应一个固定掩码槽；CPU matcher 在上一轮 post_handle 后填充，
+            # 采样时在同一流上异步传到 GPU；已有完成事件保护下一轮 pinned 源缓冲区的复用。
+            self.req_to_bitmask = torch.empty(
+                (max_request_num + 1, self.mtp_verify_width, (self.vocab_size + 31) // 32),
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
+            )
+            self.req_to_bitmask_enabled = torch.zeros(
+                max_request_num + 1, dtype=torch.bool, device="cpu", pin_memory=True
+            )
 
         self.req_to_exponential_decay_length_penalty = torch.zeros(
             max_request_num + 1, dtype=torch.float32, device="cuda"

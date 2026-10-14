@@ -14,14 +14,6 @@ except:
     pass
 
 
-@triton.jit
-def _ceil_to_ue8m0(x):
-    bits = x.to(tl.float32).to(tl.int32, bitcast=True)
-    exp = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0)
-    exp = tl.maximum(tl.minimum(exp, 254), 1)
-    return (exp << 23).to(tl.float32, bitcast=True)
-
-
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/quantization/fp8_kernel.py
 @triton.jit
 def _per_token_group_quant_fp8(
@@ -33,19 +25,45 @@ def _per_token_group_quant_fp8(
     eps,
     fp8_min,
     fp8_max,
+    xs_m,
     xs_n,
-    xs_stride_m,
-    xs_stride_n,
+    xs_row_major: tl.constexpr,
     BLOCK: tl.constexpr,
     NEED_MASK: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
+    USE_PACKED_UE8M0: tl.constexpr,
 ):
+    if USE_PACKED_UE8M0:
+        row_id = tl.program_id(0)
+        packed_col = tl.program_id(1)
+        byte_ids = tl.arange(0, 4)
+        group_ids = packed_col * 4 + byte_ids
+        cols = tl.arange(0, BLOCK)
+        offsets = (row_id * xs_n + group_ids[:, None]) * y_stride + cols[None, :]
+        mask = (group_ids[:, None] < xs_n) & (cols[None, :] < N)
+        y = tl.load(y_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        y_s = tl.maximum(tl.max(tl.abs(y), axis=1), eps) / fp8_max
+        y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
+        y_q = tl.clamp(y / y_s[:, None], fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        tl.store(y_q_ptr + offsets, y_q, mask=mask)
+        exponents = (y_s.to(tl.int32, bitcast=True) >> 23) & 255
+        packed = tl.sum(tl.where(group_ids < xs_n, exponents << (byte_ids * 8), 0), axis=0)
+        if xs_row_major:
+            scale_offset = row_id * ((xs_n + 3) // 4) + packed_col
+        else:
+            scale_offset = row_id + packed_col * xs_m
+        tl.store(y_s_ptr + scale_offset, packed)
+        return
+
     g_id = tl.program_id(0)
     y_ptr += g_id * y_stride
     y_q_ptr += g_id * y_stride
-    row_id = g_id // xs_n
-    col_id = g_id % xs_n
-    y_s_ptr += row_id * xs_stride_m + col_id * xs_stride_n
+    if xs_row_major:
+        y_s_ptr += g_id
+    else:
+        row_id = g_id // xs_n
+        col_id = g_id % xs_n
+        y_s_ptr += col_id * xs_m + row_id  # col major
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
 
@@ -59,10 +77,9 @@ def _per_token_group_quant_fp8(
     y = tl.load(y_ptr + cols, mask=mask, other=other).to(tl.float32)
     # Quant
     _absmax = tl.max(tl.abs(y))
+    y_s = tl.maximum(_absmax, eps) / fp8_max
     if USE_UE8M0_SCALE:
-        y_s = _ceil_to_ue8m0(tl.maximum(_absmax, 1.0e-4) / fp8_max)
-    else:
-        y_s = tl.maximum(_absmax, eps) / fp8_max
+        y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
@@ -77,21 +94,23 @@ def lightllm_per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: torch.dtype = torch.float8_e4m3fn,
     use_ue8m0_scales: bool = False,
+    use_packed_ue8m0: bool = False,
 ):
     """group-wise, per-token quantization on input tensor `x`.
     Args:
         x: The input tenosr with ndim >= 2.
         group_size: The group size used for quantization.
         x_q: the tensor to save the quantized result of x.
-        x_s: the tensor to save the scale of x.
+        x_s: packed INT32 scales when use_packed_ue8m0 is True, otherwise FP32 scales.
         eps: The minimum to avoid dividing zero.
         dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn` is supported for now.
     """
     assert x.shape[-1] % group_size == 0, "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
-    xs_n = x_s.shape[-1]
-    xs_stride_m, xs_stride_n = x_s.stride()
+    xs_row_major = x_s.is_contiguous()
+    xs_m = x_s.stride(1) if use_packed_ue8m0 else x_s.shape[0]
+    xs_n = x.shape[-1] // group_size
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max
 
@@ -103,7 +122,8 @@ def lightllm_per_token_group_quant_fp8(
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    _per_token_group_quant_fp8[(M,)](
+    grid = (x.shape[-2], triton.cdiv(xs_n, 4)) if use_packed_ue8m0 else (M,)
+    _per_token_group_quant_fp8[grid](
         x,
         x_q,
         x_s,
@@ -112,12 +132,13 @@ def lightllm_per_token_group_quant_fp8(
         eps,
         fp8_min=fp8_min,
         fp8_max=fp8_max,
+        xs_m=xs_m,
         xs_n=xs_n,
-        xs_stride_m=xs_stride_m,
-        xs_stride_n=xs_stride_n,
+        xs_row_major=xs_row_major,
         BLOCK=BLOCK,
         NEED_MASK=BLOCK != group_size,
         USE_UE8M0_SCALE=use_ue8m0_scales,
+        USE_PACKED_UE8M0=use_packed_ue8m0,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -133,22 +154,41 @@ def per_token_group_quant_fp8(
     scale_tma_aligned: bool = False,
     alloc_func: Callable = torch.empty,
     use_ue8m0_scales: bool = False,
+    use_packed_ue8m0: bool = False,
 ):
+    use_sgl = HAS_SGL_KERNEL and (not use_ue8m0_scales or use_packed_ue8m0)
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
-    if column_major_scales:
-        if scale_tma_aligned:
-            aligned_size = (x.shape[-2] + 3) // 4 * 4
-            x_s = alloc_func(
-                x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
-                device=x.device,
-                dtype=torch.float32,
-            ).permute(-1, -2)[: x.shape[-2], :]
+    x_s = None
+    # Adapted from
+    # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
+    # Packed UE8M0 uses SGL's INT32, column-major TMA-aligned scale layout.
+    if use_packed_ue8m0:
+        groups = x.shape[-1] // group_size
+        aligned_size = (x.shape[-2] + 3) // 4 * 4
+        x_s = alloc_func(((groups + 3) // 4, aligned_size), device=x.device, dtype=torch.int32).t()[: x.shape[-2], :]
+    elif use_sgl:
+        # 创建scale张量
+        if column_major_scales:
+            if scale_tma_aligned:
+                # 对齐到4 * sizeof(float)
+                aligned_size = (x.shape[-2] + 3) // 4 * 4
+                x_s = alloc_func(
+                    x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)[: x.shape[-2], :]
+            else:
+                x_s = alloc_func(
+                    (x.shape[-1] // group_size,) + x.shape[:-1],
+                    device=x.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)
         else:
             x_s = alloc_func(
-                (x.shape[-1] // group_size,) + x.shape[:-1],
+                x.shape[:-1] + (x.shape[-1] // group_size,),
                 device=x.device,
                 dtype=torch.float32,
-            ).permute(-1, -2)
+            )
     else:
         x_s = alloc_func(
             x.shape[:-1] + (x.shape[-1] // group_size,),
@@ -156,11 +196,12 @@ def per_token_group_quant_fp8(
             dtype=torch.float32,
         )
 
-    if HAS_SGL_KERNEL and not use_ue8m0_scales:
+    if use_sgl:
         finfo = torch.finfo(dtype)
-        fp8_max, fp8_min = finfo.max, finfo.min
         # 使用SGL kernel进行量化
-        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False, enable_v2=True)
+        sgl_ops.sgl_per_token_group_quant_fp8(
+            x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=use_packed_ue8m0, enable_v2=True
+        )
     else:
         # 使用LightLLM kernel进行量化
         lightllm_per_token_group_quant_fp8(
@@ -168,10 +209,13 @@ def per_token_group_quant_fp8(
             group_size,
             x_q,
             x_s,
-            eps=eps,
+            eps=1e-10,
             dtype=dtype,
             use_ue8m0_scales=use_ue8m0_scales,
+            use_packed_ue8m0=use_packed_ue8m0,
         )
+        if not use_packed_ue8m0 and column_major_scales and scale_tma_aligned:
+            x_s = tma_align_input_scale(x_s)
     return x_q, x_s
 
 

@@ -63,6 +63,17 @@ class PD_Client_Obj:
     # 当前派发到该节点且尚未产出首 token 的请求数。
     dispatched_req_num: int = 0
 
+    dp_index: Optional[int] = None
+    connection_id: Optional[str] = None
+
+    @staticmethod
+    def make_connection_key(client_ip_port: str, dp_index: Optional[int]) -> str:
+        return f"{client_ip_port}/dp{dp_index}"
+
+    @property
+    def connection_key(self) -> str:
+        return self.make_connection_key(self.client_ip_port, self.dp_index)
+
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
             error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""

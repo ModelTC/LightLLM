@@ -1,9 +1,11 @@
 import pytest
+import pickle
+from unittest.mock import Mock
 from lightllm.server.core.objs.sampling_params import (
+    StopStrMatchMode,
     StopSequence,
     StopSequenceGroups,
     RegularConstraint,
-    AllowedTokenIds,
     ExponentialDecayLengthPenalty,
     NodeUUId,
     SamplingParams,
@@ -11,10 +13,10 @@ from lightllm.server.core.objs.sampling_params import (
     GuidedJsonSchema,
     STOP_SEQUENCE_MAX_LENGTH,
     REGULAR_CONSTRAINT_MAX_LENGTH,
-    ALLOWED_TOKEN_IDS_MAX_LENGTH,
     JSON_SCHEMA_MAX_LENGTH,
     GRAMMAR_CONSTRAINT_MAX_LENGTH,
 )
+from lightllm.server.core.objs.py_sampling_params import SamplingParams as PySamplingParams
 
 grammar_str = r"""root ::= (expr "=" term)+
 expr ::= term ([-+*/] term)*
@@ -56,18 +58,47 @@ def test_stop_sequence_initialization_too_many():
 
 
 @pytest.mark.parametrize(
-    "stop_sequences, expected",
+    "stop_sequences, expected_ids, expected_strings, expected_original",
     [
-        (["stop1", "stop2"], [[1, 2], [3, 4]]),  # 根据 MockTokenizer 返回的 ID
-        ([], []),  # 空输入
+        (["stop1", "stop2"], [], ["stop1", "stop2"], ["stop1", "stop2"]),
+        ("END", [], ["END"], ["END"]),
+        ([[1, 2], [3, 4]], [[1, 2], [3, 4]], [], [[1, 2], [3, 4]]),
+        (["END", [1, 2], "结束"], [[1, 2]], ["END", "结束"], ["END", [1, 2], "结束"]),
+        (["", [], "END", [1]], [[1]], ["END"], ["END", [1]]),
+        ([], [], [], []),
+        (None, [], [], []),
     ],
 )
-def test_stop_sequence_groups_initialization(stop_sequences, expected):
-    tokenizer = MockTokenizer()
+def test_stop_sequence_groups_initialization(stop_sequences, expected_ids, expected_strings, expected_original):
     groups = StopSequenceGroups()
-    groups.initialize(stop_sequences, tokenizer)
-    assert groups.size == len(expected)
-    assert groups.to_list() == expected
+    groups.initialize(stop_sequences)
+    assert groups.size == len(expected_original)
+    assert groups.to_token_ids_list() == expected_ids
+    assert groups.to_stop_str_list() == expected_strings
+    assert groups.has_stop_strs() is bool(expected_strings)
+    assert groups.to_origin_list() == expected_original
+
+
+@pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
+def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
+    tokenizer = Mock()
+    tokenizer.encode.side_effect = AssertionError("String stops must not be tokenized")
+    stops = ["END", [10, 11], "结束"]
+    params = SamplingParams()
+    params.init(tokenizer, stop_sequences=stops, stop_str_match_mode=mode)
+    serialized = params.to_dict()
+    assert serialized["stop_sequences"] == stops
+    restored = SamplingParams()
+    restored.init(tokenizer, **serialized)
+    for candidate in (params, restored, SamplingParams.from_buffer_copy(params), pickle.loads(pickle.dumps(params))):
+        assert candidate.stop_sequences.to_token_ids_list() == [[10, 11]]
+        assert candidate.stop_sequences.to_stop_str_list() == ["END", "结束"]
+        assert candidate.stop_str_match_mode.get_mode() == mode
+        assert candidate.to_origin_dict()["stop_sequences"] == stops
+    py_params = PySamplingParams(stop_sequences=serialized["stop_sequences"], stop_str_match_mode=mode)
+    py_params.verify()
+    assert py_params.to_dict()["stop_sequences"] == stops
+    tokenizer.encode.assert_not_called()
 
 
 def test_regular_constraint_initialization():
@@ -96,16 +127,6 @@ def test_guided_json_schema_initialization():
 
     with pytest.raises(AssertionError):
         schema.initialize("a" * (JSON_SCHEMA_MAX_LENGTH + 1), None)
-
-
-def test_allowed_token_ids_initialization():
-    allowed_ids = AllowedTokenIds()
-    allowed_ids.initialize([1, 2, 3])
-    assert allowed_ids.size == 3
-    assert allowed_ids.to_list() == [1, 2, 3]
-
-    with pytest.raises(AssertionError):
-        allowed_ids.initialize([1] * (ALLOWED_TOKEN_IDS_MAX_LENGTH + 1))
 
 
 def test_exponential_decay_length_penalty_initialization():
@@ -152,7 +173,6 @@ def test_sampling_params_initialization():
         "add_spaces_between_special_tokens": True,
         "print_eos_token": False,
         "regular_constraint": "",
-        "allowed_token_ids": [1, 2, 3],
         "stop_sequences": [[2, 1], [3, 4]],
         "exponential_decay_length_penalty": (1, 1.0),
         "pd_master_node_id": pd_master_node_id,
@@ -168,6 +188,80 @@ def test_sampling_params_initialization():
     assert params.stop_sequences.size == 2
     assert params.pd_master_node_id.get() == pd_master_node_id
     assert params.pd_kv_trans_params.get() == pd_kv_trans_params
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [({}, False), ({"include_stop_str_in_output": False}, False), ({"include_stop_str_in_output": True}, True)],
+)
+def test_include_stop_str_in_output_round_trip(kwargs, expected):
+    params = SamplingParams()
+    params.init(None, **kwargs)
+    assert params.include_stop_str_in_output is expected
+    assert params.to_dict()["include_stop_str_in_output"] is expected
+    assert SamplingParams.from_buffer_copy(params).include_stop_str_in_output is expected
+
+    restored = SamplingParams()
+    restored.init(None, **params.to_dict())
+    assert restored.include_stop_str_in_output is expected
+
+    py_params = PySamplingParams(**kwargs)
+    assert py_params.include_stop_str_in_output is expected
+    assert py_params.to_dict()["include_stop_str_in_output"] is expected
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [
+        ({}, StopStrMatchMode.ALL_TEXT),
+        ({"stop_str_match_mode": StopStrMatchMode.ALL_TEXT}, StopStrMatchMode.ALL_TEXT),
+        ({"stop_str_match_mode": StopStrMatchMode.CONTENT_ONLY}, StopStrMatchMode.CONTENT_ONLY),
+    ],
+)
+def test_stop_matching_policy_round_trip(kwargs, expected):
+    params = SamplingParams()
+    params.init(None, **kwargs)
+    serialized = params.to_dict()
+    assert serialized["stop_str_match_mode"] == expected
+    assert type(serialized["stop_str_match_mode"]) is int
+    assert "enable_stop_match_in_backend" not in serialized
+    assert "_skip_stop_in_reasoning" not in serialized
+    restored = SamplingParams()
+    restored.init(None, **serialized)
+    py_params = PySamplingParams(**kwargs)
+    for candidate in (params, SamplingParams.from_buffer_copy(params), restored, py_params):
+        assert candidate.stop_str_match_mode.get_mode() == expected
+        assert candidate.stop_str_match_mode.is_all_text() is (expected == StopStrMatchMode.ALL_TEXT)
+        assert candidate.stop_str_match_mode.is_content_only() is (expected == StopStrMatchMode.CONTENT_ONLY)
+        assert candidate.to_dict()["stop_str_match_mode"] == expected
+    py_restored = PySamplingParams(**py_params.to_dict())
+    assert py_restored.stop_str_match_mode.get_mode() == expected
+
+
+@pytest.mark.parametrize("mode", [-1, 0, 3, 2 ** 32, "CONTENT_ONLY", None, 0.0])
+def test_invalid_stop_str_match_mode(mode):
+    params = SamplingParams()
+    with pytest.raises((ValueError, TypeError)):
+        params.init(None, stop_str_match_mode=mode)
+    with pytest.raises((ValueError, TypeError)):
+        PySamplingParams(stop_str_match_mode=mode)
+
+
+def test_stop_str_match_mode_updates_shared_buffer():
+    params = SamplingParams()
+    params.init(None, include_stop_str_in_output=True, _initial_reasoning_state=1)
+    storage = bytearray(bytes(params))
+    writer = SamplingParams.from_buffer(storage)
+    reader = SamplingParams.from_buffer(storage)
+    writer.stop_str_match_mode.set_mode(StopStrMatchMode.CONTENT_ONLY)
+    assert reader.stop_str_match_mode.is_content_only()
+    assert reader.to_dict()["stop_str_match_mode"] == StopStrMatchMode.CONTENT_ONLY
+    assert reader.include_stop_str_in_output is True
+    assert reader._initial_reasoning_state == 1
+    assert params.stop_str_match_mode.is_all_text()
+    with pytest.raises(ValueError):
+        writer.stop_str_match_mode.set_mode(3)
+    assert reader.stop_str_match_mode.is_content_only()
 
 
 # Mock tokenizer for testing

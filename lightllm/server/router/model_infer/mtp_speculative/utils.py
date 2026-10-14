@@ -69,6 +69,12 @@ def scatter_mtp_next_tokens(
         ),
         schedule_scores=schedule_scores,
     )
+    if sampling_params_manager.req_to_bitmask_enabled is not None:
+        # 同一流中先写 GPU 主表，再更新常驻 CPU 快照；调用方随后记录的 sync_event 覆盖这次拷贝。
+        # 下一轮采样准备等待上一轮 post_handle 交接后才读取，避免拷贝未完成或覆盖仍在读取的快照。
+        sampling_params_manager.req_to_next_token_ids_cpu.copy_(
+            sampling_params_manager.req_to_next_token_ids, non_blocking=True
+        )
 
 
 def record_request_mtp_metrics(

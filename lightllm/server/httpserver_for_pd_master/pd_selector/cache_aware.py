@@ -8,7 +8,7 @@ PD Master 的 cache-aware prefill 选点策略。
 
 实现要点：
   - 用前缀树（见 PromptCacheTree）记录「成功进入推理的 prompt -> 处理它的 worker」；
-  - 树中的 prefill_node 对应 worker.client_ip_port；
+  - 树中的 prefill_node 对应 worker.connection_key，可区分同一服务的不同 DP 连接；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
   - 根据推理侧返回的平均 prompt cache 命中率，动态调整 cache 亲和与负载均衡的权重；
   - 优先使用 dispatched_req_num 为 0 的空闲节点，避免 GPU 闲置；
@@ -152,7 +152,7 @@ class CacheAwarePolicy:
     def get_estimated_cache_info(self, selected_worker: PD_Client_Obj, request_text: str) -> PDSelectionExtraInfo:
         """查询最终选中节点的输入 cache 命中率和最近插入时间。"""
         result = self.prompt_cache_tree.prefix_match(request_text)
-        if result.prefill_node != selected_worker.client_ip_port or result.input_char_count == 0:
+        if result.prefill_node != selected_worker.connection_key or result.input_char_count == 0:
             return PDSelectionExtraInfo()
         return PDSelectionExtraInfo(
             estimated_cache_hit_rate=result.matched_char_count / result.input_char_count,
@@ -161,7 +161,7 @@ class CacheAwarePolicy:
 
     def insert_prompt_cache(self, request_text: str, selected_worker: PD_Client_Obj) -> None:
         """在请求成功进入推理后，记录 prompt 与实际执行的 Prefill 节点。"""
-        self.prompt_cache_tree.insert(request_text, selected_worker.client_ip_port)
+        self.prompt_cache_tree.insert(request_text, selected_worker.connection_key)
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         """记录推理侧上报的真实 cache 命中率，并更新动态负载阈值。"""
@@ -184,7 +184,7 @@ class CacheAwarePolicy:
             return None
 
         for worker in workers:
-            if worker.client_ip_port == result.prefill_node:
+            if worker.connection_key == result.prefill_node:
                 return worker
         return None
 

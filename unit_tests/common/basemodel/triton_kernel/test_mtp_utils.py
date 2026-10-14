@@ -25,11 +25,13 @@ def test_build_mtp_shared_group_markers(monkeypatch, max_group_size, req_indexes
     assert markers.cpu().tolist() == expected_markers
 
 
-def test_mtp_verify_scatter_and_start_locations():
+@pytest.mark.parametrize("pinned", [False, True])
+def test_mtp_verify_scatter_and_start_locations(pinned):
     req_to_next_token_ids = torch.tensor(
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]],
         dtype=torch.int64,
-        device="cuda",
+        device="cpu" if pinned else "cuda",
+        pin_memory=pinned,
     )
     b_req_idx = torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32, device="cuda")
     b_mtp_index = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32, device="cuda")
@@ -50,6 +52,7 @@ def test_mtp_verify_scatter_and_start_locations():
     mtp_accept_len, accepted_index = mtp_utils.mtp_verify(
         req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx
     )
+    assert mtp_accept_len.is_cuda and accepted_index.is_cuda
     mtp_utils.mtp_scatter_next_token_ids(
         req_to_next_token_ids=req_to_next_token_ids,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
@@ -81,8 +84,11 @@ def test_mtp_verify_scatter_and_start_locations():
     )
 
 
-def test_mtp_scatter_handles_zero_draft_step():
-    req_to_next_token_ids = torch.full((1, 4), -1, dtype=torch.int64, device="cuda")
+@pytest.mark.parametrize("pinned", [False, True])
+def test_mtp_scatter_handles_zero_draft_step(pinned):
+    req_to_next_token_ids = torch.full(
+        (1, 4), -1, dtype=torch.int64, device="cpu" if pinned else "cuda", pin_memory=pinned
+    )
     req_to_next_token_scores = torch.full((1, 4), -1.0, dtype=torch.float32, device="cuda")
 
     mtp_utils.mtp_scatter_next_token_ids(
