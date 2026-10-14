@@ -33,6 +33,36 @@ def _make_manager(device="cpu"):
     return manager
 
 
+def test_req_index_allocation_preserves_order_capacity_and_reuse():
+    indexes = _ReqLinkedList(3)
+    assert indexes.is_all_free() and indexes.can_alloc_size == 3
+    assert [indexes.alloc() for _ in range(3)] == [0, 1, 2]
+    assert indexes.can_alloc_size == 0 and not indexes.is_all_free()
+    assert indexes.alloc() is None
+
+    indexes.free(1)
+    indexes.free(0)
+    assert indexes.can_alloc_size == 2
+    assert [indexes.alloc(), indexes.alloc()] == [0, 1]
+    assert indexes.alloc() is None
+    for index in range(3):
+        indexes.free(index)
+    assert indexes.is_all_free() and indexes.can_alloc_size == 3
+
+
+def test_req_index_free_rejects_unallocated_and_duplicate_indexes():
+    indexes = _ReqLinkedList(2)
+    with pytest.raises(AssertionError):
+        indexes.free(0)
+    assert indexes.alloc() == 0
+    indexes.free(0)
+    with pytest.raises(AssertionError):
+        indexes.free(0)
+    assert indexes.can_alloc_size == 2
+    assert [indexes.alloc(), indexes.alloc()] == [0, 1]
+    assert indexes.alloc() is None
+
+
 def test_cpu_updates_own_allocator_values_and_defer_gpu_publication():
     manager = _make_manager()
     indexes = torch.tensor([20, 21, 22, 23], dtype=torch.int32)
