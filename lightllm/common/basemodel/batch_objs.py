@@ -61,18 +61,11 @@ class ModelInput:
     mtp_draft_swa_pages_cpu: Optional[torch.Tensor] = None
     mtp_draft_swa_pages: Optional[torch.Tensor] = None
 
-    def _capture_cpu_mirror(self, tensor_name: str, mirror_name: str):
-        tensor = getattr(self, tensor_name)
-        if tensor is not None and not tensor.is_cuda:
-            setattr(self, mirror_name, tensor)
-        return
-
     def capture_cpu_mirrors(self):
-        self._capture_cpu_mirror("b_req_idx", "b_req_idx_cpu")
-        self._capture_cpu_mirror("b_mtp_index", "b_mtp_index_cpu")
-        self._capture_cpu_mirror("b_seq_len", "b_seq_len_cpu")
-        self._capture_cpu_mirror("b_ready_cache_len", "b_ready_cache_len_cpu")
-        return
+        for name in ("b_req_idx", "b_mtp_index", "b_seq_len", "b_ready_cache_len"):
+            tensor = getattr(self, name)
+            if tensor is not None and not tensor.is_cuda:
+                setattr(self, f"{name}_cpu", tensor)
 
     def select_mtp_cpu_mirrors(self, accept_len: torch.Tensor) -> None:
         """Select accepted tails on a draft copy and advance to its first decode token."""

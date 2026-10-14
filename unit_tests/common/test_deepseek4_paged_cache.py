@@ -11,7 +11,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 
 @pytest.fixture
-def cache(monkeypatch, tmp_path):
+def cache(monkeypatch, tmp_path, request):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the packed cache kernels")
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 100}))
@@ -21,8 +21,8 @@ def cache(monkeypatch, tmp_path):
         "LIGHTLLM_START_ARGS",
         json.dumps(
             {
-                "page_size": 256,
-                "linear_att_hash_page_size": 256,
+                "page_size": getattr(request, "param", 256),
+                "linear_att_hash_page_size": getattr(request, "param", 256),
                 "linear_att_page_block_num": 8,
                 "chunked_prefill_size": 2048,
                 "max_req_total_len": 4096,
@@ -37,6 +37,7 @@ def cache(monkeypatch, tmp_path):
         ),
     )
     get_env_start_args.cache_clear()
+    page_size = getattr(request, "param", 256)
     manager = DeepseekV4MemoryManager(
         8192,
         torch.bfloat16,
@@ -47,6 +48,7 @@ def cache(monkeypatch, tmp_path):
         max_request_num=2,
         mtp_step=3,
         swa_page_num=64,
+        cpu_cache_token_page_size=(2048 + page_size - 1) // page_size * page_size,
     )
     requests = DeepseekV4ReqManager(2, 4096, manager, sliding_window=128)
     yield manager, requests
@@ -54,22 +56,52 @@ def cache(monkeypatch, tmp_path):
     get_env_start_args.cache_clear()
 
 
+def _read_packed_rows(pool, layer_index, slots):
+    slots = slots.reshape(-1).long()
+    page_base = (slots // pool.page_size) * pool.bytes_per_page
+    data_offsets = page_base + (slots % pool.page_size) * pool.data_bytes_per_token
+    scale_offsets = page_base + pool.scale_offset_in_page + (slots % pool.page_size) * pool.scale_bytes_per_token
+    flat = pool.buffer[layer_index].view(-1)
+    data = flat[data_offsets[:, None] + torch.arange(pool.data_bytes_per_token, device=slots.device)]
+    scales = flat[scale_offsets[:, None] + torch.arange(pool.scale_bytes_per_token, device=slots.device)]
+    return torch.cat((data, scales), dim=1)
+
+
+def _write_packed_rows(pool, layer_index, slots, packed):
+    slots = slots.reshape(-1).long()
+    packed = packed.reshape(-1, pool.bytes_per_token)
+    page_base = (slots // pool.page_size) * pool.bytes_per_page
+    data_offsets = page_base + (slots % pool.page_size) * pool.data_bytes_per_token
+    scale_offsets = page_base + pool.scale_offset_in_page + (slots % pool.page_size) * pool.scale_bytes_per_token
+    flat = pool.buffer[layer_index].view(-1)
+    flat[data_offsets[:, None] + torch.arange(pool.data_bytes_per_token, device=slots.device)] = packed[
+        :, : pool.data_bytes_per_token
+    ]
+    flat[scale_offsets[:, None] + torch.arange(pool.scale_bytes_per_token, device=slots.device)] = packed[
+        :, pool.data_bytes_per_token :
+    ]
+
+
 def _reserve(manager, requests, length):
     req_idx = requests.alloc()
-    held = (length + 255) // 256 * 256
+    held = (length + manager.page_size - 1) // manager.page_size * manager.page_size
     slots = manager.alloc(held).cuda()
     requests.req_to_token_indexs[req_idx, :held] = slots
     return req_idx, slots
 
 
 @pytest.mark.parametrize("ratio", [4, 128])
+@pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
 def test_noncontiguous_pages_obey_logical_compression_boundaries(cache, ratio):
     manager, requests = cache
-    req_idx, allocated = _reserve(manager, requests, 768)
-    slots = allocated.view(3, 256)[torch.tensor([2, 0, 1], device="cuda")].reshape(-1)
-    requests.req_to_token_indexs[req_idx, :768] = slots
-    positions = torch.tensor([0, 2, 3, 126, 127, 254, 255, 256, 511, 512], device="cuda")
-    indexes = torch.empty((len(positions), 768 // ratio), dtype=torch.int32, device="cuda")
+    page_size = manager.page_size
+    req_idx, allocated = _reserve(manager, requests, 3 * page_size)
+    slots = allocated.view(3, page_size)[torch.tensor([2, 0, 1], device="cuda")].reshape(-1)
+    requests.req_to_token_indexs[req_idx, : slots.numel()] = slots
+    positions = torch.tensor(
+        [0, 2, 3, 126, 127, 254, 255, page_size - 1, page_size, 2 * page_size - 1, 2 * page_size], device="cuda"
+    )
+    indexes = torch.empty((len(positions), slots.numel() // ratio), dtype=torch.int32, device="cuda")
     lengths = torch.empty_like(positions, dtype=torch.int32)
     build_compress_index(
         torch.full_like(positions, req_idx), positions, requests.req_to_token_indexs, ratio, indexes, lengths
@@ -93,11 +125,15 @@ def test_indexer_writer_only_writes_closed_groups(cache):
     manager.c4_indexer_pool.buffer.zero_()
     manager.pack_indexer_k_to_cache(0, slots[:259], positions, keys)
     closed = torch.arange(3, 259, 4, device="cuda")
-    actual = manager.c4_indexer_pool.read(0, slots[closed] // 4)
-    expected = manager._pack_indexer_k(keys[closed])
+    actual = _read_packed_rows(manager.c4_indexer_pool, 0, slots[closed] // 4)
+    # Reference quantization is independent of the cache writer and stays in the test.
+    selected_keys = keys[closed].float()
+    scale = selected_keys.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4) / 448.0
+    quantized = (selected_keys / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    expected = torch.cat((quantized.view(torch.uint8), scale.view(torch.uint8)), dim=-1)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     # Positions 256..258 cannot publish their reserved next compressed slot.
-    assert manager.c4_indexer_pool.read(0, slots[256:257] // 4).eq(0).all()
+    assert _read_packed_rows(manager.c4_indexer_pool, 0, slots[256:257] // 4).eq(0).all()
 
 
 def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
@@ -165,11 +201,47 @@ def test_prefill_chunk_keeps_all_new_swa_rows(cache):
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
 
 
+@pytest.mark.parametrize(
+    "stage,mode", [("prefill", "none"), ("decode", "none"), ("decode", "dspark"), ("restore", "none")]
+)
+def test_request_budget_matches_private_page_allocation(cache, stage, mode):
+    manager, requests = cache
+    req_idx = requests.alloc()
+    requests.prepare_swa(req_idx, 0, 768)
+    start = 768 if stage == "prefill" else 1023
+    end = 1153 if stage == "prefill" else 1024
+    req = SimpleNamespace(
+        req_idx=req_idx,
+        cur_kv_len=start,
+        mtp_step=3,
+        args=SimpleNamespace(mtp_mode=mode),
+        get_cur_total_len=lambda: end,
+        get_chuncked_input_token_len=lambda: end,
+    )
+    budget = requests.get_request_resource_budget()
+    needed = requests.get_request_resource_need(req, stage, is_chunked_prefill=True, target_kv_len=end)
+    assert budget.reserve(needed)
+    if stage == "restore":
+        requests.prepare_swa(req_idx, end - requests.get_prompt_cache_page_size(), end)
+    elif stage == "prefill":
+        requests.prepare_prefill(torch.tensor([req_idx]), torch.tensor([start]), torch.tensor([end]))
+    else:
+        width = req.mtp_step + 1 if mode == "dspark" else max(req.mtp_step + 1, 2 * req.mtp_step)
+        requests.prepare_decode(torch.full((width,), req_idx), torch.arange(end, end + width), torch.arange(width))
+    scratch = manager.alloc_dspark_swa_block(req.mtp_step + 1, req.mtp_step + 1) if mode == "dspark" else None
+    assert budget.available <= manager.swa_page_allocator.can_use_mem_size
+    if scratch is not None:
+        manager.free_dspark_swa_block(scratch[0])
+    requests.free_req(req_idx)
+    assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
+
+
+@pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
 def test_history_copy_preserves_packed_data_and_scale_regions(cache):
     manager, requests = cache
-    _, src = _reserve(manager, requests, 512)
-    _, dst = _reserve(manager, requests, 512)
-    src = src.view(2, 256).flip(0).reshape(-1)
+    _, src = _reserve(manager, requests, 2 * manager.page_size)
+    _, dst = _reserve(manager, requests, 2 * manager.page_size)
+    src = src.view(2, manager.page_size).flip(0).reshape(-1)
     for pool in (manager.c4_pool, manager.c4_indexer_pool, manager.c128_pool):
         pool.buffer.random_(0, 256)
     manager.operator.copy_mem_to_mem(src_mem_index=src, dst_mem_index=dst)
@@ -180,11 +252,13 @@ def test_history_copy_preserves_packed_data_and_scale_regions(cache):
     assert requests.req_to_swa_pages[: requests.HOLD_REQUEST_ID].eq(-1).all()
 
 
+@pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
 def test_hold_page_and_dspark_scratch_have_separate_capacity(cache):
     manager, requests = cache
     hold = requests.req_to_token_indexs[requests.HOLD_REQUEST_ID]
     torch.testing.assert_close(
-        hold[:256], torch.arange(manager.size, manager.size + 256, dtype=torch.int32, device="cuda")
+        hold[: manager.page_size],
+        torch.arange(manager.size, manager.size + manager.page_size, dtype=torch.int32, device="cuda"),
     )
     assert requests.req_to_swa_pages[requests.HOLD_REQUEST_ID].eq(manager.swa_num_pages).all()
     assert (hold // 4).lt(manager.c4_pool.num_pages * 64).all()
@@ -198,37 +272,42 @@ def test_hold_page_and_dspark_scratch_have_separate_capacity(cache):
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
 
 
+@pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
 def test_cpu_cache_roundtrip_uses_derived_history_slots(cache):
     manager, requests = cache
-    req_idx, src = _reserve(manager, requests, 2048)
-    requests.prepare_prefill(torch.tensor([req_idx]), torch.tensor([0]), torch.tensor([2048]))
+    length = manager.cpu_cache_layout.token_page_size
+    req_idx, src = _reserve(manager, requests, length)
+    requests.prepare_prefill(torch.tensor([req_idx]), torch.tensor([0]), torch.tensor([length]))
     for pool in (manager.c4_pool, manager.c4_indexer_pool, manager.c128_pool, manager.swa_pool):
         pool.buffer.random_(0, 256)
     manager.c4_state_buffer.uniform_()
     manager.c4_indexer_state_buffer.uniform_()
     staging = torch.empty((1, manager.cpu_cache_layout.page_nbytes), dtype=torch.uint8, device="cuda")
-    manager.operator.pack_cpu_cache_pages(src.view(1, -1), torch.tensor([[req_idx, 2048]], device="cuda"), staging)
+    manager.operator.pack_cpu_cache_pages(src.view(1, -1), torch.tensor([[req_idx, length]], device="cuda"), staging)
     cpu_page = torch.empty(staging.shape, dtype=torch.uint8, pin_memory=True)
     cpu_page.copy_(staging)
     dst_req = requests.alloc()
-    requests.prepare_swa(dst_req, 1792, 2048)
-    resume_slots = requests.get_swa_slots(dst_req, torch.arange(1792, 2048, device="cuda"))
-    plan = manager.prepare_cpu_cache_load(2048, 2048, resume_slots)
+    requests.prepare_swa(dst_req, length - 256, length)
+    resume_slots = requests.get_swa_slots(dst_req, torch.arange(length - 256, length, device="cuda"))
+    plan = manager.prepare_cpu_cache_load(length, length, resume_slots)
     manager.operator.load_cpu_cache_pages(
         plan, torch.tensor([0], dtype=torch.int32, device="cuda"), SimpleNamespace(cpu_kv_cache_tensor=cpu_page)
     )
     for pool, ratio in ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128)):
         torch.testing.assert_close(
-            pool.read(0, src[ratio - 1 :: ratio].long() // ratio),
-            pool.read(0, plan.mem_indexes[ratio - 1 :: ratio].long() // ratio),
+            _read_packed_rows(pool, 0, src[ratio - 1 :: ratio].long() // ratio),
+            _read_packed_rows(pool, 0, plan.mem_indexes[ratio - 1 :: ratio].long() // ratio),
             rtol=0,
             atol=0,
         )
-    src_swa = requests.get_swa_slots(req_idx, torch.arange(1792, 2048, device="cuda")).long()
+    src_swa = requests.get_swa_slots(req_idx, torch.arange(length - 256, length, device="cuda")).long()
     dst_swa = resume_slots.long()
     for layer in range(manager.layer_num):
         torch.testing.assert_close(
-            manager.swa_pool.read(layer, src_swa), manager.swa_pool.read(layer, dst_swa), rtol=0, atol=0
+            _read_packed_rows(manager.swa_pool, layer, src_swa),
+            _read_packed_rows(manager.swa_pool, layer, dst_swa),
+            rtol=0,
+            atol=0,
         )
     requests.free([req_idx, dst_req], torch.cat([src, plan.mem_indexes]))
     assert manager.allocator.can_use_mem_size == manager.size
@@ -239,7 +318,7 @@ def test_cpu_cache_roundtrip_uses_derived_history_slots(cache):
 def test_common_cpu_cache_incrementally_preserves_recycled_checkpoints(cache, monkeypatch, gpu_prefix_len):
     from collections import deque
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuPageAllocState
-    from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as module
+    from lightllm.models.deepseek_v4 import cpu_cache as module
 
     manager, requests = cache
     req_idx, src = _reserve(manager, requests, 4096)
@@ -253,7 +332,7 @@ def test_common_cpu_cache_incrementally_preserves_recycled_checkpoints(cache, mo
         update_pages_status_to_ready=lambda pages, **kwargs: published.extend(pages),
         deref_pages=released.extend,
     )
-    cache_module = module.MultiLevelKvCacheModule.__new__(module.MultiLevelKvCacheModule)
+    cache_module = module.DeepseekV4MultiLevelKvCacheModule.__new__(module.DeepseekV4MultiLevelKvCacheModule)
     cache_module.backend = SimpleNamespace(
         is_master_in_dp=True, radix_cache=None, model=SimpleNamespace(mem_manager=manager, req_manager=requests)
     )
@@ -269,9 +348,6 @@ def test_common_cpu_cache_incrementally_preserves_recycled_checkpoints(cache, mo
     monkeypatch.setattr(module.g_infer_context, "radix_cache", None)
     monkeypatch.setattr(module.g_infer_context, "get_cpu_kv_cache_stream", lambda: cpu_stream)
     monkeypatch.setattr(module.g_infer_context, "get_can_alloc_token_num", lambda: manager.allocator.can_use_mem_size)
-    monkeypatch.setattr(
-        module.g_infer_context, "get_can_alloc_dsv4_swa_page_num", lambda: manager.swa_page_allocator.can_use_mem_size
-    )
     monkeypatch.setattr(module.dist, "barrier", lambda group: None)
     req = SimpleNamespace(
         req_id=1,
@@ -297,7 +373,7 @@ def test_common_cpu_cache_incrementally_preserves_recycled_checkpoints(cache, mo
         manager.c4_indexer_state_buffer.fill_(31 + start // 2048)
         expected_history.append(
             [
-                pool.read(0, src[start + ratio - 1 : end : ratio].long() // ratio).clone()
+                _read_packed_rows(pool, 0, src[start + ratio - 1 : end : ratio].long() // ratio).clone()
                 for pool, ratio in ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128))
             ]
         )
@@ -327,8 +403,11 @@ def test_common_cpu_cache_incrementally_preserves_recycled_checkpoints(cache, mo
         for index, (pool, ratio) in enumerate(
             ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128))
         ):
-            pool.write(
-                0, prefix[ratio - 1 :: ratio].long() // ratio, expected_history[0][index][: gpu_prefix_len // ratio]
+            _write_packed_rows(
+                pool,
+                0,
+                prefix[ratio - 1 :: ratio].long() // ratio,
+                expected_history[0][index][: gpu_prefix_len // ratio],
             )
     radix = SimpleNamespace(free_radix_cache_to_get_enough_token=lambda tokens: None)
     cache_module.backend.radix_cache = radix
@@ -349,14 +428,14 @@ def test_common_cpu_cache_incrementally_preserves_recycled_checkpoints(cache, mo
             ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128))
         ):
             torch.testing.assert_close(
-                pool.read(0, restored[start + ratio - 1 : end : ratio].long() // ratio),
+                _read_packed_rows(pool, 0, restored[start + ratio - 1 : end : ratio].long() // ratio),
                 expected_history[page][index],
                 rtol=0,
                 atol=0,
             )
     swa_slots = requests.get_swa_slots(req.req_idx, torch.arange(3840, 4096, device="cuda")).long()
     for layer in range(manager.layer_num):
-        assert manager.swa_pool.read(layer, swa_slots).eq(12).all()
+        assert _read_packed_rows(manager.swa_pool, layer, swa_slots).eq(12).all()
     tail_rows = swa_slots[-4:] // 128 * manager.c4_state_ring + swa_slots[-4:] % manager.c4_state_ring
     assert manager.c4_state_buffer[:, tail_rows].eq(22).all()
     assert manager.c4_indexer_state_buffer[:, tail_rows].eq(32).all()
@@ -406,9 +485,10 @@ def test_shared_history_restores_private_continuation(cache, length):
     assert states.get_free_cache_num() == 1
 
 
+@pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
 @pytest.mark.parametrize("length", [3, 127, 128, 255, 256, 257, 511, 512, 513, 2051])
 def test_pd_roundtrip_preserves_live_and_aligned_continuations(cache, length):
-    from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4PDCacheLayout
+    from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DeepseekV4PDCacheLayout
     from lightllm.models.deepseek_v4.triton_kernel.pd_cache_io import pack_pd_cache_page, unpack_pd_cache_page
 
     manager, requests = cache
@@ -420,16 +500,16 @@ def test_pd_roundtrip_preserves_live_and_aligned_continuations(cache, length):
         pool.buffer.random_(0, 256)
     for buffer in (manager.c4_state_buffer, manager.c4_indexer_state_buffer, manager.c128_state_buffer):
         buffer.uniform_()
-    layout = DeepseekV4PDCacheLayout.from_compress_rates(manager.compress_rates, token_page_size=256)
+    layout = DeepseekV4PDCacheLayout.from_compress_rates(manager.compress_rates, token_page_size=manager.page_size)
     staging = torch.empty((layout.page_nbytes,), dtype=torch.uint8, device="cuda")
-    for start in range(0, length, 256):
-        end = min(length, start + 256)
+    for start in range(0, length, layout.token_page_size):
+        end = min(length, start + layout.token_page_size)
         pack_pd_cache_page(manager, layout, src[start:end], staging, start, length, source)
         unpack_pd_cache_page(manager, layout, dst[start:end], staging, start, length, destination)
     for pool, ratio in ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128)):
         torch.testing.assert_close(
-            pool.read(0, src[ratio - 1 : length : ratio].long() // ratio),
-            pool.read(0, dst[ratio - 1 : length : ratio].long() // ratio),
+            _read_packed_rows(pool, 0, src[ratio - 1 : length : ratio].long() // ratio),
+            _read_packed_rows(pool, 0, dst[ratio - 1 : length : ratio].long() // ratio),
             rtol=0,
             atol=0,
         )
@@ -438,7 +518,9 @@ def test_pd_roundtrip_preserves_live_and_aligned_continuations(cache, length):
     src_swa = requests.get_swa_slots(source, positions).long()
     dst_swa = requests.get_swa_slots(destination, positions).long()
     for layer in range(manager.layer_num):
-        torch.testing.assert_close(manager.swa_pool.read(layer, src_swa), manager.swa_pool.read(layer, dst_swa))
+        torch.testing.assert_close(
+            _read_packed_rows(manager.swa_pool, layer, src_swa), _read_packed_rows(manager.swa_pool, layer, dst_swa)
+        )
     state_positions = list(range(max(0, length - 4 - length % 4), length))
     if checkpoint:
         state_positions += list(range(checkpoint - 4, checkpoint))
@@ -460,8 +542,6 @@ def test_pd_roundtrip_preserves_live_and_aligned_continuations(cache, length):
 
 
 def test_dp_transfer_uses_request_page_tables(cache):
-    from lightllm.models.deepseek_v4.triton_kernel.dp_cache_io import copy_dsv4_dp_caches
-
     manager, requests = cache
     source, src = _reserve(manager, requests, 512)
     destination, dst = _reserve(manager, requests, 512)
@@ -471,37 +551,26 @@ def test_dp_transfer_uses_request_page_tables(cache):
         pool.buffer.random_(0, 256)
     manager.c4_state_buffer.uniform_()
     manager.c4_indexer_state_buffer.uniform_()
-    pointers = torch.tensor(
-        [
-            [
-                buffer.data_ptr()
-                for buffer in (
-                    manager.c4_pool.buffer,
-                    manager.c4_indexer_pool.buffer,
-                    manager.c128_pool.buffer,
-                    requests.req_to_swa_pages,
-                    manager.swa_pool.buffer,
-                    manager.c4_state_buffer,
-                    manager.c4_indexer_state_buffer,
-                )
-            ]
-        ],
-        dtype=torch.uint64,
-        device="cuda",
+    manager.operator.init_dp_cache_transfer([manager])
+    task = SimpleNamespace(
+        req=SimpleNamespace(req_idx=destination, cur_kv_len=0),
+        mem_indexes=dst,
+        max_kv_len_mem_manager_index=0,
+        max_kv_len_mem_indexes=src,
+        source_req_idx=source,
     )
-    meta = torch.tensor(
-        [0, src.data_ptr(), dst.data_ptr(), source, destination, 512], dtype=torch.uint64, device="cuda"
-    )
-    history = torch.tensor([0, 0, 0, 1], dtype=torch.uint64, device="cuda")
-    copy_dsv4_dp_caches(pointers, manager, meta, history)
+    manager.operator.transfer_dp_cache([task], requests)
     for pool, ratio in ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128)):
         torch.testing.assert_close(
-            pool.read(0, src[ratio - 1 :: ratio].long() // ratio), pool.read(0, dst[ratio - 1 :: ratio].long() // ratio)
+            _read_packed_rows(pool, 0, src[ratio - 1 :: ratio].long() // ratio),
+            _read_packed_rows(pool, 0, dst[ratio - 1 :: ratio].long() // ratio),
         )
     src_swa = requests.get_swa_slots(source, torch.arange(256, 512, device="cuda")).long()
     dst_swa = requests.get_swa_slots(destination, torch.arange(256, 512, device="cuda")).long()
     for layer in range(manager.layer_num):
-        torch.testing.assert_close(manager.swa_pool.read(layer, src_swa), manager.swa_pool.read(layer, dst_swa))
+        torch.testing.assert_close(
+            _read_packed_rows(manager.swa_pool, layer, src_swa), _read_packed_rows(manager.swa_pool, layer, dst_swa)
+        )
     src_rows = src_swa[-4:] // 128 * manager.c4_state_ring + src_swa[-4:] % manager.c4_state_ring
     dst_rows = dst_swa[-4:] // 128 * manager.c4_state_ring + dst_swa[-4:] % manager.c4_state_ring
     for buffer in (manager.c4_state_buffer, manager.c4_indexer_state_buffer):
@@ -567,8 +636,8 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
     compress(destination, dst, 508, 512, decode=True)
     pool = manager.c4_pool if ratio == 4 else manager.c128_pool
     torch.testing.assert_close(
-        pool.read(0, src[256 + ratio - 1 : 512 : ratio].long() // ratio),
-        pool.read(0, dst[256 + ratio - 1 : 512 : ratio].long() // ratio),
+        _read_packed_rows(pool, 0, src[256 + ratio - 1 : 512 : ratio].long() // ratio),
+        _read_packed_rows(pool, 0, dst[256 + ratio - 1 : 512 : ratio].long() // ratio),
         rtol=0,
         atol=0,
     )
@@ -612,7 +681,9 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     requests.free([source, destination], torch.cat([src, dst]))
 
 
-@pytest.mark.parametrize("hash_page_size", [256, 512])
+@pytest.mark.parametrize(
+    "cache,hash_page_size", [(256, 256), (256, 512), (512, 512), (768, 768), (1024, 1024)], indirect=["cache"]
+)
 @pytest.mark.parametrize("hit_extra_page", [False, True])
 @pytest.mark.parametrize("chunked", [True, False])
 def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash_page_size, hit_extra_page, chunked):
@@ -623,13 +694,15 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
 
     manager, requests = cache
     small = requests.create_small_page_cache_manager(2)
-    radix = HybridAttPagedRadixCache(manager.size, 0, hash_page_size, 2048 // hash_page_size, manager, small)
+    block_num = 2048 // hash_page_size
+    big_page_tokens = block_num * hash_page_size
+    radix = HybridAttPagedRadixCache(manager.size, 0, hash_page_size, block_num, manager, small)
     args = get_env_start_args()
     args.linear_att_hash_page_size = hash_page_size
-    args.linear_att_page_block_num = 2048 // hash_page_size
+    args.linear_att_page_block_num = block_num
     args.disable_chunked_prefill = not chunked
-    tail_len = 2048 + hash_page_size
-    hit_len = tail_len if hit_extra_page else 2048
+    tail_len = big_page_tokens + hash_page_size
+    hit_len = tail_len if hit_extra_page else big_page_tokens
     if not chunked:
         args.chunked_prefill_size = args.max_req_total_len
     for name, value in {
@@ -668,7 +741,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     source, held = _reserve(manager, requests, tail_len + 1)
     req = request(source, tail_len + 1)
     req.hold_kv_len = held.numel()
-    for end in (2048, tail_len) if chunked else (tail_len + 1,):
+    for end in (big_page_tokens, tail_len) if chunked else (tail_len + 1,):
         assert req.get_chuncked_input_token_len() == end
         requests.prepare_swa(source, req.cur_kv_len, end)
         for pool in (manager.swa_pool, manager.c4_pool, manager.c4_indexer_pool, manager.c128_pool):
@@ -691,14 +764,14 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
         fork._hybrid_match_radix_cache()
         assert fork.cur_kv_len == hit_len
         assert fork.hold_kv_len == hit_len
-        assert fork.shared_kv_node.node_prefix_total_len == 2048
+        assert fork.shared_kv_node.node_prefix_total_len == big_page_tokens
         if hit_extra_page:
-            assert requests.req_to_token_indexs[fork.req_idx, 2048].item() != held[2048].item()
+            assert requests.req_to_token_indexs[fork.req_idx, big_page_tokens].item() != held[big_page_tokens].item()
         restored = requests.req_to_token_indexs[fork.req_idx, :hit_len]
         for pool, ratio in ((manager.c4_pool, 4), (manager.c4_indexer_pool, 4), (manager.c128_pool, 128)):
             torch.testing.assert_close(
-                pool.read(0, held[ratio - 1 : hit_len : ratio].long() // ratio),
-                pool.read(0, restored[ratio - 1 : hit_len : ratio].long() // ratio),
+                _read_packed_rows(pool, 0, held[ratio - 1 : hit_len : ratio].long() // ratio),
+                _read_packed_rows(pool, 0, restored[ratio - 1 : hit_len : ratio].long() // ratio),
             )
     assert set(requests._swa_pages[forks[0].req_idx].values()).isdisjoint(
         requests._swa_pages[forks[1].req_idx].values()
@@ -717,55 +790,155 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     assert small.get_free_cache_num() == small.size
 
 
-def test_cpu_load_failure_releases_reserved_history_and_private_swa(cache, monkeypatch):
-    from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as module
+@pytest.mark.parametrize("failure_stage", ["copy", "checkpoint"])
+def test_cpu_load_failure_releases_reserved_history_and_private_swa(cache, monkeypatch, failure_stage):
+    from lightllm.models.deepseek_v4 import cpu_cache as module
 
     manager, requests = cache
     req_idx = requests.alloc()
-    cache_module = module.MultiLevelKvCacheModule.__new__(module.MultiLevelKvCacheModule)
+    cache_module = module.DeepseekV4MultiLevelKvCacheModule.__new__(module.DeepseekV4MultiLevelKvCacheModule)
     cache_module.backend = SimpleNamespace(
         is_master_in_dp=False, radix_cache=None, model=SimpleNamespace(mem_manager=manager, req_manager=requests)
     )
     cache_module.cpu_cache_client = SimpleNamespace()
     cache_module.init_sync_group = None
+    pages = [0] if failure_stage == "copy" else [0, 1]
+    if failure_stage == "checkpoint":
+        cache_module.backend.radix_cache = SimpleNamespace(free_radix_cache_to_get_enough_token=lambda size: None)
+        # The first checkpoint registers successfully; reading the missing second page fails.
+        cache_module.cpu_cache_client.cpu_kv_cache_tensor = torch.zeros(
+            (1, manager.cpu_cache_layout.page_nbytes), dtype=torch.uint8
+        )
     req = SimpleNamespace(
         req_idx=req_idx,
         req_id=1,
         cur_kv_len=0,
         hold_kv_len=0,
+        hybrid_cache_len=len(pages) * 2048,
+        hybrid_len_to_big_page_id={},
+        tail_small_page_buffer_id=None,
         image_block_spans=[],
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
         shm_req=SimpleNamespace(
-            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [0]),
-            token_hash_page_len_list=SimpleNamespace(get_all=lambda: [2048]),
+            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: pages),
+            token_hash_page_len_list=SimpleNamespace(get_all=lambda: [2048, 4096][: len(pages)]),
             disk_prompt_cache_len=0,
         ),
     )
 
     def fail(**kwargs):
-        raise RuntimeError("injected copy failure")
+        if failure_stage == "copy":
+            raise RuntimeError("injected copy failure")
 
     monkeypatch.setattr(manager.operator, "load_cpu_cache_pages", fail)
     monkeypatch.setattr(module.g_infer_context, "is_deepseek_v4", True)
     monkeypatch.setattr(module.g_infer_context, "req_manager", requests)
     monkeypatch.setattr(module.g_infer_context, "radix_cache", None)
     monkeypatch.setattr(module.g_infer_context, "get_can_alloc_token_num", lambda: manager.allocator.can_use_mem_size)
-    monkeypatch.setattr(
-        module.g_infer_context, "get_can_alloc_dsv4_swa_page_num", lambda: manager.swa_page_allocator.can_use_mem_size
-    )
-    with pytest.raises(RuntimeError, match="injected copy failure"):
+    with pytest.raises(RuntimeError if failure_stage == "copy" else IndexError):
         cache_module.load_cpu_cache_to_reqs([req])
     assert req.cur_kv_len == req.hold_kv_len == 0
     assert manager.allocator.can_use_mem_size == manager.size
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
+    assert manager.big_page_buffers.get_free_cache_num() == manager.big_page_buffers.size
+    assert req.hybrid_len_to_big_page_id == {}
+    assert req.tail_small_page_buffer_id is None
     requests.free_req(req_idx)
+
+
+@pytest.mark.parametrize("mode", ["decode", "prefill", "prefill_aux"])
+def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
+    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+    from lightllm.models.deepseek_v4.layer_infer import indexer as indexer_module
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4C4PrefillWorkspace, DeepseekV4Workspace
+
+    torch.manual_seed(1593)
+    monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
+    monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
+    args = get_env_start_args()
+    monkeypatch.setitem(args, "mtp_mode", "none")
+    monkeypatch.setitem(args, "enable_decode_microbatch_overlap", False)
+    monkeypatch.setitem(args, "enable_prefill_microbatch_overlap", False)
+    manager, requests = cache
+    req_idx, slots = _reserve(manager, requests, 4096)
+    heads, tokens = 64, 5
+    config = dict(
+        compress_ratios=[4, 128, 0],
+        index_topk=512,
+        index_head_dim=128,
+        qk_rope_head_dim=64,
+        index_n_heads=heads,
+        sliding_window=128,
+        head_dim=512,
+        rms_norm_eps=1e-6,
+    )
+    indexer = indexer_module.DeepseekV4IndexInfer(0, config, 1)
+    model = SimpleNamespace(batch_max_tokens=tokens, config=config, max_seq_length=4096)
+    state = DeepseekV4InferStateInfo()
+    state.mem_manager, state.req_manager = manager, requests
+    state.dsv4_workspace = DeepseekV4Workspace(model)
+    state.is_prefill = mode != "decode"
+    state.microbatch_index, state.max_kv_seq_len = 0, 4096
+    state.b_req_idx = torch.tensor([req_idx] if state.is_prefill else [req_idx] * tokens, device="cuda")
+    state.b_seq_len = torch.full_like(state.b_req_idx, 4096)
+    state.position_ids = torch.arange(3068, 3068 + tokens, device="cuda")
+    state._dsv4_token_to_batch_idx = torch.zeros(tokens, dtype=torch.int64, device="cuda")
+    # Exercise chunk scheduling without requiring a long prompt or large logits allocation.
+    monkeypatch.setattr(indexer_module, "C4_PREFILL_LOGITS_BUDGET_BYTES", 2 * 1024 * 4)
+    aux = DeepseekV4C4PrefillWorkspace(tokens, 4096, 1, heads, 128) if mode == "prefill_aux" else None
+    if aux is not None:
+        monkeypatch.setattr(aux, "rows_per_logits_chunk", lambda capacity: 2)
+    keys = (torch.randn((1024, 128), device="cuda") * 0.1).to(torch.float8_e4m3fn)
+    scales = torch.ones((1024, 1), dtype=torch.float32, device="cuda")
+    packed = torch.cat((keys.view(torch.uint8), scales.view(torch.uint8)), dim=1)
+    c4_slots = slots[3::4].long() // 4
+    _write_packed_rows(manager.c4_indexer_pool, 0, c4_slots, packed)
+    q = (torch.randn((tokens, heads, 128), device="cuda") * 0.125).to(torch.float8_e4m3fn)
+    weights = torch.rand((tokens, heads), device="cuda")
+
+    def select():
+        return indexer._c4_indices(state, q, weights, state.position_ids, c4_aux_workspace=aux)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        select()
+        state.c4_indexer_metadata = None
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured, captured_lengths = select()
+    # Change both causal lengths and Q inputs; graph metadata must be recomputed.
+    state.position_ids.add_(256)
+    state.b_seq_len.fill_(3584)
+    q.copy_((q.float() * 1.25).to(q.dtype))
+    graph.replay()
+    actual = captured.clone()
+    actual_lengths = captured_lengths.clone()
+    state.c4_indexer_metadata = None
+    eager, eager_lengths = select()
+    torch.testing.assert_close(actual.sort(dim=-1).values, eager.sort(dim=-1).values, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lengths, eager_lengths, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lengths, torch.full_like(actual_lengths, 512))
+    inverse_slots = torch.full((manager.c4_indexer_pool.num_pages * 64,), -1, device="cuda", dtype=torch.long)
+    inverse_slots[c4_slots] = torch.arange(1024, device="cuda")
+    logical_indices = inverse_slots[actual[:, 0].long()]
+    scores = ((q.float() @ keys.float().T).relu() * weights[:, :, None]).sum(1)
+    valid_lengths = (state.position_ids + 1) // 4
+    for row in range(tokens):
+        selected = logical_indices[row]
+        assert ((selected >= 0) & (selected < valid_lengths[row])).all()
+        selected_scores = scores[row, selected].sort(descending=True).values
+        reference_scores = scores[row, : valid_lengths[row]].topk(512).values
+        torch.testing.assert_close(selected_scores, reference_scores, rtol=2e-3, atol=2e-3)
+    requests.free([req_idx], slots)
 
 
 def _checkpoint_transfer_worker(rank, rendezvous):
     from datetime import timedelta
     from sortedcontainers import SortedDict
     import torch.distributed as dist
-    from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4CpuCacheLayout
+    from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DeepseekV4CpuCacheLayout
     from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheManager
     from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
     from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -775,7 +948,13 @@ def _checkpoint_transfer_worker(rank, rendezvous):
         "gloo", init_method="file://" + rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=60)
     )
     try:
-        buffers = DeepseekV4StateCacheManager(2, DeepseekV4CpuCacheLayout.from_compress_rates([4, 128]))
+        layout = DeepseekV4CpuCacheLayout.from_compress_rates([4, 128])
+        buffers = DeepseekV4StateCacheManager(
+            2,
+            swa_shape=(layout.layer_num, layout.swa_gpu_pages_per_page, layout.swa_gpu_page_nbytes),
+            c4_shape=(layout.n_c4, layout.c4_state_rows, 4 * layout.head_dim),
+            indexer_shape=(layout.n_c4, layout.c4_state_rows, 4 * layout.indexer_head_dim),
+        )
         if rank == 0:
             for value in (31, 32):
                 buffers.buffer[buffers.alloc_one_state_cache()].fill_(value)

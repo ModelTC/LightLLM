@@ -485,12 +485,7 @@ def pack_gpu_cache_to_staging(
 ) -> None:
     """Pack a compact batch of complete CPU checkpoint pages into caller-owned CUDA staging."""
     layout = mem_manager.cpu_cache_layout
-    assert source_mem_indexes.is_cuda and staging.is_cuda
-    assert source_mem_indexes.ndim == 2 and source_mem_indexes.shape[1] == layout.token_page_size
-    assert staging.dtype == torch.uint8 and staging.is_contiguous()
     page_num = source_mem_indexes.shape[0]
-    assert source_req_meta.shape == (page_num, 2) and source_req_meta.is_cuda
-    assert staging.shape == (page_num, layout.page_nbytes)
 
     full_slots = source_mem_indexes.reshape(-1)
     has_c4 = mem_manager.c4_pool is not None
@@ -592,11 +587,7 @@ def scatter_staging_to_cpu_pages(
     page_indexes: torch.Tensor,
 ) -> None:
     """Copy packed staging rows to their pinned, mapped shared-memory pages."""
-    assert staging.is_cuda and page_indexes.is_cuda
-    assert staging.dtype == torch.uint8 and staging.is_contiguous() and cpu_pages.is_contiguous()
     page_num, page_nbytes = staging.shape
-    assert page_indexes.numel() == page_num
-    assert cpu_pages.ndim == 2 and cpu_pages.shape[1] == page_nbytes
     blocks_per_page = triton.cdiv(page_nbytes, _BYTE_BLOCK)
     _scatter_staging_to_cpu_kernel[(page_num * blocks_per_page,)](
         staging,
@@ -616,40 +607,22 @@ def unpack_cpu_cache_to_gpu(
     load_plan,
     cpu_pages: torch.Tensor,
     cpu_page_indexes: torch.Tensor,
-    first_page_history_offset_tokens: int = 0,
 ) -> None:
     """Restore missing 256-token history blocks and the final 256-token resume state.
 
     ``cpu_page_indexes`` names consecutive large CPU checkpoint pages. The first
-    page may overlap an existing radix prefix; ``first_page_history_offset_tokens``
-    selects its first missing 256-token block without copying the overlapped bytes.
+    page may overlap an existing radix prefix. The validated load plan identifies
+    the first missing block, so the overlapped bytes remain untouched.
     """
     layout = mem_manager.cpu_cache_layout
-    assert load_plan.history_full_slots.is_cuda and cpu_page_indexes.is_cuda
-    assert load_plan.history_full_slots.ndim == 2
-    assert load_plan.history_full_slots.shape[1] == _HISTORY_BLOCK_SIZE
-    assert load_plan.resume_swa_slots.shape == (_HISTORY_BLOCK_SIZE,)
-    assert 0 <= first_page_history_offset_tokens < layout.token_page_size
-    assert first_page_history_offset_tokens % _HISTORY_BLOCK_SIZE == 0
-    assert cpu_pages.ndim == 2 and cpu_pages.shape[1] == layout.page_nbytes and cpu_pages.is_contiguous()
-    assert cpu_page_indexes.numel() > 0
-
     history_block_num = load_plan.history_full_slots.shape[0]
-    assert history_block_num > 0
-    assert load_plan.loaded_end - load_plan.loaded_start == history_block_num * _HISTORY_BLOCK_SIZE
-    assert load_plan.loaded_start % layout.token_page_size == first_page_history_offset_tokens
     blocks_per_cpu_page = layout.history_block_num
-    first_history_block = first_page_history_offset_tokens // _HISTORY_BLOCK_SIZE
+    first_history_block = (load_plan.loaded_start % layout.token_page_size) // _HISTORY_BLOCK_SIZE
     expected_cpu_page_num = triton.cdiv(first_history_block + history_block_num, blocks_per_cpu_page)
     assert cpu_page_indexes.numel() == expected_cpu_page_num
 
     has_c4 = mem_manager.c4_pool is not None
     has_c128 = mem_manager.c128_pool is not None
-    if has_c4:
-        assert load_plan.history_c4_slots.shape == (history_block_num, mem_manager.c4_pool.page_size)
-    if has_c128:
-        assert load_plan.history_c128_slots.shape == (history_block_num, 2)
-
     c4_pool = mem_manager.c4_pool.buffer if has_c4 else None
     c4_indexer_pool = mem_manager.c4_indexer_pool.buffer if has_c4 else None
     c128_pool = mem_manager.c128_pool.buffer if has_c128 else None

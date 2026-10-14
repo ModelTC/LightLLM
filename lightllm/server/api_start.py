@@ -66,9 +66,12 @@ def _launch_subprocesses(args: StartArgs):
 
     model_type = get_model_type(args.model_dir)
     if model_type == "deepseek_v4":
-        if args.page_size != 256:
-            logger.warning("DeepSeek-V4 forces --page_size to 256 (got %s)", args.page_size)
-        args.page_size = 256
+        from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DSV4_CACHE_BLOCK_SIZE
+
+        if args.page_size == 1:
+            args.page_size = DSV4_CACHE_BLOCK_SIZE
+        if args.page_size <= 0 or args.page_size % DSV4_CACHE_BLOCK_SIZE:
+            raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_CACHE_BLOCK_SIZE}")
         if args.enable_cpu_cache and args.cache_placement_strategy == "adaptive":
             logger.warning("DeepSeek-V4 incremental CPU cache uses legacy placement")
             args.cache_placement_strategy = "legacy"
@@ -150,7 +153,8 @@ def _launch_subprocesses(args: StartArgs):
     if is_hybrid_model:
         # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
         assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
-        assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
+        if model_type != "deepseek_v4":
+            assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
         # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。
         assert not is_hybrid_model, "--diverse_mode does not support hybrid attention models"
@@ -318,7 +322,7 @@ def _launch_subprocesses(args: StartArgs):
                 if args.cpu_cache_token_page_size != big_page_tokens:
                     raise ValueError("DeepSeek-V4 CPU cache pages must match the hybrid big-page checkpoint interval")
             elif args.cpu_cache_token_page_size is None:
-                args.cpu_cache_token_page_size = 2048
+                args.cpu_cache_token_page_size = (2048 + args.page_size - 1) // args.page_size * args.page_size
         elif is_hybrid_att_model(args.model_dir):
             args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
             logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")

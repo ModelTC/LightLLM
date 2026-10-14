@@ -3,7 +3,8 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
-ARG VLLM_VERSION=0.21.0
+# GLM/DSV4 use the row-wise Top-K interface tested with vLLM 0.22.1.
+ARG VLLM_VERSION=0.22.1
 ARG NIXL_REF=v1.2.0
 # The independently buildable vLLM fork retains Hopper/DSV4 and supports out buffers.
 ARG FLASH_MLA_REPO=https://github.com/vllm-project/FlashMLA.git

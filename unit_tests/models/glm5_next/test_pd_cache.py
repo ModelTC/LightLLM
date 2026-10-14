@@ -113,13 +113,37 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
             ]
         )
 
-    source[0].write_mem_to_page_kv_move_buffer(src_indexes, 0, 0, source, prefill_tp)
+    moved_bytes = source[0].write_mem_to_page_kv_move_buffer(
+        src_indexes, 0, 0, source, prefill_tp, start_kv_index=0, request_kv_len=length
+    )
+    assert moved_bytes == source[0].kv_move_buffer[0].nbytes
     # Model a byte-preserving transport between separate P/D page buffers.
     dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp)
-    source[0].write_mem_to_page_kv_move_buffer([], 0, 0, source, prefill_tp, "att_state", src_req)
+    dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp, start_kv_index=0, request_kv_len=length)
+    moved_bytes = source[0].write_mem_to_page_kv_move_buffer(
+        [],
+        0,
+        0,
+        source,
+        prefill_tp,
+        start_kv_index=0,
+        request_kv_len=length,
+        page_kind="att_state",
+        req_idx=src_req,
+    )
+    assert moved_bytes == source[0].kv_move_buffer[0].nbytes
     dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem([], 0, 0, dest, decode_tp, "att_state", dst_req)
+    dest[0].read_page_kv_move_buffer_to_mem(
+        [],
+        0,
+        0,
+        dest,
+        decode_tp,
+        start_kv_index=0,
+        request_kv_len=length,
+        page_kind="att_state",
+        req_idx=dst_req,
+    )
     torch.cuda.synchronize()
 
     for rank, mem in enumerate(dest):

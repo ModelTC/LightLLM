@@ -3,7 +3,7 @@ import os
 
 import torch
 
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_C4_PAGE_SIZE
+from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DSV4_CACHE_BLOCK_SIZE
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -11,8 +11,8 @@ C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
 C4_LOGITS_ALIGNMENT = 256
 
 
-def _compress_cap(max_kv_seq_len: int, ratio: int) -> int:
-    entries = max(1, int(max_kv_seq_len) // ratio)
+def compressed_kv_capacity(max_kv_seq_len: int, compress_ratio: int) -> int:
+    entries = max(1, int(max_kv_seq_len) // compress_ratio)
     return ((entries + 63) // 64) * 64
 
 
@@ -31,11 +31,15 @@ class DeepseekV4C4PrefillWorkspace:
         self.max_request_num = int(max_request_num)
         self.index_n_heads = int(index_n_heads)
         self.index_head_dim = int(index_head_dim)
-        self.max_page_cap = _compress_cap(max_seq_length, 4) // DSV4_C4_PAGE_SIZE
+        self.max_page_cap = compressed_kv_capacity(max_seq_length, 4) // (DSV4_CACHE_BLOCK_SIZE // 4)
 
-        # The same byte arena serves the sequential indexer-K, indexer-Q and logits
-        # phases. Those phases run on one CUDA stream and therefore never overlap.
-        self.scratch = torch.empty((C4_PREFILL_LOGITS_BUDGET_BYTES,), dtype=torch.uint8, device="cuda")
+        max_indexer_k_phase = self.token_capacity * self.index_head_dim * (4 * 4 + 2 + 2)
+        max_indexer_q_phase = self.token_capacity * self.index_n_heads * (self.index_head_dim * 2 + 2)
+        assert max(max_indexer_k_phase, max_indexer_q_phase) <= C4_PREFILL_LOGITS_BUDGET_BYTES
+
+        # K/Q staging shares one arena on the auxiliary stream. DeepGEMM owns
+        # its logits output; rows_per_logits_chunk bounds that allocation separately.
+        self.scratch = torch.empty((max(max_indexer_k_phase, max_indexer_q_phase),), dtype=torch.uint8, device="cuda")
         self.idx_q_fp8 = torch.empty(
             (self.token_capacity, self.index_n_heads, self.index_head_dim),
             dtype=torch.float8_e4m3fn,
@@ -49,20 +53,13 @@ class DeepseekV4C4PrefillWorkspace:
         self.ctx_lens = torch.empty((self.token_capacity, 1), dtype=torch.int32, device="cuda")
         self.topk_lengths = torch.empty((self.token_capacity,), dtype=torch.int32, device="cuda")
 
-        max_indexer_k_phase = self.token_capacity * self.index_head_dim * (4 * 4 + 2 + 2)
-        max_indexer_q_phase = self.token_capacity * self.index_n_heads * (self.index_head_dim * 2 + 2)
-        assert max(max_indexer_k_phase, max_indexer_q_phase) <= C4_PREFILL_LOGITS_BUDGET_BYTES
-
     @staticmethod
     def _flat_view(buffer: torch.Tensor, shape) -> torch.Tensor:
         size = math.prod(shape)
-        assert size <= buffer.numel()
         return buffer[:size].view(shape)
 
     def _scratch_view(self, shape, dtype: torch.dtype, byte_offset: int = 0) -> torch.Tensor:
-        nbytes = math.prod(shape) * torch._utils._element_size(dtype)
-        assert byte_offset % torch._utils._element_size(dtype) == 0
-        assert byte_offset + nbytes <= self.scratch.numel()
+        nbytes = math.prod(shape) * dtype.itemsize
         return self.scratch[byte_offset : byte_offset + nbytes].view(dtype).view(shape)
 
     def indexer_k_buffers(self, token_num: int):
@@ -100,17 +97,9 @@ class DeepseekV4C4PrefillWorkspace:
             self.topk_lengths[:token_num],
         )
 
-    @staticmethod
-    def aligned_c4_cap(c4_cap: int) -> int:
-        return ((int(c4_cap) + C4_LOGITS_ALIGNMENT - 1) // C4_LOGITS_ALIGNMENT) * C4_LOGITS_ALIGNMENT
-
     def rows_per_logits_chunk(self, c4_cap: int) -> int:
-        return max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (self.aligned_c4_cap(c4_cap) * 4))
-
-    def logits(self, row_num: int, c4_cap: int) -> torch.Tensor:
-        aligned_c4_cap = self.aligned_c4_cap(c4_cap)
-        logits = self._scratch_view((row_num, aligned_c4_cap), torch.float32)
-        return logits[:, :c4_cap]
+        aligned_c4_cap = ((c4_cap + C4_LOGITS_ALIGNMENT - 1) // C4_LOGITS_ALIGNMENT) * C4_LOGITS_ALIGNMENT
+        return max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_c4_cap * 4))
 
 
 class DeepseekV4Workspace:
@@ -127,7 +116,7 @@ class DeepseekV4Workspace:
             # the actual number of visible history + draft-block entries.
             self.swa_capacity = max(self.swa_capacity, ((dspark_width + 127) // 128) * 128)
         self.index_topk = int(model.config["index_topk"])
-        self.c128_cap = self.compress_cap(model.max_seq_length, 128)
+        self.c128_cap = compressed_kv_capacity(model.max_seq_length, 128)
         overlap = args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap
         self.microbatch_count = 1 + int(overlap)
 
@@ -146,7 +135,6 @@ class DeepseekV4Workspace:
         self.c4_prefill_aux = None
 
     def init_c4_prefill_aux(self, model):
-        assert self.needs_c4_prefill_aux(model)
         if self.c4_prefill_aux is None:
             self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(
                 token_capacity=self.token_capacity,
@@ -162,10 +150,6 @@ class DeepseekV4Workspace:
                 (self.token_capacity, padded_q_head_num, head_dim), dtype=dtype, device="cuda"
             )
             self.flashmla_prefill_q[:, real_q_head_num:, :].zero_()
-
-    @staticmethod
-    def compress_cap(max_kv_seq_len: int, ratio: int) -> int:
-        return _compress_cap(max_kv_seq_len, ratio)
 
     @staticmethod
     def needs_c4_prefill_aux(model) -> bool:

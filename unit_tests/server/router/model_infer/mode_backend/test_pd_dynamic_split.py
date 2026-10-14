@@ -54,6 +54,9 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
     backend._reorder_long_prefill_reqs = MagicMock(side_effect=lambda reqs: reqs)
 
     infer_context = base_backend.g_infer_context
+    from lightllm.common.req_manager.base import ReqManager
+
+    monkeypatch.setattr(infer_context, "req_manager", ReqManager.__new__(ReqManager))
     monkeypatch.setattr(infer_context, "get_can_alloc_token_num", MagicMock(return_value=0))
     monkeypatch.setattr(
         infer_context,

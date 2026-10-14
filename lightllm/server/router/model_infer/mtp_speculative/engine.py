@@ -15,7 +15,6 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
-from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle_with_att import EagleWithAttProposer
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -110,9 +109,6 @@ class SpecEngine:
         accept_len: Optional[torch.Tensor] = None,  # [req_num]
         accept_len_cpu: Optional[AsyncPinnedCpuTensor] = None,  # [req_num]
     ) -> SpecProposal:
-        proposer_kwargs = {}
-        if self.backend.is_deepseek_v4 and isinstance(self.proposer, EagleWithAttProposer):
-            proposer_kwargs = {"accept_len_cpu": accept_len_cpu}
         return self.proposer.propose_next(
             target_model_input=target_model_input,
             target_model_output=target_model_output,
@@ -120,7 +116,7 @@ class SpecEngine:
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=draft_step,
             accept_len=accept_len,
-            **proposer_kwargs,
+            accept_len_cpu=accept_len_cpu,
         )
 
     # Planner runtime statistics.

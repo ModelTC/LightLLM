@@ -55,8 +55,6 @@ class MMWeightTpl(BaseWeightTpl):
         use_custom_tensor_mananger: bool = True,
         out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
-        if out_dtype is not None and not isinstance(self.quant_method, NoQuantization):
-            raise NotImplementedError(f"out_dtype is not supported for quant method {self.quant_method.method_name}")
         if out_dtype is not None:
             return self.quant_method.apply(
                 input_tensor,

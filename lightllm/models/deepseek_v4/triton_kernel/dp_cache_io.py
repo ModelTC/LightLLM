@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_PROMPT_CACHE_PAGE_SIZE
+from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DSV4_CACHE_BLOCK_SIZE
 
 
 _C4_RATIO = 4
@@ -296,7 +296,7 @@ def copy_dsv4_dp_caches(
         task_num,
         source_pool_ptr_count=_SOURCE_POOL_PTR_COUNT,
         task_meta_width=_TASK_META_WIDTH,
-        history_block_size=DSV4_PROMPT_CACHE_PAGE_SIZE,
+        history_block_size=DSV4_CACHE_BLOCK_SIZE,
         history_layer_num=history_layer_num,
         c4_ratio=_C4_RATIO,
         c4_pool_page_size=dst_mem_manager.c4_pool.page_size if has_c4 else 0,

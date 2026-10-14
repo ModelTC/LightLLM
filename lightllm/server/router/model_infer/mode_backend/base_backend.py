@@ -206,7 +206,11 @@ class ModeBackend:
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
         # DeepSeek-V4 DP prompt-cache checkpoints live in process-local CPU memory.
-        self.node_gloo_group = create_new_group_for_current_node("gloo")
+        self.node_gloo_group = (
+            create_new_group_for_current_node("gloo")
+            if self.is_deepseek_v4 and self.args.enable_dp_prompt_cache_fetch
+            else None
+        )
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
@@ -253,7 +257,12 @@ class ModeBackend:
             self.init_spec_engine()
 
         if self.args.enable_cpu_cache:
-            self.multi_level_cache_module = MultiLevelKvCacheModule(self)
+            cache_module_class = MultiLevelKvCacheModule
+            if self.is_deepseek_v4:
+                from lightllm.models.deepseek_v4.cpu_cache import DeepseekV4MultiLevelKvCacheModule
+
+                cache_module_class = DeepseekV4MultiLevelKvCacheModule
+            self.multi_level_cache_module = cache_module_class(self)
 
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
@@ -290,7 +299,7 @@ class ModeBackend:
             else:
                 self.mem_managers.append(self.model.mem_manager)
         if self.is_deepseek_v4:
-            self.dp_kv_shared_module.init_dsv4_cache_transfer(self.mem_managers)
+            self.model.mem_manager.operator.init_dp_cache_transfer(self.mem_managers)
         return
 
     def get_max_total_token_num(self):
@@ -724,10 +733,8 @@ class ModeBackend:
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
-        is_deepseek_v4 = self.is_deepseek_v4
-        can_alloc_dsv4_swa_page_num = None
-        if is_deepseek_v4:
-            can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
+        req_manager = g_infer_context.req_manager
+        resource_budget = req_manager.get_request_resource_budget()
 
         for req_obj in ready_reqs:
             if req_obj.filter_mark:
@@ -763,16 +770,13 @@ class ModeBackend:
                 # Small pages benefit from reserving a few decode slots per allocation.
                 if alloc_token_num > 0 and self.args.page_size < 8:
                     alloc_token_num += 8 // self.args.page_size * self.args.page_size
-                can_run = alloc_token_num <= can_alloc_token_num
-                if can_run and is_deepseek_v4:
-                    swa_page_num = req_obj.get_dsv4_decode_need_swa_page_num()
-                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
+                can_run = alloc_token_num <= can_alloc_token_num and resource_budget.reserve(
+                    req_manager.get_request_resource_need(req_obj, "decode")
+                )
                 if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
-                    if is_deepseek_v4:
-                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         if self.args.run_mode == "decode":
@@ -804,17 +808,14 @@ class ModeBackend:
                 token_num, alloc_token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=is_chuncked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                can_run = alloc_token_num <= can_alloc_token_num
-                if can_run and is_deepseek_v4:
-                    swa_page_num = req_obj.get_dsv4_prefill_need_swa_page_num(is_chuncked_prefill=is_chuncked_prefill)
-                    can_run = swa_page_num <= can_alloc_dsv4_swa_page_num
+                can_run = alloc_token_num <= can_alloc_token_num and resource_budget.reserve(
+                    req_manager.get_request_resource_need(req_obj, "prefill", is_chunked_prefill=is_chuncked_prefill)
+                )
                 if can_run:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
-                    if is_deepseek_v4:
-                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True

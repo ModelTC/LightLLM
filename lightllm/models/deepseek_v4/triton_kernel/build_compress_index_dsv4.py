@@ -44,7 +44,7 @@ def build_compress_index(
     index: torch.Tensor,
     length: torch.Tensor,
 ):
-    """Derive compressed entries from group-end full slots in 256-token pages.
+    """Derive compressed entries from group-end full slots in aligned allocation pages.
 
     Only entries closed at the logical query position are visible. Reserved
     capacity beyond that position is masked to -1, regardless of its contents.

@@ -25,7 +25,7 @@ class _Tokenizer:
 
 @pytest.mark.parametrize("prefix_len", range(8))
 def test_tokenizer_uses_position_dependent_canonical_suffix(prefix_len):
-    from lightllm.models.deepseek_v4.model import DeepSeekV4Tokenizer
+    from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
     tokenizer = DeepSeekV4Tokenizer(_Tokenizer(), "/unused", VISION_CONFIG)
     image = SimpleNamespace(
@@ -52,7 +52,7 @@ def test_tokenizer_uses_position_dependent_canonical_suffix(prefix_len):
 
 
 def test_tokenizer_keeps_dsv4_on_one_dimensional_positions():
-    from lightllm.models.deepseek_v4.model import DeepSeekV4Tokenizer
+    from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
     tokenizer = DeepSeekV4Tokenizer(_Tokenizer(), "/unused", VISION_CONFIG)
     image = SimpleNamespace(image_h=64, image_w=64, grid_thwd=None)
@@ -126,17 +126,15 @@ def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypa
 
     radix_cache = FakeRadixCache()
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
-    monkeypatch.setattr(g_infer_context, "get_can_alloc_dsv4_swa_page_num", lambda: 2)
     monkeypatch.setattr(g_infer_context, "is_deepseek_v4", True)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
-    monkeypatch.setattr(
-        g_infer_context,
-        "req_manager",
-        SimpleNamespace(
-            req_to_token_indexs=torch.empty((1, 1025), dtype=torch.int64),
-            restore_small_page_state=lambda **kwargs: None,
-        ),
-    )
+    from lightllm.common.req_manager import DeepseekV4ReqManager
+
+    req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
+    req_manager.req_to_token_indexs = torch.empty((1, 1025), dtype=torch.int64)
+    req_manager.restore_small_page_state = lambda **kwargs: None
+    req_manager.mem_manager = SimpleNamespace(swa_page_allocator=SimpleNamespace(can_use_mem_size=2))
+    monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
@@ -214,13 +212,11 @@ def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
 def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
     from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 
-    monkeypatch.setattr(
-        g_infer_context,
-        "req_manager",
-        SimpleNamespace(
-            sliding_window=128, get_prompt_cache_page_size=lambda: 256, get_swa_page_need=lambda req, start, end: 16
-        ),
-    )
+    from lightllm.common.req_manager import DeepseekV4ReqManager
+
+    req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
+    req_manager.sliding_window = 128
+    req_manager._swa_pages = [{}]
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(disable_chunked_prefill=False, chunked_prefill_size=128)
@@ -228,10 +224,9 @@ def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
     req.cur_output_len = 0
     req.shm_req = SimpleNamespace(input_len=2000)
     req.image_block_spans = [(500, 884)]
-    req.dsv4_swa_page_size = 128
     req.req_idx = 0
 
-    assert req.get_dsv4_recover_need_swa_page_num() == 8
+    assert req_manager.get_request_resource_need(req, "recover") == 8
 
 
 @pytest.mark.parametrize(
@@ -246,19 +241,15 @@ def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
     ],
 )
 def test_cpu_cache_load_end_never_splits_an_image(loaded_start, load_end, spans, expected):
-    from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import (
-        MultiLevelKvCacheModule,
-    )
+    from lightllm.models.deepseek_v4.cpu_cache import DeepseekV4MultiLevelKvCacheModule
 
     req = SimpleNamespace(image_block_spans=spans)
 
-    assert MultiLevelKvCacheModule._get_image_safe_load_end(req, loaded_start, load_end, 2048) == expected
+    assert DeepseekV4MultiLevelKvCacheModule._get_image_safe_load_end(req, loaded_start, load_end, 2048) == expected
 
 
 def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
-    from lightllm.server.router.model_infer.mode_backend import (
-        multi_level_kv_cache as cache_module,
-    )
+    from lightllm.models.deepseek_v4 import cpu_cache as cache_module
 
     capacity_results = iter([6144, 4096])
     capacity_calls = []
@@ -282,6 +273,7 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         req_to_token_indexs=req_to_token_indexs,
         prepare_swa=lambda req_idx, start, end: finish_calls.append((req_idx, start, end)),
         get_swa_slots=lambda req_idx, positions: positions,
+        get_loadable_cpu_cache_end=get_loadable_cpu_cache_end,
     )
     mem_manager = SimpleNamespace(
         cpu_cache_layout=SimpleNamespace(token_page_size=2048),
@@ -289,15 +281,18 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
         n_c128=False,
         allocator=SimpleNamespace(can_use_mem_size=8192),
         swa_page_allocator=SimpleNamespace(can_use_mem_size=2),
-        get_loadable_cpu_cache_end=get_loadable_cpu_cache_end,
         prepare_cpu_cache_load=prepare_cpu_cache_load,
         alloc=lambda token_num: torch.arange(token_num, dtype=torch.int32),
     )
     from lightllm.common.kv_cache_mem_manager.operator.deepseek import DeepseekV4MemOperator
+    from lightllm.common.req_manager import DeepseekV4ReqManager
+
+    req_manager.mem_manager = mem_manager
+    req_manager.prepare_cpu_cache_load = lambda *args: DeepseekV4ReqManager.prepare_cpu_cache_load(req_manager, *args)
 
     mem_manager.operator = DeepseekV4MemOperator(mem_manager)
     mem_manager.operator.load_cpu_cache_pages = load_cpu_cache_pages
-    module = object.__new__(cache_module.MultiLevelKvCacheModule)
+    module = object.__new__(cache_module.DeepseekV4MultiLevelKvCacheModule)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         radix_cache=None,
@@ -335,11 +330,6 @@ def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
     monkeypatch.setattr(cache_module.g_infer_context, "req_manager", req_manager)
     monkeypatch.setattr(cache_module.g_infer_context, "radix_cache", None)
     monkeypatch.setattr(cache_module.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
-    monkeypatch.setattr(
-        cache_module.g_infer_context,
-        "get_can_alloc_dsv4_swa_page_num",
-        lambda: 2,
-    )
 
     module.load_cpu_cache_to_reqs([req])
 

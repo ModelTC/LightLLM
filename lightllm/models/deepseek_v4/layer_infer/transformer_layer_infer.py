@@ -1,28 +1,24 @@
 import torch
 import triton
-from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
+from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
-from .compressor import fused_compress as fused_compress_op
-from .compressor import apply_ape
+from .compressor import CompressorInfer
+from .indexer import DeepseekV4IndexInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
-import deep_gemm
-from lightllm.models.deepseek_v4.triton_kernel.topk_transform import topk_transform_512
 from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
-from lightllm.models.deepseek_v4.workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES
 
 
-class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
+class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def __init__(self, layer_num, network_config):
-        TransformerLayerInferTpl.__init__(self, layer_num, network_config)
+        super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
         self.embed_dim_ = network_config["hidden_size"]
         self.num_heads = network_config["num_attention_heads"]
@@ -347,7 +343,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
-        from lightllm.models.deepseek_v4.triton_kernel.norm_rope_cuda import fused_q_norm_rope
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_norm_rope
 
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         T = input.shape[0]
@@ -362,7 +358,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
             q[:, self.tp_q_head_num_ :, :].zero_()
         fused_q_norm_rope(q_in, q[:, : self.tp_q_head_num_, :], self.eps_, self.freqs_cis, infer_state.position_ids)
-        # kv: rmsnorm + rope + fp8 pack + scatter 进 swa 池,一个 DSV4 CUDA kernel 完成，
+        # kv: RMSNorm + RoPE + FP8 pack + scatter into SWA in one Triton kernel.
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
             swa_slots=infer_state.dsv4_swa_write_slots,
@@ -534,25 +530,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         )
 
     # ------------------------------------------------------------------ moe
-    def _routed_experts(
-        self,
-        x,
-        weights,
-        indices,
-        infer_state: DeepseekV4InferStateInfo,
-        layer_weight: DeepseekV4TransformerLayerWeight,
-    ):
-        return layer_weight.experts_.experts_with_topk(
-            input_tensor=x,
-            topk_weights=weights,
-            topk_ids=indices,
-            is_prefill=infer_state.is_prefill,
-            infer_state=infer_state,
-            alpha=1.0,
-            limit=float(self.swiglu_limit),
-            clamp_up_add_one=False,
-        )
-
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
@@ -575,13 +552,22 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         logits = layer_weight.gate_weight_.mm(x, out_dtype=torch.float32)
-        weights, indices = self._select_experts(logits, infer_state, layer_weight)
+        topk_weights, topk_indices = self._select_experts(logits, infer_state, layer_weight)
         # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
-        # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
+        # 是 inplace 的，routed 计算结束后 x 已被覆盖为输出。
         # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
         # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
-        routed = self._routed_experts(x, weights, indices, infer_state, layer_weight)
+        routed = layer_weight.experts_.experts_with_topk(
+            input_tensor=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_indices,
+            is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+        )
         if self.enable_ep_moe:
             return routed + shared
         out = routed + shared
@@ -590,458 +576,40 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _select_experts(
         self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        M = logits.shape[0]
-        bias = None
+        num_tokens = logits.shape[0]
+        correction_bias = None
         bias_vl = None
-        input_tokens = None
-        hash_indices_table = None
+        input_ids = None
+        tid2eid = None
         image_token_start = 0
         indices_dtype = torch.int64
         if self.is_hash:
-            hash_indices_table = layer_weight.gate_tid2eid_.weight
-            indices_dtype = hash_indices_table.dtype
-            input_tokens = infer_state.input_ids.to(dtype=indices_dtype)
+            tid2eid = layer_weight.gate_tid2eid_.weight
+            indices_dtype = tid2eid.dtype
+            input_ids = infer_state.input_ids.to(dtype=indices_dtype)
         else:
-            bias = layer_weight.gate_bias_.weight
+            correction_bias = layer_weight.gate_bias_.weight
         if self.has_vision and infer_state.is_prefill:
             bias_vl = layer_weight.gate_bias_vl_.weight
             image_token_start = self.vocab_size
-            if input_tokens is None:
-                input_tokens = infer_state.input_ids
+            if input_ids is None:
+                input_ids = infer_state.input_ids
 
-        weights = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.float32, device=logits.device)
-        indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=indices_dtype, device=logits.device)
+        topk_weights = self.alloc_tensor(
+            (num_tokens, self.num_experts_per_tok), dtype=torch.float32, device=logits.device
+        )
+        topk_indices = self.alloc_tensor(
+            (num_tokens, self.num_experts_per_tok), dtype=indices_dtype, device=logits.device
+        )
         topk_softplus_sqrt(
-            weights,
-            indices,
-            logits,
-            self.routed_scaling_factor,
-            bias,
-            input_tokens,
-            hash_indices_table,
-            bias_vl,
-            image_token_start,
+            topk_weights=topk_weights,
+            topk_indices=topk_indices,
+            logits=logits,
+            routed_scaling_factor=self.routed_scaling_factor,
+            correction_bias=correction_bias,
+            input_ids=input_ids,
+            tid2eid=tid2eid,
+            bias_vl=bias_vl,
+            image_token_start=image_token_start,
         )
-        return weights, indices
-
-
-class CompressorInfer(BaseLayerInfer):
-    """Window-softmax compressor. is_in_indexer=False compresses the c4/c128 latent KV into the
-    paged fp8 slab (attention extra_k); is_in_indexer=True reuses the SAME machinery (mirroring
-    sglang's Compressor(is_in_indexer=...)) with the indexer weights/dims/state pool to produce the
-    per-c4-entry Lightning-Indexer keys, emitted as dense bf16 (OUTPUT_BF16) then fp8-packed into
-    c4_indexer_pool by the caller. Indexer mode is c4-only."""
-
-    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int, is_in_indexer: bool = False):
-        super().__init__()
-        self.layer_idx_ = layer_idx
-        self.network_config_ = network_config
-        self.tp_world_size_ = tp_world_size
-        self.is_in_indexer = is_in_indexer
-        self.compress_ratio = network_config["compress_ratios"][layer_idx]
-        self.head_dim = network_config["head_dim"]
-        self.index_head_dim = network_config["index_head_dim"]
-        self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
-        self.eps = network_config["rms_norm_eps"]
-
-    def compress(
-        self,
-        x: torch.Tensor,
-        infer_state: DeepseekV4InferStateInfo,
-        layer_weight: DeepseekV4TransformerLayerWeight,
-        cos_table: torch.Tensor,
-        sin_table: torch.Tensor,
-        use_custom_tensor_manager: bool = True,
-        kv_score_out: torch.Tensor = None,
-        out_buffer: torch.Tensor = None,
-    ):
-        if self.compress_ratio == 0:
-            return None
-        if self.is_in_indexer:
-            kv_score = layer_weight.idx_cmp_wkv_gate_.mm(
-                x,
-                out=kv_score_out,
-                use_custom_tensor_mananger=use_custom_tensor_manager,
-                out_dtype=torch.float32,
-            )
-            norm_weight = layer_weight.idx_cmp_norm_.weight
-            ape = layer_weight.idx_cmp_ape_.weight
-            head_dim = self.index_head_dim
-        else:
-            kv_score = layer_weight.compressor_wkv_gate_.mm(
-                x, use_custom_tensor_mananger=use_custom_tensor_manager, out_dtype=torch.float32
-            )
-            norm_weight = layer_weight.compressor_norm_.weight
-            ape = layer_weight.compressor_ape_.weight
-            head_dim = self.head_dim
-        apply_ape(
-            kv_score=kv_score,
-            position_ids=infer_state.position_ids,
-            ape=ape,
-            compress_ratio=self.compress_ratio,
-        )
-        if self.is_in_indexer and use_custom_tensor_manager and out_buffer is None:
-            out_buffer = self.alloc_tensor(
-                (infer_state.mem_index.numel(), self.index_head_dim),
-                torch.bfloat16,
-                device=infer_state.mem_index.device,
-            )
-        return fused_compress_op(
-            kv_score=kv_score,
-            infer_state=infer_state,
-            layer_idx=self.layer_idx_,
-            norm_weight=norm_weight,
-            eps=self.eps,
-            head_dim=head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            compress_ratio=self.compress_ratio,
-            cos_table=cos_table,
-            sin_table=sin_table,
-            is_in_indexer=self.is_in_indexer,
-            out_buffer=out_buffer,
-        )
-
-
-class DeepseekV4IndexInfer(BaseLayerInfer):
-    """Model-side builder for the FlashMLA sparse-index metadata. Mirrors deepseek3_2's NsaInfer
-    boundary (the model owns ALL index construction; the attention backend only forwards final
-    tensors to flash_mla.flash_mla_with_kvcache) AND its c4 implementation: hadamard'd fp8 q/K, a
-    ragged gather of the compressed c4 keys, deep_gemm.fp8_mqa_logits, then topk -- adapted for the
-    replicated indexer (no gather-q/all_reduce), the c4-compressed entry space, and topk-512 (no
-    inheritance only because of those data-shape differences). swa metadata is precomputed in
-    init_some_extra_state; this class owns the c4 entry gather (build_compress_index) AND the c4
-    Lightning-Indexer scoring (gather + deep_gemm.fp8_mqa_logits + topk). Holds only static per-layer
-    config; all per-request data flows in via args. Invoke from _context/_token_attention_kernel
-    (after compressor.compress, before *_att) so the c4 scorer/topk keep the same cuda-graph
-    capture position they had when this lived in the backend. The indexer is replicated (no TP collective)."""
-
-    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
-        self.layer_idx_ = layer_idx
-        self.compress_ratio = network_config["compress_ratios"][layer_idx]
-        self.index_topk = network_config["index_topk"]
-        self.index_head_dim = network_config["index_head_dim"]
-        self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
-        self.index_n_heads = network_config["index_n_heads"]
-        self.tp_world_size_ = tp_world_size
-        self.indexer_score_scale = self.index_head_dim ** -0.5
-        self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
-        # c4 layers own a second compressor (is_in_indexer) that writes the Lightning-Indexer key
-        # pool every step; _c4_indices gathers it back + scores via deep_gemm.fp8_mqa_logits.
-        self.indexer_compressor = (
-            CompressorInfer(layer_idx, network_config, tp_world_size, is_in_indexer=True)
-            if self.compress_ratio == 4
-            else None
-        )
-
-    def write_indexer_k(
-        self,
-        x,
-        infer_state: DeepseekV4InferStateInfo,
-        layer_weight,
-        cos_table,
-        sin_table,
-        use_custom_tensor_manager=True,
-        c4_aux_workspace=None,
-    ):
-        if self.compress_ratio != 4:
-            return
-        # Only group-end rows in this dense bf16 scratch are valid indexer keys.
-        kv_score_out = indexer_k_out = hadamard_out = None
-        if c4_aux_workspace is not None:
-            kv_score_out, indexer_k_out, hadamard_out = c4_aux_workspace.indexer_k_buffers(x.shape[0])
-        scratch = self.indexer_compressor.compress(
-            x,
-            infer_state,
-            layer_weight,
-            cos_table,
-            sin_table,
-            use_custom_tensor_manager=use_custom_tensor_manager,
-            kv_score_out=kv_score_out,
-            out_buffer=indexer_k_out,
-        )
-        # Rotate K (post norm+rope) by the SAME 1/sqrt(d) Hadamard the q kernel applies, so
-        # (Hq)·(Hk)=q·k (H orthogonal) and the fp8 quant of K stays accurate.
-        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
-
-        if use_custom_tensor_manager:
-            hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)
-        scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5, out=hadamard_out)
-        mem_manager = infer_state.mem_manager
-        mem_manager.pack_indexer_k_to_cache(
-            self.layer_idx_,
-            infer_state.mem_index.reshape(-1),
-            infer_state.position_ids,
-            scratch,
-        )
-
-    def build_metadata(
-        self,
-        x,
-        q_lora,
-        infer_state: DeepseekV4InferStateInfo,
-        layer_weight,
-        use_custom_tensor_manager=True,
-        c4_aux_workspace=None,
-    ):
-        swa_indices = infer_state.dsv4_swa_indices.unsqueeze(1)
-        swa_lengths = infer_state.dsv4_swa_lengths
-        positions = infer_state.position_ids
-        extra_indices = extra_lengths = None
-        if self.compress_ratio == 4:
-            idx_q_fp8, weights = self._indexer_q_weight(
-                x,
-                q_lora,
-                infer_state,
-                layer_weight,
-                use_custom_tensor_manager=use_custom_tensor_manager,
-                c4_aux_workspace=c4_aux_workspace,
-            )
-            extra_indices, extra_lengths = self._c4_indices(
-                infer_state, idx_q_fp8, weights, positions, c4_aux_workspace=c4_aux_workspace
-            )
-        elif self.compress_ratio == 128:
-            extra_indices = infer_state.dsv4_c128_indices.unsqueeze(1)
-            extra_lengths = infer_state.dsv4_c128_lengths
-        return {
-            "swa_indices": swa_indices,
-            "swa_lengths": swa_lengths,
-            "extra_indices": extra_indices,
-            "extra_lengths": extra_lengths,
-        }
-
-    def _indexer_q_weight(
-        self,
-        x,
-        q_lora,
-        infer_state: DeepseekV4InferStateInfo,
-        layer_weight,
-        use_custom_tensor_manager=True,
-        c4_aux_workspace=None,
-    ):
-        # Fused: wq_b mm -> rope(last rope dims) -> 1/sqrt(d) Hadamard -> per-token fp8 quant, with the
-        # per-token q scale + indexer_weight_scale folded into weights, all in ONE kernel (was 4 kernels:
-        # rotary_emb_fwd + hadamard_transform + act_quant + weights mul). freqs_cis is the compress rope
-        # table (same one the main compress-layer Q path uses); positions indexed inside the kernel.
-        from lightllm.models.deepseek_v4.triton_kernel.norm_rope_cuda import (
-            fused_q_indexer_rope_hadamard_quant,
-        )
-
-        token_num = q_lora.shape[0]
-        if x.shape[0] != token_num:
-            raise RuntimeError(
-                f"DeepSeek-V4 indexer expects full-token hidden states, got x={x.shape[0]} q_lora={token_num}"
-            )
-        idx_q_out = raw_w_out = None
-        if c4_aux_workspace is not None:
-            idx_q_out, raw_w_out = c4_aux_workspace.indexer_q_inputs(token_num)
-        idx_q = layer_weight.idx_wq_b_.mm(
-            q_lora, out=idx_q_out, use_custom_tensor_mananger=use_custom_tensor_manager
-        ).view(token_num, self.index_n_heads, self.index_head_dim)
-        raw_w = layer_weight.idx_weights_proj_.mm(
-            x, out=raw_w_out, use_custom_tensor_mananger=use_custom_tensor_manager
-        ).view(
-            token_num, self.index_n_heads
-        )  # [T, H] raw
-        idx_q_fp8_out = weights_out = None
-        if c4_aux_workspace is not None:
-            idx_q_fp8_out, weights_out = c4_aux_workspace.indexer_q_outputs(token_num)
-        elif use_custom_tensor_manager:
-            idx_q_fp8_out = self.alloc_tensor(idx_q.shape, torch.float8_e4m3fn, device=idx_q.device)
-            weights_out = self.alloc_tensor((*idx_q.shape[:-1], 1), torch.float32, device=idx_q.device)
-        idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
-            idx_q,
-            raw_w,
-            self.indexer_weight_scale,
-            self.freqs_cis,
-            infer_state.position_ids,
-            q_fp8=idx_q_fp8_out,
-            weights_out=weights_out,
-        )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
-        return idx_q_fp8, weights.squeeze(-1)
-
-    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions, c4_aux_workspace=None):
-        """c4 scorer via the page-safe deep_gemm.fp8_paged_mqa_logits over the paged c4 indexer pool,
-        then masked topk-512 -> c4 slots. Fixed shapes (c4_cap pinned per graph bucket) keep the decode
-        cuda graph capturable."""
-        mem_manager = infer_state.mem_manager
-        workspace = infer_state.dsv4_workspace
-        index_topk = self.index_topk
-        max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
-        c4_cap = ((max_entries + 63) // 64) * 64
-
-        if max_entries <= index_topk:
-            from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
-
-            slots, lengths = workspace.c4(infer_state.microbatch_index, positions.shape[0], c4_cap)
-            slots, lengths = build_compress_index(
-                infer_state.dsv4_sparse_req_idx,
-                positions,
-                infer_state.req_manager.req_to_token_indexs,
-                4,
-                slots,
-                lengths,
-            )
-            return slots.unsqueeze(1), lengths
-
-        page_size = mem_manager.c4_indexer_pool.page_size
-
-        cached = getattr(infer_state, "_c4_paged_meta", None)
-        if cached is None:
-            from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
-
-            b_req_idx = infer_state.b_req_idx
-            batch = b_req_idx.shape[0]
-            token_num = positions.numel()
-            if c4_aux_workspace is None:
-                c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)
-                page_table_out = row_page_table = None
-            else:
-                page_cap = c4_cap // page_size
-                page_table_out, row_page_table = c4_aux_workspace.page_tables(batch, token_num, page_cap)
-                c4_len, _, _, _ = c4_aux_workspace.metadata(batch, token_num)
-                c4_len.copy_(torch.div(infer_state.b_seq_len, 4, rounding_mode="floor"))
-            page_table = build_c4_indexer_page_table(
-                mem_manager,
-                b_req_idx,
-                c4_len,
-                c4_cap,
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.req_manager.HOLD_REQUEST_ID,
-                out=page_table_out,
-            )
-
-            if infer_state.is_prefill:
-                token_batch_pos = infer_state._dsv4_token_to_batch_idx
-                if row_page_table is None:
-                    row_page_table = page_table[token_batch_pos]
-                else:
-                    torch.index_select(page_table, 0, token_batch_pos, out=row_page_table)
-            else:
-                row_page_table = page_table
-
-            if c4_aux_workspace is None:
-                valid_len = ((positions + 1) // 4).to(torch.int32)
-                ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1)
-                topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
-            else:
-                _, valid_len, ctx_lens, topk_lengths = c4_aux_workspace.metadata(batch, token_num)
-                valid_len.copy_((positions + 1) // 4)
-                torch.clamp(valid_len, min=1, out=ctx_lens[:, 0])
-                torch.clamp(valid_len, min=1, max=index_topk, out=topk_lengths)
-            rows_per_chunk = None
-            chunk_metadata = None
-            if infer_state.is_prefill:
-                if c4_aux_workspace is None:
-                    aligned_c4_cap = ((c4_cap + C4_LOGITS_ALIGNMENT - 1) // C4_LOGITS_ALIGNMENT) * C4_LOGITS_ALIGNMENT
-                    rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_c4_cap * 4))
-                else:
-                    rows_per_chunk = c4_aux_workspace.rows_per_logits_chunk(c4_cap)
-                if positions.numel() > rows_per_chunk:
-                    chunk_metadata = tuple(
-                        deep_gemm.get_paged_mqa_logits_metadata(
-                            ctx_lens[start : start + rows_per_chunk],
-                            page_size,
-                            deep_gemm.get_num_sms(),
-                        )
-                        for start in range(0, positions.numel(), rows_per_chunk)
-                    )
-
-            metadata = (
-                deep_gemm.get_paged_mqa_logits_metadata(
-                    ctx_lens,
-                    page_size,
-                    deep_gemm.get_num_sms(),
-                )
-                if chunk_metadata is None
-                else None
-            )
-            cached = (
-                row_page_table,
-                valid_len,
-                ctx_lens,
-                metadata,
-                topk_lengths,
-                rows_per_chunk,
-                chunk_metadata,
-            )
-            infer_state._c4_paged_meta = cached
-
-        row_page_table, valid_len, ctx_lens, metadata, topk_lengths, rows_per_chunk, chunk_metadata = cached
-        indexer_k_cache = mem_manager.c4_indexer_pool.get_layer_buffer(
-            mem_manager.layer_to_c4_idx[self.layer_idx_]
-        ).view(
-            mem_manager.c4_indexer_pool.num_pages,
-            page_size,
-            1,
-            self.index_head_dim + 4,
-        )
-        top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
-        if chunk_metadata is not None:
-            for chunk_idx, start in enumerate(range(0, idx_q_fp8.shape[0], rows_per_chunk)):
-                end = min(start + rows_per_chunk, idx_q_fp8.shape[0])
-                self._c4_score_topk(
-                    idx_q_fp8[start:end],
-                    indexer_k_cache,
-                    weights[start:end],
-                    ctx_lens[start:end],
-                    row_page_table[start:end],
-                    chunk_metadata[chunk_idx],
-                    c4_cap,
-                    valid_len[start:end],
-                    top_slots[start:end],
-                    page_size,
-                    logits_out=(c4_aux_workspace.logits(end - start, c4_cap) if c4_aux_workspace is not None else None),
-                )
-            return top_slots.unsqueeze(1), topk_lengths
-
-        self._c4_score_topk(
-            idx_q_fp8,
-            indexer_k_cache,
-            weights,
-            ctx_lens,
-            row_page_table,
-            metadata,
-            c4_cap,
-            valid_len,
-            top_slots,
-            page_size,
-            logits_out=(c4_aux_workspace.logits(idx_q_fp8.shape[0], c4_cap) if c4_aux_workspace is not None else None),
-        )
-        return top_slots.unsqueeze(1), topk_lengths
-
-    @staticmethod
-    def _c4_score_topk(
-        idx_q_fp8,
-        indexer_k_cache,
-        weights,
-        ctx_lens,
-        row_page_table,
-        metadata,
-        c4_cap,
-        valid_len,
-        top_slots,
-        page_size,
-        logits_out=None,
-    ):
-        args = (
-            idx_q_fp8.unsqueeze(1),
-            indexer_k_cache,
-            weights,
-            ctx_lens,
-            row_page_table,
-            metadata,
-            c4_cap,
-            False,
-        )
-        logits = (
-            deep_gemm.fp8_paged_mqa_logits(*args)
-            if logits_out is None
-            else deep_gemm.fp8_paged_mqa_logits(*args, out=logits_out)
-        )
-        topk_transform_512(
-            logits,
-            valid_len,
-            row_page_table,
-            top_slots,
-            page_size,
-        )
+        return topk_weights, topk_indices

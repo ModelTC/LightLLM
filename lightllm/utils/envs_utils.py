@@ -312,6 +312,9 @@ def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
         draft_config = json.load(json_file)
 
     if draft_config.get("model_type") == "deepseek_v4" and draft_config.get("dspark_block_size"):
+        from lightllm.utils.config_utils import normalize_deepseek_v4_config
+
+        normalize_deepseek_v4_config(draft_config)
         target_layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
         compress_ratios = draft_config.get("compress_ratios")
         if target_layer_num is not None and isinstance(compress_ratios, list):

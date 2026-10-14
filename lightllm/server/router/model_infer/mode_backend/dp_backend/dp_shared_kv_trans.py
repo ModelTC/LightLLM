@@ -9,9 +9,7 @@ from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 import torch.distributed as dist
-from lightllm.models.deepseek_v4.triton_kernel.dp_cache_io import copy_dsv4_dp_caches
 
 
 class DPKVSharedMoudle:
@@ -33,30 +31,6 @@ class DPKVSharedMoudle:
         self.shared_req_infos.create_shm()
         self.dp_rank_in_node = get_dp_rank_in_node()
         assert get_env_start_args().diverse_mode is False
-
-        if self.backend.is_deepseek_v4:
-            from lightllm.utils.device_utils import kv_trans_use_p2p
-
-            assert kv_trans_use_p2p(), "DeepSeek-V4 DP prompt-cache fetch requires P2P KV transfer"
-
-    def init_dsv4_cache_transfer(self, mem_managers: List[MemoryManager]) -> None:
-        pointer_rows = []
-        for mem_manager in mem_managers:
-            has_c4 = mem_manager.c4_pool is not None
-            has_c128 = mem_manager.c128_pool is not None
-            pointer_rows.append(
-                [
-                    mem_manager.c4_pool.buffer.data_ptr() if has_c4 else 0,
-                    mem_manager.c4_indexer_pool.buffer.data_ptr() if has_c4 else 0,
-                    mem_manager.c128_pool.buffer.data_ptr() if has_c128 else 0,
-                    mem_manager.req_to_swa_pages.data_ptr(),
-                    mem_manager.swa_pool.buffer.data_ptr(),
-                    mem_manager.c4_state_buffer.data_ptr() if has_c4 else 0,
-                    mem_manager.c4_indexer_state_buffer.data_ptr() if has_c4 else 0,
-                ]
-            )
-        self.dsv4_source_pool_ptrs = torch.tensor(pointer_rows, dtype=torch.uint64, device="cuda")
-        return
 
     def fill_reqs_info(self, reqs: List[InferReq]):
         """
@@ -84,10 +58,8 @@ class DPKVSharedMoudle:
         dist.barrier(group=self.backend.node_nccl_group)
 
         trans_tasks: List[TransTask] = []
-        if self.backend.is_deepseek_v4:
-            dsv4_mem_manager = self.backend.model.mem_manager
-            dsv4_swa_capacity = g_infer_context.get_can_alloc_dsv4_swa_page_num()
-            dsv4_prompt_page_size = self.backend.model.req_manager.get_prompt_cache_page_size()
+        req_manager = g_infer_context.req_manager
+        resource_budget = req_manager.get_request_resource_budget()
 
         rank_max_radix_cache_lens = np.max(
             self.shared_req_infos.arr[0 : len(reqs), :, self._KV_LEN_INDEX], axis=1, keepdims=False
@@ -101,11 +73,6 @@ class DPKVSharedMoudle:
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
             trans_size = min(max_req_radix_cache_len, req.get_cur_total_len() - 1) - req.cur_kv_len
 
-            can_alloc_dsv4_cache = True
-            if self.backend.is_deepseek_v4 and trans_size > 0:
-                need_swa_pages = dsv4_prompt_page_size // dsv4_mem_manager.swa_pool.page_size
-                can_alloc_dsv4_cache = dsv4_swa_capacity >= need_swa_pages
-
             target_kv_len = req.cur_kv_len + trans_size
             alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
 
@@ -113,7 +80,9 @@ class DPKVSharedMoudle:
                 is_current_dp_handle
                 and trans_size > 0
                 and alloc_token_num <= g_infer_context.get_can_alloc_token_num()
-                and can_alloc_dsv4_cache
+                and resource_budget.reserve(
+                    req_manager.get_request_resource_need(req, "restore", target_kv_len=target_kv_len)
+                )
             ):
                 assert req.hold_kv_len == req.cur_kv_len
                 mem_indexes = self.backend._alloc_req_kv_mem(req, alloc_token_num)
@@ -121,8 +90,6 @@ class DPKVSharedMoudle:
                 # mem_indexes 只描述需要复制的逻辑 KV；页尾预留槽位已经由
                 # _alloc_req_kv_mem 写入请求表，但不参与本次跨 DP 传输。
                 mem_indexes = mem_indexes[:trans_size]
-                if self.backend.is_deepseek_v4:
-                    dsv4_swa_capacity -= need_swa_pages
                 max_kv_len_dp_rank = self.shared_req_infos.arr[req_index, :, self._KV_LEN_INDEX].argmax()
                 max_kv_len_req_idx = int(self.shared_req_infos.arr[req_index, max_kv_len_dp_rank, self._REQ_IDX_INDEX])
                 max_kv_len_mem_manager_index = max_kv_len_dp_rank * self.backend.dp_world_size + self.backend.rank_in_dp
@@ -198,61 +165,7 @@ class DPKVSharedMoudle:
         # kv 传输
         if len(trans_tasks) > 0:
             if self.backend.is_deepseek_v4:
-                req_manager = g_infer_context.req_manager
-                prompt_cache_page_size = req_manager.get_prompt_cache_page_size()
-                req_list = []
-                seq_list = []
-                task_meta_data = []
-                history_block_nums = []
-                for trans_task in trans_tasks:
-                    start = trans_task.req.cur_kv_len
-                    end = start + len(trans_task.mem_indexes)
-                    dst_full_slots = req_manager.req_to_token_indexs[trans_task.req.req_idx, start:end]
-                    dst_full_slots.copy_(trans_task.mem_indexes, non_blocking=True)
-                    req_list.append(trans_task.req.req_idx)
-                    seq_list.append(end)
-                    task_meta_data.extend(
-                        [
-                            trans_task.max_kv_len_mem_manager_index,
-                            trans_task.max_kv_len_mem_indexes.data_ptr(),
-                            dst_full_slots.data_ptr(),
-                            trans_task.source_req_idx,
-                            trans_task.req.req_idx,
-                            end,
-                        ]
-                    )
-                    history_block_nums.append((end - start) // prompt_cache_page_size)
-
-                for req_idx, end in zip(req_list, seq_list):
-                    req_manager.prepare_swa(req_idx, end - prompt_cache_page_size, end)
-
-                # The history kernel consumes (task index, block index) pairs in block-major order.
-                history_meta_data = []
-                for block_index in range(max(history_block_nums)):
-                    for task_index, block_num in enumerate(history_block_nums):
-                        if block_index < block_num:
-                            history_meta_data.extend([task_index, block_index])
-
-                # transfer_meta packs two flat uint64 tables into one H2D copy:
-                #   task_meta:    (source manager, source/destination slots pointers,
-                #                  source/destination request IDs, logical end)
-                #   history_meta: (task index, block index)
-                # For two tasks with 2 and 1 history blocks, the layout is:
-                #   [task0 fields, task1 fields, (0, 0), (1, 0), (0, 1)]
-                task_meta_size = len(task_meta_data)
-                transfer_meta = g_pin_mem_manager.gen_from_list(
-                    key="dsv4_dp_cache_transfer_meta",
-                    data=task_meta_data + history_meta_data,
-                    dtype=torch.uint64,
-                ).to(req_manager.req_to_token_indexs.device, non_blocking=True)
-
-                dst_mem_manager = self.backend.model.mem_manager
-                copy_dsv4_dp_caches(
-                    source_pool_ptrs=self.dsv4_source_pool_ptrs,
-                    dst_mem_manager=dst_mem_manager,
-                    task_meta=transfer_meta[:task_meta_size],
-                    history_meta=transfer_meta[task_meta_size:],
-                )
+                self.backend.model.mem_manager.operator.transfer_dp_cache(trans_tasks, self.backend.model.req_manager)
             else:
                 max_kv_len_mem_indexes = []
                 max_kv_len_dp_ranks = []

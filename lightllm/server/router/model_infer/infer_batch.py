@@ -393,7 +393,7 @@ class InferenceContext:
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
             can_alloc_token_num = self.get_can_alloc_token_num()
-            can_alloc_dsv4_swa_page_num = self.get_can_alloc_dsv4_swa_page_num() if self.is_deepseek_v4 else None
+            resource_budget = self.req_manager.get_request_resource_budget()
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
@@ -402,10 +402,8 @@ class InferenceContext:
                 if alloc_token_num > can_alloc_token_num:
                     break
 
-                if self.is_deepseek_v4:
-                    swa_page_num = req.get_dsv4_recover_need_swa_page_num()
-                    if swa_page_num > can_alloc_dsv4_swa_page_num:
-                        break
+                if not resource_budget.reserve(self.req_manager.get_request_resource_need(req, "recover")):
+                    break
 
                 if g_infer_context.is_hybrid_att_model:
                     req._hybrid_match_radix_cache()
@@ -418,8 +416,6 @@ class InferenceContext:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= alloc_token_num
-                if can_alloc_dsv4_swa_page_num is not None:
-                    can_alloc_dsv4_swa_page_num -= swa_page_num
         return
 
     def get_can_alloc_token_num(self):
@@ -429,9 +425,6 @@ class InferenceContext:
                 self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
             )
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
-
-    def get_can_alloc_dsv4_swa_page_num(self):
-        return int(self.req_manager.mem_manager.swa_page_allocator.can_use_mem_size)
 
     def save_hybrid_state_to_cache(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
@@ -607,10 +600,6 @@ class InferReq:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_hybrid_att
             self.get_chuncked_input_token_ids = self.get_chuncked_input_token_ids_for_hybrid_att
 
-        if g_infer_context.is_deepseek_v4:
-            mem_manager = g_infer_context.req_manager.mem_manager
-            self.dsv4_swa_page_size: int = mem_manager.swa_pool.page_size
-
         self._init_all_state()
 
         self.generator = None
@@ -700,8 +689,11 @@ class InferReq:
             g_infer_context.is_hybrid_att_model is True
         ), "current _hybrid_match_radix_cache only supports hybrid attention models, to do..."
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
-        if g_infer_context.is_deepseek_v4:
-            enable_prompt_cache = enable_prompt_cache and g_infer_context.get_can_alloc_dsv4_swa_page_num() >= 2
+        if enable_prompt_cache:
+            req_manager = g_infer_context.req_manager
+            enable_prompt_cache = req_manager.get_request_resource_budget().reserve(
+                req_manager.get_request_resource_need(self, "restore")
+            )
         block_hashs = self.shm_req.hybrid_token_hash_list.get_all()
         hash_page_size = self.args.linear_att_hash_page_size
         match_tokens = min(len(block_hashs) * hash_page_size, self.get_cur_total_len() - 1)
@@ -1021,42 +1013,6 @@ class InferReq:
         alloc_token_num = max(target_hold_len - self.hold_kv_len, 0)
         assert alloc_token_num % page_size == 0
         return alloc_token_num
-
-    def get_dsv4_prefill_need_swa_page_num(self, is_chuncked_prefill: bool) -> int:
-        start = self.cur_kv_len
-        end = self.get_chuncked_input_token_len() if is_chuncked_prefill else self.get_cur_total_len()
-        if end <= start:
-            return 0
-
-        return g_infer_context.req_manager.get_swa_page_need(self.req_idx, start, end)
-
-    def get_dsv4_recover_need_swa_page_num(self) -> int:
-        swa_page_num = self.get_dsv4_prefill_need_swa_page_num(is_chuncked_prefill=False)
-        if swa_page_num == 0 or self.args.disable_chunked_prefill:
-            return swa_page_num
-
-        # C4/C128 accumulate across recovery chunks; only SWA is evicted chunk by chunk.
-        req_manager: DeepseekV4ReqManager = g_infer_context.req_manager
-        prompt_cache_page_size = req_manager.get_prompt_cache_page_size()
-        max_prefill_token_num = max(
-            self.args.chunked_prefill_size,
-            max((image_end - image_start for image_start, image_end in self.image_block_spans), default=0),
-        )
-        peak_token_num = min(
-            self.get_cur_total_len(),
-            max_prefill_token_num + int(req_manager.sliding_window) + 2 * prompt_cache_page_size,
-        )
-        swa_page_num = (peak_token_num + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
-        return swa_page_num
-
-    def get_dsv4_decode_need_swa_page_num(self) -> int:
-        seq_len = self.get_cur_total_len()
-        if seq_len <= 0:
-            return 0
-
-        width = self.mtp_step + 1 if self.args.mtp_mode == "dspark" else max(self.mtp_step + 1, self.mtp_step * 2)
-        need = g_infer_context.req_manager.get_swa_page_need(self.req_idx, seq_len - 1, seq_len - 1 + width)
-        return need + int(self.args.mtp_mode == "dspark")
 
 
 class InferReqUpdatePack:

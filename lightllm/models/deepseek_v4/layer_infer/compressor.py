@@ -1,303 +1,88 @@
 import torch
 import triton
-import triton.language as tl
-from triton.language.extra import libdevice
 
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_SWA_PAGE_SIZE
-
-
-@triton.jit
-def _add_ape_to_kv_score_kernel(
-    kv_score,
-    kv_score_stride0,
-    kv_score_stride1,
-    ape,
-    ape_stride0,
-    positions,
-    STATE_WIDTH: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    offs = tl.arange(0, BLOCK)
-    mask = offs < STATE_WIDTH
-
-    position = tl.load(positions + token_idx)
-    ape_row = position % COMPRESS_RATIO
-    score = tl.load(kv_score + token_idx * kv_score_stride0 + (STATE_WIDTH + offs) * kv_score_stride1, mask=mask)
-    ape_value = tl.load(ape + ape_row * ape_stride0 + offs, mask=mask)
-    tl.store(
-        kv_score + token_idx * kv_score_stride0 + (STATE_WIDTH + offs) * kv_score_stride1,
-        score + ape_value,
-        mask=mask,
-    )
-    return
+from lightllm.common.basemodel import BaseLayerInfer
+from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DSV4_SWA_PAGE_SIZE
+from ..infer_struct import DeepseekV4InferStateInfo
+from ..layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
+from ..triton_kernel.compressor import apply_ape, _fused_compress_norm_rope_insert_kernel, _save_partial_states_kernel
 
 
-@triton.jit
-def _save_partial_states_kernel(
-    kv_score,
-    kv_score_stride0,
-    kv_score_stride1,
-    positions,
-    token_to_batch_idx,
-    b_req_idx,
-    b_seq_len,
-    swa_write_slots,
-    state_buffer,
-    STATE_WIDTH: tl.constexpr,
-    STATE_LAST_DIM: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    IS_C4: tl.constexpr,
-    IS_PREFILL: tl.constexpr,
-    SWA_PAGE_SIZE: tl.constexpr,
-    STATE_RING: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
-    position = tl.load(positions + token_idx)
-    seq_len = tl.load(b_seq_len + batch_idx)
+class CompressorInfer(BaseLayerInfer):
+    """Window-softmax compressor. is_in_indexer=False compresses the c4/c128 latent KV into the
+    paged fp8 slab (attention extra_k); is_in_indexer=True reuses the SAME machinery (mirroring
+    sglang's Compressor(is_in_indexer=...)) with the indexer weights/dims/state pool to produce the
+    per-c4-entry Lightning-Indexer keys, emitted as dense bf16 (OUTPUT_BF16) then fp8-packed into
+    c4_indexer_pool by the caller. Indexer mode is c4-only."""
 
-    if IS_C4:
-        same_page_next = (position % SWA_PAGE_SIZE) + STATE_RING < SWA_PAGE_SIZE
-        if same_page_next and position + STATE_RING < seq_len:
-            return
-    else:
-        if position + COMPRESS_RATIO < seq_len:
-            return
+    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int, is_in_indexer: bool = False):
+        super().__init__()
+        self.layer_idx_ = layer_idx
+        self.network_config_ = network_config
+        self.tp_world_size_ = tp_world_size
+        self.is_in_indexer = is_in_indexer
+        self.compress_ratio = network_config["compress_ratios"][layer_idx]
+        self.head_dim = network_config["head_dim"]
+        self.index_head_dim = network_config["index_head_dim"]
+        self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
+        self.eps = network_config["rms_norm_eps"]
 
-    if IS_C4:
-        swa_slot = tl.load(swa_write_slots + token_idx).to(tl.int64)
-        if swa_slot < 0:
-            return
-        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
-    else:
-        req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-        state_row = req_idx * STATE_RING + position % STATE_RING
-
-    offs = tl.arange(0, BLOCK)
-    mask = offs < STATE_WIDTH
-    kv = tl.load(kv_score + token_idx * kv_score_stride0 + offs * kv_score_stride1, mask=mask)
-    score = tl.load(kv_score + token_idx * kv_score_stride0 + (STATE_WIDTH + offs) * kv_score_stride1, mask=mask)
-    state_base = state_buffer + state_row * STATE_LAST_DIM
-    tl.store(state_base + offs, kv, mask=mask)
-    tl.store(state_base + STATE_WIDTH + offs, score, mask=mask)
-    return
-
-
-@triton.jit
-def _fused_compress_norm_rope_insert_kernel(
-    kv_score,
-    kv_score_stride0,
-    kv_score_stride1,
-    state_buffer,
-    positions,
-    token_to_batch_idx,
-    b_req_idx,
-    b_mtp_index,
-    b_seq_len,
-    b_ready_cache_len,
-    b_q_start_loc,
-    req_to_swa_pages,
-    req_to_swa_stride0,
-    out_slots,
-    norm_weight,
-    rms_eps,
-    cos_table,
-    cos_stride0,
-    cos_stride1,
-    sin_table,
-    sin_stride0,
-    sin_stride1,
-    out_buffer,
-    HEAD_DIM: tl.constexpr,
-    STATE_WIDTH: tl.constexpr,
-    STATE_LAST_DIM: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    WINDOW_SIZE: tl.constexpr,
-    IS_C4: tl.constexpr,
-    IS_PREFILL: tl.constexpr,
-    SWA_PAGE_SIZE: tl.constexpr,
-    STATE_RING: tl.constexpr,
-    ROPE_HEAD_DIM: tl.constexpr,
-    FP8_MAX: tl.constexpr,
-    AMAX_MIN: tl.constexpr,
-    NOPE_DIM: tl.constexpr,
-    QUANT_BLOCK: tl.constexpr,
-    SCALE_BYTES: tl.constexpr,
-    PAGE_SIZE: tl.constexpr,
-    BYTES_PER_PAGE: tl.constexpr,
-    BLOCK: tl.constexpr,
-    IS_IN_INDEXER: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    out_slot = tl.load(out_slots + token_idx).to(tl.int64)
-    if out_slot < 0:
-        return
-
-    position = tl.load(positions + token_idx)
-    if (position + 1) % COMPRESS_RATIO != 0:
-        return
-
-    batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
-    req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-    seq_len = tl.load(b_seq_len + batch_idx)
-    if IS_PREFILL:
-        ready_len = tl.load(b_ready_cache_len + batch_idx)
-        q_start = tl.load(b_q_start_loc + batch_idx)
-    else:
-        mtp_index = tl.load(b_mtp_index + batch_idx)
-        ready_len = position - mtp_index
-        q_start = token_idx - mtp_index
-
-    token_offsets = tl.arange(0, WINDOW_SIZE)
-    # position 11, start 4
-    start = position - WINDOW_SIZE + 1
-    # 最近的window个索引 [4, 5, 6, 7, 8, 9, 10, 11]
-    gather_pos = start + token_offsets
-    # 都在[0, 12)之间，valid [1, 1, 1, 1, 1, 1, 1, 1]
-    valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
-    # 新计算的mask ready_len=8 [0, 0, 0, 0, 1, 1, 1, 1]
-    use_current = (gather_pos >= ready_len) & valid_pos
-    # 现在的kvscore的索引 [-4, -3, -2, -1, 0, 1, 2, 3]
-    current_idx = q_start + (gather_pos - ready_len)
-    # cache的mask [1, 1, 1, 1, 0, 0, 0, 0]
-    valid_pos = valid_pos & (~use_current)
-    cache_pos = valid_pos
-
-    if IS_C4:
-        swa_page = tl.load(
-            req_to_swa_pages + req_idx * req_to_swa_stride0 + gather_pos // SWA_PAGE_SIZE,
-            mask=cache_pos,
-            other=-1,
-        ).to(tl.int64)
-        swa_slot = swa_page * SWA_PAGE_SIZE + gather_pos % SWA_PAGE_SIZE
-        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
-        state_valid = cache_pos & (swa_slot >= 0)
-        head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
-    else:
-        state_row = req_idx * STATE_RING + gather_pos % STATE_RING
-        state_valid = cache_pos
-        head_offset = token_offsets * 0
-
-    offs = tl.arange(0, BLOCK)
-    dim_mask = offs < HEAD_DIM
-    current_mask = use_current[:, None] & dim_mask[None, :]
-    state_mask = state_valid[:, None] & dim_mask[None, :]
-
-    cur_ptrs = (
-        kv_score + current_idx[:, None] * kv_score_stride0 + (head_offset[:, None] + offs[None, :]) * kv_score_stride1
-    )
-    cur_kv = tl.load(
-        cur_ptrs,
-        mask=current_mask,
-        other=0.0,
-    )
-    cur_score = tl.load(
-        cur_ptrs + STATE_WIDTH * kv_score_stride1,
-        mask=current_mask,
-        other=float("-inf"),
-    )
-
-    state_ptrs = state_buffer + state_row[:, None] * STATE_LAST_DIM + head_offset[:, None] + offs[None, :]
-    state_kv = tl.load(
-        state_ptrs,
-        mask=state_mask,
-        other=0.0,
-    )
-    state_score = tl.load(
-        state_ptrs + STATE_WIDTH,
-        mask=state_mask,
-        other=float("-inf"),
-    )
-
-    kv = tl.where(current_mask, cur_kv, state_kv)
-    score = tl.where(current_mask, cur_score, state_score)
-    score = tl.softmax(score, dim=0)
-    compressed_kv = tl.sum(kv * score, axis=0)
-    # 以上得到compressed_kv
-
-    # rms_norm
-    rms_w = tl.load(norm_weight + offs, mask=dim_mask, other=0.0)
-    variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_DIM
-    rrms = tl.rsqrt(variance + rms_eps)
-    normed = compressed_kv * rrms * rms_w
-
-    # rope
-    num_pairs: tl.constexpr = BLOCK // 2
-    nope_pairs: tl.constexpr = NOPE_DIM // 2
-    pair_2d = tl.reshape(normed, (num_pairs, 2))
-    even, odd = tl.split(pair_2d)
-    pair_idx = tl.arange(0, num_pairs)
-    rope_pair_local = pair_idx - nope_pairs
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-    compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cos_v = tl.load(cos_table + compressed_pos * cos_stride0 + cs_idx * cos_stride1, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(sin_table + compressed_pos * sin_stride0 + cs_idx * sin_stride1, mask=is_rope_pair, other=0.0)
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
-    rotated = tl.interleave(new_even, new_odd)
-
-    if IS_IN_INDEXER:
-        # indexer-K path: emit the post-rope full HEAD_DIM vector as dense bf16 (token-indexed),
-        # leaving the fp8 single-amax pack to destindex_copy_indexer_k_dsv4 (the c4_indexer_pool
-        # ABI differs from the latent slab: whole-vector fp8 + one fp32 scale, no bf16 rope tail).
-        tl.store(out_buffer + token_idx * HEAD_DIM + offs, rotated.to(tl.bfloat16), mask=dim_mask)
-        return
-
-    page = out_slot // PAGE_SIZE
-    token_in_page = out_slot % PAGE_SIZE
-    data_base = page * BYTES_PER_PAGE + token_in_page * (NOPE_DIM + ROPE_HEAD_DIM * 2)
-    scale_base = page * BYTES_PER_PAGE + PAGE_SIZE * (NOPE_DIM + ROPE_HEAD_DIM * 2) + token_in_page * SCALE_BYTES
-
-    n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
-    n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
-    # 有待检验是否有必要
-    quant_input = normed.to(tl.bfloat16).to(tl.float32)
-    quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
-    abs_2d = tl.abs(quant_2d)
-    block_absmax = tl.maximum(tl.max(abs_2d, axis=1), AMAX_MIN)
-    scale_exp = tl.ceil(libdevice.log2(block_absmax / FP8_MAX)).to(tl.int32)
-    scale = ((scale_exp + 127) << 23).to(tl.float32, bitcast=True)
-    kv_fp8 = tl.clamp(quant_2d / scale[:, None], -FP8_MAX, FP8_MAX).to(tl.float8e4nv)
-    kv_u8 = tl.reshape(kv_fp8.to(tl.uint8, bitcast=True), (BLOCK,))
-    tl.store(out_buffer + data_base + offs, kv_u8, mask=offs < NOPE_DIM)
-
-    # ue8m0
-    scale_idx = tl.arange(0, SCALE_BYTES)
-    scale_bytes = tl.where(scale_idx < n_nope_blocks, scale_exp + 127, 0).to(tl.uint8)
-    tl.store(out_buffer + scale_base + scale_idx, scale_bytes)
-
-    rope_local = offs - NOPE_DIM
-    rope_mask = (offs >= NOPE_DIM) & dim_mask
-    rope_ptr = (out_buffer + data_base + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
-    tl.store(rope_ptr + rope_local, rotated.to(tl.bfloat16), mask=rope_mask)
-    return
-
-
-def apply_ape(
-    *,
-    kv_score: torch.Tensor,
-    position_ids: torch.Tensor,
-    ape: torch.Tensor,
-    compress_ratio: int,
-):
-    state_width = kv_score.shape[-1] // 2
-    _add_ape_to_kv_score_kernel[(kv_score.shape[0],)](
-        kv_score,
-        kv_score.stride(0),
-        kv_score.stride(1),
-        ape,
-        ape.stride(0),
-        position_ids,
-        STATE_WIDTH=state_width,
-        COMPRESS_RATIO=compress_ratio,
-        BLOCK=triton.next_power_of_2(state_width),
-        num_warps=4,
-    )
-    return
+    def compress(
+        self,
+        x: torch.Tensor,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
+        use_custom_tensor_manager: bool = True,
+        kv_score_out: torch.Tensor = None,
+        out_buffer: torch.Tensor = None,
+    ):
+        if self.compress_ratio == 0:
+            return None
+        if self.is_in_indexer:
+            kv_score = layer_weight.idx_cmp_wkv_gate_.mm(
+                x,
+                out=kv_score_out,
+                use_custom_tensor_mananger=use_custom_tensor_manager,
+                out_dtype=torch.float32,
+            )
+            norm_weight = layer_weight.idx_cmp_norm_.weight
+            ape = layer_weight.idx_cmp_ape_.weight
+            head_dim = self.index_head_dim
+        else:
+            kv_score = layer_weight.compressor_wkv_gate_.mm(
+                x, use_custom_tensor_mananger=use_custom_tensor_manager, out_dtype=torch.float32
+            )
+            norm_weight = layer_weight.compressor_norm_.weight
+            ape = layer_weight.compressor_ape_.weight
+            head_dim = self.head_dim
+        apply_ape(
+            kv_score=kv_score,
+            position_ids=infer_state.position_ids,
+            ape=ape,
+            compress_ratio=self.compress_ratio,
+        )
+        if self.is_in_indexer and use_custom_tensor_manager and out_buffer is None:
+            out_buffer = self.alloc_tensor(
+                (infer_state.mem_index.numel(), self.index_head_dim),
+                torch.bfloat16,
+                device=infer_state.mem_index.device,
+            )
+        return fused_compress(
+            kv_score=kv_score,
+            infer_state=infer_state,
+            layer_idx=self.layer_idx_,
+            norm_weight=norm_weight,
+            eps=self.eps,
+            head_dim=head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            compress_ratio=self.compress_ratio,
+            cos_table=cos_table,
+            sin_table=sin_table,
+            is_in_indexer=self.is_in_indexer,
+            out_buffer=out_buffer,
+        )
 
 
 def fused_compress(
@@ -335,12 +120,10 @@ def fused_compress(
         out_page_size = 1
     else:
         if compress_ratio == 4:
-
             state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
             state_ring = mem_manager.c4_state_ring
             out_page_size = mem_manager.c4_pool.page_size
         elif compress_ratio == 128:
-
             state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
             state_ring = mem_manager.c128_state_ring
             out_page_size = mem_manager.c128_pool.page_size

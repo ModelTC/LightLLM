@@ -48,6 +48,7 @@ class VanillaWithAttProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
+        accept_len_cpu=None,  # Optional asynchronous CPU acceptance lengths.
     ) -> VanillaSpecProposal:
         """运行完整 Vanilla-With-Att 级联并生成下一轮 proposal。
 

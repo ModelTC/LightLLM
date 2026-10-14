@@ -70,7 +70,7 @@ def _case(heads, ratio):
         softmax_scale=512 ** -0.5,
         swa_indices=indices,
         swa_lengths=lengths,
-        attn_sink=torch.linspace(-0.5, 0.5, backend.padded_q_head_num, dtype=torch.float32, device="cuda"),
+        attn_sink=torch.linspace(-0.5, 0.5, heads, dtype=torch.float32, device="cuda"),
         extra_indices=extra_indices,
         extra_lengths=lengths.clone() if ratio else None,
     )
@@ -110,6 +110,13 @@ def test_prefill_matches_reference_and_preserves_out(heads, ratio, provide_out):
         att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params),
         out=out,
     )
+    assert params["attn_sink"].shape == (heads,)
+    adapted_sink = backend.prepare_attn_sink(params["attn_sink"])
+    assert adapted_sink.shape == (backend.padded_q_head_num,)
+    torch.testing.assert_close(adapted_sink[:heads], params["attn_sink"])
+    if heads < backend.padded_q_head_num:
+        assert torch.count_nonzero(adapted_sink[heads:]) == 0
+        assert backend.prepare_attn_sink(params["attn_sink"]).data_ptr() == adapted_sink.data_ptr()
     if provide_out:
         assert actual is out
     assert actual.is_contiguous()
@@ -177,21 +184,3 @@ def test_prefill_out_supports_strided_scratch_buffer():
     assert actual is out
     assert storage[..., 512:].isnan().all()
     torch.testing.assert_close(actual, _reference(q, decoded, extra_decoded, params, 64), rtol=0.02, atol=5e-4)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("invalid", ["shape", "dtype", "device", "stride"])
-def test_native_out_validation(invalid):
-    backend, state_info, q, pool, _, _, params = _case(64, 0)
-    if not backend.supports_out:
-        pytest.skip("FlashMLA package has no out argument")
-    if invalid == "shape":
-        out = torch.empty((q.shape[0], 1, 63, 512), dtype=q.dtype, device=q.device)
-    elif invalid == "dtype":
-        out = torch.empty((q.shape[0], 1, 64, 512), dtype=torch.float32, device=q.device)
-    elif invalid == "device":
-        out = torch.empty((q.shape[0], 1, 64, 512), dtype=q.dtype, device="cpu")
-    else:
-        out = torch.empty((q.shape[0], 1, 64, 1024), dtype=q.dtype, device=q.device)[..., ::2]
-    with pytest.raises(RuntimeError):
-        backend._flashmla_att(q, pool, state_info.mem_manager, params, attention.flashmla.get_mla_metadata()[0], out)

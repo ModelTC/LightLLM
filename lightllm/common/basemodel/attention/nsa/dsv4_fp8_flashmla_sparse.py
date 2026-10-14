@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING
 import torch
 import flash_mla as flashmla
 
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
-    DSV4_C128_PAGE_SIZE,
-    DSV4_C4_PAGE_SIZE,
-    DSV4_MLA_BYTES_PER_TOKEN,
+from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import (
+    DSV4_CACHE_BLOCK_SIZE,
+    DSV4_MLA_DATA_BYTES_PER_TOKEN,
+    DSV4_MLA_SCALE_BYTES,
     DSV4_SWA_PAGE_SIZE,
 )
 
@@ -19,45 +19,34 @@ if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4MemoryManager
 
-# Hopper sparse decode kernels support these local Q-head counts.
-_SUPPORTED_Q_HEADS = (64, 128)
-_COMPRESSED_PAGE_SIZES = {4: DSV4_C4_PAGE_SIZE, 128: DSV4_C128_PAGE_SIZE}
-
-
-def get_dsv4_flashmla_padded_q_heads(q_head_num: int) -> int:
-    for supported_head_num in _SUPPORTED_Q_HEADS:
-        if q_head_num <= supported_head_num:
-            return supported_head_num
-    raise ValueError(f"FlashMLA does not support {q_head_num} local Q heads; supported counts: {_SUPPORTED_Q_HEADS}")
-
 
 def _view_cache(buffer: torch.Tensor, page_size: int) -> torch.Tensor:
     """Expose FlashMLA's [page, token, KV head, byte] axes while retaining the padded page stride."""
-    bytes_per_page = page_size * DSV4_MLA_BYTES_PER_TOKEN
-    return buffer[:, :bytes_per_page].view(buffer.shape[0], page_size, 1, DSV4_MLA_BYTES_PER_TOKEN)
-
-
-def _get_compressed_cache(mem_manager: "DeepseekV4MemoryManager", nsa_dict: dict) -> torch.Tensor | None:
-    compress_ratio = nsa_dict["compress_ratio"]
-    if compress_ratio == 0:
-        return None
-
-    page_size = _COMPRESSED_PAGE_SIZES.get(compress_ratio)
-    if page_size is None:
-        raise ValueError(f"unsupported DeepSeek-V4 compress ratio: {compress_ratio}")
-
-    packed_cache = mem_manager.get_compressed_kv_buffer(nsa_dict["layer_index"])
-    return _view_cache(packed_cache, page_size)
+    bytes_per_token = DSV4_MLA_DATA_BYTES_PER_TOKEN + DSV4_MLA_SCALE_BYTES
+    bytes_per_page = page_size * bytes_per_token
+    return buffer[:, :bytes_per_page].view(buffer.shape[0], page_size, 1, bytes_per_token)
 
 
 class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
         self.real_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
-        self.padded_q_head_num = get_dsv4_flashmla_padded_q_heads(self.real_q_head_num)
+        # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
+        self.padded_q_head_num = ((self.real_q_head_num + 63) // 64) * 64
         self.compress_ratios = tuple(dict.fromkeys(model.config["compress_ratios"]))
         # Use the package's optional out interface; older upstream builds use a copy.
         self.supports_out = "out" in inspect.signature(flashmla.flash_mla_with_kvcache).parameters
+        self.attn_sink_cache: dict[torch.Tensor, torch.Tensor] = {}
+
+    def prepare_attn_sink(self, attn_sink: torch.Tensor) -> torch.Tensor:
+        """Cache backend head padding while retaining the model's local-head weight."""
+        if self.real_q_head_num == self.padded_q_head_num:
+            return attn_sink
+        if attn_sink not in self.attn_sink_cache:
+            padded = attn_sink.new_zeros(self.padded_q_head_num)
+            padded[: self.real_q_head_num].copy_(attn_sink)
+            self.attn_sink_cache[attn_sink] = padded
+        return self.attn_sink_cache[attn_sink]
 
     def _flashmla_att(
         self,
@@ -69,7 +58,11 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         out: torch.Tensor = None,
     ) -> torch.Tensor:
         """Attend to SWA plus optional compressed KV, then trim padded Q heads from the result."""
-        compressed_cache = _get_compressed_cache(mem_manager, nsa_dict)
+        compress_ratio = nsa_dict["compress_ratio"]
+        compressed_cache = None
+        if compress_ratio:
+            packed_cache = mem_manager.get_compressed_kv_buffer(nsa_dict["layer_index"])
+            compressed_cache = _view_cache(packed_cache, DSV4_CACHE_BLOCK_SIZE // compress_ratio)
         swa_cache = _view_cache(packed_kv, DSV4_SWA_PAGE_SIZE)
         output_kwargs = {}
         if self.supports_out and out is not None:
@@ -87,7 +80,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             causal=False,
             is_fp8_kvcache=True,
             indices=nsa_dict["swa_indices"],
-            attn_sink=nsa_dict["attn_sink"],
+            attn_sink=self.prepare_attn_sink(nsa_dict["attn_sink"]),
             topk_length=nsa_dict["swa_lengths"],
             extra_k_cache=compressed_cache,
             extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
@@ -110,11 +103,6 @@ class _PrefillAttState(BasePrefillAttState):
     def init_state(self):
         self.sched_meta_by_ratio = {}
 
-    def _get_sched_meta(self, compress_ratio: int) -> "FlashMLASchedMeta":
-        if compress_ratio not in self.sched_meta_by_ratio:
-            self.sched_meta_by_ratio[compress_ratio] = flashmla.get_mla_metadata()[0]
-        return self.sched_meta_by_ratio[compress_ratio]
-
     def prefill_att(
         self,
         q: torch.Tensor,
@@ -125,9 +113,10 @@ class _PrefillAttState(BasePrefillAttState):
         *,
         out: torch.Tensor = None,
     ) -> torch.Tensor:
-        assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
-        assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
         nsa_dict = att_control.nsa_prefill_dict
+        compress_ratio = nsa_dict["compress_ratio"]
+        if compress_ratio not in self.sched_meta_by_ratio:
+            self.sched_meta_by_ratio[compress_ratio] = flashmla.get_mla_metadata()[0]
         needs_head_padding = self.backend.real_q_head_num != self.backend.padded_q_head_num
         can_write_out = out is not None and self.backend.supports_out and not needs_head_padding
 
@@ -138,7 +127,7 @@ class _PrefillAttState(BasePrefillAttState):
             k,
             self.infer_state.mem_manager,
             nsa_dict,
-            self._get_sched_meta(nsa_dict["compress_ratio"]),
+            self.sched_meta_by_ratio[compress_ratio],
             out=flashmla_out,
         )
 
@@ -173,8 +162,6 @@ class _DecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
-        assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
         nsa_dict = att_control.nsa_decode_dict
         real_out = self.backend._flashmla_att(
             q,

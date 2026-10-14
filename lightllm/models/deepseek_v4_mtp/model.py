@@ -34,13 +34,9 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
     transformer_layer_infer_class = DeepseekV4MTPTransformerLayerInfer
 
     def __init__(self, kvargs: dict):
-        self._pre_init(kvargs)
-        super().__init__(kvargs)
-        return
-
-    def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
+        super().__init__(kvargs)
         return
 
     def _init_custom(self):
@@ -137,7 +133,8 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
             gc.collect()
 
         self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
+        for weight in self.trans_layers_weight:
+            weight.verify_load()
         logger.info(f"loaded DeepSeek-V4 MTP weights: {loaded_key_count} tensors")
         return
 

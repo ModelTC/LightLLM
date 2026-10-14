@@ -42,7 +42,6 @@ def _rotary_kernel(
     dim_range1 = dim_range0 + 1
     cos_range = tl.arange(0, BLOCK_DMODEL // 2)
     for seq_index in tl.range(seq_start_index, seq_end_index):
-
         off_dimcos_sin = seq_index * stride_cosbs + cos_range * stride_cosd
         cos = tl.load(Cos + off_dimcos_sin)
         sin = tl.load(Sin + off_dimcos_sin)
@@ -115,7 +114,6 @@ def get_test_configs():
 
 
 def get_static_key(q, k):
-    assert q is not None, "q can not be None"
     head_num_q = q.shape[1]
     head_num_k = k.shape[1] if k is not None else 0
     head_dim = q.shape[2]
@@ -136,7 +134,6 @@ def get_static_key(q, k):
 )
 @torch.no_grad()
 def rotary_emb_fwd(q, k, cos, sin, inverse=False, run_config=None):
-    assert q is not None, "q can not be None"
     has_k = k is not None and k.shape[1] != 0
     total_len = q.shape[0]
     head_num_q = q.shape[1]

@@ -48,10 +48,9 @@ def test_hold_request_indexes_require_all_requests_released():
 
 def _make_context(monkeypatch):
     mem_manager = _FakeMemManager()
-    req_manager = SimpleNamespace(
-        mem_manager=mem_manager,
-        req_to_token_indexs=torch.full((2, 16), -1, dtype=torch.int32),
-    )
+    req_manager = ReqManager.__new__(ReqManager)
+    req_manager.mem_manager = mem_manager
+    req_manager.req_to_token_indexs = torch.full((2, 16), -1, dtype=torch.int32)
     context = SimpleNamespace(
         args=SimpleNamespace(page_size=4),
         req_manager=req_manager,
@@ -494,10 +493,9 @@ def test_recover_paused_reqs_uses_page_allocation_need(monkeypatch):
     infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
     infer_context.radix_cache = None
     freed_indexes = []
-    infer_context.req_manager = SimpleNamespace(
-        req_to_token_indexs=torch.arange(16, dtype=torch.int32).reshape(2, 8),
-        free_token=lambda indexes: freed_indexes.extend(indexes.tolist()),
-    )
+    infer_context.req_manager = ReqManager.__new__(ReqManager)
+    infer_context.req_manager.req_to_token_indexs = torch.arange(16, dtype=torch.int32).reshape(2, 8)
+    infer_context.req_manager.free_token = lambda indexes: freed_indexes.extend(indexes.tolist())
     infer_context.get_can_alloc_token_num = lambda: 5
     large_req = _make_paused_req(req_idx=0, target_kv_len=5, page_size=4)
     small_req = _make_paused_req(req_idx=1, target_kv_len=4, page_size=4)
@@ -519,10 +517,9 @@ def test_recover_paused_reqs_requires_capacity_for_the_full_sequence(monkeypatch
     infer_context = InferenceContext.__new__(InferenceContext)
     infer_context.args = SimpleNamespace(page_size=4)
     infer_context.radix_cache = None
-    infer_context.req_manager = SimpleNamespace(
-        req_to_token_indexs=torch.arange(8, dtype=torch.int32)[None, :],
-        free_token=lambda indexes: None,
-    )
+    infer_context.req_manager = ReqManager.__new__(ReqManager)
+    infer_context.req_manager.req_to_token_indexs = torch.arange(8, dtype=torch.int32)[None, :]
+    infer_context.req_manager.free_token = lambda indexes: None
     infer_context.get_can_alloc_token_num = lambda: 4
     req = _make_paused_req(req_idx=0, target_kv_len=8, page_size=4, chunk_kv_len=4)
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", False)
@@ -537,6 +534,7 @@ def test_recover_paused_reqs_requires_capacity_for_the_full_sequence(monkeypatch
 
 def test_recover_paused_reqs_accounts_for_rematched_prefix(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
+    infer_context.req_manager = ReqManager.__new__(ReqManager)
     infer_context.args = SimpleNamespace(page_size=4)
     infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
     infer_context.get_can_alloc_token_num = lambda: 12

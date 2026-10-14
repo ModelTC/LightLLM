@@ -1,7 +1,23 @@
+import dataclasses
+
 import torch
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
+from .workspace import compressed_kv_capacity
+
+
+@dataclasses.dataclass
+class C4IndexerMetadata:
+    """Shared paged scorer inputs for the C4 layers of one forward."""
+
+    row_page_table: torch.Tensor
+    valid_lengths: torch.Tensor
+    context_lengths: torch.Tensor
+    scheduler: torch.Tensor | None
+    topk_lengths: torch.Tensor
+    rows_per_chunk: int | None
+    chunk_schedulers: tuple[torch.Tensor, ...] | None
 
 
 class DeepseekV4InferStateInfo(InferStateInfo):
@@ -30,10 +46,10 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_workspace = None
         # token -> batch-position map for the compressor; built per prefill forward in init_some_extra_state.
         self._dsv4_token_to_batch_idx = None
-        # lazily-built (first c4 layer) cache of layer-independent paged-c4 metadata; reused by the
-        # other c4 layers in the same forward. Plain tuple (not a tensor attr) so copy_for_cuda_graph
-        # ignores it -- it's a capture-time wiring of layer0->others, not a staged graph input.
-        self._c4_paged_meta = None
+        # The first C4 layer builds metadata and later layers reuse it within this forward.
+        # During CUDA Graph capture its tensor producers become graph nodes. Replay updates
+        # those captured buffers from staged inputs; copy_for_cuda_graph skips this container.
+        self.c4_indexer_metadata: C4IndexerMetadata | None = None
 
     def _dsv4_index_max_kv_seq_len(self, model):
         if (
@@ -45,7 +61,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         return self.max_kv_seq_len
 
     def init_some_extra_state(self, model):
-        self._c4_paged_meta = None  # reset per forward before any c4 layer runs
+        self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
         pos = self.position_ids
         self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
@@ -108,7 +124,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         )
         from lightllm.models.deepseek_v4.triton_kernel.build_compress_index_dsv4 import build_compress_index
 
-        cap = workspace.compress_cap(self._dsv4_index_max_kv_seq_len(model), 128)
+        cap = compressed_kv_capacity(self._dsv4_index_max_kv_seq_len(model), 128)
         self.dsv4_c128_indices, self.dsv4_c128_lengths = workspace.c128(self.microbatch_index, pos.numel(), cap)
         build_compress_index(
             self.dsv4_sparse_req_idx,

@@ -131,8 +131,12 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     module.backend = backend
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
+    from lightllm.common.req_manager.base import ReqManager
+
+    req_manager = ReqManager.__new__(ReqManager)
+    req_manager.req_to_token_indexs = table
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=table),
+        req_manager=req_manager,
         get_can_alloc_token_num=lambda: 100,
     )
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)

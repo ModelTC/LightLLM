@@ -1,7 +1,3 @@
-import copy
-import importlib.util
-import json
-import math
 import os
 
 import torch
@@ -9,11 +5,6 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
-    DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
-    DSV4_PROMPT_CACHE_PAGE_SIZE,
-    DSV4_SWA_PAGE_SIZE,
-)
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
 )
@@ -89,37 +80,23 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         )
         return
 
-    def _get_compress_rates(self, layer_num):
-        return get_deepseek_v4_compress_rates(self.config, layer_num)
-
     def _init_mem_manager(self):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
         state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
-        retain = self.config["sliding_window"] + DSV4_PROMPT_CACHE_PAGE_SIZE
-        decode_width = max(state_mtp_step + 1, 2 * state_mtp_step)
-        # The retained window may straddle one extra physical page.
-        per_req_pages = math.ceil((retain + decode_width - 1) / DSV4_SWA_PAGE_SIZE) + 1
-        window_pages = self.max_req_num * per_req_pages
-        if self.args.run_mode != "prefill" and self.args.mtp_mode == "dspark":
-            window_pages += self.max_req_num
-        swa_page_num = window_pages
-        if self.args.run_mode != "decode":
-            swa_page_num += math.ceil(self.batch_max_tokens / DSV4_SWA_PAGE_SIZE)
+        swa_page_num = self.req_manager.get_swa_pool_page_num(self.args, self.batch_max_tokens, state_mtp_step)
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
             head_dim=self.config["head_dim"],
             layer_num=layer_num,
-            compress_rates=self._get_compress_rates(layer_num),
+            compress_rates=get_deepseek_v4_compress_rates(self.config, layer_num),
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
             mtp_step=state_mtp_step,
             swa_page_num=swa_page_num,
             cpu_cache_token_page_size=(
-                DSV4_CPU_CACHE_TOKEN_PAGE_SIZE
-                if self.args.cpu_cache_token_page_size is None
-                else self.args.cpu_cache_token_page_size
+                2048 if self.args.cpu_cache_token_page_size is None else self.args.cpu_cache_token_page_size
             ),
             mem_fraction=self.mem_fraction,
         )
@@ -146,14 +123,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         )
         for layer_infer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
-            if padded_q_head_num == real_q_head_num:
-                continue
-            attn_sink = layer_weight.attn_sink_.weight
-            assert attn_sink.shape == (real_q_head_num,)
-            padded_attn_sink = torch.zeros((padded_q_head_num,), dtype=attn_sink.dtype, device=attn_sink.device)
-            padded_attn_sink[: attn_sink.shape[0]].copy_(attn_sink)
-            padded_attn_sink.load_ok = attn_sink.load_ok
-            layer_weight.attn_sink_.weight = padded_attn_sink
+            # Prepare both backends before graph capture without changing model weights.
+            self.prefill_att_backend.prepare_attn_sink(layer_weight.attn_sink_.weight)
+            self.decode_att_backend.prepare_attn_sink(layer_weight.attn_sink_.weight)
         return
 
     def _init_custom(self):
@@ -163,14 +135,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             prefill_aux_stream = torch.cuda.Stream()
         self.dsv4_workspace = DeepseekV4Workspace(self)
         if self.dsv4_workspace.needs_c4_prefill_aux(self):
-            import deep_gemm
-
-            if "out:" not in (deep_gemm.fp8_paged_mqa_logits.__doc__ or ""):
-                raise RuntimeError(
-                    "C4 prefill overlap workspace requires a DeepGEMM build whose "
-                    "fp8_paged_mqa_logits API accepts out="
-                )
-            assert prefill_aux_stream is not None
             with torch.cuda.stream(prefill_aux_stream):
                 self.dsv4_workspace.init_c4_prefill_aux(self)
         if prefill_aux_stream is not None:
@@ -281,189 +245,3 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
 class DeepseekV4VisionTpPartModel(DeepseekV4TpPartModel):
     has_vision = True
-
-
-class DeepSeekV4Tokenizer:
-    """Tokenizer wrapper for DeepSeek-V4's Python prompt encoding."""
-
-    # DeepSeek-V4 has a per-request thinking mode (<think>...</think>) toggled via
-    # chat_template_kwargs={"thinking": true}. It has no Jinja chat_template string,
-    # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
-    supports_thinking = True
-
-    def __init__(self, tokenizer, model_dir, model_config=None):
-        self.tokenizer = tokenizer
-        self.model_dir = model_dir
-        self.model_config = {} if model_config is None else model_config
-        self.has_vision = self.model_config.get("vision_n_layers", 0) > 0
-        self.image_token_id = tokenizer.convert_tokens_to_ids("<｜deepseek_image｜>") if self.has_vision else None
-        self._encoding_module = None
-        self._added_vocab = None
-
-    def __getattr__(self, name):
-        return getattr(self.tokenizer, name)
-
-    def get_added_vocab(self):
-        if self._added_vocab is None:
-            self._added_vocab = self.tokenizer.get_added_vocab()
-        return self._added_vocab
-
-    def init_imageitem_extral_params(self, img, multi_params, sampling_params):
-        return
-
-    def get_image_token_length(self, img):
-        from lightllm.models.deepseek_v4.image_processor import get_image_grid
-
-        cfg = self.model_config
-        _, _, _, _, token_num = get_image_grid(
-            img.image_h,
-            img.image_w,
-            cfg["vision_patch_size"],
-            cfg["vision_downsample_ratio"],
-            cfg["vision_max_n_token"],
-            cfg["vision_min_pixels"],
-            cfg.get("vision_max_wh_ratio"),
-        )
-        return token_num
-
-    def encode(self, prompt, multimodal_params=None, **kwargs):
-        if isinstance(prompt, str):
-            origin_ids = self.tokenizer.encode(prompt, **kwargs)
-        elif isinstance(prompt, list):
-            origin_ids = prompt
-        else:
-            raise ValueError(f"Unsupported prompt type: {type(prompt)}")
-
-        images = [] if multimodal_params is None else multimodal_params.images
-        if not images:
-            return origin_ids
-
-        placeholder_count = sum(token_id == self.image_token_id for token_id in origin_ids)
-        if placeholder_count != len(images):
-            raise ValueError(f"invalid image placeholder count: {placeholder_count} vs {len(images)}")
-
-        input_ids = []
-        image_index = 0
-        for token_id in origin_ids:
-            if token_id != self.image_token_id:
-                input_ids.append(token_id)
-                continue
-
-            image = images[image_index]
-            cache_skip = len(input_ids) % 4
-            compress_pad = 3 - cache_skip
-            image.block_start_idx = len(input_ids)
-            image.start_idx = len(input_ids) + compress_pad
-            input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))
-            image.block_end_idx = len(input_ids)
-            image_index += 1
-
-        return input_ids
-
-    def decode(self, token_ids, **kwargs):
-        if self.has_vision:
-            # Prompt image embeddings use out-of-vocabulary cache IDs that the HF tokenizer cannot decode.
-            vocab_size = self.model_config["vocab_size"]
-            token_ids = [
-                self.image_token_id if int(token_id) >= vocab_size else int(token_id) for token_id in token_ids
-            ]
-        return self.tokenizer.decode(token_ids, **kwargs)
-
-    def _get_encoding_module(self):
-        if self._encoding_module is not None:
-            return self._encoding_module
-
-        # Prefer the encoder shipped inside the model dir (respects any model-specific
-        # customization); fall back to the copy vendored in this repo, because some
-        # DeepSeek-V4 releases (e.g. the FP8 weights) do NOT ship an encoding/ dir.
-        # vLLM/sglang likewise vendor this encoder in-tree instead of depending on the
-        # model directory.
-        encoding_path = os.path.join(self.model_dir, "encoding", "encoding_dsv4.py")
-        if not os.path.exists(encoding_path):
-            encoding_path = os.path.join(os.path.dirname(__file__), "encoding", "encoding_dsv4.py")
-        if not os.path.exists(encoding_path):
-            raise FileNotFoundError(f"DeepSeek-V4 encoding file not found: {encoding_path}")
-
-        spec = importlib.util.spec_from_file_location("lightllm_deepseek_v4_encoding_dsv4", encoding_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"failed to load DeepSeek-V4 encoding module from {encoding_path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        self._encoding_module = module
-        return module
-
-    def apply_chat_template(
-        self,
-        conversation=None,
-        messages=None,
-        tools=None,
-        tokenize=False,
-        add_generation_prompt=True,
-        thinking=None,
-        enable_thinking=None,
-        **kwargs,
-    ):
-        msgs = conversation if conversation is not None else messages
-        if msgs is None:
-            raise ValueError("Either 'conversation' or 'messages' must be provided")
-
-        msgs = copy.deepcopy(msgs)
-
-        # The model's DSML encoder (encode_arguments_to_dsml in encoding_dsv4.py) expects
-        # function.arguments as a JSON string and parses it internally. Upstream,
-        # build_prompt._normalize_tool_call_arguments converts arguments from the OpenAI
-        # JSON string to a dict (needed by Qwen3.x-style Jinja templates). A dict hits the
-        # encoder's except-branch and gets wrapped under a single name="arguments" param,
-        # which the model then imitates and amplifies across turns until required fields go
-        # missing. Re-serialize dicts back to JSON strings so the encoder emits one
-        # <parameter> per real arg.
-        for msg in msgs:
-            content = msg.get("content")
-            if isinstance(content, list) and all(
-                isinstance(part, dict) and part.get("type") == "text" for part in content
-            ):
-                msg["content"] = "".join(part.get("text") or "" for part in content)
-            for tc in msg.get("tool_calls") or []:
-                fn = tc.get("function")
-                if isinstance(fn, dict) and isinstance(fn.get("arguments"), dict):
-                    fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
-
-        if tools:
-            wrapped_tools = []
-            for tool in tools:
-                if "function" in tool:
-                    wrapped_tools.append(tool)
-                else:
-                    wrapped_tools.append({"type": "function", "function": tool})
-
-            injected = False
-            for msg in msgs:
-                if msg.get("role") == "system":
-                    existing = msg.get("tools") or []
-                    msg["tools"] = existing + wrapped_tools
-                    injected = True
-                    break
-
-            if not injected:
-                msgs.insert(0, {"role": "system", "content": "", "tools": wrapped_tools})
-
-        if thinking is None:
-            thinking = bool(enable_thinking) if enable_thinking is not None else True
-        thinking_mode = "thinking" if thinking else "chat"
-        effort = kwargs.get("reasoning_effort")
-        if thinking and effort is None:
-            effort = os.getenv("LIGHTLLM_DSV4_THINKING_EFFORT", "high")
-        if effort not in ("max", "high", None):
-            effort = None
-        encoding = self._get_encoding_module()
-        prompt = encoding.encode_messages(
-            msgs,
-            thinking_mode=thinking_mode,
-            drop_thinking=kwargs.get("drop_thinking", True),
-            add_default_bos_token=kwargs.get("add_default_bos_token", True),
-            reasoning_effort=effort,
-        )
-
-        if tokenize:
-            return self.tokenizer.encode(prompt, add_special_tokens=False)
-        return prompt

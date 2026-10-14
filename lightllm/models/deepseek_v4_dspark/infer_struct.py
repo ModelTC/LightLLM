@@ -1,4 +1,4 @@
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
+from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import (
     DSV4_SWA_PAGE_SIZE,
 )
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo

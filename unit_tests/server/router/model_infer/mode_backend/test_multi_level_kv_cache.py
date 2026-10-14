@@ -12,6 +12,8 @@ from lightllm.server.multi_level_kv_cache import (
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as multi_level_kv_cache_impl
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
+from lightllm.models.deepseek_v4 import cpu_cache as dsv4_cpu_cache_impl
+from lightllm.models.deepseek_v4.cpu_cache import DeepseekV4MultiLevelKvCacheModule
 
 
 def test_cache_tiers_reassignment_is_rejected():
@@ -231,7 +233,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
 
 @pytest.mark.parametrize("disk_cache", [False, True])
 def test_dsv4_store_survives_request_finish_and_waits_for_load(disk_cache, monkeypatch):
-    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module = DeepseekV4MultiLevelKvCacheModule.__new__(DeepseekV4MultiLevelKvCacheModule)
     slot = SimpleNamespace(in_use=True)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
@@ -242,13 +244,11 @@ def test_dsv4_store_survives_request_finish_and_waits_for_load(disk_cache, monke
     load_event.query = lambda: load_event.ready
     store_event = SimpleNamespace(ready=False)
     store_event.query = lambda: store_event.ready
-    session = multi_level_kv_cache_impl.Dsv4CpuStoreSession(
+    session = dsv4_cpu_cache_impl.Dsv4CpuStoreSession(
         request_id=3, leased_pages=[5, 7], pending_task_num=1, load_submitted=True, load_event=load_event
     )
     module._dsv4_store_sessions = {3: session}
-    module._dsv4_store_tasks = deque(
-        [multi_level_kv_cache_impl.Dsv4StoreTask([7], [session], 0, object(), store_event)]
-    )
+    module._dsv4_store_tasks = deque([dsv4_cpu_cache_impl.Dsv4StoreTask([7], [session], 0, object(), store_event)])
     published = []
     released = []
     module.cpu_cache_client = SimpleNamespace(
@@ -285,12 +285,12 @@ def test_dsv4_store_survives_request_finish_and_waits_for_load(disk_cache, monke
 @pytest.mark.parametrize("is_master_in_dp", [False, True])
 @pytest.mark.parametrize("mixed_batch", [False, True])
 def test_prompt_logprobs_filter_is_shared_by_models(is_deepseek_v4, is_master_in_dp, mixed_batch, monkeypatch):
-    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module_class = DeepseekV4MultiLevelKvCacheModule if is_deepseek_v4 else MultiLevelKvCacheModule
+    module = module_class.__new__(module_class)
     module.backend = SimpleNamespace(is_master_in_dp=is_master_in_dp)
     loaded = []
     released = []
-    module._load_dsv4_cpu_cache_to_reqs = loaded.extend
-    module._load_standard_cpu_cache_to_reqs = loaded.extend
+    module._load_cpu_cache_to_reqs = loaded.extend
     module.cpu_cache_client = SimpleNamespace(
         lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
         deref_pages=released.extend,

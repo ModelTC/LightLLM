@@ -9,7 +9,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
 )
 from lightllm.common.quantization import Quantcfg
-from lightllm.models.deepseek_v4.triton_kernel.quant_convert import dequant_fp8_block_to_bf16
+from lightllm.models.deepseek_v4.triton_kernel.quant_convert import prepare_fp8_weights
 
 
 class DeepseekV4MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -88,20 +88,5 @@ class DeepseekV4MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
         return
 
     def load_hf_weights(self, weights):
-        self._dequant_in_place(weights)
+        prepare_fp8_weights(weights, (self.e_proj_weight_, self.h_proj_weight_), self.data_type_)
         return super().load_hf_weights(weights)
-
-    def _dequant_in_place(self, weights):
-        for attr in (self.e_proj_weight_, self.h_proj_weight_):
-            for weight_name, scale_name in zip(attr.weight_names, attr.weight_scale_names):
-                scale_key = weight_name[: -len(".weight")] + ".scale"
-                if scale_key not in weights:
-                    continue
-                if scale_name is None:
-                    weights[weight_name] = dequant_fp8_block_to_bf16(weights[weight_name], weights[scale_key]).to(
-                        self.data_type_
-                    )
-                else:
-                    weights[scale_name] = weights[scale_key].to(torch.float32)
-                del weights[scale_key]
-        return

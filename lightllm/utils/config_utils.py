@@ -45,10 +45,10 @@ def normalize_deepseek_v4_config(config: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(f"Unsupported DeepSeek-V4 compression ratio {ratio!r} for layer type {layer_type!r}")
         ratios.append(ratio)
 
-    # Older checkpoints include one trailing entry for the optional MTP KV
-    # layer. Preserve that layout so both regular and MTP paths can slice it.
+    # Match the older checkpoint layout, including trailing MTP/DSpark KV layers.
     if len(ratios) == config.get("num_hidden_layers"):
-        ratios.append(0)
+        draft_layer_num = len(config.get("dspark_target_layer_ids", [])) or 1
+        ratios.extend([0] * draft_layer_num)
 
     config["compress_ratios"] = ratios
     return config

@@ -52,6 +52,7 @@ class DFlashProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
+        accept_len_cpu=None,  # Optional asynchronous CPU acceptance lengths.
     ) -> DFlashSpecProposal:
         """提交 target verify KV，并生成下一轮 DFlash block proposal。
 

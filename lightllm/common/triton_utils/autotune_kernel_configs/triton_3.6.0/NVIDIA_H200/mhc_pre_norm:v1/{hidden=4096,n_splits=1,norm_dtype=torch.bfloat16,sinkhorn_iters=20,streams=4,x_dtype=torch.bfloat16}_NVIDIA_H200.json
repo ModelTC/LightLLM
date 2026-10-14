@@ -1,0 +1,6 @@
+{
+  "8192": {
+    "num_warps": 4,
+    "unroll_sinkhorn": true
+  }
+}

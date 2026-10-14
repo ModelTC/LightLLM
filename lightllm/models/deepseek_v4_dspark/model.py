@@ -49,13 +49,10 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     infer_state_class = DeepseekV4DSparkInferStateInfo
 
     def __init__(self, kvargs: dict):
-        self._pre_init(kvargs)
-        super().__init__(kvargs)
-
-    def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         assert not self.mtp_previous_draft_models, "DeepSeek-V4 DSpark uses one parallel draft model"
+        super().__init__(kvargs)
 
     def _init_config(self):
         super()._init_config()
@@ -260,7 +257,8 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             gc.collect()
 
         self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
+        for weight in self.trans_layers_weight:
+            weight.verify_load()
         self._load_context_wkv_weights()
         logger.info("loaded DeepSeek-V4 DSpark weights: %d tensors", loaded_key_count)
 

@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("model_type", ["llama", "deepseek_v32"])
+@pytest.mark.parametrize("model_type", ["llama", "deepseek_v32", "deepseek_v4"])
 def test_tokenizer_imports_are_isolated(model_type):
     result = subprocess.run(
         [
@@ -37,6 +37,8 @@ class RejectUnrelatedModels(importlib.abc.MetaPathFinder):
             allowed = {"lightllm.models.registry", "lightllm.models.draft_registry", "lightllm.models.builtin"}
             if model_type == "deepseek_v32":
                 allowed.add("lightllm.models.deepseek3_2")
+            if model_type == "deepseek_v4":
+                allowed.update({"lightllm.models.deepseek_v4", "lightllm.models.deepseek_v4.tokenizer"})
             if fullname not in allowed:
                 raise AssertionError("Unexpected model import: " + fullname)
 sys.meta_path.insert(0, RejectUnrelatedModels())

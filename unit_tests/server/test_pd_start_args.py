@@ -61,13 +61,15 @@ def test_cpu_cache_page_defaults_preserve_model_contracts(
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "llama"])
 @pytest.mark.parametrize("enable_cpu_cache", [False, True])
+@pytest.mark.parametrize("disable_chunked_prefill", [False, True])
 def test_model_kv_defaults_preserve_hash_pages_kv_selection_and_explicit_pd_tuning(
-    startup_args, monkeypatch, model_type, enable_cpu_cache
+    startup_args, monkeypatch, model_type, enable_cpu_cache, disable_chunked_prefill
 ):
     monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda _: model_type)
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda _: model_type == "deepseek_v4")
     args = startup_args
     args.enable_cpu_cache = enable_cpu_cache
+    args.disable_chunked_prefill = disable_chunked_prefill
     args.pd_kv_page_num, args.pd_kv_page_size = 8, 2048
     with pytest.raises(RuntimeError, match="startup validation complete"):
         _launch_subprocesses(args)
@@ -135,21 +137,23 @@ def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_typ
 
 @pytest.mark.parametrize(
     "page_size,hash_page_size,cpu_page_size",
-    [(1, 256, None), (256, 512, None), (256, 256, 4096), (256, 256, None), (256, 512, 4096)],
+    [
+        (1, 256, None),
+        (256, 512, None),
+        (256, 256, 4096),
+        (256, 256, None),
+        (256, 512, 4096),
+        (512, 512, None),
+        (768, 768, None),
+        (1024, 1024, None),
+    ],
 )
-def test_dsv4_page_and_checkpoint_configuration(monkeypatch, page_size, hash_page_size, cpu_page_size):
-    for name in (
-        "_set_envs_and_config",
-        "auto_set_max_req_total_len",
-        "auto_set_fused_shared_experts",
-        "set_unique_server_name",
-    ):
-        monkeypatch.setattr("lightllm.server.api_start." + name, lambda args: None)
+def test_dsv4_page_and_checkpoint_configuration(startup_args, monkeypatch, page_size, hash_page_size, cpu_page_size):
     monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda model_dir: "deepseek_v4")
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda model_dir: True)
 
     def validation_finished(args):
-        assert args.page_size == 256
+        assert args.page_size == (256 if page_size == 1 else page_size)
         assert args.linear_att_hash_page_size == hash_page_size
         assert args.cpu_cache_token_page_size == hash_page_size * 8
         assert args.llm_kv_type == "None"
@@ -157,19 +161,12 @@ def test_dsv4_page_and_checkpoint_configuration(monkeypatch, page_size, hash_pag
         raise RuntimeError("DSV4 page-size validation passed")
 
     monkeypatch.setattr("lightllm.server.api_start.auto_set_response_parsers", validation_finished)
-    args = StartArgs(
-        model_dir="unused",
-        page_size=page_size,
-        linear_att_hash_page_size=hash_page_size,
-        linear_att_page_block_num=8,
-        enable_cpu_cache=True,
-        cpu_cache_token_page_size=cpu_page_size,
-        max_req_total_len=8192,
-        eos_id=[2],
-        disable_vision=True,
-        disable_audio=True,
-        disable_shm_warning=True,
-    )
+    args = startup_args
+    args.page_size = page_size
+    args.linear_att_hash_page_size = hash_page_size
+    args.linear_att_page_block_num = 8
+    args.enable_cpu_cache = True
+    args.cpu_cache_token_page_size = cpu_page_size
     if cpu_page_size is not None and cpu_page_size != hash_page_size * 8:
         with pytest.raises(ValueError, match="CPU cache pages must match"):
             _launch_subprocesses(args)
@@ -178,25 +175,21 @@ def test_dsv4_page_and_checkpoint_configuration(monkeypatch, page_size, hash_pag
             _launch_subprocesses(args)
 
 
-@pytest.mark.parametrize("hash_page_size", [128, 384])
-def test_dsv4_rejects_hash_pages_not_aligned_to_physical_kv_pages(monkeypatch, hash_page_size):
-    for name in (
-        "_set_envs_and_config",
-        "auto_set_max_req_total_len",
-        "auto_set_fused_shared_experts",
-        "set_unique_server_name",
-    ):
-        monkeypatch.setattr("lightllm.server.api_start." + name, lambda args: None)
+@pytest.mark.parametrize(
+    "page_size,hash_page_size", [(256, 128), (256, 384), (512, 256), (0, 512), (128, 512), (384, 768)]
+)
+def test_dsv4_rejects_unaligned_cache_pages(startup_args, monkeypatch, page_size, hash_page_size):
     monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda _: "deepseek_v4")
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda _: True)
-    args = StartArgs(
-        model_dir="unused",
-        linear_att_hash_page_size=hash_page_size,
-        disable_vision=True,
-        disable_audio=True,
-        disable_shm_warning=True,
+    args = startup_args
+    args.page_size = page_size
+    args.linear_att_hash_page_size = hash_page_size
+    error = (
+        "--page_size must be a positive multiple"
+        if page_size <= 0 or page_size % 256
+        else "--linear_att_hash_page_size must be divisible by --page_size"
     )
-    with pytest.raises(ValueError, match="--linear_att_hash_page_size must be divisible by --page_size"):
+    with pytest.raises(ValueError, match=error):
         _launch_subprocesses(args)
 
 

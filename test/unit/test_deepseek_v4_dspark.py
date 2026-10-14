@@ -57,7 +57,8 @@ def test_deepseek_v4_dspark_rejects_invalid_runtime_width(monkeypatch, mtp_step)
         model._verify_params()
 
 
-def test_deepseek_v4_dspark_layer_count_uses_trailing_swa_layers(tmp_path):
+@pytest.mark.parametrize("schema", ["compress_ratios", "layer_types"])
+def test_deepseek_v4_dspark_layer_count_uses_trailing_swa_layers(tmp_path, schema):
     config = {
         "model_type": "deepseek_v4",
         "num_hidden_layers": 43,
@@ -65,6 +66,10 @@ def test_deepseek_v4_dspark_layer_count_uses_trailing_swa_layers(tmp_path):
         "dspark_block_size": 5,
         "dspark_target_layer_ids": [40, 41, 42],
     }
+    if schema == "layer_types":
+        del config["compress_ratios"]
+        config["layer_types"] = ["compressed_attention"] * 43
+        config["compress_rates"] = {"compressed_attention": 4}
     (tmp_path / "config.json").write_text(json.dumps(config))
 
     assert _get_mtp_draft_backbone_layer_num(str(tmp_path)) == 3

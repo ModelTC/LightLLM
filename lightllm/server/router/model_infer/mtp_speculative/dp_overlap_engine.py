@@ -11,9 +11,6 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers imp
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
     BaseDpOverlapProposer,
 )
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.eagle_with_att import (
-    DpOverlapEagleWithAttProposer,
-)
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.planner import SpecDecodePlan
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
@@ -160,9 +157,6 @@ class DPOverlapSpecEngine:
         assert accept_len0.ndim == 1
         assert accept_len1.ndim == 1
 
-        proposer_kwargs = {}
-        if self.proposer.backend.is_deepseek_v4 and isinstance(self.proposer, DpOverlapEagleWithAttProposer):
-            proposer_kwargs = {"accept_len_cpu": accept_len_cpu}
         return self.proposer.propose_next_overlap(
             target_model_input0=target_model_input0,
             target_model_output0=target_model_output0,
@@ -173,7 +167,7 @@ class DPOverlapSpecEngine:
             target_next_token_ids1=target_next_token_ids1,
             accept_len1=accept_len1,
             draft_step=draft_step,
-            **proposer_kwargs,
+            accept_len_cpu=accept_len_cpu,
         )
 
     def update_planner_statics(

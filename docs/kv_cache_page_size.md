@@ -46,20 +46,28 @@ diverse mode 仍只支持 `page_size=1`，启动阶段会对其他取值明确�
 
 ## DeepSeek-V4
 
-V4 首版整合固定使用 256-token 分配页和 256-token 小页。启动时需要添加：
+V4 的分配页 `--page_size` 支持 256 的正整数倍，例如 256、512、768、1024。
+沿用默认值 `1` 时自动选择 256；显式配置的合法页大小会保留。
+小页缓存边界 `--linear_att_hash_page_size` 必须是分配页大小的整数倍，例如：
 
 ```bash
 --page_size 256 --linear_att_hash_page_size 256
+# 或
+--page_size 768 --linear_att_hash_page_size 768
 ```
 
-启用每 2048 token 一个大页 checkpoint 时，再添加 `--linear_att_page_block_num 8`。
+大页 checkpoint 间隔是小页大小乘以 `--linear_att_page_block_num`。
+例如 256-token 小页配合 `--linear_att_page_block_num 8`，每 2048 token 保存一次 checkpoint。
 省略该参数时沿用主线默认值，关闭大页 checkpoint。PD Decode 节点仍按主线规则关闭大页。
 启用大页和 CPU cache 时，`--cpu_cache_token_page_size` 必须等于大页间隔；未指定时自动设置。
+PD 传输页 `--pd_kv_page_size` 和 CPU cache 页也必须是分配页大小的整数倍。
+例如 768-token 分配页可以配合 `--pd_kv_page_size 1536`。
 
-- 统一 token 页持有压缩历史。闭合分组的 C4/C128 槽分别由组末 full slot 除以 4/128 得到；
+- 分配页按 256-token packed block 持有压缩历史。闭合分组的 C4/C128 槽分别由组末 full slot 除以 4/128 得到；
   不再维护独立压缩槽映射或 allocator。预留容量不改变 attention 的逻辑可见长度。
 - packed 格式保持独立：SWA 每页 128 槽，C4 每页 64 槽，C128 每页 2 槽。
-  历史复制、CPU cache 和 PD 使用 V4 专用算子，不能直接按普通 KV 的 token 维度复制。
+  这些物理块大小来自算子布局，与分配页大小独立。历史复制遍历分配页内的所有 packed block；
+  HOLD 请求也预留整个分配页对应的压缩容量。
 - SWA 页和 compressor 运行态归请求所有，保留完整 prefill chunk 所需的数据。
   两个请求命中同一前缀时，共享压缩历史，分别恢复自己的 SWA 和 compressor 状态。
 - 大小页 CPU checkpoint 只保存末尾 256 token 的 SWA、C4 和 indexer continuation，

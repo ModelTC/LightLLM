@@ -70,6 +70,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         target_next_token_ids1: torch.Tensor,
         accept_len1: torch.Tensor,
         draft_step: int,
+        accept_len_cpu=None,  # Optional asynchronous CPU acceptance lengths.
     ) -> VanillaSpecProposal:
         assert draft_step == self.backend.max_draft_step
         assert len(self.backend.draft_models) == draft_step
