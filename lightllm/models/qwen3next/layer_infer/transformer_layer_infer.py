@@ -1,6 +1,5 @@
 import torch
 
-import torch.distributed as dist
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
     Qwen3NextTransformerLayerWeight,
 )
@@ -12,7 +11,6 @@ from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from lightllm.common.basemodel.attention.base_att import AttControl
 from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
-from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args
 from functools import partial
@@ -246,6 +244,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             return super().context_attention_forward(input_embdings, infer_state, layer_weight)
 
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
+        input_embdings = self._tpsp_allgather(input_embdings, infer_state)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
 
         if torch.cuda.is_current_stream_capturing():
@@ -268,9 +267,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
-        if self.tp_world_size_ > 1:
-            all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return gdn_out
+        return self._tpsp_reduce(gdn_out, infer_state)
 
     def token_attention_forward(
         self,
@@ -282,6 +279,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             return super().token_attention_forward(input_embdings, infer_state, layer_weight)
 
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
+        input_embdings = self._tpsp_allgather(input_embdings, infer_state)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
         core_attn_out, z = infer_state.decode_att_state1.decode_att(
             q=None,
@@ -299,9 +297,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
-        if self.tp_world_size_ > 1:
-            all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return gdn_out
+        return self._tpsp_reduce(gdn_out, infer_state)
 
     def _linear_in_proj(
         self,
