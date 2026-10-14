@@ -264,6 +264,18 @@ class DPKVSharedMoudle:
                 )
             )
 
+        # Group each receiver's requests by source, preserving first-source and per-source order.
+        # Every rank builds this schedule from the same gathered plans, so send/recv stay paired.
+        for destination, destination_tasks in enumerate(transfer_plan):
+            by_source = {}
+            for task in destination_tasks:
+                by_source.setdefault(task[0], []).append(task)
+            reordered_tasks = []
+            for source_tasks in by_source.values():
+                for task in source_tasks:
+                    reordered_tasks.append(task)
+            transfer_plan[destination] = reordered_tasks
+
         return tasks, transfer_plan
 
     def _transfer_dsv4_source_data(self, trans_tasks, matches, transfer_plan):
