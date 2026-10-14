@@ -143,9 +143,6 @@ class DeepseekV4Workspace:
         self.c128_indices = self._alloc(self.c128_cap)
         self.c128_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
         self.flashmla_prefill_q = None
-        self.flashmla_prefill_full_out = None
-        self.flashmla_prefill_o_accum = None
-        self.flashmla_prefill_lse_accum = None
         self.c4_prefill_aux = None
 
     def init_c4_prefill_aux(self, model):
@@ -165,24 +162,6 @@ class DeepseekV4Workspace:
                 (self.token_capacity, padded_q_head_num, head_dim), dtype=dtype, device="cuda"
             )
             self.flashmla_prefill_q[:, real_q_head_num:, :].zero_()
-
-    def init_flashmla_prefill_full_out(self, q_head_num: int, head_dim_v: int, dtype: torch.dtype):
-        if self.flashmla_prefill_full_out is None:
-            self.flashmla_prefill_full_out = torch.empty(
-                (self.token_capacity, 1, q_head_num, head_dim_v), dtype=dtype, device="cuda"
-            )
-
-    def init_flashmla_prefill_split_kv_workspace(self, q_head_num: int, head_dim_v: int):
-        if self.flashmla_prefill_o_accum is None:
-            sm_count = torch.cuda.get_device_properties().multi_processor_count
-            # FlashMLA stores one row per query plus at most one split row per SM.
-            split_capacity = self.token_capacity + sm_count
-            self.flashmla_prefill_o_accum = torch.empty(
-                (split_capacity, 1, q_head_num, head_dim_v), dtype=torch.float32, device="cuda"
-            )
-            self.flashmla_prefill_lse_accum = torch.empty(
-                (split_capacity, 1, q_head_num), dtype=torch.float32, device="cuda"
-            )
 
     @staticmethod
     def compress_cap(max_kv_seq_len: int, ratio: int) -> int:

@@ -1,20 +1,14 @@
 import dataclasses
+import inspect
 from typing import TYPE_CHECKING
 
 import torch
-from vllm.v1.attention.ops import flashmla
-
-from lightllm.utils.log_utils import init_logger
+import flash_mla as flashmla
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
-
-logger = init_logger(__name__)
-if not hasattr(torch.ops._flashmla_C, "sparse_decode_fwd_with_workspace"):
-    logger.warning("FlashMLA sparse_decode_fwd_with_workspace is unavailable; prefill uses flash_mla_with_kvcache")
-
 
 # The current FlashMLA MODEL1 binary only instantiates these Q-head counts.
 _SUPPORTED_Q_HEADS = (64, 128)
@@ -34,38 +28,14 @@ def _view_cache(buffer: torch.Tensor, page_size: int) -> torch.Tensor:
     return buffer[:, :byte_num].view(buffer.shape[0], page_size, 1, DSV4_MLA_BYTES_PER_TOKEN)
 
 
-def _flashmla_sparse_decode_with_workspace(
-    op, kwargs: dict, sched_meta, o_accum: torch.Tensor, lse_accum: torch.Tensor
-):
-    out, lse, new_tile_scheduler_metadata, new_num_splits = op(
-        kwargs["q"],
-        kwargs["k_cache"],
-        kwargs["indices"],
-        kwargs["topk_length"],
-        kwargs["attn_sink"],
-        sched_meta.tile_scheduler_metadata,
-        sched_meta.num_splits,
-        kwargs["extra_k_cache"],
-        kwargs["extra_indices_in_kvcache"],
-        kwargs["extra_topk_length"],
-        kwargs["head_dim_v"],
-        kwargs["softmax_scale"],
-        kwargs["out"],
-        o_accum,
-        lse_accum,
-    )
-    sched_meta.tile_scheduler_metadata = new_tile_scheduler_metadata
-    sched_meta.num_splits = new_num_splits
-    return out, lse
-
-
 class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
         self.real_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
         self.padded_q_head_num = get_dsv4_flashmla_padded_q_heads(self.real_q_head_num)
         self.compress_ratios = tuple(dict.fromkeys(model.config["compress_ratios"]))
-        self._flashmla_workspace_op = getattr(torch.ops._flashmla_C, "sparse_decode_fwd_with_workspace", None)
+        # Our standalone build accepts out; upstream builds still work through a copy.
+        self.supports_out = "out" in inspect.signature(flashmla.flash_mla_with_kvcache).parameters
 
     def _flashmla_att(
         self,
@@ -74,9 +44,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         mem_manager,
         nsa_dict: dict,
         sched_meta,
-        flashmla_out: torch.Tensor = None,
-        flashmla_o_accum: torch.Tensor = None,
-        flashmla_lse_accum: torch.Tensor = None,
+        out: torch.Tensor = None,
     ) -> torch.Tensor:
         from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
             DSV4_C128_PAGE_SIZE,
@@ -96,7 +64,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             buffer = mem_manager.get_compressed_kv_buffer(nsa_dict["layer_index"])
             extra_cache = _view_cache(buffer, extra_page_size)
 
-        kwargs = dict(
+        full_out, _ = flashmla.flash_mla_with_kvcache(
             q=q.unsqueeze(1),
             k_cache=_view_cache(packed_kv, DSV4_SWA_PAGE_SIZE),
             block_table=None,
@@ -113,19 +81,8 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             extra_k_cache=extra_cache,
             extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
             extra_topk_length=nsa_dict.get("extra_lengths"),
+            **({"out": out} if self.supports_out and out is not None else {}),
         )
-        if flashmla_out is not None:
-            kwargs["out"] = flashmla_out
-        if flashmla_o_accum is None or self._flashmla_workspace_op is None:
-            full_out, _ = flashmla.flash_mla_with_kvcache(**kwargs)
-        else:
-            full_out, _ = _flashmla_sparse_decode_with_workspace(
-                self._flashmla_workspace_op,
-                kwargs,
-                sched_meta,
-                flashmla_o_accum,
-                flashmla_lse_accum,
-            )
         return full_out[:, 0, : self.real_q_head_num, :]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":
@@ -160,30 +117,22 @@ class _PrefillAttState(BasePrefillAttState):
         assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
         assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
         nsa_dict = att_control.nsa_prefill_dict
-        if out is None:
-            out = alloc_func(
-                (q.shape[0], self.backend.real_q_head_num, nsa_dict["head_dim_v"]),
-                dtype=q.dtype,
-                device=q.device,
-            )
-        needs_padding = self.backend.real_q_head_num != self.backend.padded_q_head_num
-        full_out = (
-            self.infer_state.dsv4_workspace.flashmla_prefill_full_out[: q.shape[0]]
-            if needs_padding
-            else out.unsqueeze(1)
-        )
+        direct_out = out is not None and self.backend.real_q_head_num == self.backend.padded_q_head_num
         att_out = self.backend._flashmla_att(
             q,
             k,
             self.infer_state.mem_manager,
             nsa_dict,
             self._get_sched_meta(nsa_dict["compress_ratio"]),
-            flashmla_out=full_out,
-            flashmla_o_accum=self.infer_state.dsv4_workspace.flashmla_prefill_o_accum,
-            flashmla_lse_accum=self.infer_state.dsv4_workspace.flashmla_prefill_lse_accum,
+            out=out.unsqueeze(1) if direct_out else None,
         )
-        if needs_padding:
-            out.copy_(att_out)
+        if direct_out and self.backend.supports_out:
+            return out
+        if out is None:
+            if self.backend.real_q_head_num == self.backend.padded_q_head_num:
+                return att_out
+            out = alloc_func(att_out.shape, dtype=att_out.dtype, device=att_out.device)
+        out.copy_(att_out)
         return out
 
 

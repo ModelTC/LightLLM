@@ -1,0 +1,87 @@
+diff --git a/csrc/api/api.cpp b/csrc/api/api.cpp
+index f43f2a0..7a310a3 100644
+--- a/csrc/api/api.cpp
++++ b/csrc/api/api.cpp
+@@ -7,7 +7,13 @@
+ 
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     m.doc() = "FlashMLA";
+-    m.def("sparse_decode_fwd", &sparse_attn_decode_interface);
++    m.def("sparse_decode_fwd", &sparse_attn_decode_interface,
++          pybind11::arg("q"), pybind11::arg("kv"), pybind11::arg("indices"),
++          pybind11::arg("topk_length"), pybind11::arg("attn_sink"),
++          pybind11::arg("tile_scheduler_metadata"), pybind11::arg("num_splits"),
++          pybind11::arg("extra_kv"), pybind11::arg("extra_indices"),
++          pybind11::arg("extra_topk_length"), pybind11::arg("d_v"),
++          pybind11::arg("sm_scale"), pybind11::arg("out") = pybind11::none());
+     m.def("dense_decode_fwd", &dense_attn_decode_interface);
+     m.def("sparse_prefill_fwd", &sparse_attn_prefill_interface);
+     m.def("dense_prefill_fwd", &FMHACutlassSM100FwdRun);
+diff --git a/csrc/api/sparse_decode.h b/csrc/api/sparse_decode.h
+index 6df5c84..369c2ca 100644
+--- a/csrc/api/sparse_decode.h
++++ b/csrc/api/sparse_decode.h
+@@ -193,7 +193,8 @@ sparse_attn_decode_interface(
+     const std::optional<at::Tensor> &extra_indices,
+     const std::optional<at::Tensor> &extra_topk_length,
+     int d_v,
+-    float sm_scale
++    float sm_scale,
++    const std::optional<at::Tensor> &out_buffer
+ ) {
+     using bf16 = cutlass::bfloat16_t;
+ 
+@@ -312,7 +313,17 @@ sparse_attn_decode_interface(
+     at::cuda::CUDAGuard device_guard{(char)q.get_device()};
+     auto opts = q.options();
+ 
+-    at::Tensor out = torch::empty({b, s_q, h_q, d_v}, opts);
++    at::Tensor out;
++    if (out_buffer.has_value()) {
++        TORCH_CHECK(out_buffer->device() == q.device(), "out must be on the same device as q");
++        KU_CHECK_DTYPE(out_buffer, torch::kBFloat16);
++        KU_CHECK_NDIM(out_buffer, 4);
++        KU_CHECK_SHAPE(out_buffer, b, s_q, h_q, d_v);
++        KU_CHECK_LAST_DIM_CONTIGUOUS(out_buffer);
++        out = out_buffer.value();
++    } else {
++        out = torch::empty({b, s_q, h_q, d_v}, opts);
++    }
+     at::Tensor lse = torch::empty({b, s_q, h_q}, opts.dtype(at::kFloat));
+ 
+     ModelType model_type;
+diff --git a/flash_mla/flash_mla_interface.py b/flash_mla/flash_mla_interface.py
+index a3740b0..1869072 100644
+--- a/flash_mla/flash_mla_interface.py
++++ b/flash_mla/flash_mla_interface.py
+@@ -66,7 +66,8 @@ def flash_mla_with_kvcache(
+     extra_k_cache: Optional[torch.Tensor] = None,
+     extra_indices_in_kvcache: Optional[torch.Tensor] = None,
+     topk_length: Optional[torch.Tensor] = None,
+-    extra_topk_length: Optional[torch.Tensor] = None
++    extra_topk_length: Optional[torch.Tensor] = None,
++    out: Optional[torch.Tensor] = None,
+ ) -> Tuple[torch.Tensor, torch.Tensor]:
+     """
+     Arguments:
+@@ -86,6 +87,7 @@ def flash_mla_with_kvcache(
+                     Pay attention that indices_in_kvcache[i][j][k] = (the index of the page block where token t resides) * block_size + (the offset of token t among the page block),
+                     where t is the k-th token of the j-th q-sequence in the i-th batch.
+         attn_sink: Optional[torch.Tensor], (num_heads_q, ), torch.float32. If presented, the final output will be scaled by exp(lse) / (exp(lse) + exp(attn_sink)). Have no affect on the returned softmax_lse. +inf will cause the result to become 0.
++        out: Optional BF16 output buffer [batch_size, seq_len_q, num_heads_q, head_dim_v] for sparse attention.
+         extra_k_cache and extra_indices_in_kvcache: If provided, will attend to these extra tokens in addition to those in k_cache and indices_in_kvcache. Their format requirements are the same as k_cache and indices_in_kvcache respectively.
+         topk_length/extra_topk_length: (batch_size, ), torch.int32. If provided, only the leftmost topk_length indices will be processed. Useful when the actual topk for different queries are different so that we can save some computation, compared to masking.
+     
+@@ -156,10 +158,11 @@ def flash_mla_with_kvcache(
+             q, k_cache, indices_in_kvcache, topk_length, attn_sink,
+             sched_meta.tile_scheduler_metadata, sched_meta.num_splits,
+             extra_k_cache, extra_indices_in_kvcache, extra_topk_length,
+-            head_dim_v, softmax_scale
++            head_dim_v, softmax_scale, out
+         )
+     else:
+         # Dense attention
++        assert out is None, "out is only supported for sparse attention"
+         assert indices_in_kvcache is None and attn_sink is None and extra_k_cache is None and extra_indices_in_kvcache is None and topk_length is None and extra_topk_length is None, "indices_in_kvcache, attn_sink, extra_k_cache, extra_indices_in_kvcache, topk_length and extra_topk_length must be None when dense attention is used."
+         assert block_table is not None and cache_seqlens is not None, "block_table and cache_seqlens must be provided when dense attention is used."
+         out, lse, new_tile_scheduler_metadata, new_num_splits = flash_mla_cuda.dense_decode_fwd(
