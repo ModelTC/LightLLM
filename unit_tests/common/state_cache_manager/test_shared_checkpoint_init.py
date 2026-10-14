@@ -80,7 +80,7 @@ def test_big_pool_initializes_in_one_call(monkeypatch, manager_type, dp, nnodes)
 def test_shared_pool_constructor_never_allocates_private_storage(monkeypatch, create):
     zeros, share_memory = Mock(), Mock()
     monkeypatch.setattr(torch, "zeros", zeros)
-    monkeypatch.setattr(LayerCache, "share_memory", share_memory)
+    monkeypatch.setattr(LayerCache, "init_share_memory", share_memory)
     metadata = np.array([15, 1, *range(16), 1, *([0] * 15)], dtype=np.int64)
     original_metadata = metadata.copy()
     metadata_shm = NS(buf=metadata.data)

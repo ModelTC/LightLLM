@@ -148,3 +148,44 @@ def test_shared_checkpoint_save_restore_and_private_small_pool(tmp_path, kind):
         nprocs=2,
         join=True,
     )
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 1, reason="requires a CUDA device")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_shared_checkpoint_copy_across_registration_boundary(monkeypatch, dtype):
+    from lightllm.server.router.model_infer.mode_backend import generic_pre_process  # noqa: F401
+    from lightllm.common.state_cache_manager import LayerCache
+    from lightllm.utils.envs_utils import get_unique_server_name
+    from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
+
+    service_name = f"test_checkpoint_registration_{uuid.uuid4().hex}"
+    monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", service_name)
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    get_unique_server_name.cache_clear()
+    torch.cuda.set_device(0)
+    cell_bytes = 7749120
+    layer_num = 2
+    shape = (cell_bytes // (layer_num * torch._utils._element_size(dtype)),)
+    crossing_index = (128 * 1024 * 1024) // cell_bytes
+    assert crossing_index * cell_bytes < 128 * 1024 * 1024 < (crossing_index + 1) * cell_bytes
+    try:
+        pool = LayerCache(
+            crossing_index + 2,
+            dtype,
+            shape,
+            layer_num,
+            "cpu",
+            size_first=True,
+            shm_name="checkpoints",
+            shm_create=True,
+        )
+        assert pool.get_cell_size() == cell_bytes
+        source = torch.full((layer_num, *shape), 19, dtype=dtype, device="cuda")
+        pool.buffer[crossing_index].copy_(source, non_blocking=True)
+        torch.cuda.synchronize()
+        restored = pool.buffer[crossing_index].cuda(non_blocking=True)
+        torch.cuda.synchronize()
+        assert torch.equal(restored, source)
+    finally:
+        ServiceShmCleanup(service_name).cleanup_service_resources()
+        get_unique_server_name.cache_clear()

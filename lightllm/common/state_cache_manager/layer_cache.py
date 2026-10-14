@@ -50,7 +50,8 @@ class LayerCache:
         size_bytes = int(size * self.get_cell_size())
         self.shm = create_or_link_shm(name, size_bytes, force_mode="create" if create else "link")
         host_ptr = ctypes.addressof(ctypes.c_uint8.from_buffer(self.shm.buf))
-        mapped_ptr = register_shm_ptr_to_pin(host_ptr, size_bytes)
+        # CUDA memcpy cannot span independently registered host allocations.
+        mapped_ptr = register_shm_ptr_to_pin(host_ptr, size_bytes, registration_alignment=int(self.get_cell_size()))
         array = np.frombuffer((ctypes.c_uint8 * size_bytes).from_address(mapped_ptr), dtype=np.uint8)
         self.buffer = torch.from_numpy(array).view(self.dtype).view(size, self.layer_num, *self.shape)
         self.size = size
