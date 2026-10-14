@@ -27,8 +27,10 @@ KV 存储和请求表，但资源的申请、缓存和释放以完整物理页�
 `_get_classed_reqs` 返回前通过 backend 的 `_copy_req_token_indexes_to_gpu` 统一收集
 prefill/decode 请求的
 `[move_to_gpu_index_len, hold_kv_len)` 区间，通过一次原生 `cudaMemcpyBatchAsync` 提交，
-成功后将长度更新到 `hold_kv_len`。`DuringApiCall` 源访问属性保证返回前读取完 CPU 数据，
-后续计算依靠同流顺序读取 GPU 表；长度表示异步拷贝已排队，不表示设备已经完成拷贝。
+成功后将长度更新到 `hold_kv_len`。原生批量拷贝使用 `cudaMemcpySrcAccessOrderStream` 源访问属性，
+源数据读取遵循当前非默认推理流的顺序。调用方必须保持对应的 pinned CPU 源区间有效且内容不变，
+直到传输完成；API 返回时源数据读取可能仍未完成，修改、释放或复用源区间前须确认传输已完成。
+后续计算依靠同流顺序读取 GPU 表；`move_to_gpu_index_len` 表示异步拷贝已排队，不表示设备已经完成拷贝。
 暂停/释放时重置长度，前缀重映射时回退长度以重新上传。
 DP 在发布请求 KV 信息前，让专用传输流等待 overlap 流已有的索引更新，
 再将各 TP rank 的待上传索引拷贝到 GPU 表；
