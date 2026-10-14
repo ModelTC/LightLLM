@@ -3,6 +3,10 @@ import torch
 from ..base_att import AttControl
 from .fp import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
 from .env_utils import set_flashinfer_envs
+from lightllm.utils.log_utils import init_logger
+
+
+logger = init_logger(__name__)
 
 
 class Fp8FlashInferAttBackend(FlashInferAttBackend):
@@ -10,6 +14,18 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         set_flashinfer_envs()
         super().__init__(model=model)
         self.kv_data_type = torch.float8_e4m3fn
+
+    def _init_infer_page_size(self):
+        # TODO: FP8 FlashInfer 完成多 token 推理页适配后，改为继承模型 page_size。
+        self.infer_page_size = 1
+        assert self.model.args.page_size % self.infer_page_size == 0, (
+            f"model page_size {self.model.args.page_size} "
+            f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
+        logger.warning(
+            "Fp8FlashInferAttBackend temporarily uses infer_page_size=1 with "
+            f"model page_size={self.model.args.page_size}; multi-token FP8 inference pages are not implemented yet."
+        )
 
     def create_att_prefill_state(self, infer_state) -> "Fp8FlashInferPrefillAttState":
         return Fp8FlashInferPrefillAttState(backend=self, infer_state=infer_state)

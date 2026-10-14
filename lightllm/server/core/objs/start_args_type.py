@@ -23,6 +23,7 @@ class StartArgs:
     pd_master_ip: str = field(default="0.0.0.0")
     pd_master_port: int = field(default=1212)
     pd_master_mode: str = field(default="elastic")
+    use_dp_split_mode_connect_pd_master: bool = field(default=False)
     disable_pd_node_self_request_limit: bool = field(default=False)
     disable_pd_cache_high_priority: bool = field(default=False)
     pd_trans_mode: str = field(default="nccl", metadata={"choices": ["nccl", "nixl"]})
@@ -103,8 +104,14 @@ class StartArgs:
     disable_chunked_prefill: bool = field(default=False)
     short_prefill_token_threshold: Optional[int] = field(default=None)
     diverse_mode: bool = field(default=False)
-    output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
-    first_token_constraint_mode: bool = field(default=False)
+    target_vocab_topk_sampling: Optional[int] = field(
+        default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
+    )
+    draft_vocab_topk_sampling: Optional[int] = field(
+        default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
+    )
+    output_constraint_mode: str = field(default="xgrammar", metadata={"choices": ["xgrammar", "none"]})
+    grammar_compile_timeout: float = field(default=30.0)
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
     disable_audio: Optional[bool] = field(default=None)
@@ -168,6 +175,7 @@ class StartArgs:
     llm_decode_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
+    page_size: int = field(default=1)
     vit_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )
@@ -194,6 +202,7 @@ class StartArgs:
                 "eagle3",
                 "dspark",
                 "dflash",
+                "dflash2",
                 None,
             ]
         },

@@ -24,7 +24,6 @@ def test_select_accepted_tail_rows_triton_matches_index_select():
     b_req_idx = (torch.arange(16, dtype=torch.int32, device=device) + 10)[::2]
     b_mtp_index = torch.arange(8, dtype=torch.int32, device=device)
     b_seq_len = (torch.arange(16, dtype=torch.int32, device=device) + 20)[::2]
-    mem_indexes = (torch.arange(16, dtype=torch.int32, device=device) + 100)[::2]
     b_shared_seq_len = (torch.arange(16, dtype=torch.int32, device=device) + 30)[::2]
     b_shared_radix_node_id = (torch.arange(16, dtype=torch.int64, device=device) + 1000)[::2]
     b_position_delta = (torch.arange(16, dtype=torch.int32, device=device) - 8)[::2]
@@ -37,7 +36,6 @@ def test_select_accepted_tail_rows_triton_matches_index_select():
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
-        mem_indexes=mem_indexes,
         b_shared_seq_len=b_shared_seq_len,
         b_shared_radix_node_id=b_shared_radix_node_id,
         b_position_delta=b_position_delta,
@@ -48,7 +46,6 @@ def test_select_accepted_tail_rows_triton_matches_index_select():
     torch.testing.assert_close(selected.b_req_idx, b_req_idx.index_select(0, expected_rows))
     torch.testing.assert_close(selected.b_mtp_index, b_mtp_index.index_select(0, expected_rows))
     torch.testing.assert_close(selected.b_seq_len, b_seq_len.index_select(0, expected_rows))
-    torch.testing.assert_close(selected.mem_indexes, mem_indexes.index_select(0, expected_rows))
     torch.testing.assert_close(selected.b_shared_seq_len, b_shared_seq_len.index_select(0, expected_rows))
     torch.testing.assert_close(
         selected.b_shared_radix_node_id,
@@ -82,8 +79,6 @@ def test_vanilla_no_att_runs_all_draft_steps_for_empty_dp_batch():
         b_req_idx=empty_i32,
         b_mtp_index=empty_i32,
         b_seq_len=empty_i32,
-        mem_indexes=empty_i32,
-        mem_indexes_cpu=torch.empty((0,), dtype=torch.int32),
         b_position_delta=empty_i32,
         b_shared_seq_len=empty_i32,
         b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64, device=device),
@@ -135,7 +130,6 @@ def test_vanilla_no_att_proposes_from_one_accepted_tail_per_request():
                     "b_req_idx": model_input.b_req_idx.cpu(),
                     "b_mtp_index": model_input.b_mtp_index.cpu(),
                     "b_seq_len": model_input.b_seq_len.cpu(),
-                    "mem_indexes": model_input.mem_indexes.cpu(),
                 }
             )
             return draft_outputs[step]
@@ -154,8 +148,6 @@ def test_vanilla_no_att_proposes_from_one_accepted_tail_per_request():
         b_req_idx=torch.tensor([7, 7, 7, 9, 9], dtype=torch.int32, device=device),
         b_mtp_index=torch.tensor([0, 1, 2, 0, 1], dtype=torch.int32, device=device),
         b_seq_len=torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32, device=device),
-        mem_indexes=torch.tensor([100, 101, 102, 103, 104], dtype=torch.int32, device=device),
-        mem_indexes_cpu=torch.tensor([100, 101, 102, 103, 104], dtype=torch.int32),
         b_position_delta=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32, device=device),
         b_shared_seq_len=torch.tensor([8, 8, 8, 6, 6], dtype=torch.int32, device=device),
         b_shared_radix_node_id=torch.tensor([70, 70, 70, 90, 90], dtype=torch.int64, device=device),
@@ -183,7 +175,6 @@ def test_vanilla_no_att_proposes_from_one_accepted_tail_per_request():
     torch.testing.assert_close(draft_calls[0]["b_req_idx"], torch.tensor([7, 9], dtype=torch.int32))
     torch.testing.assert_close(draft_calls[0]["b_mtp_index"], torch.tensor([1, 1], dtype=torch.int32))
     torch.testing.assert_close(draft_calls[0]["b_seq_len"], torch.tensor([11, 21], dtype=torch.int32))
-    torch.testing.assert_close(draft_calls[0]["mem_indexes"], torch.tensor([101, 104], dtype=torch.int32))
     torch.testing.assert_close(draft_calls[1]["input_ids"], torch.tensor([21, 24]))
     torch.testing.assert_close(
         draft_calls[1]["draft_hidden"],

@@ -238,7 +238,6 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
         batch_size=0,
         b_req_idx=empty_i32,
         b_mtp_index=empty_i32,
-        mem_indexes_cpu=torch.empty((0,), dtype=torch.int32),
     )
     model_output = SimpleNamespace(logits=torch.empty((0, 8), device=device))
     calls = []
@@ -261,6 +260,7 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.spec_engine = _CommonEngine()
+    backend.args = SimpleNamespace(penalty_counter_mode="gpu_counter")
     backend.model = SimpleNamespace(forward=lambda _: model_output)
     event_pack = SimpleNamespace(
         notify_post_handle_and_wait_pre_post_handle=lambda: calls.append("post_wait"),
@@ -277,21 +277,14 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
         "g_infer_context",
         SimpleNamespace(get_overlap_stream=lambda: torch.cuda.current_stream()),
     )
-    monkeypatch.setattr(
-        dp_backend_impl.mtp_utils,
-        "free_mem_indexes",
-        lambda **kwargs: calls.append("free"),
-    )
-
     backend.decode_mtp(event_pack=event_pack, decode_reqs=[])
 
     assert calls == [
         "plan",
         "prepare",
-        "propose",
         "post_wait",
+        "propose",
         "forward_wait",
-        "free",
         "pre_post",
     ]
 
@@ -417,7 +410,7 @@ def test_dp_overlap_engine_moves_verify_rows_to_the_side_with_capacity(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch):
+def test_dp_overlap_decode_delegates_empty_layout(monkeypatch):
     device = "cuda"
     empty_i32 = torch.empty((0,), dtype=torch.int32, device=device)
     model_input0 = SimpleNamespace(batch_size=0, b_req_idx=empty_i32, b_mtp_index=empty_i32)
@@ -450,6 +443,7 @@ def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.decode_draft_engine = _OverlapEngine()
+    backend.args = SimpleNamespace(penalty_counter_mode="gpu_counter")
     backend.model = SimpleNamespace(
         microbatch_overlap_decode=lambda input0, input1: (model_output0, model_output1),
     )
@@ -468,20 +462,13 @@ def test_dp_overlap_decode_delegates_empty_layout_and_frees_proposal(monkeypatch
         "g_infer_context",
         SimpleNamespace(get_overlap_stream=lambda: torch.cuda.current_stream()),
     )
-    monkeypatch.setattr(
-        dp_backend_impl.mtp_utils,
-        "free_mem_indexes",
-        lambda **kwargs: calls.append("free"),
-    )
-
     backend.decode_overlap_mtp(event_pack=event_pack, decode_reqs=[])
 
     assert calls == [
         "plan",
         "prepare",
-        "propose",
         "post_wait",
+        "propose",
         "forward_wait",
-        "free",
         "pre_post",
     ]

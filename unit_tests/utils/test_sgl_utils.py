@@ -95,7 +95,8 @@ def test_fa3_runtime_matches_cached_config_by_actual_length(monkeypatch):
     assert set(kernel.fast_match_configs[static_key]) == {str(base_key + 8192), str(base_key + 15360)}
 
 
-def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch):
+@pytest.mark.parametrize("page_size, actual_kv_len", [(1, 8192), (16, 8191), (256, 8192)])
+def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, page_size, actual_kv_len):
     graph = SimpleNamespace(can_run=lambda **kwargs: True, graph_max_len_in_batch=32768)
     model = SimpleNamespace(
         graph=graph,
@@ -106,23 +107,25 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch):
     state = fa3_module.Fa3DecodeAttState(
         backend=SimpleNamespace(
             model=model,
+            page_size=page_size,
             uses_causal_attention=lambda: True,
             uses_dynamic_spec_verify_layout=lambda: False,
             get_page_table_view=lambda att_batch_size, max_kv_len, microbatch_index: torch.zeros(
-                att_batch_size, max_kv_len, dtype=torch.int32
+                att_batch_size, math.ceil(max_kv_len / page_size), dtype=torch.int32
             ),
         ),
         infer_state=SimpleNamespace(
             batch_size=2,
-            max_kv_seq_len=8192,
+            max_kv_seq_len=actual_kv_len,
             microbatch_index=0,
             b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
-            b_seq_len=torch.tensor([4096, 8192], dtype=torch.int32),
+            b_seq_len=torch.tensor([4096, actual_kv_len], dtype=torch.int32),
             b1_cu_q_seq_len=torch.tensor([0, 1, 2], dtype=torch.int32),
-            b1_cu_kv_seq_len=torch.tensor([0, 4096, 12288], dtype=torch.int32),
+            b1_cu_kv_seq_len=torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32),
         ),
     )
-    monkeypatch.setattr(fa3_module, "page_table_copy", lambda **kwargs: None)
+    copy_calls = []
+    monkeypatch.setattr(fa3_module, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
     state.init_state()
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
     state.infer_state.max_kv_seq_len = graph.graph_max_len_in_batch
@@ -133,9 +136,14 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch):
         return kwargs["q"]
 
     monkeypatch.setattr(fa3_module, "flash_attn_with_kvcache_autotune", attention)
-    state.decode_att(torch.empty(2, 4, 8), torch.empty(1, 2, 8), torch.empty(1, 2, 8))
-    assert calls[0]["max_seqlen_k"] == 8192
-    assert calls[0]["page_table"].shape == (2, 32768)
+    state.decode_att(torch.empty(2, 4, 8), torch.empty(page_size, 2, 8), torch.empty(page_size, 2, 8))
+    assert calls[0]["max_seqlen_k"] == actual_kv_len
+    assert calls[0]["page_table"].shape == (2, 32768 // page_size)
+
+    assert copy_calls[0]["page_table"].shape == (2, math.ceil(actual_kv_len / page_size))
+    assert copy_calls[0]["page_size"] == page_size
+    assert calls[0]["k_cache"].shape == (1, page_size, 2, 8)
+    assert calls[0]["v_cache"].shape == (1, page_size, 2, 8)
 
 
 @pytest.mark.parametrize("seq_len", ["0", "-1", "invalid"])

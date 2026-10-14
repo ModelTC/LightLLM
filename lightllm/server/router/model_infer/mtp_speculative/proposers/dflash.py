@@ -5,11 +5,7 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
-    BaseSpecProposer,
-    MtpMemIndexesToFree,
-)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
     DFlashSpecProposal,
 )
@@ -97,19 +93,8 @@ class DFlashProposer(BaseSpecProposer):
             verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
             draft_model.forward(verify_draft_input)
 
-        # 每个请求始终展开完整 block。full 模式分配的临时 KV slot 在 verify
-        # 后通过 proposal 释放；windowed 模式不占用 target KV slot。
-        if windowed:
-            extra_mem_indexes_cpu = None
-            scratch_indexes = torch.full(
-                (req_num * block_size,),
-                draft_model.mem_manager.HOLD_TOKEN_MEMINDEX,
-                dtype=torch.int32,
-                device=target_next_token_ids.device,
-            )
-        else:
-            extra_mem_indexes_cpu = mtp_utils.alloc_mem_indexes(req_num * block_size)
-            scratch_indexes = extra_mem_indexes_cpu.cuda(non_blocking=True)
+        # 每个请求始终展开完整 block，未被本轮 proposal 返回的 block 尾部仍会
+        # 参与 parallel forward；KV 位置由请求页表和序列位置确定。
         block_input_ids = target_next_token_ids.new_full(
             (req_num * block_size,),
             fill_value=draft_model.mask_token_id,
@@ -157,11 +142,23 @@ class DFlashProposer(BaseSpecProposer):
             .repeat_interleave(block_size)
             .contiguous()
         )
-        draft_input.mem_indexes = scratch_indexes
-        draft_input.mem_indexes_cpu = None
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         draft_output = draft_model.forward(draft_input)
 
+        return self._build_proposal(
+            draft_output=draft_output,
+            req_num=req_num,
+            block_size=block_size,
+            draft_step=draft_step,
+        )
+
+    def _build_proposal(
+        self,
+        draft_output: ModelOutput,
+        req_num: int,
+        block_size: int,
+        draft_step: int,
+    ) -> DFlashSpecProposal:
         if self.enable_dynmaic_mtp:
             flat_draft_token_ids, flat_draft_token_probs = self.backend._gen_argmax_token_ids_and_prob(draft_output)
         else:
@@ -177,10 +174,5 @@ class DFlashProposer(BaseSpecProposer):
             schedule_scores = block_draft_token_probs[:, :draft_step].float().contiguous()
         return DFlashSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=(
-                [MtpMemIndexesToFree(mem_indexes_cpu=extra_mem_indexes_cpu)]
-                if extra_mem_indexes_cpu is not None
-                else []
-            ),
             schedule_scores=schedule_scores,
         )

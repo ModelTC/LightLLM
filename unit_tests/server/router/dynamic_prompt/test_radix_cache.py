@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.utils import shm_utils
 
 
@@ -264,6 +267,54 @@ def test_case10():
     assert tree.root_node.token_id_key.numel() == 0
     assert tree.root_node.token_mem_index_value.numel() == 0
     assert tree.root_node.ref_counter == 1
+
+
+def test_page_aligned_insert_and_match():
+    tree = RadixCache(100, 99, page_size=4)
+    values = torch.arange(100, 110, dtype=torch.int64)
+
+    prefix_len, _ = tree.insert(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), values)
+    assert prefix_len == 0
+    assert tree.get_tree_total_tokens_num() == 8
+
+    # A mismatch inside a page cannot produce a partial-page cache hit.
+    node, matched_len, matched_values = tree.match_prefix(torch.tensor([1, 2, 0, 4, 5, 6, 7, 8]))
+    assert node is None
+    assert matched_len == 0
+    assert matched_values is None
+
+    node, matched_len, matched_values = tree.match_prefix(torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 11]))
+    assert node is not None
+    assert matched_len == 8
+    assert matched_values.tolist() == list(range(100, 108))
+
+    # The second sequence shares exactly one page and then branches by its
+    # complete second-page key.
+    prefix_len, _ = tree.insert(
+        torch.tensor([1, 2, 3, 4, 5, 6, 0, 8]),
+        torch.arange(200, 208, dtype=torch.int64),
+    )
+    assert prefix_len == 4
+    assert tree.get_tree_total_tokens_num() == 12
+
+
+def test_page_size_must_match_mem_manager():
+    mem_manager = SimpleNamespace(page_size=8)
+
+    with pytest.raises(ValueError, match="must match mem_manager page_size 8"):
+        RadixCache(100, 100, mem_manager=mem_manager, page_size=4)
+
+
+def test_page_key_bytes_does_not_share_tensor_memory():
+    token_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+    expected_key = token_ids.clone().numpy().tobytes()
+    key = TreeNode(page_size=4).get_child_key(token_ids)
+
+    token_ids[0] = 100
+
+    assert isinstance(key, bytes)
+    assert key == expected_key
+    assert key != TreeNode(page_size=4).get_child_key(token_ids)
 
 
 if __name__ == "__main__":

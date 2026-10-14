@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 import copy
 import bisect
+import math
 import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
@@ -47,7 +48,9 @@ class CudaGraph:
         batch_sizes = sorted({size for size in batch_sizes if size < max_batch_size} | {max_batch_size})
 
         if args.enable_tpsp_mix_mode:
-            batch_sizes = sorted({triton.cdiv(size, tp_world_size) * tp_world_size for size in batch_sizes})
+            # Keep complete fixed-layout MTP groups as well as TP/SP shards.
+            alignment = math.lcm(batch_step_size_before_split, tp_world_size)
+            batch_sizes = sorted({triton.cdiv(size, alignment) * alignment for size in batch_sizes})
         assert batch_sizes[-1] == max_batch_size
         return batch_sizes
 
@@ -259,7 +262,6 @@ class CudaGraph:
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
             input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
             b_req_idx = torch.tensor(
                 [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
             )
@@ -274,7 +276,6 @@ class CudaGraph:
                 max_q_seq_len=1,
                 max_kv_seq_len=max_len_in_batch,
                 input_ids=input_ids,
-                mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
@@ -288,7 +289,6 @@ class CudaGraph:
             model_output: ModelOutput = model.forward(model_input)
             del model_output
             del input_ids
-            del mem_indexes
             del b_req_idx
             del b_seq_len
 
@@ -320,7 +320,6 @@ class CudaGraph:
                 total_token_num = batch_size * seq_len
                 max_len_in_batch = self.graph_max_len_in_batch
                 input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
                 b_req_idx = torch.tensor(
                     [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
                 )
@@ -337,7 +336,6 @@ class CudaGraph:
                     max_kv_seq_len=max_len_in_batch,
                     input_ids=input_ids,
                     b_mtp_index=b_mtp_index,
-                    mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
                     b_shared_seq_len=b_shared_seq_len,

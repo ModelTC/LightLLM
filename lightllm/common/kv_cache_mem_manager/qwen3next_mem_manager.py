@@ -4,7 +4,13 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
-from .operator import LinearAttMemOperator
+from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManager
+from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
+from .operator import (
+    FP8StaticPerHeadQuantMemOperator,
+    FP8StaticPerTensorQuantMemOperator,
+    LinearAttMemOperator,
+)
 from .windowed_mtp import WindowKVPageHelper
 from typing import Tuple, Any, List
 
@@ -34,6 +40,9 @@ class Qwen3NextMemManager(MemoryManager):
         return super().get_att_input_params(layer_index)
 
     def _init_state_cache_buffers(self):
+        self._init_linear_att_buffers()
+
+    def _init_linear_att_buffers(self):
         big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
@@ -54,14 +63,22 @@ class Qwen3NextMemManager(MemoryManager):
     def write_to_shm(self, req_manager):
         self.req_to_conv_state = req_manager.req_to_conv_state
         self.req_to_ssm_state = req_manager.req_to_ssm_state
-        return super().write_to_shm(req_manager)
+        # Keep pinned CPU checkpoints out of cross-process GPU state exports.
+        big_page_buffers = self.big_page_buffers
+        self.big_page_buffers = None
+        try:
+            return super().write_to_shm(req_manager)
+        finally:
+            self.big_page_buffers = big_page_buffers
 
     def _assert_att_state_page_size(self):
-        helper = Qwen3NextLinearAttPageHelper(self)
-        if self.windowed_draft_kv is None:
-            helper.assert_page_size()
-        else:
-            WindowKVPageHelper(self, offset=helper.state_nbytes).assert_page_size()
+        self.att_state_page_helper = self._create_att_state_page_helper()
+        self.att_state_page_helper.assert_page_size()
+        if self.windowed_draft_kv is not None:
+            WindowKVPageHelper(self, offset=self.att_state_page_helper.state_nbytes).assert_page_size()
+
+    def _create_att_state_page_helper(self):
+        return Qwen3NextLinearAttPageHelper(self)
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -85,7 +102,7 @@ class Qwen3NextMemManager(MemoryManager):
             )
         assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
-        helper = Qwen3NextLinearAttPageHelper(self)
+        helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.write_req_to_page(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         if self.windowed_draft_kv is not None:
@@ -116,7 +133,7 @@ class Qwen3NextMemManager(MemoryManager):
             )
         assert page_kind == "att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
-        helper = Qwen3NextLinearAttPageHelper(self)
+        helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.read_page_to_req(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         if self.windowed_draft_kv is not None:
@@ -124,6 +141,26 @@ class Qwen3NextMemManager(MemoryManager):
                 page_index, req_idx, dp_mems, mode="read"
             )
         return
+
+
+class _FP8StaticPerHeadQuantLinearAttMemOperator(LinearAttMemOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
+        FP8StaticPerHeadQuantMemOperator.copy_kv_to_mem_manager(self, full_att_layer_index, mem_index, kv)
+
+
+class _FP8StaticPerTensorQuantLinearAttMemOperator(LinearAttMemOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
+        FP8StaticPerTensorQuantMemOperator.copy_kv_to_mem_manager(self, full_att_layer_index, mem_index, kv)
+
+
+class FP8StaticPerHeadQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerHeadQuantMemManager):
+    operator_class = _FP8StaticPerHeadQuantLinearAttMemOperator
+
+
+class FP8StaticPerTensorQuantQwen3NextMemManager(Qwen3NextMemManager, FP8StaticPerTensorQuantMemManager):
+    operator_class = _FP8StaticPerTensorQuantLinearAttMemOperator
 
 
 class Qwen3NextLinearAttPageHelper:

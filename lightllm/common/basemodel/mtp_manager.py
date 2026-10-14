@@ -16,7 +16,7 @@ class MtpManager:
     _instance: ClassVar[Optional["MtpManager"]] = None
     _CHAINED_DRAFT_MODES = ("vanilla_with_att", "vanilla_no_att")
     _RECURRENT_DRAFT_MODES = ("eagle_with_att", "eagle_no_att", "eagle3")
-    _BLOCK_DRAFT_MODES = ("dspark", "dflash")
+    _BLOCK_DRAFT_MODES = ("dspark", "dflash", "dflash2")
 
     @classmethod
     def get_instance(cls) -> "MtpManager":
@@ -27,8 +27,8 @@ class MtpManager:
     def __init__(self):
         self.args = get_env_start_args()
 
-    def get_decode_batch_multiplier(self, is_draft_model: bool) -> int:
-        """Return the physical decode rows used by one logical request."""
+    def get_decode_tokens_per_request(self, is_draft_model: bool) -> int:
+        """返回每请求的 decode token 数；动态 verify 返回压缩前的最大 token 数，用于容量规划。"""
 
         spec_mode = self.args.mtp_mode
         if spec_mode is None:
@@ -51,26 +51,25 @@ class MtpManager:
 
         # Block draft models decode mtp_step rows per logical request.
         if spec_mode in self._BLOCK_DRAFT_MODES:
+            if spec_mode == "dflash2":
+                # Row 0 provides anchor context; only rows 1..mtp_step produce
+                # proposals. The physical block is [anchor, MASK * mtp_step].
+                return self.args.mtp_step + 1
+            # Current DFlash/DSpark paths use every output row, including row 0.
             return self.args.mtp_step
 
         return 1
 
-    def get_decode_cuda_graph_grow_step_size(self, is_draft_model: bool) -> int:
-        """Return the batch-size stride used to capture decode CUDA Graphs."""
-
-        # Draft model CUDA Graphs follow the drafter's physical decode layout.
-        if is_draft_model:
-            return self.get_decode_batch_multiplier(is_draft_model=True)
-        # Main model CUDA Graphs use unit growth for dynamically compacted verify rows.
-        else:
-            if self.args.mtp_dynamic_verify:
-                return 1
-            return self.get_decode_batch_multiplier(is_draft_model=False)
+    def get_decode_batch_alignment(self, is_draft_model: bool) -> int:
+        """返回 decode/graph 的基础对齐粒度；动态主模型压缩后允许任意行数。"""
+        if not is_draft_model and self.args.mtp_dynamic_verify:
+            return 1
+        return self.get_decode_tokens_per_request(is_draft_model)
 
     def get_decode_draft_step(self, is_draft_model: bool) -> int:
         """Return the number of extra decode rows processed per request."""
 
-        return self.get_decode_batch_multiplier(is_draft_model) - 1
+        return self.get_decode_tokens_per_request(is_draft_model) - 1
 
     def create_hidden_collector(
         self,
@@ -83,7 +82,7 @@ class MtpManager:
         if spec_mode is None:
             collector_type = NoopHiddenCollector
         elif model.is_mtp_draft_model:
-            if spec_mode == "dspark":
+            if spec_mode in ("dspark", "dflash2"):
                 collector_type = MtpHeadOutputCollector
             elif spec_mode in self._BLOCK_DRAFT_MODES:
                 collector_type = NoopHiddenCollector

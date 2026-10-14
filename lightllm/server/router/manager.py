@@ -18,7 +18,6 @@ from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import (
     GroupReqIndexes,
     AbortedReqCmd,
-    StopStrMatchedReqCmd,
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
@@ -32,6 +31,7 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.config_utils import get_running_max_req_size_per_dp
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
@@ -148,18 +148,17 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "max_req_num": self.args.running_max_req_size,
+            "max_req_num": get_running_max_req_size_per_dp(self.args),
             # MTP length stopping is asynchronous, so up to mtp_step accepted
             # positions may already be committed when FINISHED_LENGTH is observed.
             # The overlapped iteration then needs mtp_step positions for target
             # verification and another mtp_step for the DSpark/DFlash draft block.
             # Thus the page table needs 3 * mtp_step positions of MTP headroom.
-            # Keep eight additional positions as a safety margin for future overlap
-            # changes while preserving the historical +8 for non-MTP runs.
-            "max_seq_length": self.args.max_req_total_len + 3 * self.args.mtp_step + 8,
+            # Keep 16 additional positions: eight preserve the historical safety
+            # margin and eight cover the small-page decode preallocation window.
+            "max_seq_length": self.args.max_req_total_len + 3 * self.args.mtp_step + 16,
             "nccl_host": self.args.nccl_host,
             "nccl_port": get_shm_port_args().nccl_port,
-            "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
             "disable_chunked_prefill": self.args.disable_chunked_prefill,
             "chunked_prefill_size": self.args.chunked_prefill_size,
             "use_reward_model": self.args.use_reward_model,
@@ -303,12 +302,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
             await self._aborted_reqs(aborted_reqs=aborted_reqs)
-        if self.is_multinode_tp:
-            stop_str_matched_reqs = self.get_stop_str_matched_reqs_from_running_batch_multinode_tp()
-        else:
-            stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
-        if stop_str_matched_reqs:
-            await self._stop_str_matched_reqs(stop_str_matched_reqs=stop_str_matched_reqs)
         return
 
     async def _add_batch(self, batch: Batch):
@@ -345,14 +338,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.shm_reqs_io_buffer.set_ready()
         return
 
-    async def _stop_str_matched_reqs(self, stop_str_matched_reqs: List[Req]):
-        cmds = [StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs]
-        while not self.shm_reqs_io_buffer.is_empty():
-            await asyncio.sleep(0.001)
-        self.shm_reqs_io_buffer.write_obj(cmds)
-        self.shm_reqs_io_buffer.set_ready()
-        return
-
     def _add_new_batch_to_running_batch(self, new_batch: Batch):
         if self.running_batch is None:
             self.running_batch = new_batch
@@ -375,16 +360,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         for req in self.running_batch.reqs:
             if req.is_aborted and req._router_aborted is False:
                 req._router_aborted = True
-                ans.append(req)
-        return ans
-
-    def _get_stop_str_reqs_from_running_batch(self) -> List[Req]:
-        ans = []
-        if self.running_batch is None:
-            return ans
-        for req in self.running_batch.reqs:
-            if req.stop_str_matched and req._router_stop_str_matched is False:
-                req._router_stop_str_matched = True
                 ans.append(req)
         return ans
 
@@ -430,7 +405,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # 防止反复发送abort命令给推理进程
             req._router_aborted = False
             # 作用同 _router_aborted 类似
-            req._router_stop_str_matched = False
             req_group.append(req)
 
             logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")

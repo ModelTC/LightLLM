@@ -324,7 +324,6 @@ def prepare_dynamic_mtp_model_input(
 
     # All compaction work stays on the current CUDA stream and needs no host sync.
     model_input.to_cuda()
-    assert model_input.mem_indexes.shape[0] == dynamic_batch_size
 
     selected_row_mask = sample_dynamic_mtp_row_mask(
         dynamic_batch_size=dynamic_batch_size,

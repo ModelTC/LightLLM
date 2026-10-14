@@ -1,7 +1,6 @@
 import os
 import json
 import torch
-from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.build_utils import repair_config
@@ -19,7 +18,6 @@ from lightllm.distributed.communication_op import dist_group_manager
 logger = init_logger(__name__)
 
 
-@ModelRegistry("gemma4", is_multimodal=True)
 class Gemma4TpPartModel(LlamaTpPartModel):
     pre_and_post_weight_class = Gemma4PreAndPostLayerWeight
     transformer_weight_class = Gemma4TransformerLayerWeight

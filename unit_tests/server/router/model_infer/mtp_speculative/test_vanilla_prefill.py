@@ -223,7 +223,6 @@ def test_chained_decode_overlays_verified_tokens_for_the_next_level():
         proposal.schedule_scores,
         torch.tensor([[0.32, 0.42, 0.52], [0.34, 0.44, 0.54]], device=device),
     )
-    assert proposal.extra_mem_indexes_cpu == []
     assert target_input.input_ids is original_input_ids
     assert target_input.mtp_draft_input_hiddens is None
 

@@ -244,6 +244,7 @@ class MoeRouteInfoManager:
             routing_buffer_ptr=self.routing_buffer_ptr,
             moe_layer_index=moe_layer_index,
             num_moe_layers=self.num_moe_layers,
+            kv_cache_size=self.kv_cache_size,
             topk=self.topk,
             dtype_id=self.dtype_id,
         )

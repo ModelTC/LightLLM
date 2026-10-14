@@ -50,6 +50,16 @@ def get_env_start_args():
 
 
 @lru_cache(maxsize=None)
+def get_model_infer_recursion_limit() -> int:
+    return int(os.getenv("LIGHTLLM_MODEL_INFER_RECURSION_LIMIT", "4000"))
+
+
+@lru_cache(maxsize=None)
+def get_pd_master_recursion_limit() -> int:
+    return int(os.getenv("LIGHTLLM_PD_MASTER_RECURSION_LIMIT", "4000"))
+
+
+@lru_cache(maxsize=None)
 def get_llm_data_type() -> torch.dtype:
     data_type: str = get_env_start_args().data_type
     if data_type in ["fp16", "float16"]:
@@ -66,6 +76,12 @@ def get_llm_data_type() -> torch.dtype:
 @lru_cache(maxsize=None)
 def enable_env_vars(args):
     return os.getenv(args, "False").upper() in ["ON", "TRUE", "1"]
+
+
+@lru_cache(maxsize=None)
+def is_stop_matching_in_reasoning_enabled() -> bool:
+    """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""
+    return os.getenv("LIGHTLLM_STOP_IN_REASONING", "False").upper() in ["ON", "TRUE", "1"]
 
 
 @lru_cache(maxsize=None)
@@ -274,6 +290,8 @@ def get_added_mtp_kv_layer_num() -> int:
     if mtp_mode == "dspark":
         return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
     if mtp_mode == "dflash":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash2":
         return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
 
     raise ValueError(f"unsupported mtp_mode: {mtp_mode}")

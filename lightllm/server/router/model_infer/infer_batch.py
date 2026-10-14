@@ -25,9 +25,11 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
+from lightllm.server.router.model_infer.structured_output.state import ConstraintState
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
 
 logger = init_logger(__name__)
 
@@ -42,6 +44,7 @@ class InferenceContext:
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
     cache_placement_controller: Optional[CachePlacementController] = None
+    output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -70,8 +73,26 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_hybrid_att_model = isinstance(self.req_manager, HybridAttentionReqManager)
+        self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
+
+    def _init_output_constraint_state_factory(self) -> Optional["OutputConstraintStateFactory"]:
+        if self.args.output_constraint_mode != "xgrammar":
+            return None
+        from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
+        from lightllm.server.tokenizer import get_tokenizer
+
+        # HTTP workers already compiled the grammar. Inference needs only the
+        # shared tokenizer information to deserialize their artifacts.
+        tokenizer = get_tokenizer(
+            self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+        )
+        return OutputConstraintStateFactory(
+            tokenizer=tokenizer,
+            vocab_size=self.vocab_size,
+            eos_ids=self.args.eos_id,
+        )
 
     def init_cpu_embed_cache_client(self):
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
@@ -91,12 +112,13 @@ class InferenceContext:
         req_objs = []
         request_ids = []
         for r in requests:
-            r_id, r_index, multimodal_params, _ = r
+            r_id, r_index, multimodal_params, dp_rank_in_node = r
             assert r_id not in self.requests_mapping.keys()
             r_obj = InferReq(
                 req_id=r_id,
                 req_idx=self.req_manager.alloc(),
                 shm_index=r_index,
+                dp_rank_in_node=dp_rank_in_node,
                 multimodal_params=multimodal_params,
                 vocab_size=self.vocab_size,
                 init_prefix_cache=init_prefix_cache,
@@ -129,7 +151,7 @@ class InferenceContext:
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.hold_kv_len])
         elif CacheTier.GPU not in req.cache_tiers:
             self._free_req_mem_without_radix_insert(free_token_index=free_token_index, req=req)
         else:
@@ -139,12 +161,13 @@ class InferenceContext:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
         req.cur_kv_len = 0
+        req.hold_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
     def _free_req_mem_without_radix_insert(self, free_token_index: List, req: "InferReq"):
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.hold_kv_len])
 
         if self.is_hybrid_att_model:
             # 释放请求尾部尚未移交给 radix cache 的 hybrid attention 小页状态。
@@ -163,10 +186,15 @@ class InferenceContext:
         return
 
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
+        page_size = self.args.page_size
+        cache_kv_len = req.cur_kv_len // page_size * page_size
+        # radix cache 只保存完整页，因此不足一页的有效 KV 和页内预留空间都不会参与插入。
+        # 先释放截断后的 [cache_kv_len, hold_kv_len) 区间，再处理可缓存前缀的插入和去重。
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
         input_token_ids = req.get_input_token_ids()
-        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+        key = torch.tensor(input_token_ids[0:cache_kv_len], dtype=torch.int64, device="cpu")
         # .cpu() 是 流内阻塞操作
-        value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+        value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_kv_len].detach().cpu()
 
         prefix_len, _ = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
@@ -191,14 +219,14 @@ class InferenceContext:
         if req.tail_small_page_buffer_id is not None:
             assert req.hybrid_cache_len <= req.cur_kv_len
 
-        if req.cur_kv_len == 0:
+        if req.cur_kv_len == 0 and req.hold_kv_len == 0:
             return
 
         if req.hybrid_cache_len <= req.cur_kv_len and req.tail_small_page_buffer_id is not None:
             # 只有小页可以有 tail_small_page_buffer_id，然后进行小页插入。
             assert page_num % big_page_num != 0
             free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][req.hybrid_cache_len : req.cur_kv_len]
+                self.req_manager.req_to_token_indexs[req.req_idx][req.hybrid_cache_len : req.hold_kv_len]
             )
             req.cur_kv_len = req.hybrid_cache_len
             input_token_ids = req.get_input_token_ids()
@@ -225,7 +253,7 @@ class InferenceContext:
 
         if shared_kv_len < tail_big_page_token_num <= req.cur_kv_len:
             free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][tail_big_page_token_num : req.cur_kv_len]
+                self.req_manager.req_to_token_indexs[req.req_idx][tail_big_page_token_num : req.hold_kv_len]
             )
             req.cur_kv_len = tail_big_page_token_num
 
@@ -253,7 +281,7 @@ class InferenceContext:
             return
 
         if shared_kv_len <= req.cur_kv_len:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.hold_kv_len])
             # 该分支不会把 prefill 阶段累积的 big page id 插入 radix cache（典型为 pause/abort
             # 在 prefill 跨过 big page 边界后、到达末尾前触发），需在此显式释放，避免泄漏。
 
@@ -361,12 +389,16 @@ class InferenceContext:
                 self.req_manager.free_token(free_token_index)
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
+    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
         if paused_reqs:
+            # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
+            can_alloc_token_num = self.get_can_alloc_token_num()
 
             for req in paused_reqs:
-                prefill_need_token_num = req.get_cur_total_len()
-                if prefill_need_token_num > can_alloc_token_num:
+                # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
+                # 才允许执行 radix cache 匹配，避免在容量不足时提前改变引用或重建 hybrid cache 状态。
+                alloc_token_num = req._kv_cache_alloc_need(req.get_cur_total_len())
+                if alloc_token_num > can_alloc_token_num:
                     break
 
                 if g_infer_context.is_hybrid_att_model:
@@ -379,7 +411,7 @@ class InferenceContext:
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
-                can_alloc_token_num -= prefill_need_token_num
+                can_alloc_token_num -= alloc_token_num
         return
 
     def get_can_alloc_token_num(self):
@@ -451,30 +483,8 @@ class InferSamplingParams:
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
-        # output constraint states
-        self.regular_constraint = self.shm_param.regular_constraint.to_str()
-        self.guided_grammar = self.shm_param.guided_grammar.to_str()
-        self.guided_json = self.shm_param.guided_json.to_str()
-        if len(self.regular_constraint) == 0:
-            self.regular_constraint = None
-        if len(self.guided_grammar) == 0:
-            self.guided_grammar = None
-        if len(self.guided_json) == 0:
-            self.guided_json = None
-
-        self.fsm_current_state: int = 0
-        self.allowed_token_ids = self.shm_param.allowed_token_ids.to_list()
-        if len(self.allowed_token_ids) == 0:
-            self.allowed_token_ids = None
-
         # if provided, invalid_token_ids are masked to -inf during sampling (see generic_post_process.sample)
         self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
-
-        # this check is not very good to placed here. to do...
-        if self.allowed_token_ids is not None:
-            if not all(e < vocab_size for e in self.allowed_token_ids):
-                logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
-                self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
 
         if len(self.invalid_token_ids) > 0:
             if not all(e < vocab_size for e in self.invalid_token_ids):
@@ -490,14 +500,6 @@ class InferSamplingParams:
         # only pd mode used.
         self.pd_master_node_id: int = self.shm_param.pd_master_node_id.get()
         return
-
-    def has_constraint_setting(self) -> bool:
-        return (
-            self.regular_constraint is not None
-            or self.allowed_token_ids is not None
-            or self.guided_grammar is not None
-            or self.guided_json is not None
-        )
 
 
 class InferReq:
@@ -520,6 +522,7 @@ class InferReq:
         req_id: int,
         req_idx: int,
         shm_index: int,
+        dp_rank_in_node: int,
         multimodal_params: MultimodalParams,
         vocab_size: int = -1,
         init_prefix_cache: bool = True,
@@ -528,8 +531,14 @@ class InferReq:
         self.req_id = req_id
         self.req_idx = req_idx
         self.shm_index = shm_index
+        # 请求归属的节点内 DP 组编号，用于区分本组生成请求与跨 DP 缓存共享的临时请求。
+        # 其他 DP 组的临时请求只参与 KV cache 复用，无需初始化输出约束状态机。
+        self.dp_rank_in_node = dp_rank_in_node
         self.multimodal_params = multimodal_params
         self.vocab_size = vocab_size
+        # cur_kv_len is the logical length already written; hold_kv_len is the
+        # page-aligned physical capacity owned by this request.
+        self.hold_kv_len = 0
 
         # 请求需要被暂停
         self.wait_pause = False
@@ -575,10 +584,6 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
-        if self.mtp_step > 0:
-            self.decode_need_token_num = self._mtp_decode_need_token_num
-        else:
-            self.decode_need_token_num = self._normal_decode_need_token_num
 
         if g_infer_context.is_hybrid_att_model:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_hybrid_att
@@ -603,6 +608,11 @@ class InferReq:
         self.shm_req.link_prompt_ids_shm_array()
         self.shm_req.link_logprobs_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
+        self.output_constraint: Optional[ConstraintState] = None
+        state_factory = g_infer_context.output_constraint_state_factory
+        # 只为归属当前 DP 组的生成请求创建约束状态；跨 DP 缓存共享的临时请求保持 None。
+        if state_factory is not None and self.dp_rank_in_node == g_infer_context.backend.dp_rank_in_node:
+            self.output_constraint = state_factory.create_state(self.shm_req, self.sampling_param)
 
         # 更新 pd 分离模式下， prefill 节点需要开始传输的起始位置
         if self.sampling_param.pd_decode_node is not None:
@@ -615,7 +625,8 @@ class InferReq:
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
-        self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
+        # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
+        self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
@@ -645,6 +656,8 @@ class InferReq:
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                self.hold_kv_len = self.cur_kv_len
+                assert self.hold_kv_len % self.args.page_size == 0
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
@@ -711,6 +724,7 @@ class InferReq:
                         radix_cache = g_infer_context.radix_cache
                         if g_infer_context.get_can_alloc_token_num() > need_tokens:
                             # 有充足的token 容量时
+                            assert need_tokens % self.args.page_size == 0
                             radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
                             tail_mems = radix_cache.mem_manager.alloc(need_size=need_tokens)
                             g_infer_context.req_manager.req_to_token_indexs[
@@ -761,6 +775,12 @@ class InferReq:
                                 )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
+
+        # hybrid radix cache 使用自己的 hash page；启动检查保证它是模型
+        # page_size 的整数倍，因此命中前缀和尾部重建后的持有长度均可直接
+        # 作为请求分页预留边界。
+        self.hold_kv_len = self.cur_kv_len
+        assert self.hold_kv_len % self.args.page_size == 0
 
         if self.cur_kv_len == 0:
             # 说明没有任何命中
@@ -906,6 +926,9 @@ class InferReq:
         return
 
     def _stop_sequences_matched(self, output_len: int):
+        # 显式 token ID stop 始终生效，包括 reasoning 阶段；stop_str_match_mode 只控制字符串。
+        if not self.stop_sequences:
+            return False
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
             if stop_len > 0:
@@ -915,24 +938,39 @@ class InferReq:
                         return True
         return False
 
-    def prefill_need_token_num(self, is_chuncked_prefill: bool):
+    def prefill_need_token_num(self, is_chuncked_prefill: bool) -> Tuple[int, int]:
+        """返回 (本轮需要计算的 token 数, 需要额外分配的 KV token 容量)。
+
+        第一个值为目标 KV 长度减去已计算的 cur_kv_len，用于限制 batch 的计算量。
+        第二个值先将目标 KV 长度按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
+        用于检查和分配 KV 空间。已有页的剩余容量足够时，即使仍需计算 token，第二个值也可以为 0。
+        """
         if is_chuncked_prefill:
-            input_token_ids = self.get_chuncked_input_token_ids()
+            target_kv_len = self.get_chuncked_input_token_len()
         else:
-            input_token_ids = self.get_input_token_ids()
+            target_kv_len = self.get_cur_total_len()
+        token_num = target_kv_len - self.cur_kv_len
+        alloc_token_num = self._kv_cache_alloc_need(target_kv_len)
+        return token_num, alloc_token_num
 
-        seq_len = len(input_token_ids)
-        input_token_len = seq_len - self.cur_kv_len
-        return input_token_len
+    def decode_need_token_num(self) -> Tuple[int, int]:
+        """返回 (decode 需要的 token 数, 需要额外分配的 KV token 容量)。
 
-    def decode_need_token_num(self) -> int:
-        raise NotImplementedError("error")
+        第一个值沿用分页分配前的需求估算：普通 decode 为 1，MTP 为 2 * (mtp_step + 1)，
+        其中 MTP 的两倍系数包含原有的预留窗口，并非本轮实际接受的输出 token 数。
+        第二个值将 cur_kv_len 加上上述需求后按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
+        用于检查和分配 KV 空间。已有页的剩余容量足够时，第二个值为 0，仍可继续 decode。
+        """
+        decode_token_num = 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
+        alloc_token_num = self._kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
+        return decode_token_num, alloc_token_num
 
-    def _normal_decode_need_token_num(self) -> int:
-        return 1
-
-    def _mtp_decode_need_token_num(self) -> int:
-        return (1 + self.mtp_step) * 2
+    def _kv_cache_alloc_need(self, target_kv_len: int) -> int:
+        page_size = self.args.page_size
+        target_hold_len = (target_kv_len + page_size - 1) // page_size * page_size
+        alloc_token_num = max(target_hold_len - self.hold_kv_len, 0)
+        assert alloc_token_num % page_size == 0
+        return alloc_token_num
 
 
 class InferReqUpdatePack:
@@ -987,6 +1025,16 @@ class InferReqUpdatePack:
 
         # 更新判断请求的 finished 状态
         req_obj.update_finish_status(eos_ids=eos_ids, output_len=self.output_len)
+
+        constraint = req_obj.output_constraint
+        if constraint is not None:
+            # Commit local output and PD's first token before the next sampling step.
+            # MTP commits only accepted tokens; speculative mask traversal is rolled back.
+            constraint.commit(next_token_id)
+            if constraint.error is not None:
+                finish_status.set_status(FinishStatus.FINISHED_ERROR)
+            elif constraint.is_terminated():
+                finish_status.set_status(FinishStatus.FINISHED_STOP)
 
         if extra_post_req_handle_func is not None:
             extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)

@@ -8,7 +8,6 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPAttBackend
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
 from lightllm.models.qwen3_dflash.layer_infer.pre_layer_infer import Qwen3DFlashPreLayerInfer
@@ -17,7 +16,6 @@ from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
 
 
-@DraftModelRegistry(model_type="qwen3", spec_modes="dflash")
 class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
@@ -45,7 +43,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
 
         assert self.args.mtp_step <= self.config["block_size"]
         self.config["block_size"] = self.args.mtp_step
-        self.uses_windowed_draft_kv = self.args.mtp_draft_kv_mode == "window"
+        self.uses_windowed_draft_kv = getattr(self.args, "mtp_draft_kv_mode", "full") == "window"
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
@@ -131,11 +129,11 @@ class Qwen3DFlashModel(LlamaTpPartModel):
             kv = layer._get_context_kv(features, infer_state, weight)
             store.write(i, reqs, positions, kv)
 
-    def _update_decode_req_to_token(self, infer_state: Qwen3DFlashInferStateInfo):
-        # Windowed draft blocks have no target-owned KV slots to record.
-        if self.uses_windowed_draft_kv:
-            return
-        return super()._update_decode_req_to_token(infer_state)
+    def _select_mem_indexes(self, model_input: ModelInput):
+        if self.uses_windowed_draft_kv and not model_input.is_prefill:
+            # Windowed draft blocks do not write into the target's request pages.
+            return torch.full_like(model_input.b_req_idx, self.mem_manager.HOLD_TOKEN_MEMINDEXES[0])
+        return super()._select_mem_indexes(model_input)
 
     def _decode(self, model_input: ModelInput) -> ModelOutput:
         if self.uses_windowed_draft_kv:
@@ -156,8 +154,10 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
         infer_state.mem_manager = self.mem_manager
-        infer_state.mem_index = model_input.mem_indexes
+        infer_state.mem_index = self._select_mem_indexes(model_input)
 
+        # 这里调用的是 DFlash 覆写后的 context_forward：pre layer 只投影 target hidden，
+        # transformer layer 只生成带 RoPE 的 K/V 并写入 draft cache，不会计算 attention、FFN 和 logits。
         hidden = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
         for layer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
             hidden = layer.context_forward(hidden, infer_state, layer_weight)

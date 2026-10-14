@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import rpyc
 import socket
@@ -14,10 +15,7 @@ from rpyc.utils.server import ThreadedServer
 from rpyc.utils.factory import unix_connect
 from lightllm.server.router.model_infer.mode_backend import (
     ChunkedPrefillBackend,
-    FirstTokenConstraintBackend,
-    OutlinesConstraintBackend,
     RewardModelBackend,
-    XgrammarBackend,
     DPChunkedPrefillBackend,
     DiversehBackend,
     PDChunkedPrefillForPrefillNode,
@@ -31,7 +29,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from lightllm.server.io_struct import RlOpReq, RlOpRsp
 
@@ -59,11 +57,7 @@ class ModelRpcServer(rpyc.Service):
         self.world_size = kvargs["world_size"]
         use_reward_model = self.args.use_reward_model
         diverse_mode = self.args.diverse_mode
-        is_first_token_constraint_mode = self.args.first_token_constraint_mode
 
-        is_outlines_constraint_mode = self.args.output_constraint_mode == "outlines"
-        is_xgrammar_constraint_mode = self.args.output_constraint_mode == "xgrammar"
-        assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
 
@@ -85,12 +79,6 @@ class ModelRpcServer(rpyc.Service):
             self.backend = RewardModelBackend()
         elif diverse_mode:
             self.backend = DiversehBackend()
-        elif is_outlines_constraint_mode:
-            self.backend = OutlinesConstraintBackend()
-        elif is_xgrammar_constraint_mode:
-            self.backend = XgrammarBackend()
-        elif is_first_token_constraint_mode:
-            self.backend = FirstTokenConstraintBackend()
         else:
             self.backend = ChunkedPrefillBackend()
 
@@ -172,6 +160,10 @@ def _init_env(
     success_event,
 ):
     import lightllm.utils.rpyc_fix_utils as _
+
+    # spawn 不继承父进程的递归上限；在启动推理线程前为每个 rank 显式设置。
+    sys.setrecursionlimit(get_model_infer_recursion_limit())
+    logger.info(f"Model inference rank {rank} Python recursion limit: {sys.getrecursionlimit()}")
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)

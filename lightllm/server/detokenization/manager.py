@@ -10,7 +10,6 @@ from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from typing import Union, Dict, List
 from .decode import decode_token
-from .decode_mode_fix import decode_mode_fix
 from .decode_req import DecodeReq
 from ..tokenizer import get_tokenizer
 import pickle
@@ -40,7 +39,6 @@ class DeTokenizationManager:
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out: Dict[int, DecodeReq] = {}
         self.eos_id = args.eos_id
-        self.is_pd_decode_mode = False
         self.shm_req_manager = ShmReqManager()
 
     def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
@@ -53,10 +51,7 @@ class DeTokenizationManager:
                 f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
             )
 
-            # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-            decode_req = DecodeReq(req, self.is_pd_decode_mode)
-            if self.is_pd_decode_mode:
-                decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
+            decode_req = DecodeReq(req)
             self.req_id_to_out[req.request_id] = decode_req
         return
 
@@ -94,10 +89,6 @@ class DeTokenizationManager:
         exist_need_detoken = False
         exist_decode = False
         for decode_req in self.req_id_to_out.values():
-            # 已经满足停止字符串停止条件，则不再处理后续生成 token
-            if decode_req.req.stop_str_matched:
-                continue
-
             if decode_req.need_detoken() and not decode_req.out_queue_is_full():
                 new_token_id, src_index = decode_req.get_next_token_id_and_index()
                 decode_req.output_ids.append(new_token_id)
@@ -111,13 +102,6 @@ class DeTokenizationManager:
                     int(new_token_id),
                     self.eos_id,
                 )
-
-                decode_req.output_strs.append(new_text)
-
-                # 停止字符串匹配
-                if not decode_req.req.finish_status.is_stopped() and decode_req.stop_sequences_str_match():
-                    decode_req.req.stop_str_matched_token_index = src_index
-                    decode_req.req.stop_str_matched = True
 
                 decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
 

@@ -3,6 +3,7 @@ from typing import List
 import torch
 
 from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 
@@ -59,13 +60,40 @@ class ReqManager:
         # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
         # 这样让 DP 的实现更为简化一些。
         self.req_list = _ReqLinkedList(max_request_num)
+        page_size = get_env_start_args().page_size
+        max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )
-        self.mem_manager = mem_manager
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
+        self.mem_manager = None
+        if mem_manager is not None:
+            self.bind_mem_manager(mem_manager)
+
+    def bind_mem_manager(self, mem_manager: MemoryManager):
+        self.mem_manager = mem_manager
+
+        self.init_hold_request_indexs()
+        return
+
+    def init_hold_request_indexs(self):
+        assert (
+            self.req_list.is_all_free()
+        ), "hold request indexes can only be initialized when all requests are released"
+
+        # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
+        # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
+        # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
+        hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
+        hold_page = torch.tensor(
+            self.mem_manager.HOLD_TOKEN_MEMINDEXES,
+            dtype=hold_row.dtype,
+            device=hold_row.device,
+        )
+        hold_row.view(-1, self.mem_manager.page_size).copy_(hold_page)
+        return
 
     def alloc(self):
         return self.req_list.alloc()

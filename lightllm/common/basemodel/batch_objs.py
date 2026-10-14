@@ -32,7 +32,6 @@ class ModelInput:
     # Decode 逐行携带的 radix node 标识。相同 id 表示请求引用同一个共享
     # radix node；该 id 只用于重建 diverse attention 的 b_mark_shared_group。
     b_shared_radix_node_id: torch.Tensor = None
-    mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
     # Request/row-aligned MRoPE position offset. It is decode-only; prefill
@@ -41,8 +40,6 @@ class ModelInput:
     b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
-    # cpu 变量
-    mem_indexes_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
     # 标记 prefill 请求是否会在本轮产生输出。Prefill 必填（空 batch 使用空 list），decode 不使用。
@@ -59,8 +56,6 @@ class ModelInput:
         self.check_input()
 
         # Prefill 和 decode 都必须提供的公共张量。
-        if self.mem_indexes is None:
-            self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
@@ -94,8 +89,6 @@ class ModelInput:
         assert self.b_mtp_index is not None
         assert self.b_seq_len is not None
         assert self.multimodal_params is not None
-        assert self.mem_indexes is not None or self.mem_indexes_cpu is not None
-
         assert self.b_req_idx.shape == (self.batch_size,)
         assert self.b_mtp_index.shape == self.b_req_idx.shape
         assert self.b_seq_len.shape == self.b_req_idx.shape
@@ -122,9 +115,6 @@ class ModelInput:
             assert self.b_position_delta.shape == self.b_req_idx.shape
             assert self.b_shared_seq_len.shape == self.b_req_idx.shape
             assert self.b_shared_radix_node_id.shape == self.b_req_idx.shape
-
-        mem_indexes = self.mem_indexes if self.mem_indexes is not None else self.mem_indexes_cpu
-        assert mem_indexes.ndim == 1
 
 
 @dataclass
@@ -184,6 +174,14 @@ class ModelMtpOutputCollector:
 
 
 @dataclass
+class PostLayerOutput:
+    """输出层 logits，以及可选的候选列到 token ID 的映射。"""
+
+    logits: torch.Tensor
+    logits_token_ids: Optional[torch.Tensor] = None
+
+
+@dataclass
 class ModelOutput:
     # 通用变量
     logits: torch.Tensor
@@ -200,10 +198,16 @@ class ModelOutput:
     # 需要返回 prompt logprobs 信息时才会非空。
     prompt_logics: Optional[torch.Tensor] = None
 
+    # 仅在 draft 模型直接返回紧凑候选词表时提供。
+    # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
+    logits_token_ids: Optional[torch.Tensor] = None
+
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
+        if self.logits_token_ids is not None:
+            self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
         self.mtp_collector.to_no_ref_tensor()

@@ -1,4 +1,3 @@
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen2.layer_weights.pre_and_post_layer_weight import Qwen2PreAndPostLayerWeight
 from lightllm.models.qwen2.layer_weights.transformer_layer_weight import Qwen2TransformerLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -6,7 +5,6 @@ from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_cl
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 
 
-@ModelRegistry("qwen2")
 class Qwen2TpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = Qwen2PreAndPostLayerWeight

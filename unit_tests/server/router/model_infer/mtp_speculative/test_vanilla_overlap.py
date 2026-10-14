@@ -104,7 +104,6 @@ def test_dp_vanilla_proposer_owns_overlap_decode():
         [1, 1],
         [0, 0],
     ]
-    assert proposal.extra_mem_indexes_cpu == []
     assert draft_models[0].decode_batch_sizes == [(3, 3)]
     assert draft_models[1].decode_batch_sizes == [(3, 3)]
 

@@ -70,10 +70,16 @@ class DPKVSharedMoudle:
             is_current_dp_handle = req_dp_rank == self.dp_rank_in_node
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
             trans_size = min(max_req_radix_cache_len, req.get_cur_total_len() - 1) - req.cur_kv_len
+            target_kv_len = req.cur_kv_len + trans_size
+            alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
 
-            if is_current_dp_handle and trans_size > 0 and g_infer_context.get_can_alloc_token_num() > trans_size:
-                g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(trans_size)
-                mem_indexes = self.backend.model.mem_manager.alloc(trans_size)
+            if is_current_dp_handle and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
+                assert req.hold_kv_len == req.cur_kv_len
+                mem_indexes = self.backend._alloc_req_kv_mem(req, alloc_token_num)
+                assert mem_indexes is not None
+                # mem_indexes 只描述需要复制的逻辑 KV；页尾预留槽位已经由
+                # _alloc_req_kv_mem 写入请求表，但不参与本次跨 DP 传输。
+                mem_indexes = mem_indexes[:trans_size]
                 max_kv_len_dp_rank = self.shared_req_infos.arr[req_index, :, self._KV_LEN_INDEX].argmax()
                 max_kv_len_req_idx = int(self.shared_req_infos.arr[req_index, max_kv_len_dp_rank, self._REQ_IDX_INDEX])
                 max_kv_len_mem_manager_index = max_kv_len_dp_rank * self.backend.dp_world_size + self.backend.rank_in_dp
@@ -94,8 +100,6 @@ class DPKVSharedMoudle:
         return trans_tasks
 
     def kv_trans(self, trans_tasks: List["TransTask"]):
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
         # kv 传输
         if len(trans_tasks) > 0:
             max_kv_len_mem_indexes = []
@@ -121,11 +125,8 @@ class DPKVSharedMoudle:
             self.backend.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
 
         for trans_task in trans_tasks:
-            g_infer_context.req_manager.req_to_token_indexs[
-                trans_task.req.req_idx,
-                trans_task.req.cur_kv_len : (trans_task.req.cur_kv_len + len(trans_task.mem_indexes)),
-            ] = trans_task.mem_indexes
             trans_task.req.cur_kv_len += len(trans_task.mem_indexes)
+            assert trans_task.req.cur_kv_len <= trans_task.req.hold_kv_len
             if self.backend.is_master_in_dp:
                 trans_task.req.shm_req.shm_cur_kv_len = trans_task.req.cur_kv_len
 

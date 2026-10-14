@@ -1,7 +1,6 @@
 import os
 import json
 import torch
-from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
@@ -76,7 +75,6 @@ class Gemma3Tokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry("gemma3")
 class Gemma3TpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = Gemma3PreAndPostLayerWeight

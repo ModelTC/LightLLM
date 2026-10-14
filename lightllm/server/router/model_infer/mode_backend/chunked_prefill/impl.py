@@ -14,7 +14,6 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.server.router.model_infer.mtp_speculative.proposers.base import MtpMemIndexesToFree
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from .control_state import ControlState
@@ -110,6 +109,11 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
@@ -117,7 +121,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 run_reqs=run_reqs,
                 is_prefill=True,
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
-                mask_func=self.prefill_mask_func,
             )
             g_infer_context.save_hybrid_state_to_cache(
                 b_req_idx=model_input.b_req_idx,
@@ -125,9 +128,6 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             sync_event = torch.cuda.Event()
             sync_event.record()
-
-        # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
         # 第三阶段
@@ -154,19 +154,21 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
                 is_prefill=False,
-                mask_func=self.decode_mask_func,
             )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
-        # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
 
         # 第三阶段
@@ -194,6 +196,11 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             (
                 next_token_ids,
                 next_token_ids_cpu,
@@ -206,7 +213,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 run_reqs=run_reqs,
                 is_prefill=True,
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
-                mask_func=self.prefill_mask_func,
             )
             # mtp kv fill
             spec_engine = self.spec_engine
@@ -222,8 +228,6 @@ class ChunkedPrefillBackend(ModeBackend):
             sync_event = torch.cuda.Event()
             sync_event.record()
 
-        # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
         # 第三阶段
@@ -271,10 +275,16 @@ class ChunkedPrefillBackend(ModeBackend):
                 async_selected_row_mask_cpu.wait()
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
                 self.eos_id,
+                b_mtp_index=model_input.b_mtp_index,
             )
             next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
@@ -334,9 +344,6 @@ class ChunkedPrefillBackend(ModeBackend):
             sync_event = torch.cuda.Event()
             sync_event.record()
 
-        # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
-
         # 当 pre_draft_step == 0 时，上一轮没有生成 draft token，本轮每个请求
         # 只有一个由 target model 产生且必然提交的 token，不存在需要根据
         # accepted_index_cpu 剔除的 draft 行。因此这里可以直接使用 run_reqs，
@@ -375,17 +382,6 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ranks=next_token_ranks_cpu[select_mask],
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
-        )
-
-        proposal.extra_mem_indexes_cpu.append(
-            MtpMemIndexesToFree(
-                mem_indexes_cpu=model_input.mem_indexes_cpu,
-                free_mask_cpu=accepted_index_cpu == 0,
-            ),
-        )
-        mtp_utils.free_mem_indexes(
-            backend=self,
-            extra_mem_indexes_cpu=proposal.extra_mem_indexes_cpu,
         )
 
         # 第四阶段

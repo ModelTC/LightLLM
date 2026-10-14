@@ -9,6 +9,7 @@ def _scatter_routing_topk_to_cpu(
     mem_indexes,
     routing_buffer_ptr,
     total_size,
+    kv_cache_size,
     moe_layer_index: tl.constexpr,
     layer_topk_size: tl.constexpr,
     topk: tl.constexpr,
@@ -23,14 +24,16 @@ def _scatter_routing_topk_to_cpu(
     topk_offsets = offsets - token_offsets * topk
     mem_index = tl.load(mem_indexes + token_offsets, mask=mask, other=-1).to(tl.int64)
     data = tl.load(topk_ids + offsets, mask=mask, other=0)
+    # CUDA Graph/DP padding 使用 allocator 范围外的 HOLD 索引，这些占位行不需要写入 capture buffer。
+    write_mask = mask & (mem_index >= 0) & (mem_index < kv_cache_size)
 
     dst_offsets = mem_index * layer_topk_size + moe_layer_index * topk + topk_offsets
     if dtype_id == 1:
         dst_ptr = tl.load(routing_buffer_ptr).to(tl.pointer_type(tl.uint8))
-        tl.store(dst_ptr + dst_offsets, data.to(tl.uint8), mask=mask)
+        tl.store(dst_ptr + dst_offsets, data.to(tl.uint8), mask=write_mask)
     else:
         dst_ptr = tl.load(routing_buffer_ptr).to(tl.pointer_type(tl.int16))
-        tl.store(dst_ptr + dst_offsets, data.to(tl.int16), mask=mask)
+        tl.store(dst_ptr + dst_offsets, data.to(tl.int16), mask=write_mask)
 
 
 def scatter_routing_topk_to_cpu(
@@ -39,6 +42,7 @@ def scatter_routing_topk_to_cpu(
     routing_buffer_ptr: torch.Tensor,
     moe_layer_index: int,
     num_moe_layers: int,
+    kv_cache_size: int,
     topk: int,
     dtype_id: int,
 ):
@@ -52,6 +56,7 @@ def scatter_routing_topk_to_cpu(
     assert topk_ids.shape[1] == topk
     assert topk_ids.is_contiguous()
     assert 0 <= moe_layer_index < num_moe_layers
+    assert kv_cache_size > 0
 
     num_tokens = topk_ids.shape[0]
     layer_topk_size = num_moe_layers * topk
@@ -66,6 +71,7 @@ def scatter_routing_topk_to_cpu(
         mem_indexes=mem_indexes,
         routing_buffer_ptr=routing_buffer_ptr,
         total_size=total_size,
+        kv_cache_size=kv_cache_size,
         moe_layer_index=moe_layer_index,
         layer_topk_size=layer_topk_size,
         topk=topk,

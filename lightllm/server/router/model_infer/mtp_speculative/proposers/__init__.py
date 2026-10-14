@@ -14,6 +14,10 @@ def build_spec_proposer(*, spec_mode: str, backend: "ModeBackend", enable_dynmai
         from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
 
         return DFlashProposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
+    if spec_mode == "dflash2":
+        from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash2 import DFlash2Proposer
+
+        return DFlash2Proposer(backend=backend, enable_dynmaic_mtp=enable_dynmaic_mtp)
     if spec_mode == "eagle3":
         from lightllm.server.router.model_infer.mtp_speculative.proposers.eagle3 import Eagle3Proposer
 

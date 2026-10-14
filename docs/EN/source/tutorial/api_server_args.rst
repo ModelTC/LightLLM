@@ -5,6 +5,48 @@ APIServer Parameter Details
 
 This document provides detailed information about all startup parameters and their usage for LightLLM APIServer.
 
+Vocabulary Parallel Sampling
+----------------------------
+
+.. option:: --target_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    Candidate count communicated by each TP rank for target-model logits. The default ``None`` disables candidate communication.
+
+.. option:: --draft_vocab_topk_sampling {2,8,16,32,64,128,256,512}
+
+    Output candidate count from each TP rank for the draft model. The default ``None`` disables candidate output.
+    The two options independently control the target-model and draft-model output widths.
+    When unset, the corresponding model retains full-vocabulary logits communication and sampling.
+    When set, every TP rank selects local candidates, then one all-gather returns the logits and global
+    token IDs from all TP ranks. The settings also apply at TP=1.
+
+    Fixed-step draft decoding takes argmax over the candidates. The result remains the exact
+    full-vocabulary argmax because every shard contributes its local maximum. Dynamic MTP applies
+    softmax over the gathered candidates to produce simulated scheduling confidence; this is not
+    a full-vocabulary probability and can change dynamic step selection.
+
+    The target model selects the configured candidate count from each TP vocabulary shard before temperature,
+    request top-k, and top-p processing. The output layer then creates full-vocabulary logits, fills
+    non-candidate positions with ``-10000000.0``, and scatters candidate values by global token ID.
+    Downstream code continues through the existing full-vocabulary sampling path without a candidate-ID
+    mapping; existing penalties and invalid-token masking still run after candidate reconstruction.
+    A request top-k of -1 or larger than the gathered candidate count still only covers the candidates.
+    Generated-token logprobs and top-p mass
+    are relative to the candidate set, so enabling target candidates explicitly opts into approximate sampling.
+
+    Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary
+    results. Examples include the complete token ranks required by ``--enable_rl`` or a large logit bias that
+    would have promoted a non-candidate token into the selected set.
+    ``--target_vocab_topk_sampling`` requires ``--output_constraint_mode none``;
+    combining it with ``xgrammar`` causes a startup error.
+    This check does not restrict ``--draft_vocab_topk_sampling``.
+    Use matching settings on PD master, prefill, and decode services.
+
+    Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
+    ``_lm_head_and_gather`` implementations; normalization overrides are allowed.
+    Model initialization no longer checks output-layer compatibility.
+    Leave the corresponding candidate option unset for nonstandard output heads.
+
 Basic Configuration Parameters
 ------------------------------
 
@@ -209,7 +251,10 @@ Memory and Batch Processing Parameters
 
 .. option:: --running_max_req_size
 
-    Maximum number of requests for simultaneous forward inference, default is ``1000``
+    Total shared request slots on the local node, default is ``256``.
+    DP mode allocates ``ceil(running_max_req_size / local DP rank count)``
+    request-state slots per rank, which also limits scheduling concurrency and CUDA Graph batches.
+    Diverse mode and DP prompt cache fetch keep the original capacity.
 
 .. option:: --max_req_total_len
 
@@ -332,14 +377,20 @@ Output Constraint Parameters
 
     Set the output constraint backend, optional values:
     
-    * ``outlines``: Use outlines backend
-    * ``xgrammar``: Use xgrammar backend
-    * ``none``: No output constraint (default)
+    * ``xgrammar``: Default; enabled per request, supporting JSON Schema, JSON objects, EBNF, and regex
+    * ``none``: Disable the output constraint backend
 
-.. option:: --first_token_constraint_mode
+    Supports TP/DP, MTP, and microbatch overlap. The Outlines backend has been removed;
+    ``regular_constraint`` uses XGrammar regex syntax.
 
-    Constrain the allowed range of the first token
-    Use environment variable FIRST_ALLOWED_TOKENS to set the range, e.g., FIRST_ALLOWED_TOKENS=1,2
+    ChatCompletion JSON Schema / JSON object constraints apply after thinking ends,
+    as indicated by the configured reasoning parser's closing marker.
+    With thinking disabled, constraints apply from the first output token.
+
+.. option:: --grammar_compile_timeout
+
+    HTTP grammar compilation wait timeout in seconds. Defaults to ``30.0`` and must be positive.
+    Invalid grammars, compilation failures, or timeouts return HTTP 400 before inference or streaming starts.
 
 Multimodal Parameters
 ---------------------

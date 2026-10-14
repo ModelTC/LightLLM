@@ -59,7 +59,6 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
         if draft_step == 0:
             return EagleSpecProposal(
                 token_ids=proposal_token_ids,
-                extra_mem_indexes_cpu=[],
                 schedule_scores=schedule_scores,
             )
 
@@ -98,7 +97,6 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 b_seq_len=model_input.b_seq_len,
-                mem_indexes=model_input.mem_indexes,
                 b_shared_seq_len=model_input.b_shared_seq_len,
                 b_shared_radix_node_id=model_input.b_shared_radix_node_id,
                 b_position_delta=model_input.b_position_delta,
@@ -109,11 +107,9 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
             draft_input.b_req_idx = selected_rows.b_req_idx
             draft_input.b_mtp_index = selected_rows.b_mtp_index
             draft_input.b_seq_len = selected_rows.b_seq_len
-            draft_input.mem_indexes = selected_rows.mem_indexes
             draft_input.b_shared_seq_len = selected_rows.b_shared_seq_len
             draft_input.b_shared_radix_node_id = selected_rows.b_shared_radix_node_id
             draft_input.b_position_delta = selected_rows.b_position_delta
-            draft_input.mem_indexes_cpu = None
             draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(batch_req_num)]
             draft_inputs.append(draft_input)
             draft_token_ids_by_batch.append(selected_rows.input_ids)
@@ -145,6 +141,5 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
 
         return EagleSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=schedule_scores,
         )

@@ -41,11 +41,13 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers import (
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import (
     BaseSpecProposer,
-    MtpMemIndexesToFree,
     SpecProposal,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import (
     DFlashProposer,
+)
+from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash2 import (
+    DFlash2Proposer,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import (
     DSparkProposer,
@@ -211,6 +213,7 @@ def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
                 req_sampling_params_manager=SimpleNamespace(
+                    req_to_bitmask_enabled=None,
                     req_to_next_token_ids=req_to_next_token_ids,
                     req_to_next_token_scores=req_to_next_token_scores,
                 )
@@ -219,7 +222,6 @@ def test_scatter_mtp_next_tokens_consumes_mode_proposal(monkeypatch):
     )
     proposal = DFlashSpecProposal(
         token_ids=torch.arange(2, dtype=torch.int64).view(2, 1),
-        extra_mem_indexes_cpu=[],
         schedule_scores=torch.arange(2, dtype=torch.float32).view(2, 1),
     )
     next_token_ids = torch.tensor([10, 11], dtype=torch.int64)
@@ -251,6 +253,7 @@ def test_scatter_mtp_next_tokens_ignores_empty_schedule_scores(monkeypatch):
         model=SimpleNamespace(
             req_manager=SimpleNamespace(
                 req_sampling_params_manager=SimpleNamespace(
+                    req_to_bitmask_enabled=None,
                     req_to_next_token_ids=torch.empty((4, 2), dtype=torch.int64),
                     req_to_next_token_scores=torch.empty((4, 2), dtype=torch.float32),
                 )
@@ -259,7 +262,6 @@ def test_scatter_mtp_next_tokens_ignores_empty_schedule_scores(monkeypatch):
     )
     proposal = VanillaSpecProposal(
         token_ids=torch.empty((2, 0), dtype=torch.int64),
-        extra_mem_indexes_cpu=[],
         schedule_scores=torch.empty((2, 0), dtype=torch.float32),
     )
 
@@ -306,6 +308,12 @@ def test_engine_routes_only_dspark_to_the_confidence_planner():
     dflash_planner = build_planner("dflash")
     assert isinstance(dflash_planner, LightSpecPlanner)
     assert dflash_planner.draft_steps == (3,)
+
+    dflash2_planner = build_planner("dflash2", enable_dynmaic_mtp=False)
+    assert isinstance(dflash2_planner, FixedSpecPlanner)
+    dflash2_dynamic_planner = build_planner("dflash2")
+    assert isinstance(dflash2_dynamic_planner, LightSpecPlanner)
+    assert dflash2_dynamic_planner.draft_steps == (3,)
 
     eagle_planner = build_planner("eagle3")
     assert isinstance(eagle_planner, LightSpecPlanner)
@@ -376,6 +384,7 @@ def test_each_mode_proposer_inherits_its_expected_implementation_base():
     for proposer_type in proposer_types:
         assert proposer_type.__bases__ == (BaseSpecProposer,)
     assert Eagle3Proposer.__bases__ == (EagleWithAttProposer,)
+    assert DFlash2Proposer.__bases__ == (DFlashProposer,)
     for proposer_type in dp_overlap_proposer_types:
         assert proposer_type.__bases__ == (BaseDpOverlapProposer,)
     assert DpOverlapEagle3Proposer.__bases__ == (DpOverlapEagleWithAttProposer,)
@@ -390,6 +399,7 @@ def test_each_mtp_mode_builds_its_own_proposer():
         "eagle_no_att": EagleNoAttProposer,
         "eagle3": Eagle3Proposer,
         "dflash": DFlashProposer,
+        "dflash2": DFlash2Proposer,
         "dspark": DSparkProposer,
     }
 
@@ -432,29 +442,6 @@ def test_eagle_proposer_skips_draft_forward_for_zero_steps():
     assert isinstance(proposal, EagleSpecProposal)
     assert proposal.token_ids.shape == (2, 0)
     assert proposal.schedule_scores.shape == (2, 0)
-
-
-def test_free_mem_indexes_applies_extra_masks():
-    freed = []
-    backend = SimpleNamespace(
-        model=SimpleNamespace(
-            req_manager=SimpleNamespace(mem_manager=SimpleNamespace(free=lambda indexes: freed.append(indexes.clone())))
-        )
-    )
-    mtp_utils.free_mem_indexes(
-        backend=backend,
-        extra_mem_indexes_cpu=[
-            MtpMemIndexesToFree(mem_indexes_cpu=torch.tensor([11, 12, 13])),
-            MtpMemIndexesToFree(
-                mem_indexes_cpu=torch.tensor([20, 21]),
-                free_mask_cpu=torch.tensor([True, False]),
-            ),
-            MtpMemIndexesToFree(mem_indexes_cpu=torch.tensor([22])),
-        ],
-    )
-
-    assert len(freed) == 1
-    assert freed[0].tolist() == [11, 12, 13, 20, 22]
 
 
 def test_records_request_mtp_metrics_in_one_pass():
@@ -600,11 +587,12 @@ def test_lightspec_keeps_vanilla_attention_chained_depth_fixed():
     assert plan.draft_step == plan.pre_draft_step == 3
 
 
-def test_lightspec_compacts_block_verify_without_changing_draft_shape():
+@pytest.mark.parametrize("spec_mode,block_size", [("dflash", 7), ("dflash2", 8)])
+def test_lightspec_compacts_block_verify_without_changing_draft_shape(spec_mode, block_size):
     planner = build_lightspec_planner(
         max_draft_step=7,
-        spec_mode="dflash",
-        block_size=7,
+        spec_mode=spec_mode,
+        block_size=block_size,
     )
     for batch_size, target_cost in ((2, 1.0), (4, 1.1), (8, 3.0), (16, 8.0)):
         planner.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=target_cost)
@@ -664,21 +652,12 @@ def test_engine_lets_planner_count_requests_with_a_previous_proposal():
     assert ready_plan.all_reqs_have_proposals
 
 
-def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypatch):
+def test_dynamic_prepare_delegates_row_compaction(monkeypatch):
     from lightllm.common.basemodel.triton_kernel import dynamic_mtp_utils
-    from lightllm.server.router.model_infer import infer_batch as infer_batch_module
     from lightllm.server.router.model_infer.mtp_speculative import (
         engine as engine_module,
     )
 
-    freed = []
-    monkeypatch.setattr(
-        infer_batch_module,
-        "g_infer_context",
-        SimpleNamespace(
-            req_manager=SimpleNamespace(mem_manager=SimpleNamespace(free=lambda indexes: freed.append(indexes.clone())))
-        ),
-    )
     selected_row_mask = torch.tensor([1, 0, 1, 0], dtype=torch.int32)
     monkeypatch.setattr(
         dynamic_mtp_utils,
@@ -702,8 +681,6 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
     )
     model_input = SimpleNamespace(
         batch_size=4,
-        mem_indexes=torch.tensor([20, 21, 22, 23], dtype=torch.int32),
-        mem_indexes_cpu=torch.tensor([10, 11, 12, 13], dtype=torch.int32),
     )
     plan = SpecDecodePlan(origin_batch_size=4, dynamic_batch_size=2, draft_step=1, pre_draft_step=1)
 
@@ -715,10 +692,6 @@ def test_dynamic_prepare_keeps_prefix_mem_indexes_and_frees_unused_tail(monkeypa
 
     assert compacted_input is model_input
     assert selected_mask_cpu is async_mask
-    assert model_input.mem_indexes.tolist() == [20, 21]
-    assert model_input.mem_indexes_cpu.tolist() == [10, 11]
-    assert len(freed) == 1
-    assert freed[0].tolist() == [12, 13]
 
 
 def test_lightspec_eagle_draft_always_keeps_the_extend_candidate():
@@ -799,11 +772,12 @@ def test_autoregressive_eagle_planner_prices_extend_and_decode_rows():
         assert draft_cost_ms == 64.0
 
 
-def test_block_planner_prices_commit_and_complete_block():
+@pytest.mark.parametrize("spec_mode,block_size,expected_cost", [("dflash", 7, 1.5), ("dflash2", 8, 1.6)])
+def test_block_planner_prices_commit_and_complete_block(spec_mode, block_size, expected_cost):
     planner = build_lightspec_planner(
         max_draft_step=7,
-        spec_mode="dflash",
-        block_size=7,
+        spec_mode=spec_mode,
+        block_size=block_size,
     )
     planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=0.4)
 
@@ -813,7 +787,7 @@ def test_block_planner_prices_commit_and_complete_block():
         draft_step=7,
     )
 
-    assert np.isclose(draft_cost_ms, 1.5)
+    assert np.isclose(draft_cost_ms, expected_cost)
 
 
 def test_dspark_planner_prices_commit_and_complete_block():
@@ -925,7 +899,6 @@ def test_engine_skips_feedback_for_a_mixed_proposal_batch():
         plan=plan,
         proposal=SpecProposal(
             token_ids=torch.empty((0,), dtype=torch.int64),
-            extra_mem_indexes_cpu=[],
         ),
         req_num=2,
         accept_lengths_cpu=torch.tensor([1, 2], dtype=torch.int32),
@@ -943,7 +916,6 @@ def test_dspark_applies_confidence_capacity_after_two_step_delay():
     plan = SpecDecodePlan(origin_batch_size=8, dynamic_batch_size=8, draft_step=3, pre_draft_step=3)
     proposal = DSparkSpecProposal(
         token_ids=torch.empty((0,), dtype=torch.int64),
-        extra_mem_indexes_cpu=[],
         schedule_scores_cpu=torch.from_numpy(confidence_probs),
     )
     engine = SpecEngine.__new__(SpecEngine)

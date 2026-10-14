@@ -25,7 +25,8 @@ import triton.language as tl
 @triton.jit
 def _fill_exact_mla_decode_plan_kernel(
     int_buf_i32,
-    kv_indptr,
+    kv_page_indptr,
+    kv_lens,
     q_indptr_off: tl.constexpr,
     kv_indptr_off: tl.constexpr,
     partial_indptr_off: tl.constexpr,
@@ -47,7 +48,7 @@ def _fill_exact_mla_decode_plan_kernel(
     BLOCK_C: tl.constexpr,
 ):
     # exact non-split 路径：每个 request 只有一个 work item。它直接使用真实
-    # kv_indptr，也不会写 partial 输出，是最简单、最稳的 CUDA graph replay plan。
+    # kv_page_indptr，也不会写 partial 输出，是最简单、最稳的 CUDA graph replay plan。
     cluster_offsets = tl.arange(0, BLOCK_C)
     base_count = batch_size // num_clusters
     extra_count = batch_size - base_count * num_clusters
@@ -84,9 +85,9 @@ def _fill_exact_mla_decode_plan_kernel(
     # 连续 work range，和 FlashInfer scheduler 的约定保持一致。
     record_index = cluster * base_count + tl.minimum(cluster, extra_count) + rank_in_cluster
 
-    kv_start = tl.load(kv_indptr + batch_offsets, mask=valid_batch, other=0)
-    kv_next = tl.load(kv_indptr + batch_offsets + 1, mask=valid_batch, other=0)
-    kv_len = kv_next - kv_start
+    kv_start = tl.load(kv_page_indptr + batch_offsets, mask=valid_batch, other=0)
+    # kv_page_indptr 是页偏移；长度和分块边界按真实 token 数计算，避免计入末页空位。
+    kv_len = tl.load(kv_lens + batch_offsets, mask=valid_batch, other=0)
 
     tl.store(int_buf_i32 + q_indptr_off + record_index, batch_offsets, mask=valid_batch)
     tl.store(int_buf_i32 + kv_indptr_off + record_index, kv_start, mask=valid_batch)
@@ -101,7 +102,8 @@ def _fill_exact_mla_decode_plan_kernel(
 @triton.jit
 def _fill_fixed_chunk_mla_decode_plan_kernel(
     int_buf_i32,
-    kv_indptr,
+    kv_page_indptr,
+    kv_lens,
     q_indptr_off: tl.constexpr,
     kv_indptr_off: tl.constexpr,
     partial_indptr_off: tl.constexpr,
@@ -134,15 +136,15 @@ def _fill_fixed_chunk_mla_decode_plan_kernel(
     batch_offsets = tl.arange(0, BLOCK_B)
     valid_batch = batch_offsets < batch_size
 
-    kv_start = tl.load(kv_indptr + batch_offsets, mask=valid_batch, other=0)
-    kv_next = tl.load(kv_indptr + batch_offsets + 1, mask=valid_batch, other=0)
-    kv_len = kv_next - kv_start
+    kv_start = tl.load(kv_page_indptr + batch_offsets, mask=valid_batch, other=0)
+    # kv_page_indptr 是页偏移；长度和分块边界按真实 token 数计算，避免计入末页空位。
+    kv_len = tl.load(kv_lens + batch_offsets, mask=valid_batch, other=0)
 
-    # 使用 GPU 上真实 kv_indptr 来模拟 FlashInfer CPU scheduler：
+    # 使用 GPU 上真实 token 长度来模拟 FlashInfer CPU scheduler：
     #   kv_len_limit = f(total_kv_len / num_clusters)
     # 这是它和 conservative max-kv plan 的关键区别：不依赖 host meta，也能适配
     # 长短混合 batch。
-    total_kv_len = tl.load(kv_indptr + batch_size) - tl.load(kv_indptr)
+    total_kv_len = tl.sum(kv_len, 0)
     avg_kv_len = (total_kv_len + num_clusters - 1) // num_clusters
     chunk_hint = tl.where(
         avg_kv_len <= 8,
@@ -265,7 +267,9 @@ def _fill_fixed_chunk_mla_decode_plan_kernel(
 
 
 @torch.no_grad()
-def fill_exact_mla_decode_plan(decode_wrapper, kv_indptr: torch.Tensor, batch_size: int) -> None:
+def fill_exact_mla_decode_plan(
+    decode_wrapper, kv_page_indptr: torch.Tensor, kv_lens: torch.Tensor, batch_size: int
+) -> None:
     plan_info = [int(v) for v in decode_wrapper._plan_info]
     int_buf_i32 = decode_wrapper._int_workspace_buffer.view(torch.int32)
     # FlashInfer plan offset 是 byte offset；Triton 这里按 int32 元素写入。
@@ -279,7 +283,8 @@ def fill_exact_mla_decode_plan(decode_wrapper, kv_indptr: torch.Tensor, batch_si
 
     _fill_exact_mla_decode_plan_kernel[(1,)](
         int_buf_i32=int_buf_i32,
-        kv_indptr=kv_indptr,
+        kv_page_indptr=kv_page_indptr,
+        kv_lens=kv_lens,
         q_indptr_off=offsets[2],
         kv_indptr_off=offsets[3],
         partial_indptr_off=offsets[4],
@@ -321,7 +326,8 @@ def _mla_kv_len_limit_hint(avg_kv_len: int) -> int:
 @torch.no_grad()
 def fill_fixed_chunk_mla_decode_plan(
     decode_wrapper,
-    kv_indptr: torch.Tensor,
+    kv_page_indptr: torch.Tensor,
+    kv_lens: torch.Tensor,
     batch_size: int,
     num_heads: int,
     max_kv_len: int,
@@ -345,7 +351,7 @@ def fill_fixed_chunk_mla_decode_plan(
 
     # 这个上界用于确定 BLOCK_K，同时保护 FlashInfer 固定的
     # max_total_num_works=16384 表容量。实际 chunk size 仍会在 Triton kernel
-    # 内根据真实 GPU kv_indptr 重新计算。
+    # 内根据 GPU 上的真实 token 长度重新计算。
     min_chunk_size = _mla_kv_len_limit_hint(triton.cdiv(max_kv_len, num_blks_y))
     if min_chunk_size >= max_kv_len:
         return False
@@ -367,7 +373,8 @@ def fill_fixed_chunk_mla_decode_plan(
 
     _fill_fixed_chunk_mla_decode_plan_kernel[(1,)](
         int_buf_i32=int_buf_i32,
-        kv_indptr=kv_indptr,
+        kv_page_indptr=kv_page_indptr,
+        kv_lens=kv_lens,
         q_indptr_off=offsets[2],
         kv_indptr_off=offsets[3],
         partial_indptr_off=offsets[4],
@@ -400,22 +407,27 @@ def fill_fixed_chunk_mla_decode_plan(
 @torch.no_grad()
 def fill_mla_decode_plan_for_cuda_graph(
     decode_wrapper,
-    kv_indptr: torch.Tensor,
+    kv_page_indptr: torch.Tensor,
+    kv_lens: torch.Tensor,
     batch_size: int,
     num_heads: int,
     max_kv_len: int,
 ) -> str:
+    # kv_page_indptr 以页为单位；kv_lens 和 max_kv_len 以 token 为单位，与 page_size 无关。
     # 长 decode 优先使用 split plan，因为它能匹配 FlashInfer 的 split-K 并行度。
     # 短序列或当前不支持的 graph shape 回退到 exact plan 来保证正确性。
     use_fixed_chunk_split = fill_fixed_chunk_mla_decode_plan(
-        decode_wrapper,
-        kv_indptr,
-        batch_size,
-        num_heads,
-        max_kv_len,
+        decode_wrapper=decode_wrapper,
+        kv_page_indptr=kv_page_indptr,
+        kv_lens=kv_lens,
+        batch_size=batch_size,
+        num_heads=num_heads,
+        max_kv_len=max_kv_len,
     )
     if use_fixed_chunk_split:
         return "fixed_chunk_split"
 
-    fill_exact_mla_decode_plan(decode_wrapper, kv_indptr, batch_size)
+    fill_exact_mla_decode_plan(
+        decode_wrapper=decode_wrapper, kv_page_indptr=kv_page_indptr, kv_lens=kv_lens, batch_size=batch_size
+    )
     return "exact_non_split"

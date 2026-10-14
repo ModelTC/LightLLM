@@ -113,7 +113,8 @@ class DiversehBackend(ChunkedPrefillBackend):
         run_reqs = []
         for i in range(len(master_reqs)):
             master_req = master_reqs[i]
-            slave_reqs = master_req.slave_reqs
+            # overlap 模式会延迟一轮释放终止请求，本轮不能再为已标记的 slave 复制 logits。
+            slave_reqs = [req for req in master_req.slave_reqs if not req.filter_mark]
             slave_num = len(slave_reqs)
             batch_idx.append(i)
             run_reqs.append(master_req)
@@ -213,6 +214,8 @@ class DiversehBackend(ChunkedPrefillBackend):
         # torch.cuda.current_stream().synchronize()
         slave_req.shared_kv_node = master_req.shared_kv_node
         slave_req.cur_kv_len = kv_len
+        # slave 在 prefill 阶段没有独立分配 KV，共享完成后需要同步其已持有的 KV 长度。
+        slave_req.hold_kv_len = kv_len
         slave_req.cur_output_len = master_req.cur_output_len
         if self.is_master_in_dp:
             slave_req.shm_req.shm_cur_kv_len = slave_req.cur_kv_len

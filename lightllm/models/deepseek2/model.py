@@ -1,6 +1,5 @@
 import torch
 from typing import final
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -14,7 +13,6 @@ from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class
 logger = init_logger(__name__)
 
 
-@ModelRegistry(["deepseek_v2", "deepseek_v3"])
 class Deepseek2TpPartModel(LlamaTpPartModel):
     # weight class
     transformer_weight_class = Deepseek2TransformerLayerWeight

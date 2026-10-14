@@ -7,6 +7,8 @@ logger = init_logger(__name__)
 
 
 def launch_server(args: StartArgs):
+    if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
+        raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
     set_log_node_role(args.run_mode)
     from .api_start import pd_master_start, normal_or_p_d_start, config_server_start, visual_only_start
 

@@ -47,7 +47,7 @@ RUN case ${TARGETPLATFORM} in \
     esac && \
     /opt/conda/bin/conda clean -ya
 
-WORKDIR /root
+WORKDIR /lightllm
 
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip

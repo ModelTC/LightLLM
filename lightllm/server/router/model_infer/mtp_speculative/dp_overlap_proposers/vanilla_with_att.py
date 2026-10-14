@@ -152,7 +152,6 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
 
         return VanillaSpecProposal(
             token_ids=proposal_token_ids,
-            extra_mem_indexes_cpu=[],
             schedule_scores=proposal_schedule_scores,
         )
 
