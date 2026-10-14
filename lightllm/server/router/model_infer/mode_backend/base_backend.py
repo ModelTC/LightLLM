@@ -614,8 +614,6 @@ class ModeBackend:
             )
         return
 
-
-
     def _classify_reqs_and_alloc_kv(self, candidates, available):
         """按优先级顺序接纳请求，再一次性分配所有必需的 token 容量。
 

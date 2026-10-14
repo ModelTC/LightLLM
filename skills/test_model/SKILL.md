@@ -80,20 +80,17 @@ lm_eval --model local-completions \
 设置表中 `--page_size` 和 `--cpu_cache_token_page_size`。257 特意不整除物理页大小，
 用于覆盖 chunk 跨页边界。按子 skill 的方法检查服务日志、端口，并完成真实请求 warmup。
 
-服务就绪后执行（变量对应本组实际启动参数）：
+仓库目前没有自动执行 GPU 前缀逐出后真实 CPU cache 回载的探针。服务就绪后，
+用以下人工步骤记录请求参数、响应与服务日志，不能把连续两轮精度评测当作已覆盖逐出回载：
 
-```bash
-python test/acc/paged_cpu_cache_probe.py \
-  --url "http://127.0.0.1:${PORT}" --model-dir "${MODEL_DIR}" \
-  --server-log "${LOG_DIR}/server.log" --output "${LOG_DIR}/cpu-cache-probe.json" \
-  --page-size "${PAGE_SIZE}" --cpu-page-size "${CPU_PAGE_SIZE}" --kv-capacity 32768
-```
+1. 对固定提示词使用 greedy 采样，记录 GPU 常驻前缀参考的 32 个输出 token 和 logprob。
+2. 用其他提示词填充 KV cache，确认目标 GPU 前缀已被逐出且其 CPU cache 仍可用。
+3. 再次请求目标提示词，确认日志中有实际 CPU cache 命中；另测仍有部分 GPU 前缀命中的情况。
+   参考与回载请求须使用相同的 prefill 起点，避免 chunk/query 形状改变造成的 BF16 舍入差异。
+   32 个输出 token 必须相同，logprob 最大绝对差不超过 0.02。
+4. 请求 prompt logprobs，检查禁用缓存复用后仍返回全部输入位置的有效结果。
 
-Qwen3.5 的探针额外传入 `--hash-page-size 256`，与服务端 hybrid hash page 保持一致。
-
-探针要求回载日志包含实际 CPU cache 命中，并覆盖部分 GPU 前缀同时命中的情况；
-GPU 常驻前缀参考与 CPU 回载使用相同的 prefill 起点，避免 chunk/query 形状改变产生的
-BF16 舍入差异干扰传输校验；32 个输出 token 必须相同，logprob 最大绝对差不超过 0.02。
-另外检查 prompt logprobs 禁用缓存复用后仍返回全部输入位置的有效结果。
-GPU↔CPU KV 逐值一致性、碎片页和异步引用生命周期由
-`unit_tests/server/router/model_infer/mode_backend/test_paged_cpu_cache.py` 覆盖。
+Qwen3.5 服务的 `--linear_att_hash_page_size` 保持为 256。现有
+`unit_tests/server/router/model_infer/mode_backend/test_multi_level_kv_cache.py`
+覆盖后端缓存任务状态和引用释放；它使用模拟传输，不能证明真实 GPU↔CPU KV 逐值一致性。
+未完成上述人工验证或逐值传输校验时，在结果中明确列为验证缺口。

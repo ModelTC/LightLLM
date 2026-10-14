@@ -59,6 +59,14 @@ class MemoryManager:
         # 构建对外的操作类接口
         self.operator: BaseMemManagerOperator = self.operator_class(self)
 
+    def __getstate__(self):
+        # IPC consumers access KV buffers and request indexes, while allocation
+        # remains owned by the inference process. NumPy pools would otherwise
+        # be embedded in every descriptor written by write_to_shm.
+        state = self.__dict__.copy()
+        state["allocator"] = None
+        return state
+
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]
         v = self.kv_buffer[layer_index][:, self.head_num :, :]
