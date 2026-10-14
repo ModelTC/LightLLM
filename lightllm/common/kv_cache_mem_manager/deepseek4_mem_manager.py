@@ -321,7 +321,7 @@ class PackedPagePool:
 
     寻址是纯 token 槽位 (page = slot // page_size)，page 只是 scale-tail/对齐的物理打包技巧，
     不存在页粒度的分配。``write``/``read`` 是 torch 参考实现(单测 oracle)；生产写入走
-    triton packed writer(destindex_copy_kv_flashmla_dsv4 等)，kernel 直接消费 ``buffer``。
+    packed writer(norm_rope_cuda、destindex_copy_indexer_k_dsv4 等)，kernel 直接消费 ``buffer``。
     """
 
     def __init__(
@@ -401,10 +401,7 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     operator_class = DeepseekV4MemOperator
 
-    mla_nope_dim = DSV4_MLA_NOPE_DIM  # 448
-    mla_rope_dim = DSV4_MLA_ROPE_DIM  # 64
     mla_head_dim = DSV4_MLA_HEAD_DIM  # 512
-    mla_quant_group_size = DSV4_MLA_QUANT_GROUP_SIZE  # 64
     mla_scale_bytes = DSV4_MLA_SCALE_BYTES  # 8
     mla_bytes_per_token = DSV4_MLA_BYTES_PER_TOKEN  # 584
     indexer_head_dim_default = DSV4_INDEXER_HEAD_DIM  # 128
@@ -777,48 +774,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.swa_page_allocator.free_all()
         self.big_page_buffers.clear_to_init_state()
 
-    # ------------------------------------------------------------------ packed codecs (torch reference)
-    # 与 sglang/vllm 的 fp8_ds_mla 字节布局逐位对齐(ue8m0 幂次 scale)。这些 torch 实现是该 ABI 的
-    # 可执行规格(单测 oracle，triton writer 与其逐字节对拍)，不可删除。
-    # torch参考，未使用
-    def _pack_mla_kv(self, kv: torch.Tensor) -> torch.Tensor:
-        kv = kv.reshape(-1, self.mla_head_dim)
-        out = torch.empty((kv.shape[0], self.mla_bytes_per_token), dtype=torch.uint8, device=kv.device)
-        nope = kv[:, : self.mla_nope_dim].float().reshape(-1, self.mla_scale_bytes - 1, self.mla_quant_group_size)
-        amax = torch.clamp(nope.abs().amax(dim=-1), min=DSV4_FP8_AMAX_MIN)
-        scale = amax / DSV4_FP8_E4M3_MAX
-        scale_exp = torch.ceil(torch.log2(scale)).to(torch.int32)
-        scale = torch.exp2(scale_exp.float())
-        nope_fp8 = torch.clamp(nope / scale.unsqueeze(-1), -DSV4_FP8_E4M3_MAX, DSV4_FP8_E4M3_MAX).to(
-            torch.float8_e4m3fn
-        )
-        out[:, : self.mla_nope_dim].copy_(nope_fp8.reshape(-1, self.mla_nope_dim).view(dtype=torch.uint8))
-        rope_start = self.mla_nope_dim
-        rope_end = rope_start + self.mla_rope_dim * 2
-        rope = kv[:, self.mla_nope_dim : self.mla_head_dim].to(torch.bfloat16)
-        out[:, rope_start:rope_end].copy_(rope.view(dtype=torch.uint8).reshape(-1, self.mla_rope_dim * 2))
-        scale_start = rope_end
-        scale_end = scale_start + self.mla_scale_bytes - 1
-        out[:, scale_start:scale_end].copy_((scale_exp + 127).to(torch.uint8))
-        out[:, scale_end].zero_()
-        return out
-
-    def _unpack_mla_kv(self, packed: torch.Tensor) -> torch.Tensor:
-        packed = packed.reshape(-1, self.mla_bytes_per_token)
-        if packed.shape[0] == 0:
-            return torch.empty((0, self.mla_head_dim), dtype=self.dtype, device=packed.device)
-        nope_fp8 = packed[:, : self.mla_nope_dim].view(dtype=torch.float8_e4m3fn).float()
-        nope_fp8 = nope_fp8.reshape(-1, self.mla_scale_bytes - 1, self.mla_quant_group_size)
-        rope_start = self.mla_nope_dim
-        rope_end = rope_start + self.mla_rope_dim * 2
-        scale_start = rope_end
-        scale_end = scale_start + self.mla_scale_bytes - 1
-        scale_exp = packed[:, scale_start:scale_end].to(torch.int32) - 127
-        scale = torch.exp2(scale_exp.float())
-        nope = (nope_fp8 * scale.reshape(-1, self.mla_scale_bytes - 1, 1)).reshape(-1, self.mla_nope_dim)
-        rope = packed[:, rope_start:rope_end].view(dtype=torch.bfloat16)
-        return torch.cat([nope.to(self.dtype), rope.to(self.dtype)], dim=-1)
-
+    # Torch reference for byte-for-byte tests of the packed indexer-K writer.
     def _pack_indexer_k(self, indexer_k: torch.Tensor) -> torch.Tensor:
         indexer_k = indexer_k.reshape(-1, self.indexer_head_dim)
         out = torch.empty(
@@ -833,14 +789,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         out[:, : self.indexer_head_dim].copy_(k_fp8.view(dtype=torch.uint8))
         out[:, self.indexer_head_dim :].copy_(scale.view(dtype=torch.uint8).reshape(-1, DSV4_INDEXER_SCALE_BYTES))
         return out
-
-    def _unpack_indexer_k(self, packed: torch.Tensor) -> torch.Tensor:
-        packed = packed.reshape(-1, self.indexer_bytes_per_token)
-        if packed.shape[0] == 0:
-            return torch.empty((0, self.indexer_head_dim), dtype=self.dtype, device=packed.device)
-        k_fp8 = packed[:, : self.indexer_head_dim].view(dtype=torch.float8_e4m3fn).float()
-        scale = packed[:, self.indexer_head_dim :].view(dtype=torch.float32)
-        return (k_fp8 * scale).to(self.dtype)
 
     # ------------------------------------------------------------------ cache write paths
     def pack_mla_kv_to_cache_fused_norm_rope(
@@ -869,21 +817,6 @@ class DeepseekV4MemoryManager(MemoryManager):
             page_size=self.swa_pool.page_size,
         )
         return
-
-    def pack_compressed_kv_to_cache(self, layer_index: int, slots: torch.Tensor, comp: torch.Tensor):
-        if comp.shape[0] == 0:
-            return
-        from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_kv_flashmla_dsv4 import (
-            destindex_copy_kv_flashmla_dsv4,
-        )
-
-        pool, local_layer = self._pool_and_local_layer(layer_index)
-        destindex_copy_kv_flashmla_dsv4(
-            comp.reshape(-1, self.mla_head_dim),
-            slots.to(comp.device),
-            pool.get_layer_buffer(local_layer),
-            pool.page_size,
-        )
 
     def pack_indexer_k_to_cache(
         self,

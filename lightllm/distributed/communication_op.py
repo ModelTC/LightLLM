@@ -18,12 +18,11 @@
 # limitations under the License.
 
 
-import os
 import torch
 import triton
 import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
-from typing import List, Dict, Optional, Set, Union
+from typing import List, Optional, Set, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (

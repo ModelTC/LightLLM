@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.distributed as dist
 import copy
@@ -8,13 +7,9 @@ import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.utils.torch_memory_saver_utils import (
-    TorchMemorySaverWrapper,
-    MemoryTag,
-)
+from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
 from .infer_struct import InferStateInfo
 
 

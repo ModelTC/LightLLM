@@ -29,6 +29,7 @@ def cache(monkeypatch, tmp_path):
                 "disable_chunked_prefill": False,
                 "model_dir": str(tmp_path),
                 "penalty_counter_mode": "cpu_counter",
+                "output_constraint_mode": "none",
                 "mtp_step": 3,
                 "mtp_dynamic_verify": False,
                 "enable_ep_moe": False,

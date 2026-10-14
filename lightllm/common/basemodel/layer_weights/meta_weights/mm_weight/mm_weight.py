@@ -1,13 +1,8 @@
-import os
 import torch
-import threading
-from abc import abstractmethod
-from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict, Union, Type
+from typing import Optional, List, Dict, Union
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
-from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.no_quant import NoQuantization
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
@@ -93,7 +88,6 @@ class MMWeightTpl(BaseWeightTpl):
         return
 
     def load_hf_weights(self, weights):
-
         for sub_child_index, param_name in enumerate(self.weight_names):
             self._load_weight(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
         for sub_child_index, param_name in enumerate(self.weight_scale_names):

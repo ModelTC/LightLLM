@@ -1,6 +1,5 @@
 import torch.multiprocessing as mp
-import random
-from typing import List, Tuple
+from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger

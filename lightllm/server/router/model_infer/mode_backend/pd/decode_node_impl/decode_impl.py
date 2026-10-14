@@ -1,4 +1,3 @@
-import random
 import torch
 import torch.multiprocessing as mp
 from lightllm.common.req_manager import DeepseekV4ReqManager

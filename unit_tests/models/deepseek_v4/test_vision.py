@@ -10,9 +10,12 @@ import pytest
 import torch
 from PIL import Image
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from lightllm.common.basemodel.attention_vit.sdpa.fp import SdpaVitAttBackend
 from lightllm.models.deepseek_v4 import deepseek_v4_visual as visual
 from lightllm.models.deepseek_v4 import image_processor as ours
+from lightllm.server import visualserver
 
 
 REFERENCE_DIR = "/mtc/models/DeepSeek-V4-Flash-Vision-Exp/inference"
@@ -145,7 +148,8 @@ def _tiny_vision_args():
 
 
 @pytest.mark.parametrize("n_vit_h,n_vit_w", [(4, 4), (5, 3)])
-def test_vit_matches_reference(reference_vision, n_vit_h, n_vit_w):
+def test_vit_matches_reference(reference_vision, n_vit_h, n_vit_w, monkeypatch):
+    monkeypatch.setattr(visualserver, "VIT_ATTN_BACKEND", SdpaVitAttBackend)
     torch.manual_seed(0)
     args = _tiny_vision_args()
     model = visual.ViT(args).eval()
@@ -163,7 +167,7 @@ def test_vit_matches_reference(reference_vision, n_vit_h, n_vit_w):
         args.vision_patch_size,
         dtype=torch.bfloat16,
     )
-    with torch.inference_mode():
+    with torch.inference_mode(), sdpa_kernel(SDPBackend.MATH):
         actual = model(patches, n_vit_h, n_vit_w)
         expected = reference(patches, n_vit_h, n_vit_w)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)

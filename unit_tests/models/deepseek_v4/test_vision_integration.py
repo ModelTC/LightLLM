@@ -190,7 +190,8 @@ def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
         infer_batch,
         "InferSamplingParams",
         lambda *args: SimpleNamespace(
-            pd_decode_node=None, shm_param=SimpleNamespace(stop_sequences=SimpleNamespace(to_list=lambda: []))
+            pd_decode_node=None,
+            shm_param=SimpleNamespace(stop_sequences=SimpleNamespace(to_token_ids_list=lambda: [])),
         ),
     )
     monkeypatch.setattr(infer_batch, "PromptSelectedLogprobsExt", lambda req: None)

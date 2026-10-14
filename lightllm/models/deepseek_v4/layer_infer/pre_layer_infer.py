@@ -1,8 +1,5 @@
-import torch
-import torch.distributed as dist
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
-from lightllm.distributed.communication_op import all_reduce
 from ..infer_struct import DeepseekV4InferStateInfo
 
 

@@ -3,7 +3,6 @@ import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
 from lightllm.utils.log_utils import init_logger
@@ -104,7 +103,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)

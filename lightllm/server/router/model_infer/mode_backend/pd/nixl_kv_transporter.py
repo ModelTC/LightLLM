@@ -3,7 +3,6 @@ import copy
 import os
 import threading
 import time
-from dataclasses import dataclass
 from typing import Dict
 from torch import Tensor
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDAgentMetadata

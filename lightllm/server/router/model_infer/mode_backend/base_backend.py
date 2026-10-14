@@ -5,7 +5,7 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional, Union
+from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
@@ -730,7 +730,6 @@ class ModeBackend:
             can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue

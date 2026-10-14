@@ -26,14 +26,7 @@ def get_unique_server_name():
     return service_uni_name
 
 
-def set_cuda_arch(args):
-    if not torch.cuda.is_available():
-        return
-    return
-
-
 def set_env_start_args(args):
-    set_cuda_arch(args)
     if not isinstance(args, dict):
         args = vars(args)
     os.environ["LIGHTLLM_START_ARGS"] = json.dumps(args)

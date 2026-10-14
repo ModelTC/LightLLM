@@ -1,4 +1,3 @@
-import threading
 import torch.distributed as dist
 import torch
 import dataclasses
@@ -8,11 +7,9 @@ from typing import Optional, List, Deque, Dict
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient, CpuPageAllocState
-from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.envs_utils import get_env_start_args, get_dsv4_cpu_cache_max_pages_per_task
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
-from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.operator.deepseek import DeepseekV4MemOperator
@@ -248,7 +245,6 @@ class MultiLevelKvCacheModule(object):
             assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 

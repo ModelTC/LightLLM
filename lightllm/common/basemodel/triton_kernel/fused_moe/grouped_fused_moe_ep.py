@@ -2,8 +2,7 @@
 
 import torch
 import triton
-import triton.language as tl
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd

@@ -1,5 +1,4 @@
 # 该文件用于提供在数据dp并行的推理模式下，共享kv cache trans相关的功能函数模块
-import time
 import numpy as np
 import dataclasses
 import torch
@@ -9,7 +8,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
-from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 import torch.distributed as dist
