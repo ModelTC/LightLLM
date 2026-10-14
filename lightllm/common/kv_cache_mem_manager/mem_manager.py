@@ -1,7 +1,6 @@
 import math
 import os
 import re
-import weakref
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -249,16 +248,6 @@ class MemoryManager:
         # 这个地方是一个不太优雅的设计，但是暂时这么做，可以让dp shared kv swap模块直接访问 req_manager 中的 req_to_token_indexs
         # 避免过多无用的数据复制和传输开销。
         self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
-        # DP transfers need allocation metadata even before the next model forward publishes it.
-        self.req_to_token_indexs_cpu: torch.Tensor = req_manager.req_to_token_indexs_cpu.share_memory_()
-        # share_memory_ 会更换存储并丢失 pinned 属性，注册共享存储以继续直接异步上传。
-        if not self.req_to_token_indexs_cpu.is_pinned():
-            runtime = torch.cuda.cudart()
-            cpu_table = self.req_to_token_indexs_cpu
-            error = runtime.cudaHostRegister(cpu_table.data_ptr(), cpu_table.numel() * cpu_table.element_size(), 0)
-            if error != runtime.cudaError.success:
-                raise RuntimeError(f"cudaHostRegister failed for shared request indexes: {error}")
-            weakref.finalize(cpu_table, runtime.cudaHostUnregister, cpu_table.data_ptr())
 
         lock = FileLock(f"/tmp/{get_service_shm_name('mem_manager_lock')}")
         with lock:

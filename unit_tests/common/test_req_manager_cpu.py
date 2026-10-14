@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from multiprocessing.reduction import ForkingPickler
 from contextlib import nullcontext
 import builtins
 
@@ -64,52 +63,27 @@ def test_releasing_request_memory_resets_uploaded_length():
     assert req.cur_kv_len == req.hold_kv_len == req.move_to_gpu_index_len == 0
 
 
-def test_shared_cpu_mirror_exposes_updates_before_gpu_publication():
-    manager = _make_manager()
-    source = manager.req_to_token_indexs_cpu.share_memory_()
-    remote = ForkingPickler.loads(ForkingPickler.dumps(source))
-    manager.req_to_token_indexs_cpu[0, :2].copy_(torch.tensor([8, 9], dtype=torch.int32))
-
-    assert remote[0, :2].tolist() == [8, 9]
-    assert manager.req_to_token_indexs.eq(-1).all()
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("registration_fails", [False, True])
-def test_shared_export_preserves_pinned_mirror_and_async_upload(monkeypatch, registration_fails):
+def test_shared_export_keeps_cpu_mirror_local_and_pinned(monkeypatch):
     from lightllm.common.kv_cache_mem_manager import mem_manager as impl
 
     req_manager = _make_manager("cuda")
     mem_manager = impl.MemoryManager.__new__(impl.MemoryManager)
-    runtime = torch.cuda.cudart()
-    registrations, cleanups, remote_tables = [], [], []
-
-    def register(ptr, size, flags):
-        registrations.append((ptr, size))
-        return 1 if registration_fails else runtime.cudaHostRegister(ptr, size, flags)
-
-    original_finalize = impl.weakref.finalize
-
-    def finalize(obj, *args):
-        cleanup = original_finalize(obj, *args)
-        cleanups.append(cleanup)
-        return cleanup
+    source = req_manager.req_to_token_indexs_cpu
+    source_ptr = source.data_ptr()
+    exports = []
 
     def serialize(manager):
-        assert manager.req_to_token_indexs_cpu.is_pinned()
-        remote_tables.append(ForkingPickler.loads(ForkingPickler.dumps(manager.req_to_token_indexs_cpu)))
+        assert manager.req_to_token_indexs is req_manager.req_to_token_indexs
+        assert not hasattr(manager, "req_to_token_indexs_cpu")
+        exports.append(manager)
         return memoryview(b"test")
 
-    monkeypatch.setattr(
-        torch.cuda,
-        "cudart",
-        lambda: SimpleNamespace(
-            cudaError=runtime.cudaError,
-            cudaHostRegister=register,
-            cudaHostUnregister=runtime.cudaHostUnregister,
-        ),
-    )
-    monkeypatch.setattr(impl.weakref, "finalize", finalize)
+    def forbid_cpu_export(*args, **kwargs):
+        pytest.fail("CPU mirror export and host registration must not run")
+
+    monkeypatch.setattr(torch.Tensor, "share_memory_", forbid_cpu_export)
+    monkeypatch.setattr(torch.cuda, "cudart", forbid_cpu_export)
     monkeypatch.setattr(impl, "ForkingPickler", SimpleNamespace(dumps=serialize))
     monkeypatch.setattr(impl, "kv_trans_use_p2p", lambda: False)
     monkeypatch.setattr(impl, "FileLock", lambda path: nullcontext())
@@ -124,32 +98,13 @@ def test_shared_export_preserves_pinned_mirror_and_async_upload(monkeypatch, reg
         ),
     )
 
-    try:
-        if registration_fails:
-            with pytest.raises(RuntimeError, match="cudaHostRegister failed"):
-                mem_manager.write_to_shm(req_manager)
-            assert not cleanups and not remote_tables
-            return
+    mem_manager.write_to_shm(req_manager)
+    mem_manager.write_to_shm(req_manager)
 
-        mem_manager.write_to_shm(req_manager)
-        mem_manager.write_to_shm(req_manager)
-        source = req_manager.req_to_token_indexs_cpu
-        assert mem_manager.req_to_token_indexs_cpu is source
-        assert source.is_shared() and source.is_pinned()
-        assert len(registrations) == len(cleanups) == 1
-        source[0, :4].copy_(torch.arange(40, 44, dtype=torch.int32))
-        assert all(table[0, :4].tolist() == [40, 41, 42, 43] for table in remote_tables)
-
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            cuda_memcpy_pinned_h2d_batch_async([req_manager.req_to_token_indexs[0, :4]], [source[0, :4]])
-        stream.synchronize()
-        assert req_manager.req_to_token_indexs[0, :4].cpu().tolist() == [40, 41, 42, 43]
-    finally:
-        torch.cuda.synchronize()
-        for cleanup in cleanups:
-            assert cleanup() == runtime.cudaError.success
+    assert len(exports) == 4
+    assert req_manager.req_to_token_indexs_cpu is source
+    assert source.data_ptr() == source_ptr
+    assert source.is_pinned() and not source.is_shared()
 
 
 def test_prefix_match_invalidates_uploaded_length(monkeypatch):

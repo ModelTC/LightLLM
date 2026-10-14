@@ -8,6 +8,7 @@ import torch
 # 在独立运行本测试文件时形成模块级循环导入。
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process  # noqa: F401
 from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.dp_backend import dp_shared_kv_trans
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_impl
@@ -101,6 +102,85 @@ def test_pd_prefill_rejects_unaligned_transfer_page_size():
         backend._prefill_chuncked_handle_func(req, next_token_id=1, next_token_prob=1.0, output_len=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("is_master_in_dp", [False, True])
+def test_dp_cache_fetch_publishes_gpu_indexes_before_barrier_returns(monkeypatch, is_master_in_dp):
+    cpu_table = torch.empty((2, 16), dtype=torch.int32, pin_memory=True)
+    torch.arange(32, out=cpu_table.view(-1))
+    gpu_table = torch.full((2, 16), -1, dtype=torch.int32, device="cuda")
+    gpu_table[1, :2].copy_(cpu_table[1, :2], non_blocking=True)
+    req_manager = SimpleNamespace(req_to_token_indexs_cpu=cpu_table, req_to_token_indexs=gpu_table)
+    reqs = [
+        SimpleNamespace(req_idx=1, cur_kv_len=4, hold_kv_len=4, move_to_gpu_index_len=2),
+        SimpleNamespace(req_idx=0, cur_kv_len=4, hold_kv_len=8, move_to_gpu_index_len=0),
+    ]
+    stream = torch.cuda.Stream()
+    overlap_stream = torch.cuda.Stream()
+    current_stream = torch.cuda.current_stream()
+    # 测试刚创建的 GPU 表先完成初始化；生产表在模型初始化期间已经就绪。
+    overlap_stream.wait_stream(current_stream)
+    # 模拟 overlap 流上尚未完成的旧索引写入，验证 DP 上传会排在其后。
+    with torch.cuda.stream(overlap_stream):
+        torch.cuda._sleep(20_000_000)
+        gpu_table[0, :8].fill_(-2)
+    context = SimpleNamespace(req_manager=req_manager, get_overlap_stream=lambda: overlap_stream)
+    monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
+    monkeypatch.setattr(base_backend, "g_infer_context", context)
+    backend = SimpleNamespace(node_nccl_group=object(), is_master_in_dp=is_master_in_dp)
+    order = []
+
+    def upload(run_reqs):
+        assert torch.cuda.current_stream() == stream
+        order.append("upload")
+        base_backend.ModeBackend._copy_req_token_indexes_to_gpu(backend, run_reqs)
+
+    original_synchronize = torch.cuda.Stream.synchronize
+    original_wait_stream = torch.cuda.Stream.wait_stream
+
+    def forbid_synchronize(*args):
+        pytest.fail("DP shared must rely on NCCL barrier rather than explicitly synchronizing a stream")
+
+    def wait_stream(waiting_stream, source_stream):
+        if waiting_stream == stream:
+            assert source_stream == overlap_stream
+            order.append("copy_waits_overlap")
+        else:
+            assert waiting_stream == current_stream and source_stream == stream
+            order.append("current_waits_copy")
+        original_wait_stream(waiting_stream, source_stream)
+
+    def barrier(group):
+        assert group is backend.node_nccl_group
+        assert order == ["copy_waits_overlap", "upload", "current_waits_copy"]
+        # 模拟同步 NCCL barrier 在 C++ 层等待当前流完成。
+        original_synchronize(current_stream)
+        assert torch.equal(gpu_table[1, :4].cpu(), cpu_table[1, :4])
+        assert torch.equal(gpu_table[0, :8].cpu(), cpu_table[0, :8])
+        assert gpu_table[0, 8:].eq(-1).all()
+        assert gpu_table[1, 4:].eq(-1).all()
+        order.append("barrier")
+
+    backend._copy_req_token_indexes_to_gpu = upload
+    monkeypatch.setattr(torch.cuda.Stream, "synchronize", forbid_synchronize)
+    monkeypatch.setattr(torch.cuda.Stream, "wait_stream", wait_stream)
+    monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", barrier)
+    module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
+    module.backend = backend
+    module.copy_stream = stream
+    module.dp_rank_in_node = 0
+    module.shared_req_infos = SimpleNamespace(arr=np.full((2, 2, 2), -1, dtype=np.int64))
+
+    module.fill_reqs_info(reqs)
+
+    assert order == ["copy_waits_overlap", "upload", "current_waits_copy", "barrier"]
+    assert [req.move_to_gpu_index_len for req in reqs] == [4, 8]
+    if is_master_in_dp:
+        assert module.shared_req_infos.arr[:, 0].tolist() == [[4, 1], [4, 0]]
+    else:
+        assert (module.shared_req_infos.arr == -1).all()
+    assert cpu_table.is_pinned() and not cpu_table.is_shared()
+
+
 def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypatch):
     table = torch.full((1, 16), -1, dtype=torch.int32)
     table[0, :4] = torch.arange(4, dtype=torch.int32)
@@ -121,7 +201,7 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         dp_world_size=1,
         rank_in_dp=0,
         node_nccl_group=None,
-        mem_managers=[SimpleNamespace(req_to_token_indexs_cpu=source_table)] * 2,
+        mem_managers=[SimpleNamespace(req_to_token_indexs=source_table)] * 2,
     )
     backend._alloc_req_kv_mem = lambda cur_req, size: _reserve_into_table(table, cur_req, alloc_sizes, next_index, size)
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)

@@ -81,16 +81,23 @@ class ReqSamplingParamsManager:
         else:
             self.req_to_out_token_id_counter[req.req_idx].fill_(0)
             if req.sampling_param.shm_param.input_penalty and req.need_out_token_id_statistics:
-                prompt_ids = g_pin_mem_manager.gen_from_list(
-                    key="prompt_ids_for_penalty",
-                    data=req.shm_req.get_prompt_ids_numpy(),
+                # 每次独立申请 pinned 内存，避免缓冲池循环复用时覆盖尚未完成的异步上传源。
+                # 上传源释放后由 PyTorch pinned allocator 跟踪拷贝完成再复用；上传和计数
+                # 在同一流上按序执行，后续采样由推理入口的流依赖保证，无需在此阻塞 CPU。
+                prompt_ids_numpy = req.shm_req.get_prompt_ids_numpy()
+                prompt_ids_cpu = torch.empty(
+                    prompt_ids_numpy.shape,
                     dtype=torch.int32,
-                ).cuda(non_blocking=True)
+                    device="cpu",
+                    pin_memory=True,
+                )
+                prompt_ids_cpu.numpy()[:] = prompt_ids_numpy
+                # 当前流的 GPU 暂存区覆盖最大请求长度，仅上传实际 prompt 部分。
+                prompt_ids = self._get_prompt_ids_gpu_buffer()[: prompt_ids_cpu.numel()]
+                prompt_ids.copy_(prompt_ids_cpu, non_blocking=True)
                 token_id_counter(
                     prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
-                # TODO: 分析计数初始化后同步当前流的必要性，以及对请求接入和推理并行的影响。
-                torch.cuda.current_stream().synchronize()
 
         return
 
@@ -150,3 +157,18 @@ class ReqSamplingParamsManager:
             p_token_counts_tensor.cuda(non_blocking=True),
             p_cumsum_seq_len_tensor.cuda(non_blocking=True),
         )
+
+    def _get_prompt_ids_gpu_buffer(self) -> torch.Tensor:
+        """获取当前 CUDA 流的 int32 暂存区，容量为最大请求长度加 64。"""
+        buffers = getattr(self, "_prompt_ids_gpu_buffers", None)
+        if buffers is None:
+            buffers = {}
+            self._prompt_ids_gpu_buffers = buffers
+        stream = torch.cuda.current_stream()
+        buffer = buffers.get(stream)
+        if buffer is None:
+            buffer = torch.empty(get_env_start_args().max_req_total_len + 64, dtype=torch.int32, device=stream.device)
+            buffers[stream] = buffer
+        # 每个流最多缓存一个 GPU buffer；使用者须在当前流上提交拷贝和读取，
+        # 下一次覆盖会排在此前读取之后，不同流使用独立 buffer，避免互相覆盖。
+        return buffer

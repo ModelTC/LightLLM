@@ -683,7 +683,6 @@ class ModeBackend:
             return
 
         cuda_memcpy_pinned_h2d_batch_async(dst_tensors, src_tensors)
-        gpu_table.record_stream(torch.cuda.current_stream())
         for req, end in pending_copies:
             req.move_to_gpu_index_len = end
 

@@ -30,7 +30,10 @@ prefill/decode 请求的
 成功后将长度更新到 `hold_kv_len`。`DuringApiCall` 源访问属性保证返回前读取完 CPU 数据，
 后续计算依靠同流顺序读取 GPU 表；长度表示异步拷贝已排队，不表示设备已经完成拷贝。
 暂停/释放时重置长度，前缀重映射时回退长度以重新上传。
-DP 通过共享 CPU 镜像读取其他 rank 的分配元数据，无需等待下一次推理。
+DP 在发布请求 KV 信息前，让专用传输流等待 overlap 流已有的索引更新，
+再将各 TP rank 的待上传索引拷贝到 GPU 表；
+当前流等待传输流，再由同步 NCCL barrier 保证上传完成。其他 DP rank 在 barrier 后
+通过 GPU 请求表读取分配元数据，不跨进程共享 CPU 镜像。
 请求筛选、地址计算、批量上传及长度更新均在这个 backend 函数内完成；`ReqManager` 只持有映射表。
 独立 benchmark 和模型初始化检查共用 `cuda_memcpy_batch_async` 底层调用。
 
