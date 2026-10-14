@@ -8,20 +8,22 @@ from lightllm.utils.envs_utils import _get_mtp_draft_backbone_layer_num
 from lightllm.utils.config_utils import get_deepseek_v4_compress_rates
 
 
-def test_dspark_decode_admission_reserves_one_swa_scratch_page(monkeypatch):
-    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+def test_dspark_decode_admission_reserves_one_swa_scratch_page():
+    from lightllm.common.req_manager import DeepseekV4ReqManager
+    from lightllm.server.router.model_infer.infer_batch import InferReq
 
     req = InferReq.__new__(InferReq)
     req.req_idx = 0
-    monkeypatch.setattr(g_infer_context, "req_manager", SimpleNamespace(get_swa_page_need=lambda req, start, end: 0))
+    req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
+    req_manager.sliding_window = 128
+    req_manager._swa_pages = [{0: 0}]
     req.args = SimpleNamespace(mtp_mode="eagle")
     req.mtp_step = 1
-    req.dsv4_swa_page_size = 128
     req.get_cur_total_len = lambda: 10
 
-    normal_need = req.get_dsv4_decode_need_swa_page_num()
+    normal_need = req_manager.get_request_resource_need(req, "decode")
     req.args.mtp_mode = "dspark"
-    dspark_need = req.get_dsv4_decode_need_swa_page_num()
+    dspark_need = req_manager.get_request_resource_need(req, "decode")
 
     assert dspark_need == normal_need + 1
 
