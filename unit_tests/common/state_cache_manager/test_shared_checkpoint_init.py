@@ -11,7 +11,7 @@ from lightllm.common.kv_cache_mem_manager import qwen3next_mem_manager as memory
 from lightllm.common.kv_cache_mem_manager.glm5_next_mem_manager import Glm5NextMemManager
 from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheManager
 from lightllm.server.core.objs import atomic_lock
-from lightllm.utils import shm_utils
+from lightllm.utils import shm_utils, envs_utils, dist_utils
 
 
 def _config():
@@ -37,15 +37,22 @@ def _config():
 def test_big_pool_initializes_in_one_call(monkeypatch, manager_type, dp, nnodes):
     args = NS(dp=dp, nnodes=nnodes, linear_att_page_block_num=4, linear_att_hash_page_size=64)
     monkeypatch.setattr(memory_module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: args)
     group_factory, barrier = Mock(), Mock()
-    monkeypatch.setattr(memory_module, "create_new_group_for_current_node", group_factory)
+    monkeypatch.setattr(dist_utils, "create_new_group_for_current_node", group_factory)
     monkeypatch.setattr(memory_module, "get_dp_rank_in_node", lambda: 0)
-    monkeypatch.setattr(memory_module, "get_current_rank_in_dp", lambda: 0)
+    monkeypatch.setattr(dist_utils, "get_dp_rank_in_node", lambda: 0)
+    monkeypatch.setattr(dist_utils, "get_current_rank_in_dp", lambda: 0)
     monkeypatch.setattr(dist, "barrier", barrier)
     dp_size_in_node = max(1, dp // nnodes)
     if dp_size_in_node > 1:
         pool_constructor = Mock()
-        monkeypatch.setattr(memory_module, "LinearAttCacheManager", pool_constructor)
+
+        def construct(pool, **kwargs):
+            pool.__dict__.update(kwargs)
+            pool_constructor(**kwargs)
+
+        monkeypatch.setattr(LinearAttCacheManager, "__init__", construct)
     zeros = Mock()
     monkeypatch.setattr(torch, "zeros", zeros)
     manager = object.__new__(manager_type)
@@ -61,7 +68,7 @@ def test_big_pool_initializes_in_one_call(monkeypatch, manager_type, dp, nnodes)
             shm_name="dp_big_checkpoints_tp_0",
             shm_create=True,
         )
-        assert manager.big_page_buffers is pool_constructor.return_value
+        assert isinstance(manager.big_page_buffers, LinearAttCacheManager)
         group_factory.assert_called_once_with("gloo")
         assert barrier.call_count == 2
         zeros.assert_not_called()
@@ -119,15 +126,22 @@ def test_private_small_pool_still_allocates_pinned_buffers(monkeypatch):
 def test_shared_pool_groups_corresponding_tp_shards_and_reserves_per_dp_scratch(monkeypatch, rank):
     args = NS(dp=2, nnodes=1, linear_att_page_block_num=4, linear_att_hash_page_size=64)
     monkeypatch.setattr(memory_module, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(memory_module, "create_new_group_for_current_node", lambda backend: None)
+    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(dist_utils, "create_new_group_for_current_node", lambda backend: None)
     monkeypatch.setattr(memory_module, "get_dp_rank_in_node", lambda: rank // 2)
-    monkeypatch.setattr(memory_module, "get_current_rank_in_dp", lambda: rank % 2)
+    monkeypatch.setattr(dist_utils, "get_dp_rank_in_node", lambda: rank // 2)
+    monkeypatch.setattr(dist_utils, "get_current_rank_in_dp", lambda: rank % 2)
     manager = object.__new__(memory_module.Qwen3NextMemManager)
     manager.size, manager.linear_config = 768, _config()
     events = []
     pool_constructor = Mock()
     pool_constructor.side_effect = lambda **kwargs: events.append("construct") or pool_constructor.return_value
-    monkeypatch.setattr(memory_module, "LinearAttCacheManager", pool_constructor)
+
+    def construct(pool, **kwargs):
+        pool.__dict__.update(kwargs)
+        pool_constructor(**kwargs)
+
+    monkeypatch.setattr(LinearAttCacheManager, "__init__", construct)
     monkeypatch.setattr(dist, "barrier", lambda group: events.append("barrier"))
     manager._init_linear_att_buffers()
     capacity = 6
@@ -138,7 +152,7 @@ def test_shared_pool_groups_corresponding_tp_shards_and_reserves_per_dp_scratch(
         shm_name=f"dp_big_checkpoints_tp_{rank % 2}",
         shm_create=rank < 2,
     )
-    assert manager.big_page_buffers is pool_constructor.return_value
+    assert isinstance(manager.big_page_buffers, LinearAttCacheManager)
     assert events == (["construct", "barrier", "barrier"] if rank < 2 else ["barrier", "construct", "barrier"])
     assert manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID == capacity + (rank // 2) * 2
     assert manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID == capacity + (rank // 2) * 2 + 1

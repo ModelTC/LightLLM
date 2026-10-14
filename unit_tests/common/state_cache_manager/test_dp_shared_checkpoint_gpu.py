@@ -30,6 +30,7 @@ def _gpu_rank(rank, rendezvous, service_name, kind):
     from lightllm.common.kv_cache_mem_manager.glm5_next_mem_manager import Glm5NextMemManager
     from lightllm.common.req_manager.linear_att import ReqManagerForMamba
     from lightllm.common.req_manager.glm5_next import Glm5NextReqManager
+    from lightllm.utils import envs_utils, dist_utils
 
     torch.cuda.set_device(rank)
     dist.init_process_group(
@@ -40,12 +41,13 @@ def _gpu_rank(rank, rendezvous, service_name, kind):
         config = _config()
         memory_type = Glm5NextMemManager if kind == "glm" else Qwen3NextMemManager
         memory = object.__new__(memory_type)
-        memory_module.get_env_start_args = lambda: NS(
-            dp=2, nnodes=1, linear_att_page_block_num=4, linear_att_hash_page_size=64
-        )
-        memory_module.create_new_group_for_current_node = lambda backend: dist.group.WORLD
+        args = NS(dp=2, nnodes=1, linear_att_page_block_num=4, linear_att_hash_page_size=64)
+        memory_module.get_env_start_args = lambda: args
+        envs_utils.get_env_start_args = lambda: args
+        dist_utils.create_new_group_for_current_node = lambda backend: dist.group.WORLD
         memory_module.get_dp_rank_in_node = lambda: rank
-        memory_module.get_current_rank_in_dp = lambda: 0
+        dist_utils.get_dp_rank_in_node = lambda: rank
+        dist_utils.get_current_rank_in_dp = lambda: 0
         memory.size, memory.linear_config = 512, config
         memory._init_linear_att_buffers()
         big = memory.big_page_buffers
