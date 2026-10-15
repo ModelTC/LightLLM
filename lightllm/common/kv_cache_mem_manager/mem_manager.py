@@ -312,7 +312,7 @@ class MemoryManager:
             shm_name = f"mem_manager_{get_current_rank_in_node()}"
             # Only GPU running state is consumed by PD. Pickling CPU checkpoints
             # would move their storage into ordinary shared memory and lose pinning.
-            big_page_buffers = self.big_page_buffers
+            big_page_buffers = getattr(self, "big_page_buffers", None)
             self.big_page_buffers = None
             try:
                 obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]

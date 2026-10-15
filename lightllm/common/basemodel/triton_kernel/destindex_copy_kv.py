@@ -29,8 +29,9 @@ def _fwd_kernel_destindex_copy_kv(
     k_ptrs = K + cur_index * stride_k_bs + stride_k_h * offs_h[:, None] + stride_k_d * offs_d[None, :]
     o_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]
 
-    k = tl.load(k_ptrs, mask=offs_h[:, None] < head_num, other=0.0)
-    tl.store(o_ptrs, k, mask=offs_h[:, None] < head_num)
+    mask = (dest_index >= 0) & (offs_h[:, None] < head_num)
+    k = tl.load(k_ptrs, mask=mask, other=0.0)
+    tl.store(o_ptrs, k, mask=mask)
     return
 
 

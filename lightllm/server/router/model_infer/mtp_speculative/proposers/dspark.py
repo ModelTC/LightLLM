@@ -40,8 +40,8 @@ class DSparkProposer(BaseSpecProposer):
         # DSpark prefill 直接使用 target prompt 的 token 布局和 hidden，将 prompt
         # KV 写入唯一的 parallel-block draft model。使用浅副本，避免把 draft
         # 专用 hidden 挂到后续流程仍可能读取的 target ModelInput 上。
-        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False) is True:
-            self.backend.draft_models[0].commit_features(target_model_input, target_hidden)
+        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False):
+            self.backend.draft_models[0].commit_window_kv(target_model_input, target_hidden)
             return
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
@@ -86,9 +86,8 @@ class DSparkProposer(BaseSpecProposer):
 
         # full 模式通过 draft forward 写入 verify 行对应的 KV；windowed 模式
         # 只将接受的 target hidden 投影并写入独立窗口，不保留被拒绝的行。
-        windowed = getattr(draft_model, "uses_windowed_draft_kv", False) is True
-        if windowed:
-            draft_model.commit_features(
+        if getattr(draft_model, "uses_windowed_draft_kv", False):
+            draft_model.commit_window_kv(
                 target_model_input, target_model_output.mtp_collector.spec_hidden, b_req_mtp_start_loc, accept_len
             )
         else:

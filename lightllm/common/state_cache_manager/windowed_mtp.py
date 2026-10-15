@@ -1,13 +1,12 @@
 """Window state configuration and checkpoints shared by hybrid attention caches."""
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.build_utils import repair_config
+from lightllm.utils.config_utils import get_config_json
 from .base import StateCacheManager
 from .layer_cache import LayerCache
 
@@ -35,11 +34,11 @@ class WindowStateCacheConfig:
         return (self.window, 2 * self.kv_heads, self.head_dim)
 
     def get_state_bytes(self, element_size):
-        return self.layers * self.window * 2 * self.kv_heads * self.head_dim * element_size + 12
+        return self.layers * self.window * 2 * self.kv_heads * self.head_dim * element_size + 8
 
 
 def load_window_state_config(args):
-    config = json.loads((Path(args.mtp_draft_model_dir[0]) / "config.json").read_text())
+    config = get_config_json(args.mtp_draft_model_dir[0])
     # Match the existing draft initialization order: base aliases, Llama KV
     # defaults, then the overrides applied by Qwen3.5 adapters.
     # Do not normalize again after merging: runtime also retains those aliases.
@@ -57,8 +56,7 @@ class WindowStateBuffers:
     """Pinned CPU payload; the containing StateCacheManager owns all slot IDs."""
 
     def __init__(self, size: int, config: WindowStateCacheConfig, dtype: torch.dtype):
-        self.config = config
-        self.kv = LayerCache(
+        self.kv_buffer = LayerCache(
             size=size,
             dtype=dtype,
             shape=config.get_state_shape(),
@@ -66,19 +64,17 @@ class WindowStateBuffers:
             device="cpu",
             size_first=True,
         ).buffer
-        self.ends = torch.zeros(size, dtype=torch.int64, device="cpu", pin_memory=True)
-        self.counts = torch.zeros(size, dtype=torch.int32, device="cpu", pin_memory=True)
+        self.seq_lens = torch.zeros(size, dtype=torch.int64, device="cpu", pin_memory=True)
         logger.info(
             f"draft window checkpoint slots={size}, pinned_bytes={size * config.get_state_bytes(dtype.itemsize)}"
         )
 
     def get_state_cache(self, buffer_idx: int):
-        return self.kv[buffer_idx], self.ends[buffer_idx : buffer_idx + 1], self.counts[buffer_idx : buffer_idx + 1]
+        return self.kv_buffer[buffer_idx], self.seq_lens[buffer_idx : buffer_idx + 1]
 
     def clear_to_init_state(self):
-        self.kv.zero_()
-        self.ends.zero_()
-        self.counts.zero_()
+        self.kv_buffer.zero_()
+        self.seq_lens.zero_()
 
 
 class WindowStateCacheManager(StateCacheManager):
@@ -144,28 +140,42 @@ class WindowedMTPCacheConfig:
             * self.dtype.itemsize
         )
 
+    def get_full_att_kv_view(self, cpu_cache_tensor):
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        page_tokens = get_env_start_args().cpu_cache_token_page_size
+        pages = cpu_cache_tensor.view(cpu_cache_tensor.shape[0], -1).view(torch.uint8)
+        return (
+            pages[:, : self.get_cpu_cache_full_att_bytes()]
+            .view(self.dtype)
+            .view(
+                pages.shape[0],
+                self.full_att_layer_num,
+                page_tokens,
+                2 * self.full_att_all_num_kv_heads,
+                self.full_att_head_dim,
+            )
+        )
+
     def get_cpu_cache_window_offset(self):
         if self.linear_config is not None:
             return self.linear_config.get_cpu_cache_big_page_bytes()
         return (self.get_cpu_cache_full_att_bytes() + 15) // 16 * 16
 
     def get_cpu_cache_window_rank_bytes(self):
-        kv_bytes = self.window_config.get_state_bytes(self.dtype.itemsize) - 12
-        # Align int64 ends and each rank's payload; counts is int32.
-        return (((kv_bytes + 7) // 8 * 8 + 12) + 15) // 16 * 16
+        kv_bytes = self.window_config.get_state_bytes(self.dtype.itemsize) - 8
+        # Align the int64 sequence length and each rank's payload.
+        return (((kv_bytes + 7) // 8 * 8 + 8) + 15) // 16 * 16
 
     def get_cpu_cache_big_page_bytes(self):
         return self.get_cpu_cache_window_offset() + self.tp_world_size * self.get_cpu_cache_window_rank_bytes()
 
     def get_window_views(self, cpu_cache_tensor, tp_rank):
-        assert 0 <= tp_rank < self.tp_world_size
         pages = cpu_cache_tensor.view(cpu_cache_tensor.shape[0], -1).view(torch.uint8)
-        assert pages.shape[1] == self.get_cpu_cache_big_page_bytes()
         start = self.get_cpu_cache_window_offset() + tp_rank * self.get_cpu_cache_window_rank_bytes()
-        kv_bytes = self.window_config.get_state_bytes(self.dtype.itemsize) - 12
+        kv_bytes = self.window_config.get_state_bytes(self.dtype.itemsize) - 8
         end_offset = start + (kv_bytes + 7) // 8 * 8
         return (
             pages[:, start : start + kv_bytes].view(self.dtype),
             pages[:, end_offset : end_offset + 8].view(torch.int64),
-            pages[:, end_offset + 8 : end_offset + 12].view(torch.int32),
         )

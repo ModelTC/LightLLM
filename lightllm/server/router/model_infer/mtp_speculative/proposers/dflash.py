@@ -39,8 +39,8 @@ class DFlashProposer(BaseSpecProposer):
         # DFlash prefill 直接复用 target prompt 的 token 布局，并注入 target
         # hidden 初始化唯一 draft model 的 KV。使用浅副本避免在 target 输入上
         # 保留 draft 专用状态。
-        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False) is True:
-            self.backend.draft_models[0].commit_features(target_model_input, target_hidden)
+        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False):
+            self.backend.draft_models[0].commit_window_kv(target_model_input, target_hidden)
             return
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
@@ -83,9 +83,8 @@ class DFlashProposer(BaseSpecProposer):
 
         # full 模式通过 draft forward 写入 verify 行对应的 KV；windowed 模式
         # 只将接受的 target hidden 投影并写入独立窗口，不保留被拒绝的行。
-        windowed = getattr(draft_model, "uses_windowed_draft_kv", False) is True
-        if windowed:
-            draft_model.commit_features(
+        if getattr(draft_model, "uses_windowed_draft_kv", False):
+            draft_model.commit_window_kv(
                 target_model_input, target_model_output.mtp_collector.spec_hidden, b_req_mtp_start_loc, accept_len
             )
         else:

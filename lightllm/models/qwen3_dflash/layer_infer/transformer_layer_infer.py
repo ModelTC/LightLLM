@@ -58,7 +58,11 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
         q, noise_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
         model = att_state.backend.model
         scratch = infer_state.mem_manager.windowed_draft_kv.pack(
-            self.layer_num_ - model.draft_layer_start, att_state.b_req_idx, noise_kv, att_state.block_size
+            self.layer_num_ - model.draft_layer_start,
+            att_state.b_req_idx,
+            noise_kv,
+            att_state.block_size,
+            alloc_func=self.alloc_tensor,
         )
         output = att_state.decode_att(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),

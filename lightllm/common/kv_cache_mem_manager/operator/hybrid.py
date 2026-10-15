@@ -157,21 +157,24 @@ class HybridAttMemOperator(BaseMemManagerOperator):
 
     def _copy_tail_state(self, source, source_id, destination_id):
         self._copy_target_state(source, source_id, destination_id)
-        window = getattr(self.mem_manager.big_page_buffers, "draft_window", None)
+        window = self.mem_manager.big_page_buffers.draft_window
         if window is not None:
-            from lightllm.common.basemodel.triton_kernel.hybrid_cpu_cache_copy import copy_checkpoint_state
-
-            copy_checkpoint_state(
-                source.draft_window.get_state_cache(source_id), window.get_state_cache(destination_id)
+            from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (
+                copy_linear_att_state_to_linear_att_state,
             )
 
+            # The existing copier handles both contiguous checkpoint tensors as bytes.
+            src_kv, src_seq_lens = source.draft_window.get_state_cache(source_id)
+            dst_kv, dst_seq_lens = window.get_state_cache(destination_id)
+            copy_linear_att_state_to_linear_att_state(src_kv, src_seq_lens, dst_kv, dst_seq_lens)
+
     def _copy_window_pages(self, buffer_ids, page_indexes, cpu_cache_client, page_readies=None):
-        window = getattr(self.mem_manager.big_page_buffers, "draft_window", None)
+        window = self.mem_manager.big_page_buffers.draft_window
         if window is None:
             return
         from lightllm.common.basemodel.triton_kernel.hybrid_cpu_cache_copy import copy_checkpoint_pages
 
-        buffers = (window.kv, window.ends, window.counts)
+        buffers = (window.kv_buffer, window.seq_lens)
         pages = self.cpu_cache_config.get_window_views(cpu_cache_client.cpu_kv_cache_tensor, get_current_rank_in_dp())
         if page_readies is None:
             copy_checkpoint_pages(pages, buffers, page_indexes, buffer_ids)

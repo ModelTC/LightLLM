@@ -57,10 +57,11 @@ def _offload_gpu_kv_to_cpu(
         ready_state = tl.load(page_readies_ptr + block_index)
 
         mask_layer_num = tl.where(cpu_page_index == -1, 0, 1)
-        mask_layer_num = tl.where(ready_state, 0, mask_layer_num)
+        mask_layer_num = tl.where(ready_state != 0, 0, mask_layer_num)
 
         token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
         token_indexes = tl.load(token_indexes_ptr + token_range).to(tl.int64)
+        token_mask = token_indexes >= 0
         head_dim_range = tl.arange(0, BLOCK_HEAD_DIM)
         head_dim_mask = head_dim_range < head_dim
         scale_head_dim_mask = head_dim_range < scale_head_dim
@@ -77,7 +78,7 @@ def _offload_gpu_kv_to_cpu(
                     + gpu_k_head_index.to(tl.int64) * gpu_stride2
                     + head_dim_range[None, :]
                 )
-                gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
+                gpu_data = tl.load(gpu_ptr, mask=token_mask[:, None] & head_dim_mask[None, :], other=0.0)
                 cpu_ptr = (
                     cpu_kv_cache_ptr
                     + cpu_page_index * cpu_stride0
@@ -89,7 +90,7 @@ def _offload_gpu_kv_to_cpu(
                 tl.store(
                     cpu_ptr,
                     gpu_data,
-                    mask=head_dim_mask[None, :],
+                    mask=token_mask[:, None] & head_dim_mask[None, :],
                     cache_modifier=".wt",
                 )
                 if HAS_SCALE:
@@ -100,7 +101,9 @@ def _offload_gpu_kv_to_cpu(
                         + gpu_k_head_index.to(tl.int64) * gpu_scale_stride2
                         + head_dim_range[None, :]
                     )
-                    gpu_scale_data = tl.load(gpu_scale_ptr, mask=scale_head_dim_mask[None, :], other=0.0)
+                    gpu_scale_data = tl.load(
+                        gpu_scale_ptr, mask=token_mask[:, None] & scale_head_dim_mask[None, :], other=0.0
+                    )
                     cpu_scale_ptr = (
                         cpu_kv_cache_scale_ptr
                         + cpu_page_index * cpu_scale_stride0
@@ -112,7 +115,7 @@ def _offload_gpu_kv_to_cpu(
                     tl.store(
                         cpu_scale_ptr,
                         gpu_scale_data,
-                        mask=scale_head_dim_mask[None, :],
+                        mask=token_mask[:, None] & scale_head_dim_mask[None, :],
                         cache_modifier=".wt",
                     )
 
@@ -127,7 +130,7 @@ def _offload_gpu_kv_to_cpu(
                     + gpu_v_head_index.to(tl.int64) * gpu_stride2
                     + head_dim_range[None, :]
                 )
-                gpu_data = tl.load(gpu_ptr, mask=head_dim_mask[None, :], other=0.0)
+                gpu_data = tl.load(gpu_ptr, mask=token_mask[:, None] & head_dim_mask[None, :], other=0.0)
                 cpu_ptr = (
                     cpu_kv_cache_ptr
                     + cpu_page_index * cpu_stride0
@@ -139,7 +142,7 @@ def _offload_gpu_kv_to_cpu(
                 tl.store(
                     cpu_ptr,
                     gpu_data,
-                    mask=head_dim_mask[None, :],
+                    mask=token_mask[:, None] & head_dim_mask[None, :],
                     cache_modifier=".wt",
                 )
                 if HAS_SCALE:
@@ -150,7 +153,9 @@ def _offload_gpu_kv_to_cpu(
                         + gpu_v_head_index.to(tl.int64) * gpu_scale_stride2
                         + head_dim_range[None, :]
                     )
-                    gpu_scale_data = tl.load(gpu_scale_ptr, mask=scale_head_dim_mask[None, :], other=0.0)
+                    gpu_scale_data = tl.load(
+                        gpu_scale_ptr, mask=token_mask[:, None] & scale_head_dim_mask[None, :], other=0.0
+                    )
                     cpu_scale_ptr = (
                         cpu_kv_cache_scale_ptr
                         + cpu_page_index * cpu_scale_stride0
@@ -162,7 +167,7 @@ def _offload_gpu_kv_to_cpu(
                     tl.store(
                         cpu_scale_ptr,
                         gpu_scale_data,
-                        mask=scale_head_dim_mask[None, :],
+                        mask=token_mask[:, None] & scale_head_dim_mask[None, :],
                         cache_modifier=".wt",
                     )
 
@@ -407,6 +412,7 @@ def _load_cpu_cache_to_gpu(
         gpu_mem_indexes = tl.load(gpu_mem_indexes_ptr + token_range, mask=token_mask).to(tl.int64)
         cpu_mem_indexes = tl.load(cpu_mem_indexes_ptr + token_range, mask=token_mask).to(tl.int64)
         cpu_page_indexes = tl.load(cpu_page_indexes_ptr + token_range, mask=token_mask).to(tl.int64)
+        token_mask = token_mask & (gpu_mem_indexes >= 0) & (cpu_page_indexes >= 0)
 
         head_dim_range = tl.arange(0, BLOCK_HEAD_DIM)
         head_dim_mask = head_dim_range < head_dim

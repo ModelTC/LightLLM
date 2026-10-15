@@ -29,6 +29,8 @@ class Qwen3_5DFlashModel(Qwen3DFlashModel):
         self.mask_token_id = self.config["mask_token_id"]
 
     def _init_mem_manager(self):
+        if self.uses_windowed_draft_kv:
+            return super()._init_mem_manager()
         target_mem_manager = self.main_model.mem_manager
         draft_kv_shape = (self.config["num_key_value_heads"], self.config["head_dim"])
         target_kv_shape = (

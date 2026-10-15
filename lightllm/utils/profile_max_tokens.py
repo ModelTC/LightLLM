@@ -38,11 +38,10 @@ def get_mtp_adjusted_mem_fraction(
     target_weight_bytes: int,
     target_layer_num: int,
     mtp_layer_num: int,
-    draft_cache_bytes: int = 0,
 ) -> float:
     mtp_weight_bytes = target_weight_bytes * mtp_layer_num / target_layer_num
     total_gpu_bytes = torch.cuda.get_device_properties(get_current_device_id()).total_memory
-    adjusted_mem_fraction = mem_fraction - (mtp_weight_bytes + draft_cache_bytes) / total_gpu_bytes
+    adjusted_mem_fraction = mem_fraction - mtp_weight_bytes / total_gpu_bytes
 
     # 不同 rank 的权重分片大小和 GPU 总显存可能不同。取全局最小值，保证所有
     # rank 使用相同且能够安全预留 MTP 权重显存的 KV cache 比例。
@@ -75,17 +74,20 @@ def profile_mtp_weight_memory(model):
     weight_memory_before = torch.cuda.memory_allocated()
     yield
     target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
-    draft_cache_bytes = 0
+    mem_fraction = model.mem_fraction
     if getattr(model.args, "mtp_draft_kv_mode", "full") == "window":
         from lightllm.common.state_cache_manager.windowed_mtp import load_window_state_config
+
         config = load_window_state_config(model.args)
-        draft_cache_bytes = (model.args.running_max_req_size + 1) * config.get_state_bytes(model.data_type.itemsize)
+        draft_cache_bytes = (model.max_req_num + 1) * config.get_state_bytes(model.data_type.itemsize)
+        total_gpu_bytes = torch.cuda.get_device_properties(get_current_device_id()).total_memory
+        # Include the window reservation in the existing per-rank budget reduction.
+        mem_fraction -= draft_cache_bytes / total_gpu_bytes
     model.mem_fraction = get_mtp_adjusted_mem_fraction(
-        mem_fraction=model.mem_fraction,
+        mem_fraction=mem_fraction,
         target_weight_bytes=target_weight_bytes,
         target_layer_num=model.config["n_layer"],
         mtp_layer_num=get_mtp_weight_layer_num(),
-        draft_cache_bytes=draft_cache_bytes,
     )
 
 

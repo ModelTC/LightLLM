@@ -15,10 +15,13 @@ class WindowedMTPDecodeAttState(BaseDecodeAttState):
     def init_state(self):
         model = self.backend.model
         self.block_size = model.block_size
-        self.b_req_idx = self.infer_state.b_req_idx[:: self.block_size].long()
+        self.b_req_idx = self.infer_state.b_req_idx[:: self.block_size].contiguous()
         # The base attention-state copy refreshes these tensors on graph replay.
         store = self.infer_state.mem_manager.windowed_draft_kv
-        self.cache_seqlens = store.counts.index_select(0, self.b_req_idx) + self.block_size
+        self.cache_seqlens = (
+            store.req_to_seq_len.index_select(0, self.b_req_idx).clamp(max=store.capacity).to(torch.int32)
+            + self.block_size
+        )
 
     def decode_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty):
         return flash_attn_with_kvcache(

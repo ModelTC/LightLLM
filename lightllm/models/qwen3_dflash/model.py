@@ -14,6 +14,7 @@ from lightllm.models.qwen3_dflash.layer_infer.pre_layer_infer import Qwen3DFlash
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import Qwen3DFlashPreAndPostLayerWeight
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
 class Qwen3DFlashModel(LlamaTpPartModel):
@@ -59,7 +60,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.mem_manager = self.main_model.mem_manager
         if self.uses_windowed_draft_kv:
             self.mem_manager.init_windowed_draft_kv(
-                requests=self.args.running_max_req_size + 1,
+                requests=self.req_manager.max_request_num + 1,
                 layers=self.config["n_layer"],
                 kv_heads=self.config["num_key_value_heads"] // self.tp_world_size_,
                 head_dim=self.config.get("head_dim", self.config["n_embed"] // self.config["num_attention_heads"]),
@@ -69,6 +70,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
     def _init_att_backend(self):
         if self.uses_windowed_draft_kv:
             from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+
             if flash_attn_with_kvcache is None:
                 raise NotImplementedError("Windowed MTP requires FA3")
 
@@ -104,42 +106,56 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         ]
 
     @torch.no_grad()
-    def commit_features(self, model_input, hidden, starts=None, accept_len=None):
+    def commit_window_kv(self, model_input, hidden, b_req_mtp_start_loc=None, accept_len=None):
         """Commit accepted target features to the bounded draft KV store."""
-        # The fused feature is transient; only its per-layer K/V is retained.
-        projected = self.pre_post_weight.fc_weight_.mm(hidden, use_custom_tensor_mananger=False)
-        projected = self.pre_post_weight.hidden_norm_weight_(projected, eps=self.pre_infer.eps_, alloc_func=torch.empty)
+        if hidden.numel() == 0:
+            return
         if model_input.is_prefill:
-            reqs = model_input.b_req_idx.long()
-            starts = model_input.b_prefill_start_loc
-            first = model_input.b_ready_cache_len
-            lengths = model_input.b_seq_len - first
-            max_new = model_input.max_q_seq_len
+            b_req_idx = model_input.b_req_idx
+            b_start_loc = model_input.b_prefill_start_loc
+            b_ready_cache_len = model_input.b_ready_cache_len
+            b_q_seq_len = model_input.b_seq_len - b_ready_cache_len
+            max_q_seq_len = model_input.max_q_seq_len
         else:
-            reqs = model_input.b_req_idx.index_select(0, starts.long()).long()
-            first = model_input.b_seq_len.index_select(0, starts.long()) - 1
-            lengths = accept_len
-            max_new = self.args.mtp_step + 1
+            b_start_loc = b_req_mtp_start_loc
+            b_req_idx = model_input.b_req_idx.index_select(0, b_start_loc)
+            b_ready_cache_len = model_input.b_seq_len.index_select(0, b_start_loc) - 1
+            b_q_seq_len = accept_len
+            max_q_seq_len = self.args.mtp_step + 1
         store = self.mem_manager.windowed_draft_kv
-        features, positions = store.prepare(reqs, projected, starts, first, lengths, max_new)
+        features, position_ids, mem_index = store.prepare(
+            b_req_idx,
+            hidden,
+            b_start_loc,
+            b_ready_cache_len,
+            b_q_seq_len,
+            max_q_seq_len,
+            alloc_func=self.pre_infer.alloc_tensor,
+        )
         infer_state = self.infer_state_class()
-        infer_state.position_cos = self._cos_cached.index_select(0, positions.clamp_min(0))
-        infer_state.position_sin = self._sin_cached.index_select(0, positions.clamp_min(0))
+        infer_state.mtp_draft_input_hiddens = features
+        features = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
+        position_ids = position_ids.clamp_min(0)
+        infer_state.position_cos = self._cos_cached.index_select(0, position_ids)
+        infer_state.position_sin = self._sin_cached.index_select(0, position_ids)
         for i, (layer, weight) in enumerate(zip(self.layers_infer, self.trans_layers_weight)):
             kv = layer._get_context_kv(features, infer_state, weight)
-            store.write(i, reqs, positions, kv)
+            store.write(i, mem_index, kv)
 
     def _select_mem_indexes(self, model_input: ModelInput):
         if self.uses_windowed_draft_kv and not model_input.is_prefill:
             # Windowed draft blocks do not write into the target's request pages.
-            return torch.full_like(model_input.b_req_idx, self.mem_manager.HOLD_TOKEN_MEMINDEXES[0])
+            hold_mem_index = self.mem_manager.HOLD_TOKEN_MEMINDEXES[0]
+            return g_pin_mem_manager.get_const_gpu_tensor(
+                key=f"window_mtp_mem_indexes_{hold_mem_index}_{model_input.b_req_idx.dtype}",
+                shape=model_input.b_req_idx.shape,
+                fill_value=hold_mem_index,
+                dtype=model_input.b_req_idx.dtype,
+            )
         return super()._select_mem_indexes(model_input)
 
     def _decode(self, model_input: ModelInput) -> ModelOutput:
-        if self.uses_windowed_draft_kv:
-            assert model_input.batch_size > 0 and model_input.batch_size % self.block_size == 0
-            return super()._decode(model_input)
-        if model_input.mtp_draft_input_hiddens is None:
+        if self.uses_windowed_draft_kv or model_input.mtp_draft_input_hiddens is None:
             return super()._decode(model_input)
 
         assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
