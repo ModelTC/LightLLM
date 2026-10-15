@@ -78,7 +78,13 @@ def masked_group_gemm(
     expected_m: int,
     clamp_limit: Optional[float] = None,
     alloc_tensor_func: Callable = torch.empty,
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ):
+    assert clamp_limit is None or limit is None
+    if clamp_limit is not None:
+        limit = clamp_limit
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
     block_size = 128
@@ -91,7 +97,16 @@ def masked_group_gemm(
     qsilu_out = alloc_tensor_func((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
-    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m, limit=clamp_limit)
+    silu_and_mul_masked_post_quant_fwd(
+        gemm_out_a,
+        qsilu_out,
+        qsilu_out_scale,
+        block_size,
+        masked_m,
+        alpha=alpha,
+        limit=limit,
+        clamp_up_add_one=clamp_up_add_one,
+    )
     del gemm_out_a
     gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
@@ -220,9 +235,7 @@ def quantize_fused_experts_input(
     quant_method: Any,
 ):
     check_ep_expert_dtype(quant_method)
-    block_size_k = 0
-    if w13.weight.ndim == 3:
-        block_size_k = w13.weight.shape[2] // w13.weight_scale.shape[2]
+    block_size_k = quant_method.block_size
     assert block_size_k == 128, "block_size_k must be 128"
     return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
 
@@ -240,10 +253,19 @@ def fused_experts(
     clamp_limit: Optional[float] = None,
     alloc_tensor_func: Callable = torch.empty,
     ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ):
+    assert clamp_limit is None or limit is None
+    if clamp_limit is not None:
+        limit = clamp_limit
+    assert alpha is None or limit is not None
     check_ep_expert_dtype(quant_method)
     mma_type = getattr(quant_method, "mega_moe_mma_type", None)
     if mma_type is not None:
+        if alpha is not None and (alpha != 1.0 or clamp_up_add_one):
+            raise NotImplementedError("Mega MoE only supports standard clamped SiLU")
         return mega_moe_impl(
             hidden_states,
             w13,
@@ -252,7 +274,7 @@ def fused_experts(
             topk_idx,
             quant_method,
             mma_type,
-            clamp_limit=clamp_limit,
+            clamp_limit=limit,
             alloc_tensor_func=alloc_tensor_func,
         )
 
@@ -264,6 +286,7 @@ def fused_experts(
         topk_weights=topk_weights,
         topk_idx=topk_idx,
         num_experts=num_experts,
+        block_size_k=quant_method.block_size,
         buffer=buffer,
         is_prefill=is_prefill,
         use_fp8_w8a8=True,
@@ -272,9 +295,11 @@ def fused_experts(
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,
         previous_event=previous_event,
-        clamp_limit=clamp_limit,
         alloc_tensor_func=alloc_tensor_func,
         ep_balance_counters=ep_balance_counters,
+        alpha=alpha,
+        limit=limit,
+        clamp_up_add_one=clamp_up_add_one,
     )
 
 
@@ -296,7 +321,14 @@ def fused_experts_impl(
     clamp_limit: Optional[float] = None,
     alloc_tensor_func: Callable = torch.empty,
     ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
+    block_size_k: int = 128,
 ):
+    assert clamp_limit is None or limit is None
+    if clamp_limit is not None:
+        limit = clamp_limit
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert topk_weights.shape == topk_idx.shape, "topk shape mismatch"
@@ -307,11 +339,6 @@ def fused_experts_impl(
 
     # qaunt hidden_states
     assert use_fp8_w8a8 and use_fp8_all2all, "use_fp8_w8a8 and use_fp8_all2all must be True"
-
-    block_size_k = 0
-
-    if w1.ndim == 3:
-        block_size_k = w1.shape[2] // w1_scale.shape[2]
 
     assert block_size_k == 128, "block_size_k must be 128"
 
@@ -373,7 +400,9 @@ def fused_experts_impl(
                 block_size_k=block_size_k,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
                 hidden_dtype=hidden_states.dtype,
-                clamp_limit=clamp_limit,
+                alpha=alpha,
+                limit=limit,
+                clamp_up_add_one=clamp_up_add_one,
             )
         else:
             gather_out = torch.empty(
@@ -389,7 +418,13 @@ def fused_experts_impl(
                 N = w1.shape[1]
                 _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
                 _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, limit=clamp_limit)
+                silu_and_mul_fwd(
+                    _gemm_out_a.view(-1, N),
+                    _silu_out,
+                    alpha=alpha,
+                    limit=limit,
+                    clamp_up_add_one=clamp_up_add_one,
+                )
                 _gemm_out_a, _silu_out = None, None
         del recv_x
 
@@ -424,8 +459,10 @@ def fused_experts_impl(
             w2,
             w2_scale,
             expected_m,
-            clamp_limit=clamp_limit,
             alloc_tensor_func=alloc_tensor_func,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
@@ -545,8 +582,14 @@ def chunked_expanded_moe_forward(
     workspace: torch.Tensor,  # [workspace_bytes], uint8
     hidden_dtype: torch.dtype,  # scalar dtype descriptor
     clamp_limit: Optional[float] = None,
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
+    assert clamp_limit is None or limit is None
+    if clamp_limit is not None:
+        limit = clamp_limit
     alignment = 128
     all_tokens, intermediate_twice = recv_x[0].shape[0], w1.shape[1]
     intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
@@ -614,7 +657,7 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out, limit=clamp_limit)
+            silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
             workspace_manager.free(gemm_out_a)
             del gemm_out_a
 

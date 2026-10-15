@@ -49,7 +49,7 @@ class LightSpecPlanner(BaseMtpPlanner):
         self.spec_mode = spec_mode
         self.backend = backend
         self.max_draft_step = int(backend.max_draft_step)
-        self.block_size = int(backend.draft_models[0].block_size) if self.spec_mode == "dflash" else None
+        self.block_size = int(backend.draft_models[0].block_size) if self.spec_mode in ("dflash", "dflash2") else None
         self.draft_steps = self._get_draft_steps()
 
         self.target_infer_costs = _InferCostMsTable()
@@ -202,7 +202,7 @@ class LightSpecPlanner(BaseMtpPlanner):
             return (self.max_draft_step,)
         if self.spec_mode in ("eagle_with_att", "eagle3"):
             return tuple(range(1, self.max_draft_step + 1))
-        if self.spec_mode == "dflash":
+        if self.spec_mode in ("dflash", "dflash2"):
             return (self.max_draft_step,)
         raise ValueError(f"unsupported LightSpec mode: {self.spec_mode}")
 
@@ -217,7 +217,7 @@ class LightSpecPlanner(BaseMtpPlanner):
             if draft_step > 1:
                 draft_cost_ms += self.draft_infer_costs.estimate(req_num) * (draft_step - 1)
             return draft_cost_ms
-        if self.spec_mode == "dflash":
+        if self.spec_mode in ("dflash", "dflash2"):
             assert self.block_size is not None
             extend_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
             block_cost_ms = self.draft_infer_costs.estimate(req_num * self.block_size)

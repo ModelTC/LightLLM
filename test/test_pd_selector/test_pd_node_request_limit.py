@@ -46,15 +46,15 @@ def test_pd_node_resource_wait_timeout_is_internal_and_defaults_to_waiting_forev
     assert sampling_params.pd_node_resource_wait_timeout_seconds == -1
 
 
-def test_shm_req_partial_allocations_are_released_on_failure():
+def test_shm_req_batch_allocation_failure_does_not_release_unallocated_slots():
     async def run():
         manager = _manager()
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[3, RuntimeError("failed")])
+        manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=RuntimeError("failed"))
 
         with pytest.raises(RuntimeError, match="failed"):
             await manager._alloc_shm_req_indexes(2)
 
-        manager.shm_req_manager.async_release_req_index.assert_awaited_once_with(3)
+        manager.shm_req_manager.async_release_req_index.assert_not_awaited()
 
     asyncio.run(run())
 
@@ -62,7 +62,7 @@ def test_shm_req_partial_allocations_are_released_on_failure():
 def test_shm_req_allocation_waits_forever_when_timeout_is_negative():
     async def run():
         manager = _manager()
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, None, 3])
+        manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=[None, None, [3]])
 
         with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
             assert await manager._alloc_shm_req_indexes(1) == [3]
@@ -76,7 +76,7 @@ def test_multinode_tp_slave_does_not_apply_shm_req_allocation_timeout():
     async def run():
         manager = _manager()
         manager.is_multinode_tp_slave = True
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, None, 3])
+        manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=[None, None, [3]])
 
         with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
             assert await manager._alloc_shm_req_indexes(1, pd_node_resource_wait_timeout_seconds=0) == [3]
@@ -89,7 +89,7 @@ def test_multinode_tp_slave_does_not_apply_shm_req_allocation_timeout():
 def test_high_priority_shm_req_allocation_uses_shorter_backoff_even_with_local_limit():
     async def run():
         manager = _manager()
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(side_effect=[None, 3])
+        manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=[None, [3]])
 
         with patch("lightllm.server.httpserver.manager.asyncio.sleep", new=AsyncMock()) as sleep:
             assert (
@@ -110,7 +110,7 @@ def test_high_priority_shm_req_allocation_uses_shorter_backoff_even_with_local_l
 def test_shm_req_allocation_uses_master_timeout_independently_of_priority(pd_high_priority_request):
     async def run():
         manager = _manager()
-        manager.shm_req_manager.async_alloc_req_index = AsyncMock(return_value=None)
+        manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(return_value=None)
 
         with (
             patch("lightllm.server.httpserver.manager.time.monotonic", side_effect=[100, 161]),

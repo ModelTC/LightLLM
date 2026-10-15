@@ -22,6 +22,7 @@ def _silu_and_mul_quant_fp8(
     GROUPS_PER_CTA: tl.constexpr,
     USE_LIMIT: tl.constexpr,
     USE_GELU: tl.constexpr,
+    USE_UE8M0_SCALE: tl.constexpr,
 ):
     ids = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
     rows = ids // (size_n // GROUP_SIZE)
@@ -43,7 +44,9 @@ def _silu_and_mul_quant_fp8(
     gate = gate.to(input_ptr.dtype.element_ty)
     # Preserve both rounding boundaries of activation -> BF16 buffer -> FP8.
     value = (up * gate.to(tl.float32)).to(input_ptr.dtype.element_ty).to(tl.float32)
-    scale = _ceil_to_ue8m0(tl.maximum(tl.max(tl.abs(value), axis=1), 1e-4) / fp8_max)
+    scale = tl.maximum(tl.max(tl.abs(value), axis=1), 1e-10) / fp8_max
+    if USE_UE8M0_SCALE:
+        scale = _ceil_to_ue8m0(scale)
     quant = tl.clamp(value / scale[:, None], -fp8_max, fp8_max).to(quant_ptr.dtype.element_ty)
     tl.store(quant_ptr + ids[:, None] * GROUP_SIZE + cols, quant, mask)
     tl.store(scale_ptr + rows + group_cols * scale_stride_n, scale, ids < groups)
@@ -54,18 +57,21 @@ def _silu_and_mul_quant_fp8(
     configs_gen_func=lambda: [
         {"GROUPS_PER_CTA": g, "num_warps": w} for g, w in [(1, 1), (4, 1), (4, 4), (8, 4), (16, 4)]
     ],
-    static_key_func=lambda input, group_size, dtype, limit: {
+    static_key_func=lambda input, group_size, dtype, limit, use_ue8m0_scales: {
         "N": input.shape[1] // 2,
         "input_dtype": str(input.dtype),
         "output_dtype": str(dtype),
         "group_size": group_size,
         "clamp": limit is not None,
         "gelu": ffn_use_tanh_approximate_gelu(),
+        "ue8m0": use_ue8m0_scales,
     },
     run_key_func=lambda input: input.shape[0],
 )
-def silu_and_mul_quant_fp8(input, group_size, dtype, limit=None, alloc_func=torch.empty, run_config=None):
-    """Fuse blocked activation with UE8M0 quantization and TMA-aligned column-major scales."""
+def silu_and_mul_quant_fp8(
+    input, group_size, dtype, limit=None, alloc_func=torch.empty, run_config=None, use_ue8m0_scales=True
+):
+    """Fuse blocked activation with FP8 quantization and TMA-aligned column-major scales."""
     assert input.ndim == 2 and input.stride(1) == 1
     assert input.shape[1] % (2 * group_size) == 0 and group_size == triton.next_power_of_2(group_size)
     m, n = input.shape[0], input.shape[1] // 2
@@ -88,6 +94,7 @@ def silu_and_mul_quant_fp8(input, group_size, dtype, limit=None, alloc_func=torc
         group_size,
         USE_LIMIT=limit is not None,
         USE_GELU=ffn_use_tanh_approximate_gelu(),
+        USE_UE8M0_SCALE=use_ue8m0_scales,
         **run_config,
     )
     return quant, scale
@@ -112,6 +119,7 @@ def _silu_and_mul_kernel_fast(
     layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
     USE_LIMIT_ONLY: tl.constexpr = False,
+    CLAMP_UP_ADD_ONE: tl.constexpr = True,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
@@ -158,11 +166,9 @@ def _silu_and_mul_kernel_fast(
             up = tl.minimum(tl.maximum(up, -limit), limit)
             gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
             gate = gate.to(input_ptr.dtype.element_ty)
-            tl.store(
-                output_ptr + out_offsets,
-                (up + 1) * gate,
-                mask=mask,
-            )
+            if CLAMP_UP_ADD_ONE:
+                up += 1
+            tl.store(output_ptr + out_offsets, up * gate, mask=mask)
         else:
             if USE_LIMIT_ONLY:
                 # clamped swiglu (DeepSeek-V4 swiglu_limit): clamp 后接标准 silu，
@@ -214,6 +220,7 @@ def silu_and_mul_fwd(
     limit=None,
     alpha=None,
     run_config=None,
+    clamp_up_add_one=True,
 ):
     assert input.stride(-1) == 1
     assert output.is_contiguous()
@@ -267,6 +274,7 @@ def silu_and_mul_fwd(
         layout=layout,
         USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
         USE_LIMIT_ONLY=USE_LIMIT_ONLY,
+        CLAMP_UP_ADD_ONE=clamp_up_add_one,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
     )
     return

@@ -165,6 +165,17 @@ class PD_Client_Obj:
     _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
     _send_task: Optional[asyncio.Task] = field(default=None, init=False, repr=False, compare=False)
 
+    dp_index: Optional[int] = None
+    connection_id: Optional[str] = None
+
+    @staticmethod
+    def make_connection_key(client_ip_port: str, dp_index: Optional[int]) -> str:
+        return f"{client_ip_port}/dp{dp_index}"
+
+    @property
+    def connection_key(self) -> str:
+        return self.make_connection_key(self.client_ip_port, self.dp_index)
+
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
             error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""

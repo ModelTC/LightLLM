@@ -17,9 +17,10 @@ from lightllm.models.llama.model import LlamaTpPartModel
 
 
 @pytest.mark.parametrize("mtp_step", [1, 5, 7])
-def test_parallel_block_runtime_width_follows_mtp_step(monkeypatch, mtp_step):
+@pytest.mark.parametrize("model_class", [Qwen3DFlashModel, Qwen3DSparkModel, Qwen3_5DSparkModel])
+def test_parallel_block_runtime_width_follows_mtp_step(monkeypatch, mtp_step, model_class):
     monkeypatch.setattr(LlamaTpPartModel, "_verify_params", lambda self: None)
-    model = Qwen3DFlashModel.__new__(Qwen3DFlashModel)
+    model = model_class.__new__(model_class)
     model.args = SimpleNamespace(mtp_mode="dspark", mtp_step=mtp_step)
     model.config = {"block_size": 7}
     model.enable_tpsp_mix_mode = False
@@ -29,15 +30,31 @@ def test_parallel_block_runtime_width_follows_mtp_step(monkeypatch, mtp_step):
     assert model.config["block_size"] == mtp_step
 
 
-def test_parallel_block_rejects_mtp_step_above_checkpoint_capacity(monkeypatch):
+@pytest.mark.parametrize("model_class", [Qwen3DFlashModel, Qwen3DSparkModel, Qwen3_5DSparkModel])
+def test_parallel_block_rejects_mtp_step_above_checkpoint_capacity(monkeypatch, model_class):
     monkeypatch.setattr(LlamaTpPartModel, "_verify_params", lambda self: None)
-    model = Qwen3DFlashModel.__new__(Qwen3DFlashModel)
+    model = model_class.__new__(model_class)
     model.args = SimpleNamespace(mtp_mode="dflash", mtp_step=8)
     model.config = {"block_size": 7}
     model.enable_tpsp_mix_mode = False
 
     with pytest.raises(AssertionError):
         model._verify_params()
+
+
+@pytest.mark.parametrize("model_class", [Qwen3DSparkModel, Qwen3_5DSparkModel])
+@pytest.mark.parametrize("mtp_step", [1, 6])
+def test_dspark_without_block_size_uses_mtp_step(model_class, mtp_step):
+    model = model_class.__new__(model_class)
+    model.args = SimpleNamespace(mtp_step=mtp_step)
+    model.config = {"num_attention_heads": 40, "num_key_value_heads": 8}
+    model.load_way = "HF"
+    model.tp_world_size_ = 4
+    model.enable_tpsp_mix_mode = False
+
+    model._verify_params()
+
+    assert model.config["block_size"] == mtp_step
 
 
 @pytest.mark.parametrize(
@@ -274,6 +291,7 @@ def test_biased_dspark_heads_do_not_inherit_model_quantization(monkeypatch, head
 def test_fixed_dspark_does_not_require_confidence_head(monkeypatch):
     monkeypatch.setattr(Qwen3DFlashModel, "_verify_params", lambda self: None)
     model = Qwen3DSparkModel.__new__(Qwen3DSparkModel)
+    model.args = SimpleNamespace(mtp_step=6)
     model.config = {"enable_confidence_head": False}
 
     model._verify_params()

@@ -36,8 +36,12 @@ class FuseMoeMarlin(FuseMoeTriton):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
-        assert clamp_limit is None, "awq_marlin fused MoE does not support clamp_limit yet"
+        if alpha is not None or limit is not None or clamp_limit is not None:
+            raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")
 
         w1_weight, w1_scale, w1_zero_point = w13.weight, w13.weight_scale, w13.weight_zero_point
         w2_weight, w2_scale, w2_zero_point = w2.weight, w2.weight_scale, w2.weight_zero_point

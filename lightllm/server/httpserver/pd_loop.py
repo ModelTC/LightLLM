@@ -9,6 +9,7 @@ import weakref
 import os
 import signal
 import sys
+import uuid
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import (
@@ -22,7 +23,7 @@ from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.server.httpserver.manager import HttpServerManager
-from ..pd_io_struct import PD_Master_Obj
+from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
@@ -42,7 +43,7 @@ async def timer_log(manager: HttpServerManager):
     return
 
 
-async def pd_handle_loop(manager: HttpServerManager):
+async def pd_handle_loop(manager: HttpServerManager, dp_index: Optional[int] = None):
     if manager.args.host in ["127.0.0.1", "localhost"]:
         logger.error("pd mode must specify host ip, not use 127.0.0.1 or localhost")
         # kill father process to trigger graceful exit, avoid orphan process
@@ -53,8 +54,6 @@ async def pd_handle_loop(manager: HttpServerManager):
         manager.host_ip = get_hostname_ip()
     else:
         manager.host_ip = manager.args.host
-
-    asyncio.create_task(timer_log(manager))
 
     id_to_handle_task: Dict[int, asyncio.Task] = {}
 
@@ -72,7 +71,9 @@ async def pd_handle_loop(manager: HttpServerManager):
 
                 for node_id, pd_master_obj in id_to_pd_master_obj.items():
                     if node_id not in id_to_handle_task:
-                        id_to_handle_task[node_id] = asyncio.create_task(_pd_handle_task(manager, pd_master_obj))
+                        id_to_handle_task[node_id] = asyncio.create_task(
+                            _pd_handle_task(manager, pd_master_obj, dp_index)
+                        )
 
             await asyncio.sleep(30)
 
@@ -81,7 +82,7 @@ async def pd_handle_loop(manager: HttpServerManager):
             await asyncio.sleep(10)
 
 
-async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_Obj):
+async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_Obj, dp_index: Optional[int] = None):
     """
     pd_handle_loop 主要负责与 pd master 进行注册连接，然后接收pd master发来的请求，然后
     将推理结果转发给 pd master进行处理。
@@ -105,7 +106,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                args_dict = vars(manager.args)
+                args_dict = vars(manager.args).copy()
                 args_dict["host"] = manager.host_ip
                 # 发送注册信息
                 regist_json = {
@@ -113,13 +114,17 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     "client_ip_port": f"{manager.host_ip}:{get_shm_port_args().port}",
                     "mode": manager.pd_mode.value,
                     "start_args": args_dict,
+                    "dp_index": dp_index,
+                    "connection_id": uuid.uuid4().hex,
                 }
 
                 await websocket.send(json.dumps(regist_json))
                 logger.info(f"Sent registration JSON: {regist_json}")
 
                 # 转发任务
-                forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
+                forwarding_tokens_task = asyncio.create_task(
+                    _up_tokens_to_pd_master(forwarding_queue, websocket, dp_index)
+                )
                 heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
@@ -129,6 +134,15 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     obj = pickle.loads(recv_bytes)
                     if obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
+                        if dp_index is not None:
+                            if sampling_params.suggested_dp_index != -1:
+                                logger.warning(
+                                    f"group_request_id={sampling_params.group_request_id}: "
+                                    f"suggested_dp_index={sampling_params.suggested_dp_index} is unexpected "
+                                    f"in DP split connection mode; overriding with connection dp_index={dp_index}"
+                                )
+                            # 连接对应固定的本地 DP rank，master 无需感知请求的 rank 分配。
+                            sampling_params.suggested_dp_index = dp_index
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
@@ -303,7 +317,9 @@ async def _pd_process_generate(
 
 
 # 转发token的task
-async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: ClientConnection):
+async def _up_tokens_to_pd_master(
+    forwarding_queue: AsyncQueue, websocket: ClientConnection, dp_index: Optional[int] = None
+):
     max_message_size = get_lightllm_websocket_max_message_size()
     event_loop = asyncio.get_running_loop()
     next_queue_metric_time = 0.0
@@ -322,7 +338,7 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: Clien
                     "lightllm_pd_forward_queue_duration", queue_duration
                 )
                 next_queue_metric_time = now + 1.0
-            load_info: dict = _get_load_info()
+            load_info: dict = _get_load_info(dp_index)
             pending_handle_lists = []
             group_start = 0
             group_is_compact = len(handle_list[0]) == PD_COMPACT_TOKEN_INFO_LEN
@@ -369,7 +385,7 @@ async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
 
 
 # 获取节点负载信息
-def _get_load_info() -> dict:
+def _get_load_info(dp_index: Optional[int] = None) -> dict:
 
     from lightllm.server.api_http import g_objs
 
@@ -382,9 +398,12 @@ def _get_load_info() -> dict:
     current_load = [
         float(g_objs.shared_token_load.get_dynamic_max_load(dp_index)) for dp_index in range(dp_size_in_node)
     ]
-    mean_node_load = sum(current_load) / len(current_load)
+    # 拆分连接只上报对应 rank 的负载；普通连接仍上报节点平均负载。
+    mean_node_load = sum(current_load) / len(current_load) if dp_index is None else current_load[dp_index]
     load_info = {
         "total_token_usage_rate": mean_node_load,
-        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}",
+        "connection_key": PD_Client_Obj.make_connection_key(
+            f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}", dp_index
+        ),
     }
     return load_info

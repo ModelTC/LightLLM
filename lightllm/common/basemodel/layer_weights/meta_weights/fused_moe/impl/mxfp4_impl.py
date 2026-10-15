@@ -20,7 +20,15 @@ class FuseMoeMXFP4(FuseMoeTriton):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
+        if alpha is not None and (alpha != 1.0 or clamp_up_add_one):
+            raise NotImplementedError("This MoE backend only supports standard clamped SiLU")
+        assert clamp_limit is None or limit is None
+        if limit is not None:
+            clamp_limit = limit
         try:
             from vllm.model_executor.layers.fused_moe.activation import MoEActivation
             from vllm.model_executor.layers.fused_moe.experts.marlin_moe import fused_marlin_moe

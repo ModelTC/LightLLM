@@ -28,6 +28,8 @@ ModelRegistry.register("gemma3", "lightllm.models.gemma3.model:Gemma3TpPartModel
 ModelRegistry.register("gemma4", "lightllm.models.gemma4.model:Gemma4TpPartModel", is_multimodal=True)
 ModelRegistry.register("gemma", "lightllm.models.gemma_2b.model:Gemma_2bTpPartModel")
 ModelRegistry.register("glm4_moe_lite", "lightllm.models.glm4_moe_lite.model:Glm4MoeLiteTpPartModel")
+ModelRegistry.register("glm5_next", "lightllm.models.glm5_next.model:Glm5NextTpPartModel", is_multimodal=True)
+ModelRegistry.register("glm5_next_text", "lightllm.models.glm5_next.model:Glm5NextTpPartModel")
 ModelRegistry.register("gpt_oss", "lightllm.models.gpt_oss.model:GptOssTpPartModel")
 ModelRegistry.register("internlm", "lightllm.models.internlm.model:InternlmTpPartModel")
 ModelRegistry.register("internlm2", "lightllm.models.internlm2.model:Internlm2TpPartModel")
@@ -165,6 +167,11 @@ DraftModelRegistry.register(
     "lightllm.models.glm4_moe_lite_mtp.model:Glm4MoeLiteMTPModel",
 )
 DraftModelRegistry.register(
+    ("glm5_next", "glm5_next_text"),
+    ("vanilla_with_att", "eagle_with_att"),
+    "lightllm.models.glm5_next_mtp.model:Glm5NextMTPModel",
+)
+DraftModelRegistry.register(
     "mistral", ("vanilla_no_att", "eagle_no_att"), "lightllm.models.mistral_mtp.model:MistralMTPModel"
 )
 DraftModelRegistry.register(
@@ -184,6 +191,7 @@ DraftModelRegistry.register(
     "lightllm.models.qwen3_5_mtp.model:Qwen3_5MTPModel",
 )
 DraftModelRegistry.register("qwen3", "dflash", "lightllm.models.qwen3_dflash.model:Qwen3DFlashModel")
+DraftModelRegistry.register("qwen3", "dflash2", "lightllm.models.qwen3_dflash2.model:Qwen3DFlash2Model")
 DraftModelRegistry.register("qwen3", "dspark", "lightllm.models.qwen3_dspark.model:Qwen3DSparkModel")
 DraftModelRegistry.register("qwen3", "eagle3", "lightllm.models.qwen3_eagle.model:Qwen3EagleModel")
 DraftModelRegistry.register(

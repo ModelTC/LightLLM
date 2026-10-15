@@ -1,10 +1,26 @@
 from lightllm.utils.envs_utils import (
+    is_stop_matching_in_reasoning_enabled,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
     get_pd_node_continuation_resource_wait_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
 )
+
+
+def test_stop_in_reasoning_defaults_to_false(monkeypatch):
+    monkeypatch.delenv("LIGHTLLM_STOP_IN_REASONING", raising=False)
+    is_stop_matching_in_reasoning_enabled.cache_clear()
+    assert is_stop_matching_in_reasoning_enabled() is False
+    is_stop_matching_in_reasoning_enabled.cache_clear()
+
+
+def test_stop_in_reasoning_reads_environment(monkeypatch):
+    for value, expected in [("1", True), ("true", True), ("ON", True), ("0", False), ("false", False)]:
+        monkeypatch.setenv("LIGHTLLM_STOP_IN_REASONING", value)
+        is_stop_matching_in_reasoning_enabled.cache_clear()
+        assert is_stop_matching_in_reasoning_enabled() is expected
+    is_stop_matching_in_reasoning_enabled.cache_clear()
 
 
 def test_pd_cache_high_priority_max_age_defaults_to_180_seconds(monkeypatch):

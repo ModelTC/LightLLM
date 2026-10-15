@@ -18,6 +18,62 @@ First, ensure that the LightLLM service is started:
         --port 8088 \
         --tp 1
 
+Stop Strings
+------------
+
+``/v1/chat/completions`` and ``/v1/completions`` accept ``stop`` and
+``include_stop_str_in_output``. By default, the matched stop string is excluded
+from returned text. Set ``include_stop_str_in_output`` to ``true`` to include it.
+Text after the stop string in the same token is excluded in either case. This
+applies to streaming and non-streaming requests, including PD deployments.
+String stops retain their original text; they are not encoded into token ID
+sequences or matched as token IDs in the inference layer.
+
+With the OpenAI Python client, pass the option through ``extra_body``:
+
+.. code-block:: python
+
+    response = client.chat.completions.create(
+        model="your_model_name",
+        messages=[{"role": "user", "content": "Hello"}],
+        stop=["END"],
+        extra_body={"include_stop_str_in_output": True},
+    )
+
+For example, generated text ``helloEND`` is returned as ``hello`` by default,
+or ``helloEND`` with this option enabled.
+
+For ``/v1/chat/completions`` with a reasoning parser configured (automatically or via ``--reasoning_parser``),
+user string stops apply only to final answer ``content`` by default. A matching
+string inside reasoning does not end generation. This also applies when
+``separate_reasoning=False`` combines reasoning and content in the response.
+EOS and the output token limit still end generation in either phase.
+
+To enable string stops in reasoning as well, set this environment variable
+before starting the service:
+
+.. code-block:: bash
+
+    export LIGHTLLM_STOP_IN_REASONING=1
+
+The default is ``0``; ``1``, ``true``, and ``ON`` enable the option. Restart the
+service after changing it. For PD deployments, set it on the master that accepts
+OpenAI requests; the stop scope is passed to prefill/decode nodes in sampling parameters.
+``/v1/completions`` matches stops against all generated text. Chat requests without
+a reasoning parser use the same behavior.
+
+This phase scope applies only to string stops. Explicit token ID sequences in
+the native API's ``parameters.stop_sequences`` match independently in inference
+and HTTP output and can end generation during reasoning or answer content, regardless of
+this environment variable or ``include_stop_str_in_output``.
+
+RL, routed-expert output, and prompt-logprob requests are supported only in normal
+mode. A stop match still requests backend shutdown. The matched string packet is trimmed
+according to ``include_stop_str_in_output`` but retains the backend finish status.
+Subsequent packets pass through unchanged until the backend finishes with final metadata.
+In-flight tokens may therefore appear after the match, and the backend determines the final finish reason.
+PD mode rejects the corresponding startup flags; request parameters cannot enable these server features.
+
 Basic Conversation Examples
 ---------------------------
 

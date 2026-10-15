@@ -345,8 +345,15 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
         shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
     ):
+        assert clamp_limit is None or limit is None
+        if clamp_limit is not None:
+            limit = clamp_limit
+
         if shared_expert_func is not None:
             assert is_prefill is False and self.supports_decode_shared_expert_overlap
             check_ep_expert_dtype(self.quant_method)
@@ -365,7 +372,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 masked_m,
                 input_tensor.dtype,
                 expected_m,
-                clamp_limit=clamp_limit,
+                clamp_limit=limit,
                 alloc_tensor_func=alloc_tensor_func,
             )
             routed, combine_hook = self.low_latency_combine(gemm_out, topk_ids, topk_weights, handle)
@@ -392,7 +399,9 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
-            clamp_limit=clamp_limit,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
             alloc_tensor_func=alloc_tensor_func,
             ep_balance_counters=self.ep_balance_counters,
         )

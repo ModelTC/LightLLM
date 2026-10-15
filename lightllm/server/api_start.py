@@ -37,14 +37,14 @@ def _set_envs_and_config(args: StartArgs):
 
 
 def _launch_subprocesses(args: StartArgs):
+    _validate_pd_features(args)
     _set_envs_and_config(args)
 
     if args.target_vocab_topk_sampling is not None:
         # 在加载模型和启动子进程前拒绝该组合，避免候选裁剪使输出约束失效。
         # 数值冲突与后续兼容方案见 LlamaPostLayerInfer._target_lm_head_and_gather。
-        assert args.output_constraint_mode == "none" and not args.first_token_constraint_mode, (
-            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode outlines/xgrammar "
-            "or --first_token_constraint_mode: candidate pruning can cause forbidden tokens to be selected. "
+        assert args.output_constraint_mode == "none", (
+            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode xgrammar "
             "Disable --target_vocab_topk_sampling when using output constraints."
         )
 
@@ -169,12 +169,16 @@ def _launch_subprocesses(args: StartArgs):
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # mode setting check.
-    if args.output_constraint_mode != "none":
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
+    is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    if is_hybrid_model:
+        # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
+        assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
+        assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
+        # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。
+        assert not is_hybrid_model, "--diverse_mode does not support hybrid attention models"
+        assert not args.disable_dynamic_prompt_cache, "--diverse_mode requires dynamic prompt cache"
+        assert not args.disable_chunked_prefill, "--diverse_mode requires chunked prefill"
     if args.use_reward_model:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
@@ -231,7 +235,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.page_size > 1:
         # hybrid radix cache 的共享边界按 linear_att_hash_page_size 划分。只有该
         # 边界同时落在模型 KV 页面边界上，hold_kv_len 才能保持统一的分页语义。
-        is_hybrid_model = is_hybrid_att_model(args.model_dir)
         if is_hybrid_model and args.linear_att_hash_page_size % args.page_size != 0:
             raise ValueError(
                 "--linear_att_hash_page_size must be divisible by --page_size when paged KV cache is enabled"
@@ -243,6 +246,7 @@ def _launch_subprocesses(args: StartArgs):
                 "eagle3",
                 "dspark",
                 "dflash",
+                "dflash2",
             ), f"--mtp_draft_model_dir is required for {args.mtp_mode} mode"
             args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
         assert args.mtp_step > 0
@@ -250,10 +254,11 @@ def _launch_subprocesses(args: StartArgs):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
-    # automatically set visual_dp based on visual_tp and tp.
+    # automatically set visual_dp based on visual_tp and the per-node world size.
     # In visual proxy mode keep the caller-provided visual_dp / visual_tp.
-    if not args.visual_use_proxy_mode and args.visual_tp < args.tp and args.tp % args.visual_tp == 0:
-        args.visual_dp = args.tp // args.visual_tp
+    node_world_size = args.tp // args.nnodes
+    if not args.visual_use_proxy_mode and args.visual_tp < node_world_size and node_world_size % args.visual_tp == 0:
+        args.visual_dp = node_world_size // args.visual_tp
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
@@ -568,6 +573,7 @@ def normal_or_p_d_start(args: StartArgs):
 
 
 def pd_master_start(args: StartArgs):
+    _validate_pd_features(args)
     _set_envs_and_config(args)
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
@@ -718,3 +724,10 @@ def config_server_start(args):
     http_server_process = subprocess.Popen(command)
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
+
+
+def _validate_pd_features(args: StartArgs):
+    if args.run_mode in ("pd_master", "prefill", "decode") and (
+        args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
+    ):
+        raise ValueError("PD mode does not support RL, routed experts or prompt logprobs")

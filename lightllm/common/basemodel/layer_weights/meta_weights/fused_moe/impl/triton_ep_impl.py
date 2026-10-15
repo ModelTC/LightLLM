@@ -29,7 +29,15 @@ class FuseMoeTritonEP(FuseMoeTriton):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ) -> torch.Tensor:
+        if alpha is not None and (alpha != 1.0 or clamp_up_add_one):
+            raise NotImplementedError("This MoE backend only supports standard clamped SiLU")
+        assert clamp_limit is None or limit is None
+        if limit is not None:
+            clamp_limit = limit
         buffer = dist_group_manager.ep_triton_moe_buffer
         return buffer.forward(
             input_tensor,

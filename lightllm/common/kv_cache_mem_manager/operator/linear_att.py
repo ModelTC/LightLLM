@@ -6,7 +6,6 @@ from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.state_cache_manager import LinearAttCacheConfig
 
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
@@ -22,7 +21,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
     def __init__(self, mem_manager):
         super().__init__(mem_manager)
-        self.linear_config = LinearAttCacheConfig.load_from_args()
+        self.linear_config = mem_manager.linear_config
 
     def load_cpu_cache_to_gpu(
         self,

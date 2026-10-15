@@ -24,12 +24,17 @@ from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse
-from lightllm.server.core.objs.sampling_params import SamplingParams
+from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs.sampling_params import SamplingParams, StopStrMatchMode
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
-from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_lightllm_websocket_max_message_size,
+    is_stop_matching_in_reasoning_enabled,
+)
 from lightllm.utils.error_utils import (
     ClientDisconnected,
     GenerationError,
@@ -198,25 +203,38 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     """Whether this request uses forced thinking / reasoning (parser + template)."""
     from .build_prompt import tokenizer_supports_force_thinking
 
-    if not tokenizer_supports_force_thinking():
-        return False
-
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
-    if reasoning_parser in ["qwen3-thinking", "gpt-oss", "minimax"]:
+    # Always-thinking models may have no thinking switch in their chat template.
+    # Their answer grammar must wait for the reasoning delimiter nonetheless.
+    if reasoning_parser in ["deepseek-r1", "qwen3-thinking", "gpt-oss", "minimax"]:
         return True
-    if reasoning_parser in ["deepseek-v3", "deepseek-v4"]:
+    if reasoning_parser == "deepseek-v4":
         chat_template_kwargs = request.chat_template_kwargs or {}
         if "thinking" in chat_template_kwargs:
             return chat_template_kwargs["thinking"] is True
         if request.reasoning_effort is not None:
             return request.reasoning_effort != "none"
         return True
+    if not tokenizer_supports_force_thinking():
+        return False
+    if reasoning_parser == "deepseek-v3":
+        return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
         # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
         return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True
     return True  # default
+
+
+def _get_guided_reasoning_end(request: ChatCompletionRequest, tokenizer) -> List[int]:
+    """Use the same thinking mode as the chat template for grammar activation."""
+    if not _is_force_thinking_mode(request):
+        return []
+    parser_name = get_env_start_args().reasoning_parser
+    detector = ReasoningParser.DetectorMap[parser_name.lower()]()
+    token_ids = tokenizer.encode(detector.grammar_start_token, add_special_tokens=False)
+    return token_ids
 
 
 def _process_reasoning_stream(
@@ -374,6 +392,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "best_of": request.n,
         "add_special_tokens": False,
         "seed": request.seed,
+        "include_stop_str_in_output": request.include_stop_str_in_output,
     }
 
     # Gemma-4's reasoning delimiters (<|channel>=100, <channel|>=101) are
@@ -392,6 +411,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         sampling_params_dict["max_new_tokens"] = request.max_tokens
     if request.stop is not None:
         sampling_params_dict["stop_sequences"] = request.stop
+        if get_env_start_args().reasoning_parser:
+            # The prompt may already open reasoning; generated tokens may omit the opening marker.
+            sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
+            # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
+            sampling_params_dict["stop_str_match_mode"] = (
+                StopStrMatchMode.ALL_TEXT if is_stop_matching_in_reasoning_enabled() else StopStrMatchMode.CONTENT_ONLY
+            )
 
     # Structured output handling
     if request.response_format:
@@ -403,13 +429,18 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+        if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
+            sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
+                request, g_objs.httpserver_manager.tokenizer
+            )
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     # Chat completions don't expose output-token logprobs. PD nodes use this
     # transport-only marker to avoid forwarding unused per-token metadata.
     sampling_params.return_output_logprobs = False
+    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
-    sampling_params.verify()
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
@@ -426,6 +457,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         completion_tokens = 0
         reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
             from .req_id_generator import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -596,6 +628,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         completion_tokens = 0
         cached_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
             prompt_tokens = metadata["prompt_tokens"]
             cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
@@ -907,6 +940,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         "best_of": request.best_of,
         "add_special_tokens": False,
         "seed": request.seed,
+        "include_stop_str_in_output": request.include_stop_str_in_output,
     }
     if request.max_completion_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
@@ -927,20 +961,19 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     sampling_params.return_output_logprobs = request.logprobs is not None
-    sampling_params.verify()
+    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
     # v1/completions does not support multimodal inputs, so we use an empty MultimodalParams
     multimodal_params = MultimodalParams()
 
     return await _process_prompts_completion(
-        prompts, sampling_params, sampling_params_dict, multimodal_params, raw_request, request, created_time
+        prompts, sampling_params, multimodal_params, raw_request, request, created_time
     )
 
 
 async def _process_prompts_completion(
     prompts: Union[List[str], List[List[int]]],
     sampling_params: SamplingParams,
-    sampling_params_dict: Dict,
     multimodal_params: MultimodalParams,
     raw_request: Request,
     request: CompletionRequest,
@@ -961,12 +994,13 @@ async def _process_prompts_completion(
         )
 
     async def process_single_prompt(prompt: Union[str, List[int]]):
-        if len(prompts) > 1:
-            individual_sampling_params = SamplingParams()
-            individual_sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-            individual_sampling_params.verify()
-        else:
-            individual_sampling_params = sampling_params
+        # 各 prompt 会并发调用 generate，后者会原地写入 group_request_id，
+        # 并按各自的 prompt 长度调整 max_new_tokens；共用参数会导致请求 ID 相互覆盖，
+        # 或使较长 prompt 缩减后的生成长度影响其他 prompt。
+        # SamplingParams 是 ctypes.Structure，包含嵌套结构和数组；这里通过 from_buffer_copy
+        # 深拷贝整个结构体缓冲区，确保每个 prompt 的参数（含嵌套字段）拥有独立内存，
+        # 避免仅复制引用或创建共享缓冲区视图时，原地修改仍影响其他请求。
+        individual_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
 
         # Convert token array to string for _collect_generation_results
         prompt_str = prompt
@@ -977,7 +1011,7 @@ async def _process_prompts_completion(
             prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
-        return await _collect_generation_results(generator, request, prompt_str, individual_sampling_params)
+        return await _collect_generation_results(generator, request, prompt_str)
 
     tasks = [asyncio.create_task(process_single_prompt(prompt)) for prompt in prompts]
 
@@ -1028,6 +1062,7 @@ async def _handle_streaming_completion(
 
         try:
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
                 group_request_id = convert_sub_id_to_group_id(sub_req_id)
                 choice_index = sub_req_id - group_request_id
                 prompt_tokens = metadata["prompt_tokens"]
@@ -1099,9 +1134,7 @@ async def _handle_streaming_completion(
     )
 
 
-async def _collect_generation_results(
-    generator, request: CompletionRequest, prompt: str, sampling_params: SamplingParams
-):
+async def _collect_generation_results(generator, request: CompletionRequest, prompt: str):
     final_outputs = collections.defaultdict(list)
     output_token_counts = collections.defaultdict(int)
     finish_reasons = {}
@@ -1112,6 +1145,7 @@ async def _collect_generation_results(
     prompt_token_ids = {}
 
     async for sub_req_id, request_output, metadata, finish_status in generator:
+        finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
         if sub_req_id not in prompt_token_ids:
             prompt_logprobs[sub_req_id] = metadata.get("prompt_logprobs")
             prompt_token_ids[sub_req_id] = metadata.get("prompt_token_ids")
@@ -1137,18 +1171,6 @@ async def _collect_generation_results(
     for sub_req_id in sorted(final_outputs)[: request.n]:
         final_text = "".join(final_outputs[sub_req_id])
         finish_reason = finish_reasons.get(sub_req_id)
-
-        if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
-            for stop_str in sampling_params.stop_sequences.to_strings():
-                stop_index = final_text.rfind(
-                    stop_str,
-                    max(0, len(final_text) - len(stop_str) - 20),
-                    len(final_text),
-                )
-                if stop_index != -1:
-                    logger.debug("removed stop sequence in tail: '%s'", final_text[stop_index:])
-                    final_text = final_text[:stop_index]
-                    break
 
         results.append(
             {
@@ -1287,3 +1309,11 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
         "top_logprobs": top_logprobs_list,
         "text_offset": all_text_offsets,
     }
+
+
+def _convert_openai_finish_status(finish_status, sub_req_id):
+    if finish_status.status == FinishStatus.FINISHED_ABORTED:
+        # TODO: OpenAI 响应模型暂不接受 abort，先映射为 stop；后续统一取消与应用侧 stop 的对外语义。
+        logger.info(f"OpenAI maps finish_reason=abort to stop for compatibility, sub_req_id={sub_req_id}")
+        return FinishStatus(FinishStatus.FINISHED_STOP)
+    return finish_status

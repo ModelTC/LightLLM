@@ -13,3 +13,7 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
 
     pre_and_post_weight_class = Qwen3DSparkPreAndPostLayerWeight
     post_layer_infer_class = Qwen3DSparkPostLayerInfer
+
+    def _verify_params(self):
+        self.config.setdefault("block_size", self.args.mtp_step)
+        super()._verify_params()
