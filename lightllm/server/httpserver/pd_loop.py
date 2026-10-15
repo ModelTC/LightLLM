@@ -64,7 +64,7 @@ async def pd_handle_loop(manager: HttpServerManager):
             logger.info(f"get pd_master_objs {id_to_pd_master_obj}")
 
             if id_to_pd_master_obj is not None:
-                for node_id, pd_master_obj in id_to_handle_task.items():
+                for node_id, pd_master_obj in list(id_to_handle_task.items()):
                     if node_id not in id_to_pd_master_obj:
                         id_to_handle_task[node_id].cancel()
                         id_to_handle_task.pop(node_id, None)

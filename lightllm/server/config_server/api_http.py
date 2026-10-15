@@ -71,7 +71,8 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         logger.error(f"registered_pd_master_obj {registered_pd_master_obj} removed")
         with registered_pd_master_obj_lock:
-            registered_pd_master_objs.pop(registered_pd_master_obj.node_id, None)
+            if registered_pd_master_objs.get(registered_pd_master_obj.node_id) is registered_pd_master_obj:
+                registered_pd_master_objs.pop(registered_pd_master_obj.node_id, None)
     return
 
 
