@@ -41,7 +41,7 @@ class MemoryManager:
         self.always_copy = always_copy
         self.dtype = dtype
         self.windowed_draft_kv = None
-        self._windowed_draft_kv_params = None
+        self._windowed_draft_max_req_num = None
         args = get_env_start_args()
         self.window_state_config = load_window_state_config(args) if args.mtp_windowed else None
         # profile the max total token num if the size is None
@@ -131,8 +131,8 @@ class MemoryManager:
         self.kv_buffer = torch.empty(
             (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=dtype, device="cuda"
         )
-        if self._windowed_draft_kv_params is not None:
-            self.init_windowed_draft_kv(**self._windowed_draft_kv_params)
+        if self._windowed_draft_max_req_num is not None:
+            self.init_windowed_draft_kv(self._windowed_draft_max_req_num)
         self._init_state_cache_buffers()
 
     def _init_state_cache_buffers(self):
@@ -151,13 +151,19 @@ class MemoryManager:
             self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
             self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
 
-    def init_windowed_draft_kv(self, **cache_params):
-        """Create draft window storage from dimensions supplied by the draft model."""
-        if self.window_state_config is not None:
-            for name in ("layers", "kv_heads", "head_dim", "window"):
-                assert cache_params[name] == getattr(self.window_state_config, name), f"draft window {name} mismatch"
-        self._windowed_draft_kv_params = cache_params
-        self.windowed_draft_kv = WindowKVStore(**cache_params, dtype=self.dtype, device=self.kv_buffer.device)
+    def init_windowed_draft_kv(self, max_request_num):
+        """Allocate request windows from the shared draft-state configuration."""
+        config = self.window_state_config
+        self._windowed_draft_max_req_num = max_request_num
+        self.windowed_draft_kv = WindowKVStore(
+            requests=max_request_num + 1,
+            layers=config.layers,
+            kv_heads=config.kv_heads,
+            head_dim=config.head_dim,
+            dtype=self.dtype,
+            device=self.kv_buffer.device,
+            window=config.window,
+        )
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         self.kv_move_buffer = torch.empty(

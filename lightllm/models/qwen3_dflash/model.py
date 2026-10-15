@@ -59,13 +59,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         # The shared manager owns target KV and, when enabled, draft window KV.
         self.mem_manager = self.main_model.mem_manager
         if self.uses_windowed_draft_kv:
-            self.mem_manager.init_windowed_draft_kv(
-                requests=self.req_manager.max_request_num + 1,
-                layers=self.config["n_layer"],
-                kv_heads=self.config["num_key_value_heads"] // self.tp_world_size_,
-                head_dim=self.config.get("head_dim", self.config["n_embed"] // self.config["num_attention_heads"]),
-                window=self.args.mtp_window_size,
-            )
+            self.mem_manager.init_windowed_draft_kv(self.req_manager.max_request_num)
 
     def _init_att_backend(self):
         if self.uses_windowed_draft_kv:

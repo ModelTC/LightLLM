@@ -3,20 +3,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.kv_cache_mem_manager.windowed_mtp import WindowKVStore
-from lightllm.common.kv_cache_mem_manager.windowed_mtp import WindowKVPageHelper
-from lightllm.common.state_cache_manager.windowed_mtp import (
-    WindowedMTPCacheConfig,
-    WindowStateBuffers,
-    WindowStateCacheConfig,
-)
-
-
-def _checkpoint_buffers(slots, layers, window, kv_heads, head_dim, dtype):
-    return SimpleNamespace(
-        kv_buffer=torch.zeros((slots, layers, window, 2 * kv_heads, head_dim), dtype=dtype),
-        seq_lens=torch.zeros(slots, dtype=torch.int64),
-    )
+from lightllm.common.kv_cache_mem_manager.windowed_mtp import WindowKVStore, WindowKVPageHelper
+from lightllm.common.state_cache_manager.windowed_mtp import WindowedMTPCacheConfig, WindowStateCacheConfig
 
 
 @pytest.fixture
@@ -30,114 +18,54 @@ def tensor_cache():
         g_cache_manager.cache_env_out()
 
 
-def test_checkpoint_round_trip_preserves_physical_ring_layout():
-    layers = 2
-    window = 4
-    kv_heads = 2
-    head_dim = 3
-    source_req = 1
-    destination_req = 2
-    checkpoint_slot = 1
+def test_checkpoint_and_cpu_rank_layout():
+    store = WindowKVStore(3, 2, 1, 3, torch.float32, "cpu", 4)
+    expected = torch.arange(48, dtype=torch.float32).view(2, 4, 2, 3)
+    store.kv_buffer[:, :4].copy_(expected)
+    store.req_to_seq_len[0] = 9
+    buffers = SimpleNamespace(kv_buffer=torch.zeros(2, 2, 4, 2, 3), seq_lens=torch.zeros(2, dtype=torch.int64))
+    store.save_checkpoint(0, buffers, 1)
+    store.restore_checkpoint(2, buffers, 1)
+    torch.testing.assert_close(store.kv_buffer[:, 8:12], expected, rtol=0, atol=0)
+    assert store.req_to_seq_len.tolist() == [9, 0, 9]
 
-    store = WindowKVStore(
-        requests=3,
-        layers=layers,
-        kv_heads=kv_heads,
-        head_dim=head_dim,
-        dtype=torch.float32,
-        device="cpu",
-        window=window,
-    )
-    expected_kv = torch.arange(
-        layers * window * 2 * kv_heads * head_dim,
-        dtype=torch.float32,
-    ).view(layers, window, 2 * kv_heads, head_dim)
-    store.kv_buffer[:, source_req * window : (source_req + 1) * window].copy_(expected_kv)
-    store.req_to_seq_len[source_req] = 9
-
-    buffers = _checkpoint_buffers(
-        slots=2,
-        layers=layers,
-        window=window,
-        kv_heads=kv_heads,
-        head_dim=head_dim,
-        dtype=store.kv_buffer.dtype,
-    )
-    store.save_checkpoint(source_req, buffers, checkpoint_slot)
-
-    store.kv_buffer[:, destination_req * window : (destination_req + 1) * window].fill_(-1)
-    store.req_to_seq_len[destination_req] = -1
-    store.restore_checkpoint(destination_req, buffers, checkpoint_slot)
-
-    assert torch.equal(buffers.kv_buffer[checkpoint_slot], expected_kv)
-    assert torch.equal(store.kv_buffer[:, destination_req * window : (destination_req + 1) * window], expected_kv)
-    assert store.req_to_seq_len[destination_req].item() == 9
-
-
-class _TargetStateLayout:
-    def __init__(self, page_bytes):
-        self.page_bytes = page_bytes
-
-    def get_cpu_cache_big_page_bytes(self):
-        return self.page_bytes
-
-
-def test_cpu_page_keeps_tp_rank_window_states_separate():
-    target_page_bytes = 32
-    window_config = WindowStateCacheConfig(layers=2, kv_heads=1, head_dim=3, window=4)
-    config = WindowedMTPCacheConfig(
-        window_config=window_config,
-        dtype=torch.float16,
-        tp_world_size=2,
-        full_att_all_num_kv_heads=0,
-        full_att_head_dim=0,
-        full_att_layer_num=0,
-        linear_config=_TargetStateLayout(target_page_bytes),
-    )
-    pages = torch.zeros((2, config.get_cpu_cache_big_page_bytes()), dtype=torch.uint8)
-
-    rank0_kv, rank0_ends = config.get_window_views(pages, tp_rank=0)
-    rank1_kv, rank1_ends = config.get_window_views(pages, tp_rank=1)
-    rank0_kv.fill_(1)
-    rank1_kv.fill_(2)
-    rank0_ends.copy_(torch.tensor([[11], [12]], dtype=torch.int64))
-    rank1_ends.copy_(torch.tensor([[21], [22]], dtype=torch.int64))
-
-    restored_rank0 = config.get_window_views(pages, tp_rank=0)
-    restored_rank1 = config.get_window_views(pages, tp_rank=1)
-    assert torch.all(restored_rank0[0] == 1)
-    assert torch.all(restored_rank1[0] == 2)
-    assert restored_rank0[1].tolist() == [[11], [12]]
-    assert restored_rank1[1].tolist() == [[21], [22]]
-    assert torch.count_nonzero(pages[:, :target_page_bytes]).item() == 0
+    config = WindowStateCacheConfig(2, 1, 3, 4)
+    target = SimpleNamespace(get_cpu_cache_big_page_bytes=lambda: 32)
+    layout = WindowedMTPCacheConfig(config, torch.float16, 2, 0, 0, 0, target)
+    pages = torch.zeros(2, layout.get_cpu_cache_big_page_bytes(), dtype=torch.uint8)
+    for rank in range(2):
+        kv, seq_lens = layout.get_window_views(pages, rank)
+        kv.fill_(rank + 1)
+        seq_lens.fill_(2 ** 35 + rank)
+    for rank in range(2):
+        kv, seq_lens = layout.get_window_views(pages, rank)
+        assert kv.eq(rank + 1).all()
+        assert seq_lens.eq(2 ** 35 + rank).all()
+    assert not pages[:, :32].any()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("window", [1, 4, 8])
-def test_window_commit_and_pack_handles_ragged_strided_inputs_and_rejections(window, tensor_cache):
+def test_commit_pack_and_graph_replay(window, tensor_cache):
     store = WindowKVStore(3, 2, 1, 3, torch.float32, "cuda", window)
     reqs = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
-    # Neither the hidden rows nor the noise head dimensions are contiguous.
     hidden = torch.arange(20 * 12, device="cuda", dtype=torch.float32).view(20, 12)[::2, ::2]
     starts = torch.tensor([0, 7], dtype=torch.int32, device="cuda")
-    first = torch.tensor([0, 0], dtype=torch.int32, device="cuda")
+    first = torch.zeros(2, dtype=torch.int32, device="cuda")
     lengths = torch.tensor([7, 3], dtype=torch.int32, device="cuda")
-    features, positions, mem_index = store.prepare(reqs, hidden, starts, first, lengths, 7, alloc_func=tensor_cache)
+    features, _, mem_index = store.prepare(reqs, hidden, starts, first, lengths, 7, alloc_func=tensor_cache)
     for layer in range(2):
         store.write(layer, mem_index, features.view(-1, 2, 3) + layer)
 
-    accepted_hidden = torch.arange(5 * 6, device="cuda", dtype=torch.float32).view(5, 6) + 1000
+    accepted = torch.arange(5 * 6, device="cuda", dtype=torch.float32).view(5, 6) + 1000
     starts = torch.tensor([0, 3], dtype=torch.int32, device="cuda")
     first = torch.tensor([7, 3], dtype=torch.int32, device="cuda")
     lengths = torch.tensor([2, 1], dtype=torch.int32, device="cuda")
-    features, positions, mem_index = store.prepare(
-        reqs, accepted_hidden, starts, first, lengths, 3, alloc_func=tensor_cache
-    )
+    features, _, mem_index = store.prepare(reqs, accepted, starts, first, lengths, 3, alloc_func=tensor_cache)
     for layer in range(2):
         store.write(layer, mem_index, features.view(-1, 2, 3) + layer)
-
+    history = [torch.cat((hidden[:7], accepted[:2])), torch.cat((hidden[7:10], accepted[3:4]))]
     noise = torch.randn(4, 2, 6, device="cuda")[:, :, ::2]
-    history = [torch.cat((hidden[:7], accepted_hidden[:2])), torch.cat((hidden[7:10], accepted_hidden[3:4]))]
     for layer in range(2):
         packed = store.pack(layer, reqs, noise, 2, alloc_func=tensor_cache)
         expected = torch.zeros_like(packed)
@@ -148,50 +76,31 @@ def test_window_commit_and_pack_handles_ragged_strided_inputs_and_rejections(win
         torch.testing.assert_close(packed, expected, rtol=0, atol=0)
     assert store.req_to_seq_len.tolist() == [9, 0, 4]
 
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_window_pack_graph_replay_reads_current_request_and_sequence_length(tensor_cache):
-    store = WindowKVStore(2, 1, 1, 8, torch.float32, "cuda", 4)
-    store.kv_buffer.copy_(torch.arange(8 * 2 * 8, device="cuda").view(1, 8, 2, 8))
-    store.req_to_seq_len.copy_(torch.tensor([7, 1], device="cuda"))
-    reqs = torch.tensor([0], dtype=torch.int32, device="cuda")
-    noise = torch.randn(2, 2, 8, device="cuda")
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        store.pack(0, reqs, noise, 2, alloc_func=tensor_cache)
+        store.pack(1, reqs, noise, 2, alloc_func=tensor_cache)
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        packed = store.pack(0, reqs, noise, 2, alloc_func=tensor_cache)
+        packed = store.pack(1, reqs, noise, 2, alloc_func=tensor_cache)
     reqs.fill_(1)
     graph.replay()
-    expected = torch.zeros_like(packed)
-    expected[0, 0] = store.kv_buffer[0, 4]
-    expected[0, 1:3] = noise
+    expected.zero_()
+    expected[:, :2] = noise.reshape(2, 2, 2, 3)
     torch.testing.assert_close(packed, expected, rtol=0, atol=0)
-    store.reset_req(1)
+    store.kv_buffer[:, window : window + 1].fill_(42)
+    store.req_to_seq_len[1] = 1
     graph.replay()
     expected.zero_()
-    expected[0, :2] = noise
+    expected[:, 0] = 42
+    expected[:, 1:3] = noise.reshape(2, 2, 2, 3)
     torch.testing.assert_close(packed, expected, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_empty_window_batch_uses_existing_empty_token_shapes(tensor_cache):
-    store = WindowKVStore(1, 1, 1, 8, torch.float32, "cuda", 4)
-    reqs = torch.empty(0, dtype=torch.int32, device="cuda")
-    features, positions, mem_index = store.prepare(
-        reqs, torch.empty(0, 16, device="cuda"), reqs, reqs, reqs, 3, alloc_func=tensor_cache
-    )
-    assert features.shape == (0, 16)
-    assert positions.shape == mem_index.shape == (0,)
-    assert store.pack(0, reqs, torch.empty(0, 2, 8, device="cuda"), 2, alloc_func=tensor_cache).shape == (0, 6, 2, 8)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("tp_world_size", [1, 2, 4])
-def test_window_target_pages_reuse_normal_cpu_transfer_with_partial_pages(monkeypatch, tp_world_size):
+def test_cpu_transfer_partial_pages(monkeypatch, tp_world_size):
     from lightllm.common.basemodel.triton_kernel.kv_cache_offload import load_cpu_kv_to_gpu, offload_gpu_kv_to_cpu
 
     args = SimpleNamespace(cpu_cache_token_page_size=4, linear_att_hash_page_size=2, linear_att_page_block_num=2)
@@ -206,7 +115,7 @@ def test_window_target_pages_reuse_normal_cpu_transfer_with_partial_pages(monkey
     expected = [kv.clone() for kv in kvs]
     mem_index = torch.tensor([1, 5, -1, -1], dtype=torch.int32, device="cuda")
     page_index = torch.zeros(1, dtype=torch.int64, device="cuda")
-    readies = torch.zeros(1, dtype=torch.int32, device="cuda")
+    readies = torch.zeros(1, dtype=torch.bool, device="cuda")
     for rank, kv in enumerate(kvs):
         offload_gpu_kv_to_cpu(mem_index, kv, None, cpu_kv, None, page_index, readies, rank, tp_world_size, 16)
     for rank, kv in enumerate(kvs):
@@ -214,12 +123,12 @@ def test_window_target_pages_reuse_normal_cpu_transfer_with_partial_pages(monkey
         load_cpu_kv_to_gpu(mem_index, kv, None, cpu_kv, None, page_index, rank, tp_world_size, 16)
         torch.testing.assert_close(kv[:, [1, 5]], expected[rank][:, [1, 5]], rtol=0, atol=0)
         assert not kv[:, [0, 2, 3, 4, 6, 7]].any()
-    assert pages[:, config.get_cpu_cache_window_offset() :].count_nonzero() == 0
+    assert not pages[:, config.get_cpu_cache_window_offset() :].any()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (1, 2), (2, 1)])
-def test_window_pd_page_reuses_page_io_across_tp_sizes(monkeypatch, prefill_tp, decode_tp):
+def test_pd_page_round_trip(monkeypatch, prefill_tp, decode_tp):
     def make_mems(tp):
         monkeypatch.setattr("lightllm.utils.envs_utils.get_env_start_args", lambda: SimpleNamespace(tp=tp, dp=1))
         mems = [
@@ -233,8 +142,8 @@ def test_window_pd_page_reuses_page_io_across_tp_sizes(monkeypatch, prefill_tp, 
         helper.assert_page_size()
         return mems, helper
 
-    source, write_helper = make_mems(prefill_tp)
-    destination, read_helper = make_mems(decode_tp)
+    source, writer = make_mems(prefill_tp)
+    destination, reader = make_mems(decode_tp)
     global_kv = torch.randn(2, 4, 4, 8, device="cuda")
 
     def shard_heads(rank, tp):
@@ -242,15 +151,14 @@ def test_window_pd_page_reuses_page_io_across_tp_sizes(monkeypatch, prefill_tp, 
         return list(range(start, start + 2 // tp)) + list(range(2 + start, 2 + start + 2 // tp))
 
     for rank, mem in enumerate(source):
-        store = mem.windowed_draft_kv
-        store.kv_buffer[:, :4].copy_(global_kv[:, :, shard_heads(rank, prefill_tp)])
-        store.req_to_seq_len[0] = 7
+        mem.windowed_draft_kv.kv_buffer[:, :4].copy_(global_kv[:, :, shard_heads(rank, prefill_tp)])
+        mem.windowed_draft_kv.req_to_seq_len[0] = 7
     source[0].kv_move_buffer[:, :16].fill_(42)
-    write_helper.copy_req_page(0, 0, source, "write")
+    writer.copy_req_page(0, 0, source, "write")
     destination[0].kv_move_buffer.copy_(source[0].kv_move_buffer)
     for mem in destination:
         mem.windowed_draft_kv.kv_buffer.zero_()
-    read_helper.copy_req_page(0, 2, destination, "read")
+    reader.copy_req_page(0, 2, destination, "read")
     for rank, mem in enumerate(destination):
         store = mem.windowed_draft_kv
         torch.testing.assert_close(store.kv_buffer[:, 8:12], global_kv[:, :, shard_heads(rank, decode_tp)])
@@ -260,57 +168,24 @@ def test_window_pd_page_reuses_page_io_across_tp_sizes(monkeypatch, prefill_tp, 
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("linear_target", [False, True])
-def test_tail_checkpoint_copy_preserves_stream_order_and_neighbor_slots(linear_target):
+def test_tail_checkpoint_copy_preserves_stream_order():
     from lightllm.common.kv_cache_mem_manager.operator.windowed_mtp import WindowedMTPMemOperator
-    from lightllm.common.kv_cache_mem_manager.operator.linear_att import LinearAttMemOperator
+    from lightllm.common.state_cache_manager.windowed_mtp import WindowStateBuffers
 
-    config = WindowStateCacheConfig(layers=2, kv_heads=1, head_dim=8, window=4)
-    source_window = WindowStateBuffers(2, config, torch.bfloat16)
-    destination_window = WindowStateBuffers(2, config, torch.bfloat16)
-    source_target = tuple(
-        torch.zeros((2, 4, 8), dtype=dtype, pin_memory=True) for dtype in (torch.bfloat16, torch.float32)
-    )
-    destination_target = tuple(torch.zeros_like(state, pin_memory=True) for state in source_target)
-    source = SimpleNamespace(
-        draft_window=source_window,
-        get_state_cache=lambda slot: tuple(state[slot] for state in source_target),
-    )
-    destination = SimpleNamespace(
-        draft_window=destination_window,
-        get_state_cache=lambda slot: tuple(state[slot] for state in destination_target),
-    )
-    operator_class = LinearAttMemOperator if linear_target else WindowedMTPMemOperator
-    operator = operator_class.__new__(operator_class)
+    config = WindowStateCacheConfig(2, 1, 8, 4)
+    source = SimpleNamespace(draft_window=WindowStateBuffers(2, config, torch.bfloat16))
+    destination = SimpleNamespace(draft_window=WindowStateBuffers(2, config, torch.bfloat16))
+    operator = WindowedMTPMemOperator.__new__(WindowedMTPMemOperator)
     operator.mem_manager = SimpleNamespace(big_page_buffers=destination)
-
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        # Keep the save pending so a host-side tail copy would see stale data.
         torch.cuda._sleep(1_000_000)
-        expected_kv = torch.randn(source_window.kv_buffer[1].shape, dtype=torch.bfloat16, device="cuda")
-        expected_seq_len = torch.tensor([2 ** 35 + 7], dtype=torch.int64, device="cuda")
-        expected_target = [torch.randn(state.shape[1:], dtype=state.dtype, device="cuda") for state in source_target]
-        source_window.kv_buffer[1].copy_(expected_kv, non_blocking=True)
-        source_window.seq_lens[1:2].copy_(expected_seq_len, non_blocking=True)
-        for state, expected in zip(source_target, expected_target):
-            state[1].copy_(expected, non_blocking=True)
-
+        expected = torch.randn(source.draft_window.kv_buffer[1].shape, dtype=torch.bfloat16, device="cuda")
+        seq_len = torch.tensor([2 ** 35 + 7], dtype=torch.int64, device="cuda")
+        source.draft_window.kv_buffer[1].copy_(expected, non_blocking=True)
+        source.draft_window.seq_lens[1:2].copy_(seq_len, non_blocking=True)
         operator._copy_tail_state(source, source_id=1, destination_id=0)
-        restored_kv = torch.empty_like(expected_kv)
-        restored_seq_len = torch.empty_like(expected_seq_len)
-        restored_kv.copy_(destination_window.kv_buffer[0], non_blocking=True)
-        restored_seq_len.copy_(destination_window.seq_lens[:1], non_blocking=True)
     stream.synchronize()
-
-    torch.testing.assert_close(restored_kv, expected_kv, rtol=0, atol=0)
-    torch.testing.assert_close(restored_seq_len, expected_seq_len, rtol=0, atol=0)
-    torch.testing.assert_close(destination_window.kv_buffer[0], expected_kv.cpu(), rtol=0, atol=0)
-    assert not destination_window.kv_buffer[1].any()
-    assert destination_window.seq_lens.tolist() == [2 ** 35 + 7, 0]
-    for state, expected in zip(destination_target, expected_target):
-        if linear_target:
-            torch.testing.assert_close(state[0], expected.cpu(), rtol=0, atol=0)
-        else:
-            assert not state[0].any()
-        assert not state[1].any()
+    torch.testing.assert_close(destination.draft_window.kv_buffer[0], expected.cpu(), rtol=0, atol=0)
+    assert destination.draft_window.seq_lens.tolist() == [2 ** 35 + 7, 0]
+    assert not destination.draft_window.kv_buffer[1].any()

@@ -96,8 +96,8 @@ class WindowKVPageHelper:
         self.shape = (window, layers, heads * tp_world_size, dim)
         self.kv_offset = (offset + 7) // 8 * 8
         self.kv_nbytes = window * layers * heads * tp_world_size * dim * store.kv_buffer.element_size()
-        self.end_offset = (self.kv_offset + self.kv_nbytes + 7) // 8 * 8
-        self.state_nbytes = self.end_offset + 8
+        self.seq_len_offset = (self.kv_offset + self.kv_nbytes + 7) // 8 * 8
+        self.state_nbytes = self.seq_len_offset + 8
 
     def assert_page_size(self):
         page = self.mem_manager.kv_move_buffer[0]
@@ -116,7 +116,7 @@ class WindowKVPageHelper:
             .view(self.mem_manager.windowed_draft_kv.kv_buffer.dtype)
             .view(self.shape)
         )
-        end_page = page[self.end_offset : self.end_offset + 8].view(torch.int64)
+        seq_len_page = page[self.seq_len_offset : self.seq_len_offset + 8].view(torch.int64)
         window = self.shape[0]
         indexes = torch.arange(req_idx * window, (req_idx + 1) * window, dtype=torch.int64, device=page.device)
         for tp_index, mem in enumerate(dp_mems):
@@ -130,6 +130,6 @@ class WindowKVPageHelper:
                 mode=mode,
             )
             if mode == "read":
-                store.req_to_seq_len[req_idx : req_idx + 1].copy_(end_page, non_blocking=True)
+                store.req_to_seq_len[req_idx : req_idx + 1].copy_(seq_len_page, non_blocking=True)
             elif tp_index == 0:
-                end_page.copy_(store.req_to_seq_len[req_idx : req_idx + 1], non_blocking=True)
+                seq_len_page.copy_(store.req_to_seq_len[req_idx : req_idx + 1], non_blocking=True)

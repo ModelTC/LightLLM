@@ -3,7 +3,7 @@ import triton
 from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp
-from lightllm.common.state_cache_manager import get_hybrid_cache_config
+from lightllm.common.state_cache_manager.windowed_mtp import WindowedMTPCacheConfig
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,7 +16,10 @@ class HybridAttMemOperator(BaseMemManagerOperator):
 
     def __init__(self, mem_manager):
         super().__init__(mem_manager)
-        self.cpu_cache_config = get_hybrid_cache_config(linear_config=getattr(mem_manager, "linear_config", None))
+        if mem_manager.window_state_config is not None:
+            self.cpu_cache_config = WindowedMTPCacheConfig.load_from_args(
+                linear_config=getattr(mem_manager, "linear_config", None)
+            )
 
     def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
         from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer

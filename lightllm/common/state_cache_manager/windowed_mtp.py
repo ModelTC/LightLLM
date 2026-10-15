@@ -174,8 +174,8 @@ class WindowedMTPCacheConfig:
         pages = cpu_cache_tensor.view(cpu_cache_tensor.shape[0], -1).view(torch.uint8)
         start = self.get_cpu_cache_window_offset() + tp_rank * self.get_cpu_cache_window_rank_bytes()
         kv_bytes = self.window_config.get_state_bytes(self.dtype.itemsize) - 8
-        end_offset = start + (kv_bytes + 7) // 8 * 8
+        seq_len_offset = start + (kv_bytes + 7) // 8 * 8
         return (
             pages[:, start : start + kv_bytes].view(self.dtype),
-            pages[:, end_offset : end_offset + 8].view(torch.int64),
+            pages[:, seq_len_offset : seq_len_offset + 8].view(torch.int64),
         )

@@ -308,7 +308,7 @@ def get_mtp_weight_layer_num() -> int:
         return args.mtp_step
     if mtp_mode == "eagle_no_att":
         return 1
-    if getattr(args, "mtp_windowed", False):
+    if args.mtp_windowed:
         return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
     return get_added_mtp_kv_layer_num()
 

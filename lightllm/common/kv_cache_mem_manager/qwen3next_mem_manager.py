@@ -63,7 +63,11 @@ class Qwen3NextMemManager(MemoryManager):
     def write_to_shm(self, req_manager):
         self.req_to_conv_state = req_manager.req_to_conv_state
         self.req_to_ssm_state = req_manager.req_to_ssm_state
-        # Keep pinned CPU checkpoints out of cross-process GPU state exports.
+        # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
+        # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本
+        # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针
+        # 启动会报 "Pointer argument cannot be accessed from Triton (cpu tensor?)"。
+        # 跨进程消费方并不使用 cpu 侧大页 state cache，序列化期间临时剔除以保住 pinned。
         big_page_buffers = self.big_page_buffers
         self.big_page_buffers = None
         try:
