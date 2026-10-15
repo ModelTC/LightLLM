@@ -796,13 +796,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",
     )
     parser.add_argument(
-        "--mtp_draft_kv_mode",
-        choices=["full", "window"],
-        default="full",
-        help="Draft KV retention policy for parallel block MTP",
-    )
-    parser.add_argument("--mtp_draft_window_size", type=int, default=512)
-    parser.add_argument(
         "--mtp_mode",
         choices=[
             "vanilla_with_att",
@@ -837,6 +830,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Number of additional draft tokens per request.
         For DSpark and DFlash this value is derived from the draft checkpoint block_size.""",
     )
+    parser.add_argument(
+        "--mtp_windowed",
+        action="store_true",
+        help="Use a sliding window for draft KV in DFlash-style MTP.",
+    )
+    parser.add_argument("--mtp_window_size", type=int, default=512)
     parser.add_argument(
         "--mtp_dynamic_verify",
         action="store_true",

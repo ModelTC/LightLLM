@@ -49,7 +49,7 @@ def load_window_state_config(args):
     config.setdefault("num_key_value_heads", config["num_attention_heads"])
     if merge_nested:
         config.update(config.get("dflash_config", {}))
-    return WindowStateCacheConfig.from_model_config(config, args.mtp_draft_window_size, args.tp // args.dp)
+    return WindowStateCacheConfig.from_model_config(config, args.mtp_window_size, args.tp // args.dp)
 
 
 class WindowStateBuffers:

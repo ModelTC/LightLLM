@@ -44,7 +44,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
 
         assert self.args.mtp_step <= self.config["block_size"]
         self.config["block_size"] = self.args.mtp_step
-        self.uses_windowed_draft_kv = getattr(self.args, "mtp_draft_kv_mode", "full") == "window"
+        self.uses_windowed_draft_kv = getattr(self.args, "mtp_windowed", False)
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
@@ -64,7 +64,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
                 layers=self.config["n_layer"],
                 kv_heads=self.config["num_key_value_heads"] // self.tp_world_size_,
                 head_dim=self.config.get("head_dim", self.config["n_embed"] // self.config["num_attention_heads"]),
-                window=self.args.mtp_draft_window_size,
+                window=self.args.mtp_window_size,
             )
 
     def _init_att_backend(self):

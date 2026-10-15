@@ -75,7 +75,7 @@ def profile_mtp_weight_memory(model):
     yield
     target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
     mem_fraction = model.mem_fraction
-    if getattr(model.args, "mtp_draft_kv_mode", "full") == "window":
+    if getattr(model.args, "mtp_windowed", False):
         from lightllm.common.state_cache_manager.windowed_mtp import load_window_state_config
 
         config = load_window_state_config(model.args)

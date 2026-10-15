@@ -43,7 +43,7 @@ class MemoryManager:
         self.windowed_draft_kv = None
         self._windowed_draft_kv_params = None
         args = get_env_start_args()
-        self.window_state_config = load_window_state_config(args) if args.mtp_draft_kv_mode == "window" else None
+        self.window_state_config = load_window_state_config(args) if args.mtp_windowed else None
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 

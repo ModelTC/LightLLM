@@ -237,7 +237,7 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        req_manager_class = ReqManagerForWindowedMTP if self.args.mtp_draft_kv_mode == "window" else ReqManager
+        req_manager_class = ReqManagerForWindowedMTP if self.args.mtp_windowed else ReqManager
         self.req_manager = req_manager_class(self.max_req_num, create_max_seq_len, None)
         return
 

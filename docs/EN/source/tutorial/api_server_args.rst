@@ -741,17 +741,6 @@ MTP Multi-Prediction Parameters
     * ``eagle_no_att``
     * ``None``: Do not enable mtp (default)
 
-.. option:: --mtp_draft_kv_mode
-
-    Draft KV cache policy; defaults to ``full``. dflash style draft models support
-    ``window``, which retains only recent-window KV. The target still
-    uses its full context.
-
-.. option:: --mtp_draft_window_size
-
-    Number of recent positions retained by ``window``; defaults to ``512`` and
-    must be positive.
-
 .. option:: --mtp_draft_model_dir
 
     Path to the draft model for MTP multi-prediction functionality

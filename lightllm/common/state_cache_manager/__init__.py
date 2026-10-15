@@ -19,7 +19,7 @@ def get_hybrid_cache_config(linear_config=None):
             linear_config = Glm5NextCacheConfig.from_model_config(model_cfg, args)
         elif model_type in ("qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"):
             linear_config = LinearAttCacheConfig.load_from_args()
-    if args.mtp_draft_kv_mode == "window":
+    if args.mtp_windowed:
         return WindowedMTPCacheConfig.load_from_args(linear_config)
     if linear_config is not None:
         return linear_config
