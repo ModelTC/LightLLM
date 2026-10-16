@@ -15,8 +15,6 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.common.eplb_utils import get_eplb_memory_reservations
-from lightllm.common.kv_cache_mem_manager.mem_manager import memory_reservation_scope
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
@@ -30,7 +28,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
+from lightllm.utils.profile_max_tokens import profile_model_memory
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_llm_data_type,
@@ -111,13 +109,12 @@ class TpPartBaseModel:
         self._init_quant()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
-        with profile_mtp_weight_memory(self):
+        with profile_model_memory(self):
             with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
                 self._init_weights()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
-            with memory_reservation_scope(get_eplb_memory_reservations(self)):
-                self._init_mem_manager()
+            self._init_mem_manager()
 
         # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
         # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
@@ -151,6 +148,7 @@ class TpPartBaseModel:
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             self.config = json.load(json_file)
+        self.config["is_mtp_draft_model"] = self.is_mtp_draft_model
         # rename keys
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])

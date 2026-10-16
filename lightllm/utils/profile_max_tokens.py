@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from transformers import AutoModelForCausalLM
 import argparse
 from lightllm.common.build_utils import repair_config
+from lightllm.common.eplb_utils import is_eplb_enabled
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_mtp_weight_layer_num
 
@@ -61,25 +62,53 @@ def get_mtp_adjusted_mem_fraction(
     return adjusted_mem_fraction
 
 
-@contextmanager
-def profile_mtp_weight_memory(model):
-    """Reserve auto-profiled KV budget for MTP weights allocated after the target model."""
-    should_adjust = (
-        model.max_total_token_num is None and not model.is_mtp_draft_model and model.args.mtp_mode is not None
+def get_eplb_adjusted_mem_fraction(model) -> float:
+    """Reserve auto-profiled KV budget for EPLB buffers allocated later."""
+    if model.max_total_token_num is not None or model.is_mtp_draft_model or not is_eplb_enabled(model.args):
+        return model.mem_fraction
+    from lightllm.common.eplb_utils import (
+        find_ep_moe_weights,
+        get_eplb_staging_nbytes,
+        get_eplb_sampling_peak_nbytes,
     )
-    if not should_adjust:
+
+    weights = [weight for weight in find_ep_moe_weights(model) if weight.expert_parallel_state.eplb is not None]
+    reserved_bytes = get_eplb_staging_nbytes(weights) + get_eplb_sampling_peak_nbytes(weights)
+    if not reserved_bytes:
+        return model.mem_fraction
+    device_id = get_current_device_id()
+    total_gpu_bytes = torch.cuda.get_device_properties(device_id).total_memory
+    adjusted_mem_fraction = model.mem_fraction - reserved_bytes / total_gpu_bytes
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        adjusted_mem_fraction_tensor = torch.tensor(
+            adjusted_mem_fraction, dtype=torch.float32, device=f"cuda:{device_id}"
+        )
+        torch.distributed.all_reduce(adjusted_mem_fraction_tensor, op=torch.distributed.ReduceOp.MIN)
+        adjusted_mem_fraction = adjusted_mem_fraction_tensor.item()
+
+    assert adjusted_mem_fraction > 0, "EPLB buffers leave no memory for the target model KV cache"
+    return adjusted_mem_fraction
+
+
+@contextmanager
+def profile_model_memory(model):
+    """Profile weights and reserve KV budget for later MTP/EPLB allocations."""
+    if model.max_total_token_num is not None or model.is_mtp_draft_model:
         yield
         return
 
-    weight_memory_before = torch.cuda.memory_allocated()
+    should_adjust_mtp = model.args.mtp_mode is not None
+    weight_memory_before = torch.cuda.memory_allocated() if should_adjust_mtp else 0
     yield
-    target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
-    model.mem_fraction = get_mtp_adjusted_mem_fraction(
-        mem_fraction=model.mem_fraction,
-        target_weight_bytes=target_weight_bytes,
-        target_layer_num=model.config["n_layer"],
-        mtp_layer_num=get_mtp_weight_layer_num(),
-    )
+    if should_adjust_mtp:
+        target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
+        model.mem_fraction = get_mtp_adjusted_mem_fraction(
+            mem_fraction=model.mem_fraction,
+            target_weight_bytes=target_weight_bytes,
+            target_layer_num=model.config["n_layer"],
+            mtp_layer_num=get_mtp_weight_layer_num(),
+        )
+    model.mem_fraction = get_eplb_adjusted_mem_fraction(model)
 
 
 def load_config(weight_dir_):

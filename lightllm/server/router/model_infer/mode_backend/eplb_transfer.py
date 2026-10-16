@@ -1,16 +1,16 @@
 """Asynchronous expert-row migration for EPLB."""
-import ctypes
 import math
 import os
-import re
 import socket
 import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
+
+from lightllm.common.cuda_wrapper import CudaBatchMemcpy, PreparedMemcpyBatch
 
 from lightllm.common.eplb_utils import (
     EPLB_FULL_STAGING_PARTS,
@@ -97,7 +97,7 @@ def build_transfer_plan(
 
 
 class NixlEPLBTransfer:
-    """GPU-direct UCX/NIXL migration through one layer's two staging parts."""
+    """GPU-direct UCX/NIXL migration through one complete staging layer."""
 
     backend = "nixl"
     staging_depth = 1
@@ -106,7 +106,7 @@ class NixlEPLBTransfer:
     @dataclass
     class _PreparedPart:
         remote_entries: Dict[int, list]
-        push_batch: "_PreparedCudaMemcpyBatch | None"
+        push_batch: "PreparedMemcpyBatch | None"
         part_index: int
 
     @dataclass
@@ -228,31 +228,20 @@ class NixlEPLBTransfer:
             raise RuntimeError("full EPLB migration phase failed") from error
 
     def _commit_full_parts(self, layer_index, buffer_index, changed_dst_slots):
-        """Commit both slices before publishing full-layout routing metadata."""
+        """Queue complete rows before routing publication on the inference stream."""
         error = None
         try:
             prepared = self._prepared_layer
-            if prepared.layer_index != layer_index or len(prepared.parts) != EPLB_FULL_STAGING_PARTS:
+            if prepared.layer_index != layer_index or len(prepared.parts) != 1:
                 raise RuntimeError("invalid full EPLB prepared layer")
+            # All ranks finished staging the complete layer before the manager's
+            # ready-MIN gate. Keep copies and routing publication on the same
+            # stream; the worker waits on the consumed event before reuse.
             self._commit_full_part(layer_index, buffer_index, changed_dst_slots, 0)
-            torch.cuda.current_stream().synchronize()
         except BaseException as exc:
             error = exc
-        self._full_phase_gate(error)  # All ranks consumed part 0 before staging reuse.
-        error = None
-        try:
-            self._copy_part(prepared.parts[1])
-        except BaseException as exc:
-            error = exc
-        self._full_phase_gate(error)  # All incoming part-1 transfers are complete.
-        error = None
-        try:
-            self._commit_full_part(layer_index, buffer_index, changed_dst_slots, 1)
-            torch.cuda.current_stream().synchronize()
-            self._prepared_layer = None
-        except BaseException as exc:
-            error = exc
-        self._full_phase_gate(error)  # All live weight slices are complete before publish.
+        self._full_phase_gate(error)  # Propagate enqueue failures before any rank publishes.
+        self._prepared_layer = None
 
     def _commit_full_part(self, layer_index, buffer_index, changed_dst_slots, part_index):
         for (_, live), (_, staging) in zip(self.live[layer_index], self.staging[buffer_index]):
@@ -275,8 +264,7 @@ class NixlEPLBTransfer:
         self._finish_transfer_generation()
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
-        # Full layouts stage every changed row of one layer before publishing;
-        # this makes arbitrary overwrite cycles safe without eight full layers.
+        # Stage complete incoming rows before any overwrite, including cycles.
         self._init_staging(weights, transfer_group, global_rank, world_size)
         self._nixl_agent = None
         self._registered_descs = None
@@ -289,25 +277,10 @@ class NixlEPLBTransfer:
         self._same_node_ranks = set()
         self._cross_node_ranks = set()
         self._push_stream = torch.cuda.Stream(device=self.device)
-        self._batch_memcpy = _CudaBatchMemcpy()
+        self._batch_memcpy = CudaBatchMemcpy()
         try:
             self._init_ipc_metadata()
             self._init_push_layouts()
-            if self._cross_node_ranks:
-                os.environ.setdefault("UCX_TLS", self._DEFAULT_UCX_TLS)
-                try:
-                    import nixl
-                except Exception as exc:
-                    raise RuntimeError("NIXL EPLB backend requires the nixl package for cross-node transfer") from exc
-                agent_name = f"lightllm-eplb-{socket.gethostname()}-{os.getpid()}-rank-{global_rank}"
-                config = nixl.nixl_agent_config(enable_prog_thread=True, enable_listen_thread=False, backends=["UCX"])
-                self._nixl_agent = nixl.nixl_agent(agent_name, config)
-                reg_tensors = [tensor for layer in self.live for _, tensor in layer] + [
-                    tensor for staging in self.staging for _, tensor in staging
-                ]
-                self._registered_descs = self._nixl_agent.get_reg_descs(reg_tensors)
-                self._nixl_agent.register_memory(self._registered_descs, backends=["UCX"])
-                self._init_remote_metadata()
         except Exception as exc:
             self.shutdown()
             if isinstance(exc, RuntimeError):
@@ -323,6 +296,7 @@ class NixlEPLBTransfer:
     def _init_ipc_metadata(self) -> None:
         hostnames = [None] * self.world_size
         dist.all_gather_object(hostnames, socket.gethostname(), group=self.transfer_group)
+        self._rank_hostnames = hostnames
         local_hostname = hostnames[self.global_rank]
         self._needs_staging_reuse_barrier = len(set(hostnames)) < len(hostnames)
         self._same_node_ranks = {rank for rank, hostname in enumerate(hostnames) if hostname == local_hostname}
@@ -480,10 +454,43 @@ class NixlEPLBTransfer:
                             size,
                         )
                     )
-        push_batch = self._batch_memcpy.prepare(push_descriptors) if push_descriptors else None
+        push_batch = self._batch_memcpy.prepare_memcpy_batch(push_descriptors) if push_descriptors else None
         return self._PreparedPart(dict(remote_entries), push_batch, part_index)
 
+    def _ensure_cross_node_transfer(self, layer_plans):
+        # Plans contain global steps on every rank. Make the same decision even
+        # on nonparticipants, since remote metadata exchange is collective.
+        if not any(
+            self._rank_hostnames[step.src_rank] != self._rank_hostnames[step.dst_rank]
+            for _, plan in layer_plans
+            for step in plan
+        ):
+            return
+        if self._nixl_agent is not None:
+            return
+        try:
+            os.environ.setdefault("UCX_TLS", self._DEFAULT_UCX_TLS)
+            try:
+                import nixl
+            except Exception as exc:
+                raise RuntimeError("NIXL EPLB backend requires the nixl package for cross-node transfer") from exc
+            agent_name = f"lightllm-eplb-{socket.gethostname()}-{os.getpid()}-rank-{self.global_rank}"
+            config = nixl.nixl_agent_config(enable_prog_thread=True, enable_listen_thread=False, backends=["UCX"])
+            self._nixl_agent = nixl.nixl_agent(agent_name, config)
+            reg_tensors = [tensor for layer in self.live for _, tensor in layer] + [
+                tensor for staging in self.staging for _, tensor in staging
+            ]
+            self._registered_descs = self._nixl_agent.get_reg_descs(reg_tensors)
+            self._nixl_agent.register_memory(self._registered_descs, backends=["UCX"])
+            self._init_remote_metadata()
+        except Exception as exc:
+            self.shutdown()
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError("NIXL EPLB initialization failed") from exc
+
     def prepare_transfer(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
+        self._ensure_cross_node_transfer(layer_plans)
         return [
             self._PreparedLayer(
                 layer_index,
@@ -553,7 +560,7 @@ class NixlEPLBTransfer:
 
     def _copy_part(self, prepared_part) -> None:
         if prepared_part.push_batch is not None:
-            self._batch_memcpy.enqueue(prepared_part.push_batch, self._push_stream.cuda_stream)
+            self._batch_memcpy.cudaMemcpyBatchAsync(prepared_part.push_batch, self._push_stream.cuda_stream)
         xfers = [
             self._get_remote_read(src_rank, entries, prepared_part.part_index)
             for src_rank, entries in prepared_part.remote_entries.items()
@@ -644,135 +651,3 @@ def _commit_staging_rows(
         live.narrow(0, run_start, run_length).copy_(staging.narrow(0, run_start, run_length), non_blocking=True)
         if dst_slot is not None:
             run_start = previous = dst_slot
-
-
-class _CudaMemLocation(ctypes.Structure):
-    _fields_ = [("type", ctypes.c_int), ("id", ctypes.c_int)]
-
-
-class _CudaMemcpyAttributes(ctypes.Structure):
-    _fields_ = [
-        ("srcAccessOrder", ctypes.c_int),
-        ("srcLocHint", _CudaMemLocation),
-        ("dstLocHint", _CudaMemLocation),
-        ("flags", ctypes.c_uint),
-    ]
-
-
-@dataclass
-class _PreparedCudaMemcpyBatch:
-    """Host-side arrays retained for one cudaMemcpyBatchAsync submission."""
-
-    dsts: object
-    srcs: object
-    sizes: object
-    attrs: _CudaMemcpyAttributes
-    attrs_idxs: object
-    count: int
-
-
-class _CudaBatchMemcpy:
-    """CUDA 13.x ``cudaMemcpyBatchAsync`` binding for EPLB source-push."""
-
-    _SRC_ACCESS_ORDER_STREAM = 1
-    _PREFER_OVERLAP_WITH_COMPUTE = 1
-    _CUDA_13_0 = 13000
-    _CUDA_14_0 = 14000
-
-    def __init__(self, library=None):
-        if library is None:
-            path = self._find_loaded_cudart()
-            if path is None:
-                raise RuntimeError(
-                    "NIXL same-node source-push requires CUDA Runtime 13.x cudaMemcpyBatchAsync; "
-                    "libcudart.so.13 is not loaded"
-                )
-            try:
-                library = ctypes.CDLL(path)
-            except OSError as exc:
-                raise RuntimeError(f"cannot load libcudart: {exc}") from exc
-
-        try:
-            runtime_get_version = library.cudaRuntimeGetVersion
-            self._batch_async = library.cudaMemcpyBatchAsync
-            self._get_error_string = library.cudaGetErrorString
-        except AttributeError as exc:
-            raise RuntimeError("cudaMemcpyBatchAsync is unavailable") from exc
-
-        runtime_get_version.restype = ctypes.c_int
-        runtime_get_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
-        self._get_error_string.restype = ctypes.c_char_p
-        self._get_error_string.argtypes = [ctypes.c_int]
-        runtime_version = ctypes.c_int()
-        result = runtime_get_version(ctypes.byref(runtime_version))
-        if result != 0:
-            raise RuntimeError(f"cudaRuntimeGetVersion failed with CUDA error {result}")
-        if not self._CUDA_13_0 <= runtime_version.value < self._CUDA_14_0:
-            raise RuntimeError(
-                f"cudaMemcpyBatchAsync requires CUDA Runtime 13.x (13.0 ABI), found {runtime_version.value}"
-            )
-
-        pointer_array = ctypes.POINTER(ctypes.c_void_p)
-        self._batch_async.restype = ctypes.c_int
-        self._batch_async.argtypes = [
-            pointer_array,
-            pointer_array,
-            ctypes.POINTER(ctypes.c_size_t),
-            ctypes.c_size_t,
-            ctypes.POINTER(_CudaMemcpyAttributes),
-            ctypes.POINTER(ctypes.c_size_t),
-            ctypes.c_size_t,
-            ctypes.c_void_p,
-        ]
-
-    @staticmethod
-    def prepare(copies: Iterable[Tuple[int, int, int]]) -> _PreparedCudaMemcpyBatch:
-        copies = tuple(copies)
-        if not copies:
-            raise ValueError("cudaMemcpyBatchAsync requires at least one copy")
-        for src, dst, size in copies:
-            if not src or not dst or size <= 0:
-                raise ValueError("cudaMemcpyBatchAsync requires non-null pointers and positive sizes")
-        count = len(copies)
-        dsts = (ctypes.c_void_p * count)(*(dst for _, dst, _ in copies))
-        srcs = (ctypes.c_void_p * count)(*(src for src, _, _ in copies))
-        sizes = (ctypes.c_size_t * count)(*(size for _, _, size in copies))
-        attrs = _CudaMemcpyAttributes()
-        attrs.srcAccessOrder = _CudaBatchMemcpy._SRC_ACCESS_ORDER_STREAM
-        attrs.flags = _CudaBatchMemcpy._PREFER_OVERLAP_WITH_COMPUTE
-        attrs_idxs = (ctypes.c_size_t * 1)(0)
-        return _PreparedCudaMemcpyBatch(dsts, srcs, sizes, attrs, attrs_idxs, count)
-
-    def enqueue(self, prepared: _PreparedCudaMemcpyBatch, stream: int) -> None:
-        result = self._batch_async(
-            prepared.dsts,
-            prepared.srcs,
-            prepared.sizes,
-            prepared.count,
-            ctypes.byref(prepared.attrs),
-            prepared.attrs_idxs,
-            1,
-            ctypes.c_void_p(stream),
-        )
-        if result != 0:
-            message = self._get_error_string(result)
-            error = message.decode("utf-8") if message else f"CUDA error {result}"
-            raise RuntimeError(f"cudaMemcpyBatchAsync failed: {error}")
-
-    @staticmethod
-    def _find_loaded_cudart() -> Optional[str]:
-        """Return a mapped CUDA 13 runtime without loading CUDA as a side effect."""
-        try:
-            with open("/proc/self/maps") as maps:
-                for line in maps:
-                    if "libcudart" not in line:
-                        continue
-                    path_start = line.find("/")
-                    if path_start < 0:
-                        continue
-                    path = line[path_start:].strip().removesuffix(" (deleted)")
-                    if re.search(r"libcudart[^/]*\.so\.13(?:\D|$)", path):
-                        return path
-        except OSError:
-            pass
-        return None
