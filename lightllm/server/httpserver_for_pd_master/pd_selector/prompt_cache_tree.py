@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass, field
-from threading import Lock, RLock
+from threading import RLock
 from typing import Dict, Optional, Tuple
 
 from sortedcontainers import SortedDict
@@ -26,13 +26,14 @@ class PromptCacheMatchResult:
 
 @dataclass(slots=True)
 class _PromptCacheNode:
-    """单字符边的 trie 节点：parent --edge_char--> self。"""
+    """压缩边节点；key 中所有采样字符共享处理位置与插入时间。"""
 
     children: Dict[str, "_PromptCacheNode"] = field(default_factory=dict)
     parent: Optional["_PromptCacheNode"] = None
-    edge_char: Optional[str] = None
+    key: str = ""
     last_prefill_node: Optional[str] = None
     last_insert_time: Optional[float] = None
+    # 边末端字符的 LRU 序号；向边起点回退时每个字符加 1。
     last_time_mark: int = 0
 
 
@@ -40,9 +41,9 @@ class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    prompt 先按 sample_stride 抽稀成 key，再递归按单字符建树/匹配。
+    prompt 先按 sample_stride 抽稀成 key，再按压缩边建树/匹配。
     recursion_limit 在初始化时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
-    整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
+    容量按采样字符数计算；超限时按 LRU 删除或裁剪叶边。
     """
 
     def __init__(
@@ -55,7 +56,7 @@ class PromptCacheTree:
         """
         Args:
             sample_stride: 每隔多少个字符抽 1 个作为 trie key。
-            max_node_count: 树中允许的最大节点数（不含 root）；超限时触发 LRU 驱逐。
+            max_node_count: 树中允许的最大采样字符数（不含 root）；超限时触发 LRU 驱逐。
             evict_node_batch: 每次驱逐时在超出量基础上额外腾出的节点缓冲数。
             recursion_limit: 初始化时通过 sys.setrecursionlimit 设置的调用栈深度上限。
         """
@@ -77,7 +78,7 @@ class PromptCacheTree:
         self._node_count = 0
         self._leaf_lru: SortedDict[int, _PromptCacheNode] = SortedDict()
         self._lock = RLock()
-        self._time_mark_lock = Lock()
+        self._time_mark = -1
 
     def _to_key(self, text: str) -> str:
         return text[:: self.sample_stride]
@@ -89,7 +90,7 @@ class PromptCacheTree:
         """将 text 的前缀路径写入树，并关联到 prefill_node。
 
         路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
-        max_node_count 会立即按 LRU 驱逐一批叶节点。
+        max_node_count 会立即按 LRU 删除或裁剪叶边。
 
         Args:
             text: 原始 prompt 文本。
@@ -106,48 +107,100 @@ class PromptCacheTree:
             self._evict_if_needed()
 
     def _insert_at(self, node: _PromptCacheNode, key: str, depth: int, prefill_node: str) -> None:
-        try:
-            if depth >= len(key):
-                return
-
-            ch = key[depth]
-            child = node.children.get(ch)
+        start = node
+        time_mark = self._time_mark
+        insert_time = time.monotonic()
+        root = self.root
+        leaf_lru = self._leaf_lru
+        while depth < len(key):
+            child = node.children.get(key[depth])
             if child is None:
-                child = _PromptCacheNode(
-                    parent=node,
-                    edge_char=ch,
-                    last_insert_time=time.monotonic(),
-                )
-                child.last_time_mark = self._gen_time_mark()
-                node.children[ch] = child
-                self._node_count += 1
+                if node is not root and not node.children:
+                    leaf_lru.pop(node.last_time_mark, None)
+                suffix = key[depth:]
+                child = _PromptCacheNode(parent=node, key=suffix)
+                node.children[suffix[0]] = child
+                self._node_count += len(suffix)
+                time_mark += len(suffix)
+                node = child
+                break
+            matched = self._common_prefix_length(key, depth, child.key)
+            if matched < len(child.key):
+                child = self._split_node(child, matched)
+            depth += matched
+            node = child
 
-            self._insert_at(child, key, depth + 1, prefill_node)
-        finally:
-            if node is not self.root:
+        # insert holds the tree lock throughout all time-mark and LRU updates.
+        # Refresh leaf to root to preserve the original eviction order.
+        leaf = node if node is not root and not node.children else None
+        if leaf is not None:
+            leaf_lru.pop(leaf.last_time_mark, None)
+        while True:
+            if node is not root:
                 node.last_prefill_node = prefill_node
-                node.last_insert_time = time.monotonic()
-            if node.last_time_mark in self._leaf_lru:
-                self._leaf_lru.pop(node.last_time_mark, None)
-            node.last_time_mark = self._gen_time_mark()
-            if self._is_leaf(node):
-                self._leaf_lru[node.last_time_mark] = node
+                node.last_insert_time = insert_time
+                node.last_time_mark = time_mark + 1
+                time_mark += len(node.key)
+            else:
+                time_mark += 1
+                node.last_time_mark = time_mark
+            if node is start:
+                break
+            parent = node.parent
+            # Prefix endpoints cease to be metadata boundaries once the whole
+            # path is refreshed. Coalesce unary edges, including growing chats.
+            while parent is not start and len(parent.children) == 1:
+                node.key = parent.key + node.key
+                time_mark += len(parent.key)
+                node.parent = parent.parent
+                node.parent.children[node.key[0]] = node
+                parent = node.parent
+            node = node.parent
+        if leaf is not None:
+            leaf_lru[leaf.last_time_mark] = leaf
+        self._time_mark = time_mark
 
-    def _gen_time_mark(self) -> int:
-        with self._time_mark_lock:
-            time_mark = getattr(self, "_time_mark", -1) + 1
-            self._time_mark = time_mark
-            return time_mark
+    @staticmethod
+    def _common_prefix_length(key: str, depth: int, edge: str) -> int:
+        if key.startswith(edge, depth):
+            return len(edge)
+        remaining = len(key) - depth
+        if remaining == 1 or key[depth + 1] != edge[1]:
+            return 1
+        if remaining < len(edge) and edge.startswith(key[depth:]):
+            return remaining
+        # The child lookup already matched the first character. Use C string
+        # comparisons to locate a mismatch without walking characters in Python.
+        low, high = 1, min(remaining, len(edge))
+        while low < high:
+            mid = (low + high + 1) // 2
+            if key.startswith(edge[:mid], depth):
+                low = mid
+            else:
+                high = mid - 1
+        return low
+
+    def _split_node(self, node: _PromptCacheNode, prefix_len: int) -> _PromptCacheNode:
+        parent = node.parent
+        prefix, suffix = node.key[:prefix_len], node.key[prefix_len:]
+        middle = _PromptCacheNode(
+            children={suffix[0]: node},
+            parent=parent,
+            key=prefix,
+            last_prefill_node=node.last_prefill_node,
+            last_insert_time=node.last_insert_time,
+            last_time_mark=node.last_time_mark + len(suffix),
+        )
+        parent.children[prefix[0]] = middle
+        node.parent = middle
+        node.key = suffix
+        return middle
 
     def _evict_if_needed(self) -> None:
         if self._node_count <= self.max_node_count:
             return
         need = self._node_count - self.max_node_count + self.evict_node_batch
-        removed = 0
-        while removed < need and self._leaf_lru:
-            _, node = self._leaf_lru.peekitem(0)
-            self._remove_leaf_node(node)
-            removed += 1
+        self._evict_chars(need)
 
     def prefix_match(self, text: str) -> PromptCacheMatchResult:
         """
@@ -163,58 +216,84 @@ class PromptCacheTree:
         key = self._to_key(text)
         with self._lock:
             node, matched = self._match_at(self.root, key, 0)
-            if node is self.root:
-                prefill_node = None
-            else:
-                prefill_node = node.last_prefill_node
-            if matched <= 0:
-                matched_char_count = 0
-            else:
-                matched_char_count = min((matched - 1) * self.sample_stride + 1, len(text))
-            return PromptCacheMatchResult(
-                prefill_node=prefill_node,
-                matched_char_count=matched_char_count,
-                input_char_count=len(text),
-                last_insert_time=node.last_insert_time if node is not self.root else None,
-            )
+            # The last matched sample always falls within the input text.
+            matched_char_count = (matched - 1) * self.sample_stride + 1 if matched else 0
+            return PromptCacheMatchResult(node.last_prefill_node, matched_char_count, len(text), node.last_insert_time)
 
     def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:
-        if depth >= len(key):
-            return node, depth
-
-        child = node.children.get(key[depth])
-        if child is None:
-            return node, depth
-
-        return self._match_at(child, key, depth + 1)
+        key_len = len(key)
+        while depth < key_len:
+            child = node.children.get(key[depth])
+            if child is None:
+                break
+            node = child
+            edge = child.key
+            if len(edge) == 1:
+                depth += 1
+                continue
+            if key.startswith(edge, depth):
+                depth += len(edge)
+                continue
+            # Keep shallow misses local without scanning long edges in Python.
+            matched = 1
+            while matched < 4 and depth + matched < key_len:
+                if key[depth + matched] != edge[matched]:
+                    return node, depth + matched
+                matched += 1
+            if depth + matched == key_len:
+                return node, key_len
+            if key.startswith(edge[:32], depth):
+                matched = 32
+            else:
+                while matched < 32 and depth + matched < key_len:
+                    if key[depth + matched] != edge[matched]:
+                        return node, depth + matched
+                    matched += 1
+            if depth + matched == key_len:
+                return node, key_len
+            remaining = key_len - depth
+            if remaining < len(edge) and edge.startswith(key[depth:]):
+                return node, key_len
+            low, high = matched, min(remaining, len(edge)) - 1
+            while low < high:
+                mid = (low + high + 1) // 2
+                if key.startswith(edge[:mid], depth):
+                    low = mid
+                else:
+                    high = mid - 1
+            return node, depth + low
+        return node, depth
 
     def evict_lru_nodes(self) -> int:
-        """节点数超上限时，按 LRU 从叶节点批量删除。
+        """采样字符数超上限时，按 LRU 删除或裁剪叶边。
 
         删除数量为 ``_node_count - max_node_count + evict_node_batch``，
-        使节点数降到 max_node_count 以下并留出缓冲。
+        使采样字符数降到 max_node_count 以下并留出缓冲。
 
         Returns:
-            实际删除的叶节点数量；未超上限时返回 0。
+            实际删除的采样字符数；未超上限时返回 0。
         """
         with self._lock:
             if self._node_count <= self.max_node_count:
                 return 0
             need = self._node_count - self.max_node_count + self.evict_node_batch
-            removed = 0
-            while removed < need and self._leaf_lru:
-                _, node = self._leaf_lru.peekitem(0)
-                self._remove_leaf_node(node)
-                removed += 1
-            return removed
+            return self._evict_chars(need)
 
-    def _remove_leaf_node(self, node: _PromptCacheNode) -> None:
-        assert self._is_leaf(node)
-        parent = node.parent
-        assert parent is not None and node.edge_char is not None
-
-        self._leaf_lru.pop(node.last_time_mark, None)
-        parent.children.pop(node.edge_char, None)
-        self._node_count -= 1
-        if self._is_leaf(parent):
-            self._leaf_lru[parent.last_time_mark] = parent
+    def _evict_chars(self, need: int) -> int:
+        removed = 0
+        while removed < need and self._leaf_lru:
+            _, node = self._leaf_lru.popitem(0)
+            size = len(node.key)
+            count = min(size, need - removed)
+            self._node_count -= count
+            removed += count
+            if count < size:
+                node.key = node.key[:-count]
+                node.last_time_mark += count
+                self._leaf_lru[node.last_time_mark] = node
+            else:
+                parent = node.parent
+                parent.children.pop(node.key[0])
+                if self._is_leaf(parent):
+                    self._leaf_lru[parent.last_time_mark] = parent
+        return removed

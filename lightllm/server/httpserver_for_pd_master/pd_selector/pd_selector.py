@@ -102,11 +102,10 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
-        p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        p_node, selection_extra_info = self.policy.select_worker_with_cache_info(
+            self.prefill_nodes, request_text=prompt
+        )
         d_node = self._importance_sampling(self.decode_nodes)
-        # 选点完成后再查询一次前缀树；只有 cache 实际属于最终选中的 P 节点
-        # 时才返回命中率，避免负载均衡改派节点后误判为高命中。
-        selection_extra_info = self.policy.get_estimated_cache_info(p_node, prompt)
 
         logger.info(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
