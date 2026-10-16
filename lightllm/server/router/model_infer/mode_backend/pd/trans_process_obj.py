@@ -55,7 +55,7 @@ class KVTransProcess:
                 return False
             else:
                 return True
-        except:
+        except Exception:
             return False
 
     def killself(self):

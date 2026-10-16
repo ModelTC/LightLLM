@@ -50,7 +50,7 @@ class AfsUtils:
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except:
+            except OSError:
                 pass
 
     def load_tensor_afs(self, name: str) -> Optional[torch.Tensor]:
@@ -132,7 +132,7 @@ class SepEmbedHandler:
             ans = self.afs_utils.save_tensor_afs(md5, tensor)
             self.redis_client.update(md5)
             return ans
-        except:
+        except Exception:
             return False
 
     def load(self, md5: str) -> Optional[torch.Tensor]:
