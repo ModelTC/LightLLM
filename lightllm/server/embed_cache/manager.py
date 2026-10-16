@@ -63,7 +63,13 @@ def start_cache_manager(args: StartArgs, pipe_writer):
     from rpyc.utils.server import ThreadedServer
     import lightllm.utils.rpyc_fix_utils as _
 
-    t = ThreadedServer(service, port=get_shm_port_args().cache_port, protocol_config={"allow_pickle": True})
+    # all clients run on the same host and connect via localhost, so do not listen on external interfaces
+    t = ThreadedServer(
+        service,
+        hostname="127.0.0.1",
+        port=get_shm_port_args().cache_port,
+        protocol_config={"allow_pickle": True},
+    )
     pipe_writer.send("init ok")
     t.start()
 
