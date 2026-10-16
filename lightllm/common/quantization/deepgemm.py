@@ -119,7 +119,12 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return out
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         self.use_ue8m0_scales = (
             self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
@@ -135,7 +140,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             )
         weight_scale_out_dim = sum(weight_scale_out_dims)
         weight_scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
         if self.use_packed_ue8m0:
             aligned_out_dim = (out_dim + 3) // 4 * 4
@@ -211,12 +216,17 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         raise NotImplementedError("fp4fp8-b32-deepgemm is only implemented for fused MoE expert weights")
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         assert in_dim % 2 == 0, "FP4 packed weight requires even input dimension"
         assert in_dim % self.block_size == 0, "FP4 scale dimension must be divisible by block_size"
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8).cuda(device_id)
         weight_scale = torch.empty(expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.int32).cuda(
             device_id

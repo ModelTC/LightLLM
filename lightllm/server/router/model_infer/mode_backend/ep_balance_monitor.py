@@ -8,7 +8,6 @@ import torch.distributed as dist
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.eplb_utils import find_ep_moe_weights
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_balance import PrefillEPBalanceCounters
-from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.dist_utils import (
@@ -191,9 +190,7 @@ class EPBalanceMonitor:
         self._common_round_end = torch.zeros((), dtype=torch.int64)
         self._monitor_error = torch.zeros((), dtype=torch.int32)
 
-        self.gloo_group = dist_group_manager.ep_balance_monitor_group
-        if self.gloo_group is None:
-            raise RuntimeError("EP balance monitor requires a pre-created dedicated Gloo process group")
+        self.gloo_group = dist.new_group(ranks=list(range(self.world_size)), backend="gloo")
         self.metric_client = MetricClient(get_shm_port_args().metric_port) if self.global_rank == 0 else None
         threading.Thread(target=self._monitor_loop, daemon=True, name="ep-balance-monitor").start()
 

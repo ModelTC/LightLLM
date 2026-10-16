@@ -1,4 +1,4 @@
-"""Complete-layout EPLB migration across two, three and eight CUDA GPUs."""
+"""Complete-layout EPLB migration and stream-ordered publication across CUDA GPUs."""
 import math
 import os
 import socket
@@ -130,7 +130,7 @@ def _full_layout_worker(rank, port, world_size, redundant=0, inject_failure=Fals
     assert transfer.staging_depth == 1
     assert all(tensor.shape[0] == capacity for _, tensor in transfer.staging[0])
     actual = sum(tensor.nbytes for staging in transfer.staging for _, tensor in staging)
-    expected = sum(capacity * ((tensor[0].numel() + 1) // 2) * tensor.element_size() for _, tensor in transfer.live[0])
+    expected = sum(tensor.nbytes for _, tensor in transfer.live[0])
     shared_expected = sum(
         math.prod(get_eplb_staging_tensor_shape(tensor, capacity)) * tensor.element_size()
         for _, tensor in transfer.live[0]
@@ -169,8 +169,10 @@ def _full_layout_worker(rank, port, world_size, redundant=0, inject_failure=Fals
         maps, counts = build_logical_to_physical_maps_for_layers(
             target[None], experts, source_rank=rank, node_world_size=world_size
         )
+        maps, counts = maps.cuda(), counts.cuda()
 
         snapshots = {}
+        published = {}
 
         def assert_old(layer):
             assert_values(layer, current)
@@ -186,23 +188,17 @@ def _full_layout_worker(rank, port, world_size, redundant=0, inject_failure=Fals
             torch.cuda.current_stream().wait_stream(stream)
 
         def publish(layer):
-            assert_values(layer, target)
-            expected_old = []
-            values = (current[rank].cuda() + 10 * layer).view(-1, 1)
-            expected_old.extend(
-                [
-                    (values * 17 + torch.arange(17, device="cuda")).to(torch.uint8),
-                    (values + 0.5).float(),
-                    (values + torch.arange(5, device="cuda")).to(torch.int32),
-                    (values * 9 + torch.arange(9, device="cuda")).to(torch.float16),
-                    (values + 0.25 + torch.arange(3, device="cuda")).float(),
-                ]
-            )
-            for snapshot, expected in zip(snapshots[layer], expected_old):
-                torch.testing.assert_close(snapshot, expected)
             state = weights[layer].expert_parallel_state.eplb
-            state.logical_to_physical_map.copy_(maps[0])
-            state.logical_replica_count.copy_(counts[0])
+            state.logical_to_physical_map.copy_(maps[0], non_blocking=True)
+            state.logical_replica_count.copy_(counts[0], non_blocking=True)
+            # Observe the published generation on the same stream without a
+            # host assertion that would mask missing asynchronous ordering.
+            published[layer] = tuple(
+                t.clone()
+                for pack in (weights[layer].w13, weights[layer].w2)
+                for t in (pack.weight, pack.weight_scale, pack.weight_zero_point)
+                if t is not None
+            )
             state.physical_to_logical = target.clone()
             state.placement_generation += 1
 
@@ -210,6 +206,17 @@ def _full_layout_worker(rank, port, world_size, redundant=0, inject_failure=Fals
         torch.cuda.synchronize()
         for layer, weight in enumerate(weights):
             assert_values(layer, target)
+            for tensors, placement in [(snapshots[layer], current), (published[layer], target)]:
+                values = (placement[rank].cuda() + 10 * layer).view(-1, 1)
+                expected = [
+                    (values * 17 + torch.arange(17, device="cuda")).to(torch.uint8),
+                    (values + 0.5).float(),
+                    (values + torch.arange(5, device="cuda")).to(torch.int32),
+                    (values * 9 + torch.arange(9, device="cuda")).to(torch.float16),
+                    (values + 0.25 + torch.arange(3, device="cuda")).float(),
+                ]
+                for observed, reference in zip(tensors, expected):
+                    torch.testing.assert_close(observed, reference)
             state = weight.expert_parallel_state.eplb
             assert state.placement_generation == generation
             for expert in range(experts):
@@ -221,15 +228,15 @@ def _full_layout_worker(rank, port, world_size, redundant=0, inject_failure=Fals
     if inject_failure:
         target = current.roll(1, dims=0)
         plan = build_transfer_plan(current, target, experts, world_size, world_size)
-        original_copy = transfer._copy_part
+        original_commit = transfer._commit_full_part
 
-        def fail_second(prepared):
-            if rank == 0 and prepared.part_index == 1:
-                raise RuntimeError("injected second part failure")
-            return original_copy(prepared)
+        def fail_commit(*args):
+            if rank == 0:
+                raise RuntimeError("injected commit enqueue failure")
+            return original_commit(*args)
 
-        transfer._copy_part = fail_second
-        plans = [(layer, plan) for layer in (0, 1, 2)]
+        transfer._commit_full_part = fail_commit
+        plans = [(0, plan)]
         transfer.start(plans, transfer.prepare_transfer(plans))
         layer, buffer_index = _wait_for_ready_prefix(transfer, control_group)[0]
         with pytest.raises(RuntimeError, match="full EPLB migration phase failed"):
@@ -244,15 +251,15 @@ def _full_layout_worker(rank, port, world_size, redundant=0, inject_failure=Fals
     dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("world_size", [2, 3, 8])
-@pytest.mark.parametrize("redundant", [0, 1])
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
+@pytest.mark.parametrize("redundant", [0, 1, 2])
 def test_full_layout_gpu_overwrite_cycles_and_staging_reuse(world_size, redundant):
     if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
         pytest.skip(f"requires {world_size} CUDA GPUs")
     mp.spawn(_full_layout_worker, args=(_free_port(), world_size, redundant), nprocs=world_size, join=True)
 
 
-def test_full_layout_gpu_second_part_failure_propagates():
+def test_full_layout_gpu_commit_enqueue_failure_propagates():
     if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
         pytest.skip("requires two CUDA GPUs")
     mp.spawn(_full_layout_worker, args=(_free_port(), 2, 0, True), nprocs=2, join=True)

@@ -93,7 +93,8 @@ def test_weight_creation_preserves_expert_axis_and_loading_views(
 
 
 @pytest.mark.parametrize("redundant", [0, 2])
-def test_eplb_one_primary_expert_fp8_constructor_and_checkpoint_load(monkeypatch, device_id, redundant):
+@pytest.mark.parametrize("draft", [False, True])
+def test_eplb_one_primary_expert_fp8_constructor_and_checkpoint_load(monkeypatch, device_id, redundant, draft):
     if not HAS_DEEPGEMM:
         pytest.skip("DeepGEMM is required")
     args = StartArgs(
@@ -126,8 +127,16 @@ def test_eplb_one_primary_expert_fp8_constructor_and_checkpoint_load(monkeypatch
         moe_intermediate_size=128,
         data_type=torch.bfloat16,
         quant_method=DeepGEMMFP8w8a8B128QuantizationMethod(),
-        network_config={"num_experts_per_tok": 2, "norm_topk_prob": True, "scoring_func": "softmax"},
+        network_config={
+            "num_experts_per_tok": 2,
+            "norm_topk_prob": True,
+            "scoring_func": "softmax",
+            "is_mtp_draft_model": draft,
+        },
     )
+    assert weight.expert_parallel_state.eplb is not None
+    assert not weight.expert_parallel_state.eplb.recording
+    assert weight.expert_parallel_state.num_total_physical_experts == 8 * (1 + redundant)
     assert weight.local_n_routed_experts == 1 + redundant
     assert weight.w13.weight.shape == (1 + redundant, 256, 128)
     assert weight.w2.weight.shape == (1 + redundant, 128, 128)

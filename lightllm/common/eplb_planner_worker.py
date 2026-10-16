@@ -2,8 +2,39 @@
 import atexit
 import multiprocessing as mp
 import os
+import subprocess
+import sys
 import time
 import threading
+
+
+class _PlannerProcess:
+    """Small Process-compatible owner for the independently executed actor."""
+
+    def __init__(self, child, parent_pid):
+        self._popen = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), str(child.fileno()), str(parent_pid)],
+            pass_fds=(child.fileno(),),
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        )
+
+    def is_alive(self):
+        return self._popen.poll() is None
+
+    def join(self, timeout):
+        try:
+            self._popen.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def terminate(self):
+        self._popen.terminate()
+
+    def kill(self):
+        self._popen.kill()
+
+    def close(self):
+        self._popen.wait()
 
 
 class EPLBPlannerWorker:
@@ -12,10 +43,15 @@ class EPLBPlannerWorker:
         self._job_id = 0
         self._rpc_lock = threading.Lock()
         self._parent, child = mp.get_context("spawn").Pipe(duplex=True)
-        self._process = mp.get_context("spawn").Process(target=_serve, args=(child, os.getpid()), daemon=True)
+        self._process = None
         try:
-            self._process.start()
+            # spawn reimports the serving main before its target can hide CUDA.
+            # exec this file directly with a CPU-only environment instead.
+            self._process = _PlannerProcess(child, os.getpid())
             child.close()
+            # Torch's CPU tensor reducers share descriptors through resource_sharer.
+            # Synchronize its authentication key privately, before importing Torch.
+            self._parent.send_bytes(bytes(mp.current_process().authkey))
             hello = self._receive(timeout_s)
             if hello.get("kind") != "ready" or hello.get("cuda_initialized"):
                 raise RuntimeError(f"EPLB planner worker startup failed: {hello}")
@@ -26,6 +62,7 @@ class EPLBPlannerWorker:
             except OSError:
                 pass
             self.close()
+            self._parent.close()
             raise
         atexit.register(self.close)
 
@@ -128,6 +165,26 @@ def _watch_parent(expected_parent_pid):
         time.sleep(0.25)
 
 
+def _load_cpu_planner():
+    """Load the CPU modules without executing the GPU model package initializers."""
+    import importlib.util
+    import types
+    from pathlib import Path
+
+    name = "_lightllm_eplb_cpu"
+    directory = Path(__file__).resolve().parent / "basemodel/layer_weights/meta_weights/fused_moe"
+    package = types.ModuleType(name)
+    package.__path__ = [str(directory)]
+    sys.modules[name] = package
+    for module_name in ("eplb_placement", "eplb_planner"):
+        qualified = f"{name}.{module_name}"
+        spec = importlib.util.spec_from_file_location(qualified, directory / f"{module_name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[qualified] = module
+        spec.loader.exec_module(module)
+    return module
+
+
 def _serve(conn, expected_parent_pid):
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     threading.Thread(target=_watch_parent, args=(expected_parent_pid,), daemon=True).start()
@@ -136,7 +193,7 @@ def _serve(conn, expected_parent_pid):
 
         torch.set_num_threads(1)
         torch.set_num_interop_threads(1)
-        from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import eplb_planner
+        eplb_planner = _load_cpu_planner()
 
         # Startup prewarm is intentionally small and CPU-only.
         eplb_planner.plan_eplb_candidate(
@@ -182,3 +239,11 @@ def _serve(conn, expected_parent_pid):
             pass
     finally:
         conn.close()
+
+
+if __name__ == "__main__":
+    from multiprocessing.connection import Connection
+
+    connection = Connection(int(sys.argv[1]))
+    mp.current_process().authkey = connection.recv_bytes()
+    _serve(connection, int(sys.argv[2]))

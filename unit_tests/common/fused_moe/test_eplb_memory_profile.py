@@ -1,7 +1,7 @@
-"""EPLB reservations reach real KV profiling before any KV allocation."""
+"""EPLB buffers reduce the existing mem_fraction before KV profiling."""
+import json
 from types import SimpleNamespace
 from contextlib import nullcontext
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch
@@ -32,13 +32,24 @@ from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
     FP8StaticPerTensorQuantQwen3NextMemManager,
 )
 from lightllm.models.deepseek2 import model as deepseek_module
+from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.glm5_next import model as glm_module
+from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from lightllm.models.llama import model as llama_module
 from lightllm.models.mixtral import model as mixtral_module
 from lightllm.models.qwen2 import model as qwen_module
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
+from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
+from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.models.qwen3next import model as next_module
 from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils import device_utils, profile_max_tokens
+
+
+@pytest.fixture(autouse=True)
+def supported_eplb_device(monkeypatch):
+    monkeypatch.setattr(device_utils, "is_sm100_gpu", lambda: False)
 
 
 class KVAllocationReached(Exception):
@@ -49,6 +60,9 @@ class KVAllocationReached(Exception):
 def profile_without_allocating(monkeypatch):
     budget = SimpleNamespace(free=40 * 1024 ** 3, total=80 * 1024 ** 3)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _device: SimpleNamespace(total_memory=budget.total))
+    monkeypatch.setattr(profile_max_tokens, "get_current_device_id", lambda: 0)
+    monkeypatch.setattr(memory_module.dist, "is_initialized", lambda: False)
     monkeypatch.setattr(memory_module.dist, "get_world_size", lambda: 1)
     monkeypatch.setattr(memory_module, "get_available_gpu_memory", lambda _world: budget.free / 1024 ** 3)
     monkeypatch.setattr(memory_module, "get_total_gpu_memory", lambda: budget.total / 1024 ** 3)
@@ -85,7 +99,7 @@ def make_expert(layer=0, redundant=0):
 
 def make_model(model_class=Qwen3MOEModel, redundant=0):
     model = model_class.__new__(model_class)
-    model.args = SimpleNamespace(enable_prefill_eplb=True)
+    model.args = StartArgs(enable_ep_moe=True, enable_prefill_eplb=True, run_mode="prefill", mtp_mode=None)
     model.tp_world_size_ = 1  # DP8: the attention TP size is 1, while expert world size is 8.
     model.data_type = torch.bfloat16
     model.max_total_token_num = None
@@ -112,7 +126,7 @@ def make_model(model_class=Qwen3MOEModel, redundant=0):
     return model
 
 
-@pytest.mark.parametrize("redundant,staging", [(0, 2304), (2, 2376)])
+@pytest.mark.parametrize("redundant,staging", [(0, 4608), (2, 4752)])
 @pytest.mark.parametrize(
     "model_class,module,manager_class",
     [
@@ -154,28 +168,43 @@ def test_model_profile_reserves_eplb_before_kv_alloc(
         monkeypatch.setattr(module, "select_mem_manager_class", lambda: construct)
     monkeypatch.setattr(module, "get_added_mtp_kv_layer_num", lambda: 0, raising=False)
 
-    with memory_module.memory_reservation_scope(eplb_utils.get_eplb_memory_reservations(model)):
-        with pytest.raises(KVAllocationReached):
-            model._init_mem_manager()
-
-    expected = {"eplb_staging": staging * 1024 ** 2, "eplb_sampling": 2 * 8 * 40 * 512 * 8 + 512}
-    assert manager.memory_reservations == expected
     budget = profile_without_allocating
+    original_fraction = model.mem_fraction
+    with profile_max_tokens.profile_model_memory(model):
+        pass
+    with pytest.raises(KVAllocationReached):
+        model._init_mem_manager()
+
+    reserved_bytes = staging * 1024 ** 2 + 2 * 8 * 40 * 512 * 8 + 512
+    assert model.mem_fraction == pytest.approx(original_fraction - reserved_bytes / budget.total)
     available = budget.free - budget.total * (1 - model.mem_fraction)
-    assert manager.size == int((available - sum(expected.values())) / manager.get_cell_size())
-    # The original full R0 bug leaves ~1.6 GiB for a 2.25 GiB staging allocation.
-    assert budget.free - manager.size * manager.get_cell_size() >= sum(expected.values())
+    assert manager.size == int(available / manager.get_cell_size())
+    # The KV allocation must leave space for the complete staging layer.
+    assert budget.free - manager.size * manager.get_cell_size() >= reserved_bytes
 
 
-@pytest.mark.parametrize("enabled,draft", [(False, False), (True, True)])
-def test_disabled_eplb_and_draft_do_not_reserve_target_buffers(enabled, draft):
+@pytest.mark.parametrize(
+    "enabled,draft,size,run_mode",
+    [
+        (False, False, None, "prefill"),
+        (True, True, None, "prefill"),
+        (True, False, 1024, "prefill"),
+        (True, False, None, "decode"),
+    ],
+)
+def test_inactive_eplb_draft_and_explicit_kv_size_keep_mem_fraction(monkeypatch, enabled, draft, size, run_mode):
     model = make_model()
     model.args.enable_prefill_eplb = enabled
+    model.args.run_mode = run_mode
     model.is_mtp_draft_model = draft
-    assert eplb_utils.get_eplb_memory_reservations(model) == {}
+    model.max_total_token_num = size
+    monkeypatch.setattr(eplb_utils, "find_ep_moe_weights", lambda _: pytest.fail("EPLB budgeting must be skipped"))
+    with profile_max_tokens.profile_model_memory(model):
+        pass
+    assert model.mem_fraction == 0.98
 
 
-def test_weight_aliases_are_deduplicated_and_non_eplb_layers_are_excluded():
+def test_weight_aliases_are_deduplicated_and_non_eplb_layers_are_excluded(profile_without_allocating):
     model = make_model()
     first, last = model.trans_layers_weight[0].experts, model.trans_layers_weight[-1].experts
     ordinary = make_expert()
@@ -187,10 +216,15 @@ def test_weight_aliases_are_deduplicated_and_non_eplb_layers_are_excluded():
     assert [
         weight for weight in eplb_utils.find_ep_moe_weights(model) if weight.expert_parallel_state.eplb is not None
     ] == [first, last]
-    assert eplb_utils.get_eplb_memory_reservations(model)["eplb_sampling"] == 2 * 2 * 40 * 512 * 8 + 512
+    expected_sampling_bytes = 2 * 2 * 40 * 512 * 8 + 512
+    assert eplb_utils.get_eplb_sampling_peak_nbytes([first, last]) == expected_sampling_bytes
+    reserved_bytes = eplb_utils.get_eplb_staging_nbytes([first, last]) + expected_sampling_bytes
+    assert profile_max_tokens.get_eplb_adjusted_mem_fraction(model) == pytest.approx(
+        model.mem_fraction - reserved_bytes / profile_without_allocating.total
+    )
 
 
-@pytest.mark.parametrize("redundant,expected", [(0, 27), (2, 45)])
+@pytest.mark.parametrize("redundant,expected", [(0, 36), (2, 60)])
 @pytest.mark.parametrize("zero_point", [False, True])
 def test_full_staging_includes_odd_rows_and_scalar_quantization_scales(redundant, expected, zero_point):
     expert = make_expert(redundant=redundant)
@@ -222,48 +256,123 @@ def test_full_staging_includes_odd_rows_and_scalar_quantization_scales(redundant
         FP8StaticPerTensorQuantQwen3NextMemManager,
     ],
 )
-def test_kv_backend_constructors_deduct_reservations_once(profile_without_allocating, manager_class):
+def test_kv_backend_constructors_use_adjusted_mem_fraction_once(profile_without_allocating, manager_class):
     budget = profile_without_allocating
-    budget.free, budget.total = 64 * 1024 ** 2, 0
-    reservations = {"eplb_staging": 1024, "eplb_sampling": 512}
+    model = make_model()
+    with profile_max_tokens.profile_model_memory(model):
+        pass
     manager = manager_class.__new__(manager_class)
-    kwargs = dict(size=None, dtype=torch.bfloat16, head_num=1, head_dim=576, layer_num=8)
+    kwargs = dict(
+        size=None, dtype=torch.bfloat16, head_num=1, head_dim=576, layer_num=8, mem_fraction=model.mem_fraction
+    )
     if issubclass(manager_class, Qwen3NextMemManager):
         kwargs["num_kv_heads"] = kwargs.pop("head_num")
         kwargs["full_att_layer_num"] = kwargs.pop("layer_num")
         kwargs["linear_config"] = SimpleNamespace()
-    with memory_module.memory_reservation_scope(reservations):
-        with pytest.raises(KVAllocationReached):
-            manager_class.__init__(manager, **kwargs)
-    assert manager.memory_reservations == reservations
-    assert manager.size == (budget.free - 1536) // manager.get_cell_size()
+    with pytest.raises(KVAllocationReached):
+        manager_class.__init__(manager, **kwargs)
+    available = budget.free - budget.total * (1 - model.mem_fraction)
+    assert manager.size == int(available / manager.get_cell_size())
 
 
-def test_reservation_scope_restores_after_nested_failure_and_is_thread_local(profile_without_allocating):
-    def construct(reservations=None):
-        manager = memory_module.MemoryManager.__new__(memory_module.MemoryManager)
-        with pytest.raises(KVAllocationReached):
-            memory_module.MemoryManager.__init__(
-                manager, None, torch.bfloat16, 1, 128, 8, memory_reservations=reservations
-            )
-        return manager
-
-    assert construct().memory_reservations == {}
-    with memory_module.memory_reservation_scope({"outer": 1024}):
-        outer = construct()
-        with pytest.raises(RuntimeError, match="nested failure"):
-            with memory_module.memory_reservation_scope({"inner": 512}):
-                assert construct().memory_reservations == {"inner": 512}
-                raise RuntimeError("nested failure")
-        assert construct().memory_reservations == {"outer": 1024}
-        assert construct({}).memory_reservations == {}
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            assert executor.submit(construct).result().memory_reservations == {}
-    assert outer.memory_reservations == {"outer": 1024}
-    assert construct().memory_reservations == {}
+@pytest.mark.parametrize("eplb", [False, True])
+def test_weight_profiling_reserves_mtp_and_optional_eplb(monkeypatch, profile_without_allocating, eplb):
+    model = make_model()
+    model.args.enable_prefill_eplb = eplb
+    model.args.mtp_mode = "vanilla"
+    original_fraction = model.mem_fraction
+    allocations = iter([2 * 1024 ** 3, 10 * 1024 ** 3])
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: next(allocations))
+    monkeypatch.setattr(profile_max_tokens, "get_mtp_weight_layer_num", lambda: 1)
+    weights = [layer.experts for layer in model.trans_layers_weight]
+    eplb_bytes = (
+        eplb_utils.get_eplb_staging_nbytes(weights) + eplb_utils.get_eplb_sampling_peak_nbytes(weights) if eplb else 0
+    )
+    with profile_max_tokens.profile_model_memory(model):
+        assert model.mem_fraction == original_fraction
+    assert model.mem_fraction == pytest.approx(
+        original_fraction - (1024 ** 3 + eplb_bytes) / profile_without_allocating.total
+    )
 
 
-def test_base_model_scopes_overridden_kv_constructor(monkeypatch, profile_without_allocating):
+def test_distributed_budget_uses_minimum_mem_fraction(monkeypatch, profile_without_allocating):
+    model = make_model()
+    weights = [layer.experts for layer in model.trans_layers_weight]
+    reserved_bytes = eplb_utils.get_eplb_staging_nbytes(weights) + eplb_utils.get_eplb_sampling_peak_nbytes(weights)
+    expected_local = model.mem_fraction - reserved_bytes / profile_without_allocating.total
+    monkeypatch.setattr(profile_max_tokens, "get_current_device_id", lambda: 3)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 8)
+    original_tensor = torch.tensor
+    devices = []
+
+    def cpu_tensor(value, *, dtype, device):
+        devices.append(device)
+        return original_tensor(value, dtype=dtype)
+
+    def all_reduce(fraction, op):
+        assert fraction.item() == pytest.approx(expected_local)
+        assert op == torch.distributed.ReduceOp.MIN
+        fraction.fill_(0.8)  # Another rank has less remaining memory.
+
+    monkeypatch.setattr(torch, "tensor", cpu_tensor)
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    assert profile_max_tokens.get_eplb_adjusted_mem_fraction(model) == pytest.approx(0.8)
+    assert devices == ["cuda:3"]
+
+
+def test_eplb_without_experts_keeps_mem_fraction():
+    model = make_model()
+    model.trans_layers_weight = []
+    assert profile_max_tokens.get_eplb_adjusted_mem_fraction(model) == model.mem_fraction
+
+
+def test_insufficient_budget_is_rejected_before_kv_allocation(profile_without_allocating):
+    model = make_model()
+    model.mem_fraction = 0.001
+    with pytest.raises(AssertionError, match="EPLB buffers leave no memory"):
+        profile_max_tokens.get_eplb_adjusted_mem_fraction(model)
+
+
+@pytest.mark.parametrize(
+    "model_class,draft",
+    [
+        (base_module.TpPartBaseModel, False),
+        (deepseek_module.Deepseek2TpPartModel, False),
+        (Deepseek3MTPModel, True),
+        (Qwen3MOEModel, False),
+        (Qwen3MOEMTPModel, True),
+        (Qwen3_5TpPartModel, False),
+        (Qwen3_5MTPModel, True),
+        (Glm5NextMTPModel, True),
+    ],
+)
+def test_config_initialization_sets_model_role_before_weights(tmp_path, model_class, draft):
+    config = dict(
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        hidden_size=16,
+        num_hidden_layers=4,
+        num_nextn_predict_layers=1,
+        mhc=True,
+        is_mtp_draft_model=not draft,
+    )
+    (tmp_path / "config.json").write_text(json.dumps(dict(config, text_config=config)))
+    model = model_class.__new__(model_class)
+    model.weight_dir_ = str(tmp_path)
+    model.finetune_config = None
+    model.tp_world_size_ = 1
+    model.max_total_token_num = None
+    model.main_model = SimpleNamespace(config=config)
+
+    model._init_config()
+
+    assert model.config["is_mtp_draft_model"] is draft
+    assert config["is_mtp_draft_model"] is not draft
+    assert config["mhc"] is True
+
+
+def test_base_model_passes_adjusted_fraction_to_overridden_kv_constructor(monkeypatch, profile_without_allocating):
     template = make_model()
 
     class Model(base_module.TpPartBaseModel):
@@ -274,19 +383,24 @@ def test_base_model_scopes_overridden_kv_constructor(monkeypatch, profile_withou
             self.trans_layers_weight = template.trans_layers_weight
 
         def _init_req_manager(self):
-            # EPLB budgeting must happen after request-state allocation.
+            # Weight profiling has already reserved EPLB memory; request-state
+            # allocation must still be visible to KV capacity profiling.
+            assert self.mem_fraction < 0.9
             profile_without_allocating.free -= 1024
 
         def _init_mem_manager(self):
             self.mem_manager = memory_module.MemoryManager.__new__(memory_module.MemoryManager)
-            memory_module.MemoryManager.__init__(self.mem_manager, None, torch.bfloat16, 8, 128, 8)
+            memory_module.MemoryManager.__init__(
+                self.mem_manager, None, torch.bfloat16, 8, 128, 8, mem_fraction=self.mem_fraction
+            )
 
     for name in ("_verify_must", "_verify_params", "_init_quant"):
         monkeypatch.setattr(Model, name, lambda self: None)
-    monkeypatch.setattr(base_module, "get_env_start_args", lambda: StartArgs(enable_prefill_eplb=True))
+    monkeypatch.setattr(
+        base_module, "get_env_start_args", lambda: StartArgs(enable_ep_moe=True, enable_prefill_eplb=True)
+    )
     monkeypatch.setattr(base_module, "get_llm_data_type", lambda: torch.bfloat16)
     monkeypatch.setattr(base_module, "get_dp_world_size", lambda: 1)
-    monkeypatch.setattr(base_module, "profile_mtp_weight_memory", lambda model: nullcontext())
     monkeypatch.setattr(
         base_module, "TorchMemorySaverWrapper", lambda enabled: SimpleNamespace(region=lambda **kwargs: nullcontext())
     )
@@ -300,8 +414,8 @@ def test_base_model_scopes_overridden_kv_constructor(monkeypatch, profile_withou
     model = Model.__new__(Model)
     with pytest.raises(KVAllocationReached):
         Model.__init__(model, dict(run_mode="prefill", weight_dir="unused", max_total_token_num=None))
-    expected = eplb_utils.get_eplb_memory_reservations(model)
-    assert model.mem_manager.memory_reservations == expected
+    weights = [layer.experts for layer in model.trans_layers_weight]
+    reserved_bytes = eplb_utils.get_eplb_staging_nbytes(weights) + eplb_utils.get_eplb_sampling_peak_nbytes(weights)
+    assert model.mem_fraction == pytest.approx(0.9 - reserved_bytes / profile_without_allocating.total)
     available = profile_without_allocating.free - profile_without_allocating.total * (1 - model.mem_fraction)
-    assert model.mem_manager.size == int((available - sum(expected.values())) / model.mem_manager.get_cell_size())
-    assert memory_module._memory_reservations.get() is None
+    assert model.mem_manager.size == int(available / model.mem_manager.get_cell_size())

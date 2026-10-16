@@ -97,7 +97,7 @@ def build_transfer_plan(
 
 
 class NixlEPLBTransfer:
-    """GPU-direct UCX/NIXL migration through one layer's two staging parts."""
+    """GPU-direct UCX/NIXL migration through one complete staging layer."""
 
     backend = "nixl"
     staging_depth = 1
@@ -228,31 +228,20 @@ class NixlEPLBTransfer:
             raise RuntimeError("full EPLB migration phase failed") from error
 
     def _commit_full_parts(self, layer_index, buffer_index, changed_dst_slots):
-        """Commit both slices before publishing full-layout routing metadata."""
+        """Queue complete rows before routing publication on the inference stream."""
         error = None
         try:
             prepared = self._prepared_layer
-            if prepared.layer_index != layer_index or len(prepared.parts) != EPLB_FULL_STAGING_PARTS:
+            if prepared.layer_index != layer_index or len(prepared.parts) != 1:
                 raise RuntimeError("invalid full EPLB prepared layer")
+            # All ranks finished staging the complete layer before the manager's
+            # ready-MIN gate. Keep copies and routing publication on the same
+            # stream; the worker waits on the consumed event before reuse.
             self._commit_full_part(layer_index, buffer_index, changed_dst_slots, 0)
-            torch.cuda.current_stream().synchronize()
         except BaseException as exc:
             error = exc
-        self._full_phase_gate(error)  # All ranks consumed part 0 before staging reuse.
-        error = None
-        try:
-            self._copy_part(prepared.parts[1])
-        except BaseException as exc:
-            error = exc
-        self._full_phase_gate(error)  # All incoming part-1 transfers are complete.
-        error = None
-        try:
-            self._commit_full_part(layer_index, buffer_index, changed_dst_slots, 1)
-            torch.cuda.current_stream().synchronize()
-            self._prepared_layer = None
-        except BaseException as exc:
-            error = exc
-        self._full_phase_gate(error)  # All live weight slices are complete before publish.
+        self._full_phase_gate(error)  # Propagate enqueue failures before any rank publishes.
+        self._prepared_layer = None
 
     def _commit_full_part(self, layer_index, buffer_index, changed_dst_slots, part_index):
         for (_, live), (_, staging) in zip(self.live[layer_index], self.staging[buffer_index]):
@@ -275,8 +264,7 @@ class NixlEPLBTransfer:
         self._finish_transfer_generation()
 
     def __init__(self, weights, transfer_group, global_rank, world_size):
-        # Full layouts stage every changed row of one layer before publishing;
-        # this makes arbitrary overwrite cycles safe without eight full layers.
+        # Stage complete incoming rows before any overwrite, including cycles.
         self._init_staging(weights, transfer_group, global_rank, world_size)
         self._nixl_agent = None
         self._registered_descs = None
@@ -293,21 +281,6 @@ class NixlEPLBTransfer:
         try:
             self._init_ipc_metadata()
             self._init_push_layouts()
-            if self._cross_node_ranks:
-                os.environ.setdefault("UCX_TLS", self._DEFAULT_UCX_TLS)
-                try:
-                    import nixl
-                except Exception as exc:
-                    raise RuntimeError("NIXL EPLB backend requires the nixl package for cross-node transfer") from exc
-                agent_name = f"lightllm-eplb-{socket.gethostname()}-{os.getpid()}-rank-{global_rank}"
-                config = nixl.nixl_agent_config(enable_prog_thread=True, enable_listen_thread=False, backends=["UCX"])
-                self._nixl_agent = nixl.nixl_agent(agent_name, config)
-                reg_tensors = [tensor for layer in self.live for _, tensor in layer] + [
-                    tensor for staging in self.staging for _, tensor in staging
-                ]
-                self._registered_descs = self._nixl_agent.get_reg_descs(reg_tensors)
-                self._nixl_agent.register_memory(self._registered_descs, backends=["UCX"])
-                self._init_remote_metadata()
         except Exception as exc:
             self.shutdown()
             if isinstance(exc, RuntimeError):
@@ -323,6 +296,7 @@ class NixlEPLBTransfer:
     def _init_ipc_metadata(self) -> None:
         hostnames = [None] * self.world_size
         dist.all_gather_object(hostnames, socket.gethostname(), group=self.transfer_group)
+        self._rank_hostnames = hostnames
         local_hostname = hostnames[self.global_rank]
         self._needs_staging_reuse_barrier = len(set(hostnames)) < len(hostnames)
         self._same_node_ranks = {rank for rank, hostname in enumerate(hostnames) if hostname == local_hostname}
@@ -483,7 +457,40 @@ class NixlEPLBTransfer:
         push_batch = self._batch_memcpy.prepare(push_descriptors) if push_descriptors else None
         return self._PreparedPart(dict(remote_entries), push_batch, part_index)
 
+    def _ensure_cross_node_transfer(self, layer_plans):
+        # Plans contain global steps on every rank. Make the same decision even
+        # on nonparticipants, since remote metadata exchange is collective.
+        if not any(
+            self._rank_hostnames[step.src_rank] != self._rank_hostnames[step.dst_rank]
+            for _, plan in layer_plans
+            for step in plan
+        ):
+            return
+        if self._nixl_agent is not None:
+            return
+        try:
+            os.environ.setdefault("UCX_TLS", self._DEFAULT_UCX_TLS)
+            try:
+                import nixl
+            except Exception as exc:
+                raise RuntimeError("NIXL EPLB backend requires the nixl package for cross-node transfer") from exc
+            agent_name = f"lightllm-eplb-{socket.gethostname()}-{os.getpid()}-rank-{self.global_rank}"
+            config = nixl.nixl_agent_config(enable_prog_thread=True, enable_listen_thread=False, backends=["UCX"])
+            self._nixl_agent = nixl.nixl_agent(agent_name, config)
+            reg_tensors = [tensor for layer in self.live for _, tensor in layer] + [
+                tensor for staging in self.staging for _, tensor in staging
+            ]
+            self._registered_descs = self._nixl_agent.get_reg_descs(reg_tensors)
+            self._nixl_agent.register_memory(self._registered_descs, backends=["UCX"])
+            self._init_remote_metadata()
+        except Exception as exc:
+            self.shutdown()
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError("NIXL EPLB initialization failed") from exc
+
     def prepare_transfer(self, layer_plans: Sequence[Tuple[int, Sequence[TransferStep]]]):
+        self._ensure_cross_node_transfer(layer_plans)
         return [
             self._PreparedLayer(
                 layer_index,

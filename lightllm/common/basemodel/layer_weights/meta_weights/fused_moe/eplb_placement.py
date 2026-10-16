@@ -1,5 +1,31 @@
 from typing import Dict, Tuple
+from math import isqrt
 import torch
+
+
+def get_max_reachable_replicas(placement: torch.Tensor, num_logical_experts: int, node_world_size: int) -> int:
+    """Bound hash sampling by the node holdings preserved by the full planner.
+
+    A node needs one slot per held expert. Its other slots bound how many
+    copies of any one expert it can own. Only experts absent from a source
+    node need a global-fallback histogram.
+    """
+    ranks, capacity = placement.shape
+    if ranks % node_world_size:
+        raise ValueError("EP ranks must form complete nodes")
+    holdings = torch.zeros((ranks // node_world_size, num_logical_experts), dtype=torch.bool)
+    limits = []
+    for node in range(len(holdings)):
+        ids = placement[node * node_world_size : (node + 1) * node_world_size].unique()
+        holdings[node, ids] = True
+        limits.append(min(node_world_size, node_world_size * capacity - len(ids) + 1))
+    limits = torch.tensor(limits, dtype=torch.int64)
+    maximum = int(limits.max())
+    absent_somewhere = ~holdings.all(0)
+    if absent_somewhere.any():
+        global_limits = (holdings * limits[:, None]).sum(0)
+        maximum = max(maximum, int(global_limits[absent_somewhere].max()))
+    return maximum
 
 
 def build_initial_redundant_expert_ids(
@@ -50,6 +76,7 @@ def build_logical_to_physical_map(
     num_logical_experts: int,  # 逻辑 expert 的总数。
     source_rank: int | None = None,  # 可选的全局源 rank；传入时优先选择同节点副本。
     node_world_size: int | None = None,  # 单个节点包含的 rank 数；source_rank 非空时必填。
+    replica_rotation_rank: int | None = None,
 ) -> Tuple[
     torch.Tensor, torch.Tensor
 ]:  # logical_to_physical [num_logical_experts, num_ranks], replica_counts [num_logical_experts]
@@ -60,6 +87,7 @@ def build_logical_to_physical_map(
         num_logical_experts,
         source_rank=source_rank,
         node_world_size=node_world_size,
+        replica_rotation_rank=replica_rotation_rank,
     )
     return logical_to_physical.squeeze(0), replica_counts.squeeze(0)
 
@@ -69,6 +97,7 @@ def build_logical_to_physical_maps_for_layers(
     num_logical_experts: int,  # 逻辑 expert 的总数。
     source_rank: int | None = None,  # 可选的全局源 rank；传入时优先选择同节点副本。
     node_world_size: int | None = None,  # 单个节点包含的 rank 数；source_rank 非空时必填。
+    replica_rotation_rank: int | None = None,
 ) -> Tuple[
     torch.Tensor,  # logical_to_physical, shape [num_layers, num_logical_experts, num_ranks]
     torch.Tensor,  # replica_counts, shape [num_layers, num_logical_experts]
@@ -77,13 +106,14 @@ def build_logical_to_physical_maps_for_layers(
 
     第一维是层，不是请求或 token 的 batch，也不会自动处理模型中的其他层。
     输入包含全部物理行，副本按 rank-major、slot-major 的稳定顺序排列。
-    指定 source_rank 后，先筛选源节点内副本，再按 source_rank 轮转候选前缀。
+    source_rank 决定本地节点；replica_rotation_rank 独立控制轮转，默认使用 source_rank。
     """
     return _build_layer_maps(
         physical_expert_ids_by_layer,
         num_logical_experts,
         source_rank=source_rank,
         node_world_size=node_world_size,
+        replica_rotation_rank=replica_rotation_rank,
     )
 
 
@@ -95,13 +125,18 @@ def select_improving_placements(
     rebalance_gain_threshold: float,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float | int], torch.Tensor, torch.Tensor]:
     """Select better layers and return current/final rank loads without re-estimation."""
     if not 0.0 <= rebalance_gain_threshold <= 1.0:
         raise ValueError("rebalance_gain_threshold must be between 0.0 and 1.0")
     assert current_placement.shape == candidate_placement.shape
-    current_rank_load = _estimate_rank_load(expert_load, current_placement, expert_alignment, node_world_size)
-    candidate_rank_load = _estimate_rank_load(expert_load, candidate_placement, expert_alignment, node_world_size)
+    current_rank_load = _estimate_rank_load(
+        expert_load, current_placement, expert_alignment, node_world_size, replica_hash_load=replica_hash_load
+    )
+    candidate_rank_load = _estimate_rank_load(
+        expert_load, candidate_placement, expert_alignment, node_world_size, replica_hash_load=replica_hash_load
+    )
     if expert_load.ndim == 2:
         current_critical = current_rank_load.max(dim=1).values
         candidate_critical = candidate_rank_load.max(dim=1).values
@@ -224,6 +259,7 @@ def _build_layer_maps(
     num_logical_experts: int,  # 逻辑 expert 的总数。
     source_rank: int | None = None,  # 可选的全局源 rank；传入时优先选择同节点副本。
     node_world_size: int | None = None,  # 单个节点包含的 rank 数；source_rank 非空时必填。
+    replica_rotation_rank: int | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """构建调用方指定层的映射；全局构建、节点筛选和轮转均在此完成。"""
     if physical_expert_ids_by_layer.ndim != 3:
@@ -244,10 +280,15 @@ def _build_layer_maps(
         )
         replica_counts[layer_ids, experts] += 1
     if source_rank is None:
+        if replica_rotation_rank is not None:
+            raise ValueError("replica_rotation_rank requires source_rank")
         return logical_to_physical, replica_counts
 
     assert node_world_size is not None and 0 < node_world_size <= num_ranks
     assert num_ranks % node_world_size == 0 and 0 <= source_rank < num_ranks
+    rotation_rank = source_rank if replica_rotation_rank is None else replica_rotation_rank
+    if not 0 <= rotation_rank < num_ranks:
+        raise ValueError("replica_rotation_rank must be an EP rank")
     replica_positions = torch.arange(num_ranks, dtype=torch.int64)
     compact_maps_by_layer, selected_counts_by_layer = _select_source_node_replicas(
         logical_to_physical,
@@ -261,7 +302,7 @@ def _build_layer_maps(
         _rotate_selected_replicas(
             compact_maps_by_layer,
             selected_counts_by_layer,
-            source_rank=source_rank,
+            source_rank=rotation_rank,
             replica_positions=replica_positions,
         ),
         selected_counts_by_layer,
@@ -273,6 +314,8 @@ def _estimate_rank_load(
     physical_expert_ids: torch.Tensor,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
+    *,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Estimate runtime source-node-local routing load per physical expert.
 
@@ -298,6 +341,7 @@ def _estimate_rank_load(
         num_nodes,
         node_world_size,
         expert_alignment,
+        replica_hash_load=replica_hash_load,
     ).sum(dim=2)
     return rank_load.squeeze(0) if squeeze_sample else rank_load
 
@@ -376,10 +420,36 @@ def _expert_rank_load_all(
     num_nodes: int,
     node_world_size: int,
     expert_alignment: int | None,
+    *,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return aligned ``[samples, layers, expert, rank]`` contributions."""
-    route = _source_route(locations, num_nodes, node_world_size)
-    physical_load = torch.einsum("slne,lner->sler", source_load.to(torch.float64), route)
+    if replica_hash_load is None:
+        route = _source_route(locations, num_nodes, node_world_size)
+        physical_load = torch.einsum("slne,lner->sler", source_load.to(torch.float64), route)
+    else:
+        if replica_hash_load.shape[:-1] != source_load.shape:
+            raise ValueError("replica hash samples must match logical source loads")
+        ranks = locations.shape[-1]
+        channels = replica_hash_load.shape[-1]
+        max_replicas = (isqrt(1 + 8 * channels) - 1) // 2
+        if max_replicas * (max_replicas + 1) // 2 != channels:
+            raise ValueError("replica hash samples must contain complete replica buckets")
+        # Select exactly the same rank-major candidate prefix as runtime maps.
+        owners = locations[:, None].expand(-1, num_nodes, -1, -1)
+        rank_nodes = torch.arange(ranks, device=locations.device) // node_world_size
+        source_nodes = torch.arange(num_nodes, device=locations.device)
+        local = owners & (rank_nodes[None, None, None, :] == source_nodes[None, :, None, None])
+        selected = torch.where(local.any(-1, keepdim=True), local, owners)
+        copies = selected.sum(-1, keepdim=True)
+        if int(copies.max()) > max_replicas:
+            raise ValueError("candidate exceeds sampled reachable replica counts")
+        ordinal = selected.cumsum(-1) - 1
+        channels = (copies * (copies - 1) // 2 + ordinal).clamp_min(0)
+        per_source = torch.gather(
+            replica_hash_load.to(torch.float64), -1, channels[None].expand(source_load.shape[0], -1, -1, -1, -1)
+        )
+        physical_load = (per_source * selected[None]).sum(dim=2)
     if expert_alignment is not None:
         physical_load = torch.ceil(physical_load / expert_alignment) * expert_alignment
     return physical_load
