@@ -167,6 +167,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         x0, residual0, residual_mix0, post_mix0 = self._hc_ffn_in(x0, residual0, residual_mix0, post_mix0, layer_weight)
         x0 = self._tpsp_allgather(x0.view(-1, self.embed_dim_), infer_state)
         weights0, indices0 = self._select_experts(x0, infer_state, layer_weight)
+        weights0, indices0 = experts.fuse_moe_impl._prepare_expert_execution(weights0, indices0, is_prefill=True)
 
         indices0 = indices0.to(torch.long)
         qinput0 = experts.quantize_dispatch_input(x0)
@@ -180,6 +181,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         x1, residual1, residual_mix1, post_mix1 = self._hc_ffn_in(x1, residual1, residual_mix1, post_mix1, layer_weight)
         x1 = self._tpsp_allgather(x1.view(-1, self.embed_dim_), infer_state1)
         weights1, indices1 = self._select_experts(x1, infer_state1, layer_weight)
+        weights1, indices1 = experts.fuse_moe_impl._prepare_expert_execution(
+            weights1, indices1, is_prefill=True, poll_migration=False
+        )
 
         recv_x0, recv_indices0, recv_weights0, recv_count0, handle0, dispatch_hook0 = experts.prefill_dispatch(
             qinput0,
@@ -217,7 +221,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         del recv_x0
 
         combine_event0 = ElasticBuffer.capture()
-        routed0, combine_hook0 = experts.prefill_combine(moe_out0, handle0, overlap_event=combine_event0)
+        routed0, combine_hook0 = experts.prefill_combine(
+            moe_out0, handle0, overlap_event=combine_event0, dist_group=infer_state.dist_group
+        )
         del moe_out0
 
         dispatch_hook1()
@@ -236,7 +242,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         del recv_x1
 
         combine_event1 = ElasticBuffer.capture()
-        routed1, combine_hook1 = experts.prefill_combine(moe_out1, handle1, overlap_event=combine_event1)
+        routed1, combine_hook1 = experts.prefill_combine(
+            moe_out1, handle1, overlap_event=combine_event1, dist_group=infer_state1.dist_group
+        )
         del moe_out1
 
         shared0 = self._ffn_shared_expert(x0, infer_state, layer_weight)

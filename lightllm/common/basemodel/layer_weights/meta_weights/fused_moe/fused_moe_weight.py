@@ -59,7 +59,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
-        self._init_expert_parallel_state()
+        self._init_expert_parallel_state(network_config)
         self._init_weight_partition()
         self.fuse_moe_impl = create_fuse_moe_impl(
             n_routed_experts=self.n_routed_experts,
@@ -80,9 +80,16 @@ class FusedMoeWeight(BaseWeightTpl):
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.scoring_func = network_config.get("scoring_func", "softmax")
 
-    def _init_expert_parallel_state(self):
+    def _init_expert_parallel_state(self, network_config: Dict[str, Any]):
         self.expert_parallel_state = (
-            create_expert_parallel_state(self.n_routed_experts, self.global_world_size, self.global_rank_)
+            create_expert_parallel_state(
+                self.n_routed_experts,
+                self.global_world_size,
+                self.global_rank_,
+                tp_rank=self.tp_rank_,
+                tp_world_size=self.tp_world_size_,
+                is_mtp_draft_model=network_config.get("is_mtp_draft_model", False),
+            )
             if self.enable_ep_moe
             else None
         )
@@ -165,6 +172,7 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            dist_group=None if infer_state is None else infer_state.dist_group,
         )
 
     def experts_with_topk(
@@ -207,12 +215,14 @@ class FusedMoeWeight(BaseWeightTpl):
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
             shared_expert_func=shared_expert_func,
+            dist_group=None if infer_state is None else infer_state.dist_group,
         )
 
     def select_experts_and_quant_input(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        poll_migration: bool = True,
     ):
         assert self.enable_ep_moe, "select_experts_and_quant_input is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.select_experts_and_quant_input(
@@ -226,6 +236,7 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=self.topk_group,
             n_group=self.n_group,
             scoring_func=self.scoring_func,
+            poll_migration=poll_migration,
         )
 
     def quantize_dispatch_input(self, hidden_states: torch.Tensor):
@@ -354,12 +365,14 @@ class FusedMoeWeight(BaseWeightTpl):
         gemm_out_b: torch.Tensor,
         handle: Any,
         overlap_event: Optional[Any] = None,
+        dist_group=None,
     ):
         assert self.enable_ep_moe, "prefill_combine is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefill_combine(
             gemm_out_b=gemm_out_b,
             handle=handle,
             overlap_event=overlap_event,
+            dist_group=dist_group,
         )
 
     def load_hf_weights(self, weights):

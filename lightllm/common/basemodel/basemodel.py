@@ -217,6 +217,7 @@ class TpPartBaseModel:
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             self.config = self.normalize_model_config(json.load(json_file))
+            self.config["is_mtp_draft_model"] = self.is_mtp_draft_model
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
