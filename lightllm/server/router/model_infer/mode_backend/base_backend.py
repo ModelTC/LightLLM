@@ -663,25 +663,29 @@ class ModeBackend:
         no_decode: bool = False,
         strict_prefill: bool = False,
         recover_paused: bool = False,
-    ):
-        """
-        当将参数 no_decode 设置为True后，返回的 decode_reqs 永远为空list，主要是
-        PD 分离的某些backend需要用这个参数进行控制，因为P节点永远只进行Prefill,
-        避免一些特殊情况，如 radix cache 命中后，只有1token需要prefill，这个判断
-        条件和decode请求的分类条件相同。所以添加一个参数进行区分。
+    ) -> Tuple[List[InferReq], List[InferReq], int]:
+        """按队列策略选择本轮可执行的请求，并为其分配 KV cache。
 
-        strict_prefill参数用于控制当 cur_kv_len + 1 == input_len 时，是否将请求
-        分为 prefill,当 strict_prefill 设置为True时，表示需要将这个请求分为 prefill,
-        为 False 时，将这个请求分为decode。 strict_prefill 主要是用于diverse mode
-        使用时，其他模式目前不使用。
+        Args:
+            req_ids: 待处理的请求 ID；为 None 时使用推理上下文中的全部请求。
+            no_decode: 为 True 时，所有请求均按 prefill 处理，返回的 decode_reqs 为空。
+                用于 PD Prefill 节点，确保缓存命中后仅剩一个 token 的 prompt 仍执行 prefill。
+            strict_prefill: 为 True 时，满足 decode 判定但位于 prompt 边界
+                （cur_kv_len + 1 == input_len）的请求仍按 prefill 处理；
+                为 False 时，该请求按 decode 处理。no_decode=True 时优先遵循 no_decode。
+            recover_paused: 是否在本轮请求选择完成后尝试恢复已暂停的请求。
+                恢复后的请求从后续调度轮次开始参与选择。
 
-        将请求分类返回:
-        1. wait_pause_reqs 因为推理资源不够，等待被暂停的请求。
-        2. paused_reqs 已经被暂停的请求，可能会被恢复。
-        3. finished_reqs 需要释放的请求, 包含正常结束和aborted退出的请求。
-        4. prefill_reqs 需要进行prefill操作的请求
-        5. decode_reqs 需要进行decode操作的请求
-        6. prefill_tokens 本轮选出的 prefill batch 需要计算的 token 数
+        Returns:
+            (prefill_reqs, decode_reqs, prefill_tokens)：本轮选出的 prefill 请求、
+            decode 请求，以及 prefill batch 需要计算的 token 数。启用 prefill/decode
+            混合执行且预算允许时，decode 请求会并入 prefill_reqs，decode_reqs 为空，
+            prefill_tokens 包含并入的 decode token。该计数仅表示本轮选中的工作量，
+            是否执行由调用方决定，不代表后端累计已提交的 prefill token 数。
+
+        等待暂停、已暂停和已结束的请求在函数内部处理，不作为返回值。
+        函数会更新请求状态，并处理结束请求的释放、资源不足请求的暂停及可选的暂停恢复；
+        overlap 模式下，部分结束请求会延迟到后续轮次清理。
         """
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
