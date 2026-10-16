@@ -45,7 +45,7 @@ def _compare_and_swap(x, x_1, ids, flip, i: tl.core.constexpr, n_dims: tl.core.c
     iright = right.to(idtype, bitcast=True)
     ix = x.to(idtype, bitcast=True)
 
-    cond = (left > right) ^ flip
+    cond = ((left > right) ^ flip).to(tl.int1)
 
     ret = ix ^ tl.core.where(cond, ileft ^ iright, zeros_like(ix))
 
@@ -246,6 +246,9 @@ def grouped_topk_eplb_kernel(
     RENORMALIZE: tl.constexpr,
     GROUP_SCORE_USED_TOPK_NUM: tl.constexpr,
     COUNTER_NUM_EXPERTS: tl.constexpr,
+    COUNTER_CHANNELS: tl.constexpr,
+    HASH_REPLICA_COUNTS: tl.constexpr,
+    REPLICA_ROTATION_RANK: tl.constexpr,
     MAP_SLOTS: tl.constexpr,
     RECORD_LOAD: tl.constexpr,
     SINGLE_TOKEN: tl.constexpr,
@@ -339,11 +342,29 @@ def grouped_topk_eplb_kernel(
     topk_mask = topk_offsets < TOPK_NUM
     if RECORD_LOAD:
         tl.atomic_add(
-            expert_counter_ptr + sample_index * COUNTER_NUM_EXPERTS + selected_logical_ids,
+            expert_counter_ptr + (sample_index * COUNTER_NUM_EXPERTS + selected_logical_ids) * COUNTER_CHANNELS,
             1,
             mask=topk_mask,
             sem="relaxed",
         )
+        if COUNTER_CHANNELS > 1:
+            for copies in tl.static_range(1, HASH_REPLICA_COUNTS + 1):
+                counts = tl.full((TOPK_BLOCK_SIZE,), copies, tl.int32)
+                if SINGLE_TOKEN:
+                    bucket = tl.full((TOPK_BLOCK_SIZE,), REPLICA_ROTATION_RANK % copies, tl.int32)
+                else:
+                    bucket = (
+                        _eplb_replica_index(token_index, selected_logical_ids, counts) + REPLICA_ROTATION_RANK
+                    ) % copies
+                channel = 1 + copies * (copies - 1) // 2 + bucket
+                tl.atomic_add(
+                    expert_counter_ptr
+                    + (sample_index * COUNTER_NUM_EXPERTS + selected_logical_ids) * COUNTER_CHANNELS
+                    + channel,
+                    1,
+                    mask=topk_mask,
+                    sem="relaxed",
+                )
     if SINGLE_TOKEN:
         replica_indices = tl.zeros((TOPK_BLOCK_SIZE,), tl.int32)
     else:
@@ -456,8 +477,17 @@ def triton_grouped_topk_eplb(
     use_grouped_topk: bool,
     return_logical_ids: bool = False,
     group_score_used_topk_num: int = 2,
+    replica_rotation_rank: int = 0,
 ):
     """Fused EPLB prefill top-k returning physical IDs and optional logical IDs."""
+    from math import isqrt
+
+    channels = expert_counter.shape[2] if expert_counter.ndim == 3 else 1
+    max_hash_replicas = (isqrt(1 + 8 * (channels - 1)) - 1) // 2
+    if expert_counter.ndim not in (2, 3) or (
+        channels > 1 and max_hash_replicas * (max_hash_replicas + 1) // 2 != channels - 1
+    ):
+        raise ValueError("EPLB counters must contain logical counts and complete replica hash buckets")
     token_num, total_expert_num = gating_output.shape
     out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device=gating_output.device)
     out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device=gating_output.device)
@@ -508,6 +538,9 @@ def triton_grouped_topk_eplb(
         RENORMALIZE=renormalize,
         GROUP_SCORE_USED_TOPK_NUM=group_score_used_topk_num,
         COUNTER_NUM_EXPERTS=expert_counter.shape[1],
+        COUNTER_CHANNELS=expert_counter.shape[2] if expert_counter.ndim == 3 else 1,
+        HASH_REPLICA_COUNTS=max_hash_replicas,
+        REPLICA_ROTATION_RANK=replica_rotation_rank,
         MAP_SLOTS=logical_to_physical_map.shape[1],
         RECORD_LOAD=record_load,
         SINGLE_TOKEN=token_num == 1,

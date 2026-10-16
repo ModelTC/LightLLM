@@ -17,8 +17,14 @@ from .eplb_placement import (
 )
 
 
-def _critical_load(load, placement, alignment, node_world_size, full_layout):
-    return _estimate_rank_load(load, placement, alignment, node_world_size, full_layout).max(dim=-1).values.sum(dim=0)
+def _critical_load(load, placement, alignment, node_world_size, replica_hash_load=None, full_layout=False):
+    return (
+        _estimate_rank_load(
+            load, placement, alignment, node_world_size, full_layout, replica_hash_load=replica_hash_load
+        )
+        .max(dim=-1)
+        .values.sum(dim=0)
+    )
 
 
 def refine_placement_candidates(
@@ -28,10 +34,11 @@ def refine_placement_candidates(
     *,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
-    full_layout: bool = False,
     stickiness: float = 0.0,
     search_steps: int = 4,
     candidate_budget: int = 256,
+    full_layout: bool = False,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Keep the best layer of each seed and its bounded local search result.
 
@@ -46,7 +53,9 @@ def refine_placement_candidates(
     node_world_size = _resolve_node_world_size(expert_load, current.shape[1], node_world_size)
     load = expert_load.to(device="cpu", dtype=torch.float64)
     best = current.cpu().clone()
-    score = _critical_load(load, best, expert_alignment, node_world_size, full_layout)
+    if replica_hash_load is not None:
+        replica_hash_load = replica_hash_load.to(device="cpu", dtype=torch.float64)
+    score = _critical_load(load, best, expert_alignment, node_world_size, replica_hash_load, full_layout)
     for seed in [current, *candidates]:
         if seed.shape != current.shape:
             raise ValueError("candidate capacity differs from the current placement")
@@ -63,27 +72,44 @@ def refine_placement_candidates(
         for proposal in (
             seed,
             _local_search(
-                load, seed, expert_alignment, node_world_size, full_layout, stickiness, search_steps, candidate_budget
+                load,
+                seed,
+                expert_alignment,
+                node_world_size,
+                stickiness,
+                search_steps,
+                candidate_budget,
+                replica_hash_load=replica_hash_load,
+                full_layout=full_layout,
             ),
         ):
-            proposal_score = _critical_load(load, proposal, expert_alignment, node_world_size, full_layout)
+            proposal_score = _critical_load(
+                load, proposal, expert_alignment, node_world_size, replica_hash_load, full_layout
+            )
             improved = proposal_score < score
             best[improved] = proposal[improved]
             score[improved] = proposal_score[improved]
     return best
 
 
-def _local_search(load, placement, alignment, node_world_size, full_layout, stickiness, steps, budget):
+def _local_search(
+    load, placement, alignment, node_world_size, stickiness, steps, budget, replica_hash_load=None, full_layout=False
+):
     result = placement.clone()
     experts = load.shape[-1]
     for layer in range(placement.shape[0]):
         source = load[:, layer : layer + 1]
+        source_hash = replica_hash_load[:, layer : layer + 1] if replica_hash_load is not None else None
         margin = stickiness * float(source.sum()) / experts
-        initial_score = _critical_load(source, placement[layer : layer + 1], alignment, node_world_size, full_layout)
+        initial_score = _critical_load(
+            source, placement[layer : layer + 1], alignment, node_world_size, source_hash, full_layout
+        )
         for _ in range(steps):
             rows = result[layer]
             locations = _expert_locations(rows[None], experts, full_layout)
-            contributions = _expert_rank_load_all(source, locations, source.shape[2], node_world_size, alignment)[:, 0]
+            contributions = _expert_rank_load_all(
+                source, locations, source.shape[2], node_world_size, alignment, replica_hash_load=source_hash
+            )[:, 0]
             rank_load = contributions.sum(dim=1)
             proposals = _propose_moves(rows, locations[0], contributions, node_world_size, full_layout, budget)
             if not proposals:
@@ -105,8 +131,9 @@ def _local_search(load, placement, alignment, node_world_size, full_layout, stic
             new_locations[other_indexes, 1, other_ranks] = False
             new_locations[other_indexes, 0, other_ranks] = True
             move_load = source[:, 0, :, ids].permute(0, 2, 1, 3)
+            move_hash = source_hash[:, 0, :, ids, :].permute(0, 2, 1, 3, 4) if source_hash is not None else None
             next_contributions = _expert_rank_load_all(
-                move_load, new_locations, source.shape[2], node_world_size, alignment
+                move_load, new_locations, source.shape[2], node_world_size, alignment, replica_hash_load=move_hash
             ).sum(dim=2)
             previous = contributions[:, ids].sum(dim=2)
             scores = (rank_load[:, None] - previous + next_contributions).max(dim=-1).values.sum(dim=0)
@@ -117,7 +144,9 @@ def _local_search(load, placement, alignment, node_world_size, full_layout, stic
             rows[rank, slot] = new
             if other_rank >= 0:
                 rows[other_rank, other_slot] = old
-        final_score = _critical_load(source, result[layer : layer + 1], alignment, node_world_size, full_layout)
+        final_score = _critical_load(
+            source, result[layer : layer + 1], alignment, node_world_size, source_hash, full_layout
+        )
         if final_score + margin >= initial_score:
             result[layer].copy_(placement[layer])
     return result
@@ -214,8 +243,23 @@ def plan_eplb_candidate(
     num_redundant_experts_per_rank,
     expert_alignment,
     stickiness,
+    replica_hash_load=None,
+    incremental=False,
 ):
     """Return the manager's CPU candidate before selection/metadata/broadcast."""
+    if incremental:
+        return refine_placement_candidates(
+            expert_load,
+            current,
+            [],
+            expert_alignment=expert_alignment,
+            node_world_size=node_world_size,
+            full_layout=full_layout,
+            stickiness=stickiness,
+            search_steps=4,
+            candidate_budget=128,
+            replica_hash_load=replica_hash_load,
+        )
     if full_layout:
         return plan_full_experts(
             expert_load,
@@ -223,6 +267,7 @@ def plan_eplb_candidate(
             expert_alignment=expert_alignment,
             node_world_size=node_world_size,
             stickiness=stickiness,
+            replica_hash_load=replica_hash_load,
         )
     candidate = plan_redundant_experts(
         expert_load,
@@ -251,6 +296,7 @@ def plan_eplb_candidate(
         expert_alignment=expert_alignment,
         node_world_size=node_world_size,
         stickiness=stickiness,
+        replica_hash_load=replica_hash_load,
     )
 
 
@@ -261,6 +307,7 @@ def plan_full_experts(
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
     stickiness: float = 0.0,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Allocate load-driven replica counts, pack within nodes, then refine.
 
@@ -273,7 +320,9 @@ def plan_full_experts(
     load = expert_load.to(device="cpu", dtype=torch.float64)
     locations = _expert_locations(current, load.shape[-1], full_layout=True)
     # Sum unpadded traffic reaching a node under the current node-local policy.
-    traffic = _expert_rank_load_all(load, locations, load.shape[2], node_world_size, None).sum(dim=0)
+    traffic = _expert_rank_load_all(
+        load, locations, load.shape[2], node_world_size, None, replica_hash_load=replica_hash_load
+    ).sum(dim=0)
     candidate = current.clone()
     for layer in range(current.shape[0]):
         for start in range(0, current.shape[1], node_world_size):
@@ -296,8 +345,9 @@ def plan_full_experts(
         [candidate],
         expert_alignment=expert_alignment,
         node_world_size=node_world_size,
-        full_layout=True,
         stickiness=stickiness,
+        replica_hash_load=replica_hash_load,
+        full_layout=True,
     )
 
 

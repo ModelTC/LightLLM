@@ -22,6 +22,7 @@ def deepseek_v4_eplb_topk(
     return_logical_ids: bool = False,
     bias_vl: torch.Tensor | None = None,
     image_token_start: int = 0,
+    replica_rotation_rank: int = 0,
 ):
     """Select DeepSeek-V4 routes and emit EPLB physical expert IDs."""
     token_num, num_experts = logits.shape
@@ -65,6 +66,7 @@ def deepseek_v4_eplb_topk(
         record_load,
         return_logical_ids,
         routed_scaling_factor,
+        replica_rotation_rank,
     )
     return weights, physical_ids, logical_ids
 

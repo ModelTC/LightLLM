@@ -5,6 +5,8 @@ from __future__ import annotations
 import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.distributed import broadcast
+from lightllm.utils.dist_utils import get_global_rank
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
@@ -37,6 +39,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         self.hc_sinkhorn_iters = network_config.get("hc_sinkhorn_iters", 20)
         self.swiglu_limit = network_config["swiglu_limit"]
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        self.enable_prefill_eplb = get_env_start_args().enable_prefill_eplb
         self.is_moe = (
             network_config["n_routed_experts"] is not None
             and layer_num >= network_config["first_k_dense_replace"]
@@ -77,6 +80,18 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             output = self._moe_ffn(input, infer_state, layer_weight)
             if self.enable_ep_moe:
                 # DeepEP combine already includes all routed experts.
+                # Same-node TP replicas share an EPLB routing phase, making
+                # BF16 partial-sum groups identical without another collective.
+                # Cross-node TP groups may select different local replicas and
+                # must synchronize the complete result before mHC/attention.
+                if (
+                    self.enable_prefill_eplb
+                    and infer_state.is_prefill
+                    and self.tp_world_size_ > 1
+                    and layer_weight.experts.expert_parallel_state.eplb is not None
+                    and not layer_weight.experts.expert_parallel_state.eplb.tp_group_consistent_routing
+                ):
+                    broadcast(output, src=get_global_rank() - self.tp_rank_, group=infer_state.dist_group)
                 return output
         else:
             output = self._ffn_tp(input, infer_state, layer_weight)

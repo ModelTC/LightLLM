@@ -102,6 +102,31 @@ def test_full_layout_rejects_unrepresentable_routes(layout, message):
         build_logical_to_physical_maps_for_layers(torch.tensor(layout), 4, full_layout=True)
 
 
+@pytest.mark.parametrize("node_size", [1, 2, 4])
+def test_shared_replica_rotation_keeps_actual_source_node_selection(node_size):
+    layout = _initial(2, layers=2)
+    capacity = layout.shape[-1]
+    for source_rank, phase in itertools.product(range(4), range(4)):
+        maps, counts = build_logical_to_physical_maps_for_layers(
+            layout, 8, source_rank=source_rank, node_world_size=node_size, replica_rotation_rank=phase, full_layout=True
+        )
+        for layer, expert in itertools.product(range(2), range(8)):
+            candidates = [p for p, value in enumerate(layout[layer].flatten().tolist()) if value == expert]
+            local = [p for p in candidates if p // capacity // node_size == source_rank // node_size]
+            expected = local or candidates
+            chosen = maps[layer, expert, : counts[layer, expert]].tolist()
+            assert chosen == expected[phase % len(expected) :] + expected[: phase % len(expected)]
+
+
+def test_replica_rotation_requires_a_source_and_valid_ep_rank():
+    with pytest.raises(ValueError, match="requires source_rank"):
+        build_logical_to_physical_maps_for_layers(_initial(), 8, replica_rotation_rank=0, full_layout=True)
+    with pytest.raises(ValueError, match="must be an EP rank"):
+        build_logical_to_physical_maps_for_layers(
+            _initial(), 8, source_rank=0, node_world_size=4, replica_rotation_rank=4, full_layout=True
+        )
+
+
 def test_refinement_closes_known_fixed_primary_greedy_gap():
     loads = torch.tensor([640, 512, 1536, 3584, 3840, 8320, 9984, 512]).reshape(1, 1, 1, 8)
     current = build_initial_redundant_expert_ids(8, 4, 1)[None]
@@ -127,6 +152,19 @@ def test_refinement_closes_known_fixed_primary_greedy_gap():
     assert torch.equal(
         refined, refine_placement_candidates(loads, current, [greedy, unbiased], expert_alignment=128, stickiness=0.1)
     )
+
+
+def test_refinement_matches_small_exhaustive_complete_layout_optimum():
+    loads = torch.tensor([512, 128, 4096, 64]).reshape(1, 1, 1, 4)
+    current = torch.tensor([[[0, 2], [1, 3]]])
+    refined = refine_placement_candidates(loads, current, [], expert_alignment=128, full_layout=True)
+    optimum = min(
+        max(_independent_rank_load(loads[0, 0].tolist(), torch.tensor(rows).reshape(2, 2), 128, 2))
+        for rows in itertools.permutations(range(4))
+    )
+    assert _estimate_rank_load(loads, refined, 128, full_layout=True).max() == optimum
+    assert _estimate_rank_load(loads, current, 128, full_layout=True).max() > optimum
+    assert torch.equal(refined, refine_placement_candidates(loads, current, [], expert_alignment=128, full_layout=True))
 
 
 @pytest.mark.parametrize("redundant", [0, 1, 2])
@@ -229,6 +267,8 @@ def test_manager_full_plan_is_canonical_and_publication_tracks_partial_generatio
     manager.full_layout = True
     manager.current_placement = _initial(0, layers=2)
     original = manager.current_placement.clone()
+    manager._evaluation_snapshot = {"placement": original}
+    manager._initial_plan_complete = False
     manager.placement_stickiness, manager.rebalance_gain_threshold = 0.1, 0.05
     manager.evaluation_group = object()
     broadcasts = []
@@ -313,8 +353,8 @@ def test_full_state_initialization_including_zero_replicas(monkeypatch, redundan
     monkeypatch.setattr(module, "get_prefill_eplb_step_interval", lambda: 4)
     weight._init_expert_parallel_state()
     state = weight.expert_parallel_state.eplb
-    assert state.full_layout and state.placement_generation == 0
-    assert state.route_counter.shape == (8, 8)
+    assert state.placement_generation == 0
+    assert state.route_counter.shape == (8, 8, 2 if redundant == 0 else 11)
     assert state.physical_to_logical.shape == (4, 2 + redundant)
     assert weight.expert_parallel_state.num_total_physical_experts == 8 + 4 * redundant
     for expert, count in enumerate(state.logical_replica_count.tolist()):

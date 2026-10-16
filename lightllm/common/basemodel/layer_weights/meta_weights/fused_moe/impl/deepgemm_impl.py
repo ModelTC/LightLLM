@@ -288,6 +288,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         eplb = self.eplb
         if is_prefill is True and eplb is not None:
+            if eplb.migration_poll is not None:
+                eplb.migration_poll()
             from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
 
             group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
@@ -305,7 +307,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 sample_index=eplb.next_sample_index(),
                 record_load=eplb.recording,
                 use_grouped_topk=use_grouped_topk,
-                return_logical_ids=preserve_logical_ids,
+                return_logical_ids=preserve_logical_ids or per_expert_scale is not None,
+                replica_rotation_rank=eplb.replica_rotation_rank,
                 group_score_used_topk_num=group_score_topk_num,
             )
             origin_topk_ids = logical_topk_ids if logical_topk_ids is not None else topk_ids
@@ -324,6 +327,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 scoring_func=scoring_func,
             )
             origin_topk_ids = topk_ids
+        if per_expert_scale is not None:
+            topk_weights = topk_weights * per_expert_scale[origin_topk_ids.to(torch.long)].to(topk_weights.dtype)
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
         return topk_weights, topk_ids, origin_topk_ids

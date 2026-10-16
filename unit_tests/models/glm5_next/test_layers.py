@@ -14,9 +14,97 @@ from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.models.glm5_next.layer_infer import transformer_layer_infer as glm_layer_module
+from lightllm.models.glm5_next.layer_weights import transformer_layer_weight as glm_weight_module
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import EPLBState
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
+    build_initial_redundant_expert_ids,
+    build_logical_to_physical_map,
+    expand_redundant_placement,
+)
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
+@pytest.mark.parametrize(
+    "prefill,eplb,tp,draft,consistent",
+    [
+        (True, True, 4, False, False),
+        (True, True, 4, False, True),
+        (False, True, 4, False, False),
+        (True, False, 4, False, False),
+        (True, True, 1, False, False),
+        (True, True, 4, True, False),
+    ],
+)
+def test_eplb_ffn_restores_complete_output_on_its_own_tp_group(monkeypatch, prefill, eplb, tp, draft, consistent):
+    layer = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
+    layer.embed_dim_ = 128
+    layer.is_moe = layer.enable_ep_moe = True
+    layer.enable_prefill_eplb = eplb
+    layer.tp_world_size_, layer.tp_rank_ = tp, 2 if tp > 1 else 0
+    layer._tpsp_allgather = lambda **kwargs: kwargs["input"]
+    # The complete MoE result already includes routed and shared experts.
+    layer._moe_ffn = lambda input, *args: torch.full_like(input, 6)
+    group, calls = object(), []
+    weight = SimpleNamespace(
+        experts=SimpleNamespace(
+            expert_parallel_state=SimpleNamespace(
+                eplb=None if draft else SimpleNamespace(tp_group_consistent_routing=consistent)
+            )
+        )
+    )
+    monkeypatch.setattr(glm_layer_module, "get_global_rank", lambda: 6)
+
+    def broadcast(output, src, group):
+        calls.append((src, group))
+        output.fill_(4)
+
+    monkeypatch.setattr(glm_layer_module, "broadcast", broadcast)
+    result = layer._ffn(
+        torch.ones((3, 128), device="cuda"), SimpleNamespace(is_prefill=prefill, dist_group=group), weight
+    )
+    expected = prefill and eplb and tp > 1 and not draft and not consistent
+    assert calls == ([(4, group)] if expected else [])
+    assert torch.equal(result, torch.full_like(result, 4 if expected else 6))
+
+
+@pytest.mark.parametrize("tp,node_size", [(1, 4), (2, 4), (4, 4), (4, 2), (8, 4)])
+def test_eplb_tp_routing_initialization_preserves_node_locality_and_fallback(monkeypatch, tp, node_size):
+    world, experts = 8, 16
+    layout = expand_redundant_placement(build_initial_redundant_expert_ids(experts, world, 2), experts)
+    states = []
+    for rank in range(world):
+        maps, counts = build_logical_to_physical_map(
+            layout, experts, source_rank=rank, node_world_size=node_size, full_layout=True
+        )
+        state = EPLBState(
+            num_redundant_experts_per_rank=2,
+            initial_redundant_expert_ids_by_rank=None,
+            logical_to_physical_map=maps.cuda(),
+            logical_replica_count=counts.cuda(),
+            route_counter=torch.zeros((1, experts), device="cuda"),
+            physical_to_logical=layout,
+            replica_rotation_rank=rank,
+        )
+        weight = Glm5NextTransformerLayerWeight.__new__(Glm5NextTransformerLayerWeight)
+        weight.tp_world_size_, weight.tp_rank_, weight.n_routed_experts = tp, rank % tp, experts
+        weight.experts = SimpleNamespace(expert_parallel_state=SimpleNamespace(eplb=state))
+        monkeypatch.setattr(glm_weight_module, "get_global_rank", lambda rank=rank: rank)
+        monkeypatch.setattr(glm_weight_module, "get_node_world_size", lambda: node_size)
+        weight._init_eplb_routing()
+        optimized = 1 < tp <= node_size
+        assert state.tp_group_consistent_routing == optimized
+        assert state.replica_rotation_rank == (rank // tp * tp if optimized else rank)
+        # Only the ordering changes, never the set of eligible local replicas.
+        torch.testing.assert_close(state.logical_to_physical_map.cpu().sort(-1).values, maps.sort(-1).values)
+        states.append(state)
+    if 1 < tp <= node_size:
+        for rank, state in enumerate(states):
+            torch.testing.assert_close(state.logical_to_physical_map, states[rank // tp * tp].logical_to_physical_map)
+    else:
+        assert not any(state.tp_group_consistent_routing for state in states)
 
 
 @pytest.fixture(autouse=True)

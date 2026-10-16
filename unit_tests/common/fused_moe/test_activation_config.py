@@ -103,10 +103,6 @@ def test_marlin_rejects_clamp_at_call(monkeypatch):
         num_fused_shared_experts=0,
         routed_scaling_factor=1.0,
         quant_method=None,
-        redundancy_expert_num=0,
-        redundancy_expert_ids_tensor=None,
-        routed_expert_counter_tensor=None,
-        auto_update_redundancy_expert=False,
     )
     with pytest.raises(NotImplementedError, match="does not support clamped SwiGLU"):
         impl(

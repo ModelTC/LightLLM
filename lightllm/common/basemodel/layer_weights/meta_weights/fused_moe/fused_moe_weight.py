@@ -19,9 +19,16 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
     build_initial_redundant_expert_ids,
     expand_redundant_placement,
     build_logical_to_physical_map,
+    get_max_reachable_replicas,
 )
 from lightllm.common.quantization.quantize_method import QuantizationMethod
-from lightllm.utils.envs_utils import get_env_start_args, get_prefill_eplb_step_interval
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_prefill_eplb_step_interval,
+    get_prefill_eplb_steady_sample_steps,
+    get_dsv4_eplb_tile_routing,
+)
+from lightllm.common.eplb_utils import EPLB_STEADY_SAMPLE_STEPS
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_node_world_size
 from lightllm.utils.log_utils import init_logger
 
@@ -114,19 +121,31 @@ class FusedMoeWeight(BaseWeightTpl):
                 source_rank=self.global_rank_,
                 node_world_size=get_node_world_size(),
             )
-            # route_counter 每次 prefill dispatch 记录一行。初始阶段连续采样
-            # step_interval 个 manager step，兼顾micro batch overlap的两次 dispatch，因此容量设为
-            # 2 * step_interval。稳定阶段复用该环形缓冲区，但只把当前短采样窗口内
-            # 实际记录的最近行传给 planner，不复制整个缓冲区。
+            physical = expand_redundant_placement(all_initial_ids, self.n_routed_experts)
+            sample_steps = max(
+                get_prefill_eplb_step_interval(),
+                min(get_prefill_eplb_steady_sample_steps(), EPLB_STEADY_SAMPLE_STEPS),
+            )
+            # Full plans preserve node holdings; replica-only plans may change them.
+            max_replicas = (
+                get_max_reachable_replicas(physical, self.n_routed_experts, get_node_world_size())
+                if full_layout
+                else self.global_world_size
+            )
+            counter_shape = (2 * sample_steps, self.n_routed_experts)
+            # Tile routing uses a different assignment policy, so retain logical counts.
+            if not get_dsv4_eplb_tile_routing():
+                counter_shape += (1 + max_replicas * (max_replicas + 1) // 2,)
             eplb = EPLBState(
                 num_redundant_experts_per_rank=num_redundant_experts_per_rank,
                 initial_redundant_expert_ids_by_rank=all_initial_ids,
                 full_layout=full_layout,
-                physical_to_logical=expand_redundant_placement(all_initial_ids, self.n_routed_experts),
+                replica_rotation_rank=self.global_rank_,
+                physical_to_logical=physical,
                 logical_to_physical_map=logical_to_physical.cuda(),
                 logical_replica_count=logical_replica_count.cuda(),
                 route_counter=torch.zeros(
-                    (2 * get_prefill_eplb_step_interval(), self.n_routed_experts),
+                    counter_shape,
                     dtype=torch.int64,
                     device="cuda",
                 ),

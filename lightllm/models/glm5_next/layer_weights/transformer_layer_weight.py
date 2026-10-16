@@ -24,7 +24,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import (
     MMWeightTpl,
 )
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size, get_global_rank, get_node_world_size
 from lightllm.utils.envs_utils import get_env_start_args
 from .pre_and_post_layer_weight import add_language_model_aliases
 
@@ -213,6 +213,38 @@ class Glm5NextTransformerLayerWeight(TransformerLayerWeight):
             layer_num=self.layer_num_,
             network_config=self.network_config_,
         )
+        self._init_eplb_routing()
+
+    def _init_eplb_routing(self):
+        ep_state = self.experts.expert_parallel_state
+        state = None if ep_state is None else ep_state.eplb
+        if state is None or self.tp_world_size_ == 1:
+            return
+        rank, node_size = get_global_rank(), get_node_world_size()
+        leader = rank - self.tp_rank_
+        if leader // node_size != (leader + self.tp_world_size_ - 1) // node_size:
+            # Different nodes can select different local replica sets. Keep
+            # the output broadcast for TP groups spanning multiple nodes.
+            return
+        from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placement import (
+            build_logical_to_physical_map,
+        )
+
+        maps, counts = build_logical_to_physical_map(
+            state.physical_to_logical,
+            self.n_routed_experts,
+            source_rank=rank,
+            node_world_size=node_size,
+            replica_rotation_rank=leader,
+            full_layout=True,
+        )
+        # Replicated TP inputs must choose identical physical replicas so
+        # DeepEP combines BF16 partial sums in the same groups on every rank.
+        # Token hashing still distributes a multi-token batch among replicas.
+        state.logical_to_physical_map.copy_(maps)
+        state.logical_replica_count.copy_(counts)
+        state.replica_rotation_rank = leader
+        state.tp_group_consistent_routing = True
 
     def _init_kda(self):
         prefix = f"model.layers.{self.layer_num_}.self_attn"

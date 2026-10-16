@@ -290,6 +290,7 @@ def test_group_manager_creates_monitor_gloo_group_only_when_enabled(monkeypatch,
         disable_ep_balance_monitor=disable_monitor,
         run_mode="normal",
         enable_prefill_cudagraph=False,
+        dp=1,
         disable_symm_mem_allreduce=True,
         disable_flashinfer_allreduce=True,
     )

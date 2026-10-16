@@ -261,6 +261,8 @@ def fused_experts(
     check_ep_expert_dtype(quant_method)
     mma_type = getattr(quant_method, "mega_moe_mma_type", None)
     if mma_type is not None:
+        if alpha is not None and (alpha != 1.0 or clamp_up_add_one):
+            raise NotImplementedError("Mega MoE supports standard clamped SwiGLU only")
         return mega_moe_impl(
             hidden_states,
             w13,
@@ -269,7 +271,7 @@ def fused_experts(
             topk_idx,
             quant_method,
             mma_type,
-            clamp_limit=clamp_limit,
+            clamp_limit=limit,
             alloc_tensor_func=alloc_tensor_func,
         )
 

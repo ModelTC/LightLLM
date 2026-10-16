@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 import torch
 
@@ -34,6 +34,9 @@ class EPLBState:
     full_layout: bool = False
     physical_to_logical: Optional[torch.Tensor] = None
     placement_generation: int = 0
+    migration_poll: Optional[Callable[[], None]] = None
+    replica_rotation_rank: int = 0
+    tp_group_consistent_routing: bool = False
 
     def next_sample_index(self) -> int:
         if not self.recording:

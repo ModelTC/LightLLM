@@ -614,6 +614,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         if layer_weight.experts_.expert_parallel_state is not None:
             eplb = layer_weight.experts_.expert_parallel_state.eplb
         if infer_state.is_prefill is True and eplb is not None:
+            if eplb.migration_poll is not None:
+                eplb.migration_poll()
             from lightllm.models.deepseek_v4.triton_kernel.moe_topk import (
                 deepseek_v4_eplb_topk,
             )
@@ -635,6 +637,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
                 record_load=eplb.recording,
                 alloc_tensor_func=self.alloc_tensor,
                 return_logical_ids=tile_routing or return_logical_ids,
+                replica_rotation_rank=eplb.replica_rotation_rank,
             )
             if tile_routing:
                 from lightllm.models.deepseek_v4.triton_kernel.eplb_tile_route import route

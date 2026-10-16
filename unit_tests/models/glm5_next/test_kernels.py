@@ -14,6 +14,9 @@ from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import (
+    _get_pool_ranges,
+    _gather_pools,
+    _gather_paged_pools,
     compress_pools,
     gather_pools,
     gather_paged_pools,
@@ -177,6 +180,34 @@ def test_kpool_ranges_cuda_graph_with_changing_query_boundaries(q_lens):
     graph.replay()
     for output, reference in zip(actual, expected):
         assert torch.equal(output, reference)
+
+
+@pytest.mark.parametrize("single_query", [False, True])
+def test_kpool_dynamic_lengths_and_pool_capacity_reuse_compiled_kernel(monkeypatch, single_query):
+    compiled = []
+    original = _get_pool_ranges.run
+
+    def record_kernel(*args, **kwargs):
+        kernel = original(*args, **kwargs)
+        compiled.append(kernel.hash)
+        return kernel
+
+    monkeypatch.setattr(_get_pool_ranges, "run", record_kernel)
+    tensor = lambda values: torch.tensor(values, device="cuda", dtype=torch.int32)
+    for counts, capacity in zip([(3, 2, 4), (17, 0, 9), (257, 1, 513)], [1024, 4097, 20000]):
+        if single_query:
+            counts = (1, 1, 1)
+        cu, lengths, starts = [0], [], []
+        for request, count in enumerate(counts):
+            lengths.extend(range(request * 13 + 1, request * 13 + count + 1))
+            starts.extend([request * capacity] * count)
+            cu.append(cu[-1] + count)
+        actual = get_pool_ranges(tensor(lengths), tensor(cu), max(counts), capacity)
+        expected_lengths = tensor(lengths) // 4
+        expected_starts = tensor(starts)
+        for output, reference in zip(actual, (expected_starts, expected_starts + expected_lengths, expected_lengths)):
+            assert torch.equal(output, reference)
+    assert len(compiled) == 3 and len(set(compiled)) == 1
 
 
 @pytest.mark.parametrize("cuda_graph", [False, True])
@@ -345,6 +376,50 @@ def test_gather_paged_pools_valid_pages_and_graph_replay(max_pools):
         req_idx.copy_(torch.tensor([1, 3, 0], device="cuda", dtype=torch.int32))
         graph.replay()
         check(pages, block_table)
+
+
+@pytest.mark.parametrize("paged", [False, True])
+def test_pool_gather_dynamic_capacity_reuses_compiled_kernel(monkeypatch, paged):
+    kernel_fn = _gather_paged_pools if paged else _gather_pools
+    compiled, original = [], kernel_fn.run
+
+    def record_kernel(*args, **kwargs):
+        kernel = original(*args, **kwargs)
+        compiled.append(kernel.hash)
+        return kernel
+
+    monkeypatch.setattr(kernel_fn, "run", record_kernel)
+    storage = torch.zeros(64, 1, 584, device="cuda", dtype=torch.bfloat16)
+    packed = storage.view(torch.uint8)[:, :, -132:]
+    source_keys = torch.randn(64, 128, device="cuda").to(torch.float8_e4m3fn).view(torch.uint8)
+    source_scales = torch.rand(64, device="cuda") + 0.1
+    packed[:, 0, :128] = source_keys
+    packed[:, 0, 128:] = source_scales.view(torch.uint8).view(64, 4)
+    requests = torch.tensor([2, 0, 1], device="cuda", dtype=torch.int32)
+    for capacity in [64, 65, 257]:
+        # Real serving keeps the request table pitch fixed while the active
+        # output capacity changes with the longest current context.
+        locations = torch.randint(0, 64, (3, 257), device="cuda", dtype=torch.int32)
+        table = torch.full((3, 4 * 257), -1, device="cuda", dtype=torch.int32)
+        table[:, 3::4] = locations
+        counts = torch.tensor([capacity, 3, 0], device="cuda", dtype=torch.int32)
+        if paged:
+            pages, blocks = gather_paged_pools(packed, table, requests, counts, capacity)
+            page_bytes = pages.view(pages.shape[0], -1)
+        else:
+            keys, scales = gather_pools(packed, table, requests, counts * 4, capacity)
+        for batch, (request, count) in enumerate(zip(requests.tolist(), counts.tolist())):
+            if paged:
+                ids = blocks[batch, : triton.cdiv(count, 64)].long()
+                actual_keys = page_bytes[ids, : 64 * 128].reshape(-1, 128)
+                actual_scales = page_bytes[ids, 64 * 128 :].contiguous().view(torch.float32).flatten()
+            else:
+                actual_keys = keys.view(torch.uint8).view(3, capacity, 128)[batch]
+                actual_scales = scales.view(3, capacity)[batch]
+            indices = locations[request, :count].long()
+            assert torch.equal(actual_keys[:count], source_keys[indices])
+            assert torch.equal(actual_scales[:count], source_scales[indices])
+    assert len(compiled) == 3 and len(set(compiled)) == 1
 
 
 @pytest.mark.parametrize("max_pools", [65535, 65536, 262144])

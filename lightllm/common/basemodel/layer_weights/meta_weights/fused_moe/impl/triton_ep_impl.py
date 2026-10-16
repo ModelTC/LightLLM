@@ -29,7 +29,13 @@ class FuseMoeTritonEP(FuseMoeTriton):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ) -> torch.Tensor:
+        if alpha is not None and (alpha != 1.0 or clamp_up_add_one):
+            raise NotImplementedError("Triton EP supports standard clamped SwiGLU only")
+        clamp_limit = clamp_limit if limit is None else limit
         buffer = dist_group_manager.ep_triton_moe_buffer
         return buffer.forward(
             input_tensor,

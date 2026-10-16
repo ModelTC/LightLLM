@@ -86,6 +86,8 @@ def test_select_experts_tile_flag_preserves_logical_gates_and_counters(monkeypat
     replicas = torch.full((256,), 2, dtype=torch.int32, device=device)
     counter = torch.zeros((2, 256), dtype=torch.int64, device=device)
     eplb = SimpleNamespace(
+        migration_poll=None,
+        replica_rotation_rank=0,
         full_layout=True,
         logical_to_physical_map=mapping,
         logical_replica_count=replicas,

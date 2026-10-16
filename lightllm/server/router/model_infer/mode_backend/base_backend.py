@@ -260,11 +260,10 @@ class ModeBackend:
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
-        if self.args.enable_prefill_eplb:
-            from lightllm.server.router.model_infer.mode_backend.eplb_manager import EPLBManager
 
-            self.model.eplb_manager = EPLBManager(self.model)
-            dist.barrier()
+        from lightllm.server.router.model_infer.mode_backend.ep_runtime import install_ep_runtime
+
+        install_ep_runtime(self)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。

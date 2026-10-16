@@ -34,7 +34,7 @@ __global__ void moe_topk_eplb_kernel(
     float* __restrict__ weights, int64_t* __restrict__ physical_ids,
     int64_t* __restrict__ logical_ids, const int32_t* __restrict__ logical_to_physical,
     const int32_t* __restrict__ replica_count, int64_t* __restrict__ counter,
-    int64_t sample_index, int tokens, int topk, int map_slots, int counter_experts,
+    int64_t sample_index, int tokens, int topk, int map_slots, int counter_experts, int counter_channels, int rotation_rank,
     float routed_scaling_factor) {
   const int lane = threadIdx.x & 31;
   const int token = blockIdx.x * kWarps + threadIdx.x / 32;
@@ -99,19 +99,26 @@ __global__ void moe_topk_eplb_kernel(
     for (int k = 0; k < 8; ++k) {
       if (k >= topk) break;
       const int id = selected[k];
-      uint32_t replica = 0;
+      uint32_t hash_value = 0;
       if constexpr (!SingleToken) {
         uint32_t value = static_cast<uint32_t>(token) ^ ((static_cast<uint32_t>(id) + 1u) * 0x9E3779B9u);
         value = (value ^ (value >> 16)) * 0x7FEB352Du;
         value = (value ^ (value >> 15)) * 0x846CA68Bu;
         value ^= value >> 16;
-        replica = value % static_cast<uint32_t>(replica_count[id]);
+        hash_value = value;
       }
+      const uint32_t replica = hash_value % static_cast<uint32_t>(replica_count[id]);
       weights[token * topk + k] = selected_score[k] / fmaxf(sum, 1e-20f) * routed_scaling_factor;
       physical_ids[token * topk + k] = logical_to_physical[id * map_slots + replica];
       if constexpr (ReturnLogical) logical_ids[token * topk + k] = id;
       if constexpr (RecordLoad) {
-        atomicAdd(reinterpret_cast<unsigned long long*>(counter + sample_index * counter_experts + id), 1ULL);
+        int64_t* counts = counter + (sample_index * counter_experts + id) * counter_channels;
+        atomicAdd(reinterpret_cast<unsigned long long*>(counts), 1ULL);
+        // Sample every reachable replica count, independently of the live placement.
+        for (int copies = 1; 1 + copies * (copies + 1) / 2 <= counter_channels; ++copies) {
+          const int bucket = (hash_value % copies + rotation_rank) % copies;
+          atomicAdd(reinterpret_cast<unsigned long long*>(counts + 1 + copies * (copies - 1) / 2 + bucket), 1ULL);
+        }
       }
     }
   }
@@ -123,7 +130,7 @@ void launch(const torch::Tensor& logits, const c10::optional<torch::Tensor>& bia
             const c10::optional<torch::Tensor>& bias_vl, int64_t image_token_start,
             const torch::Tensor& weights, const torch::Tensor& physical_ids, const torch::Tensor& logical_ids,
             const torch::Tensor& logical_to_physical, const torch::Tensor& replica_count,
-            const torch::Tensor& counter, int64_t sample_index, float routed_scaling_factor) {
+            const torch::Tensor& counter, int64_t sample_index, float routed_scaling_factor, int64_t rotation_rank) {
   const int tokens = logits.size(0), topk = weights.size(1);
   moe_topk_eplb_kernel<IsHash, RecordLoad, ReturnLogical, SingleToken>
       <<< (tokens + kWarps - 1) / kWarps, kWarps * 32, 0, at::cuda::getCurrentCUDAStream() >>>(
@@ -133,7 +140,8 @@ void launch(const torch::Tensor& logits, const c10::optional<torch::Tensor>& bia
           bias_vl.has_value() ? bias_vl->data_ptr<float>() : nullptr, image_token_start,
           weights.data_ptr<float>(), physical_ids.data_ptr<int64_t>(), logical_ids.data_ptr<int64_t>(),
           logical_to_physical.data_ptr<int32_t>(), replica_count.data_ptr<int32_t>(), counter.data_ptr<int64_t>(),
-          sample_index, tokens, topk, logical_to_physical.size(1), counter.size(1), routed_scaling_factor);
+          sample_index, tokens, topk, logical_to_physical.size(1), counter.size(1),
+          counter.dim() == 3 ? counter.size(2) : 1, rotation_rank, routed_scaling_factor);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -144,9 +152,9 @@ void dispatch(const torch::Tensor& logits, const c10::optional<torch::Tensor>& b
               const torch::Tensor& weights, const torch::Tensor& physical_ids, const torch::Tensor& logical_ids,
               const torch::Tensor& logical_to_physical, const torch::Tensor& replica_count,
               const torch::Tensor& counter, int64_t sample_index, bool is_hash, bool single_token,
-              float routed_scaling_factor) {
+              float routed_scaling_factor, int64_t rotation_rank) {
 #define DSV4_EPLB_LAUNCH(HASH, SINGLE) \
-  launch<HASH, RecordLoad, ReturnLogical, SINGLE>(logits, bias, input_ids, tid2eid, bias_vl, image_token_start, weights, physical_ids, logical_ids, logical_to_physical, replica_count, counter, sample_index, routed_scaling_factor)
+  launch<HASH, RecordLoad, ReturnLogical, SINGLE>(logits, bias, input_ids, tid2eid, bias_vl, image_token_start, weights, physical_ids, logical_ids, logical_to_physical, replica_count, counter, sample_index, routed_scaling_factor, rotation_rank)
   if (is_hash && single_token) DSV4_EPLB_LAUNCH(true, true);
   else if (is_hash) DSV4_EPLB_LAUNCH(true, false);
   else if (single_token) DSV4_EPLB_LAUNCH(false, true);
@@ -169,7 +177,7 @@ void moe_topk_eplb(torch::Tensor logits, c10::optional<torch::Tensor> bias,
                    torch::Tensor physical_ids,
                    torch::Tensor logical_ids, torch::Tensor logical_to_physical, torch::Tensor replica_count,
                    torch::Tensor counter, int64_t sample_index, bool record_load, bool return_logical_ids,
-                   float routed_scaling_factor) {
+                   float routed_scaling_factor, int64_t rotation_rank) {
   const auto check = [&](const torch::Tensor& tensor, const char* name, torch::ScalarType dtype) {
     TORCH_CHECK(tensor.is_cuda(), name, " must be CUDA");
     TORCH_CHECK(tensor.device() == logits.device(), name, " must share logits device");
@@ -192,8 +200,15 @@ void moe_topk_eplb(torch::Tensor logits, c10::optional<torch::Tensor> bias,
   TORCH_CHECK(logical_to_physical.dim() == 2 && logical_to_physical.size(0) == kExperts &&
                   logical_to_physical.size(1) > 0, "logical_to_physical must be [256, map_slots]");
   TORCH_CHECK(replica_count.dim() == 1 && replica_count.size(0) == kExperts, "replica_count must be [256]");
-  TORCH_CHECK(counter.dim() == 2 && counter.size(0) > 0 && counter.size(1) == kExperts,
-              "counter must be [rows, 256]");
+  TORCH_CHECK((counter.dim() == 2 || counter.dim() == 3) && counter.size(0) > 0 && counter.size(1) == kExperts,
+              "counter must be [rows, 256] or [rows, 256, 1 + H*(H+1)/2]");
+  if (counter.dim() == 3) {
+    const int channels = counter.size(2) - 1;
+    const int max_replicas = static_cast<int>((std::sqrt(1 + 8.0 * channels) - 1) / 2);
+    TORCH_CHECK(channels > 0 && max_replicas * (max_replicas + 1) / 2 == channels,
+                "counter must contain complete replica hash buckets");
+  }
+  TORCH_CHECK(rotation_rank >= 0, "rotation_rank must be nonnegative");
   TORCH_CHECK(sample_index >= 0 && sample_index < counter.size(0), "sample_index outside counter rows");
   const bool is_hash = tid2eid.has_value();
   check_optional(logits, bias, "bias", torch::kFloat, 1, kExperts);
@@ -217,19 +232,19 @@ void moe_topk_eplb(torch::Tensor logits, c10::optional<torch::Tensor> bias,
   if (record_load && return_logical_ids) {
     dispatch<true, true>(logits, bias, input_ids, tid2eid, bias_vl, image_token_start, weights, physical_ids,
                          logical_ids, logical_to_physical, replica_count, counter, sample_index, is_hash, single,
-                         routed_scaling_factor);
+                         routed_scaling_factor, rotation_rank);
   } else if (record_load) {
     dispatch<true, false>(logits, bias, input_ids, tid2eid, bias_vl, image_token_start, weights, physical_ids,
                           logical_ids, logical_to_physical, replica_count, counter, sample_index, is_hash, single,
-                          routed_scaling_factor);
+                          routed_scaling_factor, rotation_rank);
   } else if (return_logical_ids) {
     dispatch<false, true>(logits, bias, input_ids, tid2eid, bias_vl, image_token_start, weights, physical_ids,
                           logical_ids, logical_to_physical, replica_count, counter, sample_index, is_hash, single,
-                          routed_scaling_factor);
+                          routed_scaling_factor, rotation_rank);
   } else {
     dispatch<false, false>(logits, bias, input_ids, tid2eid, bias_vl, image_token_start, weights, physical_ids,
                            logical_ids, logical_to_physical, replica_count, counter, sample_index, is_hash, single,
-                           routed_scaling_factor);
+                           routed_scaling_factor, rotation_rank);
   }
 }
 

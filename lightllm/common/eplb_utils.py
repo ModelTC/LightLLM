@@ -3,6 +3,7 @@
 import math
 
 
+EPLB_STEADY_SAMPLE_STEPS = 4
 EPLB_MAX_STAGING_DEPTH = 8
 EPLB_FULL_STAGING_PARTS = 2
 
@@ -69,3 +70,15 @@ def extract_eplb_expert_tensors(weight):
                 assert tensor.ndim >= 1 and tensor.is_contiguous(), f"{pack_name}.{value_name} must be contiguous"
                 result.append((f"{pack_name}.{value_name}", tensor))
     return result
+
+
+def find_ep_moe_weights(model):
+    # Deferred import keeps planner/transfer helpers independent of model imports.
+    from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
+
+    weights = {}
+    for layer in model.trans_layers_weight:
+        for weight in getattr(layer, "__dict__", {}).values():
+            if isinstance(weight, FusedMoeWeight) and weight.enable_ep_moe:
+                weights[id(weight)] = weight
+    return sorted(weights.values(), key=lambda weight: weight.layer_num_)

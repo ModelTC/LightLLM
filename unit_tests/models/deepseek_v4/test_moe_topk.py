@@ -250,3 +250,46 @@ def test_deepseek_v4_eplb_topk_validates_vision_arguments():
     )
     with pytest.raises(RuntimeError, match="vision routing requires"):
         deepseek_v4_eplb_topk(**kwargs, bias_vl=torch.zeros(256, device="cuda"), image_token_start=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("tokens", [1, 257])
+@pytest.mark.parametrize("is_hash", [False, True])
+def test_eplb_hash_histograms_match_rotated_replica_routing(tokens, is_hash):
+    experts, topk, maximum, copies, phase = 256, 6, 4, 3, 2
+    logits = torch.randn((tokens, experts), device="cuda")
+    ids = torch.arange(tokens, device="cuda")
+    table = torch.arange(topk, device="cuda")[None].expand(tokens, -1).contiguous()
+    original = torch.arange(experts * maximum, device="cuda", dtype=torch.int32).view(experts, maximum)
+    mapping = original.clone()
+    mapping[:, :copies] = original[:, (torch.arange(copies, device="cuda") + phase) % copies]
+    channels = 1 + maximum * (maximum + 1) // 2
+    counter = torch.zeros((3, experts, channels), device="cuda", dtype=torch.int64)
+    _, physical, logical = deepseek_v4_eplb_topk(
+        logits=logits,
+        bias=None if is_hash else torch.zeros(experts, device="cuda"),
+        input_tokens=ids if is_hash else None,
+        hash_indices_table=table if is_hash else None,
+        topk=topk,
+        routed_scaling_factor=1.0,
+        logical_to_physical_map=mapping,
+        logical_replica_count=torch.full((experts,), copies, device="cuda", dtype=torch.int32),
+        expert_counter=counter,
+        sample_index=1,
+        record_load=True,
+        return_logical_ids=True,
+        replica_rotation_rank=phase,
+    )
+    expected = torch.zeros_like(counter)
+    expected[1, :, 0] = torch.bincount(logical.flatten(), minlength=experts)
+    for count in range(1, maximum + 1):
+        replicas = torch.full((experts,), count, device="cuda", dtype=torch.int32)
+        bucket = (_expected_replica(tokens, logical, replicas) + phase) % count
+        begin = 1 + count * (count - 1) // 2
+        expected[1, :, begin : begin + count] = torch.bincount(
+            (logical * count + bucket).flatten(),
+            minlength=experts * count,
+        ).view(experts, count)
+    torch.testing.assert_close(counter, expected, rtol=0, atol=0)
+    bucket = (_expected_replica(tokens, logical, torch.full((experts,), copies, device="cuda")) + phase) % copies
+    torch.testing.assert_close(physical, logical * maximum + bucket, rtol=0, atol=0)

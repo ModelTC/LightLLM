@@ -32,6 +32,7 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
+    get_node_world_size,
     get_dp_world_size,
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
@@ -122,7 +123,14 @@ class CustomProcessGroup:
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def _support_custom_allreduce(self) -> bool:
-        return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
+        # CUDA IPC and symmetric-memory handles are local to one host.
+        node_world_size = get_node_world_size()
+        return (
+            self.dp_world_size <= node_world_size
+            and node_world_size % self.dp_world_size == 0
+            and self.dp_world_size in [2, 4, 6, 8]
+            and has_nvlink()
+        )
 
     def init_symm_mem_reduce(self) -> None:
         if not self._support_custom_allreduce():

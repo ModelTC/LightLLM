@@ -174,7 +174,7 @@ def compress_pools(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TOKENS", "MAX_POOLS"])
 def _get_pool_ranges(
     Lengths,
     CuQLens,
@@ -182,11 +182,14 @@ def _get_pool_ranges(
     Ends,
     PoolLengths,
     BATCH: tl.constexpr,
-    TOKENS: tl.constexpr,
-    MAX_POOLS: tl.constexpr,
+    TOKENS,
+    MAX_POOLS,
     SINGLE_QUERY: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    # Context lengths and packed-pool capacity change as requests finish.
+    # Neither controls a tile shape; specializing them causes compilation
+    # pauses for otherwise identical batches during normal serving.
     if SINGLE_QUERY:
         row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         batch = row
@@ -215,7 +218,7 @@ def get_pool_ranges(lengths, cu_q_lens, max_q_len, max_pools):
     return starts, ends, pool_lengths
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["POOLS"])
 def _gather_pools(
     Packed,
     ReqTable,
@@ -225,7 +228,7 @@ def _gather_pools(
     Scale,
     PACKED_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
-    POOLS: tl.constexpr,
+    POOLS,
 ):
     pool, batch = tl.program_id(0), tl.program_id(1)
     length = tl.load(SeqLen + batch)
@@ -259,7 +262,7 @@ def gather_pools(packed_buffer, req_table, req_idx, seq_len, max_pools):
     return keys, scales
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["MAX_PAGES"])
 def _gather_paged_pools(
     Packed,
     ReqTable,
@@ -268,7 +271,7 @@ def _gather_paged_pools(
     Pages,
     PACKED_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
-    MAX_PAGES: tl.constexpr,
+    MAX_PAGES,
 ):
     batch = tl.program_id(1)
     req = tl.load(ReqIdx + batch)

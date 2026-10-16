@@ -1,3 +1,4 @@
+from math import isqrt
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, Tuple
@@ -48,87 +49,55 @@ def validate_physical_placement(placement: torch.Tensor, num_logical_experts: in
 
 
 def build_logical_to_physical_map(
-    redundant_expert_ids: torch.Tensor,  # 冗余布局，shape 为 [num_ranks, num_redundant_experts_per_rank]。
+    physical_expert_ids: torch.Tensor,  # 完整物理布局，shape 为 [num_ranks, num_physical_experts_per_rank]。
     num_logical_experts: int,  # 逻辑 expert 的总数。
     source_rank: int | None = None,  # 可选的全局源 rank；传入时优先选择同节点副本。
     node_world_size: int | None = None,  # 单个节点包含的 rank 数；source_rank 非空时必填。
+    replica_rotation_rank: int | None = None,
+    *,
+    full_layout: bool = False,
 ) -> Tuple[
     torch.Tensor, torch.Tensor
 ]:  # logical_to_physical [num_logical_experts, num_ranks], replica_counts [num_logical_experts]
-    """构建单层逻辑 expert 到物理副本的映射"""
+    """构建单层完整物理布局的逻辑 expert 到副本映射。"""
 
     logical_to_physical, replica_counts = build_logical_to_physical_maps_for_layers(
-        redundant_expert_ids.unsqueeze(0),
+        physical_expert_ids.unsqueeze(0),
         num_logical_experts,
         source_rank=source_rank,
         node_world_size=node_world_size,
+        replica_rotation_rank=replica_rotation_rank,
+        full_layout=full_layout,
     )
     return logical_to_physical.squeeze(0), replica_counts.squeeze(0)
 
 
 def build_logical_to_physical_maps_for_layers(
-    redundant_expert_ids_by_layer: torch.Tensor,  # [num_layers, num_ranks, num_redundant_experts_per_rank]
+    physical_expert_ids_by_layer: torch.Tensor,  # [num_layers, num_ranks, num_physical_experts_per_rank]
     num_logical_experts: int,  # 逻辑 expert 的总数。
     source_rank: int | None = None,  # 可选的全局源 rank；传入时优先选择同节点副本。
     node_world_size: int | None = None,  # 单个节点包含的 rank 数；source_rank 非空时必填。
+    replica_rotation_rank: int | None = None,
     *,
     full_layout: bool = False,
 ) -> Tuple[
     torch.Tensor,  # logical_to_physical, shape [num_layers, num_logical_experts, num_ranks]
     torch.Tensor,  # replica_counts, shape [num_layers, num_logical_experts]
 ]:
-    """Build CPU int32 maps without modifying the supplied placement.
+    """为调用方传入的多个指定层构建逻辑 expert 到物理副本的 CPU int32 映射。
 
-    With ``full_layout=True`` the input includes all absolute physical rows;
-    otherwise it contains only the redundant rows after fixed primary rows.
+    第一维是层，不是请求或 token 的 batch，也不会自动处理模型中的其他层。
+    输入包含全部物理行，副本按 rank-major、slot-major 的稳定顺序排列。
+    source_rank 决定本地节点；replica_rotation_rank 独立控制轮转，默认使用 source_rank。
     """
-    if redundant_expert_ids_by_layer.ndim != 3:
-        raise ValueError("redundant_expert_ids_by_layer must be [layers, ranks, num_redundant_experts_per_rank]")
-    num_ranks, num_redundant_experts_per_rank = redundant_expert_ids_by_layer.shape[1:]
-    assert num_logical_experts % num_ranks == 0
-    if full_layout:
-        validate_physical_placement(redundant_expert_ids_by_layer, num_logical_experts)
-        num_physical_experts_per_rank = num_redundant_experts_per_rank
-        physical = redundant_expert_ids_by_layer.cpu().to(torch.int64)
-        layers = physical.shape[0]
-        logical_to_physical = torch.full((layers, num_logical_experts, num_ranks), -1, dtype=torch.int32)
-        replica_counts = torch.zeros((layers, num_logical_experts), dtype=torch.int32)
-        layer_ids = torch.arange(layers)[:, None]
-        for rank in range(num_ranks):
-            experts = physical[:, rank]
-            positions = replica_counts[layer_ids, experts].to(torch.int64)
-            logical_to_physical[layer_ids, experts, positions] = rank * num_physical_experts_per_rank + torch.arange(
-                num_physical_experts_per_rank, dtype=torch.int32
-            )
-            replica_counts[layer_ids, experts] += 1
-    else:
-        layout = _get_physical_expert_layout(num_logical_experts, num_ranks, num_redundant_experts_per_rank)
-        num_physical_experts_per_rank = layout.num_physical_experts_per_rank
-        logical_to_physical, replica_counts = _build_global_replica_maps_for_layers(
-            redundant_expert_ids_by_layer, layout
-        )
-    if source_rank is None:
-        return logical_to_physical, replica_counts
-
-    assert node_world_size is not None and 0 < node_world_size <= num_ranks
-    assert num_ranks % node_world_size == 0 and 0 <= source_rank < num_ranks
-    replica_positions = torch.arange(num_ranks, dtype=torch.int64)
-    compact_maps_by_layer, selected_counts_by_layer = _select_source_node_replicas(
-        logical_to_physical,
-        replica_counts,
+    return _build_layer_maps(
+        physical_expert_ids_by_layer
+        if full_layout
+        else expand_redundant_placement(physical_expert_ids_by_layer, num_logical_experts),
+        num_logical_experts,
         source_rank=source_rank,
         node_world_size=node_world_size,
-        num_physical_experts_per_rank=num_physical_experts_per_rank,
-        replica_positions=replica_positions,
-    )
-    return (
-        _rotate_selected_replicas(
-            compact_maps_by_layer,
-            selected_counts_by_layer,
-            source_rank=source_rank,
-            replica_positions=replica_positions,
-        ),
-        selected_counts_by_layer,
+        replica_rotation_rank=replica_rotation_rank,
     )
 
 
@@ -141,30 +110,53 @@ def select_improving_placements(
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
     full_layout: bool = False,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float | int], torch.Tensor, torch.Tensor]:
     """Select better layers and return current/final rank loads without re-estimation."""
     if not 0.0 <= rebalance_gain_threshold <= 1.0:
         raise ValueError("rebalance_gain_threshold must be between 0.0 and 1.0")
     assert current_placement.shape == candidate_placement.shape
     current_rank_load = _estimate_rank_load(
-        expert_load, current_placement, expert_alignment, node_world_size, full_layout
+        expert_load,
+        current_placement,
+        expert_alignment,
+        node_world_size,
+        full_layout,
+        replica_hash_load=replica_hash_load,
     )
     candidate_rank_load = _estimate_rank_load(
-        expert_load, candidate_placement, expert_alignment, node_world_size, full_layout
+        expert_load,
+        candidate_placement,
+        expert_alignment,
+        node_world_size,
+        full_layout,
+        replica_hash_load=replica_hash_load,
     )
-    current_critical = current_rank_load.max(dim=-1).values.sum(dim=0)
-    candidate_critical = candidate_rank_load.max(dim=-1).values.sum(dim=0)
+    if expert_load.ndim == 2:
+        current_critical = current_rank_load.max(dim=1).values
+        candidate_critical = candidate_rank_load.max(dim=1).values
+    else:
+        current_critical = current_rank_load.max(dim=2).values.sum(dim=0)
+        candidate_critical = candidate_rank_load.max(dim=2).values.sum(dim=0)
     # Each changed layer must reduce its own critical load. All selected
     # changes must then collectively meet the configured model-level
     # critical-load reduction threshold, avoiding low-gain migrations.
     improved = candidate_critical < current_critical
     selected = current_placement.clone()
     selected[improved] = candidate_placement[improved]
-    selected_rank_load = torch.where(improved[:, None], candidate_rank_load, current_rank_load)
+    if current_rank_load.ndim == 2:
+        selected_rank_load = torch.where(improved[:, None], candidate_rank_load, current_rank_load)
+    else:
+        selected_rank_load = torch.where(improved[None, :, None], candidate_rank_load, current_rank_load)
     model_current_critical = current_critical.sum()
-    model_current_mean = current_rank_load.mean(dim=-1).sum()
-    model_selected_critical = selected_rank_load.max(dim=-1).values.sum()
-    model_selected_mean = selected_rank_load.mean(dim=-1).sum()
+    if expert_load.ndim == 2:
+        model_current_mean = current_rank_load.mean(dim=1).sum()
+        model_selected_critical = selected_rank_load.max(dim=1).values.sum()
+        model_selected_mean = selected_rank_load.mean(dim=1).sum()
+    else:
+        model_current_mean = current_rank_load.mean(dim=2).sum()
+        model_selected_critical = selected_rank_load.max(dim=2).values.sum()
+        model_selected_mean = selected_rank_load.mean(dim=2).sum()
     model_ratio = model_current_critical / model_current_mean.clamp_min(1.0)
     candidate_model_ratio = model_selected_critical / model_selected_mean.clamp_min(1.0)
     candidate_rebalance_gain = (model_current_critical - model_selected_critical) / model_current_critical.clamp_min(
@@ -427,32 +419,40 @@ def _rotate_selected_replicas(
 
 def _estimate_rank_load(
     expert_load: torch.Tensor,
-    redundant_expert_ids: torch.Tensor,
+    physical_expert_ids: torch.Tensor,
     expert_alignment: int | None = None,
     node_world_size: int | None = None,
     full_layout: bool = False,
+    *,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Estimate [samples, layers, ranks] load from source-node-local routing.
+    """Estimate runtime source-node-local routing load per physical expert.
 
-    Source loads remain separate until assigned to physical replicas, then
-    combine before the per-expert alignment used by DeepEP.
+    ``expert_load`` accepts the historic ``[layers, experts]`` and
+    ``[samples, layers, experts]`` forms, which are both one source node, and
+    the distributed ``[samples, layers, source_nodes, experts]`` form.  Source
+    loads are kept separate until they are assigned to physical replicas, then
+    combined before applying the per-expert alignment used by DeepEP.
     """
-    node_world_size = _resolve_node_world_size(expert_load, redundant_expert_ids.shape[1], node_world_size)
-    num_samples, num_layers, num_nodes, num_logical_experts = expert_load.shape
-    assert redundant_expert_ids.ndim == 3 and redundant_expert_ids.shape[0] == num_layers
-    num_ranks, num_redundant_experts_per_rank = redundant_expert_ids.shape[1:]
+    source_load, squeeze_sample, node_world_size = _as_source_node_load(
+        expert_load, physical_expert_ids.shape[1], node_world_size
+    )
+    num_samples, num_layers, num_nodes, num_logical_experts = source_load.shape
+    assert physical_expert_ids.ndim == 3 and physical_expert_ids.shape[0] == num_layers
+    num_ranks, num_physical_experts_per_rank = physical_expert_ids.shape[1:]
     assert num_logical_experts % num_ranks == 0
     if expert_alignment is not None:
         assert expert_alignment > 0
 
     rank_load = _expert_rank_load_all(
-        expert_load,
-        _expert_locations(redundant_expert_ids, num_logical_experts, full_layout),
+        source_load,
+        _expert_locations(physical_expert_ids, num_logical_experts, full_layout),
         num_nodes,
         node_world_size,
         expert_alignment,
+        replica_hash_load=replica_hash_load,
     ).sum(dim=2)
-    return rank_load
+    return rank_load.squeeze(0) if squeeze_sample else rank_load
 
 
 def _resolve_node_world_size(expert_load: torch.Tensor, num_ranks: int, node_world_size: int | None) -> int:
@@ -518,10 +518,134 @@ def _expert_rank_load_all(
     num_nodes: int,
     node_world_size: int,
     expert_alignment: int | None,
+    *,
+    replica_hash_load: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return aligned ``[samples, layers, expert, rank]`` contributions."""
-    route = _source_route(locations, num_nodes, node_world_size)
-    physical_load = torch.einsum("slne,lner->sler", source_load.to(torch.float64), route)
+    if replica_hash_load is None:
+        route = _source_route(locations, num_nodes, node_world_size)
+        physical_load = torch.einsum("slne,lner->sler", source_load.to(torch.float64), route)
+    else:
+        if replica_hash_load.shape[:-1] != source_load.shape:
+            raise ValueError("replica hash samples must match logical source loads")
+        ranks = locations.shape[-1]
+        channels = replica_hash_load.shape[-1]
+        max_replicas = (isqrt(1 + 8 * channels) - 1) // 2
+        if max_replicas * (max_replicas + 1) // 2 != channels:
+            raise ValueError("replica hash samples must contain complete replica buckets")
+        # Select exactly the same rank-major candidate prefix as runtime maps.
+        owners = locations[:, None].expand(-1, num_nodes, -1, -1)
+        rank_nodes = torch.arange(ranks, device=locations.device) // node_world_size
+        source_nodes = torch.arange(num_nodes, device=locations.device)
+        local = owners & (rank_nodes[None, None, None, :] == source_nodes[None, :, None, None])
+        selected = torch.where(local.any(-1, keepdim=True), local, owners)
+        copies = selected.sum(-1, keepdim=True)
+        if int(copies.max()) > max_replicas:
+            raise ValueError("candidate exceeds sampled reachable replica counts")
+        ordinal = selected.cumsum(-1) - 1
+        channels = (copies * (copies - 1) // 2 + ordinal).clamp_min(0)
+        per_source = torch.gather(
+            replica_hash_load.to(torch.float64), -1, channels[None].expand(source_load.shape[0], -1, -1, -1, -1)
+        )
+        physical_load = (per_source * selected[None]).sum(dim=2)
     if expert_alignment is not None:
         physical_load = torch.ceil(physical_load / expert_alignment) * expert_alignment
     return physical_load
+
+
+def get_max_reachable_replicas(placement: torch.Tensor, num_logical_experts: int, node_world_size: int) -> int:
+    """Bound hash sampling by the node holdings preserved by the full planner.
+
+    A node needs one slot per held expert. Its other slots bound how many
+    copies of any one expert it can own. Only experts absent from a source
+    node need a global-fallback histogram.
+    """
+    ranks, capacity = placement.shape
+    if ranks % node_world_size:
+        raise ValueError("EP ranks must form complete nodes")
+    holdings = torch.zeros((ranks // node_world_size, num_logical_experts), dtype=torch.bool)
+    limits = []
+    for node in range(len(holdings)):
+        ids = placement[node * node_world_size : (node + 1) * node_world_size].unique()
+        holdings[node, ids] = True
+        limits.append(min(node_world_size, node_world_size * capacity - len(ids) + 1))
+    limits = torch.tensor(limits, dtype=torch.int64)
+    maximum = int(limits.max())
+    absent_somewhere = ~holdings.all(0)
+    if absent_somewhere.any():
+        global_limits = (holdings * limits[:, None]).sum(0)
+        maximum = max(maximum, int(global_limits[absent_somewhere].max()))
+    return maximum
+
+
+def _build_layer_maps(
+    physical_expert_ids_by_layer: torch.Tensor,
+    num_logical_experts: int,  # 逻辑 expert 的总数。
+    source_rank: int | None = None,  # 可选的全局源 rank；传入时优先选择同节点副本。
+    node_world_size: int | None = None,  # 单个节点包含的 rank 数；source_rank 非空时必填。
+    replica_rotation_rank: int | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """构建调用方指定层的映射；全局构建、节点筛选和轮转均在此完成。"""
+    if physical_expert_ids_by_layer.ndim != 3:
+        raise ValueError("physical_expert_ids_by_layer must be [layers, ranks, num_physical_experts_per_rank]")
+    num_ranks, num_physical_experts_per_rank = physical_expert_ids_by_layer.shape[1:]
+    assert num_logical_experts % num_ranks == 0
+    validate_physical_placement(physical_expert_ids_by_layer, num_logical_experts)
+    physical = physical_expert_ids_by_layer.cpu().to(torch.int64)
+    layers = physical.shape[0]
+    logical_to_physical = torch.full((layers, num_logical_experts, num_ranks), -1, dtype=torch.int32)
+    replica_counts = torch.zeros((layers, num_logical_experts), dtype=torch.int32)
+    layer_ids = torch.arange(layers)[:, None]
+    for rank in range(num_ranks):
+        experts = physical[:, rank]
+        positions = replica_counts[layer_ids, experts].to(torch.int64)
+        logical_to_physical[layer_ids, experts, positions] = rank * num_physical_experts_per_rank + torch.arange(
+            num_physical_experts_per_rank, dtype=torch.int32
+        )
+        replica_counts[layer_ids, experts] += 1
+    if source_rank is None:
+        if replica_rotation_rank is not None:
+            raise ValueError("replica_rotation_rank requires source_rank")
+        return logical_to_physical, replica_counts
+
+    assert node_world_size is not None and 0 < node_world_size <= num_ranks
+    assert num_ranks % node_world_size == 0 and 0 <= source_rank < num_ranks
+    rotation_rank = source_rank if replica_rotation_rank is None else replica_rotation_rank
+    if not 0 <= rotation_rank < num_ranks:
+        raise ValueError("replica_rotation_rank must be an EP rank")
+    replica_positions = torch.arange(num_ranks, dtype=torch.int64)
+    compact_maps_by_layer, selected_counts_by_layer = _select_source_node_replicas(
+        logical_to_physical,
+        replica_counts,
+        source_rank=source_rank,
+        node_world_size=node_world_size,
+        num_physical_experts_per_rank=num_physical_experts_per_rank,
+        replica_positions=replica_positions,
+    )
+    return (
+        _rotate_selected_replicas(
+            compact_maps_by_layer,
+            selected_counts_by_layer,
+            source_rank=rotation_rank,
+            replica_positions=replica_positions,
+        ),
+        selected_counts_by_layer,
+    )
+
+
+def _as_source_node_load(
+    expert_load: torch.Tensor, num_ranks: int, node_world_size: int | None
+) -> Tuple[torch.Tensor, bool, int]:
+    """Normalize load to ``[samples, layers, source_nodes, experts]``."""
+    assert expert_load.ndim in (2, 3, 4)
+    squeeze_sample = expert_load.ndim == 2
+    if expert_load.ndim == 2:
+        source_load = expert_load.unsqueeze(0).unsqueeze(2)
+    elif expert_load.ndim == 3:
+        source_load = expert_load.unsqueeze(2)
+    else:
+        source_load = expert_load
+    # Historic 2D/3D loads represent one source node containing every rank.
+    if expert_load.ndim < 4:
+        return source_load, squeeze_sample, num_ranks
+    return source_load, squeeze_sample, _resolve_node_world_size(source_load, num_ranks, node_world_size)
