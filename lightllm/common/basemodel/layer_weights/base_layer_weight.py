@@ -4,6 +4,10 @@ import threading
 from lightllm.common.basemodel.layer_weights.meta_weights import BaseWeight
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class BaseLayerWeight:
     def __init__(self):
@@ -40,4 +44,4 @@ class BaseLayerWeight:
                 assert attr.verify_load(), f"Loading {attr_name} of layers {layer_num} fails."
 
     def _cuda(self, cpu_tensor):
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(get_current_device_id())
+        return _device_runtime.move(cpu_tensor.contiguous().to(self.data_type_), get_current_device_id())

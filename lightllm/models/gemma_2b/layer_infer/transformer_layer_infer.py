@@ -8,7 +8,12 @@ import triton
 
 from lightllm.models.gemma_2b.layer_weights.transformer_layer_weight import Gemma_2bTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.gemma_2b.triton_kernel.gelu_and_mul import gelu_and_mul_fwd
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+gelu_and_mul_fwd = _operator_backend.resolve("models.gemma_2b.gelu_and_mul.gelu_and_mul_fwd")
 
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 

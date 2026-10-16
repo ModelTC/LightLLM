@@ -4,6 +4,10 @@ from typing import Any
 from .deepseek2_mem_manager import Deepseek2MemoryManager
 from .operator import FP8PerTokenGroupQuantDeepseek3_2MemOperator
 
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
 
 class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
 
@@ -53,8 +57,8 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
         prefill_mem_index: torch.Tensor,
         prefill_cache_kv: torch.Tensor,
     ):
-        from lightllm.models.deepseek3_2.triton_kernel.prefill_compact_kv_flashmla_fp8 import (
-            get_prefill_kv_cache_and_remap_indices_triton,
+        get_prefill_kv_cache_and_remap_indices_triton = _operator_backend.resolve(
+            "models.deepseek3_2.prefill_compact_kv_flashmla_fp8.get_prefill_kv_cache_and_remap_indices_triton"
         )
 
         return get_prefill_kv_cache_and_remap_indices_triton(

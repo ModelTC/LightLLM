@@ -28,6 +28,10 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutput
 from lightllm.utils.envs_utils import use_whisper_sdpa_attention
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 def sinusoids(length: int, channels: int, max_timescale: float = 10000) -> torch.Tensor:
     """Returns sinusoids for positional embedding"""
@@ -554,7 +558,7 @@ class WhisperEncoder(WhisperPreTrainedModel):
                 .expand(-1, self.config.encoder_attention_heads, -1, -1)
                 .reshape(bsz, self.config.encoder_attention_heads, 1, batch_src_len)
             )
-            new_attention_mask = torch.zeros_like(
+            new_attention_mask = _device_runtime.zeros_like(
                 key_attention_mask,
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,

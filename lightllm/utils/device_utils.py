@@ -8,27 +8,30 @@ from typing import Optional
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+
 logger = init_logger(__name__)
 
 
 @lru_cache(maxsize=None)
 def is_tesla():
-    return "Tesla" in torch.cuda.get_device_name(0)
+    return "Tesla" in get_device_runtime().get_device_name(0)
 
 
 @lru_cache(maxsize=None)
 def is_hopper():
     return (
-        "H100" in torch.cuda.get_device_name(0)
-        or "H200" in torch.cuda.get_device_name(0)
-        or "H800" in torch.cuda.get_device_name(0)
-        or "Hopper" in torch.cuda.get_device_name(0)
+        "H100" in get_device_runtime().get_device_name(0)
+        or "H200" in get_device_runtime().get_device_name(0)
+        or "H800" in get_device_runtime().get_device_name(0)
+        or "Hopper" in get_device_runtime().get_device_name(0)
     )
 
 
 @lru_cache(maxsize=None)
 def is_4090():
-    return "4090" in torch.cuda.get_device_name(0) or "RTX 4090" in torch.cuda.get_device_name(0)
+    return "4090" in get_device_runtime().get_device_name(0) or "RTX 4090" in get_device_runtime().get_device_name(0)
 
 
 @lru_cache(maxsize=None)
@@ -42,7 +45,7 @@ def get_device_sm_count():
 
 @lru_cache(maxsize=None)
 def is_sm100_gpu():
-    return torch.cuda.get_device_capability()[0] == 10
+    return get_device_runtime().get_device_capability()[0] == 10
 
 
 @lru_cache(maxsize=None)
@@ -96,7 +99,7 @@ def is_musa():
 @lru_cache(maxsize=1)
 def is_nvidia():
     ans = (
-        torch.cuda.is_available()
+        get_device_runtime().is_available()
         and getattr(torch.version, "cuda", None) is not None
         and getattr(torch.version, "hip", None) is None
         and not is_musa()
@@ -107,9 +110,9 @@ def is_nvidia():
 
 @lru_cache(maxsize=None)
 def get_current_device_name():
-    if torch.cuda.is_available() or is_musa():
-        device = torch.cuda.current_device()
-        gpu_name = torch.cuda.get_device_name(device)
+    if get_device_runtime().is_available() or is_musa():
+        device = get_device_runtime().current_device()
+        gpu_name = get_device_runtime().get_device_name(device)
         # 4090 trans to 4090 D
         if "4090" in gpu_name and "4090 D" not in gpu_name:
             gpu_name = gpu_name.replace("4090", "4090 D")
@@ -125,13 +128,13 @@ def init_p2p(device_index):
     """
     torch 调用跨卡的to操作后，triton编译的算子便能自动操作跨卡tensor。
     """
-    num_gpus = torch.cuda.device_count()
+    num_gpus = get_device_runtime().device_count()
     tensor = torch.zeros((1,))
-    tensor = tensor.to(f"cuda:{device_index}")
+    tensor = tensor.to(get_device_runtime().device_at(device_index))
     for j in range(num_gpus):
-        tensor.to(f"cuda:{j}")
+        tensor.to(get_device_runtime().device_at(j))
 
-    torch.cuda.empty_cache()
+    get_device_runtime().empty_cache()
     return
 
 
@@ -280,7 +283,7 @@ def set_sm_limit(percent: int, gpu_index=0):
 @lru_cache(maxsize=None)
 def support_tma() -> bool:
     # 5090 关闭 tma feature，实际测试开了没啥用
-    return is_nvidia() and torch.cuda.get_device_capability() >= (9, 0) and not is_5090_gpu()
+    return is_nvidia() and get_device_runtime().get_device_capability() >= (9, 0) and not is_5090_gpu()
 
 
 @lru_cache(maxsize=None)
@@ -309,7 +312,7 @@ def triton_support_tensor_descriptor() -> bool:
 @lru_cache(maxsize=None)
 def is_5090_gpu() -> bool:
     try:
-        gpu_name = torch.cuda.get_device_name(0)
+        gpu_name = get_device_runtime().get_device_name(0)
         if "5090" in gpu_name:
             return True
         else:
@@ -327,6 +330,7 @@ class Platform(Enum):
     MUSA = "musa"  # musa
     ROCM = "rocm"  # rocm
     CPU = "cpu"  # cpu
+    METAL = "metal"
 
 
 # 目前仅支持cuda 和 musa
@@ -340,7 +344,7 @@ def get_platform(platform_name: Optional[str] = None) -> Platform:
     Returns:
         Platform: platform enum value
     """
-    assert platform_name in ["cuda", "musa"], f"Only support cuda and musa now, but got {platform_name}"
+    assert platform_name in ["cuda", "musa", "metal"], f"Only support cuda, musa and metal now, but got {platform_name}"
     platform_name = platform_name.lower()
     platform_map = {
         "cuda": Platform.CUDA,
@@ -349,6 +353,7 @@ def get_platform(platform_name: Optional[str] = None) -> Platform:
         "musa": Platform.MUSA,
         "rocm": Platform.ROCM,
         "cpu": Platform.CPU,
+        "metal": Platform.METAL,
     }
 
     platform = platform_map.get(platform_name)

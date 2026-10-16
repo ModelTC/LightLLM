@@ -3,6 +3,10 @@ from typing import Dict, Optional, Tuple
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_dp_world_size
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class ParameterWeight(BaseWeightTpl):
     def __init__(
@@ -26,10 +30,10 @@ class ParameterWeight(BaseWeightTpl):
 
     def _create_weight(self):
         if self.weight_shape is not None:
-            self.weight = torch.empty(*self.weight_shape, dtype=self.data_type_, device=self.device_id_)
+            self.weight = _device_runtime.empty(*self.weight_shape, dtype=self.data_type_, device=self.device_id_)
             self.weight.load_ok = False
         if self.bias_name is not None and self.bias_shape is not None:
-            self.bias = torch.empty(*self.bias_shape, dtype=self.data_type_, device=self.device_id_)
+            self.bias = _device_runtime.empty(*self.bias_shape, dtype=self.data_type_, device=self.device_id_)
             self.bias.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]) -> None:

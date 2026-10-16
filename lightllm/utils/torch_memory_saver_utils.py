@@ -3,17 +3,24 @@ from contextlib import contextmanager
 from enum import Enum
 from lightllm.utils.log_utils import init_logger
 
-try:
-    from torch_memory_saver import (
-        torch_memory_saver,
-        configure_subprocess as tms_configure_subprocess,
-    )
+from lightllm.backends import get_device_runtime
 
-    HAS_TORCH_MEMORY_SAVER = True
+_device_runtime = get_device_runtime()
 
-except ImportError:
-    HAS_TORCH_MEMORY_SAVER = False
-    pass
+
+HAS_TORCH_MEMORY_SAVER = False
+if _device_runtime.device_type == "cuda":
+    try:
+        from torch_memory_saver import (
+            torch_memory_saver,
+            configure_subprocess as tms_configure_subprocess,
+        )
+
+        HAS_TORCH_MEMORY_SAVER = True
+
+    except ImportError:
+        HAS_TORCH_MEMORY_SAVER = False
+        pass
 
 logger = init_logger(__name__)
 
@@ -64,7 +71,7 @@ class _TorchMemorySaver:
         # pause 后还能恢复内容的区域，比如权重。
         return torch_memory_saver.region(tag=tag.value, enable_cpu_backup=enable_cpu_backup)
 
-    def cuda_graph(self, graph_obj: torch.cuda.CUDAGraph, **kwargs):
+    def cuda_graph(self, graph_obj: _device_runtime.graph_type, **kwargs):
         # CUDA graph 的 private pool 也单独打 tag，避免和普通权重/KV cache
         # 的显存管理混在一起。
         return torch_memory_saver.cuda_graph(cuda_graph=graph_obj, **kwargs, tag=MemoryTag.GRAPH.value)
@@ -89,8 +96,8 @@ class _TorchMemorySaverFake:
     def region(self, tag: MemoryTag, enable_cpu_backup: bool = False):
         yield
 
-    def cuda_graph(self, graph_obj: torch.cuda.CUDAGraph, **kwargs):
-        return torch.cuda.graph(graph_obj, **kwargs)
+    def cuda_graph(self, graph_obj: _device_runtime.graph_type, **kwargs):
+        return _device_runtime.capture_graph(graph_obj, **kwargs)
 
     @contextmanager
     def disable(self):

@@ -5,6 +5,12 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -24,7 +30,7 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda
+        assert _device_runtime.is_device_tensor(mem_indexes) and _device_runtime.is_device_tensor(page_indexes)
         args = get_env_start_args()
         assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
@@ -37,7 +43,7 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
             mem_manager.scale_buffer.dtype
         )
 
-        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import load_cpu_kv_to_gpu
+        load_cpu_kv_to_gpu = _operator_backend.resolve("common.basemodel.kv_cache_offload.load_cpu_kv_to_gpu")
 
         load_cpu_kv_to_gpu(
             gpu_mem_indexes=mem_indexes,
@@ -60,7 +66,11 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda and page_readies.is_cuda
+        assert (
+            _device_runtime.is_device_tensor(mem_indexes)
+            and _device_runtime.is_device_tensor(page_indexes)
+            and _device_runtime.is_device_tensor(page_readies)
+        )
         args = get_env_start_args()
         assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
         assert len(mem_indexes) // args.cpu_cache_token_page_size == len(page_indexes)
@@ -74,7 +84,7 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
             mem_manager.scale_buffer.dtype
         )
 
-        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu
+        offload_gpu_kv_to_cpu = _operator_backend.resolve("common.basemodel.kv_cache_offload.offload_gpu_kv_to_cpu")
 
         offload_gpu_kv_to_cpu(
             token_indexes=mem_indexes,
@@ -96,8 +106,8 @@ class PPLInt4KVMemOperator(QuantScaleMemOperator):
         from lightllm.common.kv_cache_mem_manager.ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
 
         mem_manager: PPLINT4KVMemoryManager = self.mem_manager
-        from ...basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import (
-            destindex_copy_int4kv,
+        destindex_copy_int4kv = _operator_backend.resolve(
+            "common.basemodel.kv_copy.ppl_int4kv_copy_kv.destindex_copy_int4kv"
         )
 
         destindex_copy_int4kv(
@@ -115,8 +125,8 @@ class PPLInt8KVMemOperator(QuantScaleMemOperator):
         from lightllm.common.kv_cache_mem_manager.ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
 
         mem_manager: PPLINT8KVMemoryManager = self.mem_manager
-        from ...basemodel.triton_kernel.kv_copy.ppl_int8kv_copy_kv import (
-            destindex_copy_quantize_kv,
+        destindex_copy_quantize_kv = _operator_backend.resolve(
+            "common.basemodel.kv_copy.ppl_int8kv_copy_kv.destindex_copy_quantize_kv"
         )
 
         destindex_copy_quantize_kv(

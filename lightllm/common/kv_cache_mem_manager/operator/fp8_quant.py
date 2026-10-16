@@ -3,6 +3,11 @@ from typing import TYPE_CHECKING
 from .base import BaseMemManagerOperator
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 logger = init_logger(__name__)
@@ -15,8 +20,8 @@ class FP8StaticPerHeadQuantMemOperator(BaseMemManagerOperator):
         )
 
         mem_manager: FP8StaticPerHeadQuantMemManager = self.mem_manager
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import (
-            destindex_copy_kv_fp8,
+        destindex_copy_kv_fp8 = _operator_backend.resolve(
+            "common.basemodel.destindex_copy_kv_fp8.destindex_copy_kv_fp8"
         )
 
         scales = mem_manager.scales
@@ -34,8 +39,8 @@ class FP8StaticPerTensorQuantMemOperator(BaseMemManagerOperator):
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import (
-            destindex_copy_kv_fp8,
+        destindex_copy_kv_fp8 = _operator_backend.resolve(
+            "common.basemodel.destindex_copy_kv_fp8.destindex_copy_kv_fp8"
         )
 
         destindex_copy_kv_fp8(

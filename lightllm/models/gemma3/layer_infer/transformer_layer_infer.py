@@ -4,7 +4,12 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3TransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 
 
 class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):

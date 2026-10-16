@@ -1,3 +1,4 @@
+from pathlib import Path
 from setuptools import setup, find_packages
 
 package_data = {"lightllm": ["common/all_kernel_configs/*/*.json", "common/triton_utils/*/*/*/*/*.json"]}
@@ -25,11 +26,18 @@ setup(
         "rpyc",
         "ninja",
         "safetensors",
-        "triton",
+        "triton; sys_platform != 'darwin'",
         "orjson",
         # Keep the final image install on the FFI version tested with TileLang 0.1.9.
-        "apache-tvm-ffi==0.1.11",
-        "xgrammar>=0.2.8,<0.3",
+        "apache-tvm-ffi==0.1.11; sys_platform != 'darwin'",
+        "xgrammar>=0.2.8,<0.3; sys_platform != 'darwin'",
     ],
+    extras_require={
+        "metal": [
+            line
+            for line in (Path(__file__).parent / "requirements-metal.txt").read_text().splitlines()
+            if line and not line.startswith("#")
+        ]
+    },
     package_data=package_data,
 )

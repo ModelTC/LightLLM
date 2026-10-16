@@ -13,6 +13,10 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 import torch.distributed as dist
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class DPKVSharedMoudle:
     _KV_LEN_INDEX = 0
@@ -111,9 +115,13 @@ class DPKVSharedMoudle:
                 max_kv_len_dp_ranks.extend([trans_task.max_kv_len_dp_rank] * len(trans_task.max_kv_len_mem_indexes))
                 mem_indexes.append(trans_task.mem_indexes)
 
-            max_kv_len_mem_indexes_tensor = torch.cat(max_kv_len_mem_indexes).to(dtype=torch.int64, device="cuda")
-            max_kv_len_dp_ranks_tensor = torch.tensor(max_kv_len_dp_ranks, dtype=torch.int32, device="cuda")
-            mem_indexes_tensor = torch.cat(mem_indexes).to(dtype=torch.int64, device="cuda")
+            max_kv_len_mem_indexes_tensor = torch.cat(max_kv_len_mem_indexes).to(
+                dtype=torch.int64, device=_device_runtime.device
+            )
+            max_kv_len_dp_ranks_tensor = _device_runtime.tensor(
+                max_kv_len_dp_ranks, dtype=torch.int32, device=_device_runtime.device
+            )
+            mem_indexes_tensor = torch.cat(mem_indexes).to(dtype=torch.int64, device=_device_runtime.device)
             self.backend.model.mem_manager.operator.copy_kv_from_other_dp_ranks(
                 mem_managers=self.backend.mem_managers,
                 move_token_indexes=max_kv_len_mem_indexes_tensor,

@@ -6,6 +6,10 @@ from lightllm.common.state_cache_manager import StateCacheManager
 from .shared_arr import SharedArray
 from .radix_cache import time_gen
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class HybridAttPagedTreeNode:
     def __init__(self, hash_page_size: int, big_page_num: int):
@@ -136,8 +140,8 @@ class HybridAttPagedRadixCache:
         self._value_dtype = torch.int64
 
         self.root_node = HybridAttPagedTreeNode(hash_page_size=hash_page_size, big_page_num=big_page_num)
-        self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
-        self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
+        self.root_node.token_id_key = _device_runtime.zeros((0,), device="cpu", dtype=self._key_dtype)
+        self.root_node.token_mem_index_value = _device_runtime.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1
         self.root_node.page_num = self.big_page_num
 

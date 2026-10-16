@@ -12,6 +12,10 @@ from torchvision.transforms.v2 import functional as F
 
 from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 def smart_resize(height, width, factor=28, min_image_tokens=16, max_image_tokens=8000):
     """Choose an aligned canvas; padding, rather than stretching, preserves the image."""
@@ -62,7 +66,7 @@ class Glm5NextImageProcessor(Qwen2VLImageProcessor):
             max_image_tokens=self.max_image_tokens,
         )
 
-    def _preprocess_bydevice(self, image, device="cuda"):
+    def _preprocess_bydevice(self, image, device=_device_runtime.device):
         pixels = torch.from_numpy(np.array(image.convert("RGB"))).permute(2, 0, 1).contiguous().to(device)
         height, width = pixels.shape[-2:]
         target_h, target_w = self.get_image_size(height, width)

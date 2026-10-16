@@ -5,6 +5,11 @@ from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneL
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len, get_triton_autotune_level
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 try:
     import sgl_kernel
@@ -116,7 +121,7 @@ def _flash_attn_kvcache_rebuild_inputs(
     # 复用模型已有的 K/V 存储，只分配较小的页表和长度张量，避免为每个模拟长请求另分配完整 KV。
     # 原页表可能只填充了占位请求所用的少量条目，不能仅增加 cache_seqlens 就直接读取后续条目。
     # 因此新建页表，并沿用原页表的 dtype/device；这里没有改写原页表或 K/V 数据。
-    page_table = torch.arange(batch_size * max_pages, dtype=page_table.dtype, device=page_table.device)
+    page_table = _device_runtime.arange(batch_size * max_pages, dtype=page_table.dtype, device=page_table.device)
 
     # 取模将页编号映射到 [0, num_pages)，再整理为每个请求一行、每行 max_pages 个页编号的页表。
     # 例如 batch_size=2、max_pages=4、num_pages=6，结果为 [[0, 1, 2, 3], [4, 5, 0, 1]]。
@@ -128,7 +133,7 @@ def _flash_attn_kvcache_rebuild_inputs(
     # FA3 根据 cache_seqlens 决定每个请求实际读取多少个 KV token，因此所有模拟请求都设为目标长度。
     # 这里保留精确的 token 数，而不是取整后的页容量，最后一页的多余位置不会算入有效 KV 长度。
     # 新建 int32 长度张量，避免修改原始短请求的长度并影响后续 Graph 捕获。
-    cache_seqlens = torch.full((batch_size,), kv_len, dtype=torch.int32, device=k_cache.device)
+    cache_seqlens = _device_runtime.full((batch_size,), kv_len, dtype=torch.int32, device=k_cache.device)
 
     # Q、cu_seqlens_q 和 max_seqlen_q 保持原样，保留普通 decode、MTP 及不等长 query 分组的真实布局。
     # kwargs 原样透传 causal、window_size、softmax_scale 等设置，使计时采用与原调用一致的 attention 语义。

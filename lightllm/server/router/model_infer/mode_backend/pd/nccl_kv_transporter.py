@@ -18,6 +18,11 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.net_utils import get_hostname_ip
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -270,7 +275,7 @@ class NcclKVTransporter:
 @dataclass
 class _NcclXferHandle:
     peer_name: str
-    event: torch.cuda.Event
+    event: _device_runtime.event_type
     status: str = "PROC"
     error_info: Optional[str] = None
 
@@ -292,7 +297,7 @@ class _NcclPeer:
         self.transporter = transporter
         self.peer_name = peer_name
         self.comm: Optional[PyNcclCommunicator] = None
-        self.stream: Optional[torch.cuda.Stream] = None
+        self.stream: Optional[_device_runtime.stream_type] = None
         self.recv_queue: Optional["queue.Queue[Optional[PDChunckedTransTask]]"] = None
         self._lock = threading.Lock()
 
@@ -303,7 +308,7 @@ class _NcclPeer:
         stream = self._get_stream()
 
         comm.send(page_tensor, dst=1, stream=stream)
-        event = torch.cuda.Event()
+        event = _device_runtime.new_event()
         event.record(stream)
 
         logger.info(
@@ -330,11 +335,11 @@ class _NcclPeer:
             comm.destroy()
         return
 
-    def _get_stream(self) -> torch.cuda.Stream:
+    def _get_stream(self) -> _device_runtime.stream_type:
         with self._lock:
             if self.stream is None:
-                torch.cuda.set_device(self.transporter.tp_idx)
-                self.stream = torch.cuda.Stream()
+                _device_runtime.set_device(self.transporter.tp_idx)
+                self.stream = _device_runtime.new_stream()
             return self.stream
 
     def _get_recv_queue(self) -> "queue.Queue[Optional[PDChunckedTransTask]]":
@@ -347,7 +352,7 @@ class _NcclPeer:
             return self.recv_queue
 
     def _recv_page_loop(self, recv_queue: "queue.Queue[Optional[PDChunckedTransTask]]"):
-        torch.cuda.set_device(self.transporter.tp_idx)
+        _device_runtime.set_device(self.transporter.tp_idx)
         while True:
             trans_task = recv_queue.get()
             if trans_task is None:

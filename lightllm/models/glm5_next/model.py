@@ -2,7 +2,6 @@ import json
 import os
 
 import torch
-import triton
 
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
@@ -17,6 +16,10 @@ from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
@@ -87,7 +90,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.decode_att_backend1 = self.prefill_att_backend1
 
     def _init_custom(self):
-        triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
+        get_operator_backend().initialize_linear_attention()
         if self.args.enable_ep_moe:
             dist_group_manager.new_deepep_group(
                 n_routed_experts=self.config["n_routed_experts"],

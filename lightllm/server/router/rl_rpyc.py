@@ -11,6 +11,11 @@ from rpyc.utils.classic import obtain
 from lightllm.server.io_struct import RlOpReq, RlOpRsp
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -87,7 +92,7 @@ class RouterRlOpHelper(rpyc.Service):
 
         if self.is_multinode_tp:
             # True/False -> 1/0；MIN all_reduce：任一节点失败则全体 success=False
-            success_flag = torch.tensor([1 if ret.success else 0], dtype=torch.int32, device="cpu")
+            success_flag = _device_runtime.tensor([1 if ret.success else 0], dtype=torch.int32, device="cpu")
             dist.all_reduce(success_flag, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
             ret.success = success_flag.item() == 1
         return ret

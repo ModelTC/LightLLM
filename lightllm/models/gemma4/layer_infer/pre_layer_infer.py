@@ -5,7 +5,12 @@ from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+multimodal_emb = _operator_backend.resolve("common.basemodel.multimodal_emb.multimodal_emb")
 
 
 class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):

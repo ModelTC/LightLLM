@@ -15,6 +15,11 @@ from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -149,7 +154,9 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         )
         assert max_tokens > 0, "PLE static buffer needs a positive max-token bound"
         num_layers = self.config["num_hidden_layers"]
-        buf = torch.zeros((max_tokens, num_layers, ple_dim), dtype=self.data_type, device="cuda")
+        buf = _device_runtime.zeros(
+            (max_tokens, num_layers, ple_dim), dtype=self.data_type, device=_device_runtime.device
+        )
         self.pre_infer.ple_static_buffer = buf
         for layer_infer in self.layers_infer:
             layer_infer.ple_static_buffer = buf
@@ -169,7 +176,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         # ~200MB per table in fp32. Rely on the server's max_seq_length instead.
         max_seq_len = max(self.max_seq_length + 1024, 16384)
 
-        t = torch.arange(max_seq_len, dtype=torch.float32, device="cpu")
+        t = _device_runtime.arange(max_seq_len, dtype=torch.float32, device="cpu")
 
         # Sliding layers: default RoPE, theta=10000, full rotation over head_dim=256.
         sliding_params = rope_params["sliding_attention"]
@@ -181,8 +188,8 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             sliding_theta ** (torch.arange(0, sliding_rot_dim, 2, dtype=torch.float32) / sliding_rot_dim)
         )
         freqs_s = torch.outer(t, inv_freq_sliding)
-        self._cos_cached_sliding = torch.cos(freqs_s).to(self.data_type).cuda()
-        self._sin_cached_sliding = torch.sin(freqs_s).to(self.data_type).cuda()
+        self._cos_cached_sliding = _device_runtime.move(torch.cos(freqs_s).to(self.data_type))
+        self._sin_cached_sliding = _device_runtime.move(torch.sin(freqs_s).to(self.data_type))
 
         # Full-attention layers: proportional RoPE, theta=1_000_000,
         # partial_rotary_factor=0.25 over global_head_dim=512.
@@ -210,6 +217,6 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             inv_freq_full = 1.0 / (full_theta ** (torch.arange(0, full_rot_dim, 2, dtype=torch.float32) / full_rot_dim))
 
         freqs_f = torch.outer(t, inv_freq_full)
-        self._cos_cached_full = torch.cos(freqs_f).to(self.data_type).cuda()
-        self._sin_cached_full = torch.sin(freqs_f).to(self.data_type).cuda()
+        self._cos_cached_full = _device_runtime.move(torch.cos(freqs_f).to(self.data_type))
+        self._sin_cached_full = _device_runtime.move(torch.sin(freqs_f).to(self.data_type))
         return

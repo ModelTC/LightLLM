@@ -4,19 +4,24 @@ from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.log_utils import init_logger
 from typing import Union, List
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
 class KvCacheAllocator:
     def __init__(self, size: int) -> None:
         self.size = size
-        self.mem_state = torch.arange(
+        self.mem_state = _device_runtime.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
         self.mark_start = 0
         self.mark_end = self.size
 
-        self._mem_state_return = torch.arange(
+        self._mem_state_return = _device_runtime.arange(
             0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
         self._return_start = 0
@@ -88,13 +93,13 @@ class KvCacheAllocator:
         just for test code
         """
         self.size = new_size
-        self.mem_state = torch.arange(
+        self.mem_state = _device_runtime.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
         self.mark_start = 0
         self.mark_end = self.size
 
-        self._mem_state_return = torch.arange(
+        self._mem_state_return = _device_runtime.arange(
             0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
         self._return_start = 0

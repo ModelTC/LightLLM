@@ -35,6 +35,7 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 - [Install LightLLM](https://lightllm-en.readthedocs.io/en/latest/getting_started/installation.html)
 - [Quick Start](https://lightllm-en.readthedocs.io/en/latest/getting_started/quickstart.html)
 - [TuTorial](https://lightllm-en.readthedocs.io/en/latest/tutorial/deepseek_deployment.html)
+- [Device runtime and operator backend architecture](docs/backend_architecture.md)
 
 
 ## Performance
@@ -124,3 +125,7 @@ We have published a number of papers around components or features of LightLLM, 
   year={2025}
 }
 ```
+
+### Apple Metal (Qwen3.5-0.8B)
+
+See [Apple Metal deployment](docs/apple_metal.md) for the standard LightLLM server on Apple Silicon.

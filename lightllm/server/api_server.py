@@ -7,6 +7,14 @@ logger = init_logger(__name__)
 
 
 def launch_server(args: StartArgs):
+    from lightllm.backends import configure_backends
+
+    configure_backends(args.hardware_platform)
+    if args.hardware_platform == "metal":
+        from lightllm.backends.metal.config import configure_server
+
+        configure_server(args)
+
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
     set_log_node_role(args.run_mode)

@@ -1,9 +1,23 @@
 import torch
 from typing import List, Optional, Tuple
-from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
-from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
-from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
-from lightllm.common.basemodel.triton_kernel.post_process.apply_constraint_mask import apply_constraint_mask
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+gather = _operator_backend.resolve("sampling.gather")
+
+apply_penalty = _operator_backend.resolve("common.basemodel.post_process.apply_penalty.apply_penalty")
+apply_penalty_gpu_cache = _operator_backend.resolve(
+    "common.basemodel.post_process.apply_penalty_gpu_cache.apply_penalty_gpu_cache"
+)
+apply_invalid_token_ids = _operator_backend.resolve(
+    "common.basemodel.post_process.apply_invalid_token.apply_invalid_token_ids"
+)
+apply_constraint_mask = _operator_backend.resolve(
+    "common.basemodel.post_process.apply_constraint_mask.apply_constraint_mask"
+)
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
@@ -33,7 +47,29 @@ def sample(
         exist_req_use_random_seed,
         has_output_constraints,
     ) = _get_post_sample_tensors(reqs, sampling_params_manager, has_output)
-    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
+    eos_ids = _device_runtime.move(
+        g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32), non_blocking=True
+    )
+
+    if (
+        is_all_greedy
+        and not has_invalid_token_ids
+        and not has_output_constraints
+        and sampling_params_manager.penalty_counter_mode == "gpu_counter"
+    ):
+        greedy = getattr(_operator_backend, "greedy_sample", None)
+        if greedy is not None:
+            result = greedy(
+                logits,
+                b_req_idx,
+                b_temperatures,
+                b_length_penalty_param,
+                b_mask_eos_reqs,
+                eos_ids,
+                sampling_params_manager,
+            )
+            if result is not None:
+                return result
 
     # 这里需要区分历史token的频率惩罚类的系数的生效模式，目前支持两种在线统计方式:
     # 一种是基于 cpu 的，每个 req 对象利用其上绑定的dict对象out_token_id_count，每生成一个token就进行相应
@@ -90,8 +126,10 @@ def sample(
         apply_constraint_mask(
             logits=logits,
             b_req_idx=b_req_idx,
-            req_to_bitmask=sampling_params_manager.req_to_bitmask.cuda(non_blocking=True),
-            req_to_bitmask_enabled=sampling_params_manager.req_to_bitmask_enabled.cuda(non_blocking=True),
+            req_to_bitmask=_device_runtime.move(sampling_params_manager.req_to_bitmask, non_blocking=True),
+            req_to_bitmask_enabled=_device_runtime.move(
+                sampling_params_manager.req_to_bitmask_enabled, non_blocking=True
+            ),
             vocab_size=sampling_params_manager.vocab_size,
             b_mtp_index=b_mtp_index,
         )
@@ -99,13 +137,13 @@ def sample(
 
     if is_all_greedy:
         batch_next_token_ids = torch.argmax(logits, -1)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+        batch_next_token_probs = gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     elif skip_top_k and skip_top_p:
         # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
         batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+        batch_next_token_probs = gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     else:
@@ -121,7 +159,9 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
-    probs_sort[torch.arange(0, probs.shape[-1], device="cuda").view(1, -1) >= top_ks.view(-1, 1)] = 0.0
+    probs_sort[
+        _device_runtime.arange(0, probs.shape[-1], device=_device_runtime.device).view(1, -1) >= top_ks.view(-1, 1)
+    ] = 0.0
 
     return probs_sort, probs_idx
 
@@ -141,8 +181,8 @@ def _top_p_top_k_sample(
             sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
         else:
             sampled_index = _random_sample(probs_sort, reqs, exist_req_use_random_seed).view(-1, 1)
-        next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
-        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
+        next_token_ids = gather(probs_idx, dim=1, index=sampled_index)
+        next_token_logprobs = torch.log(gather(probs_sort, dim=1, index=sampled_index))
         return next_token_ids.view(-1), next_token_logprobs.view(-1)
 
     elif sampling_backend == "flashinfer":
@@ -157,7 +197,7 @@ def _top_p_top_k_sample(
         )
         int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
         int64_batch_next_token_ids[:] = batch_next_token_ids
-        batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
+        batch_next_token_probs = gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
     else:
         assert False, "Unsupported sampling backend for top_p_top_k_sample"
@@ -169,7 +209,7 @@ def _random_sample(probs: torch.Tensor, reqs: List[InferReq], exist_req_use_rand
     if exist_req_use_random_seed:
         for i, req in enumerate(reqs):
             if req.generator is not None:
-                q[i].exponential_(generator=req.generator)
+                _device_runtime.exponential_(q[i], generator=req.generator)
     return probs.div(q).argmax(dim=-1).view(-1)
 
 
@@ -246,14 +286,14 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
         )
 
     return (
-        req_idxes_cpu.cuda(non_blocking=True),
-        temperatures_cpu.cuda(non_blocking=True),
-        top_ps_cpu.cuda(non_blocking=True),
-        top_ks_cpu.cuda(non_blocking=True),
-        length_penalty_param_cpu.cuda(non_blocking=True),
-        mask_eos_reqs_cpu.cuda(non_blocking=True),
-        invalid_token_ids_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
-        cu_invalid_token_num_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
+        _device_runtime.move(req_idxes_cpu, non_blocking=True),
+        _device_runtime.move(temperatures_cpu, non_blocking=True),
+        _device_runtime.move(top_ps_cpu, non_blocking=True),
+        _device_runtime.move(top_ks_cpu, non_blocking=True),
+        _device_runtime.move(length_penalty_param_cpu, non_blocking=True),
+        _device_runtime.move(mask_eos_reqs_cpu, non_blocking=True),
+        _device_runtime.move(invalid_token_ids_cpu, non_blocking=True) if has_invalid_token_ids else None,
+        _device_runtime.move(cu_invalid_token_num_cpu, non_blocking=True) if has_invalid_token_ids else None,
         is_all_greedy,
         has_invalid_token_ids,
         skip_top_k,

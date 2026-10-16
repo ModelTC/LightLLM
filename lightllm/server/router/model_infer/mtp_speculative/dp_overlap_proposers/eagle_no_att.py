@@ -3,7 +3,13 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+select_accepted_tail_rows = _operator_backend.resolve("common.basemodel.select_mtp_rows.select_accepted_tail_rows")
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
     BaseDpOverlapProposer,
 )
@@ -47,7 +53,7 @@ class DpOverlapEagleNoAttProposer(BaseDpOverlapProposer):
 
         proposal_token_ids = target_next_token_ids0.new_empty((req_num, draft_step))
         schedule_scores = (
-            torch.empty(
+            _device_runtime.empty(
                 (req_num, draft_step),
                 dtype=torch.float32,
                 device=target_next_token_ids0.device,

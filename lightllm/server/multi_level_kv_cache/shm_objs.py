@@ -2,7 +2,7 @@ import ctypes
 import numpy as np
 from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.shm_utils import ServiceSharedMemory, get_service_shm_name
+from lightllm.utils.shm_utils import ServiceSharedMemory, get_service_shm_name, shm_size_matches
 
 logger = init_logger(__name__)
 
@@ -15,7 +15,7 @@ class IntList(object):
         shm = _create_shm(name=shm_name, byte_size=byte_size)
         self.shm = shm
 
-        if self.shm.size != byte_size:
+        if not shm_size_matches(self.shm.size, byte_size):
             logger.info(f"size not same, unlink lock shm {self.shm.name} and create again")
             self.shm.close()
             self.shm.unlink()
@@ -61,7 +61,7 @@ class ShmLinkedList(object):
         shm = _create_shm(name=shm_name, byte_size=byte_size)
         self.shm = shm
 
-        if self.shm.size != byte_size:
+        if not shm_size_matches(self.shm.size, byte_size):
             logger.info(f"size not same, unlink lock shm {self.shm.name} and create again")
             self.shm.close()
             self.shm.unlink()

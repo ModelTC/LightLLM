@@ -1,11 +1,20 @@
 import torch
 from typing import Tuple
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+mrope_triton_fused = _operator_backend.resolve("models.qwen2_vl.mrope.mrope_triton_fused")
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
-from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import apply_deepstack_features
+
+apply_deepstack_features = _operator_backend.resolve(
+    "models.qwen3_vl.deepstack_multimodal_emb.apply_deepstack_features"
+)
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
@@ -14,8 +23,8 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
-        self.mrope_section = torch.tensor(
-            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
+        self.mrope_section = _device_runtime.tensor(
+            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device=_device_runtime.device
         )
 
     def _get_qkv(
@@ -79,7 +88,7 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
         infer_state: InferStateInfo,
         layer_num: int,
     ):
-        if torch.cuda.is_current_stream_capturing():
+        if _device_runtime.is_current_stream_capturing():
             input_embeddings = input_embeddings.contiguous()
             _input_embeddings = tensor_to_no_ref_tensor(input_embeddings)
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()

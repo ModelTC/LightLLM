@@ -1,4 +1,3 @@
-import triton
 import orjson
 import os
 import inspect
@@ -521,6 +520,8 @@ class _BenchmarkState:
 
 
 def get_triton_version():
+    import triton
+
     return f"triton_{triton.__version__}"
 
 

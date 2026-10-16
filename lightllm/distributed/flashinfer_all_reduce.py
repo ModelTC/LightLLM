@@ -8,6 +8,11 @@ from torch.distributed import ProcessGroup
 
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 try:
@@ -54,10 +59,10 @@ class FlashInferAllReduce:
         self._ws_dtype = None
         self._ws_max_token_num = 0
 
-        if not _FI_OK or not torch.cuda.is_available():
+        if not _FI_OK or not _device_runtime.is_available():
             return
         if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
+            device = torch.device(_device_runtime.device_at(device))
         elif isinstance(device, str):
             device = torch.device(device)
         self.device = device
@@ -67,7 +72,7 @@ class FlashInferAllReduce:
         if self.world_size == 1:
             return
 
-        cap = torch.cuda.get_device_capability(device)
+        cap = _device_runtime.get_device_capability(device)
         cap_str = f"{cap[0]}.{cap[1]}"
         ws_table = _FI_WORKSPACE_MAX_SIZE_MB.get(cap_str)
         if ws_table is None or self.world_size not in ws_table:
@@ -116,7 +121,7 @@ class FlashInferAllReduce:
         return True
 
     def should_use(self, inp: torch.Tensor) -> bool:
-        if self.disabled or not inp.is_cuda or not inp.is_contiguous():
+        if self.disabled or not _device_runtime.is_device_tensor(inp) or not inp.is_contiguous():
             return False
         if inp.dtype not in (torch.bfloat16, torch.float16) or inp.dim() != 2:
             return False

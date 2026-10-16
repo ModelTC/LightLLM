@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+
 from collections import Counter
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
-from lightllm.common.basemodel.triton_kernel.mtp_utils import (
-    mtp_scatter_next_token_ids,
-    mtp_verify,
-)
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+
+mtp_scatter_next_token_ids = _operator_backend.resolve("common.basemodel.mtp_utils.mtp_scatter_next_token_ids")
+mtp_verify = _operator_backend.resolve("common.basemodel.mtp_utils.mtp_verify")
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq

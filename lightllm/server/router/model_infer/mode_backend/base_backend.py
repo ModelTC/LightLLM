@@ -42,7 +42,13 @@ from lightllm.distributed.communication_op import (
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
-from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+scatter_token = _operator_backend.resolve("common.basemodel.gather_token_id.scatter_token")
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.multi_level_kv_cache import (
     CacheTier,
@@ -195,21 +201,35 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+            self.dp_reduce_tensor = _device_runtime.tensor(
+                [0], dtype=torch.int32, device=_device_runtime.device, requires_grad=False
+            )
+            self.dp_gather_item_tensor = _device_runtime.tensor(
+                [0], dtype=torch.int32, device=_device_runtime.device, requires_grad=False
+            )
+            self.dp_all_gather_tensor = _device_runtime.tensor(
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=_device_runtime.device,
+                requires_grad=False,
             )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-        self.node_nccl_group = create_new_group_for_current_node("nccl")
+        self.node_broadcast_tensor = _device_runtime.tensor(
+            [0], dtype=torch.int32, device=_device_runtime.device, requires_grad=False
+        )
+        self.node_nccl_group = create_new_group_for_current_node(_device_runtime.distributed_backend)
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:
-            self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
-            self.multinode_tp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+            self.multinode_tp_gather_item_tensor = _device_runtime.tensor(
+                [0], dtype=torch.int32, device=_device_runtime.device
+            )
+            self.multinode_tp_all_gather_tensor = _device_runtime.tensor(
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=_device_runtime.device,
+                requires_grad=False,
             )
             self.multinode_tp_nccl_group = dist.new_group(
                 [rank for rank in range(self.global_world_size)], backend="nccl"
@@ -270,7 +290,7 @@ class ModeBackend:
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
-        torch.cuda.set_device(get_current_device_id())
+        _device_runtime.set_device(get_current_device_id())
 
         self.dp_kv_shared_module = DPKVSharedMoudle(
             max_req_num=self.args.running_max_req_size,
@@ -420,7 +440,7 @@ class ModeBackend:
                 logit_rows = prompt_logits[start_loc : start_loc + capture_count]
                 target_start = req_obj.cur_kv_len + 1
                 target_end = target_start + capture_count
-                target_token_ids = torch.tensor(
+                target_token_ids = _device_runtime.tensor(
                     req_obj.shm_req.shm_prompt_ids.arr[target_start:target_end].copy(),
                     dtype=torch.long,
                     device=logit_rows.device,
@@ -553,7 +573,7 @@ class ModeBackend:
                                 )
                                 # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
+                                _device_runtime.current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -958,9 +978,10 @@ class ModeBackend:
         next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
         b_has_out = None
         if is_prefill:
-            b_has_out = g_pin_mem_manager.gen_from_list(
-                key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
-            ).cuda(non_blocking=True)
+            b_has_out = _device_runtime.move(
+                g_pin_mem_manager.gen_from_list(key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool),
+                non_blocking=True,
+            )
 
         scatter_token(
             next_token_ids=next_token_ids,
@@ -1028,7 +1049,7 @@ class ModeBackend:
         prompt_cache_kv_buffer = {name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()}
         intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
         self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
-        intact_token_ids = torch.tensor(
+        intact_token_ids = _device_runtime.tensor(
             model_cfg["prompt_cache_token_ids"][:intact_kv_len], dtype=torch.int64, device="cpu"
         )
         self.radix_cache.insert(intact_token_ids, intact_kv_index)

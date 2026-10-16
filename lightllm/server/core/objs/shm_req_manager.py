@@ -9,7 +9,7 @@ from .atomic_lock import AtomicShmLock
 from .start_args_type import StartArgs
 from typing import List, Optional
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.shm_utils import create_or_link_shm
+from lightllm.utils.shm_utils import create_or_link_shm, shm_size_matches
 
 logger = init_logger(__name__)
 
@@ -35,7 +35,7 @@ class ShmReqManager:
     def init_reqs_shm(self):
         self._init_reqs_shm()
 
-        if self.reqs_shm.size != self.req_shm_byte_size:
+        if not shm_size_matches(self.reqs_shm.size, self.req_shm_byte_size):
             logger.info(f"size not same, unlink lock shm {self.reqs_shm.name} and create again")
             self.reqs_shm.close()
             self.reqs_shm.unlink()

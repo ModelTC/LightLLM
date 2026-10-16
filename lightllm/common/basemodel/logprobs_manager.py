@@ -50,13 +50,22 @@ indexes 导出。
     final_token_metadata shm  ──HTTP──►  response["prompt_logprobs"]
 """
 
+
 import os
 from typing import ClassVar, Optional, Tuple
 
 import numpy as np
 import torch
 
-from lightllm.common.basemodel.triton_kernel.logprobs_capture import scatter_prompt_logprobs_to_cpu
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+
+scatter_prompt_logprobs_to_cpu = _operator_backend.resolve(
+    "common.basemodel.logprobs_capture.scatter_prompt_logprobs_to_cpu"
+)
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -112,14 +121,18 @@ class PromptLogprobsCaptureManager:
             return
 
         self.kv_cache_size = kv_cache_size
-        self.top_token_ids = torch.empty(
+        self.top_token_ids = _device_runtime.empty(
             (kv_cache_size, self.max_topk), dtype=torch.int32, device="cpu", pin_memory=True
         )
-        self.top_logprobs = torch.empty(
+        self.top_logprobs = _device_runtime.empty(
             (kv_cache_size, self.max_topk), dtype=torch.float32, device="cpu", pin_memory=True
         )
-        self.top_token_ids_ptr = torch.tensor([self.top_token_ids.data_ptr()], dtype=torch.uint64, device="cuda")
-        self.top_logprobs_ptr = torch.tensor([self.top_logprobs.data_ptr()], dtype=torch.uint64, device="cuda")
+        self.top_token_ids_ptr = _device_runtime.tensor(
+            [self.top_token_ids.data_ptr()], dtype=torch.uint64, device=_device_runtime.device
+        )
+        self.top_logprobs_ptr = _device_runtime.tensor(
+            [self.top_logprobs.data_ptr()], dtype=torch.uint64, device=_device_runtime.device
+        )
 
         pinned_bytes = self.top_token_ids.numel() * self.top_token_ids.element_size()
         pinned_bytes += self.top_logprobs.numel() * self.top_logprobs.element_size()
@@ -149,7 +162,7 @@ class PromptLogprobsCaptureManager:
     def extract(self, mem_indexes: torch.Tensor, topk: int) -> Tuple[np.ndarray, np.ndarray]:
         if not self.is_buffer_initialized():
             return
-        indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
+        indexes = mem_indexes.cpu() if _device_runtime.is_device_tensor(mem_indexes) else mem_indexes
         return (
             self.top_token_ids[indexes, :topk].numpy(),
             self.top_logprobs[indexes, :topk].numpy(),
@@ -163,7 +176,9 @@ class PromptLogprobsCaptureManager:
     ) -> None:
         if not self.is_buffer_initialized():
             return
-        source = source_indexes.cpu() if source_indexes.is_cuda else source_indexes
-        destination = destination_indexes.cpu() if destination_indexes.is_cuda else destination_indexes
+        source = source_indexes.cpu() if _device_runtime.is_device_tensor(source_indexes) else source_indexes
+        destination = (
+            destination_indexes.cpu() if _device_runtime.is_device_tensor(destination_indexes) else destination_indexes
+        )
         self.top_token_ids[destination, :topk] = self.top_token_ids[source, :topk]
         self.top_logprobs[destination, :topk] = self.top_logprobs[source, :topk]

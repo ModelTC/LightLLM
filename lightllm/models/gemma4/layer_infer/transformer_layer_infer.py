@@ -4,14 +4,21 @@ import torch.nn as nn
 
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+rmsnorm_forward = _operator_backend.resolve("common.basemodel.norm.rmsnorm.rmsnorm_forward")
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import (
-    context_attention_fwd_gemma4_mm,
+
+context_attention_fwd_gemma4_mm = _operator_backend.resolve(
+    "models.gemma4.context_attention_fwd_gemma4_mm.context_attention_fwd_gemma4_mm"
 )
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+silu_and_mul_fwd = _operator_backend.resolve("common.basemodel.fused_moe.moe_silu_and_mul.silu_and_mul_fwd")
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+
+rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 
 
 class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):

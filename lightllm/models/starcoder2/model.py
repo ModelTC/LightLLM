@@ -11,6 +11,10 @@ from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_cl
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.common.basemodel import TpPartBaseModel
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class Starcoder2TpPartModel(TpPartBaseModel):
     # weight class
@@ -77,11 +81,11 @@ class Starcoder2TpPartModel(TpPartBaseModel):
             max_seq_len = max_position_embeddings * rope_scaling_factor
 
         inv_freq = 1.0 / (
-            base ** (torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_)
+            base ** (_device_runtime.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_)
         )
-        t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
+        t = _device_runtime.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = _device_runtime.move(torch.cos(freqs).to(self.data_type))
+        self._sin_cached = _device_runtime.move(torch.sin(freqs).to(self.data_type))
         return

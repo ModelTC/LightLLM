@@ -20,7 +20,7 @@
 
 import os
 import torch
-import triton
+from lightllm.utils.math_utils import ceil_div
 import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Set, Union
@@ -41,6 +41,11 @@ from lightllm.utils.dist_utils import (
 from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -58,7 +63,7 @@ class CustomProcessGroup:
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
         self.dp_world_size = get_dp_world_size()
-        self.device_group = create_new_group_for_current_dp("nccl")
+        self.device_group = create_new_group_for_current_dp(_device_runtime.distributed_backend)
         if get_env_start_args().enable_dp_prefill_balance:
             self.dp_prefill_balance_group = create_dp_special_inter_group("nccl")
         else:
@@ -75,7 +80,7 @@ class CustomProcessGroup:
         from .symm_mem_all_reduce import SymmMemAllreduce
 
         data_type = get_torch_dtype(get_env_start_args().data_type)
-        symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device(), dtype=data_type)
+        symm = SymmMemAllreduce(self.device_group, _device_runtime.current_device(), dtype=data_type)
         if not symm.disabled:
             self.symm_mem_reduce = symm
             logger.info("Enable SymmMem ALLReduce.")
@@ -86,7 +91,7 @@ class CustomProcessGroup:
         from .flashinfer_all_reduce import FlashInferAllReduce
 
         fi_cpu_group = create_new_group_for_current_dp("gloo")
-        fi = FlashInferAllReduce(fi_cpu_group, torch.cuda.current_device())
+        fi = FlashInferAllReduce(fi_cpu_group, _device_runtime.current_device())
         if not fi.disabled:
             self.flashinfer_reduce = fi
             logger.info("Enable FlashInfer ALLReduce.")
@@ -188,7 +193,7 @@ class DistributeGroupManager:
         # communicator. The default process group's warmup does not cover this group.
         dist.barrier(
             group=deepep_group,
-            device_ids=[torch.cuda.current_device()],
+            device_ids=[_device_runtime.current_device()],
         )
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
@@ -249,7 +254,7 @@ class DistributeGroupManager:
             # DeepEP 返回的 decode hint 不保证能被 microbatch 均分；最终再对齐一次，
             # 确保每个 workspace slice 的容量及起始位置仍保持 256-byte 对齐。
             rdma_alignment = microbatch_count * 256
-            num_rdma_bytes = triton.cdiv(num_rdma_bytes, rdma_alignment) * rdma_alignment
+            num_rdma_bytes = ceil_div(num_rdma_bytes, rdma_alignment) * rdma_alignment
             self.ep_low_latency_buffer = deep_ep.Buffer(
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
@@ -451,7 +456,7 @@ def _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
     """
 
     def align(value: int, alignment: int) -> int:
-        return triton.cdiv(value, alignment) * alignment
+        return ceil_div(value, alignment) * alignment
 
     def tensor_bytes(rows: int, columns: int, itemsize: int) -> int:
         # 沿用TensorBufferManager的256对齐规则

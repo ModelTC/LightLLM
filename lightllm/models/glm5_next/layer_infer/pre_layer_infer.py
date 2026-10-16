@@ -1,6 +1,10 @@
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
 # SPDX-License-Identifier: Apache-2.0
 
-from lightllm.common.basemodel.triton_kernel.mhc import hc_expand
+hc_expand = _operator_backend.resolve("common.basemodel.mhc.hc_expand")
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 
 

@@ -7,6 +7,10 @@ import numpy as np
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class ViTPreLayerInfer:
     """ """
@@ -35,7 +39,7 @@ class ViTPreLayerInfer:
         embeddings = embeddings + position_embedding.to(target_dtype)
         if self.tp_world_size_ == 1:
             return embeddings
-        gather_embedding = torch.empty(
+        gather_embedding = _device_runtime.empty(
             (embeddings.shape[2] * self.tp_world_size_, batch_size, embeddings.shape[1]),
             device=embeddings.device,
             dtype=target_dtype,

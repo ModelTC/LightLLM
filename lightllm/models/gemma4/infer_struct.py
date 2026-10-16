@@ -1,6 +1,12 @@
 import torch
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b_image_token_end
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+build_b_image_token_end = _operator_backend.resolve("models.gemma4.build_b_image_token_end.build_b_image_token_end")
 
 
 class Gemma4InferStateInfo(InferStateInfo):
@@ -44,7 +50,7 @@ class Gemma4InferStateInfo(InferStateInfo):
 
     def _build_b_image_token_end(self):
         device = self.position_ids.device
-        self.b_image_token_end = torch.zeros(self.position_ids.shape[0], dtype=torch.int32, device=device)
+        self.b_image_token_end = _device_runtime.zeros(self.position_ids.shape[0], dtype=torch.int32, device=device)
 
         if not self.multimodal_params:
             return
@@ -67,10 +73,14 @@ class Gemma4InferStateInfo(InferStateInfo):
             return
 
         build_b_image_token_end(
-            b_image_start_idx=torch.tensor(b_image_start_idx, dtype=torch.int32).cuda(non_blocking=True),
-            b_image_len=torch.tensor(b_image_len, dtype=torch.int32).cuda(non_blocking=True),
-            b_image_nums=torch.tensor(b_image_nums, dtype=torch.int32).cuda(non_blocking=True),
-            b_image_start_num=torch.tensor(b_image_start_num, dtype=torch.int32).cuda(non_blocking=True),
+            b_image_start_idx=_device_runtime.move(
+                torch.tensor(b_image_start_idx, dtype=torch.int32), non_blocking=True
+            ),
+            b_image_len=_device_runtime.move(torch.tensor(b_image_len, dtype=torch.int32), non_blocking=True),
+            b_image_nums=_device_runtime.move(torch.tensor(b_image_nums, dtype=torch.int32), non_blocking=True),
+            b_image_start_num=_device_runtime.move(
+                torch.tensor(b_image_start_num, dtype=torch.int32), non_blocking=True
+            ),
             b_q_start_loc=self.b_q_start_loc,
             b_ready_cache_len=self.b_ready_cache_len,
             b_q_seq_len=self.b_q_seq_len,

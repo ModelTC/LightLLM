@@ -23,6 +23,11 @@ from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -78,7 +83,7 @@ def _init_env(
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_trans:Device{device_id}")
 
     try:
-        torch.cuda.set_device(device_id)
+        _device_runtime.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
 
         task_out_queue.put("proc_start")
@@ -131,7 +136,7 @@ class _DecodeTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
-        self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
+        self.copy_cuda_stream = _device_runtime.new_stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
             node_id=self.args.pd_node_id,
@@ -167,7 +172,7 @@ class _DecodeTransModule:
 
     def _warmup(self):
         for dp_index in range(self.args.dp // self.args.nnodes):
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
+            with _device_runtime.stream_scope(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.read_page_kv_move_buffer_to_mem(
                     mem_indexes=[0],
@@ -176,7 +181,7 @@ class _DecodeTransModule:
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
                 )
-                torch.cuda.current_stream().synchronize()
+                _device_runtime.current_stream().synchronize()
         return
 
     @log_exception
@@ -243,7 +248,7 @@ class _DecodeTransModule:
     def accept_peer_task_loop(
         self,
     ):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             # notify update
             try:
@@ -356,7 +361,7 @@ class _DecodeTransModule:
 
     @log_exception
     def request_page_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             dst_page_index = self.page_index_queue.get()
             trans_task: PDChunckedTransTask = self.request_page_task_queue.get()
@@ -381,12 +386,12 @@ class _DecodeTransModule:
 
     @log_exception
     def read_page_to_mems_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.ready_page_task_queue.get()
-            copy_start_event = torch.cuda.Event(enable_timing=True)
-            copy_end_event = torch.cuda.Event(enable_timing=True)
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
+            copy_start_event = _device_runtime.new_event(enable_timing=True)
+            copy_end_event = _device_runtime.new_event(enable_timing=True)
+            with _device_runtime.stream_scope(stream=self.copy_cuda_stream):
                 copy_start_event.record(self.copy_cuda_stream)
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.read_page_kv_move_buffer_to_mem(
@@ -403,12 +408,12 @@ class _DecodeTransModule:
 
     @log_exception
     def success_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             copy_end_event, copy_start_event, trans_task = self.success_queue.get()
             trans_task: PDChunckedTransTask = trans_task
-            copy_end_event: Optional[torch.cuda.Event] = copy_end_event
-            copy_start_event: Optional[torch.cuda.Event] = copy_start_event
+            copy_end_event: Optional[_device_runtime.event_type] = copy_end_event
+            copy_start_event: Optional[_device_runtime.event_type] = copy_start_event
             read_page_gpu_time_ms = -1.0
             if copy_end_event is not None:
                 copy_end_event.synchronize()
@@ -433,7 +438,7 @@ class _DecodeTransModule:
 
     @log_exception
     def fail_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
 

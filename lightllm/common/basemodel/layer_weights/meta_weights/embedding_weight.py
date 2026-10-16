@@ -3,7 +3,13 @@ import numpy as np
 from typing import Dict, Optional
 from .base_weight import BaseWeightTpl
 from .platform_op import PlatformAwareOp
-from lightllm.common.basemodel.triton_kernel.embedding import embedding as embedding_kernel
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+embedding_kernel = _operator_backend.resolve("common.basemodel.embedding.embedding")
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 
 
@@ -29,7 +35,9 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
 
     def _create_weight(self):
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
-        self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.weight: torch.Tensor = _device_runtime.empty(
+            tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_
+        )
         self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
@@ -165,7 +173,7 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.weight: torch.Tensor = torch.empty(
+        self.weight: torch.Tensor = _device_runtime.empty(
             self.max_position_embeddings, self.dim, dtype=self.data_type_, device=self.device_id_
         )
         self.weight.load_ok = False

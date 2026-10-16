@@ -1,6 +1,6 @@
 import torch
 import dataclasses
-import triton
+from lightllm.utils.math_utils import ceil_div
 
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -91,7 +91,7 @@ class LinearAttCacheConfig:
         b = self.get_cpu_cache_conv_bytes()
         c = self.get_cpu_cache_ssm_bytes()
 
-        return triton.cdiv(a + b + c, 16) * 16
+        return ceil_div(a + b + c, 16) * 16
 
     def get_cpu_cache_full_att_bytes(self):
         big_page_token_num = (

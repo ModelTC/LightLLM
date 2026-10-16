@@ -7,7 +7,13 @@ from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from .cache_tensor_manager import g_cache_manager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor, all_reduce
-from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+sp_pad_copy = _operator_backend.resolve("common.basemodel.sp_pad_copy.sp_pad_copy")
 
 
 class BaseLayerInfer:
@@ -25,7 +31,7 @@ class BaseLayerInfer:
         self,
         shape: Union[torch.Size, Iterable[int]],
         dtype: torch.dtype,
-        device: str = "cuda",
+        device: str = _device_runtime.device,
     ) -> torch.Tensor:
         """ """
         return g_cache_manager.alloc_tensor(shape, dtype, device=device)

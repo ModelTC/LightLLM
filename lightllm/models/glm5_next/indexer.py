@@ -1,10 +1,20 @@
 import torch
-import triton
+from lightllm.utils.math_utils import ceil_div
 
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 
-from .triton_kernel.index_quant import hadamard_transform_quant_fp8
-from .triton_kernel.kpool import compress_pools, gather_pools, gather_paged_pools, get_pool_ranges, expand_topk
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+
+hadamard_transform_quant_fp8 = _operator_backend.resolve("models.glm5_next.index_quant.hadamard_transform_quant_fp8")
+compress_pools = _operator_backend.resolve("models.glm5_next.kpool.compress_pools")
+gather_pools = _operator_backend.resolve("models.glm5_next.kpool.gather_pools")
+gather_paged_pools = _operator_backend.resolve("models.glm5_next.kpool.gather_paged_pools")
+get_pool_ranges = _operator_backend.resolve("models.glm5_next.kpool.get_pool_ranges")
+expand_topk = _operator_backend.resolve("models.glm5_next.kpool.expand_topk")
 
 
 class Glm5NextNsaInfer:
@@ -27,7 +37,7 @@ class Glm5NextNsaInfer:
                 logits, 1, lengths, indices, logits.shape[0], logits.stride(0), logits.stride(1), indices.shape[1]
             )
         else:
-            positions = torch.arange(logits.shape[1], device=logits.device)
+            positions = _device_runtime.arange(logits.shape[1], device=logits.device)
             logits.masked_fill_(positions[None, :] >= lengths[:, None], -float("inf"))
             selected = torch.topk(logits, indices.shape[1], dim=-1, sorted=True).indices
             indices.copy_(selected.masked_fill(selected >= lengths[:, None], -1))
@@ -62,7 +72,7 @@ class Glm5NextNsaInfer:
         q_fp8, q_scale = hadamard_transform_quant_fp8(q, scale=self.dim ** -0.5)
         weights = layer_weight.weights_proj_.mm(hidden_states.float())
         weights = weights * (self.heads ** -0.5 * self.dim ** -0.5) * q_scale.squeeze(-1)
-        max_pools = triton.cdiv(infer_state.max_kv_seq_len, 4 * 128) * 128
+        max_pools = ceil_div(infer_state.max_kv_seq_len, 4 * 128) * 128
         # Prefill usually has many queries: parallelize over Q and reuse K within each query tile.
         # Decode has few queries, so paged MQA also splits K across SMs for parallelism.
         if infer_state.is_prefill:
@@ -82,7 +92,7 @@ class Glm5NextNsaInfer:
         starts, ends, lengths = get_pool_ranges(
             att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
-        groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
+        groups = _device_runtime.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
         # Budget 64 MiB for FP32 logits. At 1M tokens this permits 64 queries per chunk,
         # limiting Q parallelism even when the prefill batch contains many tokens.
         chunk_size = max(1, min(q_fp8.shape[0], 16 * 1024 * 1024 // max_pools))
@@ -120,6 +130,6 @@ class Glm5NextNsaInfer:
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8.unsqueeze(1), pages, weights, lengths, block_table, metadata, max_pools, clean_logits=False
         )
-        groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
+        groups = _device_runtime.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
         self.select_topk_indices(logits, lengths.view(-1), groups)
         return groups

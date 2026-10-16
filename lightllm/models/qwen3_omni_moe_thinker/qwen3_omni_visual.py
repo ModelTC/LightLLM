@@ -30,6 +30,10 @@ from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from lightllm.models.qwen2_vl.qwen2_visual import VisionRotaryEmbedding, VisionFlashAttention
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class Qwen3OmniMoeVisionMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int, hidden_act: str):
@@ -178,7 +182,7 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
         self.num_grid_per_side = int(self.num_position_embeddings ** 0.5)
 
         head_dim = self.hidden_size // self.num_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2).cuda()
+        self.rotary_pos_emb = _device_runtime.move(VisionRotaryEmbedding(head_dim // 2))
 
         self.blocks = nn.ModuleList(
             [
@@ -322,8 +326,8 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
                 weight_list[i].extend(weights[i].tolist())
 
         # TODO: Avoid constructing CUDA tensors directly from Python list data.
-        idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=self.pos_embed.weight.device)
-        weight_tensor = torch.tensor(
+        idx_tensor = _device_runtime.tensor(idx_list, dtype=torch.long, device=self.pos_embed.weight.device)
+        weight_tensor = _device_runtime.tensor(
             weight_list, dtype=self.pos_embed.weight.dtype, device=self.pos_embed.weight.device
         )
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
@@ -349,13 +353,13 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
         rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
-        rotary_cos = rotary_cos.to("cuda", non_blocking=True)
-        rotary_sin = rotary_sin.to("cuda", non_blocking=True)
+        rotary_cos = rotary_cos.to(_device_runtime.device, non_blocking=True)
+        rotary_sin = rotary_sin.to(_device_runtime.device, non_blocking=True)
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0,
             dtype=torch.int32,
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).to("cuda", non_blocking=True)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).to(_device_runtime.device, non_blocking=True)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
@@ -403,8 +407,8 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
-        image_grid_thw = grid_thw.to("cuda", non_blocking=True)
+        pixel_values = imgs.to(_device_runtime.device, dtype=self.data_type, non_blocking=True)
+        image_grid_thw = grid_thw.to(_device_runtime.device, non_blocking=True)
         img_embeds, deepstack_feature_lists = self.forward(pixel_values, grid_thw=image_grid_thw)
         all_img_embeds_df, valid_ids = self.concat_img_embed_and_deepstack_features(
             img_embeds, deepstack_feature_lists, valid_ids

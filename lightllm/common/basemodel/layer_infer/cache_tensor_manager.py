@@ -9,11 +9,16 @@ from torch.storage import UntypedStorage
 from dataclasses import field
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 _disable_gpu_tensor_cache = os.getenv("DISABLE_GPU_TENSOR_CACHE", None) is not None
 
-if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
+if _device_runtime.supports_tensor_cache and torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
     logger.info("USE_GPU_TENSOR_CACHE is On")
 
     # 用于进行引用计数调整和判断
@@ -75,7 +80,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self,
             shape: Union[torch.Size, Iterable[int]],
             dtype: torch.dtype,
-            device: str = "cuda",
+            device: str = _device_runtime.device,
         ) -> torch.Tensor:
             return self.alloc_tensor(
                 shape=shape,
@@ -87,7 +92,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self,
             shape: Union[torch.Size, Tuple[int, ...]],
             data_type: torch.dtype,
-            device: str = "cuda",
+            device: str = _device_runtime.device,
         ) -> torch.Tensor:
             # shape 类型转换
             if isinstance(shape, list):
@@ -95,7 +100,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
 
             # cache manager 没有被正常使用时
             if not self.cache_env_ok:
-                return torch.empty(shape, dtype=data_type, device=device, requires_grad=False)
+                return _device_runtime.empty(shape, dtype=data_type, device=device, requires_grad=False)
 
             # 回收可能消亡的 tensor
             for ptr in self.changed_ptr:
@@ -124,7 +129,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
                 ans.storage_weak_ptr = buf_node.storage_weak_ptr
                 return ans
 
-            buf_tensor = torch.empty((size,), dtype=data_type, device=device, requires_grad=False)
+            buf_tensor = _device_runtime.empty((size,), dtype=data_type, device=device, requires_grad=False)
             # 用于调试显存占用的重要日志
             # self.managed_total_tensor_bytes +=  buf_tensor.element_size() * buf_tensor.numel()
             # logger.info(f"gpu cache managed_total_tensor_bytes: {self.managed_total_tensor_bytes}")
@@ -156,17 +161,17 @@ else:
             self,
             shape: Union[torch.Size, Iterable[int]],
             dtype: torch.dtype,
-            device: str = "cuda",
+            device: str = _device_runtime.device,
         ) -> torch.Tensor:
-            return torch.empty(shape, dtype=dtype, device=device, requires_grad=False)
+            return _device_runtime.empty(shape, dtype=dtype, device=device, requires_grad=False)
 
         def alloc_tensor(
             self,
             shape: Union[torch.Size, Iterable[int]],
             data_type: torch.dtype,
-            device: str = "cuda",
+            device: str = _device_runtime.device,
         ) -> torch.Tensor:
-            return torch.empty(shape, dtype=data_type, device=device, requires_grad=False)
+            return _device_runtime.empty(shape, dtype=data_type, device=device, requires_grad=False)
 
 
 global g_cache_manager

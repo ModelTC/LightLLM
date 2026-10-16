@@ -8,6 +8,11 @@ from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -51,7 +56,7 @@ class BaseAttBackend:
         with BaseAttBackend._workspace_buffer_lock:
             workspace_buffer = BaseAttBackend._workspace_buffers.get(buffer_key)
             if workspace_buffer is None:
-                workspace_buffer = torch.empty(workspace_size, dtype=dtype, device=device_id)
+                workspace_buffer = _device_runtime.empty(workspace_size, dtype=dtype, device=device_id)
                 BaseAttBackend._workspace_buffers[buffer_key] = workspace_buffer
             return workspace_buffer
 

@@ -7,6 +7,10 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 from .operator import Deepseek2MemOperator
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger(__name__)
 
@@ -27,7 +31,9 @@ class Deepseek2MemoryManager(MemoryManager):
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         assert size % self.page_size == 0, f"KV cache size {size} must be a multiple of page_size {self.page_size}"
-        self.kv_buffer = torch.empty((layer_num, size + self.page_size, head_num, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = _device_runtime.empty(
+            (layer_num, size + self.page_size, head_num, head_dim), dtype=dtype, device=_device_runtime.device
+        )
 
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
         # DeepSeek MLA's single compressed KV latent is replicated across TP ranks,
@@ -48,7 +54,7 @@ class Deepseek2MemoryManager(MemoryManager):
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        mem_indexes_gpu = _device_runtime.move(pin_mem_indexes, non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         mla_page_io(
             mem_indexes=mem_indexes_gpu,
@@ -72,7 +78,7 @@ class Deepseek2MemoryManager(MemoryManager):
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        mem_indexes_gpu = _device_runtime.move(pin_mem_indexes, non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for mem in dp_mems:
             mla_page_io(

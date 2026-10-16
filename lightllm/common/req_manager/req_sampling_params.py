@@ -3,8 +3,16 @@ from typing import List, Optional, TYPE_CHECKING
 
 import torch
 
-from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
-from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+
+token_id_counter = _operator_backend.resolve("common.basemodel.gen_sampling_params.token_id_counter")
+update_req_to_token_id_counter = _operator_backend.resolve(
+    "common.basemodel.gen_sampling_params.update_req_to_token_id_counter"
+)
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_env_start_args
@@ -28,24 +36,30 @@ class ReqSamplingParamsManager:
         self.penalty_counter_mode = get_env_start_args().penalty_counter_mode
         self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
         self.mtp_verify_width = get_env_start_args().mtp_step + 1
-        self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
-        self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
-        self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
+        self.req_to_presence_penalty = _device_runtime.zeros(
+            max_request_num + 1, dtype=torch.float32, device=_device_runtime.device
+        )
+        self.req_to_frequency_penalty = _device_runtime.zeros(
+            max_request_num + 1, dtype=torch.float32, device=_device_runtime.device
+        )
+        self.req_to_repetition_penalty = _device_runtime.zeros(
+            max_request_num + 1, dtype=torch.float32, device=_device_runtime.device
+        )
         # GPU 主表供 scatter、gather 和 MTP verify 使用。
-        self.req_to_next_token_ids = torch.zeros(
+        self.req_to_next_token_ids = _device_runtime.zeros(
             (max_request_num + 1, self.mtp_verify_width),
             dtype=torch.int64,
-            device="cuda",
+            device=_device_runtime.device,
         )
         # 常驻 CPU 快照，由 MTP scatter 后的异步拷贝更新；读取前复用已有 CUDA event 等待完成。
-        self.req_to_next_token_ids_cpu = torch.zeros(
+        self.req_to_next_token_ids_cpu = _device_runtime.zeros(
             (max_request_num + 1, self.mtp_verify_width),
             dtype=torch.int64,
             device="cpu",
             pin_memory=True,
         )
         self.req_to_next_token_scores = (
-            torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32, device="cuda")
+            _device_runtime.zeros_like(self.req_to_next_token_ids, dtype=torch.float32, device=_device_runtime.device)
             if get_env_start_args().mtp_dynamic_verify
             else None
         )
@@ -55,26 +69,26 @@ class ReqSamplingParamsManager:
         if get_env_start_args().output_constraint_mode == "xgrammar":
             # 每个请求和验证位置对应一个固定掩码槽；CPU matcher 在上一轮 post_handle 后填充，
             # 采样时在同一流上异步传到 GPU；已有完成事件保护下一轮 pinned 源缓冲区的复用。
-            self.req_to_bitmask = torch.empty(
+            self.req_to_bitmask = _device_runtime.empty(
                 (max_request_num + 1, self.mtp_verify_width, (self.vocab_size + 31) // 32),
                 dtype=torch.int32,
                 device="cpu",
                 pin_memory=True,
             )
-            self.req_to_bitmask_enabled = torch.zeros(
+            self.req_to_bitmask_enabled = _device_runtime.zeros(
                 max_request_num + 1, dtype=torch.bool, device="cpu", pin_memory=True
             )
 
-        self.req_to_exponential_decay_length_penalty = torch.zeros(
-            max_request_num + 1, dtype=torch.float32, device="cuda"
+        self.req_to_exponential_decay_length_penalty = _device_runtime.zeros(
+            max_request_num + 1, dtype=torch.float32, device=_device_runtime.device
         )
 
         if self.penalty_counter_mode == "gpu_counter":
-            self.req_to_out_token_id_counter = torch.zeros(
-                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cuda"
+            self.req_to_out_token_id_counter = _device_runtime.zeros(
+                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device=_device_runtime.device
             )
         elif self.penalty_counter_mode == "pin_mem_counter":
-            self.req_to_out_token_id_counter = torch.zeros(
+            self.req_to_out_token_id_counter = _device_runtime.zeros(
                 (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cpu", pin_memory=True
             )
 
@@ -105,15 +119,18 @@ class ReqSamplingParamsManager:
         else:
             self.req_to_out_token_id_counter[req.req_idx].fill_(0)
             if req.sampling_param.shm_param.input_penalty and req.need_out_token_id_statistics:
-                prompt_ids = g_pin_mem_manager.gen_from_list(
-                    key="prompt_ids_for_penalty",
-                    data=req.shm_req.get_prompt_ids_numpy(),
-                    dtype=torch.int32,
-                ).cuda(non_blocking=True)
+                prompt_ids = _device_runtime.move(
+                    g_pin_mem_manager.gen_from_list(
+                        key="prompt_ids_for_penalty",
+                        data=req.shm_req.get_prompt_ids_numpy(),
+                        dtype=torch.int32,
+                    ),
+                    non_blocking=True,
+                )
                 token_id_counter(
                     prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
-                torch.cuda.current_stream().synchronize()
+                _device_runtime.current_stream().synchronize()
 
         return
 
@@ -123,7 +140,11 @@ class ReqSamplingParamsManager:
         if self.penalty_counter_mode not in ["gpu_counter", "pin_mem_counter"]:
             return
 
-        assert b_req_idx.is_cuda and next_token_ids.is_cuda and b_req_idx.shape[0] == next_token_ids.shape[0]
+        assert (
+            _device_runtime.is_device_tensor(b_req_idx)
+            and _device_runtime.is_device_tensor(next_token_ids)
+            and b_req_idx.shape[0] == next_token_ids.shape[0]
+        )
 
         update_req_to_token_id_counter(
             b_req_idx=b_req_idx,
@@ -169,7 +190,7 @@ class ReqSamplingParamsManager:
         )
 
         return (
-            p_token_ids_tensor.cuda(non_blocking=True),
-            p_token_counts_tensor.cuda(non_blocking=True),
-            p_cumsum_seq_len_tensor.cuda(non_blocking=True),
+            _device_runtime.move(p_token_ids_tensor, non_blocking=True),
+            _device_runtime.move(p_token_counts_tensor, non_blocking=True),
+            _device_runtime.move(p_cumsum_seq_len_tensor, non_blocking=True),
         )

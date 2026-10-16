@@ -10,8 +10,14 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
-from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
-from lightllm.models.vit.triton_kernel.rms_norm_vit import qk_rms_norm, rms_norm
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+apply_rotary_pos_emb_triton = _operator_backend.resolve("models.qwen2_vl.rotary_pos_emb.apply_rotary_pos_emb_triton")
+qk_rms_norm = _operator_backend.resolve("models.vit.rms_norm_vit.qk_rms_norm")
+rms_norm = _operator_backend.resolve("models.vit.rms_norm_vit.rms_norm")
 from lightllm.server.visualserver import get_vit_attn_backend
 from .vision_process import Glm5NextImageProcessor
 

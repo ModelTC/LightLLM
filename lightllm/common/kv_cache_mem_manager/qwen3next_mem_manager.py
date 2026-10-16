@@ -1,5 +1,5 @@
 import torch
-import triton
+from lightllm.utils.math_utils import ceil_div
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
@@ -52,7 +52,7 @@ class Qwen3NextMemManager(MemoryManager):
         # 永远不会被 alloc 申请到，只会在 cpu cache中，用于过渡和存储碎页情况下的
         # cpu cache 的页面拷贝。
         self.big_page_buffers = LinearAttCacheManager(
-            size=triton.cdiv(self.size, big_page_token_num) + 2,
+            size=ceil_div(self.size, big_page_token_num) + 2,
             linear_config=self.linear_config,
             keep_num=2,
         )

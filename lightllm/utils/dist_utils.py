@@ -3,6 +3,11 @@ import os
 import torch
 import requests
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 # 规范 rank 的含义，在 llm 推理的相关代码中下述的 rank 的含义如下：
 # global_rank 全局 rank 序列id， 如两节点 8卡，会存在 0 - 15 16个global_rank
 # global_world_size 全局的 world size 大小， 如两节点 8 卡，该值为 16
@@ -79,20 +84,21 @@ def init_vision_distributed_env(kvargs):
     set_current_rank_in_dp(tp_rank_id)
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
-    torch.cuda.set_device(device_id)
+    _device_runtime.set_device(device_id)
     # 不要在init_process_group时，显示的传入device_id
     # 这会触发torch的device-bound split优化，会默认后面想加入新进程组的rank
     # 都已经存在于默认组，这样RL更新weight的init_group时，外部想加入的组，在执行
     # 通信原语时例如all_reduce，会永远等不到LightLLM默认组里的回复，从而导致错误结果。
     dist.init_process_group(
-        "nccl",
+        _device_runtime.distributed_backend,
         init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
         rank=kvargs["tp_rank_id"],
         world_size=tp_world_size,
     )
     # warmup nccl communicator
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
-    dist.all_reduce(_a)
+    _a = torch.zeros([1]).to(_device_runtime.device_at(device_id))
+    if _device_runtime.distributed_backend == "nccl":
+        dist.all_reduce(_a)
     del _a
 
 
@@ -114,16 +120,17 @@ def init_audio_distributed_env(kvargs):
     set_current_rank_in_dp(tp_rank_id)
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
-    torch.cuda.set_device(device_id)
+    _device_runtime.set_device(device_id)
     dist.init_process_group(
-        "nccl",
+        _device_runtime.distributed_backend,
         init_method=f'tcp://127.0.0.1:{kvargs["audio_nccl_port"]}',
         rank=tp_rank_id,
         world_size=tp_world_size,
-        device_id=torch.device(f"cuda:{device_id}"),
+        device_id=torch.device(_device_runtime.device_at(device_id)),
     )
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
-    dist.all_reduce(_a)
+    _a = torch.zeros([1]).to(_device_runtime.device_at(device_id))
+    if _device_runtime.distributed_backend == "nccl":
+        dist.all_reduce(_a)
     del _a
 
 
@@ -144,19 +151,21 @@ def init_distributed_env(kvargs):
     dp_size_in_node = max(1, get_dp_size() // nnodes)
     set_dp_rank_in_node(get_global_dp_rank() % dp_size_in_node)
 
-    _init_nccl_env()
+    if _device_runtime.distributed_backend == "nccl":
+        _init_nccl_env()
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
-    torch.cuda.set_device(device_id)
+    _device_runtime.set_device(device_id)
     dist.init_process_group(
-        "nccl",
+        _device_runtime.distributed_backend,
         init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
     )
     # warmup nccl communicator
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
-    dist.all_reduce(_a)
+    _a = torch.zeros([1]).to(_device_runtime.device_at(device_id))
+    if _device_runtime.distributed_backend == "nccl":
+        dist.all_reduce(_a)
     del _a
 
 

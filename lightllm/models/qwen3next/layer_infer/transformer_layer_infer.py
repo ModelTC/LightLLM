@@ -11,9 +11,16 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from lightllm.common.basemodel.attention.base_att import AttControl
 from typing import Tuple
-from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+sigmoid_mul_ = _operator_backend.resolve("models.qwen3next.shared_expert_gate.sigmoid_mul_")
 from lightllm.distributed import all_reduce
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+
+rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 from lightllm.utils.envs_utils import get_env_start_args
 from functools import partial
 
@@ -204,9 +211,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         infer_state.prefill_cuda_graph_create_graph_obj()
         infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-        o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
+        o = _device_runtime.empty(o_shape, dtype=o_dtype, device=o_device)
         _o = tensor_to_no_ref_tensor(o)
-        z = torch.empty(z_shape, dtype=o_dtype, device=o_device)
+        z = _device_runtime.empty(z_shape, dtype=o_dtype, device=o_device)
         _z = tensor_to_no_ref_tensor(z)
 
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
@@ -248,7 +255,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
 
-        if torch.cuda.is_current_stream_capturing():
+        if _device_runtime.is_current_stream_capturing():
             core_attn_out, z = self._linear_prefill_cuda_graph_wrapper(mixed_qkvzba, infer_state, layer_weight)
         else:
             core_attn_out, z = infer_state.prefill_att_state1.prefill_att(

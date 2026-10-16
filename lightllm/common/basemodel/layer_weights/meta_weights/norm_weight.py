@@ -2,10 +2,16 @@ import torch
 from typing import Optional, Dict
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
-from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
-from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
-from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+rmsnorm_forward = _operator_backend.resolve("common.basemodel.norm.rmsnorm.rmsnorm_forward")
+layernorm_forward = _operator_backend.resolve("common.basemodel.norm.layernorm.layernorm_forward")
+qk_rmsnorm_fused_forward = _operator_backend.resolve("common.basemodel.norm.qk_norm.qk_rmsnorm_fused_forward")
+gated_rmsnorm_forward = _operator_backend.resolve("common.basemodel.norm.gated_rmsnorm.gated_rmsnorm_forward")
 from .platform_op import PlatformAwareOp
 
 
@@ -18,7 +24,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.weight: torch.Tensor = _device_runtime.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
         self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
@@ -150,8 +156,8 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.bias: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.weight: torch.Tensor = _device_runtime.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.bias: torch.Tensor = _device_runtime.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
         self.weight.load_ok = False
         self.bias.load_ok = False
 
@@ -275,8 +281,8 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.q_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.k_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.q_weight: torch.Tensor = _device_runtime.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.k_weight: torch.Tensor = _device_runtime.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
         self.q_weight.load_ok = False
         self.k_weight.load_ok = False
 

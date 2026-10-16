@@ -23,6 +23,7 @@ Copied from:
 https://github.com/verl-project/verl/blob/main/verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py
 """
 
+
 import gc
 from multiprocessing import shared_memory
 from typing import TypedDict
@@ -36,6 +37,10 @@ from lightllm.utils.rl.torch_cuda_ipc import (
     get_current_device_name,
     rebuild_cuda_ipc_tensor,
 )
+
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
 
 
 def get_zmq_handle() -> str:
@@ -128,7 +133,7 @@ class BucketedWeightSender:
 
                 # fill the tensor bucket
                 if offset + weight.nbytes > self.bucket_size:
-                    torch.cuda.synchronize()
+                    _device_runtime.synchronize()
                     self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
                     self.socket.recv()
                     bucket_meta = {}
@@ -149,7 +154,7 @@ class BucketedWeightSender:
                 offset += weight.nbytes
 
             # send the last bucket
-            torch.cuda.synchronize()
+            _device_runtime.synchronize()
             self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
             self.socket.recv()
         finally:
@@ -164,7 +169,7 @@ class BucketedWeightSender:
         """build communication buffer"""
         buffer, shm = None, None
         if not self.use_shm:
-            buffer = torch.empty(
+            buffer = _device_runtime.empty(
                 self.bucket_size,
                 dtype=torch.uint8,
                 device=f"{get_current_device_name()}:{get_current_device_id()}",
@@ -199,8 +204,8 @@ class BucketedWeightSender:
             del self.shm
             self.shm = None
         gc.collect()
-        torch.cuda.ipc_collect()
-        torch.cuda.empty_cache()
+        _device_runtime.ipc_collect()
+        _device_runtime.empty_cache()
 
 
 class BucketedWeightReceiver:
@@ -258,7 +263,7 @@ class BucketedWeightReceiver:
                     else:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
-                torch.cuda.synchronize()
+                _device_runtime.synchronize()
                 self.socket.send(b"")
                 on_bucket_received(dict(weights))
                 del weights, tensor
@@ -295,7 +300,7 @@ class BucketedWeightReceiver:
             self.socket = None
         # Synchronize before releasing the buffer to ensure all async ops
         # referencing it (e.g. clone, .to()) have completed.
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
         del self.buffer
         self.buffer = None
         if self.shm is not None:
@@ -303,5 +308,5 @@ class BucketedWeightReceiver:
             del self.shm
             self.shm = None
         gc.collect()
-        torch.cuda.ipc_collect()
-        torch.cuda.empty_cache()
+        _device_runtime.ipc_collect()
+        _device_runtime.empty_cache()

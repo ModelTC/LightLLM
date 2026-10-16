@@ -7,6 +7,11 @@ import torch
 
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -100,7 +105,7 @@ class ProcessProfiler:
                 return
             self._process_torch_profiler_active_tid = _get_thread_id()
 
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
         worker_name = f"{self.name}_tid{_get_thread_id()}" if self.use_multi_thread else self.name
 
         trace_handler = torch.profiler.tensorboard_trace_handler(
@@ -122,12 +127,12 @@ class ProcessProfiler:
 
         self._local.profiler_obj = p
         p.start()
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
 
     def _nvtx_start(self) -> None:
-        torch.cuda.synchronize()
-        self._local.nvtx_range_id = torch.cuda.nvtx.range_start(self._nvtx_toplevel_mark)
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
+        self._local.nvtx_range_id = _device_runtime.range_start(self._nvtx_toplevel_mark)
+        _device_runtime.synchronize()
 
     def _thread_start(self) -> None:
         if self._local.is_active:
@@ -153,7 +158,7 @@ class ProcessProfiler:
         if self._process_torch_profiler_active_tid != _get_thread_id():
             return
 
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
         logger.info(f"[{self.name} @ tid={_get_thread_id()}] Saving trace (blocking)...")
         try:
             if self._local.profiler_obj:
@@ -164,14 +169,14 @@ class ProcessProfiler:
             self._local.profiler_obj = None  # Explicitly release reference to allow GC
             self._process_torch_profiler_active_tid = None
 
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
 
     def _nvtx_stop(self) -> None:
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
         if self._local.nvtx_range_id is not None:
-            torch.cuda.nvtx.range_end(self._local.nvtx_range_id)
+            _device_runtime.range_end(self._local.nvtx_range_id)
             self._local.nvtx_range_id = None
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
 
     def _thread_stop(self) -> None:
         if not self._local.is_active:

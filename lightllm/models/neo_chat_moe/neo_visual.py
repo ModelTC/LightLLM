@@ -13,6 +13,10 @@ from transformers.modeling_utils import PreTrainedModel
 from lightllm.models.neo_chat_moe.vision_process import load_image_native
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 def apply_rotary_emb_1d(
     x: torch.Tensor,
@@ -86,13 +90,13 @@ def build_abs_positions_from_grid_hw(grid_hw: torch.Tensor, device=None):
     N_total = N.sum()
 
     # Create the batch index for each patch (B x patch count)
-    patch_to_sample = torch.repeat_interleave(torch.arange(B, device=device), N)  # (N_total,)
+    patch_to_sample = torch.repeat_interleave(_device_runtime.arange(B, device=device), N)  # (N_total,)
 
     # Generate intra-image patch index (row-major order)
-    patch_id_within_image = torch.arange(N_total, device=device)
+    patch_id_within_image = _device_runtime.arange(N_total, device=device)
     patch_id_within_image = (
         patch_id_within_image
-        - torch.cumsum(torch.cat([torch.tensor([0], device=device), N[:-1]]), dim=0)[patch_to_sample]
+        - torch.cumsum(torch.cat([_device_runtime.tensor([0], device=device), N[:-1]]), dim=0)[patch_to_sample]
     )
 
     # Get H/W for each patch according to its image
@@ -273,8 +277,8 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_hw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
-        image_grid_hw = grid_hw.to("cuda", non_blocking=True)
+        pixel_values = imgs.to(_device_runtime.device, dtype=self.data_type, non_blocking=True)
+        image_grid_hw = grid_hw.to(_device_runtime.device, non_blocking=True)
 
         all_img_embeds = self.forward(pixel_values, grid_hw=image_grid_hw)
 

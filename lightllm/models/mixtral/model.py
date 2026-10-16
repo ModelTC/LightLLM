@@ -11,6 +11,11 @@ from lightllm.models.mixtral.layer_weights.transformer_layer_weight import Mixtr
 
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -74,11 +79,11 @@ class MixtralTpPartModel(TpPartBaseModel):
             max_seq_len = max_position_embeddings * rope_scaling_factor
 
         inv_freq = 1.0 / (
-            base ** (torch.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_)
+            base ** (_device_runtime.arange(0, self.head_dim_, 2, device="cpu", dtype=torch.float32) / self.head_dim_)
         )
-        t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
+        t = _device_runtime.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = _device_runtime.move(torch.cos(freqs).to(self.data_type))
+        self._sin_cached = _device_runtime.move(torch.sin(freqs).to(self.data_type))
         return

@@ -4,17 +4,25 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
-from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
-from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
-    mtp_fused_recurrent_gated_delta_rule,
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+causal_conv1d_fn = _operator_backend.resolve("common.basemodel.linear_att.causal_conv1d.causal_conv1d_fn")
+fused_gdn_gating = _operator_backend.resolve("common.basemodel.linear_att.fused_gdn_gating.fused_gdn_gating")
+conv_pack_gdn_decode_inputs = _operator_backend.resolve(
+    "common.basemodel.linear_att.gdn_decode_pack.conv_pack_gdn_decode_inputs"
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
+mtp_fused_recurrent_gated_delta_rule = _operator_backend.resolve(
+    "common.basemodel.linear_att.mtp_fused_recurrent.mtp_fused_recurrent_gated_delta_rule"
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
-    fused_recurrent_gated_delta_rule,
+build_dynamic_mtp_linear_att_state_params = _operator_backend.resolve(
+    "common.basemodel.linear_att.mtp_state_params.build_dynamic_mtp_linear_att_state_params"
+)
+fused_recurrent_gated_delta_rule = _operator_backend.resolve(
+    "common.basemodel.linear_att.fla.ops.fused_recurrent_gated_delta_rule"
 )
 
 if TYPE_CHECKING:
@@ -240,7 +248,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
+        self.b1_mtp_cu_q_seq_len = _device_runtime.arange(
             0,
             batch_size + 1,
             mtp_size,
@@ -255,7 +263,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         att_batch_size = self.b_conv_buffer_idx.shape[0]
         # Each request owns mtp_size consecutive recurrent-state slots.
         b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
+        state_offsets = _device_runtime.arange(
             mtp_size,
             device=self.infer_state.b_req_idx.device,
             dtype=self.infer_state.b_req_idx.dtype,
@@ -364,8 +372,8 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
-        from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
-            causal_conv1d_update as causal_conv1d_update_mtp,
+        causal_conv1d_update_mtp = _operator_backend.resolve(
+            "common.basemodel.linear_att.causal_conv1d_mtp.causal_conv1d_update"
         )
 
         backend: LinearAttBackend = self.backend

@@ -27,6 +27,10 @@ from lightllm.common.basemodel.attention import (
 )
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger(__name__)
 
@@ -68,17 +72,20 @@ class NeoModelBase:
             pass
 
         full_inv_freq = 1.0 / (
-            base ** (torch.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
+            base
+            ** (_device_runtime.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
         )
         inv_freq = full_inv_freq[::2]
         t = (
-            torch.arange(max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32)
+            _device_runtime.arange(
+                max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32
+            )
             / rope_scaling_factor
         )
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = _device_runtime.move(torch.cos(freqs).to(self.data_type))
+        self._sin_cached = _device_runtime.move(torch.sin(freqs).to(self.data_type))
         return
 
     def _init_to_get_hw_rotary(self, default_base=10000):
@@ -108,17 +115,20 @@ class NeoModelBase:
         except:
             pass
         full_inv_freq = 1.0 / (
-            base ** (torch.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
+            base
+            ** (_device_runtime.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
         )
         inv_freq = full_inv_freq[::2]
         t = (
-            torch.arange(max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32)
+            _device_runtime.arange(
+                max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32
+            )
             / rope_scaling_factor
         )
         freqs = torch.outer(t, inv_freq)
 
-        self._hw_cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._hw_sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._hw_cos_cached = _device_runtime.move(torch.cos(freqs).to(self.data_type))
+        self._hw_sin_cached = _device_runtime.move(torch.sin(freqs).to(self.data_type))
         return
 
 

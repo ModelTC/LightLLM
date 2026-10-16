@@ -4,6 +4,11 @@ from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.common.basemodel.batch_objs import ModelInput
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 INT64_MAX = torch.iinfo(torch.int64).max
 
 
@@ -56,13 +61,13 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     max_q_seq_len = max(b_q_seq_len, default=0)
 
     input_ids = np.concatenate(input_ids, dtype=np.int64) if input_ids else np.empty((0,), dtype=np.int64)
-    input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
-    b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
-    b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
-    b_is_decode_req = torch.tensor(b_is_decode_req, dtype=torch.bool, device="cpu")
-    b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
-    b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
-    b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
+    input_ids = _device_runtime.tensor(input_ids, dtype=torch.int64, device="cpu")
+    b_req_idx = _device_runtime.tensor(b_req_idx, dtype=torch.int32, device="cpu")
+    b_seq_len = _device_runtime.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    b_is_decode_req = _device_runtime.tensor(b_is_decode_req, dtype=torch.bool, device="cpu")
+    b_mtp_index = _device_runtime.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_ready_cache_len = _device_runtime.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
+    b_q_seq_len = _device_runtime.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
     model_input = ModelInput(
@@ -120,15 +125,15 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     max_kv_seq_len = max(b_seq_len, default=0)
     max_q_seq_len = max(b_q_seq_len, default=1)
 
-    b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
-    b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
-    b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_req_idx = _device_runtime.tensor(b_req_idx, dtype=torch.int32, device="cpu")
+    b_seq_len = _device_runtime.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    b_mtp_index = _device_runtime.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_position_delta = build_b_position_delta(multimodal_params)
 
-    b_shared_seq_len = torch.tensor(
+    b_shared_seq_len = _device_runtime.tensor(
         [req.get_radix_cache_shared_len() for req in run_reqs], dtype=torch.int32, device="cpu"
     )
-    b_shared_radix_node_id = torch.tensor(
+    b_shared_radix_node_id = _device_runtime.tensor(
         [-1 if req.shared_kv_node is None else req.shared_kv_node.time_id % INT64_MAX for req in run_reqs],
         dtype=torch.int64,
         device="cpu",
@@ -211,4 +216,4 @@ def build_b_position_delta(multimodal_params: List[dict]) -> torch.Tensor:
             if grid_thwd is not None:
                 position_delta += grid_thwd[3]
         b_position_delta.append(position_delta)
-    return torch.tensor(b_position_delta, dtype=torch.int32, device="cpu")
+    return _device_runtime.tensor(b_position_delta, dtype=torch.int32, device="cpu")

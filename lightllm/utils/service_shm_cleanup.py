@@ -62,6 +62,24 @@ class ServiceShmCleanup:
     @staticmethod
     def cleanup_posix_shm(service_name):
         """删除名称严格属于目标 service 的 POSIX 共享内存。"""
+        if sys.platform == "darwin":
+            from multiprocessing.shared_memory import _posixshmem
+
+            manifest = IPC_DIR / f"{service_name}_posix_shm_names"
+            try:
+                names = set(manifest.read_text().splitlines())
+            except FileNotFoundError:
+                return 0
+            removed = 0
+            for name in names:
+                if name.startswith(f"{service_name}_") and "/" not in name:
+                    try:
+                        _posixshmem.shm_unlink("/" + name)
+                        removed += 1
+                    except FileNotFoundError:
+                        pass
+            manifest.unlink(missing_ok=True)
+            return removed
         try:
             entries = [entry for entry in SHM_DIR.iterdir() if entry.name.startswith(f"{service_name}_")]
         except FileNotFoundError:
@@ -84,8 +102,14 @@ class ServiceShmCleanup:
         """删除当前 service 的 ZMQ IPC socket 和端口表锁文件。"""
         removed = 0
         for entry in IPC_DIR.iterdir():
-            if (entry.name.startswith(f"_{service_name}_") and entry.is_socket()) or entry.name == (
-                f"{service_name}_shm_port_args.lock"
+            if (
+                (
+                    sys.platform == "darwin"
+                    and entry.name.startswith(f"{service_name}_")
+                    and entry.name.endswith((".process_lock", ".lock"))
+                )
+                or (entry.name.startswith(f"_{service_name}_") and entry.is_socket())
+                or entry.name == (f"{service_name}_shm_port_args.lock")
             ):
                 entry.unlink(missing_ok=True)
                 removed += 1

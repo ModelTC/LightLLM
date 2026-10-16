@@ -1,6 +1,5 @@
 import torch
 from typing import Optional
-import triton
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
     Qwen3NextTransformerLayerWeight,
@@ -20,6 +19,11 @@ from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger(__name__)
 
@@ -41,14 +45,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super().__init__(kvargs)
 
     def _init_triton(self):
-        def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
-            return torch.empty(size, device="cuda", dtype=torch.int8)
-
-        # Set Triton allocator for TMA descriptors
-        # This is required for kernels in common/.../linear_att/fla/ops/solve_tril.py
-        triton.set_allocator(_triton_allocator)
-        logger.info("Triton allocator set for Qwen3Next model")
-        return
+        get_operator_backend().initialize_linear_attention()
+        logger.info(f"Linear attention allocator initialized by {get_operator_backend().name} backend")
 
     def autotune_layers(self):
         return self.config["full_attention_interval"]

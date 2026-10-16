@@ -4,8 +4,14 @@ import torch.distributed as dist
 from typing import Tuple
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
-from lightllm.models.vit.triton_kernel.gelu_vit import gelu_fwd
-from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+gelu_fwd = _operator_backend.resolve("models.vit.gelu_vit.gelu_fwd")
+rms_norm = _operator_backend.resolve("models.vit.rms_norm_vit.rms_norm")
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
@@ -103,7 +109,7 @@ class ViTTransformerLayerInfer:
         total_len = batch_size * seq_len
         reshape = lambda t: t.view(total_len, head_num, head_dim)
         q, k, v, out = map(reshape, (q, k, v, out))
-        cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
+        cu_seqlens = _device_runtime.arange(batch_size + 1, dtype=torch.int32, device=q.device) * seq_len
         max_seqlen = seq_len
         get_vit_attn_backend()(q, k, v, out, cu_seqlens, max_seqlen)
         return out.reshape(batch_size, seq_len, -1)

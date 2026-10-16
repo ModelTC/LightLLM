@@ -1,5 +1,8 @@
 import asyncio
-import atomics
+import sys
+
+if sys.platform != "darwin":
+    import atomics
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_utils import create_or_link_shm
@@ -64,3 +67,7 @@ class AsyncLock:
     async def __aexit__(self, exc_t, exc, tb):
         self._item.release()
         return False
+
+
+if sys.platform == "darwin":
+    from .file_lock import FileShmArrayLock as AtomicShmArrayLock

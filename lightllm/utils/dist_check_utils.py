@@ -5,11 +5,17 @@
 初始化分布式后做一次真实集合通信，再退出。
 """
 
+
 import socket
 import threading
 from typing import TYPE_CHECKING, Callable
 
 from lightllm.utils.log_utils import init_logger
+
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
@@ -64,8 +70,8 @@ def _flashinfer_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> N
         import torch
         import torch.distributed as dist
 
-        cuda_device = torch.device(f"cuda:{process_rank}")
-        torch.cuda.set_device(cuda_device)
+        cuda_device = torch.device(_device_runtime.device_at(process_rank))
+        _device_runtime.set_device(cuda_device)
         dist.init_process_group(
             "nccl",
             init_method=f"tcp://127.0.0.1:{init_tcp_port}",
@@ -81,14 +87,14 @@ def _flashinfer_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> N
             if flashinfer_all_reduce.disabled:
                 raise RuntimeError("FlashInferAllReduce disabled")
             if process_rank == 0:
-                input_tensor = torch.zeros(2, 64, device=cuda_device, dtype=torch.bfloat16)
+                input_tensor = _device_runtime.zeros(2, 64, device=cuda_device, dtype=torch.bfloat16)
             else:
-                input_tensor = torch.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)
+                input_tensor = _device_runtime.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)
             if not flashinfer_all_reduce.should_use(input_tensor):
                 raise RuntimeError("FlashInferAllReduce unsupported for probe tensor")
             output_tensor = flashinfer_all_reduce.all_reduce(input_tensor)
             dist.barrier()
-            expected_reduced = torch.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)
+            expected_reduced = _device_runtime.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)
             if not torch.allclose(output_tensor, expected_reduced):
                 raise RuntimeError("FlashInfer allreduce value mismatch")
         finally:
@@ -104,8 +110,8 @@ def _symm_mem_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> Non
         import torch
         import torch.distributed as dist
 
-        cuda_device = torch.device(f"cuda:{process_rank}")
-        torch.cuda.set_device(cuda_device)
+        cuda_device = torch.device(_device_runtime.device_at(process_rank))
+        _device_runtime.set_device(cuda_device)
         dist.init_process_group(
             "nccl",
             init_method=f"tcp://127.0.0.1:{init_tcp_port}",
@@ -121,12 +127,12 @@ def _symm_mem_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> Non
             if symm_mem_all_reduce.disabled:
                 raise RuntimeError("SymmMemAllreduce disabled")
             if process_rank == 0:
-                activation_tensor = torch.zeros(8, 32, device=cuda_device, dtype=torch.bfloat16)
+                activation_tensor = _device_runtime.zeros(8, 32, device=cuda_device, dtype=torch.bfloat16)
             else:
-                activation_tensor = torch.ones(8, 32, device=cuda_device, dtype=torch.bfloat16)
+                activation_tensor = _device_runtime.ones(8, 32, device=cuda_device, dtype=torch.bfloat16)
             symm_mem_all_reduce.all_reduce(activation_tensor)
             dist.barrier()
-            expected_reduced = torch.ones(8, 32, device=cuda_device, dtype=torch.bfloat16)
+            expected_reduced = _device_runtime.ones(8, 32, device=cuda_device, dtype=torch.bfloat16)
             if not torch.allclose(activation_tensor, expected_reduced):
                 raise RuntimeError("SymmMem allreduce value mismatch")
         finally:

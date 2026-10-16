@@ -1,11 +1,18 @@
 """Backend validation with subprocess isolation and ground truth checks."""
 
+
 import multiprocessing as mp
 import os
 import torch
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_rank
 from functools import lru_cache
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
 
 logger = init_logger(__name__)
 
@@ -29,16 +36,16 @@ def _validate_fa3():
         return False, "flash_attn_varlen_func is None"
 
     batch, heads, seq, dim = 1, 4, 8, 64
-    q = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
-    k = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
-    v = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
+    q = _device_runtime.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device=_device_runtime.device)
+    k = _device_runtime.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device=_device_runtime.device)
+    v = _device_runtime.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device=_device_runtime.device)
 
     expected = _compute_ground_truth(q, k, v)
 
     q_flat = q.transpose(1, 2).reshape(batch * seq, heads, dim)
     k_flat = k.transpose(1, 2).reshape(batch * seq, heads, dim)
     v_flat = v.transpose(1, 2).reshape(batch * seq, heads, dim)
-    cu_seqlens = torch.arange(0, batch * seq + 1, seq, dtype=torch.int32, device="cuda")
+    cu_seqlens = _device_runtime.arange(0, batch * seq + 1, seq, dtype=torch.int32, device=_device_runtime.device)
 
     out = flash_attn_varlen_func(
         q=q_flat,
@@ -52,7 +59,7 @@ def _validate_fa3():
         causal=True,
     )
     out = out.reshape(batch, seq, heads, dim).transpose(1, 2)
-    torch.cuda.synchronize()
+    _device_runtime.synchronize()
 
     if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
         return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
@@ -61,16 +68,16 @@ def _validate_fa3():
 
 def _validate_flashinfer():
     """Validate FlashInfer with ground truth."""
-    capability = torch.cuda.get_device_capability()
+    capability = _device_runtime.get_device_capability()
     arch = f"{capability[0]}.{capability[1]}"
     os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
 
     import flashinfer
 
     batch, heads, seq, dim = 1, 4, 8, 64
-    q = torch.randn(batch, heads, seq, dim, dtype=torch.float16, device="cuda")
-    k = torch.randn(batch, heads, seq, dim, dtype=torch.float16, device="cuda")
-    v = torch.randn(batch, heads, seq, dim, dtype=torch.float16, device="cuda")
+    q = _device_runtime.randn(batch, heads, seq, dim, dtype=torch.float16, device=_device_runtime.device)
+    k = _device_runtime.randn(batch, heads, seq, dim, dtype=torch.float16, device=_device_runtime.device)
+    v = _device_runtime.randn(batch, heads, seq, dim, dtype=torch.float16, device=_device_runtime.device)
 
     expected = _compute_ground_truth(q, k, v)
 
@@ -78,14 +85,14 @@ def _validate_flashinfer():
     k_flat = k.transpose(1, 2).reshape(batch * seq, heads, dim)
     v_flat = v.transpose(1, 2).reshape(batch * seq, heads, dim)
 
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    qo_indptr = torch.arange(0, batch * seq + 1, seq, dtype=torch.int32, device="cuda")
+    workspace = _device_runtime.empty(128 * 1024 * 1024, dtype=torch.uint8, device=_device_runtime.device)
+    qo_indptr = _device_runtime.arange(0, batch * seq + 1, seq, dtype=torch.int32, device=_device_runtime.device)
 
     wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(workspace, kv_layout="NHD")
     wrapper.plan(qo_indptr, qo_indptr, heads, heads, dim, causal=True)
     out = wrapper.run(q_flat, k_flat, v_flat)
     out = out.reshape(batch, seq, heads, dim).transpose(1, 2)
-    torch.cuda.synchronize()
+    _device_runtime.synchronize()
 
     if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
         return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
@@ -96,9 +103,7 @@ def _validate_flashqla():
     """Validate FlashQLA against LightLLM's vendored FLA kernel."""
     from flash_qla import chunk_gated_delta_rule as flashqla_chunk_gated_delta_rule
 
-    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
-        chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
-    )
+    fla_chunk_gated_delta_rule = _operator_backend.resolve("common.basemodel.linear_att.fla.ops.chunk_gated_delta_rule")
     from lightllm.common.state_cache_manager import LinearAttCacheConfig
 
     linear_config = LinearAttCacheConfig.load_from_args()
@@ -111,13 +116,15 @@ def _validate_flashqla():
 
     batch, seq = 1, 64
     torch.manual_seed(0)
-    q = torch.randn(batch, seq, num_k_heads, head_k_dim, dtype=qkv_dtype, device="cuda")
+    q = _device_runtime.randn(batch, seq, num_k_heads, head_k_dim, dtype=qkv_dtype, device=_device_runtime.device)
     k = torch.randn_like(q)
-    v = torch.randn(batch, seq, num_v_heads, head_v_dim, dtype=qkv_dtype, device="cuda")
-    g = -torch.rand(batch, seq, num_v_heads, dtype=torch.float32, device="cuda")
-    beta = torch.rand(batch, seq, num_v_heads, dtype=torch.float32, device="cuda")
-    initial_state = torch.randn(batch, num_v_heads, head_k_dim, head_v_dim, dtype=state_dtype, device="cuda")
-    cu_seqlens = torch.tensor([0, seq], dtype=torch.int32, device="cuda")
+    v = _device_runtime.randn(batch, seq, num_v_heads, head_v_dim, dtype=qkv_dtype, device=_device_runtime.device)
+    g = -_device_runtime.rand(batch, seq, num_v_heads, dtype=torch.float32, device=_device_runtime.device)
+    beta = _device_runtime.rand(batch, seq, num_v_heads, dtype=torch.float32, device=_device_runtime.device)
+    initial_state = _device_runtime.randn(
+        batch, num_v_heads, head_k_dim, head_v_dim, dtype=state_dtype, device=_device_runtime.device
+    )
+    cu_seqlens = _device_runtime.tensor([0, seq], dtype=torch.int32, device=_device_runtime.device)
     kwargs = {
         "q": q,
         "k": k,
@@ -132,7 +139,7 @@ def _validate_flashqla():
 
     expected_out, expected_state = fla_chunk_gated_delta_rule(**kwargs)
     out, final_state = flashqla_chunk_gated_delta_rule(**kwargs)
-    torch.cuda.synchronize()
+    _device_runtime.synchronize()
 
     for name, actual, expected in (
         ("output", out, expected_out),
@@ -160,12 +167,12 @@ def _validate_triton():
         tl.store(output_ptr + row * n_cols + offs, out, mask=mask)
 
     rows, cols = 32, 64
-    x = torch.randn(rows, cols, dtype=torch.float32, device="cuda")
+    x = _device_runtime.randn(rows, cols, dtype=torch.float32, device=_device_runtime.device)
     expected = torch.softmax(x, dim=-1)
     out = torch.empty_like(x)
 
     _softmax_kernel[(rows,)](x, out, cols, BLOCK=triton.next_power_of_2(cols))
-    torch.cuda.synchronize()
+    _device_runtime.synchronize()
 
     if not torch.allclose(out, expected, rtol=1e-3, atol=1e-3):
         return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
@@ -177,7 +184,7 @@ def _validate_xformers():
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not _device_runtime.is_available():
             return False, "CUDA not available"
 
         import xformers.ops as xformers_ops
@@ -189,9 +196,9 @@ def _validate_xformers():
     dtype = torch.bfloat16
     device = "cuda"
 
-    q = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
-    k = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
-    v = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    q = _device_runtime.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    k = _device_runtime.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    v = _device_runtime.randn(batch, heads, seq, dim, dtype=dtype, device=device)
 
     expected = _compute_ground_truth(q, k, v, is_causal=False)
 
@@ -224,9 +231,9 @@ def _validate_sdpa():
     dtype = torch.bfloat16
     device = "cuda"
 
-    q = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
-    k = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
-    v = torch.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    q = _device_runtime.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    k = _device_runtime.randn(batch, heads, seq, dim, dtype=dtype, device=device)
+    v = _device_runtime.randn(batch, heads, seq, dim, dtype=dtype, device=device)
 
     expected = _compute_ground_truth(q, k, v, is_causal=False)
 
@@ -254,13 +261,13 @@ def _validate_flashmla_sparse():
     dtype = torch.bfloat16
     device = "cuda"
 
-    q = torch.randn(batch * seq, heads, qk_dim, dtype=dtype, device=device)
-    kv = torch.zeros(batch * seq, 1, qk_dim, dtype=dtype, device=device)
+    q = _device_runtime.randn(batch * seq, heads, qk_dim, dtype=dtype, device=device)
+    kv = _device_runtime.zeros(batch * seq, 1, qk_dim, dtype=dtype, device=device)
 
     index_topk = 128
-    topk_indices = torch.zeros(batch * seq, index_topk, dtype=torch.int32, device=device)
+    topk_indices = _device_runtime.zeros(batch * seq, index_topk, dtype=torch.int32, device=device)
     for i in range(seq):
-        topk_indices[i, :] = torch.arange(index_topk, dtype=torch.int32, device=device)
+        topk_indices[i, :] = _device_runtime.arange(index_topk, dtype=torch.int32, device=device)
 
     topk_indices = topk_indices.view(batch * seq, 1, index_topk)
 
@@ -274,7 +281,7 @@ def _validate_flashmla_sparse():
             sm_scale=softmax_scale,
             d_v=kv_lora_rank,
         )
-        torch.cuda.synchronize()
+        _device_runtime.synchronize()
     except Exception as e:
         return False, f"flash_mla_sparse_fwd run failed: {type(e).__name__}: {e}"
 

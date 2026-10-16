@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+
 import dataclasses
 from typing import TYPE_CHECKING
 
@@ -15,17 +16,23 @@ from lightllm.common.basemodel.attention.base_att import (
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+causal_conv1d_fn = _operator_backend.resolve("common.basemodel.linear_att.causal_conv1d.causal_conv1d_fn")
+causal_conv1d_update = _operator_backend.resolve("common.basemodel.linear_att.causal_conv1d.causal_conv1d_update")
+chunk_kda_with_fused_gate = _operator_backend.resolve(
+    "common.basemodel.linear_att.fla.ops.kda.chunk_kda_with_fused_gate"
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
-    causal_conv1d_update as causal_conv1d_update_mtp,
+fused_recurrent_kda = _operator_backend.resolve("common.basemodel.linear_att.fla.ops.kda_decode.fused_recurrent_kda")
+causal_conv1d_update_mtp = _operator_backend.resolve(
+    "common.basemodel.linear_att.causal_conv1d_mtp.causal_conv1d_update"
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
+build_dynamic_mtp_linear_att_state_params = _operator_backend.resolve(
+    "common.basemodel.linear_att.mtp_state_params.build_dynamic_mtp_linear_att_state_params"
 )
 
 if TYPE_CHECKING:
@@ -164,7 +171,7 @@ class KDADecodeAttState(BaseDecodeAttState):
         )
 
         att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
+        self.b1_mtp_cu_q_seq_len = _device_runtime.arange(
             0,
             batch_size + 1,
             mtp_size,
@@ -179,7 +186,7 @@ class KDADecodeAttState(BaseDecodeAttState):
         att_batch_size = self.b_conv_buffer_idx.shape[0]
         # Each request owns mtp_size consecutive recurrent-state slots.
         b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
+        state_offsets = _device_runtime.arange(
             mtp_size,
             device=self.infer_state.b_req_idx.device,
             dtype=self.infer_state.b_req_idx.dtype,

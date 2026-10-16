@@ -84,6 +84,12 @@ def get_tokenizer(
         logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
         return DeepSeekV32Tokenizer(hf_tokenizer)
 
+    # Metal serves Qwen3.5 text without image processors or vision packages.
+    from lightllm.backends import get_device_runtime
+
+    if model_type == "qwen3_5" and get_device_runtime().name == "metal":
+        return tokenizer
+
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.tarsier2.model import Tarsier2Tokenizer
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor

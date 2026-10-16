@@ -3,11 +3,15 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import (
-    gen_mtp_new_input_ids,
-)
-from lightllm.common.basemodel.triton_kernel.build_chained_mtp_decode_input import (
-    build_chained_mtp_decode_input_inplace,
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+gen_mtp_new_input_ids = _operator_backend.resolve("common.basemodel.gen_mtp_prefill_params.gen_mtp_new_input_ids")
+build_chained_mtp_decode_input_inplace = _operator_backend.resolve(
+    "common.basemodel.build_chained_mtp_decode_input.build_chained_mtp_decode_input_inplace"
 )
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.base import (
     BaseDpOverlapProposer,
@@ -104,7 +108,7 @@ class DpOverlapVanillaWithAttProposer(BaseDpOverlapProposer):
         ]
         proposal_token_ids = target_next_token_ids0.new_empty((sum(req_num_by_batch), draft_step))
         proposal_schedule_scores = (
-            torch.empty(
+            _device_runtime.empty(
                 (sum(req_num_by_batch), draft_step),
                 dtype=torch.float32,
                 device=target_next_token_ids0.device,

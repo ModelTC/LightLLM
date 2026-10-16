@@ -50,6 +50,11 @@ from torch.distributed import ReduceOp
 
 import logging
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -420,5 +425,5 @@ def test_ncclGetUniqueId():
 if __name__ == "__main__":
     import torch
 
-    torch.cuda.set_device(0)
+    _device_runtime.set_device(0)
     test_ncclGetUniqueId()

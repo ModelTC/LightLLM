@@ -3,6 +3,10 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 from .linear_att import ReqManagerForMamba
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class Glm5NextReqManager(ReqManagerForMamba):
     """KDA runtime state and the NSA indexer's incomplete four-token pool."""
@@ -19,7 +23,7 @@ class Glm5NextReqManager(ReqManagerForMamba):
             dtype=linear_config.full_att_dtype,
             shape=(linear_config.index_kpool + self.mtp_step, 2 * linear_config.index_head_dim),
             layer_num=linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            device="cuda",
+            device=_device_runtime.device,
         )
 
     def get_indexer_tail_buffer(self, layer_index):

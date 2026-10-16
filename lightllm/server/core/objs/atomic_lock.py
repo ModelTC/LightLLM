@@ -1,4 +1,7 @@
-import atomics
+import sys
+
+if sys.platform != "darwin":
+    import atomics
 import time
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
@@ -7,7 +10,7 @@ from lightllm.utils.shm_utils import create_or_link_shm
 logger = init_logger(__name__)
 
 
-class AtomicShmLock:
+class _AtomicShmLock:
     def __init__(self, lock_name: str):
         self.lock_name = lock_name
         self.dest_size = 4
@@ -47,3 +50,9 @@ class AtomicShmLock:
             while not a.cmpxchg_weak(1, 0):
                 pass
         return
+
+
+if sys.platform == "darwin":
+    from .file_lock import FileShmLock as AtomicShmLock
+else:
+    AtomicShmLock = _AtomicShmLock

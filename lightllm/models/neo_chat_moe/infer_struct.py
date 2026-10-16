@@ -3,7 +3,13 @@ import torch
 import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.req_manager import ReqManager
-from lightllm.models.neo_chat_moe.triton_kernel.get_neo_position import get_neo_position_triton
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+get_neo_position_triton = _operator_backend.resolve("models.neo_chat_moe.get_neo_position.get_neo_position_triton")
 from lightllm.models.llama.model import LlamaTpPartModel
 
 
@@ -22,8 +28,8 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model: LlamaTpPartModel):
         LlamaInferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
-            self.b_image_token_end = torch.zeros([self.position_ids.size(0)], dtype=torch.int32, device="cpu").cuda(
-                non_blocking=True
+            self.b_image_token_end = _device_runtime.move(
+                _device_runtime.zeros([self.position_ids.size(0)], dtype=torch.int32, device="cpu"), non_blocking=True
             )
             self.position_ids = self.get_neo_position(self.multimodal_params)
         else:
@@ -33,7 +39,7 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
                 for image in p["images"]:
                     position_delta += image["grid_thwd"][3]
                 b_position_delta[batch_idx] = position_delta
-            position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
+            position_ids = self.position_ids + _device_runtime.tensor(b_position_delta, device=self.position_ids.device)
             self.position_ids = position_ids.unsqueeze(0).expand(3, -1).clone()
             self.position_ids[1:].zero_()
 
@@ -79,11 +85,17 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             position_ids = self.position_ids.new_zeros((3, self.position_ids.size(0)))
             position_ids[0].copy_(self.position_ids)
             return position_ids.contiguous()
-        b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").cuda(non_blocking=True)
-        b_image_thwd = torch.tensor(b_image_thwd, device="cpu").cuda(non_blocking=True)  # image_num x 4
-        b_image_nums = torch.tensor(b_image_nums, device="cpu").cuda(non_blocking=True)
-        b_image_start_num = torch.tensor(b_image_start_num, device="cpu").cuda(non_blocking=True)
-        b_image_len = torch.tensor(b_image_len, device="cpu").cuda(non_blocking=True)
+        b_image_start_idx = _device_runtime.move(
+            _device_runtime.tensor(b_image_start_idx, device="cpu"), non_blocking=True
+        )
+        b_image_thwd = _device_runtime.move(
+            _device_runtime.tensor(b_image_thwd, device="cpu"), non_blocking=True
+        )  # image_num x 4
+        b_image_nums = _device_runtime.move(_device_runtime.tensor(b_image_nums, device="cpu"), non_blocking=True)
+        b_image_start_num = _device_runtime.move(
+            _device_runtime.tensor(b_image_start_num, device="cpu"), non_blocking=True
+        )
+        b_image_len = _device_runtime.move(_device_runtime.tensor(b_image_len, device="cpu"), non_blocking=True)
 
         position_ids = self.position_ids.new_zeros((3, self.position_ids.size(0)))
         position_ids[0].copy_(self.position_ids)

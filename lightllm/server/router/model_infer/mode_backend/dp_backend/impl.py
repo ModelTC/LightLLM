@@ -1,7 +1,13 @@
 import torch
 import time
 from typing import List, Tuple
-from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+gen_b_req_mtp_start_loc = _operator_backend.resolve("common.basemodel.mtp_utils.gen_b_req_mtp_start_loc")
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
@@ -114,7 +120,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         return req_ids
 
     def infer_loop(self):
-        torch.cuda.set_device(get_current_device_id())
+        _device_runtime.set_device(get_current_device_id())
         try:
             while True:
                 event_pack = self.overlap_event_manager.get_overlap_event_pack()
@@ -145,7 +151,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 if run_way.is_prefill():
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
-                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    g_infer_context.get_overlap_stream().wait_stream(_device_runtime.current_stream())
                     self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
@@ -154,7 +160,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 elif run_way.is_decode():
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
-                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    g_infer_context.get_overlap_stream().wait_stream(_device_runtime.current_stream())
                     self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
@@ -178,14 +184,14 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         run_reqs_num = len(run_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if run_reqs_num > 0:
                 (
                     _,
@@ -204,7 +210,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=model_input.b_req_idx,
                     reqs=run_reqs,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = _device_runtime.new_event()
                 sync_event.record()
 
         if run_reqs_num > 0:
@@ -233,13 +239,13 @@ class DPChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(req_objs=decode_reqs)
         model_input: ModelInput = model_input
         run_reqs_num = len(run_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if run_reqs_num > 0:
                 (
                     _,
@@ -253,7 +259,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     run_reqs=run_reqs,
                     is_prefill=False,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = _device_runtime.new_event()
                 sync_event.record()
 
         if run_reqs_num > 0:
@@ -286,7 +292,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             run_reqs1,
         ) = overlap_prepare_prefill_inputs(prefill_reqs)
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
             self._capture_prompt_logprobs_if_needed(model_input1, run_reqs1, model_output1.prompt_logics)
@@ -294,7 +300,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             logits1 = model_output1.logits
 
             req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
-            logits = torch.empty((req_num0 + req_num1, logits0.shape[1]), dtype=logits0.dtype, device=logits0.device)
+            logits = _device_runtime.empty(
+                (req_num0 + req_num1, logits0.shape[1]), dtype=logits0.dtype, device=logits0.device
+            )
             logits[0:req_num0, :].copy_(logits0, non_blocking=True)
             logits[req_num0 : req_num0 + req_num1, :].copy_(logits1, non_blocking=True)
 
@@ -306,7 +314,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if req_num0 + req_num1 > 0:
                 (
                     _,
@@ -325,7 +333,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 if g_infer_context.is_hybrid_att_model:
                     g_infer_context.save_hybrid_state_to_cache(b_req_idx=b_req_idx, reqs=run_reqs)
 
-                sync_event = torch.cuda.Event()
+                sync_event = _device_runtime.new_event()
                 sync_event.record()
 
         if req_num0 + req_num1 > 0:
@@ -356,13 +364,13 @@ class DPChunkedPrefillBackend(ModeBackend):
         run_reqs = run_reqs0 + run_reqs1
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if req_num0 + req_num1 > 0:
                 logits = torch.cat((model_output0.logits, model_output1.logits), dim=0)
                 b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
@@ -379,7 +387,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     run_reqs=run_reqs,
                     is_prefill=False,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = _device_runtime.new_event()
                 sync_event.record()
 
         if req_num0 + req_num1 > 0:
@@ -411,7 +419,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             is_chuncked_mode=not self.disable_chunked_prefill,
         )
         req_num = len(run_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output: ModelOutput = self.model.forward(model_input)
             b_has_out_cpu = model_input.b_prefill_has_output_cpu
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
@@ -421,7 +429,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 (
                     next_token_ids,
@@ -437,7 +445,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                 )
             else:
-                next_token_ids = torch.empty((0,), dtype=torch.int64, device=model_input.b_req_idx.device)
+                next_token_ids = _device_runtime.empty((0,), dtype=torch.int64, device=model_input.b_req_idx.device)
 
             # BaseModel 已负责空 batch 的内部 padding，这里直接把真实 target
             # 输出交给与非 DP 路径相同的 SpecEngine。
@@ -449,7 +457,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             if req_num > 0:
                 g_infer_context.save_hybrid_state_to_cache(b_req_idx=b_req_idx, reqs=run_reqs)
 
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         if req_num > 0:
@@ -483,7 +491,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             spec_plan = spec_engine.plan_decode(
                 model_input=model_input,
                 decode_reqs=decode_reqs,
@@ -503,7 +511,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 next_token_ids, next_token_logprobs = sample(
                     model_output.logits,
@@ -539,19 +547,19 @@ class DPChunkedPrefillBackend(ModeBackend):
                     mask=accepted_index == 1,
                 )
             else:
-                next_token_ids = torch.empty(
+                next_token_ids = _device_runtime.empty(
                     (0,),
                     dtype=torch.int64,
                     device=model_input.b_req_idx.device,
                 )
-                b_req_mtp_start_loc = torch.empty(
+                b_req_mtp_start_loc = _device_runtime.empty(
                     (0,),
                     dtype=torch.int32,
                     device=model_input.b_req_idx.device,
                 )
                 mtp_accept_len = torch.empty_like(b_req_mtp_start_loc)
 
-            verify_event = torch.cuda.Event()
+            verify_event = _device_runtime.new_event()
             verify_event.record()
 
             proposal = spec_engine.propose_next(
@@ -581,7 +589,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks=next_token_ranks,
                 )
 
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         if req_num > 0:
@@ -635,7 +643,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_input1,
             run_reqs1,
         ) = overlap_prepare_prefill_inputs(prefill_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
             self._capture_prompt_logprobs_if_needed(model_input1, run_reqs1, model_output1.prompt_logics)
@@ -643,7 +651,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             logits1 = model_output1.logits
             req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
             req_num = req_num0 + req_num1
-            logits = torch.empty(
+            logits = _device_runtime.empty(
                 (req_num0 + req_num1, logits0.shape[1]),
                 dtype=logits0.dtype,
                 device=logits0.device,
@@ -659,7 +667,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 (
                     next_token_ids,
@@ -675,7 +683,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                 )
             else:
-                next_token_ids = torch.empty((0,), dtype=torch.int64, device=logits.device)
+                next_token_ids = _device_runtime.empty((0,), dtype=torch.int64, device=logits.device)
 
             target_next_token_ids_gpu0 = next_token_ids[:req_num0]
             target_next_token_ids_gpu1 = next_token_ids[req_num0:]
@@ -692,7 +700,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             if req_num > 0 and g_infer_context.is_hybrid_att_model:
                 g_infer_context.save_hybrid_state_to_cache(b_req_idx=b_req_idx, reqs=run_reqs)
 
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         if req_num > 0:
@@ -729,7 +737,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         real_request_num1 = len(decode_reqs1)
         req_num = real_request_num0 + real_request_num1
         spec_engine = self.decode_draft_engine
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             spec_plan = spec_engine.plan_decode(
                 model_input0=model_input0,
                 model_input1=model_input1,
@@ -768,10 +776,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 assert len(run_reqs) == verify_row_num
-                logits = torch.empty(
+                logits = _device_runtime.empty(
                     (verify_row_num, logits0.shape[1]),
                     dtype=logits0.dtype,
                     device=logits0.device,
@@ -814,13 +822,15 @@ class DPChunkedPrefillBackend(ModeBackend):
                 mtp_accept_len_cpu0 = mtp_accept_len_cpu[:real_request_num0]
                 mtp_accept_len_cpu1 = mtp_accept_len_cpu[real_request_num0:]
             else:
-                b_req_idx = torch.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
-                mtp_accept_len = torch.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
+                b_req_idx = _device_runtime.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
+                mtp_accept_len = _device_runtime.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
                 mtp_accept_len0 = mtp_accept_len
                 mtp_accept_len1 = mtp_accept_len
-                b_req_mtp_start_loc = torch.empty((0,), dtype=torch.int32, device=model_input0.b_req_idx.device)
-                next_token_ids = torch.empty((0,), dtype=torch.int64, device=model_input0.b_req_idx.device)
-            verify_event = torch.cuda.Event()
+                b_req_mtp_start_loc = _device_runtime.empty(
+                    (0,), dtype=torch.int32, device=model_input0.b_req_idx.device
+                )
+                next_token_ids = _device_runtime.empty((0,), dtype=torch.int64, device=model_input0.b_req_idx.device)
+            verify_event = _device_runtime.new_event()
             verify_event.record()
 
             target_next_token_ids0 = next_token_ids[:verify_row_num0]
@@ -852,7 +862,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     mask=accepted_index == 1,
                 )
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         if req_num > 0:

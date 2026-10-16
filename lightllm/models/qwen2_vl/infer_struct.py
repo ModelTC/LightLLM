@@ -3,7 +3,15 @@ import torch
 import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.models.qwen2_vl.triton_kernel.get_mrope_position_ids import get_mrope_position_triton
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+get_mrope_position_triton = _operator_backend.resolve(
+    "models.qwen2_vl.get_mrope_position_ids.get_mrope_position_triton"
+)
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -74,11 +82,17 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         # 没有任何图片
         if image_start_num == 0:
             return self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
-        b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").cuda(non_blocking=True)
-        b_image_thwd = torch.tensor(b_image_thwd, device="cpu").cuda(non_blocking=True)  # image_num x 4
-        b_image_nums = torch.tensor(b_image_nums, device="cpu").cuda(non_blocking=True)
-        b_image_start_num = torch.tensor(b_image_start_num, device="cpu").cuda(non_blocking=True)
-        b_image_len = torch.tensor(b_image_len, device="cpu").cuda(non_blocking=True)
+        b_image_start_idx = _device_runtime.move(
+            _device_runtime.tensor(b_image_start_idx, device="cpu"), non_blocking=True
+        )
+        b_image_thwd = _device_runtime.move(
+            _device_runtime.tensor(b_image_thwd, device="cpu"), non_blocking=True
+        )  # image_num x 4
+        b_image_nums = _device_runtime.move(_device_runtime.tensor(b_image_nums, device="cpu"), non_blocking=True)
+        b_image_start_num = _device_runtime.move(
+            _device_runtime.tensor(b_image_start_num, device="cpu"), non_blocking=True
+        )
+        b_image_len = _device_runtime.move(_device_runtime.tensor(b_image_len, device="cpu"), non_blocking=True)
         position_ids = self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
         get_mrope_position_triton(
             b_image_start_idx=b_image_start_idx,

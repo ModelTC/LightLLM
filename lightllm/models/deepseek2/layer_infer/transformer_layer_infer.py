@@ -1,15 +1,20 @@
 import os
 import torch
-import triton
+from lightllm.utils.math_utils import ceil_div
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+sample_kv = _operator_backend.resolve("models.deepseek2.sample_kv.sample_kv")
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+
+rotary_emb_fwd = _operator_backend.resolve("models.deepseek2.rotary_emb.rotary_emb_fwd")
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    use_sm100_mega_moe,
-)
+
+use_sm100_mega_moe = _operator_backend.resolve("common.basemodel.fused_moe.grouped_fused_moe_ep.use_sm100_mega_moe")
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 from lightllm.utils.envs_utils import get_env_start_args
@@ -373,7 +378,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1.hook = _1_hook
 
         # moe calu
-        expected_m = triton.cdiv(
+        expected_m = ceil_div(
             input_embdings.shape[0] * get_global_world_size() * self.num_experts_per_tok, self.n_routed_experts
         )
         _0_moe_out = layer_weight.experts.masked_group_gemm(_0_recv_x, _0_masked_m, input_embdings.dtype, expected_m)

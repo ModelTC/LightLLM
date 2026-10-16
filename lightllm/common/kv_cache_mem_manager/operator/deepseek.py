@@ -3,6 +3,11 @@ from .normal import NormalMemOperator
 from .base import BaseMemManagerOperator
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+
 logger = init_logger(__name__)
 
 
@@ -12,7 +17,7 @@ class Deepseek2MemOperator(NormalMemOperator):
 
         mem_manager: Deepseek2MemoryManager = self.mem_manager
 
-        from ...basemodel.triton_kernel.kv_copy.mla_copy_kv import destindex_copy_kv
+        destindex_copy_kv = _operator_backend.resolve("common.basemodel.kv_copy.mla_copy_kv.destindex_copy_kv")
 
         rope_dim = 64
         kv_lora_rank = kv.shape[2] - rope_dim
@@ -33,7 +38,7 @@ class Deepseek3_2MemOperator(Deepseek2MemOperator):
         from lightllm.common.kv_cache_mem_manager.deepseek3_2mem_manager import Deepseek3_2MemoryManager
 
         mem_manager: Deepseek3_2MemoryManager = self.mem_manager
-        from ...basemodel.triton_kernel.kv_copy.mla_copy_kv import destindex_copy_kv
+        destindex_copy_kv = _operator_backend.resolve("common.basemodel.kv_copy.mla_copy_kv.destindex_copy_kv")
 
         rope_dim = 64
         kv_lora_rank = kv.shape[2] - rope_dim
@@ -56,8 +61,8 @@ class FP8PerTokenGroupQuantDeepseek3_2MemOperator(BaseMemManagerOperator):
         )
 
         mem_manager: FP8PerTokenGroupQuantDeepseek3_2MemoryManager = self.mem_manager
-        from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_kv_flashmla_fp8 import (
-            destindex_copy_kv_flashmla_fp8,
+        destindex_copy_kv_flashmla_fp8 = _operator_backend.resolve(
+            "models.deepseek3_2.destindex_copy_kv_flashmla_fp8.destindex_copy_kv_flashmla_fp8"
         )
 
         rope_dim = 64

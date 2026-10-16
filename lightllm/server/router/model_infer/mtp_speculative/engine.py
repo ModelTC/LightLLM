@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
@@ -15,6 +16,11 @@ from lightllm.server.router.model_infer.mtp_speculative.planner import (
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers import build_spec_proposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer, SpecProposal
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -80,7 +86,9 @@ class SpecEngine:
         if plan.dynamic_batch_size == plan.origin_batch_size:
             return model_input, None
 
-        from lightllm.common.basemodel.triton_kernel.dynamic_mtp_utils import prepare_dynamic_mtp_model_input
+        prepare_dynamic_mtp_model_input = _operator_backend.resolve(
+            "common.basemodel.dynamic_mtp_utils.prepare_dynamic_mtp_model_input"
+        )
 
         model_input, selected_row_mask = prepare_dynamic_mtp_model_input(
             model_input=model_input,

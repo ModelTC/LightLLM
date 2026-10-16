@@ -1,7 +1,13 @@
 import torch
 import torch.distributed as dist
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
-from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+multimodal_emb = _operator_backend.resolve("common.basemodel.multimodal_emb.multimodal_emb")
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from ..layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
@@ -34,13 +40,13 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])
                 img_start_locs_in_cache.append(img["start_index_in_embed_cache"])
-        out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
+        out = _device_runtime.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
         cpu_embed_cache_client = g_infer_context.cpu_embed_cache_client
         cpu_embed_cache_tensor = (
-            torch.empty((0, 0, hidden_size), dtype=dtype, device=device)
+            _device_runtime.empty((0, 0, hidden_size), dtype=dtype, device=device)
             if cpu_embed_cache_client is None
             else cpu_embed_cache_client.cpu_embed_cache_tensor
         )
@@ -51,15 +57,17 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
             f"but image embed dimension is {cpu_embed_cache_tensor.shape[2]}"
         )
         # each tp will fill the img embeds, should divide by world_size
-        infer_state.img_start_token_ids = torch.tensor(
-            img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
-        infer_state.img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
+        infer_state.img_start_token_ids = _device_runtime.move(
+            _device_runtime.tensor(img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True),
+            non_blocking=True,
         )
-        infer_state.img_start_locs_in_cache = torch.tensor(
-            img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
+        infer_state.img_token_lens = _device_runtime.move(
+            _device_runtime.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True), non_blocking=True
+        )
+        infer_state.img_start_locs_in_cache = _device_runtime.move(
+            _device_runtime.tensor(img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True),
+            non_blocking=True,
+        )
         infer_state.input_ids = input_ids
 
         multimodal_emb(

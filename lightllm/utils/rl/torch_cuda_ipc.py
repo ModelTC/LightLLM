@@ -14,12 +14,18 @@ so it avoids copying torch's CUDA IPC serialization implementation.
 Copied from:
 https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/patch_torch.py
 """
+
+
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable, Union
 
 import torch
 from torch.multiprocessing import reductions
+
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
 
 
 def monkey_patch_torch_reductions():
@@ -70,7 +76,7 @@ def _rebuild_cuda_tensor_modified(*args):
 
 
 def get_current_device_name() -> str:
-    if torch.cuda.is_available():
+    if _device_runtime.is_available():
         return "cuda"
     return "cpu"
 
@@ -88,7 +94,7 @@ def get_current_device_id() -> int:
 
 
 def cuda_device_to_uuid(device: int) -> str:
-    return str(torch.cuda.get_device_properties(device).uuid)
+    return str(_device_runtime.get_device_properties(device).uuid)
 
 
 def cuda_device_from_maybe_uuid(device_maybe_uuid: Union[int, str]) -> int:
@@ -96,8 +102,8 @@ def cuda_device_from_maybe_uuid(device_maybe_uuid: Union[int, str]) -> int:
         return device_maybe_uuid
 
     if isinstance(device_maybe_uuid, str):
-        for device in range(torch.cuda.device_count()):
-            if str(torch.cuda.get_device_properties(device).uuid) == device_maybe_uuid:
+        for device in range(_device_runtime.device_count()):
+            if str(_device_runtime.get_device_properties(device).uuid) == device_maybe_uuid:
                 return device
         fallback_device = _rebuild_device_fallback.get()
         if fallback_device is not None:

@@ -8,6 +8,11 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.utils import TensorType
 from functools import lru_cache
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 MAX_AUDIO_DURATION_SECONDS = int(os.getenv("LIGHTLLM_MAX_AUDIO_DURATION_SECONDS", "3600"))
 
 
@@ -65,7 +70,9 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         window = self.get_hann_window(device)
 
         if self.dither != 0.0:
-            waveform += self.dither * torch.randn(waveform.shape, dtype=waveform.dtype, device=waveform.device)
+            waveform += self.dither * _device_runtime.randn(
+                waveform.shape, dtype=waveform.dtype, device=waveform.device
+            )
 
         stft = torch.stft(waveform, self.n_fft, self.hop_length, window=window, return_complex=True)
         magnitudes = stft[..., :-1].abs() ** 2
@@ -189,9 +196,9 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         if return_tensors is not None:
             padded_inputs = padded_inputs.convert_to_tensors(return_tensors)
         input_features = torch.from_numpy(np.asarray(padded_inputs["input_features"], dtype=np.float32)).to(
-            device="cuda", dtype=torch.bfloat16
+            device=_device_runtime.device, dtype=torch.bfloat16
         )
         attention_mask = torch.from_numpy(np.asarray(padded_inputs["attention_mask"], dtype=np.float32)).to(
-            device="cuda", dtype=torch.int32
+            device=_device_runtime.device, dtype=torch.int32
         )
         return input_features, attention_mask

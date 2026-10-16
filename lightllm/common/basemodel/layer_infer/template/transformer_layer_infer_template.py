@@ -7,6 +7,10 @@ from lightllm.distributed import all_reduce
 from typing import Tuple
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
     """ """
@@ -101,7 +105,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _context_attention_wrapper_run(
         self, q: torch.Tensor, cache_kv: torch.Tensor, infer_state: InferStateInfo, layer_weight
     ) -> torch.Tensor:
-        if torch.cuda.is_current_stream_capturing():
+        if _device_runtime.is_current_stream_capturing():
             q = q.contiguous()
             # cache_kv is None for layers that own no K/V slot (e.g. gemma4
             # KV-shared layers, which read K/V from a prior layer's cache and
@@ -115,7 +119,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
             def get_o_shape_dtype_device():
                 # 在一个新的 graph 中尝试运行，并不是为了捕获图，是为了尝试得到 o 的形状等信息
-                with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
+                with _device_runtime.capture_graph(cuda_graph=_device_runtime.new_graph()):
                     __o = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
                     o_shape = __o.shape
                     o_dtype = __o.dtype
@@ -125,13 +129,13 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
                     import gc
 
                     gc.collect()
-                    torch.cuda.empty_cache()
+                    _device_runtime.empty_cache()
                 return o_shape, o_dtype, o_device
 
             o_shape, o_dtype, o_device = get_o_shape_dtype_device()
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
+            o = _device_runtime.empty(o_shape, dtype=o_dtype, device=o_device)
             _o = tensor_to_no_ref_tensor(o)
 
             def att_func(new_infer_state: InferStateInfo):

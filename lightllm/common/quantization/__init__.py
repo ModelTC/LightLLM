@@ -1,11 +1,18 @@
 import yaml
 import collections
 from .registry import QUANTMETHODS
-from .w8a8 import *
-from .w8a8gx import *
-from .deepgemm import *
-from .awq import *
+from lightllm.backends import get_device_runtime
+
+if get_device_runtime().device_type == "cuda":
+    from .w8a8 import *
+    from .w8a8gx import *
+    from .deepgemm import *
+    from .awq import *
 from .no_quant import *
+
+if get_device_runtime().name == "metal":
+    from lightllm.backends.metal.quantization import MetalNoQuantization
+
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import is_sm100_gpu
 
@@ -125,6 +132,6 @@ class Quantcfg:
 
     def get_quant_method(self, layer_num, name):
         quant_type = self.get_quant_type(layer_num, name)
-        quant_method = QUANTMETHODS.get(quant_type)
+        quant_method = QUANTMETHODS.get(quant_type, platform=get_device_runtime().name)
         quant_method.hf_quantization_config = self.hf_quantization_config
         return quant_method

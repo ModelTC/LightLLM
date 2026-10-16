@@ -1,3 +1,6 @@
+import mmap
+import hashlib
+import sys
 from multiprocessing import shared_memory
 from threading import RLock
 from unittest.mock import patch
@@ -26,6 +29,12 @@ class ServiceSharedMemory(shared_memory.SharedMemory):
         with self._tracking_lock:
             with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
                 super().__init__(name=name, create=create, size=size)
+        if create and sys.platform == "darwin":
+            # Darwin cannot enumerate POSIX shm names through /dev/shm. Keep a
+            # service-owned manifest for the existing launcher cleanup process.
+            service = get_unique_server_name()
+            with open(f"/tmp/{service}_posix_shm_names", "a") as manifest:
+                manifest.write(self.name + "\n")
 
     def unlink(self):
         # These blocks bypass registration, so suppress unregister as well.
@@ -48,7 +57,22 @@ def get_service_shm_name(name):
             "LIGHTLLM_UNIQUE_SERVICE_NAME_ID is unset; " "call set_unique_server_name(args) before using shared memory"
         )
     prefix = f"{service_name}_"
-    return name if name.startswith(prefix) else f"{prefix}{name}"
+    qualified = name if name.startswith(prefix) else f"{prefix}{name}"
+    if sys.platform == "darwin" and len(qualified.encode()) > 30:
+        available = 30 - len(prefix.encode())
+        if available < 8:
+            raise ValueError("Service prefix is too long for macOS shared memory")
+        qualified = prefix + hashlib.sha256(qualified.encode()).hexdigest()[:available]
+    return qualified
+
+
+def shm_size_matches(actual, expected):
+    """Darwin reports page-rounded POSIX shm lengths when attaching."""
+    if actual == expected:
+        return True
+    if sys.platform == "darwin":
+        expected = (int(expected) + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
+    return actual == expected
 
 
 def create_or_link_shm(name, expected_size, force_mode=None):
@@ -101,7 +125,7 @@ def _force_link_shm(name, expected_size):
     try:
         shm = ServiceSharedMemory(name=name)
         # 验证大小
-        if expected_size != -1 and shm.size != expected_size:
+        if expected_size != -1 and not shm_size_matches(shm.size, expected_size):
             shm.close()
             raise ValueError(f"Shared memory {name} size mismatch: expected {expected_size}, got {shm.size}")
         # logger.info(f"Force linked to existing shared memory: {name} (size={expected_size})")

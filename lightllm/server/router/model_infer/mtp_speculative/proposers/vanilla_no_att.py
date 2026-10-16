@@ -3,7 +3,13 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+select_accepted_tail_rows = _operator_backend.resolve("common.basemodel.select_mtp_rows.select_accepted_tail_rows")
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal
 
@@ -36,7 +42,7 @@ class VanillaNoAttProposer(BaseSpecProposer):
             return VanillaSpecProposal(
                 token_ids=target_next_token_ids.new_empty((req_num, 0)),
                 schedule_scores=(
-                    torch.empty((req_num, 0), dtype=torch.float32, device=target_next_token_ids.device)
+                    _device_runtime.empty((req_num, 0), dtype=torch.float32, device=target_next_token_ids.device)
                     if self.enable_dynmaic_mtp
                     else None
                 ),

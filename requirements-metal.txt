@@ -1,0 +1,33 @@
+# Portable dependencies for the regular LightLLM server on Apple Silicon.
+# Install with: python -m pip install -e '.[metal]'
+torch==2.11.0
+transformers>=5.8.0,<6
+numpy>=2.1,<3
+safetensors>=0.4.5
+fastapi>=0.115.6,<1
+pydantic>=2.10.3,<3
+uvicorn>=0.19
+hypercorn==0.18.0
+uvloop>=0.21
+pyzmq>=26
+rpyc>=5.3.1
+orjson>=3.11
+PyYAML>=6
+Pillow>=10.4
+psutil>=5.9.4
+filelock>=3.17
+requests>=2.31
+httpx>=0.28
+prometheus_client>=0.20
+setproctitle>=1.3.6
+xxhash>=3.6
+frozendict>=2.4.6
+easydict>=1.13
+partial_json_parser==0.2.1.1.post6
+redis>=7.3
+sentencepiece>=0.2
+jinja2>=3.1.6
+regex>=2026.5.9
+ujson>=5.10
+sortedcontainers>=2.4
+websockets>=15,<16

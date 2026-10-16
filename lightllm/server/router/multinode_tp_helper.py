@@ -5,12 +5,18 @@ Public 入口：
 2. ``get_aborted_reqs_from_running_batch_multinode_tp`` — abort 阶段2（running）
 """
 
+
 import torch
 import torch.distributed as dist
 
 from typing import List, Optional, Set
 from lightllm.server.router.batch import Batch, Req
 from lightllm.utils.log_utils import init_logger
+
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger(__name__)
 
@@ -116,7 +122,7 @@ class RouterMultiNodeTpHelper:
 
     def _multinode_tp_allreduce_ready_marks(self, local_marks: List[int]) -> List[int]:
         """对各节点「waiting 是否已有该 req」做 MIN all_reduce：全员 ready 才为 1。"""
-        marks = torch.tensor(local_marks, dtype=torch.int32, device="cpu")
+        marks = _device_runtime.tensor(local_marks, dtype=torch.int32, device="cpu")
         dist.all_reduce(marks, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
         return marks.tolist()
 
@@ -161,15 +167,15 @@ class RouterMultiNodeTpHelper:
         if not self.is_multinode_tp_master:
             local_aborted_req_ids = []
 
-        aborted_req_num = torch.tensor([len(local_aborted_req_ids)], dtype=torch.int64, device="cpu")
+        aborted_req_num = _device_runtime.tensor([len(local_aborted_req_ids)], dtype=torch.int64, device="cpu")
         dist.broadcast(aborted_req_num, src=0, group=self.mulitnode_group)
         aborted_req_num = int(aborted_req_num.item())
         if aborted_req_num == 0:
             return set()
 
         if self.is_multinode_tp_master:
-            aborted_req_ids = torch.tensor(local_aborted_req_ids, dtype=torch.int64, device="cpu")
+            aborted_req_ids = _device_runtime.tensor(local_aborted_req_ids, dtype=torch.int64, device="cpu")
         else:
-            aborted_req_ids = torch.empty(aborted_req_num, dtype=torch.int64, device="cpu")
+            aborted_req_ids = _device_runtime.empty(aborted_req_num, dtype=torch.int64, device="cpu")
         dist.broadcast(aborted_req_ids, src=0, group=self.mulitnode_group)
         return {int(req_id) for req_id in aborted_req_ids.tolist()}

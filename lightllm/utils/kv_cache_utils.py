@@ -6,7 +6,7 @@ import xxhash
 import threading
 import concurrent.futures
 import numpy as np
-import triton
+from lightllm.utils.math_utils import ceil_div
 from functools import lru_cache
 from lightllm.utils.envs_utils import (
     get_env_start_args,
@@ -18,17 +18,17 @@ from lightllm.utils.envs_utils import (
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_hybrid_att_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.common.kv_cache_mem_manager import (
-    MemoryManager,
-    PPLINT8KVMemoryManager,
-    PPLINT4KVMemoryManager,
-    Deepseek2MemoryManager,
-)
+
 
 from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.state_cache_manager import get_hybrid_cache_config
+
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger(__name__)
 
@@ -59,6 +59,13 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
 
 @lru_cache(maxsize=None)
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
+    from lightllm.common.kv_cache_mem_manager import (
+        MemoryManager,
+        PPLINT8KVMemoryManager,
+        PPLINT4KVMemoryManager,
+        Deepseek2MemoryManager,
+    )
+
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
@@ -180,7 +187,7 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     if use_hugetlb:
         # 向上对齐到大页大小
         huge_sz = _get_default_hugepage_size()
-        size_to_alloc = triton.cdiv(requested_size, huge_sz) * huge_sz
+        size_to_alloc = ceil_div(requested_size, huge_sz) * huge_sz
         SHM_HUGETLB = 0o4000
         shmflg |= SHM_HUGETLB
         logger.info(
@@ -221,7 +228,7 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
         page_size = _get_default_hugepage_size() if use_hugetlb else 4096
         arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
         worker_num = 8
-        chunk_size = triton.cdiv(size_to_alloc, worker_num * page_size) * page_size
+        chunk_size = ceil_div(size_to_alloc, worker_num * page_size) * page_size
 
         def _warm_range(worker_id: int):
             start = worker_id * chunk_size
@@ -258,12 +265,12 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
     cudaHostRegisterFlag = 3
 
     device_id = get_current_device_id()
-    torch.cuda.set_device(device_id)
+    _device_runtime.set_device(device_id)
     desc = f"pid {os.getpid()} Registering pinned host memory"
 
     def _register_one_segment(task: Tuple[int, int]):
         offset, seg_len = task
-        torch.cuda.set_device(device_id)
+        _device_runtime.set_device(device_id)
         ptr = ctypes.c_void_p(shm_ptr + offset)
         r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
         if r != 0:
@@ -381,7 +388,7 @@ def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
 
     if enable_huge_page():
         huge_sz = _get_default_hugepage_size()
-        size = triton.cdiv(size, huge_sz) * huge_sz
+        size = ceil_div(size, huge_sz) * huge_sz
 
     def _mbind(mode, mask):
         nodemask = ctypes.c_ulong(mask)

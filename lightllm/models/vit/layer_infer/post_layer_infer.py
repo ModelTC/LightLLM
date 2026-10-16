@@ -3,7 +3,12 @@ import torch.functional as F
 import torch.distributed as dist
 from lightllm.models.vit.layer_weights.pre_and_post_layer_weight import ViTPreAndPostLayerWeight
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
-from lightllm.models.vit.triton_kernel.gelu_vit import gelu_fwd
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+gelu_fwd = _operator_backend.resolve("models.vit.gelu_vit.gelu_fwd")
 
 
 class ViTPostLayerInfer:

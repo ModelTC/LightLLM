@@ -7,6 +7,11 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 from .hybrid_base import HybridAttentionReqManager
 
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -19,7 +24,9 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         # 因为在mtp的推理中，需要标记每个请求对应的mtp index状态(conv state 和 ssm state)，在mtp对应序列中
         # 的真实位置，所以需要需要一个标记来记录，不然算子无法找到真实的处理起点。
         self.req_to_mtp_state_index = (
-            torch.zeros((max_request_num + 1,), dtype=torch.int32, device="cuda") if self.mtp_step > 0 else None
+            _device_runtime.zeros((max_request_num + 1,), dtype=torch.int32, device=_device_runtime.device)
+            if self.mtp_step > 0
+            else None
         )
         # 突然想到， 在linear att 开启mtp的模式中，现在的prefill linear att 算子默认是从0的位置读取信息进行操作
         # 所以不能支持 prefill decode mixed 操作了，因为一个decode过的请求，重新用prefill 算子跑，会出现读错linear
@@ -37,14 +44,14 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             dtype=self.linear_config.conv_state_dtype,
             shape=self.linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step),
             layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
+            device=_device_runtime.device,
         )
         self.req_to_ssm_state = LayerCache(
             size=(max_request_num + 1) * (self.mtp_step + 1),
             dtype=self.linear_config.ssm_state_dtype,
             shape=self.linear_config.get_ssm_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
+            device=_device_runtime.device,
         )
         return
 
@@ -64,9 +71,13 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         return self.small_page_buffers
 
     def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
-        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+        copy_linear_att_state_to_kv_buffer = _operator_backend.resolve(
+            "common.basemodel.linear_att_copy.copy_linear_att_state_to_kv_buffer"
+        )
 
-        buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+        buffer_indexes = _device_runtime.move(
+            _device_runtime.tensor(buffer_indexes, dtype=torch.int32, device="cpu"), non_blocking=True
+        )
         state_cache_manager = self.big_page_buffers
         copy_linear_att_state_to_kv_buffer(
             b_req_idx=b_req_idx,
@@ -85,8 +96,10 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         gpu_conv_state = self.req_to_conv_state.buffer[:, req_idx, ..., :conv_cache_width]
         gpu_ssm_state = self.req_to_ssm_state.buffer[:, req_idx * (self.mtp_step + 1), ...]
         dst_conv_state, dst_ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
-        dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
-        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
+        # Metal host checkpoints must be complete before the request state
+        # advances. Only runtimes with pinned transfers use the async path.
+        dst_conv_state.copy_(gpu_conv_state, non_blocking=_device_runtime.supports_pinned_memory)
+        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=_device_runtime.supports_pinned_memory)
 
     def get_mamba_cache(self, layer_idx_in_all: int):
         assert (
@@ -98,7 +111,9 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         return conv_states, ssm_states
 
     def update_mtp_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
-        from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
+        linear_att_mtp_state_index_update = _operator_backend.resolve(
+            "common.basemodel.mtp_utils.linear_att_mtp_state_index_update"
+        )
 
         linear_att_mtp_state_index_update(
             req_to_mtp_state_index=self.req_to_mtp_state_index,

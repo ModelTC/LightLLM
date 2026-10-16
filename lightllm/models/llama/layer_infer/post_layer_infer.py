@@ -9,10 +9,17 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import PostLayerInferTpl
 from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor
-from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_topk
-from lightllm.common.basemodel.triton_kernel.pack_vocab_parallel_topk import (
-    pack_vocab_parallel_topk,
-    unpack_vocab_parallel_topk,
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+local_vocab_topk = _operator_backend.resolve("common.basemodel.local_vocab_topk.local_vocab_topk")
+pack_vocab_parallel_topk = _operator_backend.resolve(
+    "common.basemodel.pack_vocab_parallel_topk.pack_vocab_parallel_topk"
+)
+unpack_vocab_parallel_topk = _operator_backend.resolve(
+    "common.basemodel.pack_vocab_parallel_topk.unpack_vocab_parallel_topk"
 )
 from lightllm.utils.envs_utils import get_env_start_args
 

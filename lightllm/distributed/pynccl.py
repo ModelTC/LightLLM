@@ -42,15 +42,20 @@ from lightllm.distributed.pynccl_wrapper import (
     ncclUniqueId,
 )
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = logging.getLogger(__name__)
 
 _current_stream = None
 
 
-def current_stream() -> torch.cuda.Stream:
+def current_stream() -> _device_runtime.stream_type:
     global _current_stream
     if _current_stream is None:
-        _current_stream = torch.cuda.current_stream()
+        _current_stream = _device_runtime.current_stream()
     return _current_stream
 
 
@@ -200,7 +205,7 @@ class PyNcclCommunicator:
             else:
                 self.unique_id = group.recv_obj()
         if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
+            device = torch.device(_device_runtime.device_at(device))
         elif isinstance(device, str):
             device = torch.device(device)
         # now `device` is a `torch.device` object
@@ -209,12 +214,12 @@ class PyNcclCommunicator:
         # nccl communicator and stream will use this device
         # `torch.cuda.device` is a context manager that changes the
         # current cuda device to the specified one
-        with torch.cuda.device(device):
+        with _device_runtime.device_scope(device):
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(self.world_size, self.unique_id, self.rank)
 
             stream = current_stream()
             # A small all_reduce for warmup.
-            data = torch.zeros(1, device=device)
+            data = _device_runtime.zeros(1, device=device)
             self.all_reduce(data)
             stream.synchronize()
             del data

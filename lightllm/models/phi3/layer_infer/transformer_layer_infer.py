@@ -1,5 +1,10 @@
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.phi3.triton_kernel.rotary_emb import rotary_emb_fwd
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+rotary_emb_fwd = _operator_backend.resolve("models.phi3.rotary_emb.rotary_emb_fwd")
 from lightllm.models.phi3.layer_weights.transformer_layer_weight import Phi3TransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 

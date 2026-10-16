@@ -4,6 +4,10 @@ from typing import Dict, Iterable, Union
 
 import torch
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 Shape = Union[int, torch.Size, Iterable[int]]
 
@@ -66,7 +70,7 @@ class TensorBufferManager:
 
         # 空 tensor 不占用底层 buffer，无需创建 allocation 记录。
         if tensor_bytes == 0:
-            return torch.empty(shape, dtype=dtype, device=self._byte_buffer.device)
+            return _device_runtime.empty(shape, dtype=dtype, device=self._byte_buffer.device)
 
         # 实际 tensor 只使用 tensor_bytes；内存池按对齐后的 reserved_bytes 划出区间。
         reserved_bytes = self._align_up(tensor_bytes)

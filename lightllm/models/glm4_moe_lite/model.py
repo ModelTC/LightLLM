@@ -6,6 +6,10 @@ from lightllm.models.glm4_moe_lite.infer_struct import Glm4MoeLiteInferStateInfo
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
 
@@ -46,11 +50,11 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
 
         dim = qk_rope_head_dim
 
-        inv_freq = 1.0 / (rope_theta ** (torch.arange(0, dim, 2, device="cpu", dtype=torch.float32) / dim))
+        inv_freq = 1.0 / (rope_theta ** (_device_runtime.arange(0, dim, 2, device="cpu", dtype=torch.float32) / dim))
 
         max_seq_len = max(max_position_embeddings, self.max_seq_length)
-        t = torch.arange(max_seq_len, device="cpu", dtype=torch.float32)
+        t = _device_runtime.arange(max_seq_len, device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = _device_runtime.move(torch.cos(freqs).to(self.data_type))
+        self._sin_cached = _device_runtime.move(torch.sin(freqs).to(self.data_type))

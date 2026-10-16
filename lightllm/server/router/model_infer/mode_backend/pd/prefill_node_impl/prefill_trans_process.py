@@ -17,6 +17,10 @@ from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger(__name__)
 
@@ -54,7 +58,7 @@ def _init_env(
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::prefill_trans:Device{device_id}")
 
     try:
-        torch.cuda.set_device(device_id)
+        _device_runtime.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
         task_out_queue.put("proc_start")
 
@@ -104,7 +108,7 @@ class _PrefillTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
-        self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
+        self.copy_cuda_stream = _device_runtime.new_stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
             node_id=self.args.pd_node_id,
@@ -142,7 +146,7 @@ class _PrefillTransModule:
 
     def _warmup(self):
         for dp_index in range(self.args.dp // self.args.nnodes):
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
+            with _device_runtime.stream_scope(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.write_mem_to_page_kv_move_buffer(
                     mem_indexes=[0],
@@ -151,7 +155,7 @@ class _PrefillTransModule:
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
                 )
-                torch.cuda.current_stream().synchronize()
+                _device_runtime.current_stream().synchronize()
         return
 
     def _abort(self, request_id: int, error_info: str = "aborted req"):
@@ -170,7 +174,7 @@ class _PrefillTransModule:
 
     @log_exception
     def recv_task_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
 
         while True:
             obj: Union[PDChunckedTransTask, PDAbortReq] = self.task_in_queue.get()
@@ -195,12 +199,12 @@ class _PrefillTransModule:
 
     @log_exception
     def local_copy_kv_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.local_copy_kv_queue.get()
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
+            with _device_runtime.stream_scope(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.write_mem_to_page_kv_move_buffer(
                     trans_task.mem_indexes,
@@ -211,7 +215,7 @@ class _PrefillTransModule:
                     page_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = _device_runtime.new_event()
                 sync_event.record()
 
             self.ready_transfer_queue.put((sync_event, trans_task))
@@ -219,11 +223,11 @@ class _PrefillTransModule:
 
     @log_exception
     def ready_transfer_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             sync_event, trans_task = self.ready_transfer_queue.get()
             trans_task: PDChunckedTransTask = trans_task
-            sync_event: torch.cuda.Event = sync_event
+            sync_event: _device_runtime.event_type = sync_event
             sync_event.synchronize()
             key = trans_task.get_key()
             try:
@@ -312,7 +316,7 @@ class _PrefillTransModule:
 
     @log_exception
     def write_peer_kv_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             trans_task = self.write_peer_kv_queue.get()
             trans_task: PDChunckedTransTask = trans_task
@@ -416,7 +420,7 @@ class _PrefillTransModule:
 
     @log_exception
     def success_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.success_queue.get()
             # 写回后，回收页面
@@ -437,7 +441,7 @@ class _PrefillTransModule:
 
     @log_exception
     def fail_loop(self):
-        torch.cuda.set_device(self.device_id)
+        _device_runtime.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
 

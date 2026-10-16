@@ -3,8 +3,13 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
-from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+gen_mtp_new_input_ids = _operator_backend.resolve("common.basemodel.gen_mtp_prefill_params.gen_mtp_new_input_ids")
+select_accepted_tail_rows = _operator_backend.resolve("common.basemodel.select_mtp_rows.select_accepted_tail_rows")
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager

@@ -3,12 +3,21 @@ from typing import Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
-from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+rmsnorm_forward = _operator_backend.resolve("common.basemodel.norm.rmsnorm.rmsnorm_forward")
+rotary_emb_fwd = _operator_backend.resolve("models.deepseek2.rotary_emb.rotary_emb_fwd")
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
-from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
-from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
+
+act_quant = _operator_backend.resolve("models.deepseek3_2.act_quant.act_quant")
+destindex_copy_indexer_ks = _operator_backend.resolve(
+    "models.deepseek3_2.destindex_copy_indexer_ks.destindex_copy_indexer_ks"
+)
+extract_indexer_ks = _operator_backend.resolve("models.deepseek3_2.extract_indexer_ks.extract_indexer_ks")
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
 
@@ -180,7 +189,7 @@ class NsaInfer:
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
         if self.tp_world_size_ > 1:
-            q_merge = torch.empty(
+            q_merge = _device_runtime.empty(
                 size=(self.tp_world_size_ * q.numel()),
                 dtype=q.dtype,
                 device=q.device,
@@ -246,7 +255,9 @@ class NsaInfer:
         )
         b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
         # 将 topk index 转化为 mem index
-        from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
+        trans_topk_index_to_mem_index = _operator_backend.resolve(
+            "models.deepseek3_2.topk_index_to_mem_index.trans_topk_index_to_mem_index"
+        )
 
         b_topk_mem_index = trans_topk_index_to_mem_index(
             topk_index=b_topk_index,
@@ -258,7 +269,7 @@ class NsaInfer:
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         assert x.dtype == torch.bfloat16
-        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
+        hadamard_transform = _operator_backend.resolve("models.deepseek3_2.hadamard_transform.hadamard_transform")
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
@@ -277,7 +288,7 @@ class NsaInfer:
         k = layer_weight.k_norm_(k, eps=self.eps)
 
         # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
-        from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+        rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],

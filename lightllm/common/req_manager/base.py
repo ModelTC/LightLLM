@@ -6,6 +6,10 @@ from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger("lightllm.common.req_manager")
 
@@ -62,8 +66,8 @@ class ReqManager:
         self.req_list = _ReqLinkedList(max_request_num)
         page_size = get_env_start_args().page_size
         max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
-        self.req_to_token_indexs = torch.zeros(
-            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
+        self.req_to_token_indexs = _device_runtime.zeros(
+            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device=_device_runtime.device
         )
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
@@ -87,7 +91,7 @@ class ReqManager:
         # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
         # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
         hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
-        hold_page = torch.tensor(
+        hold_page = _device_runtime.tensor(
             self.mem_manager.HOLD_TOKEN_MEMINDEXES,
             dtype=hold_row.dtype,
             device=hold_row.device,

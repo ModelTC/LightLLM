@@ -7,6 +7,10 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.basemodel.layer_weights.meta_weights import LayerNormWeight, COLMMWeight, ROWMMWeight
 from lightllm.common.quantization import Quantcfg
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, quant_cfg):
@@ -29,12 +33,14 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         split_embed_dim = split_end - split_start
 
         # Pre-allocate memory for vision model weights
-        self.class_embedding = torch.empty((1, 1, split_embed_dim), dtype=self.data_type_).cuda()
-        self.position_embedding = torch.empty((1, self.num_positions, split_embed_dim), dtype=self.data_type_).cuda()
-        self.patch_embedding_weight_ = torch.empty(
-            (split_embed_dim, 3, self.patch_size, self.patch_size), dtype=self.data_type_
-        ).cuda()
-        self.patch_embedding_bias_ = torch.empty(split_embed_dim, dtype=self.data_type_).cuda()
+        self.class_embedding = _device_runtime.move(torch.empty((1, 1, split_embed_dim), dtype=self.data_type_))
+        self.position_embedding = _device_runtime.move(
+            torch.empty((1, self.num_positions, split_embed_dim), dtype=self.data_type_)
+        )
+        self.patch_embedding_weight_ = _device_runtime.move(
+            torch.empty((split_embed_dim, 3, self.patch_size, self.patch_size), dtype=self.data_type_)
+        )
+        self.patch_embedding_bias_ = _device_runtime.move(torch.empty(split_embed_dim, dtype=self.data_type_))
 
         self.layernorm_weight_ = LayerNormWeight(
             dim=self.embed_dim * int(1 / self.downsample_ratio) ** 2,
@@ -62,7 +68,7 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
 
     def _cuda(self, cpu_tensor):
         device_id = get_current_device_id()
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(device_id)
+        return _device_runtime.move(cpu_tensor.contiguous().to(self.data_type_), device_id)
 
     def _get_pos_embed(self, H, W):
         pos_embed = self.position_embedding[:, 1:, :]

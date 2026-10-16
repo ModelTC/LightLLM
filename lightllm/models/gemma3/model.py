@@ -17,6 +17,11 @@ from lightllm.common.build_utils import repair_config
 from transformers import AutoConfig
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -106,11 +111,20 @@ class Gemma3TpPartModel(LlamaTpPartModel):
             max_seq_len = max_position_embeddings * rope_scaling_factor
 
         inv_freq_local = 1.0 / (
-            10000.0 ** (torch.arange(0, partial_head_dim, 2, dtype=torch.int64).float().cuda() / partial_head_dim)
+            10000.0
+            ** (
+                _device_runtime.move(torch.arange(0, partial_head_dim, 2, dtype=torch.int64).float()) / partial_head_dim
+            )
         )
         inv_freq_global = (
             1.0
-            / (1000000.0 ** (torch.arange(0, partial_head_dim, 2, dtype=torch.int64).float().cuda() / partial_head_dim))
+            / (
+                1000000.0
+                ** (
+                    _device_runtime.move(torch.arange(0, partial_head_dim, 2, dtype=torch.int64).float())
+                    / partial_head_dim
+                )
+            )
             / rope_scaling_factor
         )
         # local default
@@ -123,14 +137,14 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         freqs_global = torch.outer(t, inv_freq_global)
         freqs_local = torch.outer(t, inv_freq_local)
 
-        self._cos_cached = torch.cos(freqs_global).to(torch.float32).cuda()
-        self._sin_cached = torch.sin(freqs_global).to(torch.float32).cuda()
+        self._cos_cached = _device_runtime.move(torch.cos(freqs_global).to(torch.float32))
+        self._sin_cached = _device_runtime.move(torch.sin(freqs_global).to(torch.float32))
 
-        self._cos_cached_global = torch.cos(freqs_global).to(torch.float32).cuda()
-        self._sin_cached_global = torch.sin(freqs_global).to(torch.float32).cuda()
+        self._cos_cached_global = _device_runtime.move(torch.cos(freqs_global).to(torch.float32))
+        self._sin_cached_global = _device_runtime.move(torch.sin(freqs_global).to(torch.float32))
 
-        self._cos_cached_local = torch.cos(freqs_local).to(torch.float32).cuda()
-        self._sin_cached_local = torch.sin(freqs_local).to(torch.float32).cuda()
+        self._cos_cached_local = _device_runtime.move(torch.cos(freqs_local).to(torch.float32))
+        self._sin_cached_local = _device_runtime.move(torch.sin(freqs_local).to(torch.float32))
         return
 
     def _init_custom(self):

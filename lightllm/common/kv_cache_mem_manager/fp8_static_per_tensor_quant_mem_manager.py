@@ -9,6 +9,11 @@ from lightllm.utils.envs_utils import get_env_start_args
 from .mem_manager import MemoryManager
 from .operator import FP8StaticPerTensorQuantMemOperator
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -30,9 +35,13 @@ class FP8StaticPerTensorQuantMemManager(MemoryManager):
                 "will load kv quant calibration config"
             )
             cfg = self._load_and_check_config()
-            self.scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
+            self.scales = _device_runtime.tensor(
+                cfg["scales"], dtype=torch.float32, device=_device_runtime.device
+            ).view(cfg["scales_shape"])
         else:
-            self.scales = torch.ones((self.kv_buffer.shape[0], 2), dtype=torch.float32, device="cuda")
+            self.scales = _device_runtime.ones(
+                (self.kv_buffer.shape[0], 2), dtype=torch.float32, device=_device_runtime.device
+            )
 
         self.cpu_scales = self.scales.detach().cpu().numpy()
         return

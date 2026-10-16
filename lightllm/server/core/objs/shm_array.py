@@ -1,7 +1,7 @@
 import numpy as np
 from multiprocessing import shared_memory
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.shm_utils import create_or_link_shm
+from lightllm.utils.shm_utils import create_or_link_shm, shm_size_matches
 
 logger = init_logger(__name__)
 
@@ -22,7 +22,7 @@ class ShmArray:
 
     def link_shm(self):
         self.shm = create_or_link_shm(self.name, self.dest_size, force_mode="link")
-        assert self.shm.size == self.dest_size
+        assert shm_size_matches(self.shm.size, self.dest_size)
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
         return
 

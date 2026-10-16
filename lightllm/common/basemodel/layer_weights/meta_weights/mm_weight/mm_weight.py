@@ -13,6 +13,11 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
 from .mm_slicer import SliceMixinTpl
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -92,7 +97,9 @@ class MMWeightTpl(BaseWeightTpl):
     def _create_weight(self):
         self.bias = None
         if self.bias_names is not None:
-            self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
+            self.bias = _device_runtime.move(
+                torch.empty(sum(self.out_dims), dtype=self.data_type_), get_current_device_id()
+            )
             # bias_list shares storage with bias for each output shard
             self.bias_list = torch.split(self.bias, self.out_dims, dim=0)
             for sub_bias in self.bias_list:
@@ -200,7 +207,9 @@ class BMMWeightTpl(BaseWeightTpl):
         return
 
     def _create_weight(self):
-        self.weight = torch.empty(self.dim0, self.dim1, self.dim2, dtype=self.data_type_).cuda(get_current_device_id())
+        self.weight = _device_runtime.move(
+            torch.empty(self.dim0, self.dim1, self.dim2, dtype=self.data_type_), get_current_device_id()
+        )
         self.weight.load_ok = False
         return
 
@@ -227,5 +236,5 @@ class BMMWeightTpl(BaseWeightTpl):
             if use_custom_tensor_mananger:
                 out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
             else:
-                out = torch.empty(shape, dtype=dtype, device=device)
+                out = _device_runtime.empty(shape, dtype=dtype, device=device)
         return torch.bmm(input_tensor, fpweight, out=out)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import copy
 
 import torch
@@ -10,6 +11,10 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type 
     DFlashSpecProposal,
 )
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
 
 
 class DFlashProposer(BaseSpecProposer):
@@ -93,7 +98,7 @@ class DFlashProposer(BaseSpecProposer):
         )
         block_input_ids[::block_size] = target_next_token_ids.index_select(0, accepted_tail_rows)
 
-        block_offsets = torch.arange(
+        block_offsets = _device_runtime.arange(
             block_size,
             dtype=target_model_input.b_seq_len.dtype,
             device=target_next_token_ids.device,

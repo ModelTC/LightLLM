@@ -4,6 +4,11 @@ from torch.distributed import ProcessGroup
 
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 try:
@@ -37,7 +42,7 @@ class SymmMemAllreduce:
         if not _SYMM_MEM_OK:
             return
         if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
+            device = torch.device(_device_runtime.device_at(device))
         elif isinstance(device, str):
             device = torch.device(device)
         self.device = device
@@ -45,7 +50,7 @@ class SymmMemAllreduce:
         self.dtype = dtype
         self.world_size = dist.get_world_size(group=group)
 
-        cap = torch.cuda.get_device_capability(device)
+        cap = _device_runtime.get_device_capability(device)
         cap_str = f"{cap[0]}.{cap[1]}"
         if cap_str not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
             return

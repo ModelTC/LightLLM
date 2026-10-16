@@ -11,6 +11,10 @@ from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import
     Qwen3DSparkPreAndPostLayerWeight,
 )
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
     """DSpark post layer.
@@ -100,7 +104,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         prev_token_ids = anchor_token_ids
         state = None
         sampled_tokens = []
-        req_rows = torch.arange(num_reqs, dtype=torch.long, device=local_logits.device)
+        req_rows = _device_runtime.arange(num_reqs, dtype=torch.long, device=local_logits.device)
         for step_idx in range(self.block_size_):
             prev_embeddings = self._markov_prev_embeddings(prev_token_ids, layer_weight)
             state, markov_latent = self._markov_step_latent(

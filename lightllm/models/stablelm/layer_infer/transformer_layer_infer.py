@@ -1,6 +1,11 @@
 import torch
 from functools import partial
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+rotary_emb_fwd = _operator_backend.resolve("models.llama.rotary_emb.rotary_emb_fwd")
 from lightllm.models.stablelm.layer_weights.transformer_layer_weight import StablelmTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo

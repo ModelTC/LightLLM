@@ -15,6 +15,11 @@ from lightllm.models.internvl.img_process import load_image
 from lightllm.models.vit import get_load_image_func
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -23,8 +28,8 @@ class InternVLVisionModel:
         pass
 
     def load_model(self, weight_dir):
-        assert torch.cuda.is_available()
-        self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+        assert _device_runtime.is_available()
+        self.dtype = torch.bfloat16 if _device_runtime.is_bf16_supported() else torch.float32
         self.config = json.load(open(os.path.join(weight_dir, "config.json")))
         # self.model = AutoModel.from_pretrained(
         #     weight_dir,
@@ -38,7 +43,7 @@ class InternVLVisionModel:
         self.model = InternVLChatModel.from_pretrained(
             weight_dir, config=cfg, torch_dtype=self.dtype, language_model="fake_language_model"
         )
-        self.model.eval().cuda()
+        _device_runtime.move(self.model.eval())
         self.load_image_func = get_load_image_func(weight_dir)
 
     def cuda(self):
@@ -68,7 +73,7 @@ class InternVLVisionModel:
             return None
 
         imgs = torch.cat(img_tensors, dim=0)
-        pixel_values = imgs.cuda().to(dtype=self.dtype)
+        pixel_values = _device_runtime.move(imgs).to(dtype=self.dtype)
         all_img_embeds = self.model.extract_feature(pixel_values)
 
         return all_img_embeds, uuids, valid_ids

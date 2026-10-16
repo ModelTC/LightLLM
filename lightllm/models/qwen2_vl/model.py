@@ -8,7 +8,6 @@ from lightllm.common.build_utils import repair_config
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
-from .vision_process import smart_resize
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 import os
 from typing import Union, List
@@ -40,6 +39,8 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
     def get_image_token_length(self, img: ImageItem):
         width, height = img.image_w, img.image_h
         factor = self.patch_size * self.merge_size
+        from .vision_process import smart_resize
+
         resized_height, resized_width = smart_resize(
             height=height, width=width, factor=factor, min_pixels=self.min_pixel, max_pixels=self.max_pixel
         )

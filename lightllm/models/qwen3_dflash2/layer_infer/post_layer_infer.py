@@ -5,7 +5,13 @@ from lightllm.common.basemodel.batch_objs import PostLayerOutput
 
 from lightllm.distributed.communication_op import all_gather_into_tensor
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
-from lightllm.models.qwen3_dflash2.triton_kernel.selector_walk import greedy_selector_walk
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+greedy_selector_walk = _operator_backend.resolve("models.qwen3_dflash2.selector_walk.greedy_selector_walk")
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -109,7 +115,7 @@ class Qwen3DFlash2PostLayerInfer(Qwen3DFlashPostLayerInfer):
             score_lattice = torch.cat((score_lattice, pair_scores), dim=1)
 
         confidence_logits = (
-            torch.empty((req_num, draft_width), dtype=torch.float32, device=hidden.device)
+            _device_runtime.empty((req_num, draft_width), dtype=torch.float32, device=hidden.device)
             if self.dynamic_verify_
             else None
         )

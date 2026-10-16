@@ -27,6 +27,11 @@ from lightllm.server.multi_level_kv_cache import CachePlacementController, Cache
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
 from lightllm.server.router.model_infer.structured_output.state import ConstraintState
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
     from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
@@ -46,8 +51,8 @@ class InferenceContext:
     cache_placement_controller: Optional[CachePlacementController] = None
     output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
 
-    overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
-    cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
+    overlap_stream: _device_runtime.stream_type = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
+    cpu_kv_cache_stream: _device_runtime.stream_type = None  # 用 cpu kv cache 操作的 stream
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
 
     def register(
@@ -98,14 +103,14 @@ class InferenceContext:
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         return
 
-    def get_overlap_stream(self) -> torch.cuda.Stream:
+    def get_overlap_stream(self) -> _device_runtime.stream_type:
         if self.overlap_stream is None:
-            self.overlap_stream = torch.cuda.Stream()
+            self.overlap_stream = _device_runtime.new_stream()
         return self.overlap_stream
 
-    def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
+    def get_cpu_kv_cache_stream(self) -> _device_runtime.stream_type:
         if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = torch.cuda.Stream()
+            self.cpu_kv_cache_stream = _device_runtime.new_stream()
         return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
@@ -192,7 +197,7 @@ class InferenceContext:
         # 先释放截断后的 [cache_kv_len, hold_kv_len) 区间，再处理可缓存前缀的插入和去重。
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][cache_kv_len : req.hold_kv_len])
         input_token_ids = req.get_input_token_ids()
-        key = torch.tensor(input_token_ids[0:cache_kv_len], dtype=torch.int64, device="cpu")
+        key = _device_runtime.tensor(input_token_ids[0:cache_kv_len], dtype=torch.int64, device="cpu")
         # .cpu() 是 流内阻塞操作
         value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_kv_len].detach().cpu()
 
@@ -230,7 +235,7 @@ class InferenceContext:
             )
             req.cur_kv_len = req.hybrid_cache_len
             input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+            key = _device_runtime.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
             block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:page_num]
             state_idxs = [None for _ in range(page_num)]
@@ -259,7 +264,7 @@ class InferenceContext:
 
             assert req.tail_small_page_buffer_id is None
             input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+            key = _device_runtime.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
             cur_page_num = tail_big_page_token_num // hash_page_size
             assert tail_big_page_token_num % hash_page_size == 0
@@ -593,7 +598,7 @@ class InferReq:
 
         self.generator = None
         if self.sampling_param.shm_param.seed != -1:
-            self.generator = torch.Generator(device="cuda")
+            self.generator = _device_runtime.generator(device=_device_runtime.device)
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:
@@ -647,7 +652,7 @@ class InferReq:
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         if enable_prompt_cache and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
-            key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
+            key = _device_runtime.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
@@ -680,7 +685,7 @@ class InferReq:
         big_page_is_disable = big_page_token_num > self.args.max_req_total_len
         if enable_prompt_cache and match_tokens > 1 and len(block_hashs) > 0 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
-            key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
+            key = _device_runtime.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(block_hashs) * hash_page_size
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
                 key, block_hashs=block_hashs, update_refs=True

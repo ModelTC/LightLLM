@@ -1,3 +1,4 @@
+import sys
 import ctypes
 import os
 import shutil
@@ -13,6 +14,9 @@ logger = init_logger(__name__)
 
 
 def check_recommended_shm_size(args):
+    if sys.platform != "linux":
+        # /dev/shm capacity checking applies only to Linux tmpfs.
+        return
     try:
         shm_size, recommended_shm_size, is_shm_sufficient = _check_shm_size(args)
         if not is_shm_sufficient:

@@ -3,6 +3,10 @@ from typing import Tuple, Any
 from .mem_manager import MemoryManager
 from .operator import PPLInt4KVMemOperator
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class PPLINT4KVMemoryManager(MemoryManager):
 
@@ -29,13 +33,15 @@ class PPLINT4KVMemoryManager(MemoryManager):
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         assert size % self.page_size == 0, f"KV cache size {size} must be a multiple of page_size {self.page_size}"
-        self.kv_buffer = torch.empty(
-            (layer_num, size + self.page_size, 2 * head_num, head_dim // 2), dtype=torch.int8, device="cuda"
+        self.kv_buffer = _device_runtime.empty(
+            (layer_num, size + self.page_size, 2 * head_num, head_dim // 2),
+            dtype=torch.int8,
+            device=_device_runtime.device,
         )
-        self.scale_buffer = torch.empty(
+        self.scale_buffer = _device_runtime.empty(
             (layer_num, size + self.page_size, 2 * head_num, head_dim // self.group_quant_size),
             dtype=dtype,
-            device="cuda",
+            device=_device_runtime.device,
         )
 
     def _free_buffers(self):

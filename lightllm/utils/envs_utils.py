@@ -6,6 +6,10 @@ from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 logger = init_logger(__name__)
 
@@ -27,7 +31,7 @@ def get_unique_server_name():
 
 
 def set_cuda_arch(args):
-    if not torch.cuda.is_available():
+    if not _device_runtime.is_available():
         return
     return
 

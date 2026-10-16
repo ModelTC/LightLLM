@@ -5,6 +5,12 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -17,9 +23,7 @@ class NormalMemOperator(BaseMemManagerOperator):
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import (
-            destindex_copy_kv,
-        )
+        destindex_copy_kv = _operator_backend.resolve("common.basemodel.destindex_copy_kv.destindex_copy_kv")
 
         destindex_copy_kv(kv, mem_index, mem_manager.kv_buffer[layer_index])
         return
@@ -31,13 +35,13 @@ class NormalMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda
+        assert _device_runtime.is_device_tensor(mem_indexes) and _device_runtime.is_device_tensor(page_indexes)
         args = get_env_start_args()
         assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
-        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import load_cpu_kv_to_gpu
+        load_cpu_kv_to_gpu = _operator_backend.resolve("common.basemodel.kv_cache_offload.load_cpu_kv_to_gpu")
 
         load_cpu_kv_to_gpu(
             gpu_mem_indexes=mem_indexes,
@@ -60,7 +64,7 @@ class NormalMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda
+        assert _device_runtime.is_device_tensor(mem_indexes) and _device_runtime.is_device_tensor(page_indexes)
         args = get_env_start_args()
         assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
         assert len(mem_indexes) // args.cpu_cache_token_page_size == len(page_indexes)
@@ -68,7 +72,7 @@ class NormalMemOperator(BaseMemManagerOperator):
 
         mem_manager: MemoryManager = self.mem_manager
 
-        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu
+        offload_gpu_kv_to_cpu = _operator_backend.resolve("common.basemodel.kv_cache_offload.offload_gpu_kv_to_cpu")
 
         offload_gpu_kv_to_cpu(
             token_indexes=mem_indexes,
@@ -98,13 +102,15 @@ class NormalMemOperator(BaseMemManagerOperator):
             mems_ptr_list = []
             for i in range(0, len(mem_managers)):
                 mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
-            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True)
+            self.mem_ptrs_tensor = _device_runtime.tensor(
+                mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True
+            )
 
         from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 
         # 一次性传输所有层
         kv_trans_for_dp(
-            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
+            input_mems=_device_runtime.move(self.mem_ptrs_tensor, non_blocking=True),
             input_idx=move_token_indexes,
             input_dp_idx=token_dp_indexes,
             output=self.mem_manager.kv_buffer,

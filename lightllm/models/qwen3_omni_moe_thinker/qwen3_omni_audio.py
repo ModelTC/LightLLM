@@ -12,7 +12,13 @@ from transformers.activations import ACT2FN
 from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+flash_attention_fwd = _operator_backend.resolve("models.vit.flashattention_nopad.flash_attention_fwd")
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
 
 QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 200))
@@ -275,7 +281,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
         # TODO: Avoid constructing CUDA tensors directly from Python list data.
-        chunk_lengths = torch.tensor(
+        chunk_lengths = _device_runtime.tensor(
             [self.n_window * 2] * chunk_num.sum(),
             dtype=torch.long,
             device=feature_lens.device,
@@ -288,7 +294,10 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         padded_feature = nn.utils.rnn.pad_sequence(chunk_list, batch_first=True).transpose(1, 2)
         feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
         padded_mask_after_cnn = nn.utils.rnn.pad_sequence(
-            [torch.ones(length, dtype=torch.bool, device=padded_feature.device) for length in feature_lens_after_cnn],
+            [
+                _device_runtime.ones(length, dtype=torch.bool, device=padded_feature.device)
+                for length in feature_lens_after_cnn
+            ],
             batch_first=True,
         )
         padded_feature = padded_feature.unsqueeze(1)
@@ -319,7 +328,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if remainder != 0:
                 cu_chunk_lens += [remainder]
         # TODO: Avoid constructing CUDA tensors directly from Python list data.
-        cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(-1, dtype=torch.int32)
+        cu_seqlens = _device_runtime.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(-1, dtype=torch.int32)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(
@@ -388,7 +397,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             device,
             dtype,
         )
-        input_features = torch.zeros(self.num_mel_bins, frame_len, device=device, dtype=dtype)
-        feature_lens = torch.tensor([frame_len], device=device, dtype=torch.long)
+        input_features = _device_runtime.zeros(self.num_mel_bins, frame_len, device=device, dtype=dtype)
+        feature_lens = _device_runtime.tensor([frame_len], device=device, dtype=torch.long)
         out = self.forward(input_features, feature_lens=feature_lens)
         logger.info("check_long_audio_infer: done output_shape=%s", tuple(out.shape))

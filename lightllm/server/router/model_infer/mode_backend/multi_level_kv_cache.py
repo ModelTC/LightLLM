@@ -12,7 +12,14 @@ from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
-from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+offload_gpu_kv_to_cpu = _operator_backend.resolve("common.basemodel.kv_cache_offload.offload_gpu_kv_to_cpu")
+load_cpu_kv_to_gpu = _operator_backend.resolve("common.basemodel.kv_cache_offload.load_cpu_kv_to_gpu")
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
 
@@ -32,10 +39,14 @@ class MultiLevelKvCacheModule(object):
         dist.barrier(group=self.init_sync_group)
         self.offload_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.offload_sync_group)
-        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
+        self.offload_sync_tensor = _device_runtime.empty((1,), dtype=torch.int32, device=_device_runtime.device)
 
-        self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
-        self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
+        self.page_index_buffer = _device_runtime.empty(
+            (1024 * 1024 * 4,), dtype=torch.int32, device=_device_runtime.device
+        )
+        self.page_ready_buffer = _device_runtime.empty(
+            (1024 * 1024 * 4,), dtype=torch.bool, device=_device_runtime.device
+        )
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
@@ -108,15 +119,15 @@ class MultiLevelKvCacheModule(object):
 
                     if self.need_sync_compute_stream():
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
-                        torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
+                        _device_runtime.current_stream().wait_stream(g_infer_context.get_overlap_stream())
                         # g_infer_context.get_overlap_stream().synchronize()
 
                     mem_manager = self.backend.model.mem_manager
                     req_manager = self.backend.model.req_manager
 
-                    mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
-                    page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
-                        non_blocking=True
+                    mem_indexes_cuda = _device_runtime.move(mem_indexes, non_blocking=True)
+                    page_indexes_cuda = _device_runtime.move(
+                        _device_runtime.tensor(need_pages, dtype=torch.int32, device="cpu"), non_blocking=True
                     )
                     # hybrid 页面加载必须按完整 page 处理，否则可能缺失恢复运行态所需的 checkpoint，所以
                     # 这里需要进行pad操作，使操作的页面是完整的。
@@ -143,7 +154,7 @@ class MultiLevelKvCacheModule(object):
                         req=req,
                     )
 
-                torch.cuda.current_stream().synchronize()
+                _device_runtime.current_stream().synchronize()
 
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -215,11 +226,11 @@ class MultiLevelKvCacheModule(object):
         return true_finished_reqs
 
     def _start_kv_cache_offload_task(
-        self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
+        self, req: InferReq, cpu_kv_cache_stream: _device_runtime.stream_type
     ) -> Optional["TransTask"]:
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
-        with torch.cuda.stream(cpu_kv_cache_stream):
+        with _device_runtime.stream_scope(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
@@ -268,8 +279,8 @@ class MultiLevelKvCacheModule(object):
                 page_list = broadcast_data["page_list"]
                 ready_list = broadcast_data["ready_list"]
 
-            page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
-            page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
+            page_indexes = _device_runtime.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
+            page_readies = _device_runtime.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
             assert len(page_indexes) <= self.page_index_buffer.shape[0]
             cuda_page_indexes = self.page_index_buffer[: len(page_indexes)]
             cuda_page_readies = self.page_ready_buffer[: len(page_readies)]
@@ -294,7 +305,7 @@ class MultiLevelKvCacheModule(object):
             if self.backend.dp_world_size > 1:
                 dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
             req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             trans_task = TransTask(
@@ -368,4 +379,4 @@ class TransTask:
     page_indexes: torch.Tensor
     page_readies: torch.Tensor
     req_obj: InferReq
-    sync_event: torch.cuda.Event
+    sync_event: _device_runtime.event_type

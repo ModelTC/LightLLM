@@ -3,6 +3,11 @@ import torch
 import numpy as np
 from lightllm.utils.log_utils import init_logger
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 
@@ -24,14 +29,18 @@ class LayerCache:
         self.device = device
         if not self.size_first:
             if device == "cpu":
-                self.buffer = torch.zeros((self.layer_num, size, *shape), dtype=dtype, device="cpu", pin_memory=True)
+                self.buffer = _device_runtime.zeros(
+                    (self.layer_num, size, *shape), dtype=dtype, device="cpu", pin_memory=True
+                )
             else:
-                self.buffer = torch.zeros((self.layer_num, size, *shape), dtype=dtype, device=device)
+                self.buffer = _device_runtime.zeros((self.layer_num, size, *shape), dtype=dtype, device=device)
         else:
             if device == "cpu":
-                self.buffer = torch.zeros((size, self.layer_num, *shape), dtype=dtype, device="cpu", pin_memory=True)
+                self.buffer = _device_runtime.zeros(
+                    (size, self.layer_num, *shape), dtype=dtype, device="cpu", pin_memory=True
+                )
             else:
-                self.buffer = torch.zeros((size, self.layer_num, *shape), dtype=dtype, device=device)
+                self.buffer = _device_runtime.zeros((size, self.layer_num, *shape), dtype=dtype, device=device)
 
     def get_cell_size(self):
         return np.prod(self.shape) * self.layer_num * torch._utils._element_size(self.dtype)

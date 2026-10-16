@@ -6,6 +6,10 @@ from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 class UniqueTimeIdGenerator:
     def __init__(self):
@@ -125,8 +129,8 @@ class RadixCache:
         self.page_size = page_size
 
         self.root_node = TreeNode(page_size=page_size)
-        self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
-        self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
+        self.root_node.token_id_key = _device_runtime.zeros((0,), device="cpu", dtype=self._key_dtype)
+        self.root_node.token_mem_index_value = _device_runtime.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
 
         self.evict_tree_set: Set[TreeNode] = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
@@ -258,7 +262,7 @@ class RadixCache:
             if len(ans_value_list) != 0:
                 value = torch.concat(ans_value_list)
             else:
-                value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
+                value = _device_runtime.zeros((0,), device="cpu", dtype=self._value_dtype)
             return tree_node, len(value), value
         else:
             if update_refs:

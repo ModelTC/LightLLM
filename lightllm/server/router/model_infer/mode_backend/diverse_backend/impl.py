@@ -11,7 +11,13 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 )
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
-from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+scatter_token = _operator_backend.resolve("common.basemodel.gather_token_id.scatter_token")
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from ..chunked_prefill.impl import ChunkedPrefillBackend
 from lightllm.utils.envs_utils import get_env_start_args
@@ -39,8 +45,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             group_reqs, is_chuncked_mode=not self.disable_chunked_prefill
         )
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             logits = model_output.logits
 
@@ -50,14 +55,14 @@ class DiversehBackend(ChunkedPrefillBackend):
             b_req_idx = [req.req_idx for req in run_reqs]
             b_has_out = [model_input.b_prefill_has_output_cpu[i] for i in batch_idx]
 
-            batch_idx = g_pin_mem_manager.gen_from_list(key="batch_idx_", data=batch_idx, dtype=torch.int64).cuda(
-                non_blocking=True
+            batch_idx = _device_runtime.move(
+                g_pin_mem_manager.gen_from_list(key="batch_idx_", data=batch_idx, dtype=torch.int64), non_blocking=True
             )
-            b_req_idx = g_pin_mem_manager.gen_from_list(key="b_req_idx_", data=b_req_idx, dtype=torch.int32).cuda(
-                non_blocking=True
+            b_req_idx = _device_runtime.move(
+                g_pin_mem_manager.gen_from_list(key="b_req_idx_", data=b_req_idx, dtype=torch.int32), non_blocking=True
             )
-            b_has_out = g_pin_mem_manager.gen_from_list(key="b_has_out_", data=b_has_out, dtype=torch.bool).cuda(
-                non_blocking=True
+            b_has_out = _device_runtime.move(
+                g_pin_mem_manager.gen_from_list(key="b_has_out_", data=b_has_out, dtype=torch.bool), non_blocking=True
             )
 
             logits = logits[batch_idx]
@@ -84,7 +89,7 @@ class DiversehBackend(ChunkedPrefillBackend):
                 next_token_ranks=next_token_ranks,
             )
 
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         # 第二阶段
@@ -172,12 +177,12 @@ class DiversehBackend(ChunkedPrefillBackend):
                 pack = InferReqUpdatePack(req_obj=req_obj, output_len=pre_master_req_pack.output_len)
                 update_func_objs.append(pack)
 
-        torch.cuda.current_stream().synchronize()
+        _device_runtime.current_stream().synchronize()
         return update_func_objs
 
     def _master_req_to_radix_cache(self, master_req: InferReq):
         key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
-        key = torch.tensor(key, dtype=torch.int64, device="cpu")
+        key = _device_runtime.tensor(key, dtype=torch.int64, device="cpu")
         value = self.model.req_manager.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
         prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len

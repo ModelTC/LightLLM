@@ -1,7 +1,13 @@
 import torch
 import time
 from typing import List
-from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
+
+from lightllm.backends import get_device_runtime, get_operator_backend
+
+_device_runtime = get_device_runtime()
+_operator_backend = get_operator_backend()
+
+gen_b_req_mtp_start_loc = _operator_backend.resolve("common.basemodel.mtp_utils.gen_b_req_mtp_start_loc")
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -50,7 +56,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
     @torch.inference_mode(mode=True)
     def infer_loop(self):
-        torch.cuda.set_device(get_current_device_id())
+        _device_runtime.set_device(get_current_device_id())
         try:
             while True:
                 event_pack = self.overlap_event_manager.get_overlap_event_pack()
@@ -73,7 +79,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 if run_way.is_prefill():
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
-                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    g_infer_context.get_overlap_stream().wait_stream(_device_runtime.current_stream())
                     self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
@@ -82,7 +88,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 elif run_way.is_decode():
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
-                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    g_infer_context.get_overlap_stream().wait_stream(_device_runtime.current_stream())
                     self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
@@ -106,14 +112,14 @@ class ChunkedPrefillBackend(ModeBackend):
     ):
         # 第一阶段: 模型推理
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
@@ -126,7 +132,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
@@ -152,13 +158,13 @@ class ChunkedPrefillBackend(ModeBackend):
         decode_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
@@ -166,7 +172,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 run_reqs=run_reqs,
                 is_prefill=False,
             )
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
@@ -193,14 +199,14 @@ class ChunkedPrefillBackend(ModeBackend):
         prefill_reqs: List[InferReq],
     ):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             (
                 next_token_ids,
                 next_token_ids_cpu,
@@ -225,7 +231,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 reqs=run_reqs,
             )
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
@@ -258,7 +264,7 @@ class ChunkedPrefillBackend(ModeBackend):
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             spec_plan = spec_engine.plan_decode(model_input=model_input, decode_reqs=decode_reqs)
 
             model_input, async_selected_row_mask_cpu = spec_engine.prepare_decode_model_input(
@@ -279,7 +285,7 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with _device_runtime.stream_scope(g_infer_context.get_overlap_stream()):
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
@@ -305,7 +311,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 gpu_tensor=mtp_accept_len,
             )
 
-            verify_event = torch.cuda.Event()
+            verify_event = _device_runtime.new_event()
             verify_event.record()
 
             g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
@@ -341,7 +347,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ranks=next_token_ranks,
             )
 
-            sync_event = torch.cuda.Event()
+            sync_event = _device_runtime.new_event()
             sync_event.record()
 
         # 当 pre_draft_step == 0 时，上一轮没有生成 draft token，本轮每个请求

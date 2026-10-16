@@ -10,6 +10,11 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from .cpu_cache_client import CpuKvCacheClient
 
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
+
 logger = init_logger(__name__)
 
 try:
@@ -135,7 +140,7 @@ class DiskCacheWorker:
         if not page_indexes:
             return
 
-        kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
+        kv_indexer = _device_runtime.tensor(page_indexes, dtype=torch.int32, device="cpu")
         query_result = self.service.query(hashs)
         if not all(query_result):
             # 限制写入并发量，给读取操作留资源
@@ -202,7 +207,7 @@ class DiskCacheWorker:
         #     logger.warning("disk cache worker is busy writing, skip load_pages")
         #     return False
 
-        kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
+        kv_indexer = _device_runtime.tensor(page_indexes, dtype=torch.int32, device="cpu")
         task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="r", start_pos=start_pos)
         if not self._wait_task(task, "ready"):
             return False

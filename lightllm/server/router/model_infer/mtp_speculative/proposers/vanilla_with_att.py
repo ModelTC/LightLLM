@@ -3,9 +3,14 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
-from lightllm.common.basemodel.triton_kernel.build_chained_mtp_decode_input import (
-    build_chained_mtp_decode_input_inplace,
+
+from lightllm.backends import get_operator_backend
+
+_operator_backend = get_operator_backend()
+
+gen_mtp_new_input_ids = _operator_backend.resolve("common.basemodel.gen_mtp_prefill_params.gen_mtp_new_input_ids")
+build_chained_mtp_decode_input_inplace = _operator_backend.resolve(
+    "common.basemodel.build_chained_mtp_decode_input.build_chained_mtp_decode_input_inplace"
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import VanillaSpecProposal

@@ -10,6 +10,7 @@
 - :class:`FinalTokenMetadataExt`：请求结束时汇总并写出 final token metadata
 """
 
+
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import numpy as np
@@ -18,6 +19,11 @@ import torch
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
+
+from lightllm.backends import get_device_runtime
+
+_device_runtime = get_device_runtime()
+
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -52,7 +58,7 @@ class PromptSelectedLogprobsExt:
     """
 
     # (target_start, target_end, logprobs_cpu, ranks_cpu, copy_done_event)
-    _Chunk = Tuple[int, int, torch.Tensor, torch.Tensor, torch.cuda.Event]
+    _Chunk = Tuple[int, int, torch.Tensor, torch.Tensor, _device_runtime.event_type]
 
     def __init__(self, req: "InferReq") -> None:
         self._req = req
@@ -73,12 +79,12 @@ class PromptSelectedLogprobsExt:
             logprobs: shape ``[end - start]``，GPU tensor。
             ranks: shape ``[end - start]``，GPU tensor（1-based rank）。
         """
-        logprobs_cpu = torch.empty(logprobs.shape, dtype=logprobs.dtype, device="cpu", pin_memory=True)
-        ranks_cpu = torch.empty(ranks.shape, dtype=ranks.dtype, device="cpu", pin_memory=True)
+        logprobs_cpu = _device_runtime.empty(logprobs.shape, dtype=logprobs.dtype, device="cpu", pin_memory=True)
+        ranks_cpu = _device_runtime.empty(ranks.shape, dtype=ranks.dtype, device="cpu", pin_memory=True)
         logprobs_cpu.copy_(logprobs, non_blocking=True)
         ranks_cpu.copy_(ranks, non_blocking=True)
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream())
+        event = _device_runtime.new_event()
+        event.record(_device_runtime.current_stream())
         self._chunks.append((target_start, target_end, logprobs_cpu, ranks_cpu, event))
 
     def flush(self) -> None:
