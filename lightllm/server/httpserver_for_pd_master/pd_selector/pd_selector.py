@@ -108,7 +108,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         # 时才返回命中率，避免负载均衡改派节点后误判为高命中。
         selection_extra_info = self.policy.get_estimated_cache_info(p_node, prompt)
 
-        logger.debug(
+        logger.info(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
             f"d_node={d_node.client_ip_port}, "
             f"cache_last_insert_time={selection_extra_info.cache_last_insert_time}"

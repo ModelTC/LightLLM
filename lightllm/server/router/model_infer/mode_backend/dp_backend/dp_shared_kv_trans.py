@@ -122,7 +122,7 @@ class DPKVSharedMoudle:
                 dp_size_in_node=self.backend.dp_size_in_node,
                 rank_in_dp=self.backend.rank_in_dp,
             )
-            self.backend.logger.debug(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
+            self.backend.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
 
         for trans_task in trans_tasks:
             trans_task.req.cur_kv_len += len(trans_task.mem_indexes)

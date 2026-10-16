@@ -587,7 +587,7 @@ class HttpServerManagerForPDMaster:
         req_status.raise_if_error()
 
         prompt_ids = prefill_prompt_ids_event.prompt_ids
-        logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
+        logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(
